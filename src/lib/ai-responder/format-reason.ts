@@ -89,6 +89,10 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return "model call failed";
     case "dead_letter_failed":
       return `reply could not be sent AND its text could not be saved (${detail.replace(/[:_]/g, " ")}) - check the pipeline run`;
+    case "send_timeout":
+      return "Reply timed out at the provider — held for review";
+    case "send_timeout_then_sent":
+      return "Reply accepted by provider late — do not re-send";
     case "provider_billing":
       return "Anthropic credits exhausted - AI responder down until topped up";
     case "provider_auth":
@@ -116,6 +120,10 @@ function formatShortLabel(gate: string): string {
       return "AI error";
     case "dead_letter_failed":
       return "Reply text not saved";
+    case "send_timeout":
+      return "Send timed out";
+    case "send_timeout_then_sent":
+      return "Sent late";
     case "provider_billing":
       return "API credits out";
     case "provider_auth":

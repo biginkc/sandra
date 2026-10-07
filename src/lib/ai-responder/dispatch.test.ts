@@ -152,6 +152,8 @@ type MockState = {
   sequenceLookupError?: boolean;
   deadLetters?: Array<Record<string, unknown>>;
   deadLetterInsertError?: { message: string };
+  /** pass-B per-inbound send_timeout lookup returns an error. */
+  deadLetterLookupError?: boolean;
   deadLetterInsertAttempts?: number;
   /** fn_renew_ai_send returns an error. */
   renewError?: boolean;
@@ -547,6 +549,7 @@ function createMockSupabase(state: MockState) {
         return { data: { id: state.property.id }, error: null };
       }
       if (likeFilter) {
+        if (!matchesCurrentProperty()) return { data: [], error: null };
         const cell = state.property[likeFilter.field as keyof MockState["property"]];
         return {
           data: typeof cell === "string" && cell.startsWith(likeFilter.prefix) ? [{ ...state.property }] : [],
@@ -563,6 +566,8 @@ function createMockSupabase(state: MockState) {
       },
       order: () => query,
       range: () => query,
+      limit: () => query,
+      gt: () => query,
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
         return query;
@@ -886,6 +891,8 @@ function createMockSupabase(state: MockState) {
         let dlGte: string | null = null;
         let dlIn: { field: string; values: unknown[] } | null = null;
         let dlRange: [number, number] | null = null;
+        let dlLimit: number | null = null;
+        let dlAfter: { createdAt: string; id: string } | null = null;
         const dlq = {
           select: () => dlq,
           eq(field: string, value: unknown) {
@@ -905,16 +912,35 @@ function createMockSupabase(state: MockState) {
             dlRange = [from, to];
             return dlq;
           },
-          limit: () => dlq,
+          limit(n: number) {
+            dlLimit = n;
+            return dlq;
+          },
+          or(filter: string) {
+            const m = /^created_at\.gt\.([^,]+),and\(created_at\.eq\.[^,]+,id\.gt\.([^)]+)\)$/.exec(filter);
+            if (m) dlAfter = { createdAt: m[1], id: m[2] };
+            return dlq;
+          },
           then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
+            if (state.deadLetterLookupError && dlFilters.has("inbound_message_id") && dlFilters.get("reason") === "send_timeout") {
+              return Promise.resolve({ data: null, error: { message: "dl boom" } }).then(resolve, reject);
+            }
             let rows = (state.deadLetters ?? []).filter(
               (r) =>
                 [...dlFilters].every(([k, v]) => r[k] === v) &&
                 (dlIn === null || dlIn.values.includes(r[dlIn.field])) &&
-                (dlGte === null || String(r.created_at ?? dlGte) >= dlGte),
+                (dlGte === null || String(r.created_at ?? dlGte) >= dlGte) &&
+                (dlAfter === null ||
+                  String(r.created_at) > dlAfter.createdAt ||
+                  (String(r.created_at) === dlAfter.createdAt && String(r.id) > dlAfter.id)),
             );
-            rows = [...rows].sort((a, b) => String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")));
+            rows = [...rows].sort(
+              (a, b) =>
+                String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")) ||
+                String(a.id ?? "").localeCompare(String(b.id ?? "")),
+            );
             if (dlRange) rows = rows.slice(dlRange[0], dlRange[1] + 1);
+            if (dlLimit !== null && !dlFilters.has("inbound_message_id") && !dlIn) rows = rows.slice(0, dlLimit);
             return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
           },
         };
@@ -4905,11 +4931,88 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         ];
         pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
         const supabase = createMockSupabase(state) as never;
-        expect(await sweepLateSends(supabase)).toEqual({ scanned: 1, reconciled: 1 });
+        expect(await sweepLateSends(supabase)).toMatchObject({ scanned: 1, reconciled: 1 });
         expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
         // Resolved rows are no longer scanned.
-        expect(await sweepLateSends(supabase)).toEqual({ scanned: 0, reconciled: 0 });
+        expect(await sweepLateSends(supabase)).toMatchObject({ scanned: 0, reconciled: 0 });
         expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
+      });
+
+      it("pass B only looks at flagged properties (needs_human_attention = true) so the partial index applies", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = false;
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+        state.deadLetters = [
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "sent_late", created_at: new Date().toISOString() },
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date().toISOString() },
+        ];
+        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+        expect(await sweepLateSends(createMockSupabase(state) as never)).toMatchObject({ reconciled: 0 });
+        expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
+      });
+
+      it("pass B reports a dead-letter lookup error instead of ignoring it", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = true;
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+        state.deadLetterLookupError = true;
+        reportErrorMock.mockClear();
+        const result = await sweepLateSends(createMockSupabase(state) as never);
+        expect(result).toMatchObject({ scanned: 0, reconciled: 0 });
+        expect(reportErrorMock).toHaveBeenCalledWith(
+          expect.objectContaining({ message: "dl boom" }),
+          { tags: { surface: "ai_responder_late_send_sweep" } },
+        );
+      });
+
+      it("pass A keysets past 1,000+ resolved rows (never re-reads a window) and rescues an unresolved timeout beyond the boundary", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        const base = Date.now() - 3_600_000_0;
+        const rows: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < 1005; i += 1) {
+          const id = `old-${String(i).padStart(4, "0")}`;
+          rows.push(
+            { id: `t-${id}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "send_timeout", created_at: new Date(base + i).toISOString() },
+            { id: `m-${id}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "sent_late", created_at: new Date(base + i).toISOString() },
+          );
+        }
+        rows.push({ id: "t-late", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date(base + 5000).toISOString() });
+        state.deadLetters = rows;
+        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+        const result = await sweepLateSends(createMockSupabase(state) as never, { pageSize: 100, maxPages: 20 });
+        expect(result.reconciled).toBe(1);
+        expect(result.nextCursor).toBeNull();
+        expect((state.deadLetters ?? []).filter((d) => d.inbound_message_id === "inbound-late" && d.reason === "sent_late")).toHaveLength(1);
+      });
+
+      it("a bounded run returns a continuation cursor that the next run resumes from", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        const base = Date.now() - 3_600_000;
+        state.deadLetters = [0, 1, 2, 3].map((i) => ({ id: `t-${i}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: `i-${i}`, body: "x", reason: "send_timeout", created_at: new Date(base + i).toISOString() }));
+        const supabase = createMockSupabase(state) as never;
+        const first = await sweepLateSends(supabase, { pageSize: 2, maxPages: 1 });
+        expect(first.nextCursor?.a).toEqual({ createdAt: new Date(base + 1).toISOString(), id: "t-1" });
+        const second = await sweepLateSends(supabase, { pageSize: 2, maxPages: 1, cursor: first.nextCursor! });
+        expect(second.nextCursor?.a).toEqual({ createdAt: new Date(base + 3).toISOString(), id: "t-3" });
+        expect(second.scanned).toBe(2);
+      });
+
+      it("rescues a timeout whose property flag was cleared or replaced: the marker is still written", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = false;
+        state.property.last_ai_escalation_reason = "reply_skipped:newer_inbound";
+        state.deadLetters = [
+          { id: "t-1", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date().toISOString() },
+        ];
+        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+        await sweepLateSends(createMockSupabase(state) as never);
+        expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:newer_inbound");
       });
 
       it("the sweeper leaves a timeout alone when the text never reached the provider", async () => {

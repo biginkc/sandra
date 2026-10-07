@@ -43,12 +43,15 @@ const FIRST_TOUCH_SENDER_PAUSE_REASON =
  * The return type is a short status the cron endpoint logs for audit.
  */
 
+const CONSENT_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000;
+
 export type TickOutcome =
   | { status: "sent"; enrollmentId: string; stepIndex: number; messageId: string | null }
   | { status: "status_changed"; enrollmentId: string; stepIndex: number }
   | { status: "completed"; enrollmentId: string }
   | { status: "paused"; enrollmentId: string; reason: string }
   | { status: "rescheduled_quiet_hours"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_consent_unavailable"; enrollmentId: string; nextRunAt: string; reason: "consent_unavailable" }
   | { status: "skipped_already_claimed"; enrollmentId: string }
   | { status: "skipped_no_step"; enrollmentId: string }
   | { status: "failed"; enrollmentId: string; message: string };
@@ -462,6 +465,62 @@ export async function processEnrollmentTick(
           enrollmentId: enrollment.id,
           stepIndex: step.step_index,
           messageId: messageId ?? null,
+        };
+      }
+      case "blocked_fresh_state_unavailable": {
+        // Transient consent/suppression read failure: nothing was sent and the
+        // provider did not fail. Record the step as not attempted with reason
+        // consent_unavailable, leave the enrollment active and retry next tick.
+        // (skipped_reason is CHECK-constrained, so the reason lives in
+        // failure_reason / recovery_action.)
+        const retryAt = new Date(Date.now() + CONSENT_UNAVAILABLE_RETRY_MS);
+        const { data: retiredClaim, error: retireError } = await client
+          .from("sequence_step_runs")
+          .update({
+            claim_active: false,
+            run_at: new Date().toISOString(),
+            skipped_reason: null,
+            attempt_outcome: "not_attempted",
+            failure_reason: "consent_unavailable",
+            recovery_action: "consent_unavailable_deferred",
+            recovery_evidence: "consent/suppression state could not be read; no provider attempt was made",
+          })
+          .eq("id", claim.id)
+          .eq("claim_active", true)
+          .eq("attempt_outcome", "not_attempted")
+          .select("id")
+          .maybeSingle();
+        if (retireError || !retiredClaim) {
+          return failAfterRunWrite(
+            client,
+            enrollment.id,
+            retireError?.message ?? "consent-unavailable claim changed before retirement",
+            "Consent-unavailable claim bookkeeping failed",
+          );
+        }
+        const { data: deferred, error: deferError } = await client
+          .from("sequence_enrollments")
+          .update({
+            next_run_at: retryAt.toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", enrollment.id)
+          .eq("status", "active")
+          .eq("current_step_index", enrollment.current_step_index)
+          .select("id")
+          .maybeSingle();
+        if (deferError || !deferred) {
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message: deferError?.message ?? "Enrollment changed before consent-unavailable retry was scheduled",
+          };
+        }
+        return {
+          status: "rescheduled_consent_unavailable",
+          enrollmentId: enrollment.id,
+          nextRunAt: retryAt.toISOString(),
+          reason: "consent_unavailable",
         };
       }
       case "blocked_quiet_hours": {

@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import type { ThreadRow } from "../queries";
-import { humanizeMachineValue } from "@/lib/presentation/system-labels";
+import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
 import { isOlderThan, RelativeTime } from "./relative-time";
 
@@ -59,7 +59,7 @@ export function ThreadsNeedingAttention({
                   </div>
                   {t.last_ai_escalation_reason && (
                     <div className="text-muted-foreground mt-1 truncate text-xs italic">
-                      {humanizeMachineValue(t.last_ai_escalation_reason)}
+                      {parseEscalationReason(t.last_ai_escalation_reason)?.longLabel}
                     </div>
                   )}
                 </div>

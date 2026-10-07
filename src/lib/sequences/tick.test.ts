@@ -413,6 +413,26 @@ describe("processEnrollmentTick — advancement persistence", () => {
     expect(enrollment.next_run_at).toEqual(expect.any(String));
   });
 
+  it("does not pause as provider_failed: records not_attempted/consent_unavailable and reschedules for retry", async () => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_fresh_state_unavailable",
+      error: "consent read failed",
+    });
+    const { client, enrollment } = fixture();
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toMatchObject({
+      status: "rescheduled_consent_unavailable",
+      reason: "consent_unavailable",
+      enrollmentId: "enrollment-1",
+    });
+    expect(enrollment.status).toBe("active");
+    expect(enrollment.pause_reason ?? null).toBeNull();
+    expect(enrollment.current_step_index).toBe(0);
+    expect(enrollment.next_run_at).toEqual(expect.any(String));
+  });
+
   it("completes after the final successful step", async () => {
     const { client, enrollment } = fixture();
     expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "sent" });

@@ -371,7 +371,7 @@ describe("HoldsRail degraded states", () => {
     expect(cards[0]).toHaveClass("opacity-70");
     expect(cards[1]).not.toHaveAttribute("data-informational");
     expect(
-      within(cards[0]).getByText("Informational — already delivered"),
+      within(cards[0]).getByText("Informational — accepted by provider late"),
     ).toBeInTheDocument();
   });
   it("says dead-letter status unavailable when that lookup failed", () => {

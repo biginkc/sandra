@@ -3529,35 +3529,73 @@ export async function reconcileLateSendForInbound(
  * text did reach the provider but whose in-process reconciliation never ran
  * (the invocation froze or died). Call from the stale-run cron.
  *
- * Pass A walks UNRESOLVED timeout rows (no matching `sent_late` marker),
- * oldest first, page by page, instead of a fixed newest window. Pass B repairs
- * flags still reading `send_timeout:<inbound_id>` whose marker already exists
- * (the marker-vs-flag race); it is driven by the flag itself, so it never
- * misses a stuck flag however old.
+ * Both passes use KEYSET pagination (never offset), so a bounded execution
+ * never re-reads the same window and nothing past row 1,000 is unreachable.
+ *
+ * Pass A walks `send_timeout` rows oldest-first by (created_at, id). Resolved
+ * rows (a `sent_late` marker exists) are skipped in memory but the cursor
+ * still ADVANCES past them. It does not depend on the property flag, so a
+ * timeout whose flag was cleared or replaced is still rescued: if the AI reply
+ * for that inbound is sent/delivered and no marker exists, the marker is
+ * written regardless of the flag state (the flag update itself stays
+ * conditional on the flag still naming that inbound).
+ *
+ * Pass B repairs flags still reading `send_timeout:<inbound_id>` whose marker
+ * already exists (the marker-vs-flag race). It is driven by the flag, keyset
+ * over properties.id (a unique, never-null key; `last_ai_escalation_at` can be
+ * null on a flagged row, which a timestamp keyset would silently skip).
+ *
+ * No migration may persist a cursor, so the continuation is returned
+ * (`nextCursor`, null once a pass is exhausted) and accepted back via
+ * `options.cursor`; a caller with storage can persist it so bounded runs make
+ * progress across invocations. Without one, each invocation restarts from the
+ * oldest unresolved row.
  */
+export type LateSendSweepCursor = {
+  a: { createdAt: string; id: string } | null;
+  b: string | null;
+};
+
 export async function sweepLateSends(
   supabase: SupabaseClient<Database>,
-  options: { sinceMs?: number; pageSize?: number; maxPages?: number } = {},
-): Promise<{ scanned: number; reconciled: number }> {
+  options: { sinceMs?: number; pageSize?: number; maxPages?: number; cursor?: LateSendSweepCursor } = {},
+): Promise<{ scanned: number; reconciled: number; nextCursor: LateSendSweepCursor | null }> {
   const since = new Date(Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000)).toISOString();
   const pageSize = options.pageSize ?? 100;
   const maxPages = options.maxPages ?? 10;
   let scanned = 0;
   let reconciled = 0;
+  let cursorA = options.cursor?.a ?? null;
+  let cursorB = options.cursor?.b ?? null;
+  let exhaustedA = false;
+  let exhaustedB = false;
+  const done = () => ({
+    scanned,
+    reconciled,
+    nextCursor: exhaustedA && exhaustedB ? null : { a: exhaustedA ? null : cursorA, b: exhaustedB ? null : cursorB },
+  });
 
   for (let page = 0; page < maxPages; page += 1) {
-    const { data, error } = await supabase
+    let query = supabase
       .from("ai_reply_dead_letters")
-      .select("org_id, conversation_id, property_id, inbound_message_id, body")
+      .select("id, created_at, org_id, conversation_id, property_id, inbound_message_id, body")
       .eq("reason", "send_timeout")
-      .gte("created_at", since)
+      .gte("created_at", since);
+    if (cursorA) {
+      query = query.or(
+        `created_at.gt.${cursorA.createdAt},and(created_at.eq.${cursorA.createdAt},id.gt.${cursorA.id})`,
+      );
+    }
+    const { data, error } = await query
       .order("created_at", { ascending: true })
-      .range(page * pageSize, page * pageSize + pageSize - 1);
+      .order("id", { ascending: true })
+      .limit(pageSize);
     if (error) {
       reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-      return { scanned, reconciled };
+      return done();
     }
-    const rows = (data ?? []).filter((r) => r.inbound_message_id && r.org_id && r.property_id);
+    const all = data ?? [];
+    const rows = all.filter((r) => r.inbound_message_id && r.org_id && r.property_id);
     const ids = rows.map((r) => r.inbound_message_id as string);
     let resolved = new Set<string>();
     if (ids.length > 0) {
@@ -3568,7 +3606,7 @@ export async function sweepLateSends(
         .in("inbound_message_id", ids);
       if (markerError) {
         reportError(new Error(markerError.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-        return { scanned, reconciled };
+        return done();
       }
       resolved = new Set((markers ?? []).map((m) => m.inbound_message_id as string));
     }
@@ -3584,30 +3622,42 @@ export async function sweepLateSends(
       });
       if (result === "reconciled") reconciled += 1;
     }
-    if ((data ?? []).length < pageSize) break;
+    // Advance past EVERY row read (resolved or not) so the next page never re-reads it.
+    const last = all[all.length - 1];
+    if (last?.created_at) cursorA = { createdAt: last.created_at as string, id: last.id as string };
+    if (all.length < pageSize) {
+      exhaustedA = true;
+      break;
+    }
   }
 
   // Pass B: flags still bound to a timeout whose marker already exists.
   for (let page = 0; page < maxPages; page += 1) {
-    const { data, error } = await supabase
+    let query = supabase
       .from("properties")
       .select("id, last_ai_escalation_reason")
-      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`)
-      .order("updated_at", { ascending: true })
-      .range(page * pageSize, page * pageSize + pageSize - 1);
+      .eq("needs_human_attention", true)
+      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`);
+    if (cursorB) query = query.gt("id", cursorB);
+    const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
     if (error) {
       reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-      return { scanned, reconciled };
+      return done();
     }
     for (const property of data ?? []) {
+      cursorB = property.id;
       const inboundId = (property.last_ai_escalation_reason ?? "").slice(SEND_TIMEOUT_FLAG_PREFIX.length);
       if (!inboundId) continue;
-      const { data: letter } = await supabase
+      const { data: letter, error: letterError } = await supabase
         .from("ai_reply_dead_letters")
         .select("org_id, conversation_id, body")
         .eq("reason", "send_timeout")
         .eq("inbound_message_id", inboundId)
         .limit(1);
+      if (letterError) {
+        reportError(new Error(letterError.message), { tags: { surface: "ai_responder_late_send_sweep" } });
+        return done();
+      }
       const row = (letter ?? [])[0];
       if (!row?.org_id) continue;
       scanned += 1;
@@ -3620,9 +3670,12 @@ export async function sweepLateSends(
       });
       if (result === "reconciled") reconciled += 1;
     }
-    if ((data ?? []).length < pageSize) break;
+    if ((data ?? []).length < pageSize) {
+      exhaustedB = true;
+      break;
+    }
   }
-  return { scanned, reconciled };
+  return done();
 }
 
 async function leasedSend(

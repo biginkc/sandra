@@ -144,7 +144,7 @@ export function HoldCard({
           data-testid="hold-informational"
           className="mt-2 text-xs text-muted-foreground"
         >
-          Informational — already delivered
+          Informational — accepted by provider late
         </p>
       )}
       {hasLate && (
