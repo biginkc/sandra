@@ -172,3 +172,11 @@ describe("maskText covers 7-digit, international and emails", () => {
     expect(m.maskNumber(1234567)).toBe(1234567);
   });
 });
+
+describe("assertNoRealPhones masked-email pseudonyms", () => {
+  it("does not flag an all-digit masked email hash as a phone", () => {
+    expect(() => assertNoRealPhones({ email: "user-9134441234@example.invalid" }, new Set(), { maskPii: true })).not.toThrow();
+    expect(() => assertNoRealPhones({ email: "user-9134441234@example.invalid" }, new Set(), { maskPii: false })).toThrow();
+    expect(() => assertNoRealPhones({ note: "call 913-444-1234 user-9134441234@example.invalid" }, new Set(), { maskPii: true })).toThrow();
+  });
+});
