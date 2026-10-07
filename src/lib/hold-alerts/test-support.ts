@@ -12,7 +12,16 @@ import type {
 export class FakeStore implements DeliveryStore {
   rows: Array<DeliveryRow & { sentAt: string | null; sendingAt?: string | null; orgId: string }> = [];
   private seq = 0;
+  /** Per-org watermark; pre-seed (`watermarks.set(org, iso)`) to simulate an already-initialised org. */
+  watermarks = new Map<string, string>();
   constructor(private readonly clock: () => Date) {}
+
+  async getOrInitAlertsSince(orgId: string, nowIso: string) {
+    const existing = this.watermarks.get(orgId);
+    if (existing) return { alertsSince: existing, created: false };
+    this.watermarks.set(orgId, nowIso);
+    return { alertsSince: nowIso, created: true };
+  }
 
   async ensure(input: EnsureInput): Promise<DeliveryRow> {
     const existing = this.rows.find(
@@ -118,6 +127,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
     holdKey: "prop-1:draft_held",
     propertyId: "prop-1",
     since: "2026-10-08T10:00:00.000Z",
+    startedAt: "2026-10-08T10:00:00.000Z",
     name: "Dana",
     hot: false,
     ...over,
@@ -127,11 +137,13 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
 export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string; idempotencyKey?: string };
 
 export function makeDeps(
-  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string } = {},
+  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string; noWatermark?: boolean } = {},
 ) {
   let nowIso = over.nowIso ?? "2026-10-08T10:02:00.000Z";
   const clock = () => new Date(nowIso);
   const store = (over.store as FakeStore | undefined) ?? new FakeStore(clock);
+  // Existing tests model an org whose alerts were enabled long ago; watermark tests clear this.
+  if (!over.noWatermark && !store.watermarks.has(ORG)) store.watermarks.set(ORG, "2026-10-01T00:00:00.000Z");
   const sent: Sent[] = [];
   const results: Record<"slack" | "sms" | "email", ChannelResult> = {
     slack: { status: "sent" },

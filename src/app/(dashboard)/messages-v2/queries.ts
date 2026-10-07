@@ -19,6 +19,8 @@ export type HoldPropertyRow = {
   last_ai_escalation_at: string | null;
   last_ai_escalation_reason: string | null;
   updated_at: string | null;
+  /** When the flag last went false -> true (trigger-maintained). null = unknown (flagged before the column existed). */
+  needs_human_attention_since?: string | null;
 };
 export type HoldDecisionRow = {
   property_id: string;
@@ -81,11 +83,15 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   type Acc = {
     sources: Set<HoldSource>;
     times: string[];
+    /** Reliable start instants (flag start, decision/review/draft created_at) for alert eligibility. */
+    alertTimes: string[];
     conversations: Set<string>;
     messages: Set<string>;
     notes: string[];
     flagReason?: string | null;
     flagAt?: string | null;
+    /** True when a flagged property's start time is unknown (backlog): the hold's alert start is then unknown. */
+    startUnknown?: boolean;
     /** created_at of every pending decision / review / draft (raw strings, never re-parsed). */
     rowTimes: string[];
     noProperty?: boolean;
@@ -98,6 +104,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       a = {
         sources: new Set(),
         times: [],
+        alertTimes: [],
         conversations: new Set(),
         messages: new Set(),
         notes: [],
@@ -115,6 +122,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
     a.flagAt = p.last_ai_escalation_at;
+    if (p.needs_human_attention_since) a.alertTimes.push(p.needs_human_attention_since);
+    else a.startUnknown = true;
     a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
@@ -125,6 +134,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(d.property_id);
     a.sources.add("jev_decision");
     a.times.push(d.created_at);
+    a.alertTimes.push(d.created_at);
     a.rowTimes.push(d.created_at);
     a.conversations.add(d.conversation_id);
     a.messages.add(d.source_inbound_message_id);
@@ -133,6 +143,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(r.property_id);
     a.sources.add("disposition_review");
     a.times.push(r.created_at);
+    a.alertTimes.push(r.created_at);
     a.rowTimes.push(r.created_at);
     a.conversations.add(r.conversation_id);
     a.messages.add(r.source_inbound_message_id);
@@ -157,6 +168,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     if (propertyId === null) a.noProperty = true;
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
+    a.alertTimes.push(d.created_at);
+    a.alertTimes.push(d.created_at);
     a.rowTimes.push(d.created_at);
     // Sorted oldest first above, so the last assignment is the newest draft.
     a.draft = d;
@@ -190,6 +203,11 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const since =
       [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
+    // When the hold began, for alerting only: the oldest reliable start, or null
+    // when a flagged property's start is unknown (the backlog), which never alerts.
+    const alertSince = a.startUnknown
+      ? null
+      : ([...a.alertTimes].sort((x, y) => compareInstants(x, y))[0] ?? null);
     const labels =
       sources
         .filter((s) => s !== "pending_draft")
@@ -220,6 +238,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
+      alert_since: alertSince,
       ...(a.flagReason ? { flag_reason: a.flagReason } : {}),
       reason:
         a.notes.length > 0
@@ -466,7 +485,7 @@ export async function loadMessagesV2Data(
       supabase
         .from("properties")
         .select(
-          "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at",
+          "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since",
         )
         .eq("org_id", orgId)
         .eq("needs_human_attention", true)

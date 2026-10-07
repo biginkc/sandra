@@ -6,6 +6,7 @@ import {
   type EmailMessage,
   type EnsureInput,
   type HoldAlertDeps,
+  type HoldInfo,
   type OrgAlertSummary,
 } from "./types";
 
@@ -23,6 +24,13 @@ type Task = {
   /** Asked before the row is even created; false = nothing to do yet. */
   eligible?: () => Promise<boolean>;
 };
+
+/** A hold may alert only when it began at or after the watermark. Unknown start (backlog) never does. */
+export function isNewHold(hold: Pick<HoldInfo, "startedAt">, alertsSinceMs: number): boolean {
+  if (!hold.startedAt || !Number.isFinite(alertsSinceMs)) return false;
+  const startedMs = Date.parse(hold.startedAt);
+  return Number.isFinite(startedMs) && startedMs >= alertsSinceMs;
+}
 
 const emptySummary = (): OrgAlertSummary => ({
   holds: 0,
@@ -59,13 +67,21 @@ export async function runHoldAlertsForOrg(
     new Date(startMs - ROUTE_MAX_DURATION_MS).toISOString(),
   );
 
+  // Alerts are for holds that START after they were enabled. The first run for an
+  // org only records the watermark and sends nothing; everything open right now is
+  // backlog and stays silent.
+  const mark = await deps.store.getOrInitAlertsSince(orgId, deps.now().toISOString());
+  if (mark.created) return summary;
+  const alertsSinceMs = Date.parse(mark.alertsSince);
+
   const loaded = await deps.loadHolds(orgId);
-  const holds = loaded.holds;
+  const openHolds = loaded.holds;
+  const holds = openHolds.filter((h) => isNewHold(h, alertsSinceMs));
   // Archive-on-clear: a property that is no longer held closes its delivery
   // rows so a re-opened hold gets fresh keys. Only on a COMPLETE load, or a
   // truncated / failed query would "close" holds that are still open.
   if (loaded.complete) {
-    summary.archived = await deps.store.archiveClosed(orgId, [...new Set(holds.map((h) => h.propertyId))]);
+    summary.archived = await deps.store.archiveClosed(orgId, [...new Set(openHolds.map((h) => h.propertyId))]);
   }
   summary.holds = holds.length;
   if (holds.length === 0) return summary;

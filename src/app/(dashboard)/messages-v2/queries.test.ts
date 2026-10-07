@@ -1187,3 +1187,54 @@ describe("deriveOpenHolds seen (the stale-click guard's view of the card)", () =
     expect(holds[0]!.draft).toMatchObject({ body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" });
   });
 });
+
+describe("deriveOpenHolds alert_since (when the hold began, for alert eligibility)", () => {
+  const prop = (over: Partial<{ id: string; since: string | null }> = {}) => ({
+    id: over.id ?? "p1",
+    last_ai_escalation_at: iso("01:00:00"),
+    last_ai_escalation_reason: "needs_review",
+    updated_at: iso("02:00:00"),
+    needs_human_attention_since: over.since === undefined ? iso("09:00:00") : over.since,
+  });
+  const decision = (createdAt: string) => ({
+    property_id: "p1",
+    conversation_id: "c1",
+    source_inbound_message_id: "m1",
+    created_at: createdAt,
+  });
+
+  it("is the flag's tracked start, not last_ai_escalation_at or updated_at", () => {
+    const [h] = deriveOpenHolds({ properties: [prop()], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBe(iso("09:00:00"));
+  });
+
+  it("is null for a flagged property with no tracked start (the backlog)", () => {
+    const [h] = deriveOpenHolds({ properties: [prop({ since: null })], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBeNull();
+  });
+
+  it("stays null when a newer pending decision joins a backlog flag", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [decision(iso("11:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBeNull();
+  });
+
+  it("is the oldest reliable start across sources", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: iso("09:00:00") })],
+      decisions: [decision(iso("08:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("08:00:00"));
+  });
+
+  it("is the decision's created_at for a hold with no flagged property", () => {
+    const [h] = deriveOpenHolds({ properties: [], decisions: [decision(iso("11:00:00"))], reviews: [], runs: [] });
+    expect(h.alert_since).toBe(iso("11:00:00"));
+  });
+});

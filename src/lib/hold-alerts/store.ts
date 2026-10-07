@@ -76,6 +76,19 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       };
     },
 
+    async getOrInitAlertsSince(orgId, nowIso) {
+      const settings = () => db.from("hold_alert_settings");
+      const inserted = await settings()
+        .upsert({ org_id: orgId, alerts_since: nowIso }, { onConflict: "org_id", ignoreDuplicates: true })
+        .select("alerts_since");
+      if (inserted.error) fail("watermark insert", inserted.error);
+      const created = Array.isArray(inserted.data) && inserted.data.length === 1;
+      if (created) return { alertsSince: (inserted.data as Array<{ alerts_since: string }>)[0]!.alerts_since, created };
+      const { data, error } = await settings().select("alerts_since").eq("org_id", orgId).single();
+      if (error || !data) fail("watermark select", error);
+      return { alertsSince: (data as { alerts_since: string }).alerts_since, created: false };
+    },
+
     async claim(row) {
       const { data, error } = await table()
         .update({ attempts: row.attempts + 1, status: "sending", sending_at: new Date().toISOString() })

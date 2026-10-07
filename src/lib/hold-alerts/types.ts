@@ -13,6 +13,8 @@ export type HoldInfo = {
   holdKey: string;
   propertyId: string;
   since: string | null;
+  /** When the hold began (oldest reliable start); null = unknown (backlog), which never alerts. */
+  startedAt: string | null;
   /** First name (or "Unknown ···1234"), from the page's label loader. */
   name: string;
   /** One of the hold's reasons is in the configured hot list (HOLD_ALERT_HOT_REASONS, exact match). */
@@ -51,6 +53,12 @@ export type ChannelResult =
   | { status: "failed"; error: string; terminal?: boolean };
 
 export interface DeliveryStore {
+  /**
+   * The org's alert watermark. Inserts `alerts_since = nowIso` when the org has
+   * none (insert ... on conflict do nothing) and reports `created: true` for the
+   * run that inserted it; that run sends nothing.
+   */
+  getOrInitAlertsSince(orgId: string, nowIso: string): Promise<{ alertsSince: string; created: boolean }>;
   /** insert ... on conflict do nothing, then return the row for the unique key. */
   ensure(input: EnsureInput): Promise<DeliveryRow>;
   /**
