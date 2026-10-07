@@ -2524,7 +2524,7 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
-  it("jev-driven close_dnc is held for human review: no suppression and no outreach_dispo write until confirmed", async () => {
+  it("jev-driven close_dnc suppresses the phone immediately but writes no outreach_dispo until confirmed", async () => {
     // Regression test for Astra's BLOCKING PR-review finding (2026-09-20,
     // "Option B" resolution): DNC's suppression effect must happen right
     // away (halting it would mean continuing to text someone who just
@@ -2565,9 +2565,15 @@ describe("dispatchAiResponse debounce", () => {
       // automatic-mode orgs" override).
       expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
 
-      // Q6: dnc is always human-gated, so nothing is suppressed until a
-      // human confirms the pending review.
-      expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+      // PLAN §8 Q4 OPEN: prod behaviour preserved — immediate suppression.
+      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          surface: "dnc",
+          idempotencyKey: `ai-responder-dnc-proposed:${PROPERTY_ID}:${CONTACT_ID}:model:threat_dnc`,
+        }),
+      );
 
       // The entire point of the fix: outreach_dispo is NOT written yet.
       expect(state.property.outreach_dispo).toBeNull();

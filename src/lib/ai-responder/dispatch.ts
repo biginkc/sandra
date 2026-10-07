@@ -1383,8 +1383,9 @@ async function resolveAndApplyRoute(
       });
       return { outcome: "opted_out", reason: route.reason };
     case "close_dnc": {
-      // Jev-driven dnc: held for human review, nothing applied until
-      // confirmed (Q4 always-human-gated + Q6). Legacy dnc is
+      // Jev-driven dnc: phone suppressed immediately, review + hold written,
+      // outreach_dispo deferred to a human. PLAN §8 Q4 OPEN — prod
+      // behaviour preserved until Jarrad decides. Legacy dnc is
       // completely unchanged — applyResponderDnc still applies
       // everything immediately, exactly as it does today.
       const isJevDnc = classification.kind === "jev_route";
@@ -4872,12 +4873,12 @@ async function applyResponderDnc(
 }
 
 /**
- * Jev-driven dnc is always human-gated (Q4), so under Jarrad's Q6 rule
- * ("human review below threshold, everywhere") it is held like any
- * below-threshold outcome: pending review row + hold flag, NO phone
- * suppression and NO outreach_dispo write until a human confirms via
- * `fn_confirm_ai_disposition_review`. The deterministic keyword DNC/STOP
- * gates in inbound.ts run before Jev and still suppress immediately.
+ * Jev-driven dnc: suppress the phone IMMEDIATELY (same applyPhoneLevelOptOut
+ * call and `ai-responder-dnc-proposed:` key as origin/main), while the
+ * pending review row + hold are still written and outreach_dispo stays
+ * unwritten until a human confirms via `fn_confirm_ai_disposition_review`.
+ * PLAN §8 Q4 OPEN — prod behaviour preserved until Jarrad decides.
+ * (Q6 still holds opted_out below threshold; only dnc is restored here.)
  */
 async function proposeJevDncSuppression(
   supabase: SupabaseClient<Database>,
@@ -4903,6 +4904,24 @@ async function proposeJevDncSuppression(
     });
     return { updated: false, reason: "db_error" };
   }
+
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder_threat",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "dnc",
+    idempotencyKey: `ai-responder-dnc-proposed:${args.propertyId}:${args.contactId}:${args.reason}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
+  });
 
   const { data, error } = await supabase.rpc(
     "fn_propose_ai_dnc_suppression_review",
@@ -4930,8 +4949,8 @@ async function proposeJevDncSuppression(
 
   const status = readAiDispositionRpcStatus(data);
   if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
-  // "proposed" and "replayed" both mean a pending review + hold now exist.
-  // Nothing is applied until a human confirms (Q6).
+  // "proposed" and "replayed" both mean a pending review + hold now exist
+  // and the phone is already suppressed; outreach_dispo waits for a human.
   return { updated: true };
 }
 

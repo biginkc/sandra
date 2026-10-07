@@ -4,7 +4,9 @@
  * first match wins, by BOTH the early gate (before generation) and the
  * pre-send check (under the send lease, immediately before the provider).
  *
- * Rule text (approved, verbatim, in the plan). Rule 7 is not part of this
+ * Rule text: the exact wording is recorded once in .planning/messages-v2/PLAN.md §8 Q8
+ * (engineering policy; the seller-facing intent is what the owner confirms). The
+ * comments below paraphrase — the plan is authoritative. Rule 7 is not part of this
  * function: it is the flag + dead-letter behaviour of every "not sent" exit
  * that is not one of rules 0-6 (`flagAndDeadLetter` in ./dispatch). Rules 0
  * and 8 ARE evaluated here, FIRST (before rules 1-6), so code order matches

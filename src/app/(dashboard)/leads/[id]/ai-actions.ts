@@ -3,6 +3,10 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 
+import {
+  applySuppressionForConfirmedReview,
+  SUPPRESSION_INCOMPLETE_REASON,
+} from "@/lib/ai-responder/confirm-suppression";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
@@ -63,6 +67,101 @@ export async function clearNeedsHumanAttention(
       extra: { propertyId },
     });
     return errFromUnknown(e, "CLEAR_ATTENTION_FAILED");
+  }
+}
+
+/**
+ * Re-run phone suppression for the latest confirmed opted_out/dnc review on
+ * a property whose earlier suppression failed (`suppression_incomplete`
+ * hold). Success clears the hold (only when the hold is the
+ * suppression_incomplete one, so a preserved send-timeout flag stays up) and
+ * audits it; failure keeps the hold and returns the warning.
+ */
+export async function retrySuppressionForProperty(
+  propertyId: string,
+): Promise<Result<{ cleared: boolean }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: review, error: reviewError } = await supabase
+      .from("ai_disposition_reviews")
+      .select("id")
+      .eq("property_id", propertyId)
+      .eq("status", "confirmed")
+      .in("disposition", ["opted_out", "dnc"])
+      .order("human_reviewed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (reviewError) {
+      return {
+        ok: false,
+        error: { code: "RETRY_SUPPRESSION_FAILED", message: reviewError.message },
+      };
+    }
+    if (!review) {
+      return {
+        ok: false,
+        error: {
+          code: "RETRY_SUPPRESSION_FAILED",
+          message: "No confirmed opt-out or DNC review found for this lead",
+        },
+      };
+    }
+    const suppression = await applySuppressionForConfirmedReview(
+      supabase as never,
+      review.id,
+      user.id,
+    );
+    if (!suppression.ok) {
+      return {
+        ok: false,
+        error: { code: "SUPPRESSION_INCOMPLETE", message: suppression.warning },
+      };
+    }
+    const { data: cleared, error: clearError } = await supabase
+      .from("properties")
+      .update({
+        needs_human_attention: false,
+        last_ai_escalation_reason: null,
+        last_ai_escalation_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", propertyId)
+      .eq("last_ai_escalation_reason", SUPPRESSION_INCOMPLETE_REASON)
+      .select("id")
+      .maybeSingle();
+    if (clearError) {
+      return {
+        ok: false,
+        error: { code: "CLEAR_ATTENTION_FAILED", message: clearError.message },
+      };
+    }
+    if (cleared) {
+      await recordLeadEvent({
+        propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
+        payload: { from: true, to: false, via: "retry_suppression", reviewId: review.id },
+      });
+    }
+    revalidatePath(`/leads/${propertyId}`);
+    return ok({ cleared: !!cleared });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "retry_suppression" },
+      extra: { propertyId },
+    });
+    return errFromUnknown(e, "RETRY_SUPPRESSION_FAILED");
   }
 }
 

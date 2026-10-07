@@ -5,6 +5,13 @@ const { createClient, recordLeadEvent } = vi.hoisted(() => ({
   recordLeadEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
+  applySuppressionForConfirmedReview: vi.fn(),
+}));
+vi.mock("@/lib/ai-responder/confirm-suppression", () => ({
+  applySuppressionForConfirmedReview,
+  SUPPRESSION_INCOMPLETE_REASON: "suppression_incomplete",
+}));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -20,6 +27,7 @@ vi.mock("@/lib/events", () => ({
 import {
   clearNeedsHumanAttention,
   setAiResponderDisabled,
+  retrySuppressionForProperty,
   setSkipTraceDisabled,
 } from "./ai-actions";
 
@@ -155,3 +163,71 @@ describe("lead AI actions ledger", () => {
 
 // Ordinary-record unit fixtures isolate the independently tested training lookup.
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
+
+describe("retrySuppressionForProperty", () => {
+  function retryClient(opts: { review: { id: string } | null; cleared: { id: string } | null }) {
+    const updates: unknown[] = [];
+    const eqs: Array<[string, unknown]> = [];
+    const builder: Record<string, unknown> = {};
+    let table = "";
+    builder.select = () => builder;
+    builder.in = () => builder;
+    builder.order = () => builder;
+    builder.limit = () => builder;
+    builder.eq = (c: string, v: unknown) => {
+      eqs.push([c, v]);
+      return builder;
+    };
+    builder.update = (v: unknown) => {
+      updates.push(v);
+      return builder;
+    };
+    builder.maybeSingle = async () => ({
+      data: table === "ai_disposition_reviews" ? opts.review : opts.cleared,
+      error: null,
+    });
+    return {
+      updates,
+      eqs,
+      client: {
+        auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } }, error: null }) },
+        from: (t: string) => {
+          table = t;
+          return builder;
+        },
+      },
+    };
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("re-runs suppression, clears the hold and audits on success", async () => {
+    const { client, updates, eqs } = retryClient({ review: { id: "review-9" }, cleared: { id: "property-1" } });
+    createClient.mockResolvedValue(client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    await expect(retrySuppressionForProperty("property-1")).resolves.toEqual({ ok: true, data: { cleared: true } });
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(client, "review-9", "user-1");
+    expect(updates[0]).toMatchObject({ needs_human_attention: false, last_ai_escalation_reason: null });
+    expect(eqs).toContainEqual(["last_ai_escalation_reason", "suppression_incomplete"]);
+    expect(recordLeadEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "ai_escalation_cleared", payload: expect.objectContaining({ via: "retry_suppression" }) }),
+    );
+  });
+
+  it("keeps the hold and returns the warning when suppression fails again", async () => {
+    const { client, updates } = retryClient({ review: { id: "review-9" }, cleared: null });
+    createClient.mockResolvedValue(client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: false, warning: "Confirmed, but suppression incomplete — retry." });
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toMatchObject({ ok: false, error: { message: "Confirmed, but suppression incomplete — retry." } });
+    expect(updates).toHaveLength(0);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("errors when there is no confirmed opt-out/DNC review", async () => {
+    const { client } = retryClient({ review: null, cleared: null });
+    createClient.mockResolvedValue(client);
+    await expect(retrySuppressionForProperty("property-1")).resolves.toMatchObject({ ok: false });
+    expect(applySuppressionForConfirmedReview).not.toHaveBeenCalled();
+  });
+});

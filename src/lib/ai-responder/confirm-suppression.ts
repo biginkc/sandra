@@ -90,15 +90,30 @@ async function raiseSuppressionIncompleteHold(
   reviewId: string,
 ): Promise<void> {
   try {
+    const admin = createAdminClient();
     const now = new Date().toISOString();
-    const { error } = await createAdminClient()
+    // A send-timeout flag is a different, still-open problem: keep its
+    // reason/timestamp and only (re)raise the hold.
+    const { data: current, error: readError } = await admin
       .from("properties")
-      .update({
-        needs_human_attention: true,
-        last_ai_escalation_reason: SUPPRESSION_INCOMPLETE_REASON,
-        last_ai_escalation_at: now,
-        updated_at: now,
-      })
+      .select("last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    const existing: string | null = current?.last_ai_escalation_reason ?? null;
+    const keepReason = isTimeoutEscalationReason(existing);
+    const { error } = await admin
+      .from("properties")
+      .update(
+        keepReason
+          ? { needs_human_attention: true, updated_at: now }
+          : {
+              needs_human_attention: true,
+              last_ai_escalation_reason: SUPPRESSION_INCOMPLETE_REASON,
+              last_ai_escalation_at: now,
+              updated_at: now,
+            },
+      )
       .eq("id", propertyId);
     if (error) throw new Error(error.message);
   } catch (holdError) {
@@ -107,6 +122,14 @@ async function raiseSuppressionIncompleteHold(
       extra: { reviewId, propertyId },
     });
   }
+}
+
+function isTimeoutEscalationReason(reason: string | null): boolean {
+  return (
+    !!reason &&
+    (reason.startsWith("send_timeout:") ||
+      reason.startsWith("dead_letter_failed:send_timeout:"))
+  );
 }
 
 type ReviewLookupClient = {

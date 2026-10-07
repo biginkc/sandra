@@ -2,11 +2,12 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { clearNeedsHumanAttention } = vi.hoisted(() => ({
+const { clearNeedsHumanAttention, retrySuppressionForProperty } = vi.hoisted(() => ({
   clearNeedsHumanAttention: vi.fn(),
+  retrySuppressionForProperty: vi.fn(),
 }));
 
-vi.mock("./ai-actions", () => ({ clearNeedsHumanAttention }));
+vi.mock("./ai-actions", () => ({ clearNeedsHumanAttention, retrySuppressionForProperty }));
 
 import { AiAttentionBanner } from "./ai-attention-banner";
 
@@ -68,5 +69,36 @@ describe("<AiAttentionBanner />", () => {
 
     expect(screen.getByText("5m ago")).toBeInTheDocument();
     vi.restoreAllMocks();
+  });
+
+  it("shows Retry suppression and a dismiss warning only for suppression_incomplete", async () => {
+    const { unmount } = render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible reason="low_confidence" nowMs={NOW_MS} />,
+    );
+    expect(screen.queryByTestId("ai-attention-retry-suppression")).toBeNull();
+    unmount();
+    render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible reason="suppression_incomplete" nowMs={NOW_MS} />,
+    );
+    expect(screen.getByTestId("ai-attention-suppression-warning")).toHaveTextContent(
+      "Suppression is incomplete",
+    );
+    expect(screen.getByRole("button", { name: "Dismiss anyway" })).toBeInTheDocument();
+  });
+
+  it("retry success hides the banner; failure keeps it with the warning", async () => {
+    const user = userEvent.setup();
+    retrySuppressionForProperty
+      .mockResolvedValueOnce({ ok: false, error: { message: "Confirmed, but suppression incomplete — retry." } })
+      .mockResolvedValueOnce({ ok: true, data: { cleared: true } });
+    render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible reason="suppression_incomplete" nowMs={NOW_MS} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Retry suppression" }));
+    expect(await screen.findByTestId("ai-attention-failure")).toHaveTextContent("suppression incomplete");
+    expect(screen.getByTestId("ai-attention-banner")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry suppression" }));
+    expect(retrySuppressionForProperty).toHaveBeenCalledWith("prop-1");
+    expect(screen.queryByTestId("ai-attention-banner")).toBeNull();
   });
 });

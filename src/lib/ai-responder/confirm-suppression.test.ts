@@ -218,3 +218,45 @@ describe("applySuppressionForConfirmedReview", () => {
     );
   });
 });
+
+describe("suppression_incomplete hold vs timeout flags", () => {
+  function failingClient(currentReason: string | null) {
+    const updates: unknown[] = [];
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    createAdminClient.mockReturnValue({
+      from: () => {
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => c;
+        c.maybeSingle = async () => ({ data: { last_ai_escalation_reason: currentReason }, error: null });
+        c.update = (v: unknown) => {
+          updates.push(v);
+          return { eq: async () => ({ error: null }) };
+        };
+        return c;
+      },
+    } as never);
+    return updates;
+  }
+
+  for (const reason of ["send_timeout:abc", "dead_letter_failed:send_timeout:abc"]) {
+    it(`keeps existing ${reason} reason and still raises the hold`, async () => {
+      const updates = failingClient(reason);
+      await applyConfirmedSuppression({ ...base, disposition: "dnc" });
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toMatchObject({ needs_human_attention: true });
+      expect(updates[0]).not.toHaveProperty("last_ai_escalation_reason");
+    });
+  }
+
+  for (const reason of [null, "low_confidence"]) {
+    it(`sets suppression_incomplete over ${reason ?? "null"}`, async () => {
+      const updates = failingClient(reason);
+      await applyConfirmedSuppression({ ...base, disposition: "dnc" });
+      expect(updates[0]).toMatchObject({
+        needs_human_attention: true,
+        last_ai_escalation_reason: "suppression_incomplete",
+      });
+    });
+  }
+});
