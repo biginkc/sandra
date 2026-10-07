@@ -3047,7 +3047,12 @@ function sendTimeoutBackedFlagReason(inboundMessageId: string): string {
 function sendTimeoutFlagReasons(inboundMessageId: string | null): string[] {
   const primary = sendTimeoutFlagReason(inboundMessageId);
   return inboundMessageId
-    ? [primary, `${primary}${SEND_TIMEOUT_BACKED_SUFFIX}`, `dead_letter_failed:${primary}`]
+    ? [
+        primary,
+        `${primary}${SEND_TIMEOUT_BACKED_SUFFIX}`,
+        `dead_letter_failed:${primary}`,
+        `dead_letter_failed:${primary}${SEND_TIMEOUT_BACKED_SUFFIX}`,
+      ]
     : [primary, `dead_letter_failed:${primary}`];
 }
 /** Inbound id carried by a `send_timeout:<id>[:backed]` / `dead_letter_failed:send_timeout:<id>` flag. */
@@ -3747,7 +3752,7 @@ export function orphanPropertiesQuery(
     .select("id, org_id, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("needs_human_attention", true)
     .or(
-      "and(last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.not.like.%:backed),last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
+      "and(last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.not.like.%:backed),and(last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%,last_ai_escalation_reason.not.like.%:backed)",
     )
     .gte("last_ai_escalation_at", args.windowIso);
   query = args.after ? query.gt("id", args.after) : query.gte("id", args.lower);
@@ -3770,6 +3775,32 @@ export function orphanSliceBounds(slice: number): { lower: string; upper: string
     lower: `${slice.toString(16)}${tail}`,
     upper: slice >= ORPHAN_SLICE_COUNT - 1 ? null : `${(slice + 1).toString(16)}${tail}`,
   };
+}
+
+/**
+ * Mark a timeout flag `:backed` (its recovery row exists) so the orphan query
+ * excludes it. Conditional on the exact current value (zero rows = replaced).
+ */
+async function backOrphanFlag(
+  supabase: SupabaseClient<Database>,
+  prop: { id: string; last_ai_escalation_reason: string | null },
+): Promise<void> {
+  const currentReason = prop.last_ai_escalation_reason;
+  if (!currentReason || currentReason.endsWith(SEND_TIMEOUT_BACKED_SUFFIX)) return;
+  const { error } = await supabase
+    .from("properties")
+    .update({
+      last_ai_escalation_reason: `${currentReason}${SEND_TIMEOUT_BACKED_SUFFIX}`,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", prop.id)
+    .eq("last_ai_escalation_reason", currentReason);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_orphan_timeout_backed_flag" },
+      extra: { propertyId: prop.id },
+    });
+  }
 }
 
 /**
@@ -3863,7 +3894,12 @@ async function repairOrphanedTimeouts(
     }
     for (const { prop, inboundId, stampedAt } of candidates) {
       if (inserted >= ORPHAN_PAGE_SIZE) break;
-      if (existing.has(inboundId)) continue;
+      if (existing.has(inboundId)) {
+        // Row exists but the flag is unmarked (a failed/interrupted backing
+        // write): promote it so later visits skip it.
+        await backOrphanFlag(supabase, prop);
+        continue;
+      }
       try {
         const { data: inbound, error: inboundError } = await supabase
           .from("messages")
@@ -3882,6 +3918,7 @@ async function repairOrphanedTimeouts(
         });
         if (insertError) throw new Error(insertError.message);
         inserted += 1;
+        await backOrphanFlag(supabase, prop);
       } catch (e) {
         reportError(e, {
           tags: { surface: "ai_responder_orphan_timeout_repair" },

@@ -65,6 +65,7 @@ describe("orphaned-timeout sweeper", () => {
     await seedProperty(B(1), { reason: `send_timeout:${inbound(9)}`, at: hourAgo });
     // Backed flags (dead-letter row exists) are excluded server-side, in both slices.
     await seedProperty(A(9), { reason: `send_timeout:${inbound(10)}:backed`, at: hourAgo });
+    await seedProperty(A(10), { reason: `dead_letter_failed:send_timeout:${inbound(12)}:backed`, at: hourAgo });
     await seedProperty(B(2), { reason: `send_timeout:${inbound(11)}:backed`, at: hourAgo });
 
     const supabase = createClient(process.env.TEST_SUPABASE_URL!, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!, {

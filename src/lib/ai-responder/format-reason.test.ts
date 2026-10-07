@@ -177,6 +177,11 @@ describe("send timeout reasons", () => {
     expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
     expect(parsed!.longLabel).not.toMatch(/3f1c|backed/);
   });
+  it("dead_letter_failed:send_timeout:<inbound_id>:backed is labelled like the unbacked form", () => {
+    const a = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
+    const b = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc:backed");
+    expect(b).toMatchObject({ gate: a!.gate, color: a!.color, shortLabel: a!.shortLabel, longLabel: a!.longLabel });
+  });
   it("send_timeout_then_sent warns not to re-send", () => {
     const parsed = parseEscalationReason("send_timeout_then_sent");
     expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");
