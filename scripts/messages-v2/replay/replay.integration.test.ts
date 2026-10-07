@@ -4,6 +4,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { requireLoopbackPostgresUrl } from "../../../src/lib/testing/loopback-postgres-url";
 import { buildExport } from "./export-core";
 import { countTaggedRowsPresent, replayOrgId, seedExport, wipeBatch } from "./seed-core";
 import type { Query } from "./schema";
@@ -14,7 +15,7 @@ import type { Query } from "./schema";
  * the same database here, so the "source" rows are removed before seeding to
  * mimic a separate target database.
  */
-const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
+const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "") });
 const MIGRATION = readFileSync(path.join(__dirname, "../../../supabase/migrations/20261008155000_replay_harness.sql"), "utf8")
   .replace(/^begin;$/m, "")
   .replace(/^commit;$/m, "");
