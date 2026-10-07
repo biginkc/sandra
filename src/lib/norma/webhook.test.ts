@@ -273,8 +273,9 @@ describe("bland webhook route core", () => {
     const { client, calls } = fakeClient(
       { norma_call_requests: [requestRow()] },
       {
-        fn_norma_claim_dispatch: () => true,
-        fn_norma_presend_fence: () => true,
+        // Runtime now claims through v2 and admits the send through mark_sending (H1); same outcomes as the legacy claim + fence.
+        fn_norma_claim_dispatch_v2: () => "claimed",
+        fn_norma_mark_sending: () => "sending",
         fn_norma_eligibility: () => [{ eligible: true }],
         fn_norma_bind_call_id: () => (state.status === "completed" ? "already_completed" : "bound"),
         fn_norma_mark_dispatch_unknown: unknown,
@@ -294,6 +295,7 @@ describe("bland webhook route core", () => {
       client, bland,
       blandConfig: { apiKey: "k", baseUrl: "x", pathwayId: "p", pathwayVersion: 1, voice: "v", fromNumber: "+12135550100", webhookUrl: "https://x.test", timeoutMs: 1000, waitForGreeting: true, backgroundTrack: "office" },
       gate: { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] },
+      queueConfig: { enabled: true, maxConcurrent: 5, dailyCap: 200, capTz: "America/Chicago", problems: [] },
     });
     expect(result).toEqual({ status: "dispatched", callId: "call-1" });
     expect(complete).toHaveBeenCalledTimes(1);

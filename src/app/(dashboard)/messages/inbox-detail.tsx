@@ -37,6 +37,7 @@ import { MessagesThread } from "../leads/[id]/messages-thread";
 import { DISPO_LABELS, OutcomeBar } from "@/components/leads/outcome-bar";
 
 import { AssignDropdown } from "./assign-dropdown";
+import { QueueNormaAction } from "./queue-norma-action";
 import {
   confirmAiDispositionReview,
 } from "./dispo-actions";
@@ -504,6 +505,7 @@ export function InboxDetail({
                   ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
                   : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
               </p> : null}
+              {data.propertyId ? <div className="mt-1"><QueueNormaAction propertyId={data.propertyId} propertyAddress={data.propertyAddress} /></div> : null}
               <p
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
                 title={[

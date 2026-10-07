@@ -81,6 +81,14 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/norma-queue-tick",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/norma-queue-digest",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/slack-unfurl-sweep",
       "schedule": "*/1 * * * *"
     },
