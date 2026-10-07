@@ -94,7 +94,8 @@ grant execute on function public.resume_sequence_enrollment(uuid, uuid, text) to
 
 do $$
 begin
-  if to_regclass('public.ai_reply_dead_letters') is not null then
+  if exists (select 1 from information_schema.columns
+             where table_schema='public' and table_name='ai_reply_dead_letters' and column_name='resolution_reason') then
     revoke update (resolution_reason) on table public.ai_reply_dead_letters from service_role;
     alter table public.ai_reply_dead_letters drop column if exists resolution_reason;
   end if;

@@ -321,6 +321,22 @@ describe("seam hardening", () => {
     expect(await startRun(admin, { orgId: "o", inboundMessageId: "m" })).not.toBeNull();
   });
 
+  it("PIPELINE_RUNS_ENABLED=0 after a run exists: resume returns null and nothing writes", async () => {
+    const { admin, calls } = fakeAdmin();
+    const ctx = await startRun(admin, { orgId: "o", inboundMessageId: "m" });
+    expect(ctx).not.toBeNull();
+    calls.length = 0;
+    vi.stubEnv("PIPELINE_RUNS_ENABLED", "0");
+    expect(await resumeRun(admin, ctx!.runId)).toBeNull();
+    const seqBefore = ctx!.seq;
+    await recordStep(admin, ctx, { kind: "gate", name: "g", result: "pass" });
+    await updateRun(admin, ctx, { mode: "legacy", claimId: "c" });
+    await finishRun(admin, ctx, { status: "closed" });
+    expect(calls).toHaveLength(0);
+    expect(ctx!.seq).toBe(seqBefore);
+    vi.stubEnv("PIPELINE_RUNS_ENABLED", "1");
+  });
+
   it("keeps UUIDs and ISO timestamps but still drops real-looking phones", () => {
     expect(
       sanitizeStepDetail({

@@ -18,7 +18,7 @@ import {
 function makeAdmin(options?: {
   properties?: Array<{ id: string; org_id: string }>;
   propertyError?: { message: string } | null;
-  insertError?: { message: string } | null;
+  insertError?: { message: string; code?: string } | null;
   lookupThrows?: Error;
   insertThrows?: Error;
   propertiesForIds?: (ids: string[]) => Array<{ id: string; org_id: string }>;
@@ -228,6 +228,25 @@ describe("recordLeadEvents", () => {
     }
     expect(log).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(log.mock.calls)).not.toContain("must never be logged");
+  });
+
+  it("quietly ignores a duplicate (source_type, source_id) unique violation", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = makeAdmin({
+      insertError: { message: "duplicate key value", code: "23505" },
+    });
+    mocks.createAdminClient.mockReturnValueOnce(admin.client);
+    await expect(
+      recordLeadEvent({
+        propertyId: "property-1",
+        actorType: "user",
+        actorId: "user-1",
+        eventType: LEAD_EVENT_TYPES.OPTED_OUT,
+        sourceType: "ai_disposition_reviews.confirmed_suppression",
+        sourceId: "review-1",
+      }),
+    ).resolves.toBeUndefined();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it("does not attempt an insert when no requested property resolves", async () => {

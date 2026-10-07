@@ -1,6 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { describe, expect, it, vi } from "vitest";
 
+import { confirmJevQueueItem } from "./actions";
 import { QueueItemCard } from "./queue-item-card";
 import type { JevQueueItem } from "./queries";
 
@@ -13,6 +16,10 @@ import type { JevQueueItem } from "./queries";
  * constraint error. Only the correction picker (a real supported
  * outcome) should be offered.
  */
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
+
 vi.mock("./actions", () => ({
   confirmJevQueueItem: vi.fn(),
   correctJevQueueItem: vi.fn(),
@@ -72,5 +79,42 @@ describe("<QueueItemCard /> — promoted classifier event Confirm gating (findin
   it("still shows Confirm for a genuine pending nurture decision", () => {
     render(<QueueItemCard item={item({ proposedOutcome: "nurture" })} />);
     expect(screen.getByTestId("jev-confirm-decision-1")).toBeInTheDocument();
+  });
+});
+
+describe("<QueueItemCard /> — confirm suppression warning", () => {
+  const WARNING = "Confirmed, but suppression incomplete — retry.";
+
+  it("surfaces the suppression warning as a destructive toast and inline, and does not report the row resolved", async () => {
+    vi.mocked(confirmJevQueueItem).mockResolvedValue({
+      ok: true,
+      data: { status: "confirmed", warning: WARNING },
+    });
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    const onResolved = vi.fn();
+    const user = userEvent.setup();
+    render(<QueueItemCard item={item({ source: "ai_disposition_review", proposedOutcome: "opted_out" })} onResolved={onResolved} />);
+
+    await user.click(screen.getByTestId("jev-confirm-decision-1"));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(WARNING));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId("jev-confirm-warning-decision-1")).toHaveTextContent(WARNING);
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it("a clean confirm still toasts success and reports resolved", async () => {
+    vi.mocked(confirmJevQueueItem).mockResolvedValue({ ok: true, data: { status: "confirmed" } });
+    vi.mocked(toast.success).mockClear();
+    const onResolved = vi.fn();
+    const user = userEvent.setup();
+    render(<QueueItemCard item={item()} onResolved={onResolved} />);
+
+    await user.click(screen.getByTestId("jev-confirm-decision-1"));
+
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    expect(toast.success).toHaveBeenCalled();
+    expect(screen.queryByTestId("jev-confirm-warning-decision-1")).not.toBeInTheDocument();
   });
 });

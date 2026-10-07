@@ -30,8 +30,9 @@ function looksLikePhone(value: string): boolean {
 }
 
 /**
- * Kill switch: PIPELINE_RUNS_ENABLED=0 turns every recorder into a no-op
- * (startRun returns null, so no context ever exists). Default on.
+ * Kill switch: PIPELINE_RUNS_ENABLED=0 turns every recorder into a no-op:
+ * startRun/resumeRun return null and recordStep/updateRun/finishRun write
+ * nothing, even for a context created before the switch flipped. Default on.
  */
 export function pipelineRunsEnabled(): boolean {
   return (process.env.PIPELINE_RUNS_ENABLED ?? "1").trim() !== "0";
@@ -93,7 +94,7 @@ export async function resumeRun(
   admin: Admin,
   runId: string | null | undefined,
 ): Promise<PipelineRunContext | null> {
-  if (!runId) return null;
+  if (!runId || !pipelineRunsEnabled()) return null;
   try {
     const { data: run, error } = await admin
       .from("pipeline_runs")
@@ -191,7 +192,7 @@ export async function recordStep(
   ctx: MaybeRunContext,
   step: RecordStepInput,
 ): Promise<void> {
-  if (!ctx) return;
+  if (!ctx || !pipelineRunsEnabled()) return;
   // Issue the seq before any await so concurrent callers stay ordered.
   ctx.seq += 1;
   const seq = ctx.seq;
@@ -263,7 +264,7 @@ export async function updateRun(
   ctx: MaybeRunContext,
   patch: RunPatch,
 ): Promise<void> {
-  if (!ctx) return;
+  if (!ctx || !pipelineRunsEnabled()) return;
   const columns = patchColumns(patch);
   if (Object.keys(columns).length === 0) return;
   // Remember the claim this process won so its own terminal write can
@@ -303,7 +304,7 @@ export async function finishRun(
   ctx: MaybeRunContext,
   input: FinishRunInput,
 ): Promise<void> {
-  if (!ctx) return;
+  if (!ctx || !pipelineRunsEnabled()) return;
   const presentedClaim = input.claimId ?? ctx.claimId ?? null;
   if (ctx.duplicate && !input.claimId) {
     await recordStep(admin, ctx, {

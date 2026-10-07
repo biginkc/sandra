@@ -115,20 +115,34 @@ describe("applyConfirmedSuppression", () => {
   });
 });
 
-function lookupClient(disposition: string) {
+function lookupClient(disposition: string, overrides: Record<string, unknown> = {}) {
   const rows: Record<string, unknown> = {
-    ai_disposition_reviews: { property_id: "property-1", org_id: "org-1", disposition, ai_reason: "said stop" },
+    ai_disposition_reviews: {
+      property_id: "property-1",
+      org_id: "org-1",
+      disposition,
+      ai_reason: "said stop",
+      source_inbound_message_id: "msg-1",
+    },
     properties: { homeowner_contact_id: "contact-1" },
     contacts: { phone_1: "+18165550100" },
+    messages: { from_address: "+18165550100" },
+    ...overrides,
   };
+  const updates: Array<{ table: string; values: unknown }> = [];
   const chain = (table: string) => {
     const c: Record<string, unknown> = {};
     c.select = () => c;
     c.eq = () => c;
+    c.update = (values: unknown) => {
+      updates.push({ table, values });
+      return c;
+    };
     c.maybeSingle = async () => ({ data: rows[table], error: null });
+    c.then = (resolve: (v: unknown) => void) => resolve({ error: null });
     return c;
   };
-  return { from: chain };
+  return { from: chain, updates };
 }
 
 describe("applySuppressionForConfirmedReview", () => {
@@ -157,5 +171,50 @@ describe("applySuppressionForConfirmedReview", () => {
     const bad = { from: () => { throw new Error("boom"); } };
     const result = await applySuppressionForConfirmedReview(bad, "review-1", "user-1");
     expect(result).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
+  });
+
+  it("suppresses the number the seller actually texted from (phone_2), not phone_1", async () => {
+    await applySuppressionForConfirmedReview(
+      lookupClient("opted_out", { messages: { from_address: "+18165550222" } }),
+      "review-1",
+      "user-1",
+    );
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+      { admin: true },
+      expect.objectContaining({ fromPhone: "+18165550222" }),
+    );
+  });
+
+  it("falls back to the contact phone when the source message is missing", async () => {
+    await applySuppressionForConfirmedReview(
+      lookupClient("opted_out", { messages: null }),
+      "review-1",
+      "user-1",
+    );
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+      { admin: true },
+      expect.objectContaining({ fromPhone: "+18165550100" }),
+    );
+  });
+
+  it("re-raises needs_human_attention with reason suppression_incomplete when suppression fails", async () => {
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    const admin = lookupClient("opted_out");
+    createAdminClient
+      .mockReturnValueOnce({ admin: true }) // opt-out attempt
+      .mockReturnValueOnce(admin as never); // hold re-raise
+    const result = await applySuppressionForConfirmedReview(
+      lookupClient("opted_out"),
+      "review-1",
+      "user-1",
+    );
+    expect(result).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
+    const hold = admin.updates.find((u) => u.table === "properties");
+    expect(hold?.values).toEqual(
+      expect.objectContaining({
+        needs_human_attention: true,
+        last_ai_escalation_reason: "suppression_incomplete",
+      }),
+    );
   });
 });

@@ -362,6 +362,8 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     const hook = vi.fn().mockResolvedValue(false);
     const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
     expect(hook).toHaveBeenCalledTimes(1);
+    // The hook is told which pending row is this attempt's own (not a competitor).
+    expect(hook).toHaveBeenCalledWith({ messageId: "msg-f" });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
     expect(updates[0]).toMatchObject({

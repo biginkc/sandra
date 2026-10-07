@@ -84,6 +84,7 @@ export default defineConfig({
       "supabase/migrations/20261008143500_dead_letter_resolution.sweeper.integration.test.ts",
       "supabase/migrations/20261008143600_consent_unavailable_pause.integration.test.ts",
       "supabase/migrations/20261008143700_jev_thresholds_q5.integration.test.ts",
+      "supabase/migrations/20261008143800_jev_thresholds_rls_parity.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",

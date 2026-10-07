@@ -1770,6 +1770,36 @@ describe("<InboxDetail />", () => {
     await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
   });
 
+  it("shows the suppression warning (toast + inline) and does not leave the queue when suppression is incomplete", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-ai-review";
+    const warning = "Confirmed, but suppression incomplete — retry.";
+    confirmAiDispositionReviewMock.mockResolvedValue({ ok: true, status: "confirmed", warning });
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-ai-review",
+      outreachDispo: "opted_out",
+      aiDispositionReview: {
+        id: "review-2",
+        status: "pending",
+        disposition: "opted_out",
+        reason: "Said stop",
+        sourceInboundMessageId: "message-2",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(<InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" onBackToList={onBackToList} />);
+    await user.click(screen.getByTestId("confirm-sandra-dispo"));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(warning));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sandra-dispo-warning")).toHaveTextContent(warning);
+    expect(onBackToList).not.toHaveBeenCalled();
+  });
+
   it("keeps the Sandra review control visible on permanently locked DNC history", () => {
     const data = makeData({
       contactId: "contact-locked-review",

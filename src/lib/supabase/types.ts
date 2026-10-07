@@ -7744,7 +7744,7 @@ export type Database = {
         Args: {
           p_conversation_id: string
           p_holder: string
-          p_inbound_message_id: string | null
+          p_inbound_message_id?: string
           p_lease_seconds: number
         }
         Returns: boolean

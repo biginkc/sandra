@@ -7,6 +7,8 @@ import type { Json } from "@/lib/supabase/types";
 export const SUPPRESSION_INCOMPLETE_WARNING =
   "Confirmed, but suppression incomplete — retry.";
 
+export const SUPPRESSION_INCOMPLETE_REASON = "suppression_incomplete";
+
 export type ConfirmedSuppressionResult =
   | { ok: true }
   | { ok: false; warning: string };
@@ -73,7 +75,37 @@ export async function applyConfirmedSuppression(input: {
       tags: { surface: "confirm_ai_disposition_suppression" },
       extra: { reviewId: input.reviewId, disposition: input.disposition },
     });
+    await raiseSuppressionIncompleteHold(input.propertyId, input.reviewId);
     return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
+  }
+}
+
+/**
+ * fn_confirm_ai_disposition_review clears needs_human_attention, so a failed
+ * suppression would otherwise vanish from every queue. Re-raise the hold so
+ * the lead stays visible until a human retries. Never throws.
+ */
+async function raiseSuppressionIncompleteHold(
+  propertyId: string,
+  reviewId: string,
+): Promise<void> {
+  try {
+    const now = new Date().toISOString();
+    const { error } = await createAdminClient()
+      .from("properties")
+      .update({
+        needs_human_attention: true,
+        last_ai_escalation_reason: SUPPRESSION_INCOMPLETE_REASON,
+        last_ai_escalation_at: now,
+        updated_at: now,
+      })
+      .eq("id", propertyId);
+    if (error) throw new Error(error.message);
+  } catch (holdError) {
+    reportError(holdError, {
+      tags: { surface: "confirm_ai_disposition_suppression_hold" },
+      extra: { reviewId, propertyId },
+    });
   }
 }
 
@@ -90,14 +122,16 @@ export async function applySuppressionForConfirmedReview(
   reviewId: string,
   actorId: string,
 ): Promise<ConfirmedSuppressionResult> {
+  let heldPropertyId: string | null = null;
   try {
     const { data: review, error } = await supabase
       .from("ai_disposition_reviews")
-      .select("property_id, org_id, disposition, ai_reason")
+      .select("property_id, org_id, disposition, ai_reason, source_inbound_message_id")
       .eq("id", reviewId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!review) throw new Error("review not found");
+    heldPropertyId = review.property_id;
     if (review.disposition !== "opted_out" && review.disposition !== "dnc") {
       return { ok: true };
     }
@@ -109,8 +143,21 @@ export async function applySuppressionForConfirmedReview(
       .maybeSingle();
     if (propError) throw new Error(propError.message);
     const contactId: string | null = property?.homeowner_contact_id ?? null;
+    // The automated path suppresses the number that actually texted
+    // (inboundFromPhone); mirror it, falling back to the contact phone only
+    // when the source message is gone.
     let phone: string | null = null;
-    if (contactId) {
+    if (review.source_inbound_message_id) {
+      const { data: message, error: messageError } = await supabase
+        .from("messages")
+        .select("from_address")
+        .eq("id", review.source_inbound_message_id)
+        .eq("org_id", review.org_id)
+        .maybeSingle();
+      if (messageError) throw new Error(messageError.message);
+      phone = message?.from_address ?? null;
+    }
+    if (!phone && contactId) {
       const { data: contact, error: contactError } = await supabase
         .from("contacts")
         .select("phone_1")
@@ -135,6 +182,7 @@ export async function applySuppressionForConfirmedReview(
       tags: { surface: "confirm_ai_disposition_suppression_lookup" },
       extra: { reviewId },
     });
+    if (heldPropertyId) await raiseSuppressionIncompleteHold(heldPropertyId, reviewId);
     return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
   }
 }

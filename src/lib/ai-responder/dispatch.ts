@@ -2248,6 +2248,8 @@ async function evaluateSendGate(
     checkNewerInbound: boolean;
     /** Already-loaded property (the early gate has it); otherwise read here. */
     property?: GateProperty | null;
+    /** The caller's own pending send row: it is not a competitor to itself. */
+    excludeMessageId?: string;
   },
 ): Promise<GateEvaluation> {
   const nowMs = Date.now();
@@ -2414,7 +2416,7 @@ async function loadSilentExit(
 async function gatherOutboundFacts(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  opts: { claimStartedAt: string | null },
+  opts: { claimStartedAt: string | null; excludeMessageId?: string },
   nowMs: number,
 ): Promise<{ ok: true; facts: GateOutboundFact[] } | { ok: false; truncated?: true }> {
   let claimedAtMs: number | null = null;
@@ -2513,6 +2515,7 @@ async function gatherOutboundFacts(
     }
     for (const row of (data ?? []) as Row[]) rows.set(row.id, row);
   }
+  if (opts.excludeMessageId) rows.delete(opts.excludeMessageId);
   if (rows.size === 0) return { ok: true, facts: [] };
 
   // Chunked: up to ~1000 ids must not blow the request URL limit.
@@ -3216,7 +3219,9 @@ type SendAttempt = {
   holder: string;
   conversationKey: string | null;
   reserved: boolean;
-  fenceRefusal: null | "lost" | "error" | "abandoned";
+  fenceRefusal: null | "lost" | "error" | "abandoned" | "revalidate";
+  /** Why the fence's live re-validation refused (`fence:suppressed`, ...). */
+  fenceReason?: string;
 };
 
 class AttemptAbandoned extends Error {
@@ -3249,7 +3254,9 @@ async function reserveSend(
     assertLive(attempt);
     const { data, error } = await supabase.rpc("fn_reserve_ai_send", {
       p_conversation_id: conversationKey,
-      p_inbound_message_id: inboundMessageId ?? null,
+      // Generated type is `?: string`; SQL accepts null. Cast keeps types.ts
+      // regen-safe.
+      p_inbound_message_id: (inboundMessageId ?? null) as string | undefined,
       p_holder: attempt.holder,
       p_lease_seconds: sendReservationTuning.leaseSeconds,
     });
@@ -3346,6 +3353,8 @@ async function renewSend(
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
   attempt: SendAttempt,
+  args: ResponderSendArgs,
+  ctx: { messageId?: string } = {},
 ): Promise<boolean> {
   const pastDeadline = () => attempt.abandoned || Date.now() >= attempt.deadlineAt;
   if (pastDeadline() || !attempt.conversationKey) {
@@ -3363,6 +3372,39 @@ async function fenceProviderSubmit(
     attempt.fenceRefusal = renewed;
     return false;
   }
+  // Re-validate the facts that can change in the window between the earlier
+  // checks and the submission: suppression / opt-out (Rule 0), the send-gate
+  // facts (newer inbound, a competitor that answered or was submitted; this
+  // attempt's own pending row excluded) and the live outbound policy. Any
+  // unreadable fact refuses (fail closed).
+  const refuse = (reason: string): false => {
+    attempt.fenceRefusal = "revalidate";
+    attempt.fenceReason = reason;
+    return false;
+  };
+  const evaluation = await evaluateSendGate(supabase, args.input, {
+    phase: "presend",
+    claimStartedAt: args.claimStartedAt,
+    checkNewerInbound: !!args.input.inboundMessageId,
+    excludeMessageId: ctx.messageId,
+  });
+  if (pastDeadline()) {
+    attempt.abandoned = true;
+    attempt.fenceRefusal = "abandoned";
+    return false;
+  }
+  if (!evaluation.ok) return refuse("fence:gate:error");
+  const decision = evaluation.decision;
+  if (decision.action !== "send") {
+    return refuse(decision.action === "skip" && decision.rule === 0 ? "fence:suppressed" : `fence:gate:${decision.rule}`);
+  }
+  const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
+  if (pastDeadline()) {
+    attempt.abandoned = true;
+    attempt.fenceRefusal = "abandoned";
+    return false;
+  }
+  if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
   attempt.providerStarted = true;
   return true;
 }
@@ -4216,7 +4258,7 @@ async function deliverResponderMessage(
     from: inboundToPhone ?? undefined,
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
-    beforeProviderSubmit: () => fenceProviderSubmit(supabase, attempt),
+    beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     metadata: args.input.inboundMessageId
       ? ({
           generated_by: "ai_responder_v1",
@@ -4240,6 +4282,31 @@ async function deliverResponderMessage(
       return failClosed(supabase, args, "send_check_failed", undefined, guard);
     }
     if (attempt.fenceRefusal === "abandoned") throw new AttemptAbandoned();
+    if (attempt.fenceRefusal === "revalidate") {
+      // The world changed after the earlier checks: nothing was submitted.
+      // Re-decide under the lease we still hold (silent skip / flag / hold as a
+      // draft), exactly as the pre-send check would have.
+      guard();
+      await trace(supabase, {
+        kind: "gate",
+        name: "provider_fence_refused",
+        result: "block",
+        detail: { reason: attempt.fenceReason ?? "fence:gate:error" },
+      }, args.runContext);
+      const evaluation = await evaluateSendGate(supabase, args.input, {
+        phase: "presend",
+        claimStartedAt: args.claimStartedAt,
+        checkNewerInbound: !!args.input.inboundMessageId,
+      });
+      guard();
+      const stale = await applyGateEvaluation(supabase, args, evaluation, guard);
+      if (stale) return stale;
+      const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
+      guard();
+      const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
+      if (livePolicy.hold) return holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
+      return retryOrFailReply(supabase, args, "send_lease_lost", guard);
+    }
     guard();
     await trace(supabase, { kind: "gate", name: "send_lease_lost", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "send_lease_lost", guard);

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import { callAction } from "@/lib/errors/call-action";
 
 import {
@@ -65,6 +66,7 @@ export function QueueItemCard({
   const [pending, startTransition] = useTransition();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<CorrectionHistoryEntry[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -98,13 +100,25 @@ export function QueueItemCard({
 
   const confirm = () => {
     setError(null);
+    setWarning(null);
     startTransition(async () => {
       const result = await callAction(confirmJevQueueItem(item.source as JevQueueSource, item.id), {
-        successMessage: `Confirmed ${label(item.proposedOutcome)}`,
         fallbackMessage: "Could not confirm",
       });
-      if (result.ok) onResolved?.(result.data);
-      else setError(result.error.message);
+      if (!result.ok) {
+        setError(result.error.message);
+        return;
+      }
+      const confirmWarning = result.data.warning;
+      if (confirmWarning) {
+        // Suppression incomplete: surface it and leave the row visible; the
+        // server re-raised the human-attention hold.
+        setWarning(confirmWarning);
+        toast.error(confirmWarning);
+        return;
+      }
+      toast.success(`Confirmed ${label(item.proposedOutcome)}`);
+      onResolved?.(result.data);
     });
   };
 
@@ -320,6 +334,11 @@ export function QueueItemCard({
         )}
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
+      {warning && (
+        <p role="alert" className="text-xs font-semibold text-destructive" data-testid={`jev-confirm-warning-${item.id}`}>
+          {warning}
+        </p>
+      )}
     </div>
   );
 }

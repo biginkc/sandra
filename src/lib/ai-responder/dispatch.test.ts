@@ -3034,6 +3034,95 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(Math.max(...delays)).toBeLessThan(sendReservationTuning.leaseSeconds * 1000);
   });
 
+  describe("provider fence re-validates the live gate facts (no provider call after the world changes)", () => {
+    /** The fence is the LAST await inside sendSmsToContact: mutate the world
+     * "during the preflight awaits", then run the real fence. */
+    const interleave = (state: MockState, mutate: () => void) => {
+      installSendMock(state);
+      vi.mocked(sendSmsToContact).mockImplementationOnce(async (_s, inputArgs) => {
+        mutate();
+        const refused = await passesProviderFence(state, inputArgs);
+        if (refused) return refused;
+        throw new Error("provider must not be reached");
+      });
+    };
+    const outboundRows = (state: MockState) => state.messages.filter((m) => m.direction === "outbound");
+
+    it("a STOP that completes between the reservation and the fence: nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fs", body: "Hello?" });
+      interleave(state, () => { state.contact.sms_opted_out = true; });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fs", "Hello?"), { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "contact_sms_opted_out" });
+      expect(outboundRows(state)).toHaveLength(0);
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(state.sendReservations?.size).toBe(0);
+    });
+
+    it("a destination-phone suppression that lands between the reservation and the fence: nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fp", body: "Hello?" });
+      interleave(state, () => { state.phoneSuppressions = ["+18165550001"]; });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fp", "Hello?"), { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "phone_suppressed" });
+      expect(outboundRows(state)).toHaveLength(0);
+    });
+
+    it("a failed suppression read at the fence refuses (fail closed), nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fe", body: "Hello?" });
+      interleave(state, () => { state.phoneSuppressionError = true; });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fe", "Hello?"), { anthropic: {} as never });
+      expect(result.outcome).not.toBe("sent");
+      expect(outboundRows(state)).toHaveLength(0);
+    });
+
+    it("the owner flips outbound_mode to hold between the reservation and the fence: held as a draft, nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fh", body: "Hello?" });
+      interleave(state, () => { state.config.outbound_mode = "hold"; });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fh", "Hello?"), { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "draft_held" });
+      expect(outboundRows(state)).toHaveLength(0);
+      expect(state.aiReplyDrafts).toEqual([expect.objectContaining({ inbound_message_id: "inbound-fh", status: "pending" })]);
+    });
+
+    it("a competitor submitted between the reservation and the fence: nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fc", body: "Hello?" });
+      interleave(state, () => {
+        state.messages.push({
+          id: "rep-landed", body: "rep says hi", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
+          created_at: new Date().toISOString(), direction: "outbound", metadata: null, property_id: PROPERTY_ID,
+          sent_at: new Date().toISOString(), status: "sent",
+        });
+      });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fc", "Hello?"), { anthropic: {} as never });
+      expect(result.outcome).toBe("skipped");
+      expect(outboundRows(state).filter((m) => m.id !== "rep-landed")).toHaveLength(0);
+    });
+
+    it("a newer inbound that lands between the reservation and the fence: nothing is submitted", async () => {
+      const state = createMockState();
+      seedInboundMessage(state, { id: "inbound-fn", body: "Hello?" });
+      interleave(state, () => {
+        vi.setSystemTime(new Date("2026-06-13T18:00:03.000Z"));
+        seedInboundMessage(state, { id: "inbound-fn-2", body: "Hello??" });
+      });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-fn", "Hello?"), { anthropic: {} as never });
+      expect(result.outcome).toBe("skipped");
+      expect(outboundRows(state)).toHaveLength(0);
+    });
+
+    it("an unchanged world passes the fence and sends", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-ok", body: "Hello?" });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-ok", "Hello?"), { anthropic: {} as never });
+      expect(result.outcome).toBe("sent");
+    });
+  });
+
   it("a newer inbound that lands AFTER the reservation is taken still blocks the send (and flags it)", async () => {
     const state = createMockState();
     installSendMock(state);

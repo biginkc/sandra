@@ -89,6 +89,7 @@ function SandraDispoReviewBanner({
   onResolved: (status: "confirmed" | "superseded") => void;
 }) {
   const [pending, startTransition] = useTransition();
+  const [warning, setWarning] = useState<string | null>(null);
   const label = DISPO_LABELS[review.disposition] ?? review.disposition;
   const keepsRestrictions =
     review.disposition === "dnc" || review.disposition === "opted_out";
@@ -100,6 +101,14 @@ function SandraDispoReviewBanner({
         toast.error(result.error);
         return;
       }
+      if (result.warning) {
+        // Suppression did not fully apply: keep the banner and the thread
+        // in view; the server re-raised the human-attention hold.
+        setWarning(result.warning);
+        toast.error(result.warning);
+        return;
+      }
+      setWarning(null);
       if (result.status === "confirmed") {
         toast.success("Sandra disposition confirmed");
       } else {
@@ -137,6 +146,15 @@ function SandraDispoReviewBanner({
               >
                 Reviewed message: “{review.sourceMessageBody}”
               </blockquote>
+            ) : null}
+            {warning ? (
+              <p
+                role="alert"
+                className="mt-1 text-xs font-semibold text-destructive"
+                data-testid="sandra-dispo-warning"
+              >
+                {warning}
+              </p>
             ) : null}
             {keepsRestrictions ? (
               <p className="mt-1 text-[11px] font-medium text-[#7c2d12]">

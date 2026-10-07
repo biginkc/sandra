@@ -507,7 +507,7 @@ export type SendSmsInput = {
    * at the real provider boundary, so a preflight that was paused past lease
    * expiry can never submit.
    */
-  beforeProviderSubmit?: () => Promise<boolean>;
+  beforeProviderSubmit?: (ctx?: { messageId: string }) => Promise<boolean>;
   /**
    * Sequence first-touches can have no prior inbound and no campaign snapshot.
    * When true, the provider default may be used, but inventory-aware providers
@@ -1019,7 +1019,7 @@ export async function sendSmsToContact(
     if (input.beforeProviderSubmit) {
       let proceed = false;
       try {
-        proceed = (await input.beforeProviderSubmit()) === true;
+        proceed = (await input.beforeProviderSubmit({ messageId: pending.id })) === true;
       } catch {
         proceed = false;
       }
