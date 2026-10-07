@@ -40,7 +40,7 @@ const arrive = (name: string, actors: string[], argKey?: string, argValue?: stri
  * bookkeeping times; what must not change is state, identity and content.
  */
 async function crm(propertyId: string) {
-  const T = "array['created_at','updated_at','next_check_at','completed_at','dispatched_at','dispatch_started_at','due_at','callback_requested_for','next_run_at','enrolled_at','released_at','next_attempt_at','snoozed_until']";
+  const T = "array['created_at','updated_at','next_check_at','completed_at','dispatched_at','dispatch_started_at','due_at','callback_requested_for','next_run_at','enrolled_at','released_at','next_attempt_at','snoozed_until','send_attempted_at']";
   const r = await q(
     `select (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.norma_call_requests x where x.property_id = $1) as requests,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.tasks x where x.related_property_id = $1) as tasks,
@@ -193,7 +193,7 @@ describe("close vs dispatch (expected-status)", () => {
     const remove = h.addHook(async (info) => {
       if (
         info.kind === "rpc" &&
-        ((info.name === "fn_norma_claim_dispatch" && info.actor === "dispatch-race") ||
+        ((info.name === "fn_norma_claim_dispatch_v2" && info.actor === "dispatch-race") ||
           (info.name === "fn_norma_mark_dispatch_rejected" && info.actor === "close-race")) &&
         (info.args as { p_request_id?: string }).p_request_id === request.id
       ) {
@@ -381,8 +381,9 @@ describe("button hammer", () => {
     expect(h.bland.sendsFor(request.id)).toHaveLength(1);
     expect(h.bland.callsFor(request.id)).toHaveLength(1);
     expect(request.status).toBe("dispatched");
-    // A completed call legitimately allows a new request.
+    // A completed call legitimately allows a new request (once the 10 s same-number spacing of claim_dispatch_v2 [C9] has passed).
     await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    await h.advance(11_000);
     expect(await h.requestCall(ctx, h.world.rep1)).toMatchObject({ ok: true });
   });
 
@@ -392,7 +393,7 @@ describe("button hammer", () => {
     const request = await requestOf(ctx.lead.property);
     const barrier = new Barrier(20);
     const remove = h.addHook(async (info) => {
-      if (info.kind === "rpc" && info.name === "fn_norma_claim_dispatch" && info.actor.startsWith("d20-")) await barrier.wait();
+      if (info.kind === "rpc" && info.name === "fn_norma_claim_dispatch_v2" && info.actor.startsWith("d20-")) await barrier.wait();
     });
     const out = await Promise.all(Array.from({ length: 20 }, (_, i) => h.dispatch(request.id, `d20-${i}`)));
     remove();

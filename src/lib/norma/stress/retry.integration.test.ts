@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { claimNormaDispatch } from "../rpc";
+import { claimNormaDispatchV2 } from "../rpc";
 import { handleBlandCallWebhook } from "../webhook";
 import { WEBHOOK_SECRET } from "./fake-bland";
 import { Harness } from "./harness";
@@ -159,7 +159,9 @@ describe("only the current attempt can complete or advance the request", () => {
     const first = h.bland.callsForNumber(ctx.lead.phone)[0]!;
     await h.bland.webhook(first, "good");
     // Attempt 2 claimed (dispatching) but its call id is not bound yet.
-    expect(await claimNormaDispatch(h.client("claim"), request.id, 2)).toBe(true);
+    expect(
+      await claimNormaDispatchV2(h.client("claim"), request.id, { expectedAttempt: 2, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" }),
+    ).toBe("claimed");
     expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "dispatching", attempt: 2, bland_call_id: null });
     for (const flavor of ["mismatch_call_id", "good"] as const) {
       const hook = await h.bland.webhook(first, flavor);
@@ -324,7 +326,7 @@ describe("the final pre-send fence cannot dial after review wins", () => {
     const gate = new Latch();
     const reached = new Latch();
     const remove = h.holdOnce(
-      (info) => info.kind === "rpc" && info.name === "fn_norma_presend_fence" && info.actor === `presend-${attempt}` && (info.args as { p_request_id?: string } | undefined)?.p_request_id === requestId,
+      (info) => info.kind === "rpc" && info.name === "fn_norma_mark_sending" && info.actor === `presend-${attempt}` && (info.args as { p_request_id?: string } | undefined)?.p_request_id === requestId,
       gate.promise,
       () => reached.open(),
     );
@@ -397,7 +399,7 @@ describe("a stalled dispatcher cannot act for the wrong attempt", () => {
     const gate = new Latch();
     const reached = new Latch();
     const remove = h.holdOnce(
-      (info) => info.kind === "rpc" && info.name === "fn_norma_claim_dispatch" && info.actor === "worker-A",
+      (info) => info.kind === "rpc" && info.name === "fn_norma_claim_dispatch_v2" && info.actor === "worker-A",
       gate.promise,
       () => reached.open(),
     );

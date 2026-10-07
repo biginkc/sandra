@@ -40,8 +40,9 @@ async function prepareBoundAttemptTwo(h: Harness) {
   h.skipRetryDispatchOnce = true;
   await h.bland.webhook(first, "good");
   const id = (await h.scratch.pool.query<{ id: string }>("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0]!.id;
-  const { claimNormaDispatch } = await import("../rpc");
-  await claimNormaDispatch(h.client("claim"), id, 2);
+  const { claimNormaDispatchV2 } = await import("../rpc");
+  const claimed = await claimNormaDispatchV2(h.client("claim"), id, { expectedAttempt: 2, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+  if (claimed !== "claimed") throw new Error(`attempt-2 claim answered ${claimed}`);
   await h.scratch.pool.query("update public.norma_call_requests set status = 'dispatched', bland_call_id = 'call-2' where id = $1", [id]);
   return { ctx, id };
 }
@@ -131,11 +132,11 @@ const MUTANTS: Mutant[] = [
   {
     name: "eligibility never blocks (DNC / not_interested leads get dialled)",
     invariant: "2",
+    // Every dial-time gate (claim_dispatch_v2, mark_sending, the public wrapper) reads eligibility through eligibility_core.
     apply: async (q) => {
-      await q("alter function public.fn_norma_eligibility(uuid, uuid, text) rename to fn_norma_eligibility_orig");
-      await q(`create function public.fn_norma_eligibility(p_property_id uuid, p_contact_id uuid, p_phone_e164 text)
+      await q("alter function norma_private.fn_norma_eligibility_core(uuid, uuid, text) rename to fn_norma_eligibility_core_orig");
+      await q(`create function norma_private.fn_norma_eligibility_core(p_property_id uuid, p_contact_id uuid, p_phone_e164 text)
                returns table (eligible boolean, block_reason text) language sql security definer set search_path = public as $$ select true, null::text $$`);
-      await q("grant execute on function public.fn_norma_eligibility(uuid, uuid, text) to service_role");
     },
   },
 ];
@@ -150,7 +151,7 @@ type SceneMutant = { name: string; apply: Mutant["apply"]; scene: (h: Harness) =
 const SCENE_MUTANTS: SceneMutant[] = [
   {
     name: "the final pre-send fence is removed (reviewed dispatch still dials)",
-    apply: (q) => mutateFunction(q, "public.fn_norma_presend_fence(uuid, integer)", "return v_n = 1;", "return true;"),
+    apply: (q) => mutateFunction(q, "public.fn_norma_mark_sending(uuid, uuid, integer)", "if r.id is null or r.status <> 'dispatching'\n     or not ((p_expected_attempt is null and r.attempt = 1) or r.attempt = p_expected_attempt) then", "if r.id is null then"),
     scene: async (h) => {
       const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback" });
       await h.requestCall(ctx, h.world.rep1, { crashBeforeDispatch: true });
@@ -158,7 +159,7 @@ const SCENE_MUTANTS: SceneMutant[] = [
       const gate = new Latch();
       const reached = new Latch();
       const remove = h.holdOnce(
-        (info) => info.kind === "rpc" && info.name === "fn_norma_presend_fence" && info.actor === "fence-mutant",
+        (info) => info.kind === "rpc" && info.name === "fn_norma_mark_sending" && info.actor === "fence-mutant",
         gate.promise,
         () => reached.open(),
       );
@@ -282,8 +283,9 @@ const SCENE_MUTANTS: SceneMutant[] = [
       h.skipRetryDispatchOnce = true;
       await h.bland.webhook(first, "good");
       const id = (await h.scratch.pool.query("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0].id;
-      const { claimNormaDispatch } = await import("../rpc");
-      await claimNormaDispatch(h.client("claim"), id, 2);
+      const { claimNormaDispatchV2 } = await import("../rpc");
+      const claimed = await claimNormaDispatchV2(h.client("claim"), id, { expectedAttempt: 2, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+      if (claimed !== "claimed") return [`scene setup: attempt-2 claim answered ${claimed}`];
       await h.bland.webhook(first, "mismatch_call_id");
       const row = (await h.scratch.pool.query("select status from public.norma_call_requests where id = $1", [id])).rows[0];
       return row?.status === "dispatching" ? [] : [`a forged attempt-1 call id moved the request to ${row?.status}`];

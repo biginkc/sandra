@@ -119,6 +119,17 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
   if (firstAbsent >= 0 && present.slice(firstAbsent).some(Boolean)) {
     throw new Error(`My Leads migrations are partly applied (${known.map((e, i) => `${e.key}=${present[i]}`).join(', ')}); reset the test database`);
   }
+  // Full-chain disposable database (every migration applied): the later 20261008 Norma migrations re-created fn_norma_mark_needs_review as a
+  // 3-argument overload that still calls fn_create_next_step. The 2-argument rollback of 20261005130500 cannot remove it, so the chain would
+  // look half-applied after the unwind. Drop that overload (inside the caller's rolled-back transaction) so the unwind is complete; each
+  // suite then replays the Norma migrations it needs. Only when the whole chain is present, never after a test applied it itself.
+  if (known.length > 0 && present.every(Boolean)) {
+    await db.query('drop function if exists public.fn_norma_mark_needs_review(uuid, text, integer)');
+    // Same for the legacy dispatch claim: 20261008150000 left a (uuid, integer) overload that is always false, and the historical Norma
+    // migrations a suite replays re-create the 1-argument one, which makes every 1-argument call ambiguous. Those suites test the
+    // historical function bodies; the always-false legacy claim is covered by norma_call_queue.integration.test.ts.
+    await db.query('drop function if exists public.fn_norma_claim_dispatch(uuid, integer)');
+  }
   for (let i = known.length - 1; i >= 0; i--) {
     if (present[i]) await db.query(stripTransaction(rollbackPath(known[i].file)));
   }

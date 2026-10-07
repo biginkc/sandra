@@ -17,7 +17,7 @@ async function service() {
 async function ready(c: Client, call: string, preserveReply = false) {
   const l = await world.nextLead({ enrollments: [preserveReply ? "paused:inbound_reply" : "active"] });
   const id = (await c.query("select * from public.fn_norma_create_request($1,$2,$3,$4,'private admission test',$5)", [l.property, l.contact, l.phone, world.rep1, world.assignee])).rows[0].request_id;
-  expect((await c.query("select public.fn_norma_claim_dispatch($1) as c", [id])).rows[0].c).toBe(true);
+  expect((await c.query("select public.fn_norma_claim_dispatch_v2($1,1,now(),false,1000,100000,'America/Chicago') as c", [id])).rows[0].c).toBe("claimed");
   expect((await c.query("select public.fn_norma_bind_call_id($1,$2) as b", [id, call])).rows[0].b).toBe("bound");
   return { id, l };
 }

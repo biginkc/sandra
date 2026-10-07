@@ -13,8 +13,9 @@ set local lock_timeout = '5s';
 set local statement_timeout = '120s';
 lock table public.norma_call_requests in access exclusive mode;
 
+-- norma_private already exists (20261008135000) with USAGE granted to authenticated for the inbound-call RLS helpers.
+-- Its schema privileges are deliberately NOT touched here; the new queue functions are locked down per object below.
 create schema if not exists norma_private;
-revoke all on schema norma_private from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Clock seam: the ONLY place SQL reads the real clock.
@@ -2597,7 +2598,8 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Grants: every new function is service-role only; norma_private is owner-only.
+-- Grants: every new function is service-role only. Pre-existing objects' privileges (other than the
+-- fn_norma_eligibility wrapper, restated to its unchanged pre-queue values) are never altered.
 -- ---------------------------------------------------------------------------
 do $$
 declare f record;
@@ -2606,6 +2608,9 @@ begin
     select p.oid::regprocedure as sig
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'norma_private'
+       -- ONLY the queue's own fn_norma_* functions. can_access_callbacks / associate_inbound_call (20261008135000) keep
+       -- their authenticated EXECUTE: the inbound-call RLS policies call them.
+       and p.proname like 'fn\_norma\_%'
   loop
     execute format('revoke all on function %s from public, anon, authenticated, service_role', f.sig);
   end loop;
@@ -2625,8 +2630,6 @@ begin
   end loop;
 end $$;
 
--- merge_duplicate_properties keeps its existing grants (authenticated only).
-revoke all on function public.merge_duplicate_properties(uuid, uuid) from public, anon, service_role;
-grant execute on function public.merge_duplicate_properties(uuid, uuid) to authenticated;
+-- merge_duplicate_properties is create-or-replaced above, which preserves its existing grants; nothing to do here.
 
 commit;
