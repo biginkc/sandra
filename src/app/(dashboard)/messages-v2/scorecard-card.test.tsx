@@ -96,6 +96,38 @@ describe("ScorecardCard", () => {
     expect(await nurture.findByText(/copied/i)).toBeInTheDocument();
   });
 
+  it("shows auto and held agreement separately in the suggestion line, and labels loosening", () => {
+    const samples = [
+      ...Array.from({ length: 30 }, () => [0.8, 1, "a"] as Sample),
+      ...Array.from({ length: 30 }, () => [0.97, 1, "h"] as Sample),
+    ];
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[row("nurture", { runs: 60, threshold: 0.95, samples })]}
+        load={vi.fn()}
+      />,
+    );
+    const el = within(section("nurture"));
+    expect(el.getByText(/loosens current/i)).toBeInTheDocument();
+    expect(el.getByText(/auto 100% \(n=30\)/i)).toBeInTheDocument();
+    expect(el.getByText(/held 100% \(n=30\)/i)).toBeInTheDocument();
+  });
+
+  it("keeps the current threshold when only a stray low sample would loosen it", () => {
+    const samples: Sample[] = [...batch(0.96, 29, 29), [0.4, 1]];
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[row("nurture", { runs: 30, threshold: 0.95, samples })]}
+        load={vi.fn()}
+      />,
+    );
+    const el = within(section("nurture"));
+    expect(el.getByText(/keep current threshold/i)).toBeInTheDocument();
+    expect(el.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+  });
+
   it("shows insufficient data with no copy button under 30 samples", () => {
     render(<ScorecardCard orgId="o" initialRows={ROWS} load={vi.fn()} />);
     const nl = within(section("new_lead"));

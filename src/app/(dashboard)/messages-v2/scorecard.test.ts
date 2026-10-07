@@ -82,6 +82,48 @@ describe("suggestThreshold", () => {
   });
 });
 
+describe("suggestThreshold vs the current threshold", () => {
+  it("does not loosen on one stray low-confidence agreement (29 @0.96 + 1 @0.40, current 0.95)", () => {
+    const samples: Sample[] = [...batch(0.96, 29, 29), [0.4, 1]];
+    expect(suggestThreshold(samples, 0.95)).toEqual({ kind: "keep_current", samples: 30 });
+  });
+
+  it("loosens only with >=30 samples at >=95% in the band [suggestion, current)", () => {
+    const samples: Sample[] = [...batch(0.8, 30, 30), ...batch(0.96, 30, 30)];
+    expect(suggestThreshold(samples, 0.95)).toMatchObject({
+      kind: "suggested",
+      threshold: 0.8,
+      direction: "loosens",
+    });
+  });
+
+  it("does not loosen when the band agrees under 95%", () => {
+    const samples: Sample[] = [...batch(0.8, 30, 27), ...batch(0.96, 30, 30)];
+    const s = suggestThreshold(samples, 0.95);
+    expect(s).not.toMatchObject({ direction: "loosens" });
+  });
+
+  it("labels a higher suggestion as raises and an equal one as same", () => {
+    const samples: Sample[] = [...batch(0.8, 30, 20), ...batch(0.96, 30, 30)];
+    expect(suggestThreshold(samples, 0.9)).toMatchObject({ threshold: 0.96, direction: "raises" });
+    expect(suggestThreshold(samples, 0.96)).toMatchObject({ threshold: 0.96, direction: "same" });
+    expect(suggestThreshold(samples, null)).toMatchObject({ threshold: 0.96, direction: "new" });
+  });
+
+  it("reports auto and held agreement separately for the suggested tail", () => {
+    const samples: Sample[] = [
+      ...Array.from({ length: 20 }, () => [0.97, 1, "a"] as Sample),
+      ...Array.from({ length: 10 }, (_, i) => [0.97, i < 9 ? 1 : 0, "h"] as Sample),
+      ...Array.from({ length: 10 }, () => [0.5, 0, "a"] as Sample),
+    ];
+    expect(suggestThreshold(samples, null)).toMatchObject({
+      kind: "suggested",
+      auto: { agreed: 20, n: 20 },
+      held: { agreed: 9, n: 10 },
+    });
+  });
+});
+
 describe("formatRuleText", () => {
   it("renders the exact approval text", () => {
     expect(formatRuleText("nurture", 0.9)).toBe(

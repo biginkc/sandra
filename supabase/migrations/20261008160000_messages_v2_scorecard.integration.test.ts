@@ -231,10 +231,11 @@ describe("fn_messages_v2_scorecard", () => {
       held_decided: "2",
       held_agreed: "1",
     });
-    // samples: every verdict-bearing run with a confidence, as [conf, agreed]
-    const samples = (n.samples as Array<[number, number]>).sort((x, y) => x[0] - y[0]);
+    // samples: every verdict-bearing run with a confidence, as [conf, agreed, route]
+    // where route is "a" (auto-applied) or "h" (held), so the two are never blended.
+    const samples = (n.samples as Array<[number, number, string]>).sort((x, y) => x[0] - y[0]);
     expect(samples).toEqual([
-      [0.7, 0], [0.8, 1], [0.9, 0], [0.91, 0], [0.92, 1], [0.93, 1], [0.95, 1],
+      [0.7, 0, "h"], [0.8, 1, "h"], [0.9, 0, "a"], [0.91, 0, "a"], [0.92, 1, "a"], [0.93, 1, "a"], [0.95, 1, "a"],
     ]);
   });
 
@@ -279,6 +280,23 @@ describe("fn_messages_v2_scorecard", () => {
       auto_agreed: "2",
       held_decided: "2",
       held_agreed: "1",
+    });
+  });
+
+  it("review path: a human dispo_set to the mapped disposition (dnc) is not an override of Jev's opted_out", async () => {
+    // superseded dnc review, human set dnc -> same as the review, so no verdict (run only)
+    const a = await seedRun({ outcome: "opted_out", conf: 0.97, ageHours: 120 });
+    await seedReview(a, "dnc", "superseded", { runAgeHours: 120 });
+    await leadEvent(a.propertyId, "dispo_set", "user", { from: null, to: "dnc" }, 100);
+    // a different human disposition inside 72h still is an override -> held disagreement
+    const b = await seedRun({ outcome: "opted_out", conf: 0.97, ageHours: 120 });
+    await seedReview(b, "dnc", "superseded", { runAgeHours: 120 });
+    await leadEvent(b.propertyId, "dispo_set", "user", { from: null, to: "nurture" }, 100);
+    expect((await scorecard()).opted_out).toMatchObject({
+      runs: "2",
+      held: "1",
+      held_decided: "1",
+      held_agreed: "0",
     });
   });
 
