@@ -113,7 +113,13 @@ describe("ScorecardCard", () => {
   });
 
   it("suggests a threshold and copies the exact rule text without applying anything", async () => {
-    render(<ScorecardCard orgId="o" initialRows={ROWS} load={vi.fn()} />);
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[{ ...ROWS[0], threshold: 0.85 }, ROWS[1]]}
+        load={vi.fn()}
+      />,
+    );
     const nurture = within(section("nurture"));
     expect(nurture.getByText(/suggested ≥ 0\.900/i)).toBeInTheDocument();
     expect(screen.getByText(/suggestion only/i)).toBeInTheDocument();
@@ -130,8 +136,8 @@ describe("ScorecardCard", () => {
 
   it("shows auto and held agreement separately in the suggestion line, and labels loosening", () => {
     const samples = [
-      ...Array.from({ length: 30 }, () => [0.8, 1, "a"] as Sample),
-      ...Array.from({ length: 30 }, () => [0.97, 1, "h"] as Sample),
+      ...Array.from({ length: 30 }, () => [0.8, 1, "h"] as Sample),
+      ...Array.from({ length: 30 }, () => [0.97, 1, "a"] as Sample),
     ];
     render(
       <ScorecardCard

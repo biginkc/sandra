@@ -113,7 +113,10 @@ describe("suggestThreshold vs the current threshold", () => {
   });
 
   it("loosens only with >=30 samples at >=95% in the band [suggestion, current)", () => {
-    const samples: Sample[] = [...batch(0.8, 30, 30), ...batch(0.96, 30, 30)];
+    const samples: Sample[] = [
+      ...Array.from({ length: 30 }, () => [0.8, 1, "h"] as Sample),
+      ...batch(0.96, 30, 30),
+    ];
     expect(suggestThreshold(samples, 0.95)).toMatchObject({
       kind: "suggested",
       threshold: 0.8,
@@ -144,7 +147,10 @@ describe("suggestThreshold vs the current threshold", () => {
   });
 
   it("does not loosen when the band agrees under 95%", () => {
-    const samples: Sample[] = [...batch(0.8, 30, 27), ...batch(0.96, 30, 30)];
+    const samples: Sample[] = [
+      ...Array.from({ length: 30 }, (_, i) => [0.8, i < 27 ? 1 : 0, "h"] as Sample),
+      ...batch(0.96, 30, 30),
+    ];
     const s = suggestThreshold(samples, 0.95);
     expect(s).not.toMatchObject({ direction: "loosens" });
   });

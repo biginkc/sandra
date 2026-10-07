@@ -89,7 +89,7 @@ const ceil3 = (x: number) => Math.ceil(x * 1000 - 1e-9) / 1000;
  * evaluated) such that samples with confidence >= x number at least 30 and
  * agree at least 95% of the time. A cutoff BELOW the current threshold is a
  * loosening, so it must also be backed by its own band [x, current): at least
- * 30 samples agreeing at >= 95%; otherwise the next higher cutoff is tried and,
+ * 30 held (route "h") samples agreeing at >= 95%; otherwise the next higher cutoff is tried and,
  * if none qualifies, "keep_current". "insufficient" under 30 samples overall;
  * "none" when there is enough data but no cutoff reaches the target.
  */
@@ -133,8 +133,11 @@ export function suggestThreshold(
     if (loosens) {
       const bandStart = start;
       const bandEnd = Math.max(start, curIdx);
-      const bandN = bandEnd - bandStart;
-      const bandAgreed = suffixAgreed[bandStart] - suffixAgreed[bandEnd];
+      // Held (human-decided) samples only: passive 72h auto-agreements prove
+      // nothing about a band that was held back after a threshold was lowered.
+      const band = valid.slice(bandStart, bandEnd).filter((x) => x[2] === "h");
+      const bandN = band.length;
+      const bandAgreed = band.reduce((m, x) => m + x[1], 0);
       if (
         bandN < MIN_SUGGESTION_SAMPLES ||
         bandAgreed * 100 < bandN * TARGET_AGREEMENT_PERCENT

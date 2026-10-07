@@ -173,9 +173,11 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
                 {s.total})
               </span>
             </span>
-            <Button type="button" size="sm" variant="outline" onClick={copy}>
-              Copy for approval
-            </Button>
+            {s.direction !== "same" && (
+              <Button type="button" size="sm" variant="outline" onClick={copy}>
+                Copy for approval
+              </Button>
+            )}
             {copyState === "copied" && (
               <span
                 role="status"

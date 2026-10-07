@@ -28,7 +28,9 @@
 -- within 72h that sets a different disposition (not used for new_lead, whose
 -- promotion is a status change, not a disposition). A review superseded by a
 -- human changing the disposition counts as a held disagreement; any other
--- superseded row only counts as a run (no verdict).
+-- superseded row only counts as a run (no verdict). Nurture is a parking step:
+-- a human dispo_set to needs_sequence after a nurture run (what
+-- setInboxDispoAndStartDrip writes) agrees with Jev and is not an override.
 -- Auto rows younger than 72h and not yet corrected are auto_applied but not
 -- settled, so a fresh burst cannot inflate agreement.
 
@@ -106,6 +108,7 @@ as $$
                  and e.created_at > r.created_at
                  and e.created_at <= r.created_at + interval '72 hours'
                  and e.payload ->> 'to' is distinct from v.disposition
+                 and not (v.disposition = 'nurture' and e.payload ->> 'to' = 'needs_sequence')
              ) as override
     ) o
     cross join lateral (
@@ -155,6 +158,7 @@ as $$
                  and e.created_at > r.created_at
                  and e.created_at <= r.created_at + interval '72 hours'
                  and e.payload ->> 'to' is distinct from r.outcome
+                 and not (r.outcome = 'nurture' and e.payload ->> 'to' = 'needs_sequence')
              ) as override,
              exists (
                select 1 from public.lead_events e
