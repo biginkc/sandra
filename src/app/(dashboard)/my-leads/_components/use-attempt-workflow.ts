@@ -21,6 +21,21 @@ import type { WorkflowReconciliation } from "./workflow-form"
  */
 export type AttemptOpening = { action: MyLeadAction; row: QueueRow; callActivityId?: string | null }
 
+/**
+ * The Sandra call a stored or committed request actually finalizes: only a sandra-source request
+ * carries a call identity. A manual save (even one that names a call id) finalizes no call.
+ */
+export function finalizedCallId(input: Record<string, unknown> | null | undefined): string | null {
+  if (!input || input.source !== "sandra") return null
+  return typeof input.callActivityId === "string" && input.callActivityId ? input.callActivityId : null
+}
+
+/** The call a COMMITTED save finalized, when (and only when) it is the call this opening is bound to. */
+export function boundCallFinalized<O extends AttemptOpening>(committed: AttemptCommitted<O>): string | null {
+  const bound = committed.opening.callActivityId
+  return bound && finalizedCallId(committed.input) === bound ? bound : null
+}
+
 type CommandResult = Awaited<ReturnType<typeof submitMyLeadCommand>>
 
 export type AttemptCommitted<O extends AttemptOpening> = {
@@ -133,9 +148,14 @@ function routesFor(action: MyLeadAction): string[] {
 const pendingOfferId = (row: QueueRow) => (row.offer && row.offer.outcome === "pending" ? row.offer.id : "")
 /** Decline and accept are bound to the offer they were started for. */
 const carriesOffer = (route: string) => route === "decline-offer" || route === "contract-signed"
-function operationOf(route: string, row: QueueRow): string {
+function operationOf(route: string, row: QueueRow, boundCall: string | null = null): string {
+  // A bound Sandra finalize is scoped to its call: two calls on one lead never share a record slot.
+  if (route === "finalize_attempt" && boundCall) return `${LEGACY_FINALIZE}${CALL_SCOPE}${boundCall}`
   return carriesOffer(route) ? `${route}:${pendingOfferId(row)}` : route
 }
+const LEGACY_FINALIZE = "finalize_attempt"
+const CALL_SCOPE = "@call:"
+const isCallScoped = (operation: string) => operation.startsWith(`${LEGACY_FINALIZE}${CALL_SCOPE}`)
 
 /** Which server operation a command reaches; frozen with the key at the first send. */
 export function routeOf(command: string, input: Record<string, Json>): string {
@@ -259,7 +279,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (!state.route) return null
     const status = state.committedNotSeen ? "committed-not-seen" : state.committed ? "committed" : state.alreadySaved ? "already-saved" : state.atRisk ? "uncertain" : "fresh"
     return {
-      ...scopeFor(current, state.memberId ?? memberId, state.owner), operation: operationOf(state.route, current.row), key: state.key, route: state.route,
+      ...scopeFor(current, state.memberId ?? memberId, state.owner), operation: operationOf(state.route, current.row, current.callActivityId ?? null), key: state.key, route: state.route,
       status, createdAt: state.createdAt, payload: status === "fresh" ? null : state.payload, expectedQueueVersion: state.queueVersion,
     }
   }
@@ -331,12 +351,23 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (!identified || submission.current?.opening === current) return
     // EXACT identity only: route plus, for decline/accept, the pending offer. A record for another
     // offer is never resumed, so that offer gets its own new key.
-    const wanted = routesFor(current.action).map((route) => operationOf(route, current.row))
-    const records = listSubmissions(scopeFor(current, memberId), (operation) => wanted.includes(operation))
+    const bound = current.callActivityId ?? null
+    const wantedOps = routesFor(current.action).map((route) => operationOf(route, current.row, bound))
+    // A bound opening sees only its own call-scoped finalize record, plus legacy un-scoped finalize
+    // records (persisted before call scoping). It never sees a manual (log_attempt) record or another
+    // call's scoped record: those stay in the store, protected, for the opening they belong to.
+    // An unbound opening keeps its previous view (legacy records included) and never sees call-scoped ones.
+    const wanted = (operation: string) => bound
+      ? operation === wantedOps.find(isCallScoped) || operation === LEGACY_FINALIZE
+      : wantedOps.includes(operation)
+    // A legacy record has no call in its key: a bound opening adopts it only when its own payload proves it is this call's.
+    const mine = (item: StoredSubmission) => !bound || isCallScoped(item.operation) || (item.operation === LEGACY_FINALIZE && !!item.payload && finalizedCallId(item.payload) === bound)
+    const records = listSubmissions(scopeFor(current, memberId), wanted)
       .sort((a, b) => b.createdAt - a.createdAt)
     // Opening is READ-ONLY: a committed or fresh record has nothing left to protect, so it is simply
     // ignored here (the next send overwrites it with a new key). Nothing is written or claimed.
-    const record = records.find((item) => item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen")
+    const record = records.find((item) => (item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen")
+      && mine(item) && !(bound && item.route !== "finalize_attempt"))
     if (!record) {
       // Re-read table: no record (or one that was seen and cleared) is a fresh form ONLY for an
       // opening that never held or resumed a record. One that did must not mint a key by itself.
@@ -348,8 +379,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       // old episode. Never clear it silently and never offer a new update inside the new episode.
       const orphans = listSubmissionsAcrossEpisodes(
         { viewerUserId: viewerRef.current.userId, orgId: viewerRef.current.orgId, memberId, propertyId: current.row.propertyId },
-        (operation) => wanted.some((w) => w === operation),
-      ).filter((item) => item.assignmentEpisodeId !== current.row.assignmentEpisodeId && (item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen"))
+        wanted,
+      ).filter((item) => mine(item) && item.assignmentEpisodeId !== current.row.assignmentEpisodeId && (item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen"))
       if (orphans.length > 0) {
         orphaned.current = { opening: current, records: orphans }
         setRecovery({ opening: current, message: MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: false } })
@@ -363,7 +394,9 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       opening: current, key: record.key, payload, uncertain: record.status === "uncertain" && payload !== null,
       alreadySaved: record.status === "already-saved", committedNotSeen: record.status === "committed-not-seen", route: record.route, memberId, atRisk: true,
       createdAt: record.createdAt, released: payload === null, owner: { ...viewerRef.current }, queueVersion: record.expectedQueueVersion ?? null,
-      tag: crypto.randomUUID(), epoch: getEpoch(), lease: null, readRev: record.rev ?? 0,
+      tag: crypto.randomUUID(), epoch: getEpoch(), lease: null,
+      // A legacy (un-scoped) record is adopted into the call-scoped slot, which has no revision yet.
+      readRev: record.operation === operationOf(record.route, current.row, bound) ? record.rev ?? 0 : 0,
     }
     submission.current = state
     heldFor.current = current

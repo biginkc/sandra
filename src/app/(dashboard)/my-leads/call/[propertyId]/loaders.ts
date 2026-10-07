@@ -6,6 +6,7 @@ import { FACT_FIELDS } from "@/lib/call-facts/types";
 import { loadProviderData } from "@/lib/comps/provider-data-server";
 import { LEAD_COMPS_MEMBER_COLUMNS } from "@/lib/comps/types";
 import { reportError } from "@/lib/errors/report";
+import { parseCallPromptPage, type CallPromptItem } from "@/lib/my-leads/call-state";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
 import { getMyLeadsQueueRow, myLeadsViewer, MyLeadsReadError, type MyLeadRowReason } from "@/lib/my-leads/queries";
 import { schemaReady } from "@/lib/my-leads/schema-ready";
@@ -242,6 +243,29 @@ async function loadContractSection(propertyId: string, deps: Deps): Promise<Sect
   }
 }
 
+/**
+ * The newest ended, outcome-less Sandra call on this lead (the server's own pending attempt, so a call
+ * that is already logged never appears). A read failure or a schema that has not landed is "no pending
+ * call": the prompt then simply waits for the provider's end-of-call signal.
+ */
+async function loadPendingCall(client: LooseClient, orgId: string, propertyId: string, deps: Deps): Promise<CallPromptItem | null> {
+  try {
+    if (!(await (deps.schemaReady ?? schemaReady)("ack_prompts"))) return null;
+    const { data, error } = await client.rpc("fn_list_unacknowledged_call_prompts", {
+      p_org_id: orgId,
+      p_limit: 20,
+      p_before_ended: null,
+      p_before_id: null,
+    });
+    if (error) return null;
+    const mine = parseCallPromptPage(data).items.filter((item) => item.propertyId === propertyId && item.origin === "sandra");
+    mine.sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt));
+    return mine[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Every section is independent and degrades alone; only the lead and its queue row are required. */
 export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promise<CallScreenLoad> {
   if (typeof propertyId !== "string" || !UUID.test(propertyId)) return { status: "invalid" };
@@ -269,6 +293,7 @@ export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promi
         messages,
         contract: await loadContractSection(propertyId, deps),
         facts: await section<LeadCallFactsView | null>("Call facts could not be loaded.", "facts", () => loadFacts(client, viewer.orgId, propertyId, deps)),
+        pendingCall: await loadPendingCall(client, viewer.orgId, propertyId, deps),
       },
     };
   } catch (error) {

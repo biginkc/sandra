@@ -2,6 +2,7 @@
  * Call screen data contract (TECH-PLAN-2026-10 §3.10, D7). Pure types: safe for client bundles.
  * Every section is independent and degrades alone so the page always renders.
  */
+import type { CallPromptItem } from "@/lib/my-leads/call-state";
 import type { CoachCallContext, ScriptBundle } from "@biginkc/coach";
 
 import type { ProviderData } from "@/lib/comps/provider-data";
@@ -92,6 +93,8 @@ export type CallScreenData = {
   messages: Section<CallScreenMessage[]>;
   contract: Section<ContractCardState>;
   facts: Section<LeadCallFactsView | null>;
+  /** The rep's newest ended Sandra call on this lead that has no outcome yet: the one call this screen's prompt is for. */
+  pendingCall?: CallPromptItem | null;
 };
 
 export const CALL_SCREEN_SCRIPT_SLUG = "closr-outbound";

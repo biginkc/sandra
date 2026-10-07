@@ -31,6 +31,7 @@ import type { CallingConfig } from "@/lib/direct-calling/contract";
 import { CallLockProvider } from "@/components/calls/call-lock-context";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
+import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 import { canAccessMessagesV2 } from "./messages-v2/access";
 
@@ -61,11 +62,18 @@ export default async function DashboardLayout({
       ? await getDialpadCallRoute(mine[0].org_id, user.id, isAcquisitionsCaller(mine[0]))
       : "softphone";
   });
-  const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([
+  // Acquisitions callers must log every Sandra call, so only they get the in-place Log outcome prompt (needs post_call_prompt).
+  const loggingPromise = membershipsPromise.then(async (all) => {
+    const mine = all.filter((m) => m.user_id === user.id);
+    if (mine.length !== 1 || !isAcquisitionsCaller(mine[0])) return null;
+    return (await postCallPromptEnabled(mine[0].org_id).catch(() => false)) ? mine[0].org_id : null;
+  });
+  const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult, loggingResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
     membershipsPromise,
     dialpadRoutePromise,
+    loggingPromise,
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
@@ -93,11 +101,21 @@ export default async function DashboardLayout({
   // Where every Call button sends the call: server-derived, never from the browser.
   const dialpadCallsEnabled = dialpadRouteResult.status === "fulfilled" && dialpadRouteResult.value === "dialpad";
 
+  const loggingOrgId = loggingResult.status === "fulfilled" ? loggingResult.value : null;
+  const loggingViewer =
+    dialpadCallsEnabled && loggingOrgId
+      ? {
+          userId: user.id,
+          orgId: loggingOrgId,
+          label: acquisitionRoster?.roster.members.find((m) => m.id === user.id)?.label ?? null,
+        }
+      : null;
+
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
     <CallLockProvider>
     <SoftphoneProvider callingConfig={callingConfig}>
-    <DialpadCallProvider enabled={dialpadCallsEnabled}>
+    <DialpadCallProvider enabled={dialpadCallsEnabled} loggingViewer={loggingViewer}>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />

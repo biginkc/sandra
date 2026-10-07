@@ -5,12 +5,12 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { loadMyLeadQueueRow } from "@/app/(dashboard)/my-leads/actions";
-import { PostCallPrompt, ReceiptLines } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
+import { PostCallPrompt, ReceiptLines, type PromptOutcome } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
 import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-store";
 import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
-import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
-import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
+import { boundCallFinalized, useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
+import { useOptionalDialpadCall, type DialpadEndedCall } from "@/components/dialpad/dialpad-call-context";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -39,9 +39,11 @@ export type CallScreenProps = {
   viewerLabel?: string | null;
   /** `click_to_dial` flag AND `schemaReady('api_dial')`, resolved on the server (getMyLeadsCallFeatures). Off keeps Call disabled. */
   clickToDial?: boolean;
-  /** `post_call_prompt` flag (and its schema), resolved on the server. The dock needs this AND `call_screen`. */
+  /** `post_call_prompt` flag (and its schema), resolved on the server. The post-call prompt needs this AND `call_screen`. */
   postCallPrompt?: boolean;
 };
+
+type PendingCall = { callActivityId: string; endedAt: string | null; talkSeconds: number | null; outcomeGuess: PromptOutcome | null };
 
 const STAGE_LABEL: Record<string, string> = {
   not_contacted: "Not contacted",
@@ -53,8 +55,10 @@ const STAGE_LABEL: Record<string, string> = {
 
 /**
  * D7 layout. ≥1024px: left 60% static script in its own scroll container; right 40% stacked
- * numbers → (contract, hidden in 3b) → history → docked post-call prompt. Below: single column
- * header, numbers, script, history, prompt. Call facts chips sit under the numbers when a proposal is open.
+ * numbers → facts → contract → history. Below: single column header, numbers, script, history. The
+ * post-call prompt is ONE prompt tied to the call that just ended: it appears at the top of the script
+ * column (never over the numbers or the contract card), and only after hangup while that call has no
+ * outcome. Call facts chips sit under the numbers when a proposal is open.
  */
 export function CallScreen({ data, viewerLabel = null, clickToDial = false, postCallPrompt = false }: CallScreenProps) {
   const router = useRouter();
@@ -82,13 +86,53 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
     dialpadCall?.startCall({ propertyId, contactId: lead.homeowner.contactId, label: title });
   };
 
-  // Post-call prompt (P1c) docked; the attempt workflow core is the same one the queue uses.
-  // The opening's identity is its idempotency key, so key it on the lead + queue version only. A
+  // The one call this screen's prompt is for: seeded from the server's pending attempt (a reload, or
+  // arriving after hangup) and set when this lead's call ends. Null means no prompt at all.
+  const [pendingCall, setPendingCall] = useState<PendingCall | null>(() =>
+    data.pendingCall
+      ? { callActivityId: data.pendingCall.callActivityId, endedAt: data.pendingCall.endedAt, talkSeconds: data.pendingCall.talkDurationSeconds ?? data.pendingCall.durationSeconds, outcomeGuess: data.pendingCall.outcomeGuess }
+      : null,
+  );
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const loggedIds = dialpadCall?.loggedCallActivityIds;
+  // After a save here the prompt stays as a receipt (drip choice, note status) until Done. A call logged
+  // anywhere else is never prompted again.
+  const [savedHere, setSavedHere] = useState<string | null>(null);
+  const showPrompt = postCallPrompt && pendingCall !== null && (savedHere === pendingCall.callActivityId || !loggedIds?.has(pendingCall.callActivityId));
+  const pendingCallId = pendingCall?.callActivityId ?? null;
+  const showingFor = showPrompt ? pendingCallId : null;
+  const registerPageHandlers = dialpadCall?.registerPageHandlers;
+  const openLogOutcome = dialpadCall?.openLogOutcome;
+  const onEndedRef = useRef<(info?: DialpadEndedCall) => void>(() => undefined);
+  const onLogOutcomeRef = useRef<(forProperty: string, callActivityId: string) => void>(() => undefined);
+  useEffect(() => {
+    onEndedRef.current = (info) => {
+      if (!info || info.propertyId !== propertyId) return;
+      setPendingCall((current) =>
+        current?.callActivityId === info.callActivityId ? current : { callActivityId: info.callActivityId, endedAt: info.endedAt, talkSeconds: info.talkSeconds, outcomeGuess: null },
+      );
+    };
+    onLogOutcomeRef.current = (forProperty, callActivityId) => {
+      if (forProperty === propertyId) setPendingCall((current) => (current?.callActivityId === callActivityId ? current : { callActivityId, endedAt: null, talkSeconds: null, outcomeGuess: null }));
+      else openLogOutcome?.(forProperty, callActivityId);
+    };
+  });
+  useEffect(() => {
+    if (!registerPageHandlers) return;
+    return registerPageHandlers({
+      onEnded: (info) => onEndedRef.current(info),
+      onLogOutcome: (forProperty, callActivityId) => onLogOutcomeRef.current(forProperty, callActivityId),
+      showingPromptFor: showingFor,
+    });
+  }, [registerPageHandlers, showingFor]);
+
+  // Post-call prompt (P1c); the attempt workflow core is the same one the queue uses.
+  // The opening's identity is its idempotency key, so key it on the lead + queue version + call only. A
   // refresh (e.g. after a valuation save) hands back a new queueRow object at the same version; that
   // must not mint a new opening and a second attempt key. The row is read at the version's first render.
   const queueVersion = queueRow.queueVersion;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [propertyId, queueVersion]);
+  const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow, callActivityId: pendingCallId }), [propertyId, queueVersion, pendingCallId]);
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(null);
   const extrasRequest = useRef<ExtrasRequest | null>(null);
   const extrasInFlight = useRef(new Set<string>());
@@ -148,6 +192,12 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
       return read.lookup.status === "found" ? read.lookup.row : null;
     },
     onCommitted: async (committed) => {
+      // This call's outcome is saved: its panel (and any reminder) is done, and no second prompt can open for it.
+      const finalized = boundCallFinalized(committed);
+      if (finalized) {
+        setSavedHere(finalized);
+        dialpadCall?.clearEndedCall?.(finalized);
+      }
       if (committed.extras) {
         void runExtras(
           { attemptKey: committed.attemptKey, memberId: viewer.userId, propertyId, extras: committed.extras },
@@ -191,14 +241,21 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
       <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} attemptSaved={false} onRetry={() => void retryRecovered()} />
     </div>
   ) : null;
-  const prompt = (
+  const prompt = pendingCall ? (
     <WorkflowRecoveryContext.Provider value={recoveryValue}>
       <PostCallPrompt
+        key={pendingCall.callActivityId}
         variant="dock"
         open
         propertyId={propertyId}
         propertyLabel={lead.address}
-        onOpenChange={() => undefined}
+        initialCallActivityId={pendingCall.callActivityId}
+        initialOutcome={pendingCall.outcomeGuess}
+        boundCall={{ endedAt: pendingCall.endedAt, talkSeconds: pendingCall.talkSeconds }}
+        // Done (after a save) closes the receipt; nothing else can close it, so an unsaved call stays prompted.
+        onOpenChange={(open) => {
+          if (!open) setPendingCall(null);
+        }}
         onSubmit={(payload) => submit(payload)}
         onDripChanged={onDripChanged}
         viewerUserId={viewer.userId}
@@ -211,7 +268,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
         }}
       />
     </WorkflowRecoveryContext.Provider>
-  );
+  ) : null;
 
   return (
     <div data-testid="call-screen" className="flex min-h-0 flex-1 flex-col gap-4">
@@ -238,8 +295,16 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
 
       {/* ≥1024px: two columns. Below: single column in the D7 order. */}
       <div data-testid="call-screen-columns" className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[3fr_2fr]">
-        <div data-testid="call-screen-left" className="order-2 min-h-0 lg:order-1 lg:max-h-[calc(100dvh-10rem)] lg:overflow-y-auto">
-          {script}
+        <div data-testid="call-screen-left" className="order-2 flex min-h-0 flex-col gap-4 lg:order-1 lg:max-h-[calc(100dvh-10rem)] lg:overflow-y-auto">
+          {postCallPrompt ? recoveredBanner : null}
+          {showPrompt ? prompt : null}
+          {showPrompt && !scriptOpen ? (
+            <Button type="button" variant="outline" data-testid="call-screen-show-script" className="self-start" onClick={() => setScriptOpen(true)}>
+              Show script
+            </Button>
+          ) : (
+            script
+          )}
         </div>
         <div data-testid="call-screen-right" className="order-1 flex min-h-0 flex-col gap-4 lg:order-2">
           <div className="contents lg:flex lg:flex-col lg:gap-4">
@@ -274,7 +339,6 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
               </div>
             ) : null}
             <div className="order-3 lg:order-none">{history}</div>
-            {postCallPrompt ? <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div> : null}
           </div>
         </div>
       </div>
