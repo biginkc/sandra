@@ -30,29 +30,44 @@ export type ScorecardLoader = (
 const defaultLoad: ScorecardLoader = (orgId, windowDays) =>
   fetchScorecardRows(createClient() as unknown as RpcClient, orgId, windowDays);
 
-const pct = (r: number | null) => (r === null ? "n/a" : `${Math.round(r * 100)}%`);
+const pct = (r: number | null) =>
+  r === null ? "n/a" : `${Math.round(r * 100)}%`;
 
 const routePct = (r: RouteAgreement) =>
   r.n > 0 ? `${Math.round((r.agreed / r.n) * 100)}% (n=${r.n})` : "n/a (n=0)";
 
-function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
+function Stat({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
   return (
     <div className="flex items-baseline gap-1.5">
       <span className="text-muted-foreground">{label}</span>
       <span className="font-medium tabular-nums">{value}</span>
-      {detail && <span className="text-xs text-muted-foreground">{detail}</span>}
+      {detail && (
+        <span className="text-xs text-muted-foreground">{detail}</span>
+      )}
     </div>
   );
 }
 
 function OutcomeRow({ o }: { o: OutcomeScorecard }) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const s = o.suggestion;
 
   const copy = async () => {
     if (s.kind !== "suggested") return;
     try {
-      await navigator.clipboard.writeText(formatRuleText(o.outcome, s.threshold));
+      await navigator.clipboard.writeText(
+        formatRuleText(o.outcome, s.threshold),
+      );
       setCopyState("copied");
       window.setTimeout(() => setCopyState("idle"), 2000);
     } catch {
@@ -68,10 +83,18 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h4 className="font-medium">{o.outcome}</h4>
         <span className="tabular-nums">{o.runs} runs</span>
-        <span className="tabular-nums text-muted-foreground">{o.autoApplied} auto</span>
-        <span className="tabular-nums text-muted-foreground">{o.held} held</span>
+        <span className="tabular-nums text-muted-foreground">
+          {o.autoApplied} auto
+        </span>
+        <span className="tabular-nums text-muted-foreground">
+          {o.held} held
+        </span>
         <span className="ml-auto flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-          <span>{o.threshold === null ? "no threshold" : `threshold ${o.threshold.toFixed(3)}`}</span>
+          <span>
+            {o.threshold === null
+              ? "no threshold"
+              : `threshold ${o.threshold.toFixed(3)}`}
+          </span>
           <span
             className={cn(
               "rounded px-1.5 py-0.5",
@@ -92,12 +115,20 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
         <Stat
           label="Auto agreement"
           value={pct(o.autoAgreementRate)}
-          detail={o.autoSettled > 0 ? `${o.autoAgreed}/${o.autoSettled} settled` : "none settled yet"}
+          detail={
+            o.autoSettled > 0
+              ? `${o.autoAgreed}/${o.autoSettled} settled`
+              : "none settled yet"
+          }
         />
         <Stat
           label="Held agreement"
           value={pct(o.heldAgreementRate)}
-          detail={o.heldDecided > 0 ? `${o.heldAgreed}/${o.heldDecided} decided` : "none decided yet"}
+          detail={
+            o.heldDecided > 0
+              ? `${o.heldAgreed}/${o.heldDecided} decided`
+              : "none decided yet"
+          }
         />
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -108,38 +139,56 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
         )}
         {s.kind === "none" && (
           <span className="text-muted-foreground">
-            No cutoff reaches {TARGET_AGREEMENT_PERCENT}% agreement ({s.samples} samples)
+            No cutoff reaches {TARGET_AGREEMENT_PERCENT}% agreement ({s.samples}{" "}
+            samples)
           </span>
         )}
         {s.kind === "keep_current" && (
           <span className="text-muted-foreground">
-            Keep current threshold: no lower cutoff has {MIN_SUGGESTION_SAMPLES}+ samples at{" "}
-            {TARGET_AGREEMENT_PERCENT}% in its own band ({s.samples} samples)
+            {s.currentTail
+              ? `No qualifying cutoff; current tail at ${((s.currentTail.agreed / s.currentTail.n) * 100).toFixed(1)}% (n=${s.currentTail.n})`
+              : null}
+            {!s.currentTail && (
+              <>
+                Keep current threshold: no lower cutoff has{" "}
+                {MIN_SUGGESTION_SAMPLES}+ samples at {TARGET_AGREEMENT_PERCENT}%
+                in its own band ({s.samples} samples)
+              </>
+            )}
           </span>
         )}
         {s.kind === "suggested" && (
           <>
             <span>
-              <span className="font-medium">Suggested ≥ {s.threshold.toFixed(3)}</span>{" "}
+              <span className="font-medium">
+                Suggested ≥ {s.threshold.toFixed(3)}
+              </span>{" "}
               {s.direction === "loosens" && (
                 <span className="text-xs font-medium text-amber-800 dark:text-amber-200">
                   loosens current
                 </span>
               )}{" "}
               <span className="text-xs text-muted-foreground">
-                (auto {routePct(s.auto)}, held {routePct(s.held)})
+                (auto {routePct(s.auto)}, held {routePct(s.held)}, total n=
+                {s.total})
               </span>
             </span>
             <Button type="button" size="sm" variant="outline" onClick={copy}>
               Copy for approval
             </Button>
             {copyState === "copied" && (
-              <span role="status" className="text-xs text-emerald-700 dark:text-emerald-300">
+              <span
+                role="status"
+                className="text-xs text-emerald-700 dark:text-emerald-300"
+              >
                 Copied
               </span>
             )}
             {copyState === "failed" && (
-              <span role="status" className="text-xs text-red-700 dark:text-red-300">
+              <span
+                role="status"
+                className="text-xs text-red-700 dark:text-red-300"
+              >
                 Copy failed
               </span>
             )}
@@ -205,7 +254,11 @@ export function ScorecardCard({
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+      )
+        return;
       void refresh(windowRef.current);
     }, pollMs);
     return () => window.clearInterval(id);
@@ -242,8 +295,8 @@ export function ScorecardCard({
           ))}
         </div>
         <p className="ml-auto text-xs text-muted-foreground">
-          Suggestion only: nothing is applied. Auto calls count as settled after 72h
-          without a human correction.
+          Suggestion only: nothing is applied. Auto calls count as settled after
+          72h without a human correction.
         </p>
       </div>
       {error && (
@@ -251,7 +304,8 @@ export function ScorecardCard({
           role="alert"
           className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
         >
-          Scorecard unavailable{outcomes ? "; showing the last loaded numbers" : ""}.
+          Scorecard unavailable
+          {outcomes ? "; showing the last loaded numbers" : ""}.
         </p>
       )}
       {outcomes ? (
@@ -264,7 +318,9 @@ export function ScorecardCard({
           ))}
         </ul>
       ) : (
-        !error && <p className="text-sm text-muted-foreground">Loading scorecard…</p>
+        !error && (
+          <p className="text-sm text-muted-foreground">Loading scorecard…</p>
+        )
       )}
     </section>
   );

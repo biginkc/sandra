@@ -74,7 +74,11 @@ describe("suggestThreshold", () => {
   });
 
   it("ignores samples with an invalid confidence", () => {
-    const bad = [[Number.NaN, 1], [2, 1], [-1, 0]] as Sample[];
+    const bad = [
+      [Number.NaN, 1],
+      [2, 1],
+      [-1, 0],
+    ] as Sample[];
     expect(suggestThreshold([...batch(0.9, 30, 30), ...bad])).toMatchObject({
       kind: "suggested",
       samples: 30,
@@ -85,7 +89,27 @@ describe("suggestThreshold", () => {
 describe("suggestThreshold vs the current threshold", () => {
   it("does not loosen on one stray low-confidence agreement (29 @0.96 + 1 @0.40, current 0.95)", () => {
     const samples: Sample[] = [...batch(0.96, 29, 29), [0.4, 1]];
-    expect(suggestThreshold(samples, 0.95)).toEqual({ kind: "keep_current", samples: 30 });
+    expect(suggestThreshold(samples, 0.95)).toEqual({
+      kind: "keep_current",
+      samples: 30,
+    });
+  });
+
+  it("keep_current reports the current tail when it is itself below 95%", () => {
+    const samples: Sample[] = [...batch(0.5, 25, 25), ...batch(0.96, 35, 33)];
+    expect(suggestThreshold(samples, 0.95)).toEqual({
+      kind: "keep_current",
+      samples: 60,
+      currentTail: { agreed: 33, n: 35 },
+    });
+  });
+
+  it("includes the overall sample count on a suggestion", () => {
+    const samples: Sample[] = [...batch(0.5, 10, 0), ...batch(0.97, 30, 30)];
+    expect(suggestThreshold(samples, null)).toMatchObject({
+      samples: 30,
+      total: 40,
+    });
   });
 
   it("loosens only with >=30 samples at >=95% in the band [suggestion, current)", () => {
@@ -105,15 +129,27 @@ describe("suggestThreshold vs the current threshold", () => {
 
   it("labels a higher suggestion as raises and an equal one as same", () => {
     const samples: Sample[] = [...batch(0.8, 30, 20), ...batch(0.96, 30, 30)];
-    expect(suggestThreshold(samples, 0.9)).toMatchObject({ threshold: 0.96, direction: "raises" });
-    expect(suggestThreshold(samples, 0.96)).toMatchObject({ threshold: 0.96, direction: "same" });
-    expect(suggestThreshold(samples, null)).toMatchObject({ threshold: 0.96, direction: "new" });
+    expect(suggestThreshold(samples, 0.9)).toMatchObject({
+      threshold: 0.96,
+      direction: "raises",
+    });
+    expect(suggestThreshold(samples, 0.96)).toMatchObject({
+      threshold: 0.96,
+      direction: "same",
+    });
+    expect(suggestThreshold(samples, null)).toMatchObject({
+      threshold: 0.96,
+      direction: "new",
+    });
   });
 
   it("reports auto and held agreement separately for the suggested tail", () => {
     const samples: Sample[] = [
       ...Array.from({ length: 20 }, () => [0.97, 1, "a"] as Sample),
-      ...Array.from({ length: 10 }, (_, i) => [0.97, i < 9 ? 1 : 0, "h"] as Sample),
+      ...Array.from(
+        { length: 10 },
+        (_, i) => [0.97, i < 9 ? 1 : 0, "h"] as Sample,
+      ),
       ...Array.from({ length: 10 }, () => [0.5, 0, "a"] as Sample),
     ];
     expect(suggestThreshold(samples, null)).toMatchObject({

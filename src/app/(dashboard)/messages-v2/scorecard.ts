@@ -46,11 +46,19 @@ export type Suggestion =
   | { kind: "insufficient"; samples: number }
   | { kind: "none"; samples: number }
   /** Enough data, but any lower cutoff is not backed by its own band: do not loosen. */
-  | { kind: "keep_current"; samples: number }
+  | {
+      kind: "keep_current";
+      samples: number;
+      /** Set only when the current-threshold tail is itself under the target. */
+      currentTail?: RouteAgreement;
+    }
   | {
       kind: "suggested";
       threshold: number;
+      /** Samples in the suggested tail. */
       samples: number;
+      /** All valid samples, including legacy ones with no route. */
+      total: number;
       agreement: number;
       direction: SuggestionDirection;
       /** Tail agreement split by route; never one blended number alone. */
@@ -101,7 +109,8 @@ export function suggestThreshold(
   for (let i = valid.length - 1; i >= 0; i--) {
     suffixAgreed[i] = suffixAgreed[i + 1] + valid[i][1];
   }
-  const hasCurrent = currentThreshold !== null && Number.isFinite(currentThreshold);
+  const hasCurrent =
+    currentThreshold !== null && Number.isFinite(currentThreshold);
   let curIdx = valid.length; // first index with confidence >= current
   if (hasCurrent) {
     curIdx = valid.findIndex(([c]) => c >= currentThreshold);
@@ -151,15 +160,23 @@ export function suggestThreshold(
       kind: "suggested",
       threshold: cand,
       samples: n,
+      total: valid.length,
       agreement: agreed / n,
       direction,
       auto: split("a"),
       held: split("h"),
     };
   }
-  return rejectedLoosening
-    ? { kind: "keep_current", samples: valid.length }
-    : { kind: "none", samples: valid.length };
+  if (!rejectedLoosening) return { kind: "none", samples: valid.length };
+  const curN = valid.length - curIdx;
+  const curAgreed = suffixAgreed[curIdx];
+  return curN > 0 && curAgreed * 100 < curN * TARGET_AGREEMENT_PERCENT
+    ? {
+        kind: "keep_current",
+        samples: valid.length,
+        currentTail: { agreed: curAgreed, n: curN },
+      }
+    : { kind: "keep_current", samples: valid.length };
 }
 
 /** The exact rule text copied for approval. Nothing is applied by copying. */
@@ -169,7 +186,9 @@ export function formatRuleText(outcome: string, threshold: number): string {
 
 const rate = (num: number, den: number) => (den > 0 ? num / den : null);
 
-export function buildScorecard(rows: readonly ScorecardRow[]): OutcomeScorecard[] {
+export function buildScorecard(
+  rows: readonly ScorecardRow[],
+): OutcomeScorecard[] {
   const byOutcome = new Map(rows.map((r) => [r.outcome, r]));
   return SCORECARD_OUTCOMES.map((outcome) => {
     const r = byOutcome.get(outcome);
