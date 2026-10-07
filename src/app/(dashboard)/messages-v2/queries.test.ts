@@ -397,7 +397,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit"]) {
+      for (const m of ["select", "eq", "in", "order", "limit", "not"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -493,6 +493,59 @@ describe("loadMessagesV2Data holds", () => {
     });
   });
 
+  describe("alert delivery status", () => {
+    const flagged = (id: string) => ({
+      id,
+      last_ai_escalation_at: iso("01:00:00"),
+      last_ai_escalation_reason: "draft_held",
+      updated_at: iso("01:00:00"),
+    });
+    const withDeliveries = (rows: unknown[] | null, error?: unknown) =>
+      fakeSupabase({
+        properties: (calls) =>
+          isHead(calls) ? { data: [{ id: "p1" }, { id: "p2" }, { id: "p3" }] } : { data: [flagged("p1"), flagged("p2"), flagged("p3")] },
+        hold_alert_latest_status: () => (error ? { data: null, error } : { data: rows }),
+      });
+
+    it("attaches the latest delivery status per property, newest wins", async () => {
+      const { client, queries, rpcCalls } = withDeliveries([
+        { property_id: "p1", status: "skipped", last_error: "no_token", created_at: iso("02:00:00") },
+        { property_id: "p1", status: "sent", last_error: null, created_at: iso("01:00:00") },
+        { property_id: "p2", status: "failed", last_error: "interrupted", created_at: iso("02:00:00") },
+      ]);
+      const data = await loadMessagesV2Data(client, "org");
+      const byId = Object.fromEntries(data.holds.map((h) => [h.id, h.alert]));
+      expect(byId.p1).toEqual({ status: "skipped", reason: "no_token" });
+      expect(byId.p2).toEqual({ status: "failed", reason: "interrupted" });
+      expect(byId.p3).toBeUndefined();
+      expect(rpcCalls).toContainEqual({
+        fn: "hold_alert_latest_status",
+        args: { p_org_id: "org", p_property_ids: ["p1", "p2", "p3"] },
+      });
+      expect(queries.some((c) => c[0]?.table === "hold_alert_deliveries")).toBe(false);
+    });
+
+    it("looks up each chunk of properties separately, so one noisy property cannot hide another's status", async () => {
+      const many = Array.from({ length: 450 }, (_, i) => `p${i}`);
+      const { client, rpcCalls } = fakeSupabase({
+        properties: (calls) =>
+          isHead(calls) ? { data: many.map((id) => ({ id })) } : { data: many.map(flagged) },
+        hold_alert_latest_status: () => ({ data: [] }),
+      });
+      await loadMessagesV2Data(client, "org");
+      const lookups = rpcCalls.filter((c) => c.fn === "hold_alert_latest_status");
+      expect(lookups.map((c) => (c.args.p_property_ids as string[]).length)).toEqual([200, 200, 50]);
+      expect(lookups.flatMap((c) => c.args.p_property_ids as string[]).sort()).toEqual([...many].sort());
+    });
+
+    it("reports a failed delivery lookup as a context error instead of hiding it", async () => {
+      const { client } = withDeliveries(null, { message: "boom" });
+      const data = await loadMessagesV2Data(client, "org");
+      expect(data.holdsMeta.contextErrors).toContain("alert status");
+      expect(data.holds.every((h) => h.alert === undefined)).toBe(true);
+    });
+  });
+
   it("surfaces a failed source query instead of treating it as empty", async () => {
     const { client } = fakeSupabase({
       jev_lead_decisions: (calls) =>
@@ -526,13 +579,12 @@ describe("loadMessagesV2Data holds", () => {
       .flatMap((q) => q.filter((c) => c.method === "in"))
       .map((c) => (c.args[1] as unknown[]).length);
     expect(Math.max(...inLens)).toBeLessThanOrEqual(40);
-    expect(rpcCalls.map((c) => c.fn)).toEqual(
-      Array(3).fill("pipeline_runs_latest_for_properties"),
-    );
     expect(
-      rpcCalls.map((c) => (c.args.p_property_ids as string[]).length),
-    ).toEqual([200, 200, 50]);
-    expect(rpcCalls[0].args.p_org_id).toBe("org");
+      rpcCalls.map((c) => c.fn).filter((f) => f === "pipeline_runs_latest_for_properties"),
+    ).toEqual(Array(3).fill("pipeline_runs_latest_for_properties"));
+    const runRpcs = rpcCalls.filter((c) => c.fn === "pipeline_runs_latest_for_properties");
+    expect(runRpcs.map((c) => (c.args.p_property_ids as string[]).length)).toEqual([200, 200, 50]);
+    expect(runRpcs[0].args.p_org_id).toBe("org");
   });
 
   it("surfaces run-lookup failures as context errors", async () => {
@@ -1006,5 +1058,132 @@ describe("round 4: distinct-before-cap, failed drafts, dead letters", () => {
     });
     const b = await loadMessagesV2Data(broken.client, "org");
     expect(b.holdsMeta.deadLetterUnavailable).toBe(true);
+  });
+});
+
+describe("Phase 1: pending draft exposed for the hold actions", () => {
+  const draft = (over: Partial<HoldDraftRow> & { id: string }): HoldDraftRow => ({
+    property_id: "p1",
+    conversation_id: "c1",
+    inbound_message_id: "m1",
+    run_id: null,
+    created_at: iso("05:00:00"),
+    ...over,
+  });
+
+  it("a hold carries its newest pending draft (id, inbound, body when loaded)", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        draft({ id: "old", created_at: iso("01:00:00"), body: "older", edited_body: null }),
+        draft({ id: "new", created_at: iso("02:00:00"), body: "newer", edited_body: "edited" }),
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toEqual({
+      id: "new",
+      inbound_message_id: "m1",
+      body: "newer",
+      edited_body: "edited",
+    });
+  });
+
+  it("omits body fields when the loader did not select them", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [draft({ id: "d1" })],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1" });
+  });
+
+  it("includeDraftBody selects body and edited_body; the default never does", async () => {
+    const rows = [
+      {
+        id: "d1",
+        property_id: "p9",
+        conversation_id: null,
+        inbound_message_id: "m9",
+        run_id: null,
+        created_at: iso("03:00:00"),
+        body: "hello",
+        edited_body: null,
+      },
+    ];
+    const withBody = fakeSupabase({ ai_reply_drafts: () => ({ data: rows }) });
+    const data = await loadMessagesV2Data(withBody.client, "org", Date.now(), { includeDraftBody: true });
+    expect(data.holds[0]!.draft).toMatchObject({ id: "d1", body: "hello" });
+    const q = withBody.queries.find((c) => c[0]?.table === "ai_reply_drafts" && !isHead(c))!;
+    expect(String(q.find((c) => c.method === "select")!.args[0])).toMatch(/body, edited_body/);
+
+    const without = fakeSupabase({ ai_reply_drafts: () => ({ data: rows }) });
+    await loadMessagesV2Data(without.client, "org");
+    const q2 = without.queries.find((c) => c[0]?.table === "ai_reply_drafts" && !isHead(c))!;
+    expect(String(q2.find((c) => c.method === "select")!.args[0])).not.toMatch(/body/);
+  });
+});
+
+describe("deriveOpenHolds seen (the stale-click guard's view of the card)", () => {
+  it("carries the newest pending row time (to the microsecond) and the flag the card displayed", () => {
+    const holds = deriveOpenHolds({
+      properties: [
+        {
+          id: "p1",
+          last_ai_escalation_at: "2026-10-07T11:59:00.5+00:00",
+          last_ai_escalation_reason: "draft_held",
+          updated_at: null,
+        },
+      ],
+      decisions: [
+        { property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: "2026-10-07T12:00:00.123456+00:00" },
+      ],
+      reviews: [
+        { property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m2", disposition: "dnc", created_at: "2026-10-07T12:00:00.123999+00:00" },
+      ],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: "c1", inbound_message_id: "m1", run_id: null, created_at: "2026-10-07T11:00:00+00:00" },
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.seen).toEqual({
+      through: "2026-10-07T12:00:00.123999+00:00",
+      flagReason: "draft_held",
+      flagAt: "2026-10-07T11:59:00.5+00:00",
+    });
+  });
+
+  it("has no flag fields when the hold is not flagged, and a null `through` when no rows are pending", () => {
+    const unflagged = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [{ id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: "2026-10-07T11:00:00+00:00" }],
+      runs: [],
+    });
+    expect(unflagged[0]!.seen).toEqual({ through: "2026-10-07T11:00:00+00:00", flagReason: null, flagAt: null });
+    const flagOnly = deriveOpenHolds({
+      properties: [{ id: "p2", last_ai_escalation_at: null, last_ai_escalation_reason: "price_or_offer", updated_at: null }],
+      decisions: [],
+      reviews: [],
+      runs: [],
+    });
+    expect(flagOnly[0]!.seen).toEqual({ through: null, flagReason: "price_or_offer", flagAt: null });
+  });
+
+  it("passes the draft's edit version through for Send / Edit", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: "2026-10-07T11:00:00+00:00", body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" },
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toMatchObject({ body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" });
   });
 });

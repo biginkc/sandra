@@ -68,6 +68,34 @@ describe("ageTone", () => {
 });
 
 describe("HoldsRail", () => {
+  it("is its own scroll container on desktop with a sticky header", () => {
+    render(<HoldsRail holds={[hold("a", 5)]} labels={new Map()} nowMs={NOW} />);
+    const rail = screen.getByLabelText("Holds");
+    expect(rail).toHaveClass("lg:overflow-y-auto", "lg:min-h-0");
+    expect(within(rail).getByRole("heading", { name: /Holds/ })).toHaveClass("lg:sticky", "lg:top-0");
+  });
+
+  it("shows the latest alert delivery status on the hold card (failures are visible, not silent)", () => {
+    render(
+      <HoldsRail
+        holds={[
+          { ...hold("a", 5), alert: { status: "skipped", reason: "no_token" } },
+          { ...hold("b", 5), alert: { status: "failed", reason: "slack_no_receipt" } },
+          { ...hold("c", 5), alert: { status: "sent", reason: null } },
+          hold("d", 5),
+        ]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    const cards = screen.getAllByTestId("hold-card");
+    expect(within(cards[0]).getByTestId("hold-alert")).toHaveTextContent("alert: skipped (no_token)");
+    expect(within(cards[1]).getByTestId("hold-alert")).toHaveTextContent("alert: failed");
+    expect(within(cards[1]).getByTestId("hold-alert")).toHaveAttribute("data-status", "failed");
+    expect(within(cards[2]).getByTestId("hold-alert")).toHaveTextContent("alert: sent");
+    expect(within(cards[3]).queryByTestId("hold-alert")).toBeNull();
+  });
+
   it("renders holds in the order given with why-held and age badges", () => {
     render(
       <HoldsRail
@@ -139,12 +167,10 @@ describe("HoldsRail", () => {
     expect(screen.getByText(/needs_human_review/)).toBeInTheDocument();
   });
 
-  it("disables every action with a Phase 2 tooltip", () => {
+  it("renders the actions disabled (not hidden) when no action handlers are supplied", () => {
     render(<HoldsRail holds={[hold("a", 5)]} labels={new Map()} nowMs={NOW} />);
     for (const name of ["Send", "Edit", "Take over", "Assign", "Dismiss"]) {
-      const btn = screen.getByRole("button", { name: new RegExp(`^${name}`) });
-      expect(btn).toBeDisabled();
-      expect(btn.closest("[title]")).toHaveAttribute("title", "Phase 2");
+      expect(screen.getByRole("button", { name: new RegExp(`^${name}`) })).toBeDisabled();
     }
   });
 
@@ -403,7 +429,7 @@ describe("HoldsRail degraded states", () => {
     render(<HoldsRail holds={[h]} labels={new Map()} nowMs={NOW} />);
     expect(screen.getByTestId("hold-age")).toHaveTextContent("age unknown");
   });
-  it("shows the draft-held fact (never a body) when a pending draft exists", () => {
+  it("shows the draft-held fact (no body unless the page loaded it) when a pending draft exists", () => {
     render(
       <HoldsRail
         holds={[{ ...hold("a", 5), draft_held: true }, hold("b", 5)]}
@@ -412,8 +438,7 @@ describe("HoldsRail degraded states", () => {
       />,
     );
     expect(screen.getAllByTestId("draft-held")).toHaveLength(1);
-    expect(screen.getByTestId("draft-held")).toHaveTextContent(
-      "Claude draft held (Phase 1 to act)",
-    );
+    expect(screen.getByTestId("draft-held")).toHaveTextContent("Claude draft held");
+    expect(screen.queryByTestId("draft-text")).toBeNull();
   });
 });

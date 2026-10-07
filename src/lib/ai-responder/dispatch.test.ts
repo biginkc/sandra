@@ -6,7 +6,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
-import { dispatchAiResponse, resolveOutboundPolicy, sendReservationTuning } from "./dispatch";
+import { dispatchAiResponse, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
@@ -6272,5 +6272,178 @@ describe("resolveOutboundPolicy", () => {
   it("ignores an invalid env mode and falls back to the DB value", () => {
     vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "bogus");
     expect(resolveOutboundPolicy({ source: "llm", dbMode: "hold" })).toEqual({ hold: true, reason: "outbound_mode_hold" });
+  });
+
+  it("a human-approved send is never re-held by the AI outbound policy", () => {
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "hold");
+    vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
+    expect(resolveOutboundPolicy({ source: "human", dbMode: "hold" })).toEqual({ hold: false });
+  });
+});
+
+describe("sendHumanDraft (Messages v2 Phase 1 hold Send)", () => {
+  const human = (overrides: Record<string, unknown> = {}) => ({
+    orgId: "org-1",
+    propertyId: PROPERTY_ID,
+    contactId: CONTACT_ID,
+    conversationId: CONVERSATION_ID,
+    inboundMessageId: "inbound-h",
+    inboundFromPhone: "+18165550001",
+    body: "Thanks for getting back to us",
+    userId: "user-1",
+    edited: false,
+    ...overrides,
+  });
+  const pushOutbound = (state: MockState, row: Partial<MessageRow> & { id: string }) => {
+    state.messages.push({
+      body: "x", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
+      created_at: new Date().toISOString(), direction: "outbound", metadata: null, property_id: PROPERTY_ID,
+      sent_at: null, status: "sent", ...row,
+    });
+  };
+
+  beforeEach(() => {
+    Object.assign(sendReservationTuning, { deadlineMs: 0 });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z"));
+    vi.mocked(getConsentState).mockResolvedValue({} as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    Object.assign(sendReservationTuning, defaultReservationTuning);
+  });
+
+  it("sends a held draft for a property already flagged for a human, stamping who approved it", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.aiReplyDrafts = [{ id: "d1", inbound_message_id: "inbound-h", status: "pending", body: "Thanks for getting back to us" }];
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human({ edited: true }));
+    expect(result).toMatchObject({ status: "sent" });
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact).mock.calls[0]![1]).toMatchObject({ body: "Thanks for getting back to us", origin: "automated" });
+    const sent = state.messages.find((m) => m.direction === "outbound");
+    expect(sent?.metadata).toMatchObject({
+      generated_by: "ai_responder_v1",
+      inbound_message_id: "inbound-h",
+      approved_by_user_id: "user-1",
+      edited_by_human: true,
+    });
+  });
+
+  it("still sends in draft-only mode (owner outbound_mode=hold applies to the AI, not to a human click)", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("sent");
+    expect(state.aiReplyDrafts ?? []).toHaveLength(0);
+  });
+
+  it("refuses a stale draft: a newer inbound without a live handler is not answered by the old draft", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    state.messages.find((m) => m.id === "inbound-h")!.created_at = "2026-06-13T17:00:00.000Z";
+    seedInboundMessage(state, { id: "inbound-newer", body: "actually wait" });
+    state.messages.find((m) => m.id === "inbound-newer")!.created_at = "2026-06-13T17:30:00.000Z";
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "superseded_before_send" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses when someone already answered the seller after the inbound (no double text)", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    pushOutbound(state, { id: "rep-reply", sent_at: new Date().toISOString(), metadata: { sent_by: "rep" } as never });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("refused");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a suppressed / opted-out seller even when a human clicks Send", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.contact.sms_opted_out = true;
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "stop" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "contact_sms_opted_out" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a property closed by a terminal disposition", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.property.outreach_dispo = "opted_out";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("refused");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a draft a human already discarded (rule 8)", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.aiReplyDrafts = [{ id: "d1", inbound_message_id: "inbound-h", status: "discarded", body: "old" }];
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "already_answered" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("a busy conversation lease is a retry-by-the-user refusal, never a schedule, flag or dead letter", async () => {
+    vi.useRealTimers();
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "send_reserved_elsewhere", retryable: true });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.deadLetters ?? []).toHaveLength(0);
+  });
+
+  it("refuses a human Send when the property carries any flag other than draft_held, showing the reason", async () => {
+    for (const reason of ["send_timeout:inbound-h", "keyword_stop", "jev_below_threshold:new_lead"]) {
+      const state = createMockState();
+      state.property.needs_human_attention = true;
+      state.property.last_ai_escalation_reason = reason;
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+      const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+      expect(result).toMatchObject({ status: "refused", reason: `already_flagged:${reason}`, retryable: false });
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses a human Send when the property is flagged with no recorded reason", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = null;
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "already_flagged:unknown" });
   });
 });

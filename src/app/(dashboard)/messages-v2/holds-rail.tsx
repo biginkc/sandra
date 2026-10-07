@@ -2,9 +2,14 @@
 
 import { format } from "date-fns/format";
 
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import type { HoldActionsApi } from "./hold-action-types";
+import {
+  DisabledHoldActions,
+  effectiveDraftBody,
+  HoldActionControls,
+} from "./hold-action-controls";
 import { holdReason } from "./step-format";
 import type {
   HoldsMeta,
@@ -37,31 +42,27 @@ const TONE_CLASS: Record<AgeTone, string> = {
   red: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
 };
 
-const ACTIONS = ["Send", "Edit", "Take over ↗", "Assign", "Dismiss"] as const;
-
-/** Phase 0 is read-only: every action renders disabled with a Phase 2 tooltip. */
-function Phase2Actions() {
-  return (
-    <div className="mt-3 flex flex-wrap gap-2">
-      {ACTIONS.map((action) => (
-        <span key={action} title="Phase 2">
-          <Button type="button" size="xs" variant="outline" disabled>
-            {action}
-          </Button>
-        </span>
-      ))}
-    </div>
-  );
+/** Reason codes only for skips; a failure shows just "failed" (the stored error can be provider text). */
+function alertText(alert: NonNullable<OpenHold["alert"]>): string {
+  return alert.status === "skipped" && alert.reason
+    ? `alert: skipped (${alert.reason})`
+    : `alert: ${alert.status}`;
 }
 
 export function HoldCard({
   hold,
   label,
   nowMs,
+  actions,
+  onReload,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   nowMs: number;
+  /** Re-fetch page data (a card the server found out of date). */
+  onReload?: () => void;
+  /** Server actions for the five hold actions; absent = shown disabled. */
+  actions?: HoldActionsApi;
 }) {
   const run = hold.run;
   const age = hold.since ? Math.max(0, nowMs - Date.parse(hold.since)) : null;
@@ -136,7 +137,31 @@ export function HoldCard({
           <span aria-hidden className="text-violet-600">
             ●
           </span>
-          <span>Claude draft held (Phase 1 to act)</span>
+          <span>Claude draft held</span>
+        </p>
+      )}
+      {effectiveDraftBody(hold) !== null && (
+        <p
+          data-testid="draft-text"
+          className="mt-1 whitespace-pre-wrap rounded-lg bg-secondary/60 p-2"
+        >
+          {effectiveDraftBody(hold)}
+        </p>
+      )}
+      {hold.alert && (
+        <p
+          data-testid="hold-alert"
+          data-status={hold.alert.status}
+          className={cn(
+            "mt-2 text-xs",
+            hold.alert.status === "failed"
+              ? "text-red-700 dark:text-red-300"
+              : hold.alert.status === "skipped"
+                ? "text-amber-700 dark:text-amber-300"
+                : "text-muted-foreground",
+          )}
+        >
+          {alertText(hold.alert)}
         </p>
       )}
       {informational && (
@@ -164,7 +189,18 @@ export function HoldCard({
           <span>reply text saved for review</span>
         </p>
       )}
-      {!informational && <Phase2Actions />}
+      {!informational &&
+        (actions ? (
+          <HoldActionControls
+            // A changed draft or hold remounts the controls, so no stale edit text or status survives a reload.
+            key={`${hold.draft?.id ?? ""}|${hold.draft?.edited_at ?? ""}|${hold.draft?.body ?? ""}|${hold.seen?.through ?? ""}|${hold.seen?.flagAt ?? ""}`}
+            hold={hold}
+            actions={actions}
+            onReload={onReload}
+          />
+        ) : (
+          <DisabledHoldActions title="Actions unavailable" />
+        ))}
     </article>
   );
 }
@@ -181,8 +217,12 @@ export function HoldsRail({
   labels,
   nowMs,
   meta,
+  actions,
+  onReload,
 }: {
   meta?: HoldsMeta;
+  actions?: HoldActionsApi;
+  onReload?: () => void;
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
@@ -199,8 +239,12 @@ export function HoldsRail({
             ? `(${meta.total}, ${meta.shown} shown)`
             : `(${holds.length})`;
   return (
-    <aside aria-label="Holds" className="flex flex-col gap-3">
-      <h2 className="text-sm font-semibold">
+    <aside
+      aria-label="Holds"
+      data-testid="holds-scroll"
+      className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1"
+    >
+      <h2 className="lg:sticky lg:top-0 z-10 bg-background pb-1 text-sm font-semibold">
         Holds <span className="text-muted-foreground">{count}</span>
       </h2>
       {holdFailures.length > 0 && (
@@ -245,6 +289,8 @@ export function HoldsRail({
             hold={hold}
             label={labels.get(hold.id)}
             nowMs={nowMs}
+            actions={actions}
+            onReload={onReload}
           />
         ))
       )}
