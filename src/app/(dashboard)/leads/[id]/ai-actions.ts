@@ -8,11 +8,11 @@ import {
   isSuppressionIncompleteReason,
   listOutstandingSuppressionReviews,
   recordSuppressionRetriedOk,
-  suppressionIncompleteReason,
 } from "@/lib/ai-responder/confirm-suppression";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -117,11 +117,11 @@ export async function listOutstandingSuppressionFailures(
  * Re-run phone suppression for exactly the confirmed opted_out/dnc reviews
  * whose suppression failed: the id carried in the `suppression_incomplete:<id>`
  * hold reason plus unresolved `suppression_incomplete` lead events (no later
- * `suppression_retried_ok`). Each success is recorded; the hold is cleared only
- * when nothing remains outstanding afterwards AND the hold reason is still the
- * exact value seen after the retries (a concurrent new failure rewrites it, so
- * an older retry cannot clear it). On partial success the reason is pointed at
- * a remaining id. A preserved send-timeout flag is never cleared.
+ * `suppression_retried_ok`). Each success is recorded; then
+ * fn_clear_suppression_hold_if_resolved decides, under the property row lock,
+ * whether anything is still outstanding: it clears the hold only when nothing
+ * is, otherwise rewrites the pointer to what remains. A preserved send-timeout
+ * flag is never cleared.
  */
 export async function retrySuppressionForProperty(
   propertyId: string,
@@ -201,70 +201,40 @@ export async function retrySuppressionForProperty(
       }
     }
 
-    const after = await listOutstandingSuppressionReviews(
-      supabase as never,
-      propertyId,
+    // The clear decision is made inside the database under the property row
+    // lock: it recomputes outstanding (pointer ids + ledger failures without a
+    // later retried_ok), clears the hold only when that set is empty, and
+    // otherwise rewrites the pointer to what remains. A failure recorded after
+    // our retries but before this call is therefore seen, never cleared over.
+    const { data: clearRows, error: clearError } = await createAdminClient().rpc(
+      "fn_clear_suppression_hold_if_resolved",
+      { p_property_id: propertyId },
     );
-    let cleared = false;
-    if (isSuppressionIncompleteReason(after.reason)) {
-      if (after.reviewIds.length === 0) {
-        const { data: clearedRow, error: clearError } = await supabase
-          .from("properties")
-          .update({
-            needs_human_attention: false,
-            last_ai_escalation_reason: null,
-            last_ai_escalation_at: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", propertyId)
-          .eq("last_ai_escalation_reason", after.reason as string)
-          .select("id")
-          .maybeSingle();
-        if (clearError) {
-          return {
-            ok: false,
-            error: {
-              code: "CLEAR_ATTENTION_FAILED",
-              message: clearError.message,
-            },
-          };
-        }
-        if (clearedRow) {
-          cleared = true;
-          await recordLeadEvent({
-            propertyId,
-            actorType: "user",
-            actorId: user.id,
-            eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
-            payload: {
-              from: true,
-              to: false,
-              via: "retry_suppression",
-              reviewIds: targets,
-            },
-          });
-        }
-      } else {
-        const nextReason = suppressionIncompleteReason(after.reviewIds);
-        // Drop resolved ids from the reason; keep the hold on what remains.
-        if (nextReason !== after.reason) {
-          const { error: repointError } = await supabase
-            .from("properties")
-            .update({
-              last_ai_escalation_reason: nextReason,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", propertyId)
-            .eq("last_ai_escalation_reason", after.reason as string);
-          if (repointError) {
-            // Hold stays exactly as it was; the ledger still lists what remains.
-            reportError(new Error(repointError.message), {
-              tags: { surface: "retry_suppression_repoint" },
-              extra: { propertyId },
-            });
-          }
-        }
-      }
+    if (clearError) {
+      return {
+        ok: false,
+        error: { code: "CLEAR_ATTENTION_FAILED", message: clearError.message },
+      };
+    }
+    const clearRow = (Array.isArray(clearRows) ? clearRows[0] : clearRows) as
+      | { cleared: boolean; outstanding_ids: string[] | null }
+      | null
+      | undefined;
+    const cleared = !!clearRow?.cleared;
+    const remaining = (clearRow?.outstanding_ids ?? []).length;
+    if (cleared) {
+      await recordLeadEvent({
+        propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
+        payload: {
+          from: true,
+          to: false,
+          via: "retry_suppression",
+          reviewIds: targets,
+        },
+      });
     }
     revalidatePath(`/leads/${propertyId}`);
     if (warning) {
@@ -273,7 +243,7 @@ export async function retrySuppressionForProperty(
         error: { code: "SUPPRESSION_INCOMPLETE", message: warning },
       };
     }
-    return ok({ cleared, remaining: after.reviewIds.length });
+    return ok({ cleared, remaining });
   } catch (e) {
     reportError(e, {
       tags: { surface: "retry_suppression" },

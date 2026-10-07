@@ -7722,21 +7722,35 @@ export type Database = {
         Returns: Json
       }
       // Hand-patched 2026-10-07 for migration
-      // 20261008144000_suppression_pointer_union_v2.sql (replaces the
-      // 20261008143900 signature).
+      // 20261008144100_suppression_recovery_db_truth.sql (replaces the
+      // 20261008144000 signature; backed-ness is computed in the database).
       fn_merge_suppression_incomplete_pointer: {
         Args: {
-          p_backed_ids: string[]
           p_hint_id?: string | null
+          p_ids: string[]
           p_property_id: string
           p_timeout_prefixes?: string[]
-          p_unbacked_ids: string[]
         }
         Returns: {
           dropped_ids: string[]
           kept_timeout: boolean
           merged_ids: string[]
           reason: string
+        }[]
+      }
+      // Same migration: service_role-only; clears the suppression hold only
+      // when nothing is outstanding, under the property row lock.
+      fn_clear_suppression_hold_if_resolved: {
+        Args: { p_property_id: string }
+        Returns: { cleared: boolean; outstanding_ids: string[] }[]
+      }
+      // Same migration: internal ledger-state helper (service_role-only).
+      fn_suppression_ledger_state: {
+        Args: { p_property_id: string }
+        Returns: {
+          ledger_failed: boolean
+          resolved: boolean
+          review_id: string
         }[]
       }
       // Hand-patched 2026-09-20, same caveat as sms_classification_runs above.

@@ -254,33 +254,30 @@ async function raiseSuppressionIncompleteHold(
     const existing = await readPointer();
     // Record the failed review id in the ledger BEFORE touching the hold, so
     // it survives a preserved timeout reason or a concurrent overwrite.
-    const ledgerOk = await writeLedger(reviewId);
+    await writeLedger(reviewId);
 
-    // The existing reason may be the ONLY record of earlier failures whose
-    // ledger writes failed. Backfill each; any that still fail are passed on
-    // as unbacked so the merge keeps them in the pointer. Ids whose ledger
-    // write succeeded are passed as backed so they free their pointer slot.
-    const unbackedIds: string[] = [];
-    const backedIds: string[] = [];
-    (ledgerOk ? backedIds : unbackedIds).push(reviewId);
+    // Best-effort backfill: the existing pointer may be the ONLY record of
+    // earlier failures whose ledger writes failed. Outcomes are irrelevant to
+    // the merge: the database decides, under the property row lock, which ids
+    // have a live ledger row (backed, pruned) and which exist only on the
+    // pointer (kept; cap applies to those alone). The caller just reports every
+    // id it knows about.
+    const knownIds: string[] = [reviewId];
     for (const id of suppressionReviewIdsFromReason(existing)) {
       if (id === reviewId) continue;
-      ((await writeLedger(id)) ? backedIds : unbackedIds).push(id);
+      await writeLedger(id);
+      knownIds.push(id);
     }
 
-    // One atomic call: the database locks the property row, drops backed ids
-    // from the pointer and unions this caller's unbacked ids into whatever it
-    // holds right now, so concurrent failures cannot drop each other's ids and
-    // ledger-backed ids never crowd out an unbacked one. The hint is used only
-    // when nothing else would be left. A timeout reason is kept (hold only)
-    // unless unbacked ids exist that live nowhere else.
+    // One atomic call. The hint is used by the database only when nothing else
+    // would be left; a timeout reason is kept (hold only) unless an id with no
+    // ledger row exists.
     const { data: merged, error } = await admin.rpc(
       "fn_merge_suppression_incomplete_pointer",
       {
         p_property_id: propertyId,
-        p_unbacked_ids: [...new Set(unbackedIds)],
-        p_backed_ids: [...new Set(backedIds)],
-        p_hint_id: ledgerOk ? reviewId : null,
+        p_ids: [...new Set(knownIds)],
+        p_hint_id: reviewId,
       },
     );
     if (error) throw new Error(error.message);

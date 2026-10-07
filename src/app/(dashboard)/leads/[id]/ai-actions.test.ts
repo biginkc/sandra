@@ -15,6 +15,7 @@ vi.mock("@/lib/ai-responder/confirm-suppression", async (importActual) => ({
   recordSuppressionRetriedOk,
 }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
+import { createAdminClient } from "@/lib/supabase/admin";
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -27,6 +28,7 @@ vi.mock("@/lib/events", () => ({
   recordLeadEvent,
 }));
 
+import { suppressionIncompleteReason, suppressionReviewIdsFromReason } from "@/lib/ai-responder/confirm-suppression";
 import {
   clearNeedsHumanAttention,
   setAiResponderDisabled,
@@ -174,7 +176,9 @@ describe("retrySuppressionForProperty", () => {
     events: Ev[];
     reviews: string[]; // confirmed opted_out/dnc review ids
     latest?: string | null;
-    repointError?: boolean;
+    clearRpcError?: boolean;
+    /** Runs inside the database, right before the clear function takes its lock (a concurrent writer). */
+    beforeClear?: () => void;
   };
 
   /** Stateful fake: retried_ok writes land in `events`, reason updates honour the eq guard. */
@@ -234,7 +238,6 @@ describe("retrySuppressionForProperty", () => {
             return resolve({ data: ids.map((id) => ({ id })), error: null });
           }
           if (table === "properties" && pending) {
-            if (state.repointError) return resolve({ data: null, error: { message: "repoint failed" } });
             return resolve({ data: settle(), error: null });
           }
           return resolve({ data: null, error: null });
@@ -242,10 +245,38 @@ describe("retrySuppressionForProperty", () => {
         return c;
       },
     };
+    const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    /** Mirrors fn_clear_suppression_hold_if_resolved; synchronous = atomic under the row lock. */
+    const clearIfResolved = () => {
+      state.beforeClear?.();
+      const resolved = (id: string) => {
+        const failedAt = state.events.filter((e) => e.event_type === "suppression_incomplete" && e.source_id === id).map((e) => e.created_at).sort().at(-1) ?? "";
+        return state.events.some((e) => e.event_type === "suppression_retried_ok" && e.source_id === id && e.created_at >= failedAt);
+      };
+      const isHold = !!state.reason && (state.reason === "suppression_incomplete" || state.reason.startsWith("suppression_incomplete:"));
+      const ledgerFailed = [...new Set(state.events.filter((e) => e.event_type === "suppression_incomplete").map((e) => e.source_id))];
+      const pointer = suppressionReviewIdsFromReason(state.reason).filter((i) => !resolved(i));
+      const outstanding = [...new Set([...pointer, ...ledgerFailed.filter((i) => !resolved(i))])];
+      if (!isHold) return { cleared: false, outstanding_ids: outstanding };
+      if (outstanding.length === 0) {
+        state.reason = null;
+        return { cleared: true, outstanding_ids: [] as string[] };
+      }
+      state.reason = suppressionIncompleteReason(outstanding);
+      return { cleared: false, outstanding_ids: outstanding };
+    };
+    vi.mocked(createAdminClient).mockReturnValue({
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ name, args });
+        await Promise.resolve();
+        if (state.clearRpcError) return { data: null, error: { message: "clear failed" } };
+        return { data: [clearIfResolved()], error: null };
+      },
+    } as never);
     recordSuppressionRetriedOk.mockImplementation(async ({ reviewId }: { reviewId: string }) => {
       state.events.push({ event_type: "suppression_retried_ok", source_id: reviewId, created_at: "2026-02-01" });
     });
-    return { client, updates, state };
+    return { client, updates, state, rpcCalls };
   }
   const failedEv = (id: string, at = "2026-01-01"): Ev => ({
     event_type: "suppression_incomplete",
@@ -316,25 +347,28 @@ describe("retrySuppressionForProperty", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("a failed partial-success repoint is reported and leaves the hold as is", async () => {
+  it("a failed clear call is reported and leaves the hold exactly as it was", async () => {
     const w = world({
       reason: "suppression_incomplete:A",
-      events: [failedEv("A"), failedEv("B", "2026-01-02")],
-      reviews: ["A", "B"],
-      repointError: true,
+      events: [failedEv("A")],
+      reviews: ["A"],
+      clearRpcError: true,
     });
     createClient.mockResolvedValue(w.client);
-    applySuppressionForConfirmedReview.mockImplementation(async (_c: unknown, id: string) =>
-      id === "A" ? { ok: true } : { ok: false, warning: "Confirmed, but suppression incomplete — retry." },
-    );
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
     const r = await retrySuppressionForProperty("property-1");
-    expect(r).toMatchObject({ ok: false, error: { code: "SUPPRESSION_INCOMPLETE" } });
+    expect(r).toMatchObject({ ok: false, error: { code: "CLEAR_ATTENTION_FAILED", message: "clear failed" } });
     expect(w.state.reason).toBe("suppression_incomplete:A");
-    const { reportError } = await import("@/lib/errors/report");
-    expect(reportError).toHaveBeenCalledWith(
-      expect.any(Error),
-      expect.objectContaining({ tags: { surface: "retry_suppression_repoint" } }),
-    );
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("the clear is one database call and the action never writes the hold itself", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    await retrySuppressionForProperty("property-1");
+    expect(w.rpcCalls).toEqual([{ name: "fn_clear_suppression_hold_if_resolved", args: { p_property_id: "property-1" } }]);
+    expect(w.updates).toHaveLength(0);
   });
 
   it("a concurrent new failure is not cleared by an older successful retry", async () => {
@@ -352,30 +386,17 @@ describe("retrySuppressionForProperty", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("a failure landing after the final read cannot be cleared: the clear is guarded on the exact reason", async () => {
+  it("retry A reads zero outstanding; B fails and its backfill of A fails (pointer stays A): the clear sees B and does not clear", async () => {
     const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A"] });
     createClient.mockResolvedValue(w.client);
     applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
-    const origFrom = w.client.from;
-    let reads = 0;
-    w.client.from = (t: string) => {
-      const c = origFrom(t) as Record<string, (...a: unknown[]) => unknown>;
-      if (t === "properties") {
-        const mb = c.maybeSingle;
-        c.maybeSingle = async () => {
-          const out = (await mb()) as { data: { last_ai_escalation_reason?: string } | null };
-          if (out.data && "last_ai_escalation_reason" in out.data && ++reads === 2) {
-            // race: reason flips to C right after our final read
-            w.state.reason = "suppression_incomplete:C";
-          }
-          return out;
-        };
-      }
-      return c;
-    };
+    // Lands after the retry's last read, before the clear takes the row lock:
+    // B's ledger row is recorded; the pointer is left on A.
+    w.state.beforeClear = () => w.state.events.push(failedEv("B", "2026-03-01"));
     const r = await retrySuppressionForProperty("property-1");
-    expect(r).toEqual({ ok: true, data: { cleared: false, remaining: 0 } });
-    expect(w.state.reason).toBe("suppression_incomplete:C");
+    expect(r).toEqual({ ok: true, data: { cleared: false, remaining: 1 } });
+    expect(w.state.reason).toBe("suppression_incomplete:B");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("timeout flag preserved: retries the review from the lead event, records it, and leaves the timeout hold", async () => {
