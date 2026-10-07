@@ -35,10 +35,16 @@ import {
   expireAiResponseClaimLease,
 } from "./claims";
 import {
-  classifyOutbound,
-  resolveOutboundVerdict,
-  type OutboundVerdict,
-} from "./outbound-class";
+  GATE_EVIDENCE_STATUSES,
+  classifyGateRow,
+  classifyNewerInboundHandler,
+  decideDraftGate,
+  decideSendGate,
+  type GateOutboundFact,
+  type NewerInboundFact,
+  type SendGateDecision,
+  type SendGatePhase,
+} from "./send-gate";
 import {
   REPLY_RETRY_DELAY_SECONDS,
   REPLY_RETRY_MAX,
@@ -217,42 +223,22 @@ export async function checkAiResponderDispatchPreGates(
       runCtx,
     );
   if (input.inboundMessageId) {
-    const existingReply = await findExistingAiReplyForInbound(
-      supabase,
-      input.inboundMessageId,
-    );
-    // A still-`pending` row is an in-flight (or abandoned) attempt, not a reply:
-    // it may yet abort at the provider fence, so it never ends this dispatch.
-    if (existingReply && existingReply.status !== "pending") {
-      await blocked("already_replied");
-      return {
-        ok: false,
-        outcome: { outcome: "skipped", reason: "already_replied" },
-      };
-    }
-
-    if (options.checkSuperseded === true) {
-      const latestInbound = await findLatestInboundInThread(supabase, input);
-      if (latestInbound && latestInbound.id !== input.inboundMessageId) {
-        // Skip silently ONLY when the newer inbound is actually being handled
-        // (live/finished/retry-scheduled claim, or a scheduled reply workflow).
-        // Otherwise nobody will answer the seller: flag a human.
-        if (!(await newerInboundIsHandled(supabase, latestInbound.id))) {
-          await markPropertyNeedsAttention(
-            supabase,
-            input.propertyId,
-            "reply_skipped:newer_inbound",
-            runCtx,
-          );
+    // Q8 decision table at the early gate (rules 1-6, first match wins; the
+    // same function the pre-send check uses). A failed lookup never decides
+    // here: the pre-send check re-reads under the lease and fails closed.
+    const evaluation = await evaluateSendGate(supabase, input, {
+      phase: "early",
+      claimStartedAt: null,
+      checkNewerInbound: options.checkSuperseded === true,
+    });
+    if (evaluation.ok) {
+      const plan = skipPlanFor(evaluation.decision, "early");
+      if (plan) {
+        await blocked(plan.trace);
+        if (plan.flagReason) {
+          await markPropertyNeedsAttention(supabase, input.propertyId, plan.flagReason, runCtx);
         }
-        await blocked("superseded_by_newer_inbound");
-        return {
-          ok: false,
-          outcome: {
-            outcome: "skipped",
-            reason: "superseded_by_newer_inbound",
-          },
-        };
+        return { ok: false, outcome: { outcome: "skipped", reason: plan.reason } };
       }
     }
   }
@@ -328,6 +314,16 @@ async function dispatchAiResponseCore(
             : "shadow"
           : "legacy",
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // 1b. A retry that carries its generated reply short-circuits HERE, before the
+  //     keyword / skip / throttle gates and the Jev block: it never classifies
+  //     or generates again, and a gate that trips during the retry gap cannot
+  //     silently drop the reply (see retryWithCarriedReply).
+  // --------------------------------------------------------------------------
+  if ((input.retryAttempt ?? 0) > 0 && input.retryReply) {
+    return retryWithCarriedReply(supabase, input, property, config, deps.runContext);
   }
 
   // --------------------------------------------------------------------------
@@ -431,30 +427,60 @@ async function dispatchAiResponseCore(
       input.conversationId,
       AI_REPLY_THREAD_DEBOUNCE_MS,
     );
-    if (recentReply && (input.retryAttempt ?? 0) > 0) {
-      // A RETRY never ends on the 45s throttle: an older run's reply landing
-      // while this one waited must not silently drop the seller's inbound.
-      // Classify what landed (same rule as the pre-send check): answered ->
-      // silent; anything else continues to the send path, which flags a human
-      // when the seller is still unresolved.
-      const verdict = await findOutboundVerdict(supabase, input, null);
-      if (verdict.kind === "already_answered") {
-        await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, deps.runContext);
-        return { outcome: "skipped", reason: "already_answered" };
+    if (recentReply) {
+      // The 45s throttle is not a private silent-drop rule: a recent AI reply
+      // is classified by the same Q8 table as every other outbound (an AI
+      // reply to a DIFFERENT inbound that went out is rule 3: flag a human;
+      // one still queued is rule 4: retry; one that answers this inbound is
+      // rule 2: silent). The observation window is stretched back to the
+      // recent reply so a reply that predates this inbound is still seen.
+      const evaluation = await evaluateSendGate(supabase, input, {
+        phase: "presend",
+        claimStartedAt: null,
+        checkNewerInbound: false,
+        extraWindowStartMs: recentReply.createdAtMs,
+      });
+      if (evaluation.ok && evaluation.decision.action === "retry") {
+        await trace(supabase, {
+          kind: "gate",
+          name: "duplicate_throttled",
+          result: "block",
+          detail: { rule: 4 },
+        }, deps.runContext);
+        return retryBeforeGeneration(supabase, input, property.org_id, deps.runContext);
       }
-      await trace(supabase, {
-        kind: "gate",
-        name: "duplicate_throttled",
-        result: "pass",
-        detail: { retry: true, verdict: verdict.kind },
-      }, deps.runContext);
-    } else if (recentReply) {
-      await trace(supabase, {
-        kind: "gate",
-        name: "duplicate_throttled",
-        result: "block",
-      }, deps.runContext);
-      return { outcome: "skipped", reason: "duplicate_throttled" };
+      const plan = evaluation.ok ? skipPlanFor(evaluation.decision, "presend") : null;
+      if (plan) {
+        await trace(supabase, {
+          kind: "gate",
+          name: "duplicate_throttled",
+          result: "block",
+          detail: { rule: evaluation.ok ? evaluation.decision.rule : null },
+        }, deps.runContext);
+        if (plan.flagReason) {
+          await markPropertyNeedsAttention(supabase, input.propertyId, plan.flagReason, deps.runContext);
+        }
+        return {
+          outcome: "skipped",
+          reason: plan.flagReason ? "duplicate_throttled" : plan.reason,
+        };
+      }
+      if (!evaluation.ok) {
+        // Cannot classify the recent reply: never drop silently on a failed
+        // lookup. Continue; the pre-send check is strict and fails closed.
+        await trace(supabase, {
+          kind: "gate",
+          name: "duplicate_throttled",
+          result: "error",
+          detail: { lookup: "failed" },
+        }, deps.runContext);
+      } else {
+        await trace(supabase, {
+          kind: "gate",
+          name: "duplicate_throttled",
+          result: "pass",
+        }, deps.runContext);
+      }
     } else {
       await trace(supabase, {
         kind: "gate",
@@ -474,7 +500,7 @@ async function dispatchAiResponseCore(
   });
   await traceClaim(supabase, responseClaim, deps.runContext);
   if (!responseClaim.claimed) {
-    return refusedClaimOutcome(supabase, input, responseClaim.reason, deps.runContext);
+    return refusedClaimOutcome(supabase, input, responseClaim.reason, property.org_id, deps.runContext);
   }
 
   if (isIdentityQuestion(input.inboundBody)) {
@@ -519,10 +545,10 @@ async function dispatchAiResponseCore(
     });
   }
 
-  // A retry re-sends the reply the previous attempt already generated: no
-  // second classification (no second Jev call), no second generation.
+  // A retry with no carried reply (it waited at the gate before generating)
+  // still ends at an already-stored draft: never regenerate over a human's.
   if ((input.retryAttempt ?? 0) > 0) {
-    const reused = await reuseForRetry(supabase, input, property, config!, currentTurn, {
+    const reused = await reuseForRetry(supabase, input, {
       claimId: responseClaim.claimId,
       startedAt: claimStartedAt,
     }, deps.runContext);
@@ -619,7 +645,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
   });
   await traceClaim(supabase, responseClaim, runCtx);
   if (!responseClaim.claimed) {
-    return refusedClaimOutcome(supabase, input, responseClaim.reason, runCtx);
+    return refusedClaimOutcome(supabase, input, responseClaim.reason, property.org_id, runCtx);
   }
 
   const classificationResult = await classifyAndHandleNonRouteOutcomes(
@@ -1346,6 +1372,7 @@ async function refusedClaimOutcome(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   reason: "already_claimed" | "already_replied",
+  orgId: string,
   runCtx?: MaybeRunContext,
 ): Promise<AiDispatchOutcome> {
   if (reason === "already_claimed" && (input.retryAttempt ?? 0) > 0) {
@@ -1355,12 +1382,18 @@ async function refusedClaimOutcome(
       result: "block",
       detail: { attempt: input.retryAttempt ?? 0 },
     }, runCtx);
-    await markPropertyNeedsAttention(
-      supabase,
-      input.propertyId,
-      "reply_skipped:claim_refused_on_retry",
-      runCtx,
-    );
+    // Q8 rule 7: the carried reply (when there is one) is dead-lettered with
+    // the flag; a failed dead letter changes the flag to dead_letter_failed.
+    await flagAndDeadLetter(supabase, {
+      runContext: runCtx,
+      orgId: input.retryReply?.orgId ?? orgId,
+      conversationId: input.conversationId ?? null,
+      propertyId: input.propertyId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      body: input.retryReply?.body ?? null,
+      reason: "claim_refused_on_retry",
+      flagReason: "reply_skipped:claim_refused_on_retry",
+    });
   }
   return {
     outcome: "skipped",
@@ -1412,20 +1445,16 @@ async function settleClaimForSendOutcome(
     result: "error",
     detail: { reason: outcome.reason, attempt: outcome.attempt },
   }, ctx.runContext);
-  await writeReplyDeadLetter(supabase, ctx.runContext, {
+  await flagAndDeadLetter(supabase, {
+    runContext: ctx.runContext,
     orgId: ctx.orgId,
     conversationId: ctx.input.conversationId ?? null,
     propertyId: ctx.input.propertyId,
     inboundMessageId: ctx.input.inboundMessageId ?? null,
     body: ctx.body,
     reason: outcome.reason,
+    flagReason: flagForRetryReason(outcome.reason),
   });
-  await markPropertyNeedsAttention(
-    supabase,
-    ctx.input.propertyId,
-    flagForRetryReason(outcome.reason),
-    ctx.runContext,
-  );
   // Best effort: stop the claim reading as a live retry.
   await completeAiResponseClaim(supabase, {
     claimId,
@@ -1435,80 +1464,245 @@ async function settleClaimForSendOutcome(
   return { outcome: "escalated", reason: outcome.reason };
 }
 
-async function findPendingDraftForInbound(
+/**
+ * Rule 8 evidence: what a human did to the draft(s) stored for this inbound.
+ * `error` is a failed lookup (callers fail closed).
+ */
+async function loadDraftState(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,
-): Promise<boolean> {
+): Promise<"resolved" | "pending" | "none" | "error"> {
   const { data, error } = await supabase
     .from("ai_reply_drafts")
-    .select("id")
+    .select("id, status")
     .eq("inbound_message_id", inboundMessageId)
-    .eq("status", "pending")
-    .limit(1);
+    .limit(20);
   if (error) {
     reportError(new Error(error.message), {
-      tags: { surface: "ai_responder_pending_draft_lookup" },
+      tags: { surface: "ai_responder_draft_state_lookup" },
       extra: { inboundMessageId },
     });
-    return false;
+    return "error";
   }
-  return (data ?? []).length > 0;
+  return decideDraftGate((data ?? []).map((d) => d.status));
 }
 
 /**
- * Retry shortcuts (never classify or generate twice): a draft already stored
- * for the inbound ends the retry as held; a reply carried by the retry outcome
- * is re-sent verbatim. Null = nothing to reuse (fall through to the normal
- * pipeline).
+ * Retry shortcut for a retry that has NO carried reply (so it re-runs the
+ * normal pipeline): a draft already stored for the inbound ends the retry as
+ * held. A discarded / sent draft ends it silently (rule 8). Null = fall through.
  */
 async function reuseForRetry(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  property: AiDispatchPropertyGateRow,
-  config: { model: string; outbound_mode?: string | null },
-  currentTurn: number,
   responseClaim: { claimId: string | null; startedAt?: string },
   runCtx?: MaybeRunContext,
-): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
-  if (input.inboundMessageId && (await findPendingDraftForInbound(supabase, input.inboundMessageId))) {
-    await trace(supabase, {
-      kind: "hold",
-      name: "llm_draft_held",
-      result: "held",
-      detail: { reused: true, attempt: input.retryAttempt ?? 0 },
-    }, runCtx);
-    await markPropertyNeedsAttention(supabase, input.propertyId, "draft_held", runCtx);
-    await completeAiResponseClaim(supabase, {
-      claimId: responseClaim.claimId,
-      outcome: "escalated",
-    });
-    return { outcome: "escalated", reason: "draft_held" };
-  }
-  const carried = input.retryReply;
-  if (carried && (carried.kind === "send_reply" || carried.kind === "deescalate_close")) {
-    await trace(supabase, {
-      kind: "action",
-      name: "retry_reply_reused",
-      result: "applied",
-      detail: { attempt: input.retryAttempt ?? 0 },
-    }, runCtx);
-    return deliverRoutedReply(supabase, {
-      input,
-      property,
-      config,
-      currentTurn,
-      responseClaim,
-      runCtx,
-      reply: {
-        kind: carried.kind,
-        body: carried.body,
-        confidence: carried.confidence,
-        sentiment: carried.sentiment,
-        ...(carried.closeReason ? { closeReason: carried.closeReason } : {}),
-      },
-    });
-  }
+): Promise<AiDispatchOutcome | null> {
+  if (!input.inboundMessageId) return null;
+  const draft = await loadDraftState(supabase, input.inboundMessageId);
+  if (draft === "resolved") return endAsAlreadyAnswered(supabase, responseClaim.claimId, runCtx);
+  if (draft === "pending") return holdExistingDraft(supabase, input, responseClaim.claimId, runCtx);
   return null;
+}
+
+async function endAsAlreadyAnswered(
+  supabase: SupabaseClient<Database>,
+  claimId: string | null,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, { kind: "gate", name: "already_answered", result: "pass", detail: { rule: 8 } }, runCtx);
+  await completeAiResponseClaim(supabase, { claimId, outcome: "skipped" });
+  return { outcome: "skipped", reason: "already_answered" };
+}
+
+async function holdExistingDraft(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  claimId: string | null,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "hold",
+    name: "llm_draft_held",
+    result: "held",
+    detail: { reused: true, attempt: input.retryAttempt ?? 0 },
+  }, runCtx);
+  await markPropertyNeedsAttention(supabase, input.propertyId, "draft_held", runCtx);
+  await completeAiResponseClaim(supabase, { claimId, outcome: "escalated" });
+  return { outcome: "escalated", reason: "draft_held" };
+}
+
+/**
+ * A retry carrying the reply the previous attempt generated. Order: claim ->
+ * terminal draft state (rule 8; a pending draft stays held) -> pacing gates ->
+ * the send (the pre-send Q8 table runs under the lease in `sendResponderMessage`).
+ *
+ * A reply-pacing gate (max turns, business hours) or a suppression that
+ * trips during the retry gap must not drop the reply silently: pacing gates
+ * HOLD the reply as a draft and flag a human with the text dead-lettered
+ * (Q8 rule 7); suppression / human-takeover / org-off end quietly (the AI is
+ * not allowed to answer at all).
+ */
+async function retryWithCarriedReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  property: AiDispatchPropertyGateRow,
+  config:
+    | {
+        active: boolean;
+        business_hours_only: boolean;
+        max_turns: number;
+        model: string;
+        outbound_mode?: string | null;
+      }
+    | null
+    | undefined,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const carried = input.retryReply!;
+  const claimStartedAt = new Date().toISOString();
+  const responseClaim = await claimAiResponse(supabase, {
+    orgId: property.org_id,
+    inboundMessageId: input.inboundMessageId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    conversationId: input.conversationId ?? null,
+  });
+  await traceClaim(supabase, responseClaim, runCtx);
+  if (!responseClaim.claimed) {
+    return refusedClaimOutcome(supabase, input, responseClaim.reason, property.org_id, runCtx);
+  }
+  const claim = { claimId: responseClaim.claimId, startedAt: claimStartedAt };
+
+  if (input.inboundMessageId) {
+    const draft = await loadDraftState(supabase, input.inboundMessageId);
+    if (draft === "resolved") return endAsAlreadyAnswered(supabase, claim.claimId, runCtx);
+    if (draft === "pending") return holdExistingDraft(supabase, input, claim.claimId, runCtx);
+    if (draft === "error") {
+      await flagAndDeadLetter(supabase, {
+        runContext: runCtx,
+        orgId: property.org_id,
+        conversationId: input.conversationId ?? null,
+        propertyId: input.propertyId,
+        inboundMessageId: input.inboundMessageId ?? null,
+        body: carried.body,
+        reason: "send_check_failed",
+      });
+      await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "escalated" });
+      return { outcome: "escalated", reason: "send_check_failed" };
+    }
+  }
+
+  const consentState = await getConsentState(supabase, input.contactId, "sms");
+  const currentTurn = await countAiTurnsInThread(
+    supabase,
+    input.propertyId,
+    input.contactId,
+    input.conversationId ?? null,
+  );
+  const skip = classifyAiSkip({
+    config: config
+      ? {
+          active: config.active,
+          business_hours_only: config.business_hours_only,
+          max_turns: config.max_turns,
+        }
+      : null,
+    consentState,
+    propertyDisabled: property.ai_responder_disabled,
+    currentTurn,
+    withinBusinessHours: checkQuietHours(property.state).ok,
+  });
+  await trace(
+    supabase,
+    skip.skip
+      ? { kind: "gate", name: "ai_skip", result: "block", detail: { reason: skip.reason, retry: true } }
+      : { kind: "gate", name: "ai_skip", result: "pass", detail: { retry: true } },
+    runCtx,
+  );
+  if (skip.skip) {
+    if (skip.reason === "max_turns_reached" || skip.reason === "outside_business_hours") {
+      const sendArgs = replySendArgs({
+        input,
+        orgId: property.org_id,
+        model: config?.model ?? "",
+        turn: currentTurn + 1,
+        claimStartedAt,
+        outboundMode: config?.outbound_mode,
+        runContext: runCtx,
+        reply: carried,
+      });
+      const persisted = await persistHeldDraft(supabase, sendArgs);
+      if (persisted === "already_resolved") return endAsAlreadyAnswered(supabase, claim.claimId, runCtx);
+      await flagAndDeadLetter(supabase, {
+        runContext: runCtx,
+        orgId: property.org_id,
+        conversationId: input.conversationId ?? null,
+        propertyId: input.propertyId,
+        inboundMessageId: input.inboundMessageId ?? null,
+        body: carried.body,
+        reason: skip.reason,
+        flagReason: `reply_skipped:${skip.reason}`,
+      });
+      await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "escalated" });
+      return { outcome: "escalated", reason: skip.reason };
+    }
+    await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "skipped" });
+    return { outcome: "skipped", reason: skip.reason };
+  }
+
+  await trace(supabase, {
+    kind: "action",
+    name: "retry_reply_reused",
+    result: "applied",
+    detail: { attempt: input.retryAttempt ?? 0 },
+  }, runCtx);
+  return deliverRoutedReply(supabase, {
+    input,
+    property,
+    config: { model: config!.model, outbound_mode: config!.outbound_mode },
+    currentTurn,
+    responseClaim: claim,
+    runCtx,
+    reply: {
+      kind: carried.kind,
+      body: carried.body,
+      confidence: carried.confidence,
+      sentiment: carried.sentiment,
+      ...(carried.closeReason ? { closeReason: carried.closeReason } : {}),
+    },
+  });
+}
+
+/** A retry with no reply to carry (gate-time rule-4 wait): re-dispatch later. */
+async function retryBeforeGeneration(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const attempt = input.retryAttempt ?? 0;
+  if (attempt < REPLY_RETRY_MAX) {
+    return {
+      outcome: "retry",
+      reason: "reply_pending",
+      attempt: attempt + 1,
+      delaySeconds: REPLY_RETRY_DELAY_SECONDS,
+    };
+  }
+  // Competitor still queued after the last attempt: flag a human (no reply was
+  // generated yet, so there is no text to dead-letter).
+  await flagAndDeadLetter(supabase, {
+    runContext: runCtx,
+    orgId,
+    conversationId: input.conversationId ?? null,
+    propertyId: input.propertyId,
+    inboundMessageId: input.inboundMessageId ?? null,
+    body: null,
+    reason: "reply_pending",
+    flagReason: flagForRetryReason("reply_pending"),
+  });
+  return { outcome: "escalated", reason: "reply_pending" };
 }
 
 /** Send a resolved, safety-checked reply and settle the claim. */
@@ -1522,7 +1716,7 @@ async function deliverRoutedReply(
     responseClaim: { claimId: string | null; startedAt?: string };
     runCtx?: MaybeRunContext;
     reply: {
-      kind: "send_reply" | "deescalate_close";
+      kind: "send_reply" | "deescalate_close" | "identity";
       body: string;
       confidence: number;
       sentiment: AiMessageMetadata["sentiment"];
@@ -1598,10 +1792,10 @@ function isTerminalAiResponderProperty(
 async function findLatestInboundInThreadStrict(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-): Promise<{ ok: true; row: { id: string } | null } | { ok: false }> {
+): Promise<{ ok: true; row: { id: string; created_at: string } | null } | { ok: false }> {
   let query = supabase
     .from("messages")
-    .select("id")
+    .select("id, created_at")
     .eq("property_id", input.propertyId)
     .eq("direction", "inbound")
     .eq("channel", "sms");
@@ -1629,21 +1823,11 @@ async function findLatestInboundInThreadStrict(
   return { ok: true, row: data ?? null };
 }
 
-/** Early-gate variant: a lookup error reads as "no newer inbound" (the send
- * chokepoint re-checks strictly and fails closed). */
-async function findLatestInboundInThread(
-  supabase: SupabaseClient<Database>,
-  input: AiDispatchInput,
-): Promise<{ id: string } | null> {
-  const result = await findLatestInboundInThreadStrict(supabase, input);
-  return result.ok ? result.row : null;
-}
-
 async function findRecentAiReplyInThread(
   supabase: SupabaseClient<Database>,
   conversationId: string,
   windowMs: number,
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; createdAtMs: number } | null> {
   const cutoff = new Date(Date.now() - windowMs).toISOString();
   const { data, error } = await supabase
     .from("messages")
@@ -1663,15 +1847,16 @@ async function findRecentAiReplyInThread(
     return null;
   }
 
-  return (
-    data?.find((reply) => {
-      const effectiveTimestamp =
-        reply.status === "pending"
-          ? reply.created_at
-          : (reply.sent_at ?? reply.created_at);
-      return effectiveTimestamp >= cutoff;
-    }) ?? null
-  );
+  const recent = data?.find((reply) => {
+    const effectiveTimestamp =
+      reply.status === "pending"
+        ? reply.created_at
+        : (reply.sent_at ?? reply.created_at);
+    return effectiveTimestamp >= cutoff;
+  });
+  if (!recent) return null;
+  const createdAtMs = Date.parse(recent.created_at);
+  return { id: recent.id, createdAtMs: Number.isNaN(createdAtMs) ? Date.now() - windowMs : createdAtMs };
 }
 
 // ---------- helpers ---------------------------------------------------------
@@ -1727,104 +1912,176 @@ export function resolveOutboundPolicy(args: {
   return { hold: false };
 }
 
-type ReplyCurrentCheck =
-  | { ok: true }
-  | { ok: false; reason: "newer_inbound"; newerInboundId: string }
-  | { ok: false; reason: OutboundVerdict | "send_check_failed" };
-
-type OutboundVerdictResult =
-  | { kind: "none" }
-  | { kind: "check_failed" }
-  | { kind: OutboundVerdict };
+/**
+ * What a send-gate evaluation concluded. `ok: false` is a lookup that failed
+ * or returned something unparseable: the early gate lets the pipeline continue
+ * (the pre-send check re-reads under the lease); the pre-send check FAILS
+ * CLOSED (`send_check_failed`), never "assume current".
+ */
+type GateEvaluation =
+  | { ok: true; decision: SendGateDecision; newerInboundId: string | null }
+  | { ok: false };
 
 /**
- * Pre-send re-verification. FAILS CLOSED: a lookup error or an unparseable
- * timestamp is `send_check_failed`, never "assume current".
+ * Gather every fact the Q8 table needs and decide. READS ONLY (no flag, no
+ * trace, no write): the caller applies the decision after re-validating that
+ * its attempt is still live, so a lookup that resumes after a timeout cannot
+ * mutate anything.
  *
- * Outbounds that landed in the observation window are classified (see
- * ./outbound-class, `resolveOutboundVerdict`). The window starts at
- * min(claimStartedAt, inbound.created_at), so a retry (which takes a new
- * claim) never forgets what happened before it, e.g. a human reply during the
- * retry gap.
+ * Outbound evidence window: starts at min(claimStartedAt, inbound.created_at,
+ * extraWindowStartMs), so a retry (which takes a new claim) never forgets what
+ * happened before it, e.g. a human reply during the retry gap. AI rows
+ * stamped with THIS inbound are always evidence regardless of the window.
  */
-async function verifyReplyStillCurrent(
+async function evaluateSendGate(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  claimStartedAt: string | null,
-): Promise<ReplyCurrentCheck> {
-  if (input.inboundMessageId) {
+  opts: {
+    phase: SendGatePhase;
+    claimStartedAt: string | null;
+    checkNewerInbound: boolean;
+    extraWindowStartMs?: number | null;
+  },
+): Promise<GateEvaluation> {
+  const nowMs = Date.now();
+
+  let newerInbound: NewerInboundFact = { present: false };
+  let newerInboundId: string | null = null;
+  if (opts.checkNewerInbound && input.inboundMessageId) {
     const latest = await findLatestInboundInThreadStrict(supabase, input);
-    if (!latest.ok) return { ok: false, reason: "send_check_failed" };
+    if (!latest.ok) return { ok: false };
     if (latest.row && latest.row.id !== input.inboundMessageId) {
-      return { ok: false, reason: "newer_inbound", newerInboundId: latest.row.id };
+      const handled = await newerInboundHasLiveHandler(supabase, latest.row.id, nowMs);
+      if (handled === null) return { ok: false };
+      const createdMs = Date.parse(latest.row.created_at);
+      newerInboundId = latest.row.id;
+      newerInbound = {
+        present: true,
+        handled,
+        ageMs: Number.isNaN(createdMs) ? null : nowMs - createdMs,
+      };
+      // Rule 1 decides on its own: no outbound evidence is needed.
+      return {
+        ok: true,
+        decision: decideSendGate({ newerInbound, outbound: [] }, { phase: opts.phase }),
+        newerInboundId,
+      };
     }
   }
-  const verdict = await findOutboundVerdict(supabase, input, claimStartedAt);
-  if (verdict.kind === "none") return { ok: true };
-  if (verdict.kind === "check_failed") return { ok: false, reason: "send_check_failed" };
-  return { ok: false, reason: verdict.kind };
+
+  const outbound = await gatherOutboundFacts(supabase, input, opts, nowMs);
+  if (!outbound.ok) return { ok: false };
+  return {
+    ok: true,
+    decision: decideSendGate({ newerInbound, outbound: outbound.facts }, { phase: opts.phase }),
+    newerInboundId,
+  };
 }
 
-async function findOutboundVerdict(
+async function gatherOutboundFacts(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  claimStartedAt: string | null,
-): Promise<OutboundVerdictResult> {
+  opts: { claimStartedAt: string | null; extraWindowStartMs?: number | null },
+  nowMs: number,
+): Promise<{ ok: true; facts: GateOutboundFact[] } | { ok: false }> {
   let claimedAtMs: number | null = null;
-  if (claimStartedAt) {
-    claimedAtMs = Date.parse(claimStartedAt);
-    if (Number.isNaN(claimedAtMs)) return { kind: "check_failed" };
+  if (opts.claimStartedAt) {
+    claimedAtMs = Date.parse(opts.claimStartedAt);
+    if (Number.isNaN(claimedAtMs)) return { ok: false };
   }
   const inbound = await loadInboundCreatedAtMs(supabase, input);
-  if (!inbound.ok) return { kind: "check_failed" };
-  const starts = [claimedAtMs, inbound.ms].filter((v): v is number => v !== null);
-  if (starts.length === 0) return { kind: "none" };
-  const windowStartMs = Math.min(...starts);
+  if (!inbound.ok) return { ok: false };
+  const starts = [claimedAtMs, inbound.ms, opts.extraWindowStartMs ?? null].filter(
+    (v): v is number => v !== null,
+  );
+  const windowStartMs = starts.length > 0 ? Math.min(...starts) : null;
 
-  let query = supabase
-    .from("messages")
-    .select("id, created_at, status, campaign_id, metadata")
-    .eq("property_id", input.propertyId)
-    .eq("direction", "outbound")
-    .neq("status", "failed");
-  query = input.conversationId
-    ? query.eq("conversation_id", input.conversationId)
-    : query.eq("contact_id", input.contactId);
-  const { data, error } = await query
-    .order("created_at", { ascending: false })
-    .limit(50);
-  if (error) {
-    reportError(new Error(error.message), {
-      tags: { surface: "ai_responder_pre_send_outbound_lookup" },
-      extra: { propertyId: input.propertyId },
-    });
-    return { kind: "check_failed" };
+  type Row = {
+    id: string;
+    created_at: string;
+    status: string;
+    campaign_id: string | null;
+    metadata: Json | null;
+    scheduled_for: string | null;
+  };
+  const columns = "id, created_at, status, campaign_id, metadata, scheduled_for";
+  const rows = new Map<string, Row>();
+
+  if (windowStartMs !== null) {
+    let query = supabase
+      .from("messages")
+      .select(columns)
+      .eq("property_id", input.propertyId)
+      .eq("direction", "outbound")
+      .in("status", [...GATE_EVIDENCE_STATUSES]);
+    query = input.conversationId
+      ? query.eq("conversation_id", input.conversationId)
+      : query.eq("contact_id", input.contactId);
+    const { data, error } = await query
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "ai_responder_pre_send_outbound_lookup" },
+        extra: { propertyId: input.propertyId },
+      });
+      return { ok: false };
+    }
+    for (const row of (data ?? []) as Row[]) {
+      const createdMs = Date.parse(row.created_at);
+      if (Number.isNaN(createdMs) || createdMs >= windowStartMs) rows.set(row.id, row);
+    }
   }
-  const since = (data ?? []).filter((row) => {
-    const createdMs = Date.parse(row.created_at);
-    return Number.isNaN(createdMs) || createdMs >= windowStartMs;
-  });
-  if (since.length === 0) return { kind: "none" };
+
+  if (input.inboundMessageId) {
+    const { data, error } = await supabase
+      .from("messages")
+      .select(columns)
+      .eq("channel", "sms")
+      .eq("direction", "outbound")
+      .in("status", [...GATE_EVIDENCE_STATUSES])
+      .contains("metadata", {
+        generated_by: "ai_responder_v1",
+        inbound_message_id: input.inboundMessageId,
+      })
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "ai_responder_existing_reply_lookup" },
+        extra: { inboundMessageId: input.inboundMessageId },
+      });
+      return { ok: false };
+    }
+    for (const row of (data ?? []) as Row[]) rows.set(row.id, row);
+  }
+  if (rows.size === 0) return { ok: true, facts: [] };
 
   const { data: runs, error: runsError } = await supabase
     .from("sequence_step_runs")
     .select("message_id")
-    .in("message_id", since.map((r) => r.id));
+    .in("message_id", [...rows.keys()]);
   if (runsError) {
     reportError(new Error(runsError.message), {
       tags: { surface: "ai_responder_pre_send_sequence_lookup" },
       extra: { propertyId: input.propertyId },
     });
-    return { kind: "check_failed" };
+    return { ok: false };
   }
-  const context = {
+  const ctx = {
     inboundMessageId: input.inboundMessageId ?? null,
     inboundCreatedAtMs: inbound.ms,
+    nowMs,
     sequenceMessageIds: new Set(
       (runs ?? []).map((r) => r.message_id).filter((id): id is string => !!id),
     ),
   };
-  return { kind: resolveOutboundVerdict(since.map((row) => classifyOutbound(row, context))) };
+  const facts: GateOutboundFact[] = [];
+  for (const row of rows.values()) {
+    const fact = classifyGateRow(row, ctx);
+    if (fact) facts.push(fact);
+  }
+  return { ok: true, facts };
 }
 
 async function loadInboundCreatedAtMs(
@@ -1849,6 +2106,98 @@ async function loadInboundCreatedAtMs(
 }
 
 /**
+ * How the caller applies a non-sending decision: the outcome reason, the trace
+ * gate name, and (when the table says "flag a human") the flag reason. Null
+ * for send / retry / defer.
+ */
+function skipPlanFor(
+  decision: SendGateDecision,
+  phase: SendGatePhase,
+): { reason: string; trace: string; flagReason: string | null } | null {
+  if (decision.action !== "skip") return null;
+  switch (decision.rule) {
+    case 1:
+      return decision.flag
+        ? {
+            reason: phase === "early" ? "superseded_by_newer_inbound" : "superseded_before_send",
+            trace: phase === "early" ? "superseded_by_newer_inbound" : "superseded_before_send",
+            flagReason: "reply_skipped:newer_inbound",
+          }
+        : {
+            reason: phase === "early" ? "superseded_by_newer_inbound" : "superseded_before_send",
+            trace: phase === "early" ? "superseded_by_newer_inbound" : "superseded_before_send",
+            flagReason: null,
+          };
+    case 2: {
+      // An existing AI reply for this very inbound keeps its historical
+      // early-gate reason (`already_replied`).
+      const aiEarly = phase === "early" && decision.answeredBy === "ai";
+      return {
+        reason: aiEarly ? "already_replied" : "already_answered",
+        trace: aiEarly ? "already_replied" : "already_answered",
+        flagReason: null,
+      };
+    }
+    case 3:
+      return {
+        reason: "superseded_before_send",
+        trace: "superseded_before_send",
+        flagReason: "reply_skipped:outbound_since_claim",
+      };
+    case 4:
+      return { reason: "rep_text_scheduled", trace: "rep_text_scheduled", flagReason: null };
+    case 5:
+      return { reason: "superseded_by_broadcast", trace: "superseded_by_broadcast", flagReason: null };
+  }
+}
+
+/**
+ * Rule 1 evidence: does the newer inbound have a LIVE handler (see
+ * `classifyNewerInboundHandler`)? Null = a lookup failed.
+ */
+async function newerInboundHasLiveHandler(
+  supabase: SupabaseClient<Database>,
+  newerInboundId: string,
+  nowMs: number,
+): Promise<boolean | null> {
+  const { data: claim, error } = await supabase
+    .from("ai_response_claims")
+    .select("status, error_message, lease_expires_at")
+    .eq("inbound_message_id", newerInboundId)
+    .eq("response_kind", "sms_ai_responder_v1")
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_newer_inbound_claim_lookup" },
+      extra: { newerInboundId },
+    });
+    return null;
+  }
+  const { data: message, error: messageError } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("id", newerInboundId)
+    .maybeSingle();
+  if (messageError) {
+    reportError(new Error(messageError.message), {
+      tags: { surface: "ai_responder_newer_inbound_state_lookup" },
+      extra: { newerInboundId },
+    });
+    return null;
+  }
+  const processing = readJsonObject((message?.metadata ?? null) as Json | null).processing;
+  const ai =
+    processing && typeof processing === "object" && !Array.isArray(processing)
+      ? (processing as Record<string, Json>).aiResponder
+      : null;
+  const stamp =
+    ai && typeof ai === "object" && !Array.isArray(ai)
+      ? { outcome: (ai as Record<string, Json>).outcome, workflowRunId: (ai as Record<string, Json>).workflowRunId }
+      : null;
+  return classifyNewerInboundHandler({ claim: claim ?? null, stamp, nowMs });
+}
+
+/**
  * Tunables for waiting on another sender's reservation (tests shrink them).
  * `deadlineMs` is a wall-clock budget INCLUDING RPC time (not an attempt
  * count). `providerTimeoutMs` must stay under `leaseSeconds`; it is the ONE
@@ -1861,6 +2210,8 @@ export const sendReservationTuning = {
   deadlineMs: 6_000,
   waitDelayMs: 250,
   providerTimeoutMs: 60_000,
+  /** Cleanup (lease release) gets its own short deadline; a hang = expired by time. */
+  releaseTimeoutMs: 2_000,
 };
 
 function providerTimeoutMs(): number {
@@ -1935,132 +2286,127 @@ async function loadLiveOutboundMode(
   return fallback === "hold" ? "hold" : (data.outbound_mode ?? fallback);
 }
 
-async function guardReplyStillCurrent(
+/**
+ * Called immediately before EVERY mutation made by a leased send attempt
+ * (flag, dead letter, draft write, evidence step). It throws
+ * `AttemptAbandoned` once the attempt is past its deadline, so a read that
+ * resumes after a timeout can decide nothing and write nothing. A caller that
+ * is not an attempt (the pre-lease hold path, the deadline handler itself)
+ * passes no guard.
+ */
+type Guard = () => void;
+const NO_GUARD: Guard = () => undefined;
+
+/**
+ * APPLY a pre-send evaluation (the mutations half of the Q8 gate). Returns an
+ * outcome that ends the send, or null to proceed. Every mutation is preceded
+ * by `guard()`.
+ */
+async function applyGateEvaluation(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
+  evaluation: GateEvaluation,
+  guard: Guard,
 ): Promise<ResponderSendOutcome | null> {
-  const current = await verifyReplyStillCurrent(supabase, args.input, args.claimStartedAt);
-  if (current.ok) return null;
-  if (current.reason === "send_check_failed") {
-    return failClosed(supabase, args, "send_check_failed");
+  if (!evaluation.ok) {
+    return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
-  if (current.reason === "already_answered") {
-    // A conversational reply to THIS inbound already went out (AI, or a human
-    // whose text was actually sent/delivered). Wins over everything.
-    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
-    return { outcome: "skipped", reason: "already_answered" };
-  }
-  if (current.reason === "broadcast_since_claim") {
-    // Only a drip / bulk / Norma pre-call text landed. It does not answer the
-    // seller and says nothing about a human, so: no flag.
-    await trace(supabase, { kind: "gate", name: "superseded_by_broadcast", result: "block" }, args.runContext);
-    return { outcome: "skipped", reason: "superseded_by_broadcast" };
-  }
-  if (current.reason === "reply_pending") {
-    // A human (or an in-flight attempt) has a reply that has not left yet. It
-    // does not answer the seller until it is sent, and it may still fail, so
-    // never skip silently: look again shortly (an unsent text that failed is
-    // excluded next time and this reply goes out normally).
+  const decision = evaluation.decision;
+  if (decision.action === "send" || decision.action === "defer") return null;
+  if (decision.action === "retry") {
+    // Rule 4: a competing reply is queued and has not been submitted. It does
+    // not answer the seller until it leaves and it may still fail, so never
+    // skip silently: look again shortly (a competitor that failed is excluded
+    // next time and this reply goes out normally).
+    guard();
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
-    return retryOrFailReply(supabase, args, "reply_pending");
+    return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  await trace(supabase, {
-    kind: "gate",
-    name: "superseded_before_send",
-    result: "block",
-    detail: { reason: current.reason },
-  }, args.runContext);
-  // The seller got no reply from this run. When a NEWER inbound already has
-  // a live or finished response claim (or a scheduled reply workflow), that run
-  // answers the seller and flagging would only block it; otherwise a human
-  // must see it.
-  if (
-    current.reason === "newer_inbound" &&
-    (await newerInboundIsHandled(supabase, current.newerInboundId))
-  ) {
-    return { outcome: "skipped", reason: "superseded_before_send" };
-  }
-  await markPropertyNeedsAttention(
+  const plan = skipPlanFor(decision, "presend")!;
+  guard();
+  await trace(
     supabase,
-    args.input.propertyId,
-    `reply_skipped:${current.reason}`,
+    decision.rule === 2
+      ? { kind: "gate", name: plan.trace, result: "pass" }
+      : { kind: "gate", name: plan.trace, result: "block", detail: { rule: decision.rule } },
     args.runContext,
   );
-  return { outcome: "skipped", reason: "superseded_before_send" };
+  if (plan.flagReason) {
+    guard();
+    await markPropertyNeedsAttention(
+      supabase,
+      args.input.propertyId,
+      plan.flagReason,
+      args.runContext,
+    );
+  }
+  return { outcome: "skipped", reason: plan.reason };
+}
+
+function flagForRetryReason(reason: string): string {
+  return reason === "draft_persist_failed" ? reason : `reply_skipped:${reason}`;
 }
 
 /**
- * Is the newer inbound going to be answered by someone? Yes when its response
- * claim is live (`processing`), finished (`completed`), or parked for a
- * scheduled retry (`error` + `retry_scheduled:*`), OR when its inbound row is
- * stamped `delayed` (a reply workflow has been started for it but has not
- * taken its claim yet, the normal state of a second text sent during the reply
- * delay). Anything else (no claim, a plain error) means nobody is on it.
+ * Q8 rule 7, the ONE helper behind every "not sent for a reason other than
+ * rules 1-5" exit: the generated reply text is dead-lettered (one retry of
+ * the write inside `writeReplyDeadLetter`) and the property is flagged. When
+ * the dead letter cannot be written the flag reads
+ * `dead_letter_failed:<reason>` (the text then survives only in the retry's
+ * durable workflow state). `body: null` = no reply was generated yet, so
+ * there is nothing to save. Returns whether the text is safely stored.
  */
-async function newerInboundIsHandled(
+export async function flagAndDeadLetter(
   supabase: SupabaseClient<Database>,
-  newerInboundId: string,
-): Promise<boolean> {
-  const { data, error } = await supabase
-    .from("ai_response_claims")
-    .select("status, error_message")
-    .eq("inbound_message_id", newerInboundId)
-    .maybeSingle();
-  if (error) {
-    reportError(new Error(error.message), {
-      tags: { surface: "ai_responder_newer_inbound_claim_lookup" },
-      extra: { newerInboundId },
-    });
-    return false;
-  }
-  if (data?.status === "processing" || data?.status === "completed") return true;
-  if (data?.status === "error" && (data.error_message ?? "").startsWith("retry_scheduled:")) {
-    return true;
-  }
-  if (data) return false;
-  const { data: message, error: messageError } = await supabase
-    .from("messages")
-    .select("metadata")
-    .eq("id", newerInboundId)
-    .maybeSingle();
-  if (messageError) {
-    reportError(new Error(messageError.message), {
-      tags: { surface: "ai_responder_newer_inbound_state_lookup" },
-      extra: { newerInboundId },
-    });
-    return false;
-  }
-  const processing = readJsonObject((message?.metadata ?? null) as Json | null).processing;
-  const ai =
-    processing && typeof processing === "object" && !Array.isArray(processing)
-      ? (processing as Record<string, Json>).aiResponder
-      : null;
-  return (
-    !!ai &&
-    typeof ai === "object" &&
-    !Array.isArray(ai) &&
-    (ai as Record<string, Json>).outcome === "delayed"
-  );
+  args: {
+    runContext?: MaybeRunContext;
+    orgId: string;
+    conversationId: string | null;
+    propertyId: string;
+    inboundMessageId: string | null;
+    body: string | null;
+    /** Dead-letter reason; also the flag reason unless `flagReason` is given. */
+    reason: string;
+    flagReason?: string;
+    guard?: () => void;
+  },
+): Promise<{ deadLettered: boolean; flagReason: string }> {
+  args.guard?.();
+  const deadLettered =
+    args.body === null
+      ? true
+      : await writeReplyDeadLetter(supabase, args.runContext, {
+          orgId: args.orgId,
+          conversationId: args.conversationId,
+          propertyId: args.propertyId,
+          inboundMessageId: args.inboundMessageId,
+          body: args.body,
+          reason: args.reason,
+        });
+  const flagReason = deadLettered
+    ? (args.flagReason ?? args.reason)
+    : `dead_letter_failed:${args.reason}`;
+  args.guard?.();
+  await markPropertyNeedsAttention(supabase, args.propertyId, flagReason, args.runContext);
+  return { deadLettered, flagReason };
 }
 
-/** Dead-letter the generated reply (insert retried once; ids-only failure). */
-async function deadLetterReply(
+function flagAndDeadLetterFor(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
   reason: string,
-): Promise<boolean> {
-  return writeReplyDeadLetter(supabase, args.runContext, {
+  options: { flagReason?: string; guard?: Guard } = {},
+) {
+  return flagAndDeadLetter(supabase, {
+    runContext: args.runContext,
     orgId: args.orgId,
     conversationId: args.input.conversationId ?? null,
     propertyId: args.input.propertyId,
     inboundMessageId: args.input.inboundMessageId ?? null,
     body: args.body,
     reason,
+    ...options,
   });
-}
-
-function flagForRetryReason(reason: string): string {
-  return reason === "draft_persist_failed" ? reason : `reply_skipped:${reason}`;
 }
 
 /**
@@ -2075,15 +2421,16 @@ async function failClosed(
   args: ResponderSendArgs,
   reason: "send_check_failed" | "send_timeout",
   detail?: { timeoutMs: number },
+  guard: Guard = NO_GUARD,
 ): Promise<ResponderSendOutcome> {
+  guard();
   await trace(supabase, {
     kind: "gate",
     name: reason,
     result: "error",
     ...(detail ? { detail } : {}),
   }, args.runContext);
-  await deadLetterReply(supabase, args, reason);
-  await markPropertyNeedsAttention(supabase, args.input.propertyId, reason, args.runContext);
+  await flagAndDeadLetterFor(supabase, args, reason, { guard });
   return { outcome: "escalated", reason };
 }
 
@@ -2098,6 +2445,7 @@ async function retryOrFailReply(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
   reason: RetryReason,
+  guard: Guard = NO_GUARD,
 ): Promise<ResponderSendOutcome> {
   const attempt = args.input.retryAttempt ?? 0;
   if (attempt < REPLY_RETRY_MAX) {
@@ -2116,8 +2464,10 @@ async function retryOrFailReply(
       },
     };
   }
-  await deadLetterReply(supabase, args, reason);
-  await markPropertyNeedsAttention(supabase, args.input.propertyId, flagForRetryReason(reason), args.runContext);
+  await flagAndDeadLetterFor(supabase, args, reason, {
+    flagReason: flagForRetryReason(reason),
+    guard,
+  });
   return { outcome: "escalated", reason };
 }
 
@@ -2168,8 +2518,11 @@ async function holdReplyAsDraft(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
   reason: "outbound_mode_hold" | "llm_autosend_off",
+  guard: Guard = NO_GUARD,
 ): Promise<ResponderSendOutcome> {
+  guard();
   const persisted = await persistHeldDraft(supabase, args);
+  guard();
   if (persisted === "already_resolved") {
     await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
     return { outcome: "skipped", reason: "already_answered" };
@@ -2190,7 +2543,7 @@ async function holdReplyAsDraft(
       result: "error",
       detail: { source: args.source, reason, attempt: args.input.retryAttempt ?? 0 },
     }, args.runContext);
-    return retryOrFailReply(supabase, args, "draft_persist_failed");
+    return retryOrFailReply(supabase, args, "draft_persist_failed", guard);
   }
   await trace(supabase, {
     kind: "hold",
@@ -2198,6 +2551,7 @@ async function holdReplyAsDraft(
     result: "held",
     detail: { source: args.source, reason, stored: true },
   }, args.runContext);
+  guard();
   await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held", args.runContext);
   return { outcome: "escalated", reason: "draft_held" };
 }
@@ -2206,7 +2560,7 @@ async function holdReplyAsDraft(
  * One attempt at a leased send. `abandoned` flips when the attempt's overall
  * deadline passes (or the provider fence refuses); an abandoned attempt can
  * never reach the provider and stops at its next checkpoint, so a late
- * completion of a paused preflight await can neither submit nor flag.
+ * completion of a paused await can neither submit nor flag nor write.
  */
 type SendAttempt = {
   abandoned: boolean;
@@ -2225,8 +2579,17 @@ class AttemptAbandoned extends Error {
   }
 }
 
+/** The attempt may still act: not abandoned and inside its deadline (which is
+ * always shorter than the lease, so "in time" also means "lease still ours"). */
+function attemptValid(attempt: SendAttempt): boolean {
+  return !attempt.abandoned && Date.now() < attempt.deadlineAt;
+}
+
 function assertLive(attempt: SendAttempt): void {
-  if (attempt.abandoned) throw new AttemptAbandoned();
+  if (!attemptValid(attempt)) {
+    attempt.abandoned = true;
+    throw new AttemptAbandoned();
+  }
 }
 
 async function reserveSend(
@@ -2260,27 +2623,49 @@ async function reserveSend(
   }
 }
 
+/**
+ * Release the lease, with its OWN short deadline: cleanup must never hold the
+ * outcome hostage. A release that hangs is treated as expired-by-time (the
+ * lease lapses on its own), reported, and the caller carries on.
+ */
 async function releaseSend(
   supabase: SupabaseClient<Database>,
   conversationKey: string,
   holder: string,
 ): Promise<void> {
-  try {
-    const { error } = await supabase.rpc("fn_release_ai_send", {
-      p_conversation_id: conversationKey,
-      p_holder: holder,
-    });
-    if (error) {
-      reportError(new Error(error.message), {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const release = (async () => {
+    try {
+      const { error } = await supabase.rpc("fn_release_ai_send", {
+        p_conversation_id: conversationKey,
+        p_holder: holder,
+      });
+      if (error) {
+        reportError(new Error(error.message), {
+          tags: { surface: "ai_responder_send_release" },
+          extra: { conversationKey },
+        });
+      }
+    } catch (e) {
+      reportError(e, {
         tags: { surface: "ai_responder_send_release" },
         extra: { conversationKey },
       });
     }
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "ai_responder_send_release" },
-      extra: { conversationKey },
-    });
+  })();
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      reportError(new Error("ai send lease release timed out"), {
+        tags: { surface: "ai_responder_send_release_timeout" },
+        extra: { conversationKey },
+      });
+      resolve();
+    }, sendReservationTuning.releaseTimeoutMs);
+  });
+  try {
+    await Promise.race([release, timedOut]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -2363,6 +2748,22 @@ async function sendResponderMessage(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
 ): Promise<ResponderSendOutcome> {
+  // Rule 8: a draft a human discarded, or that was already sent, is never
+  // re-sent or revived by any run (first attempt, retry, identity reply).
+  if (args.input.inboundMessageId) {
+    const draft = await loadDraftState(supabase, args.input.inboundMessageId);
+    if (draft === "error") return failClosed(supabase, args, "send_check_failed");
+    if (draft === "resolved") {
+      await trace(supabase, {
+        kind: "gate",
+        name: "already_answered",
+        result: "pass",
+        detail: { rule: 8 },
+      }, args.runContext);
+      return { outcome: "skipped", reason: "already_answered" };
+    }
+  }
+
   // Outbound policy (rollback to draft-only + D5). Lives here so immediate
   // dispatch AND the resumed delay workflow both hit it. A held reply sends
   // nothing, so it needs no reservation, but it still must be current.
@@ -2371,7 +2772,12 @@ async function sendResponderMessage(
     dbMode: args.outboundMode,
   });
   if (initialPolicy.hold) {
-    const stale = await guardReplyStillCurrent(supabase, args);
+    const evaluation = await evaluateSendGate(supabase, args.input, {
+      phase: "presend",
+      claimStartedAt: args.claimStartedAt,
+      checkNewerInbound: !!args.input.inboundMessageId,
+    });
+    const stale = await applyGateEvaluation(supabase, args, evaluation, NO_GUARD);
     if (stale) return stale;
     return holdReplyAsDraft(supabase, args, initialPolicy.reason);
   }
@@ -2384,7 +2790,8 @@ async function sendResponderMessage(
   // ONE overall deadline bounds the whole attempt (key resolution, the
   // reservation wait, every preflight read, the provider call). If it passes
   // the attempt is abandoned: it can never reach the provider (the fence
-  // refuses) and stops at its next checkpoint.
+  // refuses), it stops at its next checkpoint, and every mutation it would
+  // make is guarded (see `Guard`).
   const attempt: SendAttempt = {
     abandoned: false,
     providerStarted: false,
@@ -2441,9 +2848,10 @@ async function leasedSend(
   args: ResponderSendArgs,
   attempt: SendAttempt,
 ): Promise<ResponderSendOutcome> {
+  const guard: Guard = () => assertLive(attempt);
   const conversationKey = await resolveReservationKey(supabase, args.input);
   assertLive(attempt);
-  if (!conversationKey) return failClosed(supabase, args, "send_check_failed");
+  if (!conversationKey) return failClosed(supabase, args, "send_check_failed", undefined, guard);
   attempt.conversationKey = conversationKey;
   const reservation = await reserveSend(
     supabase,
@@ -2457,23 +2865,29 @@ async function leasedSend(
     if (attempt.reserved) await releaseSend(supabase, conversationKey, attempt.holder);
     throw new AttemptAbandoned();
   }
-  if (reservation === "error") return failClosed(supabase, args, "send_check_failed");
+  if (reservation === "error") return failClosed(supabase, args, "send_check_failed", undefined, guard);
   if (reservation === "elsewhere") {
     // Another sender held the lease for the whole wait budget. Nothing was
     // sent, so this must not end silently: retry later, flag after the last.
+    guard();
     await trace(supabase, {
       kind: "gate",
       name: "send_reserved_elsewhere",
       result: "block",
       detail: { attempt: args.input.retryAttempt ?? 0 },
     }, args.runContext);
-    return retryOrFailReply(supabase, args, "send_reserved_elsewhere");
+    return retryOrFailReply(supabase, args, "send_reserved_elsewhere", guard);
   }
 
-  // Re-validate UNDER the reservation: our inbound is still the latest and
-  // nothing has been sent in the conversation since the window opened.
-  const stale = await guardReplyStillCurrent(supabase, args);
+  // Re-validate UNDER the reservation (the Q8 table, final): READ everything,
+  // then re-check the attempt is still live, only then apply (flag / trace).
+  const evaluation = await evaluateSendGate(supabase, args.input, {
+    phase: "presend",
+    claimStartedAt: args.claimStartedAt,
+    checkNewerInbound: !!args.input.inboundMessageId,
+  });
   assertLive(attempt);
+  const stale = await applyGateEvaluation(supabase, args, evaluation, guard);
   if (stale) return stale;
 
   // Re-read the policy immediately before the provider call.
@@ -2481,7 +2895,7 @@ async function leasedSend(
   assertLive(attempt);
   const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
   if (livePolicy.hold) {
-    return await holdReplyAsDraft(supabase, args, livePolicy.reason);
+    return await holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
   }
 
   return deliverResponderMessage(supabase, args, attempt);
@@ -2492,6 +2906,7 @@ async function deliverResponderMessage(
   args: ResponderSendArgs,
   attempt: SendAttempt,
 ): Promise<ResponderSendOutcome> {
+  const guard: Guard = () => assertLive(attempt);
   let inboundToPhone = args.input.inboundToPhone ?? null;
   if (!inboundToPhone && args.input.inboundMessageId) {
     try {
@@ -2508,8 +2923,7 @@ async function deliverResponderMessage(
           inboundMessageId: args.input.inboundMessageId,
         },
       });
-      assertLive(attempt);
-      await markPropertyNeedsAttention(supabase, args.input.propertyId, reason, args.runContext);
+      await flagAndDeadLetterFor(supabase, args, reason, { guard });
       return { outcome: "escalated", reason };
     }
     assertLive(attempt);
@@ -2535,12 +2949,23 @@ async function deliverResponderMessage(
   });
 
   if (sendResult.status === "blocked_before_provider") {
+    if (sendResult.retired === false) {
+      // The refused row could not be retired: it still carries the stamp that
+      // owns this inbound, so a retry would collide with it. Never retry over
+      // it; dead-letter + flag a human.
+      await trace(supabase, { kind: "gate", name: "send_abort_unconfirmed", result: "error" }, args.runContext);
+      const reason = "send_blocked:abort_unconfirmed";
+      guard();
+      await flagAndDeadLetterFor(supabase, args, reason, { guard });
+      return { outcome: "escalated", reason };
+    }
     if (attempt.fenceRefusal === "error") {
-      return failClosed(supabase, args, "send_check_failed");
+      return failClosed(supabase, args, "send_check_failed", undefined, guard);
     }
     if (attempt.fenceRefusal === "abandoned") throw new AttemptAbandoned();
+    guard();
     await trace(supabase, { kind: "gate", name: "send_lease_lost", result: "block" }, args.runContext);
-    return retryOrFailReply(supabase, args, "send_lease_lost");
+    return retryOrFailReply(supabase, args, "send_lease_lost", guard);
   }
 
   if (
@@ -2548,16 +2973,26 @@ async function deliverResponderMessage(
     sendResult.status === "db_error" &&
     isAiReplyDuplicateInsertError(sendResult.error)
   ) {
+    guard();
     const existingReply = await findExistingAiReplyForInbound(
       supabase,
       args.input.inboundMessageId,
     );
+    guard();
     if (existingReply?.status === "pending") {
       // Another attempt's row for this inbound is still in flight (or was
       // abandoned and has not aborted yet). It is not a delivered reply: try
       // again shortly instead of ending the seller's thread silently.
       await trace(supabase, { kind: "gate", name: "send_row_in_flight", result: "block" }, args.runContext);
-      return retryOrFailReply(supabase, args, "send_reserved_elsewhere");
+      return retryOrFailReply(supabase, args, "send_reserved_elsewhere", guard);
+    }
+    if (existingReply?.status === "failed") {
+      // A previous attempt's row failed AFTER the provider boundary and still
+      // owns this inbound's stamp: the seller was not answered and a resend
+      // would collide with it. Flag, never "already replied".
+      const reason = "send_blocked:prior_attempt_failed";
+      await flagAndDeadLetterFor(supabase, args, reason, { guard });
+      return { outcome: "escalated", reason };
     }
     if (existingReply) {
       await trace(supabase, {
@@ -2573,6 +3008,7 @@ async function deliverResponderMessage(
     sendResult.status === "blocked_terminal_dispo" ||
     sendResult.status === "blocked_automated_suppressed"
   ) {
+    guard();
     await trace(supabase, {
       kind: "gate",
       name: "send_suppressed",
@@ -2584,7 +3020,7 @@ async function deliverResponderMessage(
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     const reason = `send_blocked:${sendResult.status}`;
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, reason, args.runContext);
+    await flagAndDeadLetterFor(supabase, args, reason, { guard });
     return { outcome: "escalated", reason };
   }
 
@@ -2638,6 +3074,34 @@ async function deliverResponderMessage(
     outboundMessageId: messageId,
   });
   return { outcome: "sent", messageId, confidence: args.confidence };
+}
+
+/** Build the send arguments for an already-generated (carried) reply. */
+function replySendArgs(a: {
+  input: AiDispatchInput;
+  orgId: string;
+  model: string;
+  turn: number;
+  claimStartedAt: string | null;
+  outboundMode?: string | null;
+  runContext?: MaybeRunContext;
+  reply: RetryReply;
+}): ResponderSendArgs {
+  return {
+    input: a.input,
+    body: a.reply.body,
+    model: a.model,
+    confidence: a.reply.confidence,
+    sentiment: a.reply.sentiment,
+    turn: a.turn,
+    source: "llm",
+    orgId: a.orgId,
+    claimStartedAt: a.claimStartedAt,
+    outboundMode: a.outboundMode,
+    runContext: a.runContext,
+    replyKind: a.reply.kind,
+    ...(a.reply.closeReason ? { closeReason: a.reply.closeReason } : {}),
+  };
 }
 
 async function setResponderDispo(
@@ -3532,6 +3996,9 @@ async function countAiTurnsInThread(
     .select("*", { count: "exact", head: true })
     .eq("property_id", propertyId)
     .eq("direction", "outbound")
+    // A failed row (including one retired by a refused provider submission) is
+    // not a turn the seller received.
+    .neq("status", "failed")
     .contains("metadata", { generated_by: "ai_responder_v1" });
   query = conversationId
     ? query.eq("conversation_id", conversationId)

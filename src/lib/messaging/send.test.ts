@@ -303,22 +303,78 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-1" },
   };
 
-  it("a refusing hook means NO provider call: the pending row is failed and its uniqueness-bearing stamp is retired", async () => {
+  it("a refusing hook means NO provider call: the pending row is failed and only its uniqueness-bearing inbound key is retired (generated_by stays)", async () => {
     const { provider, supabase, updates } = scripted();
     const hook = vi.fn().mockResolvedValue(false);
     const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
     expect(hook).toHaveBeenCalledTimes(1);
     expect(provider.sendSms).not.toHaveBeenCalled();
-    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f" });
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
     expect(updates[0]).toMatchObject({
       status: "failed",
       error_message: "aborted_before_provider",
       metadata: expect.objectContaining({
-        generated_by: "ai_responder_v1_aborted",
-        inbound_message_id: "inbound-1",
+        generated_by: "ai_responder_v1",
+        aborted_inbound_message_id: "inbound-1",
         abortedBeforeProvider: true,
       }),
     });
+    // The key idx_messages_ai_responder_inbound_unique matches on is gone.
+    expect(updates[0]!.metadata).not.toHaveProperty("inbound_message_id");
+  });
+
+  it("the retirement write is verified: a failed or zero-row update is retried (bounded) and then reported unconfirmed", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null }, // pending insert
+        { data: null, error: { message: "update boom" } }, // attempt 1: error
+        { data: null, error: null }, // attempt 2: zero rows affected
+        { data: null, error: null }, // attempt 3: zero rows affected
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: vi.fn().mockResolvedValue(false),
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: false });
+  });
+
+  it("a retirement that fails once and then lands is confirmed", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null },
+        { data: null, error: { message: "update boom" } },
+        { data: { id: "msg-f" }, error: null },
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: vi.fn().mockResolvedValue(false),
+    });
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
   });
 
   it("a hook that throws is a refusal", async () => {
@@ -330,7 +386,7 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
       },
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
-    expect(outcome.status).toBe("blocked_before_provider");
+    expect(outcome).toMatchObject({ status: "blocked_before_provider", retired: true });
   });
 
   it("runs after every preflight check and immediately before the provider; true lets the send proceed", async () => {

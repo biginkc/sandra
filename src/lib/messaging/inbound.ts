@@ -18,6 +18,7 @@ import {
   applyKeywordEscalation,
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
+  flagAndDeadLetter,
   markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
@@ -59,7 +60,6 @@ import {
 } from "./rep-sms-human-takeover";
 import {
   isRetryOutcome,
-  writeReplyDeadLetter,
   recordRetryScheduled,
   type AiRetryOutcome,
 } from "@/lib/ai-responder/retry";
@@ -1686,26 +1686,23 @@ async function dispatchAndStampAiResponder(
     if (await scheduleReplyRetry(supabase, input, outcome, runContext)) {
       return outcome;
     }
-    // Could not even schedule it: the generated reply is dead-lettered (its
-    // only durable copy) and a human is flagged rather than dropping it.
-    if (outcome.reply) {
-      await writeReplyDeadLetter(supabase, runContext, {
-        orgId: outcome.reply.orgId,
-        conversationId: input.conversationId ?? null,
-        propertyId: input.propertyId,
-        inboundMessageId: input.inboundMessageId ?? null,
-        body: outcome.reply.body,
-        reason: outcome.reason,
-      });
-    }
-    await markPropertyNeedsAttention(
-      supabase,
-      input.propertyId,
-      outcome.reason === "draft_persist_failed"
-        ? outcome.reason
-        : `reply_skipped:${outcome.reason}`,
+    // Could not even schedule it (Q8 rule 7): the generated reply is
+    // dead-lettered (its only durable copy) and a human is flagged rather than
+    // dropping it. A dead letter that cannot be written changes the flag to
+    // dead_letter_failed:<reason>.
+    await flagAndDeadLetter(supabase, {
       runContext,
-    );
+      orgId: outcome.reply?.orgId ?? "",
+      conversationId: input.conversationId ?? null,
+      propertyId: input.propertyId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      body: outcome.reply?.body ?? null,
+      reason: outcome.reason,
+      flagReason:
+        outcome.reason === "draft_persist_failed"
+          ? outcome.reason
+          : `reply_skipped:${outcome.reason}`,
+    });
     const terminal: AiDispatchOutcome = { outcome: "escalated", reason: outcome.reason };
     await stampAiResponderTerminalOutcome(supabase, {
       messageId: input.inboundMessageId!,

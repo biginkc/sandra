@@ -146,4 +146,12 @@ describe("provider failure reasons", () => {
     expect(parsed!.shortLabel).toBe("API key dead");
     expect(parsed!.longLabel).toMatch(/key rejected/i);
   });
+
+  it("dead_letter_failed:<reason> (Q8 rule 7) parses loud and names the original reason", () => {
+    const parsed = parseEscalationReason("dead_letter_failed:send_blocked:db_error");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("Reply text not saved");
+    expect(parsed!.longLabel).toMatch(/send blocked db error/i);
+  });
 });

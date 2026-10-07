@@ -12,17 +12,24 @@ export const REPLY_RETRY_DELAY_SECONDS = 20;
 export const REPLY_RETRY_MAX = 3;
 
 /**
- * Retry / flag matrix (what happens per failure reason):
+ * Retry / flag matrix (Q8 rule 7 behind every flag below: the carried reply is
+ * dead-lettered first - one retry of that write - and when that still fails
+ * the flag reads `dead_letter_failed:<reason>`):
  *
  *  reason                     retries?  last attempt / when not retried
  *  send_reserved_elsewhere    yes       dead-letter + flag reply_skipped:<reason>
  *  send_lease_lost            yes       dead-letter + flag reply_skipped:<reason>
  *  send_preflight_timeout     yes       dead-letter + flag reply_skipped:<reason>
- *  reply_pending        yes       dead-letter + flag reply_skipped:<reason>
+ *  reply_pending (rule 4)     yes       dead-letter + flag reply_skipped:<reason>
  *  draft_persist_failed       yes       dead-letter + flag draft_persist_failed
  *  send_timeout (not here)    NO        dead-letter + flag send_timeout (the provider
  *                                       request may still land; lease is kept)
  *  send_check_failed (n/h)    NO        dead-letter + flag send_check_failed (fails closed)
+ *  claim_refused_on_retry     NO        dead-letter + flag reply_skipped:claim_refused_on_retry
+ *  send_blocked:<status>      NO        dead-letter + flag send_blocked:<status> (incl.
+ *                                       db_error, abort_unconfirmed, prior_attempt_failed)
+ *  outside_business_hours /   NO        retry gap tripped a pacing gate: draft held +
+ *   max_turns_reached                   dead-letter + flag reply_skipped:<reason>
  *  retry unschedulable        NO        dead-letter + flag reply_skipped:<reason>
  */
 export type RetryReason =

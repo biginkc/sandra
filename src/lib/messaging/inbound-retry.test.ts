@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   markAttention: vi.fn(async () => undefined),
   recordThread: vi.fn(async () => undefined),
   deadLetter: vi.fn(async () => true),
+  flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -74,6 +75,7 @@ vi.mock("@/lib/ai-responder/dispatch", () => ({
   applyKeywordEscalation: vi.fn(async () => ({ escalated: false })),
   checkAiResponderDispatchPreGates: vi.fn(async () => ({ ok: true })),
   dispatchAiResponse: mocks.dispatchAi,
+  flagAndDeadLetter: mocks.flagAndDeadLetter,
   markPropertyNeedsAttention: mocks.markAttention,
 }));
 
@@ -390,18 +392,17 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
     mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
     await runWebhook();
-    expect(mocks.deadLetter).toHaveBeenCalledTimes(1);
-    expect((mocks.deadLetter.mock.calls[0] as unknown[])[2]).toMatchObject({
+    // Q8 rule 7: ONE helper dead-letters the carried reply and flags (and
+    // switches the flag to dead_letter_failed:<reason> when the write fails).
+    expect(mocks.flagAndDeadLetter).toHaveBeenCalledTimes(1);
+    expect((mocks.flagAndDeadLetter.mock.calls[0] as unknown[])[1]).toMatchObject({
       orgId: "org-1",
       propertyId: "property-1",
       inboundMessageId: "message-1",
       body: "Hi there, still interested?",
       reason: "send_reserved_elsewhere",
+      flagReason: "reply_skipped:send_reserved_elsewhere",
     });
-    expect((mocks.markAttention.mock.calls[0] as unknown[]).slice(1, 3)).toEqual([
-      "property-1",
-      "reply_skipped:send_reserved_elsewhere",
-    ]);
     expect(mocks.markState).toHaveBeenCalledWith(
       expect.anything(),
       "message-1",

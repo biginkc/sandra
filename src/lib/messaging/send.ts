@@ -6,6 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 import { normalizePhone } from "@/lib/csv/normalize";
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
+import { reportError } from "@/lib/errors/report";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
@@ -300,8 +301,13 @@ async function loadRepSmsIdempotencyRow(
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
-  /** `beforeProviderSubmit` refused: nothing was submitted to the provider. */
-  | { status: "blocked_before_provider"; messageId: string }
+  /**
+   * `beforeProviderSubmit` refused: nothing was submitted to the provider.
+   * `retired` is false when the refused row could NOT be marked failed with its
+   * uniqueness-bearing stamp released (see `retireRefusedRow`): the caller must
+   * not retry over it.
+   */
+  | { status: "blocked_before_provider"; messageId: string; retired: boolean }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -1002,31 +1008,17 @@ export async function sendSmsToContact(
       }
       if (!proceed) {
         // Never reached the provider. The row must not keep a uniqueness-bearing
-        // generated_by stamp, or the retry of the same inbound would collide
-        // with it (idx_messages_ai_responder_inbound_unique) and read as
-        // "already replied".
-        const baseMeta = (inputMetadata ?? {}) as Record<string, unknown>;
-        const stamp = typeof baseMeta.generated_by === "string" ? baseMeta.generated_by : null;
-        await supabase
-          .from("messages")
-          .update({
-            status: "failed",
-            failed_at: new Date().toISOString(),
-            error_message: "aborted_before_provider",
-            metadata: {
-              ...baseMeta,
-              ...(stamp ? { generated_by: `${stamp}_aborted` } : {}),
-              abortedBeforeProvider: true,
-            } as Json,
-          })
-          .eq("id", pending.id)
-          .eq("status", "pending");
+        // stamp, or the retry of the same inbound would collide with it
+        // (idx_messages_ai_responder_inbound_unique) and read as "already
+        // replied". `generated_by` stays (every reader of the AI stamp keeps
+        // working); only the inbound key moves to `aborted_inbound_message_id`.
+        const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
         if (input.repSmsReceipt) {
           await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
             providerError: "aborted_before_provider",
           });
         }
-        return { status: "blocked_before_provider", messageId: pending.id };
+        return { status: "blocked_before_provider", messageId: pending.id, retired };
       }
     }
     providerCallStarted = true;
@@ -1163,7 +1155,12 @@ export async function sendSmsToContact(
         failed_at: new Date().toISOString(),
         error_message: message,
         metadata: {
-          ...(inputMetadata ?? {}),
+          // A failure BEFORE the provider call started never reached the
+          // provider, so it must not keep the uniqueness-bearing AI stamp
+          // either (same rule as a refused submission).
+          ...(providerCallStarted
+            ? (inputMetadata ?? {})
+            : (metadataForRefusedRow(inputMetadata) as Record<string, Json>)),
             providerAttempt: {
               pendingAt,
               maxPendingMs: PROVIDER_PENDING_STALE_MS,
@@ -1183,6 +1180,62 @@ export async function sendSmsToContact(
       ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }
+}
+
+/**
+ * Metadata for a row that never reached the provider: the same stamp, minus the
+ * key the AI-reply uniqueness index matches on.
+ */
+function metadataForRefusedRow(inputMetadata: Json | null | undefined): Json {
+  const base = (
+    inputMetadata && typeof inputMetadata === "object" && !Array.isArray(inputMetadata)
+      ? inputMetadata
+      : {}
+  ) as Record<string, Json>;
+  const { inbound_message_id: inboundId, ...rest } = base;
+  return {
+    ...rest,
+    ...(inboundId !== undefined ? { aborted_inbound_message_id: inboundId } : {}),
+    abortedBeforeProvider: true,
+  } as Json;
+}
+
+const REFUSED_ROW_RETIRE_ATTEMPTS = 3;
+
+/**
+ * Mark a refused row failed AND release its uniqueness-bearing stamp. The
+ * write is verified (error AND affected-row count) and retried a bounded
+ * number of times; it never throws. Returns whether retirement is confirmed.
+ */
+async function retireRefusedRow(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  inputMetadata: Json | null | undefined,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= REFUSED_ROW_RETIRE_ATTEMPTS; attempt += 1) {
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: "aborted_before_provider",
+          metadata: metadataForRefusedRow(inputMetadata),
+        })
+        .eq("id", messageId)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (!error && data) return true;
+    } catch {
+      // fall through to the next attempt
+    }
+  }
+  reportError(new Error("refused SMS row could not be retired"), {
+    tags: { surface: "sms_refused_row_retire" },
+    extra: { messageId },
+  });
+  return false;
 }
 
 function classifySequenceProviderFailure(error: unknown): SequenceAttemptOutcome {

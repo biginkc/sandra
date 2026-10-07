@@ -55,7 +55,11 @@ export function parseEscalationReason(
   // loudest color: they mean the responder is down for EVERY lead, not
   // just this conversation.
   const color: ReasonColor =
-    gate === "provider_billing" || gate === "provider_auth" ? "rose" : "amber";
+    gate === "provider_billing" ||
+    gate === "provider_auth" ||
+    gate === "dead_letter_failed"
+      ? "rose"
+      : "amber";
 
   return {
     raw,
@@ -83,6 +87,8 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return `send pipeline blocked (${detail.replace(/_/g, " ")})`;
     case "generate_error":
       return "model call failed";
+    case "dead_letter_failed":
+      return `reply could not be sent AND its text could not be saved (${detail.replace(/[:_]/g, " ")}) - check the pipeline run`;
     case "provider_billing":
       return "Anthropic credits exhausted - AI responder down until topped up";
     case "provider_auth":
@@ -108,6 +114,8 @@ function formatShortLabel(gate: string): string {
       return "Send blocked";
     case "generate_error":
       return "AI error";
+    case "dead_letter_failed":
+      return "Reply text not saved";
     case "provider_billing":
       return "API credits out";
     case "provider_auth":
