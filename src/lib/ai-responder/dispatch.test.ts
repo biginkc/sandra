@@ -510,6 +510,7 @@ function createMockSupabase(state: MockState) {
   function buildPropertiesQuery() {
     let updateData: Partial<MockState["property"]> | null = null;
     const eqFilters = new Map<string, unknown>();
+    let likeFilter: { field: string; prefix: string } | null = null;
     let allowedDispos: string[] | null = null;
     let allowsNullDispo = false;
 
@@ -545,10 +546,23 @@ function createMockSupabase(state: MockState) {
         Object.assign(state.property, updateData);
         return { data: { id: state.property.id }, error: null };
       }
+      if (likeFilter) {
+        const cell = state.property[likeFilter.field as keyof MockState["property"]];
+        return {
+          data: typeof cell === "string" && cell.startsWith(likeFilter.prefix) ? [{ ...state.property }] : [],
+          error: null,
+        };
+      }
       return { data: { ...state.property }, error: null };
     };
 
     const query = {
+      like(field: string, pattern: string) {
+        likeFilter = { field, prefix: pattern.replace(/%$/, "") };
+        return query;
+      },
+      order: () => query,
+      range: () => query,
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
         return query;
@@ -870,10 +884,16 @@ function createMockSupabase(state: MockState) {
       if (table === "ai_reply_dead_letters") {
         const dlFilters = new Map<string, unknown>();
         let dlGte: string | null = null;
+        let dlIn: { field: string; values: unknown[] } | null = null;
+        let dlRange: [number, number] | null = null;
         const dlq = {
           select: () => dlq,
           eq(field: string, value: unknown) {
             dlFilters.set(field, value);
+            return dlq;
+          },
+          in(field: string, values: unknown[]) {
+            dlIn = { field, values };
             return dlq;
           },
           gte(_field: string, value: string) {
@@ -881,13 +901,20 @@ function createMockSupabase(state: MockState) {
             return dlq;
           },
           order: () => dlq,
+          range(from: number, to: number) {
+            dlRange = [from, to];
+            return dlq;
+          },
           limit: () => dlq,
           then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
-            const rows = (state.deadLetters ?? []).filter(
+            let rows = (state.deadLetters ?? []).filter(
               (r) =>
                 [...dlFilters].every(([k, v]) => r[k] === v) &&
+                (dlIn === null || dlIn.values.includes(r[dlIn.field])) &&
                 (dlGte === null || String(r.created_at ?? dlGte) >= dlGte),
             );
+            rows = [...rows].sort((a, b) => String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")));
+            if (dlRange) rows = rows.slice(dlRange[0], dlRange[1] + 1);
             return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
           },
         };
@@ -2834,7 +2861,7 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
     expect(state.property.needs_human_attention).toBe(true);
-    expect(state.property.last_ai_escalation_reason).toBe("send_timeout");
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-slow");
     // The only durable copy of the text is dead-lettered (the send may or may
     // not have landed: a human decides).
     expect(state.deadLetters).toEqual([expect.objectContaining({ inbound_message_id: "inbound-slow", body: "Hi there", reason: "send_timeout" })]);
@@ -2864,7 +2891,7 @@ describe("send chokepoint guards (fix round 2)", () => {
     });
     const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-late"), { anthropic: {} as never });
     expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
-    expect(state.property.last_ai_escalation_reason).toBe("send_timeout");
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
     land();
     await new Promise((r) => setTimeout(r, 30));
     expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
@@ -3808,6 +3835,19 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       expectDeadLettered(state, "send_check_failed", "inbound-e4");
     });
 
+    it("an unreadable consent state inside the send (blocked_fresh_state_unavailable) is rule 7 send_check_failed", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(sendSmsToContact).mockResolvedValue({
+        status: "blocked_fresh_state_unavailable",
+        error: "consent state lookup failed: boom",
+      } as never);
+      seedInboundAt(state, "inbound-e5", at("18:00:00"));
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-e5"), anthropic);
+      expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+      expectDeadLettered(state, "send_check_failed", "inbound-e5");
+    });
+
     it("lease lost retries while attempts remain and is dead-lettered + flagged on the last", async () => {
       const state = createMockState();
       state.renewLost = true;
@@ -4053,6 +4093,18 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
       expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:outbound_since_claim");
       expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    });
+
+    it("a throttle flag that cannot be written falls through (never a flagged skip) and fails closed at the pre-send check", async () => {
+      const state = createMockState();
+      state.flagWriteError = true;
+      installSendMock(state);
+      seedInboundAt(state, "inbound-x", at("17:59:40"));
+      pushOutbound(state, { id: "ai-w", created_at: at("17:59:50"), sent_at: at("17:59:50"), metadata: aiReplyTo("inbound-w") });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+      expect(result).toEqual({ outcome: "escalated", reason: "flag_failed" });
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+      expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "flag_failed" })]);
     });
 
     it("rules 3/5 are bounded since the seller's inbound: AI reply R to X, seller answers Y 20s later -> Y gets a reply (rule 6), the 45s throttle does not widen the window", async () => {
@@ -4750,28 +4802,28 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       });
     });
 
-    describe("3. a stale queued competitor is rule 7, not four retries", () => {
+    describe("3. a queued competitor of ANY age is rule 4 (retry, then flag), never an immediate flag", () => {
       const hoursAgo = (h: number) => new Date(Date.parse(at("18:00:00")) - h * 3_600_000).toISOString();
 
-      it("early gate: a non-scheduled queued row older than 1 hour flags stale_queued_competitor immediately (no retry)", async () => {
+      it("early gate: an old non-scheduled queued row retries (no immediate flag)", async () => {
         const state = setup();
         seedInboundAt(state, "inbound-x", at("17:59:00"));
         pushOutbound(state, { id: "stuck", status: "queued", created_at: hoursAgo(2), sent_at: null, metadata: null });
         const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
-        expect(result).toEqual({ outcome: "skipped", reason: "stale_queued_competitor" });
-        expect(state.property.needs_human_attention).toBe(true);
-        expect(state.property.last_ai_escalation_reason).toBe("stale_queued_competitor");
+        expect(result).toMatchObject({ outcome: "retry", reason: "reply_pending" });
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(state.property.last_ai_escalation_reason).not.toBe("stale_queued_competitor");
       });
 
-      it("under the lease: flagged and the generated reply dead-lettered, never retried", async () => {
+      it("under the lease: an old queued row retries, never flagged before the retries are spent", async () => {
         const state = setup();
         seedInboundAt(state, "inbound-x", at("17:59:00"));
         state.onReserved = () =>
           pushOutbound(state, { id: "stuck", status: "queued", created_at: hoursAgo(3), sent_at: null, metadata: null });
         const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
-        expect(result).toEqual({ outcome: "escalated", reason: "stale_queued_competitor" });
-        expect(state.property.last_ai_escalation_reason).toBe("stale_queued_competitor");
-        expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "stale_queued_competitor", body: "Hi there" })]);
+        expect(result).toMatchObject({ outcome: "retry", reason: "reply_pending" });
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(state.deadLetters ?? []).toHaveLength(0);
         expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
       });
 
@@ -4847,7 +4899,7 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         const { sweepLateSends } = await import("./dispatch");
         const state = setup();
         state.property.needs_human_attention = true;
-        state.property.last_ai_escalation_reason = "send_timeout";
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
         state.deadLetters = [
           { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi there", reason: "send_timeout", created_at: new Date().toISOString() },
         ];
@@ -4855,19 +4907,74 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         const supabase = createMockSupabase(state) as never;
         expect(await sweepLateSends(supabase)).toEqual({ scanned: 1, reconciled: 1 });
         expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
-        expect(await sweepLateSends(supabase)).toEqual({ scanned: 1, reconciled: 0 });
+        // Resolved rows are no longer scanned.
+        expect(await sweepLateSends(supabase)).toEqual({ scanned: 0, reconciled: 0 });
         expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
       });
 
       it("the sweeper leaves a timeout alone when the text never reached the provider", async () => {
         const { sweepLateSends } = await import("./dispatch");
         const state = setup();
-        state.property.last_ai_escalation_reason = "send_timeout";
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-none";
         state.deadLetters = [
           { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-none", body: "Hi", reason: "send_timeout", created_at: new Date().toISOString() },
         ];
-        expect(await sweepLateSends(createMockSupabase(state) as never)).toEqual({ scanned: 1, reconciled: 0 });
-        expect(state.property.last_ai_escalation_reason).toBe("send_timeout");
+        expect(await sweepLateSends(createMockSupabase(state) as never)).toMatchObject({ reconciled: 0 });
+        expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-none");
+      });
+
+      it("identity binding: timeout A's late reconciliation never converts timeout B's flag", async () => {
+        const { reconcileLateSendForInbound } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = true;
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-B";
+        const result = await reconcileLateSendForInbound(createMockSupabase(state) as never, {
+          orgId: "org-1",
+          conversationId: CONVERSATION_ID,
+          propertyId: PROPERTY_ID,
+          inboundMessageId: "inbound-A",
+          body: "text A",
+          confirmedSent: true,
+        });
+        expect(result).toBe("reconciled");
+        expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-B");
+      });
+
+      it("marker-vs-flag race: a sent_late marker already exists but the flag is still bound to it - the update still runs", async () => {
+        const { reconcileLateSendForInbound } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = true;
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+        state.deadLetters = [
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "sent_late", created_at: new Date().toISOString() },
+        ];
+        const args = { orgId: "org-1", conversationId: CONVERSATION_ID, propertyId: PROPERTY_ID, inboundMessageId: "inbound-late", body: "Hi", confirmedSent: true };
+        const supabase = createMockSupabase(state) as never;
+        expect(await reconcileLateSendForInbound(supabase, args)).toBe("reconciled");
+        expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+        expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        expect(await reconcileLateSendForInbound(supabase, args)).toBe("already_reconciled");
+      });
+
+      it("the sweeper repairs a flag stuck behind an existing marker, and pages past a full first page of resolved rows", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        state.property.needs_human_attention = true;
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+        const base = Date.now() - 3_600_000;
+        // Two older, already-resolved timeouts fill page 1 (pageSize 2).
+        state.deadLetters = [
+          ...["old-1", "old-2"].flatMap((id, i) => [
+            { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "send_timeout", created_at: new Date(base + i).toISOString() },
+            { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "sent_late", created_at: new Date(base + i).toISOString() },
+          ]),
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date(base + 10).toISOString() },
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "sent_late", created_at: new Date(base + 11).toISOString() },
+        ];
+        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+        const result = await sweepLateSends(createMockSupabase(state) as never, { pageSize: 2 });
+        expect(result.reconciled).toBe(1);
+        expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
       });
     });
 

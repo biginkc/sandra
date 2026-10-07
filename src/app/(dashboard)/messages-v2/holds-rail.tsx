@@ -68,9 +68,16 @@ export function HoldCard({
   const tone = age === null ? "neutral" : ageTone(age);
   const why = run ? holdReason(run.steps, run.reason) : null;
   // Already delivered (late) and nothing else needs a human: muted, not actionable.
+  // Derive per-inbound dead-letter state; fall back to the booleans when no list.
+  const dls = hold.dead_letters;
+  const hasLate = dls ? dls.some((d) => d.late) : !!hold.dead_letter_late;
+  const hasOpenDead = dls
+    ? dls.some((d) => !d.late)
+    : !!hold.dead_letter && !hold.dead_letter_late;
   const informational =
     hold.flag_reason === "send_timeout_then_sent" &&
-    hold.sources.every((s) => s === "needs_attention");
+    hold.sources.every((s) => s === "needs_attention") &&
+    !hasOpenDead;
   return (
     <article
       data-testid="hold-card"
@@ -140,22 +147,22 @@ export function HoldCard({
           Informational — already delivered
         </p>
       )}
-      {hold.dead_letter_late ? (
-        <p data-testid="dead-letter-late" className="mt-2 flex gap-2">
-          <span aria-hidden className="text-red-600">
+      {hasLate && (
+        <p
+          data-testid="dead-letter-late"
+          className="mt-2 flex gap-2 text-muted-foreground"
+        >
+          <span aria-hidden>●</span>
+          <span>reply accepted by provider late — do not re-send</span>
+        </p>
+      )}
+      {hasOpenDead && (
+        <p data-testid="dead-letter" className="mt-2 flex gap-2">
+          <span aria-hidden className="text-amber-600">
             ●
           </span>
-          <span>reply was delivered late — do not re-send</span>
+          <span>reply text saved for review</span>
         </p>
-      ) : (
-        hold.dead_letter && (
-          <p data-testid="dead-letter" className="mt-2 flex gap-2">
-            <span aria-hidden className="text-amber-600">
-              ●
-            </span>
-            <span>reply text saved for review</span>
-          </p>
-        )
       )}
       {!informational && <Phase2Actions />}
     </article>

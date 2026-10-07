@@ -578,7 +578,7 @@ async function dispatchAiResponseCore(
     // `decision.skip` governs whether Sandra may SEND an automated reply
     // (org-wide off, no consent, per-property AI-responder disabled —
     // a VA-controlled human-takeover kill switch, see
-    // `setAiResponderDisabled` — or the reply-pacing gates: daily
+    // `setAiResponderDisabled` — or the reply-pacing gates: per-thread
     // max-turns and outside-business-hours). Jev's own outcomes never
     // send a reply (Jev has no `send_reply`/`deescalate_close` route —
     // it only ever escalates, closes, opts out, or requests dnc/nurture)
@@ -651,13 +651,22 @@ async function dispatchAiResponseCore(
           detail: { rule: evaluation.ok ? evaluation.decision.rule : null },
         }, deps.runContext);
         if (plan.flagReason) {
-          await markPropertyNeedsAttention(supabase, input.propertyId, plan.flagReason, deps.runContext);
-          return flaggedSkip("duplicate_throttled");
+          const throttleFlagged = await markPropertyNeedsAttention(
+            supabase,
+            input.propertyId,
+            plan.flagReason,
+            deps.runContext,
+          );
+          // A flag that cannot be proven must not read as "a human was told":
+          // fall through so the pre-send check re-evaluates under the lease and
+          // fails closed (rule 7), like the early gate.
+          if (throttleFlagged) return flaggedSkip("duplicate_throttled");
+        } else {
+          const throttleRule = evaluation.ok ? silentRuleOf(evaluation.decision) : null;
+          return throttleRule === null
+            ? { outcome: "skipped", reason: plan.reason }
+            : silentSkip(plan.reason, throttleRule);
         }
-        const throttleRule = evaluation.ok ? silentRuleOf(evaluation.decision) : null;
-        return throttleRule === null
-          ? { outcome: "skipped", reason: plan.reason }
-          : silentSkip(plan.reason, throttleRule);
       }
       if (!evaluation.ok) {
         // Cannot classify the recent reply: never drop silently on a failed
@@ -2583,13 +2592,6 @@ function skipPlanFor(
       return { reason: "rep_text_scheduled", trace: "rep_text_scheduled", flagReason: null };
     case 5:
       return { reason: "superseded_by_broadcast", trace: "superseded_by_broadcast", flagReason: null };
-    case 7:
-      // A queued competitor stuck past the stale limit: flag immediately.
-      return {
-        reason: "stale_queued_competitor",
-        trace: "stale_queued_competitor",
-        flagReason: "stale_queued_competitor",
-      };
   }
 }
 
@@ -2780,18 +2782,6 @@ async function applyGateEvaluation(
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
   const plan = skipPlanFor(decision, "presend")!;
-  if (decision.rule === 7) {
-    // Rule 7: a stale queued competitor will not clear by waiting. The reply
-    // exists, so it is dead-lettered and the property flagged (no retries).
-    guard();
-    await trace(
-      supabase,
-      { kind: "gate", name: plan.trace, result: "block", detail: { rule: 7 } },
-      args.runContext,
-    );
-    await flagAndDeadLetterFor(supabase, args, "stale_queued_competitor", { guard });
-    return { outcome: "escalated", reason: "stale_queued_competitor" };
-  }
   guard();
   await trace(
     supabase,
@@ -2939,8 +2929,25 @@ async function failClosed(
     result: "error",
     ...(detail ? { detail } : {}),
   }, args.runContext);
-  await flagAndDeadLetterFor(supabase, args, reason, { guard });
+  await flagAndDeadLetterFor(
+    supabase,
+    args,
+    reason,
+    reason === "send_timeout"
+      ? { guard, flagReason: sendTimeoutFlagReason(args.input.inboundMessageId ?? null) }
+      : { guard },
+  );
   return { outcome: "escalated", reason };
+}
+
+/**
+ * The flag reason written for a provider timeout. It carries the originating
+ * inbound id (`send_timeout:<inbound_id>`) so a late reconciliation can only
+ * ever convert ITS OWN timeout flag, never a later timeout's.
+ */
+const SEND_TIMEOUT_FLAG_PREFIX = "send_timeout:";
+function sendTimeoutFlagReason(inboundMessageId: string | null): string {
+  return inboundMessageId ? `${SEND_TIMEOUT_FLAG_PREFIX}${inboundMessageId}` : "send_timeout";
 }
 
 /**
@@ -3393,8 +3400,8 @@ function runAfterResponse(task: () => Promise<void>): void {
 }
 
 /**
- * A provider timeout is flagged `send_timeout` and the reply dead-lettered
- * because the request may still land. When it DOES land (the abandoned
+ * A provider timeout is flagged `send_timeout:<inbound_id>` and the reply
+ * dead-lettered because the request may still land. When the provider ACCEPTS it late (the abandoned
  * attempt's delivery reconciliation completes with `sent` after the deadline)
  * the flag would otherwise invite a human to re-send a text the seller already
  * has. Reconcile (`reconcileLateSendForInbound`). In-process this is scheduled
@@ -3435,12 +3442,19 @@ function reconcileLateSend(
 }
 
 /**
- * Idempotently record that a timed-out send DID reach the seller: append a
- * `sent_late` dead-letter row (the table is insert-only) and move the flag
- * reason from `send_timeout` to `send_timeout_then_sent`, but ONLY while the
- * flag still reads `send_timeout` (a newer flag reason is never overwritten).
- * Without `confirmedSent` the AI reply row for the inbound must be sent /
- * delivered (the sweeper path).
+ * Idempotently record that a timed-out send was ACCEPTED BY THE PROVIDER late
+ * (acceptance, not delivery: the provider took the text after our timeout).
+ * Appends a `sent_late` marker dead-letter row (the table is insert-only; the
+ * reason name is historical, read it as "accepted by provider late") and moves
+ * the flag reason from `send_timeout:<inbound_id>` to `send_timeout_then_sent`,
+ * but ONLY while the flag still carries THIS inbound's identity (a newer flag
+ * reason, including another inbound's timeout, is never overwritten).
+ *
+ * The flag update runs EVERY time, even when the marker already exists: the
+ * sweeper can write the marker between the timeout path's dead-letter insert
+ * and its flag write, which would otherwise leave the flag stuck. It is
+ * idempotent (matches nothing once converted). Without `confirmedSent` the AI
+ * reply row for the inbound must be sent / delivered (the sweeper path).
  */
 export async function reconcileLateSendForInbound(
   supabase: SupabaseClient<Database>,
@@ -3455,6 +3469,7 @@ export async function reconcileLateSendForInbound(
   },
 ): Promise<"reconciled" | "already_reconciled" | "not_sent" | "error"> {
   try {
+    let markerExisted = false;
     if (args.inboundMessageId) {
       if (!args.confirmedSent) {
         const reply = await findExistingAiReplyForInbound(supabase, args.inboundMessageId);
@@ -3469,25 +3484,29 @@ export async function reconcileLateSendForInbound(
         .eq("reason", "sent_late")
         .limit(1);
       if (priorError) throw new Error(priorError.message);
-      if ((prior ?? []).length > 0) return "already_reconciled";
+      markerExisted = (prior ?? []).length > 0;
     }
-    const written = await writeReplyDeadLetter(supabase, args.runContext, {
-      orgId: args.orgId,
-      conversationId: args.conversationId,
-      propertyId: args.propertyId,
-      inboundMessageId: args.inboundMessageId,
-      body: args.body,
-      reason: "sent_late",
-    });
-    if (!written) return "error";
-    const { error } = await supabase
+    if (!markerExisted) {
+      const written = await writeReplyDeadLetter(supabase, args.runContext, {
+        orgId: args.orgId,
+        conversationId: args.conversationId,
+        propertyId: args.propertyId,
+        inboundMessageId: args.inboundMessageId,
+        body: args.body,
+        reason: "sent_late",
+      });
+      if (!written) return "error";
+    }
+    const { data: converted, error } = await supabase
       .from("properties")
       .update({
         last_ai_escalation_reason: "send_timeout_then_sent",
         updated_at: new Date().toISOString(),
       })
       .eq("id", args.propertyId)
-      .eq("last_ai_escalation_reason", "send_timeout");
+      .eq("last_ai_escalation_reason", sendTimeoutFlagReason(args.inboundMessageId))
+      .select("id")
+      .maybeSingle();
     if (error) {
       reportError(new Error(error.message), {
         tags: { surface: "ai_responder_late_send_flag_reason" },
@@ -3495,7 +3514,7 @@ export async function reconcileLateSendForInbound(
       });
       return "error";
     }
-    return "reconciled";
+    return markerExisted && !converted ? "already_reconciled" : "reconciled";
   } catch (e) {
     reportError(e, {
       tags: { surface: "ai_responder_late_send_reconcile" },
@@ -3506,39 +3525,104 @@ export async function reconcileLateSendForInbound(
 }
 
 /**
- * Durable recovery for `reconcileLateSend`: finish every recent `send_timeout`
- * whose text did reach the provider but whose in-process reconciliation never
- * ran (the invocation froze or died). Call from the stale-run cron.
+ * Durable recovery for `reconcileLateSend`: finish every `send_timeout` whose
+ * text did reach the provider but whose in-process reconciliation never ran
+ * (the invocation froze or died). Call from the stale-run cron.
+ *
+ * Pass A walks UNRESOLVED timeout rows (no matching `sent_late` marker),
+ * oldest first, page by page, instead of a fixed newest window. Pass B repairs
+ * flags still reading `send_timeout:<inbound_id>` whose marker already exists
+ * (the marker-vs-flag race); it is driven by the flag itself, so it never
+ * misses a stuck flag however old.
  */
 export async function sweepLateSends(
   supabase: SupabaseClient<Database>,
-  options: { sinceMs?: number; limit?: number } = {},
+  options: { sinceMs?: number; pageSize?: number; maxPages?: number } = {},
 ): Promise<{ scanned: number; reconciled: number }> {
-  const since = new Date(Date.now() - (options.sinceMs ?? 24 * 60 * 60 * 1000)).toISOString();
-  const { data, error } = await supabase
-    .from("ai_reply_dead_letters")
-    .select("org_id, conversation_id, property_id, inbound_message_id, body")
-    .eq("reason", "send_timeout")
-    .gte("created_at", since)
-    .order("created_at", { ascending: false })
-    .limit(options.limit ?? 50);
-  if (error) {
-    reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-    return { scanned: 0, reconciled: 0 };
-  }
+  const since = new Date(Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000)).toISOString();
+  const pageSize = options.pageSize ?? 100;
+  const maxPages = options.maxPages ?? 10;
+  let scanned = 0;
   let reconciled = 0;
-  for (const row of data ?? []) {
-    if (!row.inbound_message_id || !row.org_id) continue;
-    const result = await reconcileLateSendForInbound(supabase, {
-      orgId: row.org_id,
-      conversationId: row.conversation_id,
-      propertyId: row.property_id as string,
-      inboundMessageId: row.inbound_message_id,
-      body: row.body,
-    });
-    if (result === "reconciled") reconciled += 1;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const { data, error } = await supabase
+      .from("ai_reply_dead_letters")
+      .select("org_id, conversation_id, property_id, inbound_message_id, body")
+      .eq("reason", "send_timeout")
+      .gte("created_at", since)
+      .order("created_at", { ascending: true })
+      .range(page * pageSize, page * pageSize + pageSize - 1);
+    if (error) {
+      reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
+      return { scanned, reconciled };
+    }
+    const rows = (data ?? []).filter((r) => r.inbound_message_id && r.org_id && r.property_id);
+    const ids = rows.map((r) => r.inbound_message_id as string);
+    let resolved = new Set<string>();
+    if (ids.length > 0) {
+      const { data: markers, error: markerError } = await supabase
+        .from("ai_reply_dead_letters")
+        .select("inbound_message_id")
+        .eq("reason", "sent_late")
+        .in("inbound_message_id", ids);
+      if (markerError) {
+        reportError(new Error(markerError.message), { tags: { surface: "ai_responder_late_send_sweep" } });
+        return { scanned, reconciled };
+      }
+      resolved = new Set((markers ?? []).map((m) => m.inbound_message_id as string));
+    }
+    for (const row of rows) {
+      if (resolved.has(row.inbound_message_id as string)) continue;
+      scanned += 1;
+      const result = await reconcileLateSendForInbound(supabase, {
+        orgId: row.org_id as string,
+        conversationId: row.conversation_id,
+        propertyId: row.property_id as string,
+        inboundMessageId: row.inbound_message_id,
+        body: row.body,
+      });
+      if (result === "reconciled") reconciled += 1;
+    }
+    if ((data ?? []).length < pageSize) break;
   }
-  return { scanned: (data ?? []).length, reconciled };
+
+  // Pass B: flags still bound to a timeout whose marker already exists.
+  for (let page = 0; page < maxPages; page += 1) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("id, last_ai_escalation_reason")
+      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`)
+      .order("updated_at", { ascending: true })
+      .range(page * pageSize, page * pageSize + pageSize - 1);
+    if (error) {
+      reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
+      return { scanned, reconciled };
+    }
+    for (const property of data ?? []) {
+      const inboundId = (property.last_ai_escalation_reason ?? "").slice(SEND_TIMEOUT_FLAG_PREFIX.length);
+      if (!inboundId) continue;
+      const { data: letter } = await supabase
+        .from("ai_reply_dead_letters")
+        .select("org_id, conversation_id, body")
+        .eq("reason", "send_timeout")
+        .eq("inbound_message_id", inboundId)
+        .limit(1);
+      const row = (letter ?? [])[0];
+      if (!row?.org_id) continue;
+      scanned += 1;
+      const result = await reconcileLateSendForInbound(supabase, {
+        orgId: row.org_id,
+        conversationId: row.conversation_id,
+        propertyId: property.id,
+        inboundMessageId: inboundId,
+        body: row.body,
+      });
+      if (result === "reconciled") reconciled += 1;
+    }
+    if ((data ?? []).length < pageSize) break;
+  }
+  return { scanned, reconciled };
 }
 
 async function leasedSend(
@@ -3724,6 +3808,12 @@ async function deliverResponderMessage(
       detail: { status: sendResult.status },
     }, args.runContext);
     return silentSkip("already_terminal", 0);
+  }
+
+  if (sendResult.status === "blocked_fresh_state_unavailable") {
+    // A consent / suppression lookup inside the send could not be read (Q8
+    // rule 7): fail closed as `send_check_failed`, never a generic block.
+    return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {

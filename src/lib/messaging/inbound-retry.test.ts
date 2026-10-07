@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
   dispatchOwner: vi.fn(async () => undefined),
   dispatchOwnerTriage: vi.fn(async () => undefined),
   listAdmins: vi.fn(async () => []),
-  loadDelayConfig: vi.fn(async () => null),
+  loadDelayConfig: vi.fn(async () => null as unknown),
+  computeDelay: vi.fn(() => 0),
+  preGates: vi.fn(async () => ({ ok: true }) as unknown),
   dispatchAi: vi.fn(async () => ({
     outcome: "skipped" as const,
     reason: "no_config",
@@ -67,13 +69,16 @@ vi.mock("@/lib/ai-responder/retry", async (importOriginal) => ({
 }));
 
 vi.mock("@/lib/ai-responder/delay", () => ({
-  computeReplyDelaySeconds: vi.fn(() => 0),
+  computeReplyDelaySeconds: mocks.computeDelay,
   loadAiReplyDelayConfig: mocks.loadDelayConfig,
 }));
 
 vi.mock("@/lib/ai-responder/dispatch", () => ({
   applyKeywordEscalation: vi.fn(async () => ({ escalated: false })),
-  checkAiResponderDispatchPreGates: vi.fn(async () => ({ ok: true })),
+  checkAiResponderDispatchPreGates: mocks.preGates,
+  // Mirrors the real helper: a silent exit stamps `skipped:rule_<n>`.
+  inboundStampOutcomeOf: (o: { outcome: string; reason?: string }) =>
+    o.outcome === "skipped" && o.reason === "already_answered" ? "skipped:rule_2" : o.outcome,
   dispatchAiResponse: mocks.dispatchAi,
   flagAndDeadLetter: mocks.flagAndDeadLetter,
   markPropertyNeedsAttention: mocks.markAttention,
@@ -407,6 +412,42 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
       expect.anything(),
       "message-1",
       { aiResponder: expect.objectContaining({ outcome: "escalated", reason: "send_reserved_elsewhere" }) },
+    );
+  });
+
+  it("an immediate silent exit stamps skipped:rule_<n> (not bare skipped), and a redelivery then skips dispatch", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    const stampCall = mocks.markState.mock.calls.find(
+      (c) => (c as unknown[])[2] && "aiResponder" in ((c as unknown[])[2] as object),
+    ) as unknown[] | undefined;
+    const stamp = (stampCall?.[2] as { aiResponder: { outcome: string } }).aiResponder;
+    expect(stamp.outcome).toBe("skipped:rule_2");
+
+    mocks.dispatchAi.mockClear();
+    mocks.readState.mockReturnValueOnce({ aiResponder: stamp } as never);
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+  });
+
+  it("the delayed pre-gate terminal stamp also keeps skipped:rule_<n> (never bare skipped)", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({
+      delayMinSeconds: 10,
+      delayMaxSeconds: 20,
+      propertyState: null,
+      escalationKeywords: [],
+    });
+    mocks.computeDelay.mockReturnValueOnce(15);
+    mocks.preGates.mockResolvedValueOnce({
+      ok: false,
+      outcome: { outcome: "skipped", reason: "already_answered" },
+    });
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "skipped:rule_2", reason: "already_answered" }) },
     );
   });
 

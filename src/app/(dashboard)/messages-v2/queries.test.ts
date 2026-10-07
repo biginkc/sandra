@@ -909,6 +909,55 @@ describe("round 4: distinct-before-cap, failed drafts, dead letters", () => {
     expect(cols).toMatch(/\breason\b/);
     expect(cols).not.toMatch(/body|text|reply/);
   });
+  it("a hold spanning one late and one non-late inbound keeps both dead-letters", async () => {
+    const { client } = fakeSupabase({
+      ai_reply_drafts: (calls) =>
+        isHead(calls)
+          ? {}
+          : {
+              data: [
+                { ...draftRow(0), run_id: "r1", inbound_message_id: "m1" },
+                { ...draftRow(1), inbound_message_id: "m2" },
+              ],
+            },
+      pipeline_runs_latest_for_properties: () => ({
+        data: [run({ id: "r1", property_id: "p1", inbound_message_id: "m1" })],
+      }),
+      ai_reply_dead_letters: () => ({
+        data: [
+          {
+            id: "a",
+            run_id: "r1",
+            inbound_message_id: "m1",
+            reason: "send_timeout",
+          },
+          {
+            id: "b",
+            run_id: "r1",
+            inbound_message_id: "m1",
+            reason: "sent_late",
+          },
+          {
+            id: "c",
+            run_id: null,
+            inbound_message_id: "m1",
+            reason: "sent_late",
+          },
+          {
+            id: "d",
+            run_id: null,
+            inbound_message_id: "m2",
+            reason: "send_timeout",
+          },
+        ],
+      }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    const dls = data.holds[0].dead_letters ?? [];
+    expect(dls.filter((d) => d.late)).toHaveLength(1);
+    expect(dls.filter((d) => !d.late)).toHaveLength(1);
+    expect(data.holds[0].dead_letter_late).toBe(true);
+  });
   it("a non-late dead-letter reason does not set dead_letter_late", async () => {
     const { client } = fakeSupabase({
       ai_reply_drafts: (calls) =>

@@ -11,7 +11,7 @@ import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
 import { retryReceiptTransaction } from "./receipt-persistence";
-import { getConsentState, type ConsentState } from "./consent";
+import { getConsentState, getConsentStateStrict, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import {
   getSenderInventoryState,
@@ -364,7 +364,8 @@ export type SendSmsOutcome =
        * (never retried) so the queue doesn't loop on an unresolved read.
        */
       status: "blocked_fresh_state_unavailable";
-      messageId: string;
+      /** Absent when the unreadable state was caught before a row existed. */
+      messageId?: string;
       error: string;
     }
   | {
@@ -685,7 +686,23 @@ export async function sendSmsToContact(
     });
   }
 
-  const consentState = await getConsentState(supabase, input.contactId, "sms");
+  // Automated sends (the AI responder) must FAIL CLOSED on an unreadable
+  // consent state: `getConsentState` would collapse a DB error into
+  // `no_consent`, which the caller cannot tell from a real refusal. Manual
+  // (rep) sends keep the lenient read.
+  let consentState: ConsentState;
+  if (input.origin === "automated") {
+    const strict = await getConsentStateStrict(supabase, input.contactId, "sms");
+    if (!strict.ok) {
+      return preserveRepSmsPreDispatchFailure(input, {
+        status: "blocked_fresh_state_unavailable",
+        error: `consent state lookup failed: ${strict.error}`,
+      });
+    }
+    consentState = strict.state;
+  } else {
+    consentState = await getConsentState(supabase, input.contactId, "sms");
+  }
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data.outreach_dispo,
     consentState,
@@ -2444,9 +2461,9 @@ async function checkFreshAutomatedSuppression(
     data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
     error: { message: string } | null;
   };
-  let consentState: ConsentState;
+  let consentResult: Awaited<ReturnType<typeof getConsentStateStrict>>;
   try {
-    [propertyResult, contactResult, consentState] = await Promise.all([
+    [propertyResult, contactResult, consentResult] = await Promise.all([
       supabase
         .from("properties")
         .select("outreach_dispo")
@@ -2457,7 +2474,7 @@ async function checkFreshAutomatedSuppression(
         .select("do_not_contact, sms_opted_out")
         .eq("id", args.contactId)
         .maybeSingle(),
-      getConsentState(supabase, args.contactId, "sms"),
+      getConsentStateStrict(supabase, args.contactId, "sms"),
     ]);
   } catch (e) {
     return {
@@ -2465,12 +2482,13 @@ async function checkFreshAutomatedSuppression(
       error: `fresh suppression state reload threw: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (propertyResult.error || contactResult.error) {
+  if (propertyResult.error || contactResult.error || !consentResult.ok) {
     return {
       ok: false,
       error:
         propertyResult.error?.message ??
         contactResult.error?.message ??
+        (!consentResult.ok ? `consent state lookup failed: ${consentResult.error}` : null) ??
         "fresh suppression state reload failed",
     };
   }
@@ -2490,7 +2508,7 @@ async function checkFreshAutomatedSuppression(
   }
   const decision = evaluateAutomatedSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
-    consentState,
+    consentState: consentResult.ok ? consentResult.state : "no_consent",
     doNotContact: contactResult.data?.do_not_contact ?? null,
     smsOptedOut: contactResult.data?.sms_opted_out ?? null,
   });

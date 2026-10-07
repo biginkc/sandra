@@ -1,4 +1,5 @@
 import type {
+  DeadLetterInfo,
   HeaderStats,
   HoldsMeta,
   HoldSource,
@@ -632,8 +633,11 @@ export async function loadMessagesV2Data(
   const deadRunSet = new Set<string>();
   const deadMsgSet = new Set<string>();
   // sent_late = provider accepted the reply after the timeout (seller got it).
-  const lateRunSet = new Set<string>();
-  const lateMsgSet = new Set<string>();
+  const dlRows: Array<{
+    run_id: string | null;
+    inbound_message_id: string | null;
+    late: boolean;
+  }> = [];
   let deadLetterUnavailable = false;
   const deadQueries = [
     ...chunked([...runIds]).map((ids) => ["run_id", ids] as const),
@@ -667,10 +671,11 @@ export async function loadMessagesV2Data(
     }>) {
       if (row.run_id) deadRunSet.add(row.run_id);
       if (row.inbound_message_id) deadMsgSet.add(row.inbound_message_id);
-      if (row.reason === "sent_late") {
-        if (row.run_id) lateRunSet.add(row.run_id);
-        if (row.inbound_message_id) lateMsgSet.add(row.inbound_message_id);
-      }
+      dlRows.push({
+        run_id: row.run_id,
+        inbound_message_id: row.inbound_message_id,
+        late: row.reason === "sent_late",
+      });
     }
   }
   const matches = (
@@ -683,8 +688,46 @@ export async function loadMessagesV2Data(
       : false) || (h.message_ids ?? []).some((m) => msgSet.has(m));
   const isDead = (h: OpenHold<PipelineRun>): boolean =>
     matches(h, deadRunSet, deadMsgSet);
-  const isLate = (h: OpenHold<PipelineRun>): boolean =>
-    matches(h, lateRunSet, lateMsgSet);
+  // Merge rows that share a run or inbound id into one dead-letter per
+  // inbound/run (the original row + its sent_late follow-up are one). A group
+  // is late if any of its rows is sent_late.
+  const groups: DeadLetterInfo[] = [];
+  for (const row of dlRows) {
+    const hits = groups.filter(
+      (g) =>
+        (row.run_id && g.run_id === row.run_id) ||
+        (row.inbound_message_id &&
+          g.inbound_message_id === row.inbound_message_id),
+    );
+    const [first, ...rest] = hits;
+    const target =
+      first ??
+      ({
+        inbound_message_id: null,
+        run_id: null,
+        late: false,
+      } as DeadLetterInfo);
+    if (!first) groups.push(target);
+    for (const g of rest) {
+      target.run_id ??= g.run_id;
+      target.inbound_message_id ??= g.inbound_message_id;
+      target.late = target.late || g.late;
+      groups.splice(groups.indexOf(g), 1);
+    }
+    target.run_id ??= row.run_id;
+    target.inbound_message_id ??= row.inbound_message_id;
+    target.late = target.late || row.late;
+  }
+  const deadLettersFor = (h: OpenHold<PipelineRun>): DeadLetterInfo[] =>
+    groups
+      .filter(
+        (g) =>
+          (g.run_id !== null && h.run?.id === g.run_id) ||
+          (g.inbound_message_id !== null &&
+            (h.run?.inbound_message_id === g.inbound_message_id ||
+              (h.message_ids ?? []).includes(g.inbound_message_id))),
+      )
+      .map((g) => ({ ...g }));
 
   const holdsMeta = buildHoldsMeta({
     shown: openHolds.length,
@@ -721,12 +764,16 @@ export async function loadMessagesV2Data(
   const configRow = (configRes.error ? [] : (configRes.data ?? []))[0] ?? null;
   return {
     runs: windowRuns.map(withSteps),
-    holds: openHolds.map((h) => ({
-      ...h,
-      ...(isDead(h) ? { dead_letter: true } : {}),
-      ...(isLate(h) ? { dead_letter_late: true } : {}),
-      run: h.run ? withSteps(h.run) : null,
-    })),
+    holds: openHolds.map((h) => {
+      const dls = deadLettersFor(h);
+      return {
+        ...h,
+        ...(isDead(h) ? { dead_letter: true } : {}),
+        ...(dls.some((d) => d.late) ? { dead_letter_late: true } : {}),
+        ...(dls.length ? { dead_letters: dls } : {}),
+        run: h.run ? withSteps(h.run) : null,
+      };
+    }),
     holdsMeta,
     feedError,
     stepsUnavailable: contextErrors.includes("step lookup"),

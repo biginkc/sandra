@@ -283,7 +283,61 @@ describe("HoldsRail degraded states", () => {
       "reply text saved for review",
     );
   });
-  it("shows delivered-late instead of saved-for-review when sent_late exists", () => {
+  it("renders both lines when a hold has one late and one non-late dead-letter", () => {
+    render(
+      <HoldsRail
+        holds={[
+          {
+            ...hold("a", 5),
+            flag_reason: "send_timeout_then_sent",
+            dead_letter: true,
+            dead_letter_late: true,
+            dead_letters: [
+              { inbound_message_id: "m1", run_id: "r1", late: true },
+              { inbound_message_id: "m2", run_id: "r2", late: false },
+            ],
+          },
+        ]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getByTestId("dead-letter-late")).toHaveTextContent(
+      "reply accepted by provider late — do not re-send",
+    );
+    expect(screen.getByTestId("dead-letter")).toHaveTextContent(
+      "reply text saved for review",
+    );
+    expect(screen.getByTestId("hold-card")).not.toHaveAttribute(
+      "data-informational",
+    );
+  });
+  it("is informational only when every dead-letter is late", () => {
+    render(
+      <HoldsRail
+        holds={[
+          {
+            ...hold("a", 5),
+            flag_reason: "send_timeout_then_sent",
+            dead_letter: true,
+            dead_letter_late: true,
+            dead_letters: [
+              { inbound_message_id: "m1", run_id: "r1", late: true },
+              { inbound_message_id: "m2", run_id: "r2", late: true },
+            ],
+          },
+        ]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getByTestId("hold-card")).toHaveAttribute(
+      "data-informational",
+      "true",
+    );
+    expect(screen.queryByTestId("dead-letter")).toBeNull();
+  });
+  it("shows accepted-late instead of saved-for-review when sent_late exists", () => {
     render(
       <HoldsRail
         holds={[{ ...hold("a", 5), dead_letter: true, dead_letter_late: true }]}
@@ -292,7 +346,7 @@ describe("HoldsRail degraded states", () => {
       />,
     );
     expect(screen.getByTestId("dead-letter-late")).toHaveTextContent(
-      "reply was delivered late — do not re-send",
+      "reply accepted by provider late — do not re-send",
     );
     expect(screen.queryByTestId("dead-letter")).toBeNull();
     expect(screen.queryByText(/saved for review/)).toBeNull();

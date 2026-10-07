@@ -55,7 +55,7 @@ export async function markInboundMessageState(
       : {};
   const currentState = readInboundMessageState(row?.metadata ?? null);
 
-  const { error: updateError } = await supabase
+  const { data: updated, error: updateError } = await supabase
     .from("messages")
     .update({
       metadata: {
@@ -66,8 +66,14 @@ export async function markInboundMessageState(
         },
       } as Json,
     })
-    .eq("id", messageId);
+    .eq("id", messageId)
+    .select("id")
+    .maybeSingle();
   if (updateError) {
     throw new Error(`markInboundMessageState update: ${updateError.message}`);
+  }
+  // A stamp that matched no row is not a stamp: redelivery and rule 1 depend on it.
+  if (!updated) {
+    throw new Error("markInboundMessageState update: matched no row");
   }
 }

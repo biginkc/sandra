@@ -111,6 +111,12 @@ export type HoldSource =
  * `run` is the most recent pipeline run for context, or null when the hold is
  * older than the pipeline-run seam.
  */
+export type DeadLetterInfo = {
+  inbound_message_id: string | null;
+  run_id: string | null;
+  late: boolean;
+};
+
 export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Property id (one hold per property). */
   id: string;
@@ -129,8 +135,10 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   message_ids?: string[];
   /** A dead-letter row exists: the reply text was saved for review (text never loaded). */
   dead_letter?: boolean;
-  /** A dead-letter row with reason `sent_late` exists: the provider accepted the reply after the timeout, so the seller DID get it. Takes precedence over `dead_letter`. */
+  /** At least one dead-letter for this hold is `sent_late` (provider accepted it after the timeout). Does NOT mean every dead-letter is late; see `dead_letters`. */
   dead_letter_late?: boolean;
+  /** One entry per inbound/run dead-letter on this hold; `late` = provider accepted it late. */
+  dead_letters?: DeadLetterInfo[];
   /** The property's raw last_ai_escalation_reason (e.g. `send_timeout_then_sent`); null/absent when none. */
   flag_reason?: string | null;
 };

@@ -16,6 +16,7 @@ vi.mock("./registry", () => ({
 }));
 vi.mock("./consent", () => ({
   getConsentState: vi.fn(),
+  getConsentStateStrict: vi.fn(),
 }));
 vi.mock("./opt-out-phone", () => ({
   isSmsPhoneSuppressed: vi.fn(),
@@ -32,7 +33,7 @@ vi.mock("@/lib/messages/threading", () => ({
 
 import { releaseQueuedMessage, sendSmsToContact } from "./send";
 import { getMessagingProvider } from "./registry";
-import { getConsentState } from "./consent";
+import { getConsentState, getConsentStateStrict } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { checkQuietHours } from "./quiet-hours";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
@@ -120,6 +121,7 @@ const PROPERTY_ROW = {
 beforeEach(() => {
   vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
   vi.mocked(getConsentState).mockResolvedValue("can_send_marketing");
+  vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: true, state: "can_send_marketing" });
   vi.mocked(isSmsPhoneSuppressed).mockResolvedValue(false);
   vi.mocked(checkQuietHours).mockReturnValue({
     ok: true,
@@ -233,6 +235,58 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       messageId: "msg-4",
       error: "fresh suppression state reload: contact row not found",
     });
+  });
+
+  it("automated send: consent read error at the early provider-path check → no provider call, blocked status", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: false, error: "consent db down" });
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome.status).toBe("blocked_fresh_state_unavailable");
+  });
+
+  it("automated send: consent read error only in the fresh re-check → held, no provider call", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.mocked(getConsentStateStrict)
+      .mockResolvedValueOnce({ ok: true, state: "can_send_marketing" })
+      .mockResolvedValueOnce({ ok: false, error: "consent db down" });
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-1" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", messageId: "msg-1" });
+    expect(String((outcome as { error: string }).error)).toContain("consent db down");
   });
 
   it("manual send: does not run the fresh re-check at all — sends normally", async () => {

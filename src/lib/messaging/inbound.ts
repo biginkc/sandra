@@ -19,6 +19,7 @@ import {
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
   flagAndDeadLetter,
+  inboundStampOutcomeOf,
   markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
@@ -1840,7 +1841,11 @@ async function stampAiResponderTerminalOutcome(
   await markInboundMessageState(supabase, args.messageId, {
     aiResponder: {
       ...args.outcome,
+      // `skipped:rule_<n>` for a silent exit (never the bare `skipped` the raw
+      // outcome carries): rule 1 on a later inbound reads this stamp as handled,
+      // and a webhook redelivery is skipped on its presence.
+      outcome: inboundStampOutcomeOf(args.outcome),
       completedAt,
-    },
+    } as unknown as AiDispatchOutcome & { completedAt: string },
   });
 }
