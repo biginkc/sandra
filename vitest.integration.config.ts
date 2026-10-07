@@ -111,6 +111,7 @@ export default defineConfig({
       "supabase/migrations/20261008143700_jev_thresholds_q5.integration.test.ts",
       "supabase/migrations/20261008143800_jev_thresholds_rls_parity.integration.test.ts",
       "supabase/migrations/20261008144100_suppression_recovery_db_truth.integration.test.ts",
+      "supabase/migrations/20261008144200_suppression_ledger_rule.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",

@@ -50,7 +50,8 @@ type LedgerClient = { from: (table: string) => any }; // eslint-disable-line @ty
 /**
  * Failed review ids still waiting on suppression for a property: the id in the
  * hold reason plus every `suppression_incomplete` lead event with no
- * `suppression_retried_ok` event at or after it. Throws on read errors so a
+ * `suppression_retried_ok` event at all (an id is resolved whenever a
+ * retried_ok row exists, regardless of created_at order). Throws on read errors so a
  * caller never mistakes an unreadable ledger for "nothing outstanding".
  */
 export async function listOutstandingSuppressionReviews(
@@ -85,13 +86,10 @@ export async function listOutstandingSuppressionReviews(
   }
   const ids: string[] = [];
   for (const reasonId of suppressionReviewIdsFromReason(reason)) {
-    const resolved =
-      okAt.has(reasonId) && (okAt.get(reasonId) as string) >= (failedAt.get(reasonId) ?? "");
-    if (!resolved && !ids.includes(reasonId)) ids.push(reasonId);
+    if (!okAt.has(reasonId) && !ids.includes(reasonId)) ids.push(reasonId);
   }
-  for (const [id, at] of failedAt) {
-    const ok = okAt.get(id);
-    if (ok && ok >= at) continue;
+  for (const id of failedAt.keys()) {
+    if (okAt.has(id)) continue;
     if (!ids.includes(id)) ids.push(id);
   }
   return { reviewIds: ids, reason };

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008144100 -- 40 migrations: 28 inherited Jev + 12 messages-v2).
+// (20261008140000 .. 20261008144200 -- 41 migrations: 28 inherited Jev + 13 messages-v2).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008144100";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 40); // 28 inherited Jev (140000..142700) + 12 messages-v2 (143000..144100)
+const LAST = process.env.CHAIN_LAST ?? "20261008144200";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 41); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");

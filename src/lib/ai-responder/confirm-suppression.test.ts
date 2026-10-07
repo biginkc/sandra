@@ -342,6 +342,17 @@ describe("listOutstandingSuppressionReviews", () => {
     expect(result.reviewIds.sort()).toEqual(["A", "C"]);
   });
 
+  it("treats an id as resolved when its failure row was backfilled AFTER its retried_ok row", async () => {
+    const result = await listOutstandingSuppressionReviews(
+      ledger("suppression_incomplete:A", [
+        { event_type: "suppression_retried_ok", source_id: "A", created_at: "2026-01-01" },
+        { event_type: "suppression_incomplete", source_id: "A", created_at: "2026-01-05" },
+      ]),
+      "property-1",
+    );
+    expect(result.reviewIds).toEqual([]);
+  });
+
   it("finds a timeout-preserved failure from its lead event", async () => {
     const result = await listOutstandingSuppressionReviews(
       ledger("send_timeout:x", [{ event_type: "suppression_incomplete", source_id: "A", created_at: "2026-01-01" }]),
@@ -389,16 +400,14 @@ describe("atomic pointer merge (r24+)", () => {
     // Runs right before the database applies a merge (a concurrent writer).
     const beforeRpc = { fn: null as null | (() => void) };
     // Mirrors fn_merge_suppression_incomplete_pointer; synchronous = atomic.
-    // Backed-ness is DB truth: an id is backed iff a failed ledger event exists
-    // with no later-or-equal retried_ok.
-    const isBacked = (id: string) => {
-      const failed = state.events.filter((e) => e.event_type === "suppression_incomplete" && e.source_id === id);
-      if (failed.length === 0) return false;
-      const at = failed.map((e) => e.created_at).sort().at(-1) as string;
-      return !state.events.some(
-        (e) => e.event_type === "suppression_retried_ok" && e.source_id === id && e.created_at >= at,
+    // Prunable is DB truth: an id needs no pointer slot iff a failed ledger event
+    // exists (backed) OR a retried_ok event exists (resolved), in any order.
+    const isBacked = (id: string) =>
+      state.events.some(
+        (e) =>
+          e.source_id === id &&
+          (e.event_type === "suppression_incomplete" || e.event_type === "suppression_retried_ok"),
       );
-    };
     const merge = (ids: string[], hint: string | null) => {
       const isTimeout = !!state.reason && TIMEOUT_PREFIXES.some((p) => state.reason!.startsWith(p));
       state.attention = true;
