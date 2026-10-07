@@ -66,9 +66,6 @@ jobs:
       - name: Run verify
         env:
           SUPABASE_LOCAL_DB_URL: postgresql://runner@localhost:5432/postgres
-          # tsc on this repo now exceeds Node's default ~4 GB heap (OOM at
-          # 2026-10-07 run 37656511086); ubuntu-latest runners have 7 GB.
-          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run verify
 
       - name: Run chaos-harness guard unit tests (loopback only, no providers)

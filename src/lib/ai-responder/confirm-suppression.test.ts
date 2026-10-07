@@ -20,6 +20,8 @@ import {
   applyConfirmedSuppression,
   listOutstandingSuppressionReviews,
   recordSuppressionRetriedOk,
+  suppressionIncompleteReason,
+  suppressionReviewIdsFromReason,
   SUPPRESSION_INCOMPLETE_WARNING,
 } from "./confirm-suppression";
 
@@ -441,5 +443,53 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     const r = await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
     expect(r).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
     expect(state.reason).toBe("low_confidence");
+  });
+
+  it("both ledger writes fail (A then B): the reason carries A and B, retry B leaves A outstanding", async () => {
+    const { state, failLedgerFor } = statefulAdmin(null);
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    failLedgerFor.add("suppression_incomplete:B");
+    await applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" });
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:A,B");
+    expect(state.events).toHaveLength(0);
+
+    await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
+    const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
+    expect(out.reviewIds).toEqual(["A"]);
+  });
+
+  it("three ledger failures accumulate A,B,C without duplicates, even on a repeat failure of B", async () => {
+    const { state, failLedgerFor } = statefulAdmin(null);
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    for (const id of ["A", "B", "C"]) failLedgerFor.add(`suppression_incomplete:${id}`);
+    for (const id of ["A", "B", "C", "B"]) {
+      await applyConfirmedSuppression({ ...base, reviewId: id, disposition: "dnc" });
+    }
+    expect(state.reason).toBe("suppression_incomplete:A,B,C");
+    const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
+    expect(out.reviewIds.sort()).toEqual(["A", "B", "C"]);
+  });
+
+  it("caps the id list at 10, keeping the oldest, and reports the dropped id", async () => {
+    const ids = Array.from({ length: 10 }, (_, i) => `id${i}`);
+    const { state, failLedgerFor } = statefulAdmin(suppressionIncompleteReason(ids));
+    expect(suppressionReviewIdsFromReason(state.reason)).toHaveLength(10);
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:new");
+    for (const id of ids) failLedgerFor.add(`suppression_incomplete:${id}`);
+    await applyConfirmedSuppression({ ...base, reviewId: "new", disposition: "dnc" });
+    expect(suppressionReviewIdsFromReason(state.reason)).toEqual(ids);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_id_cap" } }),
+    );
+  });
+
+  it("outstanding set parses every id in a multi-id reason", async () => {
+    const { admin } = statefulAdmin("suppression_incomplete:A,B,C");
+    const out = await listOutstandingSuppressionReviews(admin as never, "property-1");
+    expect(out.reviewIds.sort()).toEqual(["A", "B", "C"]);
   });
 });

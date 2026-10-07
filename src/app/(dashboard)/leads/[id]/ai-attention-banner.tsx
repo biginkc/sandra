@@ -4,7 +4,10 @@ import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
+import {
+  parseEscalationReason,
+  suppressionReviewIdsFromReason,
+} from "@/lib/ai-responder/format-reason";
 
 import {
   clearNeedsHumanAttention,
@@ -63,7 +66,10 @@ export function AiAttentionBanner({
     };
   }, [propertyId, initialVisible, reason]);
   // `outstanding` is the loaded count (null until loaded or if the load failed).
-  const outstandingCount = outstanding ?? 0;
+  // When the ledger is unreadable (or still loading) fall back to the ids the
+  // hold reason itself carries.
+  const outstandingCount =
+    outstanding ?? suppressionReviewIdsFromReason(reason).length;
   const suppressionIncomplete = reasonIsSuppression || outstandingCount > 0;
 
   if (!visible) return null;

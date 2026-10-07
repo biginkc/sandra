@@ -390,6 +390,41 @@ describe("retrySuppressionForProperty", () => {
     expect(w.updates).toHaveLength(0);
   });
 
+  it("multi-id reason: retry B succeeds -> A still outstanding, hold kept and reason drops B", async () => {
+    const w = world({ reason: "suppression_incomplete:A,B", events: [], reviews: ["A", "B"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockImplementation(async (_c: unknown, id: string) =>
+      id === "B" ? { ok: true } : { ok: false, warning: "Confirmed, but suppression incomplete — retry." },
+    );
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toMatchObject({ ok: false, error: { code: "SUPPRESSION_INCOMPLETE" } });
+    expect(applySuppressionForConfirmedReview.mock.calls.map((c) => c[1]).sort()).toEqual(["A", "B"]);
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledTimes(1);
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledWith(expect.objectContaining({ reviewId: "B" }));
+    expect(w.state.reason).toBe("suppression_incomplete:A");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("three ids in the reason: all must resolve before the hold clears", async () => {
+    const w = world({ reason: "suppression_incomplete:A,B,C", events: [], reviews: ["A", "B", "C"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    const r = await retrySuppressionForProperty("property-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(3);
+    expect(r).toEqual({ ok: true, data: { cleared: true, remaining: 0 } });
+    expect(w.state.reason).toBeNull();
+  });
+
+  it("three ids, one still failing: reason keeps only the unresolved id", async () => {
+    const w = world({ reason: "suppression_incomplete:A,B,C", events: [], reviews: ["A", "B", "C"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockImplementation(async (_c: unknown, id: string) =>
+      id === "C" ? { ok: false, warning: "Confirmed, but suppression incomplete — retry." } : { ok: true },
+    );
+    await retrySuppressionForProperty("property-1");
+    expect(w.state.reason).toBe("suppression_incomplete:C");
+  });
+
   it("keeps the hold and returns the warning when suppression fails again", async () => {
     const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A"] });
     createClient.mockResolvedValue(w.client);

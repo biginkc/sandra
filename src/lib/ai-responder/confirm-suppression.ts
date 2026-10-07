@@ -1,5 +1,6 @@
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { suppressionReviewIdsFromReason } from "@/lib/ai-responder/format-reason";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
@@ -14,8 +15,18 @@ export const SUPPRESSION_RETRIED_OK_EVENT = "suppression_retried_ok";
 const SUPPRESSION_FAILED_SOURCE = "ai_disposition_reviews";
 const SUPPRESSION_RETRIED_SOURCE = "ai_disposition_reviews.suppression_retried";
 
-export function suppressionIncompleteReason(reviewId: string): string {
-  return `${SUPPRESSION_INCOMPLETE_REASON}:${reviewId}`;
+export { suppressionReviewIdsFromReason };
+
+/** Max failed ids one hold reason carries (oldest kept). */
+export const MAX_SUPPRESSION_REASON_IDS = 10;
+
+/** Builds `suppression_incomplete:<idA>,<idB>`: de-duplicated, capped at 10 (oldest kept). */
+export function suppressionIncompleteReason(reviewIds: string | string[]): string {
+  const ids = [...new Set(Array.isArray(reviewIds) ? reviewIds : [reviewIds])].slice(
+    0,
+    MAX_SUPPRESSION_REASON_IDS,
+  );
+  return `${SUPPRESSION_INCOMPLETE_REASON}:${ids.join(",")}`;
 }
 
 export function isSuppressionIncompleteReason(
@@ -31,8 +42,7 @@ export function isSuppressionIncompleteReason(
 export function suppressionReviewIdFromReason(
   reason: string | null | undefined,
 ): string | null {
-  if (!reason || !reason.startsWith(`${SUPPRESSION_INCOMPLETE_REASON}:`)) return null;
-  return reason.slice(SUPPRESSION_INCOMPLETE_REASON.length + 1) || null;
+  return suppressionReviewIdsFromReason(reason)[0] ?? null;
 }
 
 type LedgerClient = { from: (table: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -74,10 +84,11 @@ export async function listOutstandingSuppressionReviews(
     if (!prior || e.created_at > prior) bucket.set(e.source_id, e.created_at);
   }
   const ids: string[] = [];
-  const reasonId = suppressionReviewIdFromReason(reason);
-  const reasonResolved =
-    reasonId !== null && okAt.has(reasonId) && (okAt.get(reasonId) as string) >= (failedAt.get(reasonId) ?? "");
-  if (reasonId && !reasonResolved) ids.push(reasonId);
+  for (const reasonId of suppressionReviewIdsFromReason(reason)) {
+    const resolved =
+      okAt.has(reasonId) && (okAt.get(reasonId) as string) >= (failedAt.get(reasonId) ?? "");
+    if (!resolved && !ids.includes(reasonId)) ids.push(reasonId);
+  }
   for (const [id, at] of failedAt) {
     const ok = okAt.get(id);
     if (ok && ok >= at) continue;
@@ -240,20 +251,38 @@ async function raiseSuppressionIncompleteHold(
     // Record the failed review id in the ledger BEFORE touching the hold, so
     // it survives a preserved timeout reason or a concurrent overwrite.
     const ledgerOk = await writeLedger(reviewId);
-    // The existing reason may be the ONLY record of an earlier failure A whose
-    // ledger write failed. Backfill A before overwriting it; if that fails,
-    // keep A's reason (B is outstanding via its own ledger row).
-    const existingId = suppressionReviewIdFromReason(existing);
-    let keepEarlierSuppression = false;
-    if (existingId && existingId !== reviewId) {
-      const backfilled = await writeLedger(existingId);
-      keepEarlierSuppression = !backfilled && ledgerOk;
+    // The existing reason may be the ONLY record of earlier failures whose
+    // ledger writes failed. Backfill each before touching the reason.
+    const existingIds = suppressionReviewIdsFromReason(existing);
+    const unbackedIds: string[] = [];
+    for (const id of existingIds) {
+      if (id === reviewId) continue;
+      if (!(await writeLedger(id))) unbackedIds.push(id);
     }
     // A send-timeout flag is a different, still-open problem: keep its
     // reason/timestamp and only (re)raise the hold - but only if the failed
     // id is durably in the ledger; otherwise the suppression reason wins.
+    // Likewise keep the existing suppression reason while an earlier id has no
+    // ledger row (it lives only in that reason) and this id is ledger-backed.
     const keepReason =
-      (isTimeoutEscalationReason(existing) && ledgerOk) || keepEarlierSuppression;
+      (isTimeoutEscalationReason(existing) && ledgerOk) ||
+      (unbackedIds.length > 0 && ledgerOk);
+    // Ledger write for this id failed: APPEND it to the ids already in the
+    // reason (never replace), de-duplicated and capped at the oldest ids.
+    let nextReason: string | null = null;
+    if (!keepReason) {
+      // This id is ledger-backed (earlier ids were backfilled): repoint to it.
+      const all = ledgerOk
+        ? [reviewId]
+        : [...new Set([...existingIds, reviewId])];
+      nextReason = suppressionIncompleteReason(all);
+      if (all.length > MAX_SUPPRESSION_REASON_IDS) {
+        reportError(new Error("suppression_incomplete reason id cap reached"), {
+          tags: { surface: "confirm_ai_disposition_suppression_id_cap" },
+          extra: { propertyId, dropped: all.slice(MAX_SUPPRESSION_REASON_IDS) },
+        });
+      }
+    }
     const { error } = await admin
       .from("properties")
       .update(
@@ -261,7 +290,7 @@ async function raiseSuppressionIncompleteHold(
           ? { needs_human_attention: true, updated_at: now }
           : {
               needs_human_attention: true,
-              last_ai_escalation_reason: suppressionIncompleteReason(reviewId),
+              last_ai_escalation_reason: nextReason,
               last_ai_escalation_at: now,
               updated_at: now,
             },

@@ -226,13 +226,14 @@ export async function retrySuppressionForProperty(
             payload: { from: true, to: false, via: "retry_suppression", reviewIds: targets },
           });
         }
-      } else if (!after.reviewIds.some((id) => after.reason === suppressionIncompleteReason(id))) {
-        // The reason points at a review that is now resolved; keep the hold
-        // but point it at a still-outstanding id.
+      } else {
+        const nextReason = suppressionIncompleteReason(after.reviewIds);
+        // Drop resolved ids from the reason; keep the hold on what remains.
+        if (nextReason !== after.reason) {
         const { error: repointError } = await supabase
           .from("properties")
           .update({
-            last_ai_escalation_reason: suppressionIncompleteReason(after.reviewIds[0]),
+            last_ai_escalation_reason: nextReason,
             updated_at: new Date().toISOString(),
           })
           .eq("id", propertyId)
@@ -243,6 +244,7 @@ export async function retrySuppressionForProperty(
             tags: { surface: "retry_suppression_repoint" },
             extra: { propertyId },
           });
+        }
         }
       }
     }

@@ -32,6 +32,21 @@ const VALID_TIERS = new Set<string>([
   "distressed_seller",
 ]);
 
+const SUPPRESSION_REASON_PREFIX = "suppression_incomplete:";
+
+/** Every failed review id carried in a `suppression_incomplete:<idA>,<idB>` reason. */
+export function suppressionReviewIdsFromReason(
+  reason: string | null | undefined,
+): string[] {
+  if (!reason || !reason.startsWith(SUPPRESSION_REASON_PREFIX)) return [];
+  const ids = reason
+    .slice(SUPPRESSION_REASON_PREFIX.length)
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return [...new Set(ids)];
+}
+
 export function parseEscalationReason(
   raw: string | null | undefined,
 ): ParsedReason | null {
@@ -80,7 +95,11 @@ export function parseEscalationReason(
     tier: null,
     color,
     shortLabel: formatShortLabel(gate),
-    longLabel: formatLongLabel(gate, detail) ?? raw,
+    longLabel:
+      (gate === "suppression_incomplete" &&
+      suppressionReviewIdsFromReason(raw).length > 1
+        ? `${suppressionReviewIdsFromReason(raw).length} confirmed opt-outs saved, but the numbers may not be suppressed yet - retry suppression`
+        : formatLongLabel(gate, detail)) ?? raw,
   };
 }
 

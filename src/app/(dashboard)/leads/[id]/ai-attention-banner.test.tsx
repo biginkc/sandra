@@ -191,4 +191,22 @@ describe("<AiAttentionBanner />", () => {
       ),
     );
   });
+
+  it("counts the ids carried in the reason when the ledger is unreadable", async () => {
+    listOutstandingSuppressionFailures.mockResolvedValue({ ok: false, error: { message: "ledger down" } });
+    render(
+      <AiAttentionBanner
+        propertyId="prop-1"
+        initialVisible
+        reason="suppression_incomplete:review-a,review-b,review-c"
+        nowMs={NOW_MS}
+      />,
+    );
+    await waitFor(() => expect(listOutstandingSuppressionFailures).toHaveBeenCalled());
+    expect(screen.getByTestId("ai-attention-suppression-warning")).toHaveTextContent(
+      "3 confirmed opt-outs still need suppression",
+    );
+    expect(screen.getByRole("button", { name: "Retry suppression (3)" })).toBeInTheDocument();
+    expect(screen.queryByText(/review-a/)).toBeNull();
+  });
 });

@@ -203,4 +203,12 @@ describe("send timeout reasons", () => {
     });
     expect(withId!.longLabel).not.toMatch(/3f1c2d9e/);
   });
+  it("labels the multi-id form without uuids and counts the numbers", () => {
+    const a = "3f1c2d9e-0000-4000-8000-123456789abc";
+    const b = "7a7a7a7a-0000-4000-8000-123456789abc";
+    const parsed = parseEscalationReason(`suppression_incomplete:${a},${b}`);
+    expect(parsed).toMatchObject({ gate: "suppression_incomplete", color: "rose", shortLabel: "Suppression incomplete" });
+    expect(parsed!.longLabel).toMatch(/2 confirmed opt-outs/);
+    expect(parsed!.longLabel).not.toMatch(/3f1c2d9e|7a7a7a7a/);
+  });
 });

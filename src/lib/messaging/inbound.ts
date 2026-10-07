@@ -870,7 +870,10 @@ export async function handleInboundWebhook(
         await recordStep(supabase, runCtx, {
           kind: "gate",
           name: "classifier_config_unavailable",
-          result: "block",
+          // The legacy auto-promotion branch is skipped, but the inbound still
+          // proceeds to AI dispatch (which fails closed on its own config load).
+          result: "pass",
+          detail: { skipped: "legacy_auto_promotion" },
         });
       }
 
