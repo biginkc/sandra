@@ -356,6 +356,14 @@ describe("buildModeBadges", () => {
       ["nurture", "UNKNOWN"],
     ]);
   });
+  it("carries the stored rule (cutoff, switch, version) so an owner can edit it", () => {
+    const badges = buildModeBadges(jevAuto, [
+      { outcome: "nurture", min_confidence: "0.925", automation_enabled: false, version: 7 },
+      { outcome: "x", min_confidence: 0.9, automation_enabled: true },
+    ]);
+    expect(badges[0].rule).toEqual({ minConfidence: 0.925, automationEnabled: false, version: 7 });
+    expect(badges[1].rule).toBeUndefined(); // no version: display-only
+  });
   it("shows HELD for an outcome with automation disabled", () => {
     const [b] = buildModeBadges(jevAuto, [
       { outcome: "x", min_confidence: 0.9, automation_enabled: false },

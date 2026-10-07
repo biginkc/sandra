@@ -11,6 +11,7 @@ import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
 import type { HoldActionsApi } from "./hold-action-types";
 import { HoldsRail } from "./holds-rail";
+import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
 import { loadRunLabels } from "./labels";
 import {
   computeHeaderStats,
@@ -276,15 +277,27 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
               {props.badgesError}
             </span>
           )}
-          {badges.map((b) => (
-            <Badge
-              key={b.label}
-              variant="outline"
-              className={cn("gap-1", BADGE_CLASS[b.mode])}
-            >
-              {b.label} [{formatModeBadge(b)}]
-            </Badge>
-          ))}
+          {badges.map((b) =>
+            // Owners can edit a label's rule; Acquisitions members see the
+            // same badge read-only.
+            isOwner && isEditableBadge(b) ? (
+              <LabelRuleEditor
+                key={b.label}
+                orgId={orgId}
+                badge={b}
+                text={`${b.label} [${formatModeBadge(b)}]`}
+                className={cn("gap-1", BADGE_CLASS[b.mode])}
+              />
+            ) : (
+              <Badge
+                key={b.label}
+                variant="outline"
+                className={cn("gap-1", BADGE_CLASS[b.mode])}
+              >
+                {b.label} [{formatModeBadge(b)}]
+              </Badge>
+            ),
+          )}
         </div>
         <p
           className="ml-auto text-sm text-muted-foreground"

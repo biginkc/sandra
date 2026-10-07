@@ -133,6 +133,31 @@ beforeEach(() => {
   mocks.client.realtime.setAuth.mockClear();
 });
 
+describe("MessagesV2View label rules", () => {
+  const ruleBadges = [
+    {
+      label: "nurture",
+      mode: "AUTO" as const,
+      minConfidence: 0.95,
+      rule: { minConfidence: 0.95, automationEnabled: true, version: 2 },
+    },
+    { label: "paused", mode: "HELD" as const },
+  ];
+
+  it("owners get an edit button on badges whose rule is known; others stay plain", async () => {
+    await mount({ ...props(), badges: ruleBadges });
+    expect(screen.getByRole("button", { name: "Edit rule for nurture" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit rule for paused" })).not.toBeInTheDocument();
+    expect(screen.getByText("paused [HELD]")).toBeInTheDocument();
+  });
+
+  it("Acquisitions members see the same badges read-only", async () => {
+    await mount({ ...props(), isOwner: false, badges: ruleBadges });
+    expect(screen.getByText("nurture [AUTO ≥0.95]")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit rule/ })).not.toBeInTheDocument();
+  });
+});
+
 describe("MessagesV2View", () => {
   it("renders header, mode badges, columns, empty states and legend", async () => {
     await mount();
