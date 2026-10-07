@@ -60,7 +60,7 @@ describe("runCompare", () => {
     const run = await runCompare(fixtureExport(), opts, d);
     expect(run.thresholdSource).toBe("defaults");
     expect(jev).toHaveBeenCalledTimes(4);
-    expect(luna).toHaveBeenCalledTimes(3); // M1, M2 below threshold + M3 policy hold; M4 auto-applied is skipped
+    expect(luna).toHaveBeenCalledTimes(2); // M1, M2 below threshold only; M3 policy hold is out of scope, M4 auto-applied is skipped
     const report = buildReport(fixtureExport(), run, opts, { generatedAt: "x", lunaModel: "luna-test" });
     expect(report.sampleSizes).toMatchObject({ inboundMessages: 4, withHumanTruthExplicit: 3, withHumanTruthImplicit: 1, cascadePopulation: 2, cascadePopulationWithExplicitTruth: 2 });
     const at90 = report.explicit.cascade.find((c) => c.cutoff === 0.9)!;
@@ -69,8 +69,8 @@ describe("runCompare", () => {
     expect(at95).toMatchObject({ resolved: 1, agreed: 1, wrong: 0, remainingHuman: 1 });
     expect(report.explicit.jevAlone).toMatchObject({ autoApplied: 1, autoScored: 0, heldForHuman: 3 });
     expect(report.withImplicit.jevAlone).toMatchObject({ autoScored: 1, autoAgreed: 1 });
-    expect(report.cost.luna).toMatchObject({ calls: 3, inputTokens: 3000, outputTokens: 60 });
-    expect(report.cost.luna.totalUsd).toBeCloseTo((3000 * 2 + 60 * 8) / 1e6);
+    expect(report.cost.luna).toMatchObject({ calls: 2, inputTokens: 2000, outputTokens: 40 });
+    expect(report.cost.luna.totalUsd).toBeCloseTo((2000 * 2 + 40 * 8) / 1e6);
     expect(report.disagreements[0]).toMatchObject({ cascadeWrongAt90: true, human: "wrong_number" });
     const md = renderMarkdown(report);
     expect(md).toContain("key risk");
@@ -86,7 +86,7 @@ describe("runCompare", () => {
     const run = await runCompare(fixtureExport(), opts, second.d);
     expect(second.jev).not.toHaveBeenCalled();
     expect(second.luna).not.toHaveBeenCalled();
-    expect(run.stats).toMatchObject({ jevCached: 4, lunaCached: 3, jevCalls: 0, lunaCalls: 0 });
+    expect(run.stats).toMatchObject({ jevCached: 4, lunaCached: 2, jevCalls: 0, lunaCalls: 0 });
   });
 
   it("never caches errors, so a rerun retries them", async () => {
