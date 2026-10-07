@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +9,7 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
+import type { HoldActionsApi } from "./hold-action-types";
 import { HoldsRail } from "./holds-rail";
 import { loadRunLabels } from "./labels";
 import {
@@ -51,6 +53,8 @@ export type MessagesV2ViewProps = {
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
   nowMs: number;
+  /** Hold actions (server actions). Absent = the buttons render disabled. */
+  actions?: HoldActionsApi;
 };
 
 const LEGEND = [
@@ -72,6 +76,7 @@ const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
   const { badges, orgId, isOwner = false } = props;
+  const router = useRouter();
   const requestRefresh = useThrottledRefresh();
 
   const [lastInitial, setLastInitial] = useState(props);
@@ -361,7 +366,14 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             )}
           </div>
         </section>
-        <HoldsRail holds={holds} labels={labels} nowMs={nowMs} meta={meta} />
+        <HoldsRail
+          holds={holds}
+          labels={labels}
+          nowMs={nowMs}
+          meta={meta}
+          actions={props.actions}
+          onReload={() => router.refresh()}
+        />
       </div>
 
       <ul

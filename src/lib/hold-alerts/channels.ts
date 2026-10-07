@@ -1,0 +1,130 @@
+import { WebClient } from "@slack/web-api";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import { reportError } from "@/lib/errors/report";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
+import { getDecryptedToken } from "@/lib/integrations/tokens/store";
+import { sendRepSmsReminder } from "@/lib/notifications/rep-sms";
+import type { Database } from "@/lib/supabase/types";
+
+import type { ChannelResult, EmailMessage } from "./types";
+
+/** Same bounds as the appointment-reminder path: no SDK retry loop, 10s HTTP cap. */
+const SLACK_CLIENT_OPTIONS = { timeout: 10_000, retryConfig: { retries: 0 } } as const;
+const RESEND_URL = "https://api.resend.com/emails";
+const RESEND_TIMEOUT_MS = 10_000;
+
+const isAbort = (error: unknown) =>
+  error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+
+type Env = Record<string, string | undefined>;
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * Per-channel senders. Results are classified so the durable layer can tell a
+ * skip (no token, pref off, not configured), a retryable failure (nothing was
+ * transmitted) and a terminal failure (transmission started, outcome unknown:
+ * never retried, to avoid a duplicate DM or SMS).
+ */
+export function createChannelSenders(
+  admin: SupabaseClient<Database>,
+  opts: { env?: Env; fetch?: typeof fetch } = {},
+) {
+  const env: Env = opts.env ?? process.env;
+  const fetchImpl = opts.fetch ?? fetch;
+
+  async function sendSlack(userId: string, text: string): Promise<ChannelResult> {
+    let slack: WebClient;
+    let channel: string;
+    try {
+      const prefs = await loadIntegrationPrefs(admin, userId);
+      if (!prefs.slackEnabled) return { status: "skipped", reason: "pref_disabled" };
+      const token = await getDecryptedToken({ userId, provider: "slack", tokenType: "bot" });
+      if (!token?.externalAccountId) return { status: "skipped", reason: "no_token" };
+      slack = new WebClient(token.accessToken.reveal(), SLACK_CLIENT_OPTIONS);
+      const opened = await slack.conversations.open({ users: token.externalAccountId });
+      if (!opened.channel?.id) return { status: "failed", error: "no_dm_channel" };
+      channel = opened.channel.id;
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_slack" }, extra: { userId, stage: "pre_send" } });
+      return { status: "failed", error: messageOf(error) };
+    }
+    try {
+      const posted = await slack.chat.postMessage({ channel, text });
+      if (!posted.ts) return { status: "failed", error: "slack_no_receipt", terminal: true };
+      return { status: "sent" };
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_slack" }, extra: { userId, stage: "send" } });
+      return { status: "failed", error: messageOf(error), terminal: true };
+    }
+  }
+
+  async function sendSms(userId: string, text: string): Promise<ChannelResult> {
+    try {
+      const prefs = await loadIntegrationPrefs(admin, userId);
+      if (!prefs.reminderPhone) return { status: "skipped", reason: "no_phone" };
+      const result = await sendRepSmsReminder({ to: prefs.reminderPhone, body: text });
+      if (result.ok) return { status: "sent" };
+      if (result.reason === "not_configured") return { status: "skipped", reason: "not_configured" };
+      // Ambiguous: the provider may have sent it. Never retry.
+      if (result.reason === "aborted_ambiguous") {
+        return { status: "failed", error: `${result.reason}: ${result.message}`, terminal: true };
+      }
+      return { status: "failed", error: `${result.reason}: ${result.message}` };
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_sms" }, extra: { userId } });
+      return { status: "failed", error: messageOf(error) };
+    }
+  }
+
+  async function sendEmail(
+    userId: string,
+    message: EmailMessage,
+    opts: { idempotencyKey?: string } = {},
+  ): Promise<ChannelResult> {
+    const key = env.RESEND_API_KEY;
+    if (!key) return { status: "skipped", reason: "no_resend_key" };
+    const from = env.HOLD_ALERT_EMAIL_FROM ?? env.RESEND_FROM;
+    if (!from) return { status: "skipped", reason: "no_email_from" };
+    // Preflight: nothing has been submitted yet, so a failure here is clean and retryable.
+    let request: { headers: Record<string, string>; body: string };
+    try {
+      const { data, error } = await admin.auth.admin.getUserById(userId);
+      const email = data?.user?.email;
+      if (error || !email) return { status: "skipped", reason: "no_email" };
+      request = {
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+          // Same delivery row => same key, so a retried request can never duplicate a digest.
+          ...(opts.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {}),
+        },
+        body: JSON.stringify({ from, to: [email], subject: message.subject, text: message.text }),
+      };
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId, stage: "pre_send" } });
+      return { status: "failed", error: messageOf(error) };
+    }
+    // Submission: once fetch is invoked the outcome can be ambiguous (Resend may have accepted the
+    // request). Any throw (timeout, reset, "fetch failed") and any 5xx is terminal: never resent.
+    // A 4xx is a definite rejection (nothing was sent), so it stays retryable, like the SMS sender's
+    // non-ambiguous failures.
+    try {
+      const res = await fetchImpl(RESEND_URL, {
+        method: "POST",
+        ...request,
+        signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
+      });
+      if (res.ok) return { status: "sent" };
+      if (res.status >= 500) return { status: "failed", error: `resend_http_${res.status}`, terminal: true };
+      return { status: "failed", error: `resend_http_${res.status}` };
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId, stage: "send" } });
+      const label = isAbort(error) ? "resend_timeout" : "resend_ambiguous";
+      return { status: "failed", error: `${label}: ${messageOf(error)}`, terminal: true };
+    }
+  }
+
+  return { sendSlack, sendSms, sendEmail };
+}
