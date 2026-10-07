@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
-import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
+import { applyPhoneLevelOptOut, isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
@@ -44,7 +44,9 @@ import {
   type NewerInboundFact,
   type SendGateDecision,
   type SendGatePhase,
+  type SilentHandledRule,
   silentExitReason,
+  silentSkipClaimOutcome,
 } from "./send-gate";
 import {
   REPLY_RETRY_DELAY_SECONDS,
@@ -71,6 +73,80 @@ import type {
   AiStructuredOutput,
   AiWrongScope,
 } from "./types";
+
+/**
+ * Side-channel facts about a returned outcome that must not change its shape
+ * (callers and tests compare outcomes structurally): which Q8 rule ended a run
+ * silently, and whether the run flagged the property. Read only by
+ * `claimOutcomeOf` when the claim is completed.
+ */
+const outcomeMeta = new WeakMap<object, { silentRule?: SilentHandledRule; flagged?: boolean }>();
+
+/** A `skipped` outcome that ended silently under Q8 rule 0, 2, 4, 5 or 8. */
+function silentSkip(
+  reason: string,
+  rule: SilentHandledRule,
+): { outcome: "skipped"; reason: string } {
+  const outcome = { outcome: "skipped" as const, reason };
+  outcomeMeta.set(outcome, { silentRule: rule });
+  return outcome;
+}
+
+/** A `skipped` outcome that flagged the property for a human (rules 1 and 3). */
+function flaggedSkip(reason: string): { outcome: "skipped"; reason: string } {
+  const outcome = { outcome: "skipped" as const, reason };
+  outcomeMeta.set(outcome, { flagged: true });
+  return outcome;
+}
+
+/**
+ * What the claim records for an outcome: a silent end under rule 0/2/4/5/8 is
+ * `skipped:rule_<n>` (counts as handled for rule 1 on a newer inbound); a skip
+ * that flagged the property is `escalated`; a bare `skipped` is not handled.
+ */
+function claimOutcomeOf(outcome: { outcome: string }): string {
+  if (outcome.outcome !== "skipped") return outcome.outcome;
+  const meta = outcomeMeta.get(outcome);
+  if (meta?.silentRule !== undefined) return silentSkipClaimOutcome(meta.silentRule);
+  if (meta?.flagged) return "escalated";
+  return "skipped";
+}
+
+/**
+ * Property ids whose last attention flag write FAILED, per client. `escalated`
+ * means "a human has been told"; a claim must never read as handled unless the
+ * flag exists or was written, so `completeClaim` downgrades an `escalated`
+ * completion to an `error` claim (`flag_failed`, not handled) while the last
+ * flag write for the property failed. Cleared by the next successful write.
+ */
+const flagFailures = new WeakMap<object, Set<string>>();
+
+function noteFlagResult(supabase: object, propertyId: string, ok: boolean): void {
+  let failed = flagFailures.get(supabase);
+  if (!failed) {
+    if (ok) return;
+    failed = new Set();
+    flagFailures.set(supabase, failed);
+  }
+  if (ok) failed.delete(propertyId);
+  else failed.add(propertyId);
+}
+
+/** `completeAiResponseClaim`, refusing to record an unproven flag as handled. */
+function completeClaim(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  args: Parameters<typeof completeAiResponseClaim>[1],
+): Promise<boolean> {
+  if (
+    args.outcome === "escalated" &&
+    !args.errorMessage &&
+    flagFailures.get(supabase)?.has(propertyId)
+  ) {
+    return completeAiResponseClaim(supabase, { ...args, errorMessage: "flag_failed" });
+  }
+  return completeAiResponseClaim(supabase, args);
+}
 
 /**
  * Consider an inbound SMS for an AI first-touch reply. This is the
@@ -356,12 +432,33 @@ async function dispatchAiResponseCore(
   //    cap: provider/API credits are the only cap (Jarrad's standing rule).
   // --------------------------------------------------------------------------
   const consentState = await getConsentState(supabase, input.contactId, "sms");
-  const currentTurn = await countAiTurnsInThread(
+  const countedTurns = await countAiTurnsInThread(
     supabase,
     input.propertyId,
     input.contactId,
     input.conversationId ?? null,
   );
+  if (countedTurns === null) {
+    // Rule 7: a gate that cannot be evaluated never passes. No reply exists
+    // yet (nothing to dead-letter), so flag a human with `send_check_failed`.
+    await trace(supabase, {
+      kind: "gate",
+      name: "send_check_failed",
+      result: "error",
+      detail: { check: "max_turns" },
+    }, deps.runContext);
+    await flagAndDeadLetter(supabase, {
+      runContext: deps.runContext,
+      orgId: property.org_id,
+      conversationId: input.conversationId ?? null,
+      propertyId: input.propertyId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      body: null,
+      reason: "send_check_failed",
+    });
+    return { outcome: "escalated", reason: "send_check_failed" };
+  }
+  const currentTurn = countedTurns;
   const withinBusinessHours = checkQuietHours(property.state).ok;
 
   const decision = classifyAiSkip({
@@ -441,13 +538,12 @@ async function dispatchAiResponseCore(
       // is classified by the same Q8 table as every other outbound (an AI
       // reply to a DIFFERENT inbound that went out is rule 3: flag a human;
       // one still queued is rule 4: retry; one that answers this inbound is
-      // rule 2: silent). The observation window is stretched back to the
-      // recent reply so a reply that predates this inbound is still seen.
+      // rule 2: silent). Submitted evidence stays bounded to "since the
+      // seller's inbound" (rules 3 and 5); the throttle never widens it.
       const evaluation = await evaluateSendGate(supabase, input, {
         phase: "presend",
         claimStartedAt: null,
         checkNewerInbound: false,
-        extraWindowStartMs: recentReply.createdAtMs,
         property,
       });
       if (evaluation.ok && evaluation.decision.action === "retry") {
@@ -524,7 +620,7 @@ async function dispatchAiResponseCore(
         detail: { reason: safety.reason },
       }, deps.runContext);
       await markPropertyNeedsAttention(supabase, input.propertyId, reason, deps.runContext);
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
       });
@@ -678,7 +774,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     // as an error (lease released) so it can never read as a live handler of
     // this inbound (Q8 rule 1) for the rest of its 5-minute lease, and so a
     // re-dispatch of the same inbound can reclaim it at once.
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "skipped",
       errorMessage: "reply_ineligible",
@@ -700,7 +796,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
       },
     );
     await markPropertyNeedsAttention(supabase, input.propertyId, "jev_unexpected_send_route", runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
@@ -789,7 +885,7 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: null, to: "nurture", reason: "model:nurture" },
         });
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
@@ -806,14 +902,14 @@ async function classifyAndHandleNonRouteOutcomes(
       // already set (possibly by a human while Jev was classifying) —
       // nurture must never downgrade it. Skip silently, same treatment
       // as the legacy path's "already_terminal" RPC status.
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "skipped",
+        outcome: silentSkipClaimOutcome(0),
       });
-      return { handled: true, outcome: { outcome: "skipped", reason: "already_terminal" } };
+      return { handled: true, outcome: silentSkip("already_terminal", 0) };
     }
     const reason = applyResult.status === "stale_decision_context" ? "jev_stale_decision_context" : "nurture_write_failed";
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
       errorMessage: applyResult.status,
@@ -844,7 +940,7 @@ async function classifyAndHandleNonRouteOutcomes(
       });
     }
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
@@ -889,7 +985,7 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
@@ -907,7 +1003,7 @@ async function classifyAndHandleNonRouteOutcomes(
       detail: { status: applyResult.status },
     }, runCtx);
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
       errorMessage: applyResult.status,
@@ -930,7 +1026,7 @@ async function classifyAndHandleNonRouteOutcomes(
   if (classification.kind === "jev_no_action") {
     const reason = "jev_unclear_no_action";
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
@@ -940,7 +1036,7 @@ async function classifyAndHandleNonRouteOutcomes(
   if (classification.kind === "jev_automatic_failed") {
     const reason = `jev_automatic_failed:${classification.reason}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
@@ -1033,7 +1129,7 @@ async function resolveAndApplyRoute(
           failure: providerFailure,
         });
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
         errorMessage: reason,
@@ -1064,7 +1160,7 @@ async function resolveAndApplyRoute(
     ) {
       const reason = "ai_disposition_replay_lookup_failed";
       await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
         errorMessage: reason,
@@ -1078,7 +1174,7 @@ async function resolveAndApplyRoute(
       expectedDisposition !== "opted_out" &&
       expectedDisposition !== "dnc"
     ) {
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "skipped",
       });
@@ -1091,7 +1187,7 @@ async function resolveAndApplyRoute(
   ) {
     const reason = `low_confidence:${generated.confidence}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
@@ -1123,7 +1219,7 @@ async function resolveAndApplyRoute(
         route.reason,
         runCtx,
       );
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
       });
@@ -1161,7 +1257,7 @@ async function resolveAndApplyRoute(
       );
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
-        await completeAiResponseClaim(supabase, {
+        await completeClaim(supabase, input.propertyId, {
           claimId: responseClaim.claimId,
           outcome: outcome.outcome,
           errorMessage: dispositionClaimError(optOutResult),
@@ -1175,7 +1271,7 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "opted_out",
       });
@@ -1210,7 +1306,7 @@ async function resolveAndApplyRoute(
           });
       await traceDisposition(supabase, "dnc", dncResult, isJevDnc, runCtx);
       const dncOutcome = closeOutcome(dncResult, route.reason);
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: dncOutcome.outcome,
         errorMessage: dispositionClaimError(dncResult),
@@ -1257,7 +1353,7 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: wrongNumberOutcome.outcome,
         errorMessage: dispositionClaimError(wrongNumberResult),
@@ -1300,7 +1396,7 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      await completeAiResponseClaim(supabase, {
+      await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: autoCloseOutcome.outcome,
         errorMessage: dispositionClaimError(autoCloseResult),
@@ -1324,7 +1420,7 @@ async function resolveAndApplyRoute(
           detail: { reason: safety.reason },
         }, runCtx);
         await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-        await completeAiResponseClaim(supabase, {
+        await completeClaim(supabase, input.propertyId, {
           claimId: responseClaim.claimId,
           outcome: "escalated",
         });
@@ -1360,7 +1456,7 @@ async function resolveAndApplyRoute(
  * (sent / delivered) beats an in-flight one (pending / queued), which beats a
  * failed one. `status` matters: a `pending` row is an in-flight (or
  * abandoned) attempt, not a delivered reply. `aborted` = the row was retired
- * before the provider (`metadata.aborted_inbound_message_id`).
+ * before the provider (`metadata.abortedBeforeProvider`).
  */
 async function findExistingAiReplyForInbound(
   supabase: SupabaseClient<Database>,
@@ -1389,7 +1485,10 @@ async function findExistingAiReplyForInbound(
   const rows = (data ?? []).map((r) => ({
     id: r.id,
     status: r.status,
-    aborted: readJsonObject((r.metadata ?? null) as Json | null).aborted_inbound_message_id !== undefined,
+    aborted: (() => {
+      const meta = readJsonObject((r.metadata ?? null) as Json | null);
+      return meta.abortedBeforeProvider === true || meta.aborted_inbound_message_id !== undefined;
+    })(),
   }));
   rows.sort((l, r) => rank(l.status) - rank(r.status));
   return rows[0] ?? null;
@@ -1452,15 +1551,15 @@ async function settleClaimForSendOutcome(
   },
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   if (outcome.outcome !== "retry") {
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, ctx.input.propertyId, {
       claimId,
-      outcome: outcome.outcome,
+      outcome: claimOutcomeOf(outcome),
       outboundMessageId: outcome.outcome === "sent" ? outcome.messageId : null,
     });
     return outcome;
   }
   const errorMessage = retryableClaimError(outcome)!;
-  let released = await completeAiResponseClaim(supabase, {
+  let released = await completeClaim(supabase, ctx.input.propertyId, {
     claimId,
     outcome: outcome.outcome,
     errorMessage,
@@ -1488,7 +1587,7 @@ async function settleClaimForSendOutcome(
     flagReason: flagForRetryReason(outcome.reason),
   });
   // Best effort: stop the claim reading as a live retry.
-  await completeAiResponseClaim(supabase, {
+  await completeClaim(supabase, ctx.input.propertyId, {
     claimId,
     outcome: "escalated",
     errorMessage: "retry_unschedulable",
@@ -1543,8 +1642,8 @@ async function endAsAlreadyAnswered(
   runCtx?: MaybeRunContext,
 ): Promise<AiDispatchOutcome> {
   await trace(supabase, { kind: "gate", name: "already_answered", result: "pass", detail: { rule: 8 } }, runCtx);
-  await completeAiResponseClaim(supabase, { claimId, outcome: "skipped" });
-  return { outcome: "skipped", reason: "already_answered" };
+  await completeAiResponseClaim(supabase, { claimId, outcome: silentSkipClaimOutcome(8) });
+  return silentSkip("already_answered", 8);
 }
 
 async function holdExistingDraft(
@@ -1560,7 +1659,7 @@ async function holdExistingDraft(
     detail: { reused: true, attempt: input.retryAttempt ?? 0 },
   }, runCtx);
   await markPropertyNeedsAttention(supabase, input.propertyId, "draft_held", runCtx);
-  await completeAiResponseClaim(supabase, { claimId, outcome: "escalated" });
+  await completeClaim(supabase, input.propertyId, { claimId, outcome: "escalated" });
   return { outcome: "escalated", reason: "draft_held" };
 }
 
@@ -1620,18 +1719,35 @@ async function retryWithCarriedReply(
         body: carried.body,
         reason: "send_check_failed",
       });
-      await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "escalated" });
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "escalated" });
       return { outcome: "escalated", reason: "send_check_failed" };
     }
   }
 
   const consentState = await getConsentState(supabase, input.contactId, "sms");
-  const currentTurn = await countAiTurnsInThread(
+  const countedTurns = await countAiTurnsInThread(
     supabase,
     input.propertyId,
     input.contactId,
     input.conversationId ?? null,
   );
+  if (countedTurns === null) {
+    // Rule 7: the turn count could not be read. A reply exists (carried), so
+    // dead-letter it and flag; the claim completes as handled-by-flag only if
+    // the flag persisted (see `completeClaim`).
+    await flagAndDeadLetter(supabase, {
+      runContext: runCtx,
+      orgId: property.org_id,
+      conversationId: input.conversationId ?? null,
+      propertyId: input.propertyId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      body: carried.body,
+      reason: "send_check_failed",
+    });
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "escalated" });
+    return { outcome: "escalated", reason: "send_check_failed" };
+  }
+  const currentTurn = countedTurns;
   const skip = classifyAiSkip({
     config: config
       ? {
@@ -1676,11 +1792,15 @@ async function retryWithCarriedReply(
         reason: skip.reason,
         flagReason: `reply_skipped:${skip.reason}`,
       });
-      await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "escalated" });
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "escalated" });
       return { outcome: "escalated", reason: skip.reason };
     }
-    await completeAiResponseClaim(supabase, { claimId: claim.claimId, outcome: "skipped" });
-    return { outcome: "skipped", reason: skip.reason };
+    // Every remaining skip reason here is a rule-0 exit (suppression / off).
+    await completeClaim(supabase, input.propertyId, {
+      claimId: claim.claimId,
+      outcome: silentSkipClaimOutcome(0),
+    });
+    return silentSkip(skip.reason, 0);
   }
 
   await trace(supabase, {
@@ -1792,7 +1912,7 @@ async function deliverRoutedReply(
       reason: closeReason,
     });
     const outcome = closeOutcome(closeResult, closeReason);
-    await completeAiResponseClaim(supabase, {
+    await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: outcome.outcome,
       outboundMessageId: sent.messageId,
@@ -1801,7 +1921,7 @@ async function deliverRoutedReply(
     return outcome;
   }
 
-  await completeAiResponseClaim(supabase, {
+  await completeClaim(supabase, input.propertyId, {
     claimId: responseClaim.claimId,
     outcome: "sent",
     outboundMessageId: sent.messageId,
@@ -1972,8 +2092,8 @@ type GateProperty = Pick<
  * its attempt is still live, so a lookup that resumes after a timeout cannot
  * mutate anything.
  *
- * Outbound evidence window: starts at min(claimStartedAt, inbound.created_at,
- * extraWindowStartMs), so a retry (which takes a new claim) never forgets what
+ * Outbound evidence window: starts at min(claimStartedAt, inbound.created_at),
+ * so a retry (which takes a new claim) never forgets what
  * happened before it, e.g. a human reply during the retry gap. AI rows
  * stamped with THIS inbound are always evidence regardless of the window.
  */
@@ -1984,7 +2104,6 @@ async function evaluateSendGate(
     phase: SendGatePhase;
     claimStartedAt: string | null;
     checkNewerInbound: boolean;
-    extraWindowStartMs?: number | null;
     /** Already-loaded property (the early gate has it); otherwise read here. */
     property?: GateProperty | null;
   },
@@ -2099,12 +2218,43 @@ async function loadSilentExit(
     return { ok: false };
   }
   const consentState = await getConsentState(supabase, input.contactId, "sms");
+
+  // The SENDER's own suppression: the contact flags and the destination phone.
+  // Any failed read is `ok: false` (rule 7), never a silent pass.
+  const { data: contact, error: contactError } = await supabase
+    .from("contacts")
+    .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
+    .eq("id", input.contactId)
+    .maybeSingle();
+  if (contactError) {
+    reportError(new Error(contactError.message), {
+      tags: { surface: "ai_responder_rule0_contact_lookup" },
+      extra: { propertyId: input.propertyId },
+    });
+    return { ok: false };
+  }
+  let phoneSuppressed = false;
+  const destination = input.inboundFromPhone ?? (contact ? selectBestSmsPhone(contact)?.phone : null) ?? null;
+  if (destination) {
+    try {
+      phoneSuppressed = await isSmsPhoneSuppressed(supabase, destination, property.org_id);
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "ai_responder_rule0_phone_suppression_lookup" },
+        extra: { propertyId: input.propertyId },
+      });
+      return { ok: false };
+    }
+  }
   return {
     ok: true,
     reason: silentExitReason({
       configActive: !!config,
       consentState,
       propertyDisabled: property.ai_responder_disabled,
+      doNotContact: contact?.do_not_contact ?? null,
+      smsOptedOut: contact?.sms_opted_out ?? null,
+      phoneSuppressed,
     }),
   };
 }
@@ -2112,7 +2262,7 @@ async function loadSilentExit(
 async function gatherOutboundFacts(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  opts: { claimStartedAt: string | null; extraWindowStartMs?: number | null },
+  opts: { claimStartedAt: string | null },
   nowMs: number,
 ): Promise<{ ok: true; facts: GateOutboundFact[] } | { ok: false; truncated?: true }> {
   let claimedAtMs: number | null = null;
@@ -2122,7 +2272,7 @@ async function gatherOutboundFacts(
   }
   const inbound = await loadInboundCreatedAtMs(supabase, input);
   if (!inbound.ok) return { ok: false };
-  const starts = [claimedAtMs, inbound.ms, opts.extraWindowStartMs ?? null].filter(
+  const starts = [claimedAtMs, inbound.ms].filter(
     (v): v is number => v !== null,
   );
   const windowStartMs = starts.length > 0 ? Math.min(...starts) : null;
@@ -2509,15 +2659,42 @@ async function applyGateEvaluation(
   );
   if (plan.flagReason) {
     guard();
-    await markPropertyNeedsAttention(
+    const flagged = await markPropertyNeedsAttention(
       supabase,
       args.input.propertyId,
       plan.flagReason,
       args.runContext,
       guard,
     );
+    if (!flagged) {
+      // The flag could not be proven: the seller is unanswered and no human
+      // was told. The reply exists, so it is dead-lettered (rule 7); the
+      // claim completes as `flag_failed`, never as handled.
+      await writeReplyDeadLetter(supabase, args.runContext, {
+        orgId: args.orgId,
+        conversationId: args.input.conversationId ?? null,
+        propertyId: args.input.propertyId,
+        inboundMessageId: args.input.inboundMessageId ?? null,
+        body: args.body,
+        reason: "flag_failed",
+        guard,
+      });
+      return { outcome: "escalated", reason: "flag_failed" };
+    }
+    return flaggedSkip(plan.reason);
   }
-  return { outcome: "skipped", reason: plan.reason };
+  switch (decision.rule) {
+    case 0:
+    case 2:
+    case 4:
+    case 5:
+    case 8:
+      return silentSkip(plan.reason, decision.rule);
+    default:
+      // Rule 1 with a live handler elsewhere: silent, but not itself a
+      // handler of this inbound (stays a bare `skipped`).
+      return { outcome: "skipped", reason: plan.reason };
+  }
 }
 
 function flagForRetryReason(reason: string): string {
@@ -2713,7 +2890,7 @@ async function holdReplyAsDraft(
   guard();
   if (persisted === "already_resolved") {
     await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
-    return { outcome: "skipped", reason: "already_answered" };
+    return silentSkip("already_answered", 8);
   }
   if (typeof persisted === "object") {
     reportError(new Error(persisted.error.message), {
@@ -3008,7 +3185,9 @@ async function sendResponderMessage(
       // NOT retry it (a second send could double-text). Keep the lease until it
       // expires so nobody else sends over it; dead-letter + flag a human.
       keepLease = true;
-      return await failClosed(supabase, args, "send_timeout", { timeoutMs: providerTimeoutMs() });
+      const timedOut = failClosed(supabase, args, "send_timeout", { timeoutMs: providerTimeoutMs() });
+      reconcileLateSend(supabase, args, done, timedOut);
+      return await timedOut;
     }
     // Nothing reached the provider and nothing ever will (the fence refuses an
     // abandoned attempt): safe to retry.
@@ -3025,6 +3204,66 @@ async function sendResponderMessage(
       await releaseSend(supabase, attempt.conversationKey, attempt.holder);
     }
   }
+}
+
+/**
+ * A provider timeout is flagged `send_timeout` and the reply dead-lettered
+ * because the request may still land. When it DOES land (the abandoned
+ * attempt's delivery reconciliation completes with `sent` after the deadline)
+ * the flag would otherwise invite a human to re-send a text the seller already
+ * has. Reconcile: append a `sent_late` dead-letter row for this inbound (the
+ * table is insert-only, so the marker is a second row rather than an update)
+ * and move the flag reason to `send_timeout_then_sent`. Runs only after the
+ * timeout's own flag write settled, so it can never be overwritten by it.
+ */
+function reconcileLateSend(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+  attempt: Promise<{ kind: "done"; outcome: ResponderSendOutcome } | { kind: "deadline" }>,
+  timeoutHandled: Promise<unknown>,
+): void {
+  void (async () => {
+    let late: { kind: "done"; outcome: ResponderSendOutcome } | { kind: "deadline" };
+    try {
+      late = await attempt;
+    } catch {
+      return; // already reported by the caller's late-error handler
+    }
+    if (late.kind !== "done" || late.outcome.outcome !== "sent") return;
+    try {
+      await timeoutHandled;
+    } catch {
+      // The timeout path failed; still record that the text went out.
+    }
+    try {
+      await writeReplyDeadLetter(supabase, args.runContext, {
+        orgId: args.orgId,
+        conversationId: args.input.conversationId ?? null,
+        propertyId: args.input.propertyId,
+        inboundMessageId: args.input.inboundMessageId ?? null,
+        body: args.body,
+        reason: "sent_late",
+      });
+      const { error } = await supabase
+        .from("properties")
+        .update({
+          last_ai_escalation_reason: "send_timeout_then_sent",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", args.input.propertyId);
+      if (error) {
+        reportError(new Error(error.message), {
+          tags: { surface: "ai_responder_late_send_flag_reason" },
+          extra: { propertyId: args.input.propertyId },
+        });
+      }
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "ai_responder_late_send_reconcile" },
+        extra: { propertyId: args.input.propertyId },
+      });
+    }
+  })();
 }
 
 async function leasedSend(
@@ -3171,7 +3410,7 @@ async function deliverResponderMessage(
         name: "already_replied",
         result: "block",
       }, args.runContext);
-      return { outcome: "skipped", reason: "already_replied" };
+      return silentSkip("already_replied", 2);
     }
     if (existingStatus === "pending" || existingStatus === "queued") {
       // Another attempt's row for this inbound is still in flight (or was
@@ -3209,7 +3448,7 @@ async function deliverResponderMessage(
       result: "block",
       detail: { status: sendResult.status },
     }, args.runContext);
-    return { outcome: "skipped", reason: "already_terminal" };
+    return silentSkip("already_terminal", 0);
   }
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
@@ -4140,7 +4379,7 @@ export async function markPropertyNeedsAttention(
    * awaits, so the attempt can expire in between). Not an attempt = no guard.
    */
   guard: Guard = NO_GUARD,
-): Promise<void> {
+): Promise<boolean> {
   // Evidence first: the hold is recorded whether or not the flag write wins.
   guard();
   await trace(
@@ -4167,16 +4406,47 @@ export async function markPropertyNeedsAttention(
       tags: { surface: "ai_responder_mark_attention" },
       extra: { propertyId, reason },
     });
-    return;
+    noteFlagResult(supabase, propertyId, false);
+    return false;
   }
-  if (updated) {
+  if (!updated) {
+    // Nothing matched `needs_human_attention = false`: either a human was
+    // already told (the flag exists: success) or the property is gone / the
+    // write silently matched nothing. Prove which before claiming success.
+    const { data: current, error: readError } = await supabase
+      .from("properties")
+      .select("needs_human_attention")
+      .eq("id", propertyId)
+      .maybeSingle();
+    const exists = !readError && current?.needs_human_attention === true;
+    if (!exists) {
+      reportError(new Error(readError?.message ?? "attention flag not persisted"), {
+        tags: { surface: "ai_responder_mark_attention" },
+        extra: { propertyId, reason },
+      });
+    }
+    noteFlagResult(supabase, propertyId, exists);
+    return exists;
+  }
+  noteFlagResult(supabase, propertyId, true);
+  // Reconciliation of a SUCCESSFUL flag: the lead-event ledger entry is
+  // evidence about a flag that already exists. A failure here must never turn
+  // a persisted flag into a failed one (nor propagate), so it is reported and
+  // swallowed.
+  try {
     await recordLeadEvent({
       propertyId,
       actorType: "ai",
       eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
       payload: { from: false, to: true, reason },
     });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_responder_mark_attention_lead_event" },
+      extra: { propertyId, reason },
+    });
   }
+  return true;
 }
 
 function readJsonObject(value: Json | null): Record<string, Json> {
@@ -4201,24 +4471,30 @@ async function countAiTurnsInThread(
   propertyId: string,
   contactId: string,
   conversationId: string | null,
-): Promise<number> {
-  const base = () => {
-    const query = supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("property_id", propertyId)
-      .eq("direction", "outbound")
-      .contains("metadata", { generated_by: "ai_responder_v1" });
-    return conversationId
-      ? query.eq("conversation_id", conversationId)
-      : query.eq("contact_id", contactId);
-  };
-  const { count } = await base();
-  // Exclude ONLY rows retired before the provider (`aborted_inbound_message_id`
-  // present): the seller never received those. A row that failed at or after
-  // the provider boundary still counts (its text may have reached the seller).
-  const { count: retired } = await base().not("metadata->aborted_inbound_message_id", "is", null);
-  return Math.max(0, (count ?? 0) - (retired ?? 0));
+): Promise<number | null> {
+  // ONE query. Exclude ONLY rows retired before the provider (the always-set
+  // `abortedBeforeProvider: true` marker): the seller never received those. A
+  // row that failed at or after the provider boundary still counts (its text
+  // may have reached the seller). A failed count returns null: the caller
+  // fails CLOSED (Q8 rule 7), it never assumes "no turns yet".
+  const query = supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .contains("metadata", { generated_by: "ai_responder_v1" })
+    .or("metadata->>abortedBeforeProvider.is.null,metadata->>abortedBeforeProvider.neq.true");
+  const { count, error } = await (conversationId
+    ? query.eq("conversation_id", conversationId)
+    : query.eq("contact_id", contactId));
+  if (error || count === null || count === undefined) {
+    reportError(new Error(error?.message ?? "missing turn count"), {
+      tags: { surface: "ai_responder_turn_count" },
+      extra: { propertyId },
+    });
+    return null;
+  }
+  return count;
 }
 
 /**

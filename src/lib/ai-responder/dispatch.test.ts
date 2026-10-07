@@ -46,9 +46,10 @@ vi.mock("@/lib/messaging/send", () => ({
   sendSmsToContact: vi.fn(),
 }));
 
-vi.mock("@/lib/messaging/opt-out-phone", () => ({
-  applyPhoneLevelOptOut: vi.fn(),
-}));
+vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/messaging/opt-out-phone")>();
+  return { ...actual, applyPhoneLevelOptOut: vi.fn() };
+});
 
 vi.mock("@/lib/sequences/enrollment", () => ({
   pauseContactEnrollments: vi.fn(),
@@ -138,6 +139,13 @@ type MockState = {
   draftSelectHook?: (n: number) => Promise<void> | void;
   draftSelectCount?: number;
   reserveCalls?: number;
+  /** The max-turns count query returns a DB error. */
+  turnCountError?: boolean;
+  /** Destination phones present in sms_phone_suppressions. */
+  phoneSuppressions?: string[];
+  phoneSuppressionError?: boolean;
+  /** Property attention-flag writes fail (update returns an error). */
+  flagWriteError?: boolean;
   /** A messages lookup for this direction returns a DB error. */
   messageLookupError?: "inbound" | "outbound";
   /** Hook run once inside fn_reserve_ai_send's winner path (race injection). */
@@ -152,6 +160,8 @@ type MockState = {
     phone_2_type: string | null;
     phone_3: string | null;
     phone_3_type: string | null;
+    do_not_contact?: boolean | null;
+    sms_opted_out?: boolean | null;
   };
   config: {
     active: boolean;
@@ -318,8 +328,12 @@ function createMockSupabase(state: MockState) {
     let orderBy: { ascending: boolean; field: keyof MessageRow } | null = null;
     let selectOptions: { count?: string; head?: boolean } | undefined;
     let updateData: Partial<MessageRow> | null = null;
+    let turnCountFails = false;
 
     const execute = () => {
+      if (turnCountFails) {
+        return { data: null, error: { message: "turn count boom" } as { message: string } | null };
+      }
       if (
         !updateData &&
         state.messageLookupError &&
@@ -390,6 +404,16 @@ function createMockSupabase(state: MockState) {
       // `sent_at.gte.X,and(sent_at.is.null,created_at.gte.X)`: went out since X
       // (submission time, falling back to creation time).
       or(filter: string) {
+        if (filter.includes("abortedBeforeProvider")) {
+          // metadata->>abortedBeforeProvider IS NULL OR <> 'true' (max-turns count)
+          if (state.turnCountError) {
+            filters.predicates.push(() => true);
+            turnCountFails = true;
+            return query;
+          }
+          filters.predicates.push((row) => row.metadata?.abortedBeforeProvider !== true);
+          return query;
+        }
         const iso = /sent_at\.gte\.([^,]+),/.exec(filter)?.[1] ?? "";
         filters.predicates.push((row) =>
           row.sent_at ? row.sent_at >= iso : row.created_at >= iso,
@@ -468,6 +492,9 @@ function createMockSupabase(state: MockState) {
 
     const execute = () => {
       if (updateData) {
+        if (state.flagWriteError && "needs_human_attention" in updateData) {
+          return { data: null, error: { message: "flag boom" } };
+        }
         if (!matchesCurrentProperty()) {
           return { data: null, error: null };
         }
@@ -750,6 +777,22 @@ function createMockSupabase(state: MockState) {
       }
       if (table === "contacts") {
         return buildContactsQuery();
+      }
+      if (table === "sms_phone_suppressions") {
+        const q = {
+          select: () => q,
+          eq: () => q,
+          limit: () =>
+            Promise.resolve(
+              state.phoneSuppressionError
+                ? { data: null, error: { message: "suppression boom" } }
+                : {
+                    data: (state.phoneSuppressions ?? []).length > 0 ? [{ id: "sup-1" }] : [],
+                    error: null,
+                  },
+            ),
+        };
+        return q;
       }
       if (table === "ai_response_claims") {
         return buildAiClaimsQuery();
@@ -1151,11 +1194,14 @@ describe("dispatchAiResponse debounce", () => {
     vi.clearAllMocks();
   });
 
-  it("sends once, then skips a second inbound in the same conversation within 45 seconds", async () => {
+  it("sends once, then flags a second inbound that arrived before that reply went out (rule 3)", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
 
+    // The seller's second text arrived BEFORE the first reply went out, so
+    // that reply answers a different inbound and went out since this one: a
+    // human is flagged (rule 3), nothing more is generated or sent.
     const first = await dispatchAiResponse(
       supabase as never,
       {
@@ -1167,6 +1213,9 @@ describe("dispatchAiResponse debounce", () => {
       },
       { anthropic: {} as never },
     );
+
+    seedInboundMessage(state, { id: "inbound-2", body: "Still interested?" });
+    state.messages.find((m) => m.id === "inbound-2")!.created_at = "2026-06-13T17:59:59.000Z";
 
     const second = await dispatchAiResponse(
       supabase as never,
@@ -1181,10 +1230,12 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(first.outcome).toBe("sent");
+    // The early gate sees the first reply (went out since this inbound) as rule 3.
     expect(second).toEqual({
       outcome: "skipped",
-      reason: "duplicate_throttled",
+      reason: "superseded_before_send",
     });
+    expect(state.property.needs_human_attention).toBe(true);
     expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
   });
@@ -2724,6 +2775,38 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
   });
 
+  it("a provider timeout followed by a late success: dead letter gets a sent_late row and the flag reads send_timeout_then_sent", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { providerTimeoutMs: 20 });
+    const state = createMockState();
+    seedInboundMessage(state, { id: "inbound-late", body: "Hello?" });
+    let land!: () => void;
+    const landed = new Promise<void>((resolve) => { land = resolve; });
+    vi.mocked(sendSmsToContact).mockImplementation(async (_s, inputArgs) => {
+      await inputArgs.beforeProviderSubmit?.();
+      await landed;
+      const messageId = "sent-late-1";
+      state.messages.push({
+        id: messageId, body: inputArgs.body, channel: "sms", contact_id: inputArgs.contactId,
+        conversation_id: state.threadConversationId, created_at: new Date().toISOString(), direction: "outbound",
+        metadata: inputArgs.metadata as Record<string, unknown>, property_id: inputArgs.propertyId,
+        sent_at: new Date().toISOString(), status: "sent",
+      });
+      return { externalId: "ext-late", messageId, status: "sent" } as const;
+    });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-late"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout");
+    land();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.deadLetters).toEqual([
+      expect.objectContaining({ inbound_message_id: "inbound-late", reason: "send_timeout" }),
+      expect.objectContaining({ inbound_message_id: "inbound-late", reason: "sent_late", body: "Hi there" }),
+    ]);
+  });
+
   it("the provider timeout is always capped under the send lease", async () => {
     vi.useRealTimers();
     Object.assign(sendReservationTuning, { providerTimeoutMs: 10 * 60_000 });
@@ -3220,10 +3303,11 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
     it("a FIRST dispatch still honours the 45s throttle (only retries bypass it)", async () => {
       const state = createMockState();
       installSendMock(state);
-      seedInboundAt(state, "inbound-x", at("18:00:00"));
+      seedInboundAt(state, "inbound-x", at("17:59:40"));
       pushOutbound(state, { id: "ai-w", created_at: at("17:59:50"), sent_at: at("17:59:50"), metadata: aiReplyTo("inbound-w") });
       const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
-      expect(result).toEqual({ outcome: "skipped", reason: "duplicate_throttled" });
+      expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+      expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
     });
 
     describe("early newer-inbound check asks whether the newer inbound is handled", () => {
@@ -3309,6 +3393,33 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:newer_inbound");
         },
       );
+      it.each(["skipped:rule_0", "skipped:rule_2", "skipped:rule_4", "skipped:rule_5", "skipped:rule_8"])(
+        "a claim that ended silently (%s) on the newer inbound counts as handled: older reply skipped silently, not flagged",
+        async (outcome) => {
+          const { state, result } = await run(claim("completed", undefined, outcome));
+          expect(result).toEqual({ outcome: "skipped", reason: "superseded_by_newer_inbound" });
+          expect(state.property.needs_human_attention).toBe(false);
+        },
+      );
+      it.each(["skipped:rule_1", "skipped:rule_3", "skipped:rule_6", "skipped:rule_7", "skipped:weird"])(
+        "a skipped claim whose rule is not 0/2/4/5/8 (%s) is NOT handled: flagged",
+        async (outcome) => {
+          const { state } = await run(claim("completed", undefined, outcome));
+          expect(state.property.needs_human_attention).toBe(true);
+        },
+      );
+      it("a delay stamp counts only while its claim has not since finished without handling: bare skipped + stamp is flagged, skipped:rule_2 + stamp is handled", async () => {
+        const bare = await run((st) => {
+          claim("completed", undefined, "skipped")(st);
+          stampY(st, WORKFLOW);
+        });
+        expect(bare.state.property.needs_human_attention).toBe(true);
+        const silent = await run((st) => {
+          claim("completed", undefined, "skipped:rule_2")(st);
+          stampY(st, WORKFLOW);
+        });
+        expect(silent.state.property.needs_human_attention).toBe(false);
+      });
       it("a completed skipped claim is authoritative over a stale delayed stamp", async () => {
         const { state } = await run((st) => {
           claim("completed", undefined, "skipped")(st);
@@ -3868,12 +3979,51 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
     it("a recent AI reply to a DIFFERENT inbound that went out flags a human (never a silent drop)", async () => {
       const state = createMockState();
       installSendMock(state);
-      seedInboundAt(state, "inbound-x", at("18:00:00"));
+      seedInboundAt(state, "inbound-x", at("17:59:40"));
       pushOutbound(state, { id: "ai-w", created_at: at("17:59:50"), sent_at: at("17:59:50"), metadata: aiReplyTo("inbound-w") });
       const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
-      expect(result).toEqual({ outcome: "skipped", reason: "duplicate_throttled" });
+      expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
       expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:outbound_since_claim");
       expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    });
+
+    it("rules 3/5 are bounded since the seller's inbound: AI reply R to X, seller answers Y 20s later -> Y gets a reply (rule 6), the 45s throttle does not widen the window", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundAt(state, "inbound-y", at("18:00:00"));
+      pushOutbound(state, { id: "ai-r", created_at: at("17:59:40"), sent_at: at("17:59:40"), metadata: aiReplyTo("inbound-x") });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-y"), anthropic);
+      expect(result.outcome).toBe("sent");
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    it("a rep text sent just before the seller's inbound is not rule 3 (rule 6: send)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundAt(state, "inbound-y", at("18:00:00"));
+      pushOutbound(state, { id: "rep-1", created_at: at("17:59:58"), sent_at: at("17:59:58"), metadata: null });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-y"), anthropic);
+      expect(result.outcome).toBe("sent");
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    it("a broadcast that went out before the seller's inbound is not rule 5 (rule 6: send)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundAt(state, "inbound-y", at("18:00:00"));
+      pushOutbound(state, { id: "bc-1", created_at: at("17:59:58"), sent_at: at("17:59:58"), campaign_id: "camp-1", metadata: null });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-y"), anthropic);
+      expect(result.outcome).toBe("sent");
+    });
+
+    it("a broadcast submitted AFTER the seller's inbound is still rule 5: silent skip", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundAt(state, "inbound-y", at("17:59:50"));
+      pushOutbound(state, { id: "bc-2", created_at: at("17:59:58"), sent_at: at("17:59:58"), campaign_id: "camp-1", metadata: null });
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-y"), anthropic);
+      expect(result).toEqual({ outcome: "skipped", reason: "superseded_by_broadcast" });
+      expect(state.property.needs_human_attention).toBe(false);
     });
 
     it("a recent AI reply that is still pending is rule 4: retried (no reply generated yet, nothing to carry), flagged only after the last attempt", async () => {
@@ -4146,10 +4296,47 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       const state = createMockState();
       installSendMock(state);
       seedInboundAt(state, "inbound-mt", at("18:00:00"));
-      pushOutbound(state, { id: "failed-ai", status: "failed", created_at: at("17:00:00"), metadata: { generated_by: "ai_responder_v1", aborted_inbound_message_id: "x" } });
+      pushOutbound(state, { id: "failed-ai", status: "failed", created_at: at("17:00:00"), metadata: { generated_by: "ai_responder_v1", aborted_inbound_message_id: "x", abortedBeforeProvider: true } });
+      // An identity reply retired before the provider has the marker but NO inbound key.
+      pushOutbound(state, { id: "failed-identity", status: "failed", created_at: at("17:10:00"), metadata: { generated_by: "ai_responder_v1", abortedBeforeProvider: true } });
+      // A row that failed AT/AFTER the provider (no marker) still counts.
+      pushOutbound(state, { id: "failed-late", status: "failed", created_at: at("17:20:00"), metadata: aiReplyTo("late") });
       pushOutbound(state, { id: "sent-ai", status: "sent", created_at: at("17:30:00"), metadata: aiReplyTo("older") });
       await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-mt"), anthropic);
-      expect(vi.mocked(classifyAiSkip).mock.calls[0]![0]).toMatchObject({ currentTurn: 1 });
+      expect(vi.mocked(classifyAiSkip).mock.calls[0]![0]).toMatchObject({ currentTurn: 2 });
+    });
+
+    it("a failed max-turns count fails CLOSED (rule 7): no reply, flagged send_check_failed, nothing generated or sent", async () => {
+      const state = createMockState();
+      state.turnCountError = true;
+      installSendMock(state);
+      seedInboundAt(state, "inbound-tc", at("18:00:00"));
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-tc"), anthropic);
+      expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toBe("send_check_failed");
+      expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    });
+
+    it("a failed max-turns count on a retry that carries a reply dead-letters the reply and flags send_check_failed", async () => {
+      const state = createMockState();
+      state.turnCountError = true;
+      installSendMock(state);
+      seedInboundAt(state, "inbound-tc2", at("18:00:00"));
+      const result = await dispatchAiResponse(
+        createMockSupabase(state) as never,
+        inp("inbound-tc2", {
+          retryAttempt: 1,
+          retryReply: { body: "carried text", confidence: 0.9, sentiment: "neutral", orgId: "org-1", kind: "send_reply" },
+        }),
+        anthropic,
+      );
+      expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+      expect(state.deadLetters).toHaveLength(1);
+      expect(state.deadLetters![0]).toMatchObject({ body: "carried text", reason: "send_check_failed" });
+      expect(state.property.last_ai_escalation_reason).toBe("send_check_failed");
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
     });
   });
 
@@ -4196,6 +4383,189 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         expect.objectContaining({ tags: { surface: "ai_responder_send_release_timeout" } }),
       );
       expect(state.property.needs_human_attention).toBe(false);
+    });
+  });
+
+  describe("round 8: claim outcomes carry the silent rule, rule 0 evidence, flag proof", () => {
+    const setup = () => {
+      const state = createMockState();
+      installSendMock(state);
+      return state;
+    };
+    const claimFor = (state: MockState, inbound: string) => state.aiClaims.find((c) => c.inbound_message_id === inbound);
+
+    it.each([
+      [
+        "skipped:rule_2",
+        (state: MockState) => pushOutbound(state, { id: "rep-after", created_at: at("18:00:05"), sent_at: at("18:00:05"), metadata: null }),
+      ],
+      [
+        "skipped:rule_5",
+        (state: MockState) => pushOutbound(state, { id: "bc-after", created_at: at("18:00:05"), sent_at: at("18:00:05"), campaign_id: "camp-1", metadata: null }),
+      ],
+      [
+        "skipped:rule_4",
+        (state: MockState) =>
+          pushOutbound(state, { id: "rep-sched", status: "queued", created_at: at("18:00:05"), scheduled_for: at("23:00:00"), metadata: null }),
+      ],
+    ])("a run that ends silently under the lease records %s on its claim", async (outcome, inject) => {
+      const state = setup();
+      seedInboundAt(state, "inbound-x", at("18:00:00"));
+      state.onReserved = () => inject(state);
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+      expect(result.outcome).toBe("skipped");
+      expect(claimFor(state, "inbound-x")).toMatchObject({ status: "completed", outcome });
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    it("rule 0 under the lease records skipped:rule_0; a discarded draft records skipped:rule_8", async () => {
+      const a = setup();
+      seedInboundAt(a, "inbound-x", at("18:00:00"));
+      a.onReserved = () => vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
+      await dispatchAiResponse(createMockSupabase(a) as never, inp("inbound-x"), anthropic);
+      expect(claimFor(a, "inbound-x")).toMatchObject({ status: "completed", outcome: "skipped:rule_0" });
+
+      vi.mocked(getConsentState).mockResolvedValue({} as never);
+      const b = setup();
+      seedInboundAt(b, "inbound-x", at("18:00:00"));
+      b.onReserved = () => {
+        (b.aiReplyDrafts ??= []).push({ id: "d1", inbound_message_id: "inbound-x", status: "discarded" });
+      };
+      await dispatchAiResponse(createMockSupabase(b) as never, inp("inbound-x"), anthropic);
+      expect(claimFor(b, "inbound-x")).toMatchObject({ status: "completed", outcome: "skipped:rule_8" });
+    });
+
+    it("a flagged skip (rule 3) completes its claim as escalated, never as a bare skipped", async () => {
+      const state = setup();
+      seedInboundAt(state, "inbound-x", at("18:00:00"));
+      state.onReserved = () =>
+        pushOutbound(state, { id: "ai-other", created_at: at("18:00:05"), sent_at: at("18:00:05"), metadata: aiReplyTo("inbound-w") });
+      await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(claimFor(state, "inbound-x")).toMatchObject({ status: "completed", outcome: "escalated" });
+    });
+
+    it("end to end: B ends silently under rule 2, then A's pre-send sees B as handled (no flag)", async () => {
+      const state = setup();
+      seedInboundAt(state, "inbound-a", at("18:00:00"));
+      seedInboundAt(state, "inbound-b", at("18:00:05"));
+      // B's run: a rep text lands after B's inbound while it holds the lease.
+      state.onReserved = () => {
+        state.onReserved = undefined;
+        pushOutbound(state, { id: "rep-b", created_at: at("18:00:10"), sent_at: at("18:00:10"), metadata: null });
+      };
+      vi.setSystemTime(new Date(at("18:01:00")));
+      const supabase = createMockSupabase(state);
+      const b = await dispatchAiResponse(supabase as never, inp("inbound-b"), anthropic);
+      expect(b.outcome).toBe("skipped");
+      expect(claimFor(state, "inbound-b")?.outcome).toBe("skipped:rule_2");
+      const a = await dispatchAiResponse(supabase as never, inp("inbound-a"), { ...anthropic, checkSuperseded: true });
+      expect(a).toEqual({ outcome: "skipped", reason: "superseded_by_newer_inbound" });
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    describe("rule 0 evidence includes the SENDER's own suppression", () => {
+      it.each([
+        ["contact do_not_contact", (st: MockState) => { st.contact.do_not_contact = true; }, "contact_do_not_contact"],
+        ["contact sms_opted_out", (st: MockState) => { st.contact.sms_opted_out = true; }, "contact_sms_opted_out"],
+        ["a suppressed destination phone", (st: MockState) => { st.phoneSuppressions = ["+18165550001"]; }, "phone_suppressed"],
+      ])("%s ends silently (rule 0) before rule 1 even with an UNHANDLED newer inbound, nothing flagged", async (_label, arm, reason) => {
+        const state = setup();
+        arm(state);
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        seedInboundAt(state, "inbound-y", at("18:00:05"));
+        vi.setSystemTime(new Date(at("18:01:00")));
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), { ...anthropic, checkSuperseded: true });
+        expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(result).toEqual({ outcome: "skipped", reason });
+      });
+
+      it.each([
+        ["contact do_not_contact", (st: MockState) => { st.contact.do_not_contact = true; }],
+        ["contact sms_opted_out", (st: MockState) => { st.contact.sms_opted_out = true; }],
+        ["a suppressed destination phone", (st: MockState) => { st.phoneSuppressions = ["+18165550001"]; }],
+      ])("hold path: %s never produces a held draft or a draft_held flag", async (_label, arm) => {
+        const state = setup();
+        state.config.outbound_mode = "hold";
+        arm(state);
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+        expect(result.outcome).toBe("skipped");
+        expect(state.aiReplyDrafts ?? []).toHaveLength(0);
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(state.deadLetters ?? []).toHaveLength(0);
+        expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+      });
+
+      it("a failed phone-suppression lookup is rule 7, not a silent pass: flagged send_check_failed, reply dead-lettered, nothing sent", async () => {
+        const state = setup();
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        // The early gate tolerates a failed read (the pre-send check is strict); fail it only under the lease.
+        state.onReserved = () => { state.phoneSuppressionError = true; };
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+        expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+        expect(state.property.last_ai_escalation_reason).toBe("send_check_failed");
+        expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "send_check_failed", body: "Hi there" })]);
+        expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("an escalation must prove its flag persisted", () => {
+      it("a failed flag write is never recorded as handled: the claim completes as error flag_failed (no reply exists: nothing to dead-letter)", async () => {
+        const state = setup();
+        state.flagWriteError = true;
+        vi.mocked(generateAiReply).mockResolvedValue({ ...HAPPY_REPLY, confidence: 0.1 });
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+        expect(result.outcome).toBe("escalated");
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(claimFor(state, "inbound-x")).toMatchObject({ status: "error", error_message: "flag_failed" });
+        // ...and therefore a newer-inbound check reads it as NOT handled.
+      });
+
+      it("the same escalation with a working flag completes the claim as escalated (handled)", async () => {
+        const state = setup();
+        vi.mocked(generateAiReply).mockResolvedValue({ ...HAPPY_REPLY, confidence: 0.1 });
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(claimFor(state, "inbound-x")).toMatchObject({ status: "completed", outcome: "escalated" });
+      });
+
+      it("a flagged skip whose flag write fails dead-letters the reply and completes the claim as error flag_failed", async () => {
+        const state = setup();
+        seedInboundAt(state, "inbound-x", at("18:00:00"));
+        state.onReserved = () => {
+          pushOutbound(state, { id: "ai-other", created_at: at("18:00:05"), sent_at: at("18:00:05"), metadata: aiReplyTo("inbound-w") });
+          state.flagWriteError = true;
+        };
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-x"), anthropic);
+        expect(result).toEqual({ outcome: "escalated", reason: "flag_failed" });
+        expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "flag_failed", body: "Hi there" })]);
+        expect(claimFor(state, "inbound-x")).toMatchObject({ status: "error", error_message: "flag_failed" });
+      });
+
+      it("markPropertyNeedsAttention reports success only when the flag exists or was written", async () => {
+        const { markPropertyNeedsAttention } = await import("./dispatch");
+        const state = setup();
+        const supabase = createMockSupabase(state);
+        expect(await markPropertyNeedsAttention(supabase as never, PROPERTY_ID, "r1")).toBe(true);
+        expect(state.property.needs_human_attention).toBe(true);
+        // already flagged: the exists-check proves it
+        expect(await markPropertyNeedsAttention(supabase as never, PROPERTY_ID, "r2")).toBe(true);
+        const failing = setup();
+        failing.flagWriteError = true;
+        expect(await markPropertyNeedsAttention(createMockSupabase(failing) as never, PROPERTY_ID, "r3")).toBe(false);
+      });
+
+      it("a failing lead-event write after a persisted flag does not turn the flag into a failure", async () => {
+        const { markPropertyNeedsAttention } = await import("./dispatch");
+        recordLeadEvent.mockRejectedValueOnce(new Error("ledger down"));
+        const state = setup();
+        expect(await markPropertyNeedsAttention(createMockSupabase(state) as never, PROPERTY_ID, "r")).toBe(true);
+        expect(state.property.needs_human_attention).toBe(true);
+      });
     });
   });
 

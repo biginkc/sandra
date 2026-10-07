@@ -7,6 +7,7 @@ import {
   decideSendGate,
   NEWER_INBOUND_GRACE_MS,
   silentExitReason,
+  silentSkipClaimOutcome,
   type GateOutboundFact,
   type NewerInboundFact,
 } from "./send-gate";
@@ -209,7 +210,8 @@ describe("classifyGateRow", () => {
   });
   it("a human/rep text answers only when created at/after the inbound; otherwise it is unrelated", () => {
     expect(classifyGateRow(row(), ctx)?.author).toBe("human_after_inbound");
-    expect(classifyGateRow(row({ created_at: "2026-06-13T17:59:00.000Z" }), ctx)?.author).toBe("human_unrelated");
+    // Submitted evidence from before the inbound is dropped (rule 3 is "since the inbound").
+    expect(classifyGateRow(row({ created_at: "2026-06-13T17:59:00.000Z" }), ctx)).toBeNull();
     expect(classifyGateRow(row(), { ...ctx, inboundCreatedAtMs: null })?.author).toBe("human_unrelated");
     expect(classifyGateRow(row({ created_at: "garbage" }), ctx)?.author).toBe("human_unrelated");
   });
@@ -323,11 +325,83 @@ describe("classifyGateRow: 'went out' is the submission time", () => {
   it("a rep text created BEFORE the inbound but submitted AFTER it answers the seller", () => {
     expect(classifyGateRow(rep({ sent_at: "2026-06-13T18:05:00.000Z" }), ctx)?.author).toBe("human_after_inbound");
   });
-  it("a rep text created and submitted before the inbound is unrelated", () => {
-    expect(classifyGateRow(rep({ sent_at: "2026-06-13T17:30:00.000Z" }), ctx)?.author).toBe("human_unrelated");
+  it("a rep text created and submitted before the inbound is not evidence (rule 3 is since the inbound)", () => {
+    expect(classifyGateRow(rep({ sent_at: "2026-06-13T17:30:00.000Z" }), ctx)).toBeNull();
   });
   it("a QUEUED rep text is judged by created_at only (it has not gone out)", () => {
     expect(classifyGateRow(rep({ status: "queued", sent_at: "2026-06-13T18:05:00.000Z" }), ctx)?.author).toBe("human_unrelated");
+  });
+});
+
+describe("rules 3 and 5 are bounded 'since the seller's inbound' (classifyGateRow)", () => {
+  const inboundMs = Date.parse("2026-06-13T18:00:00.000Z");
+  const ctx = { inboundMessageId: "in-2", inboundCreatedAtMs: inboundMs, nowMs: inboundMs + 60_000 };
+  const base = { id: "m", created_at: "2026-06-13T17:59:40.000Z", sent_at: "2026-06-13T17:59:40.000Z", status: "sent" };
+  const aiTo = (inbound: string) => ({ generated_by: "ai_responder_v1", inbound_message_id: inbound });
+
+  it("AI reply to X that went out before Y is dropped; after Y it is ai_other_inbound", () => {
+    expect(classifyGateRow({ ...base, metadata: aiTo("in-1") }, ctx)).toBeNull();
+    expect(
+      classifyGateRow({ ...base, created_at: "2026-06-13T18:00:05.000Z", sent_at: "2026-06-13T18:00:05.000Z", metadata: aiTo("in-1") }, ctx)?.author,
+    ).toBe("ai_other_inbound");
+  });
+  it("a broadcast submitted before Y is dropped; one submitted after Y is a broadcast", () => {
+    expect(classifyGateRow({ ...base, campaign_id: "c1", metadata: null }, ctx)).toBeNull();
+    expect(classifyGateRow({ ...base, metadata: { generated_by: "sequence_tick" } }, ctx)).toBeNull();
+    expect(
+      classifyGateRow({ ...base, campaign_id: "c1", sent_at: "2026-06-13T18:00:05.000Z", metadata: null }, ctx)?.author,
+    ).toBe("broadcast");
+  });
+  it("sent_at, not created_at, is the time that counts for a submitted row", () => {
+    expect(
+      classifyGateRow({ ...base, created_at: "2026-06-13T17:00:00.000Z", sent_at: "2026-06-13T18:00:05.000Z", campaign_id: "c1", metadata: null }, ctx)?.author,
+    ).toBe("broadcast");
+  });
+  it("QUEUED rows are never dropped by the bound (outstanding competitors stay evidence)", () => {
+    expect(classifyGateRow({ ...base, status: "queued", metadata: aiTo("in-1") }, ctx)).toEqual({ author: "ai_other_inbound", stage: "queued", scheduledFuture: false });
+    expect(classifyGateRow({ ...base, status: "queued", campaign_id: "c1", metadata: null }, ctx)?.stage).toBe("queued");
+  });
+  it("an unreadable time stays evidence (fail toward the gate)", () => {
+    expect(classifyGateRow({ ...base, created_at: "garbage", sent_at: null, metadata: aiTo("in-1") }, ctx)?.author).toBe("ai_other_inbound");
+  });
+});
+
+describe("rule 1 'handled': a claim that ended silently under rule 0/2/4/5/8", () => {
+  const nowMs = Date.parse("2026-06-13T18:00:00.000Z");
+  const past = "2026-06-13T17:55:00.000Z";
+  const workflow = { outcome: "delayed", workflowRunId: "wf_1" };
+  it("skipped:rule_0/2/4/5/8 count as handled", () => {
+    for (const rule of [0, 2, 4, 5, 8] as const) {
+      expect(
+        classifyNewerInboundHandler({ claim: { status: "completed", outcome: silentSkipClaimOutcome(rule), lease_expires_at: past }, stamp: null, nowMs }),
+      ).toBe(true);
+    }
+  });
+  it("a bare skipped, an unknown rule, rule 1/3/6/7 and look-alikes do NOT count", () => {
+    for (const outcome of ["skipped", "skipped:rule_1", "skipped:rule_3", "skipped:rule_6", "skipped:rule_7", "skipped:rule_2x", "skipped:", "rule_2"]) {
+      expect(
+        classifyNewerInboundHandler({ claim: { status: "completed", outcome, lease_expires_at: past }, stamp: null, nowMs }),
+      ).toBe(false);
+    }
+  });
+  it("a delay stamp counts only while its claim has not since finished without handling", () => {
+    // finished without handling (bare skipped / errored non-retry): stamp is history
+    expect(classifyNewerInboundHandler({ claim: { status: "completed", outcome: "skipped", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(false);
+    expect(classifyNewerInboundHandler({ claim: { status: "error", error_message: "reply_ineligible", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(false);
+    // finished by a silent rule: handled
+    expect(classifyNewerInboundHandler({ claim: { status: "completed", outcome: silentSkipClaimOutcome(2), lease_expires_at: past }, stamp: workflow, nowMs })).toBe(true);
+    // not finished yet: the stamp still counts
+    expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(true);
+  });
+});
+
+describe("silentExitReason: the sender's own suppression is rule 0", () => {
+  const base = { configActive: true, consentState: "can_send_marketing", propertyDisabled: false };
+  it("contact do_not_contact, sms_opted_out and a suppressed destination phone are silent exits", () => {
+    expect(silentExitReason({ ...base, doNotContact: true })).toBe("contact_do_not_contact");
+    expect(silentExitReason({ ...base, smsOptedOut: true })).toBe("contact_sms_opted_out");
+    expect(silentExitReason({ ...base, phoneSuppressed: true })).toBe("phone_suppressed");
+    expect(silentExitReason({ ...base, doNotContact: false, smsOptedOut: false, phoneSuppressed: false })).toBeNull();
   });
 });
 

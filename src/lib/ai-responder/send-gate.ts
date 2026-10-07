@@ -10,25 +10,36 @@
  * and 8 ARE evaluated here, FIRST (before rules 1-6), so code order matches
  * the plan's table:
  *
- *  0. Seller opted out / suppressed, AI responder off for the org or property,
- *     or consent rules forbid a reply -> not sent, nothing flagged (silent by
- *     design; the existing gates apply as they do today).
+ *  0. Seller opted out / suppressed (consent log, the contact's
+ *     do_not_contact / sms_opted_out flags, or a suppressed destination phone),
+ *     AI responder off for the org or property, consent rules forbid a reply,
+ *     or the property is already flagged for a human / closed by a terminal
+ *     disposition -> not sent, nothing flagged (silent by design; the existing
+ *     gates apply as they do today). A lookup failure here is NOT a silent
+ *     pass: it is rule 7 (`send_check_failed`).
  *  8. A draft a human discarded, or that was already sent, is never re-sent
  *     or revived -> the run ends silently as already answered.
  *
  *  1. A newer inbound text from the seller exists: live handler -> not sent,
- *     no flag; no live handler -> not sent, flagged.
+ *     no flag; no live handler -> not sent, flagged. "Handled" includes a
+ *     claim that ended silently under rule 0, 2, 4, 5 or 8 (its claim outcome
+ *     is `skipped:rule_<n>`); a `skipped` claim with no rule reason (legacy /
+ *     unknown) is NOT handled, and a delay stamp counts only while its claim
+ *     has not since finished without handling the text.
  *  2. The seller is already answered (an AI reply to this inbound, or any
  *     human/rep text sent after the inbound, submitted or delivered) -> not
  *     sent, no flag.
  *  3. An unrelated conversational text (AI reply to a different inbound, or
  *     any other conversational text that does not answer the seller) has been
- *     submitted or delivered -> not sent, flagged.
+ *     submitted or delivered SINCE THE SELLER'S INBOUND -> not sent, flagged.
+ *     Submitted evidence that went out before the inbound is dropped by
+ *     `classifyGateRow` (no caller may widen the window); queued rows are
+ *     always kept.
  *  4. A competing reply (AI or human) is still queued, not yet submitted: a
  *     rep's text scheduled for a future time -> not sent, no flag; otherwise
  *     retry later (caller applies the 4-attempt budget), flag after the last.
- *  5. Only automated broadcasts that were submitted or delivered -> not sent,
- *     no flag.
+ *  5. Only automated broadcasts that were submitted or delivered since the
+ *     seller's inbound -> not sent, no flag (same time bound as rule 3).
  *  6. Otherwise send.
  *
  * No I/O in this file: every fact is gathered by the caller.
@@ -177,9 +188,18 @@ export function silentExitReason(args: {
   configActive: boolean;
   consentState: string | null | undefined;
   propertyDisabled: boolean;
+  /** contacts.do_not_contact on the SENDER's contact. */
+  doNotContact?: boolean | null;
+  /** contacts.sms_opted_out on the SENDER's contact. */
+  smsOptedOut?: boolean | null;
+  /** The destination phone is in sms_phone_suppressions. */
+  phoneSuppressed?: boolean;
 }): string | null {
   if (!args.configActive) return "disabled_org_wide";
   if (args.consentState === "opted_out") return "no_consent";
+  if (args.doNotContact) return "contact_do_not_contact";
+  if (args.smsOptedOut) return "contact_sms_opted_out";
+  if (args.phoneSuppressed) return "phone_suppressed";
   if (args.propertyDisabled) return "disabled_per_property";
   return null;
 }
@@ -205,6 +225,35 @@ function record(value: unknown): Record<string, unknown> | null {
  * `sequenceMessageIds` are row ids linked to a sequence step run.
  */
 export function classifyGateRow(
+  row: GateRow,
+  ctx: {
+    inboundMessageId: string | null;
+    inboundCreatedAtMs: number | null;
+    sequenceMessageIds?: ReadonlySet<string>;
+    nowMs: number;
+  },
+): GateOutboundFact | null {
+  const fact = classifyGateRowUnbounded(row, ctx);
+  if (!fact || fact.stage !== "submitted") return fact;
+  // Rules 3 and 5 are bounded "since the seller's inbound": submitted
+  // unrelated / broadcast evidence that went out BEFORE the inbound is not
+  // evidence about this inbound. (Answering authors are never dropped: they
+  // are already judged against the inbound by the classifier.) A row whose
+  // time cannot be read stays evidence.
+  if (
+    fact.author === "ai_other_inbound" ||
+    fact.author === "human_unrelated" ||
+    fact.author === "broadcast"
+  ) {
+    if (ctx.inboundCreatedAtMs !== null) {
+      const wentOutMs = Date.parse(row.sent_at ?? row.created_at);
+      if (!Number.isNaN(wentOutMs) && wentOutMs < ctx.inboundCreatedAtMs) return null;
+    }
+  }
+  return fact;
+}
+
+function classifyGateRowUnbounded(
   row: GateRow,
   ctx: {
     inboundMessageId: string | null;
@@ -289,16 +338,34 @@ export type NewerInboundStamp = {
  * Claim outcomes that mean the handler dealt with the seller's text: it sent
  * a reply or flagged the property for a human (`sent`, `escalated`), or ended
  * it by design through a suppression / terminal close (`opted_out`,
- * `auto_closed`: rule-0 type exits, silent by design). Every other finished
- * outcome (`skipped`, no consent, disabled, ...) did NOT handle the text.
+ * `auto_closed`: rule-0 type exits, silent by design). A claim that ended
+ * silently under rule 0, 2, 4, 5 or 8 records `skipped:rule_<n>` (see
+ * `silentSkipClaimOutcome`) and counts too. Every other finished outcome (a
+ * bare `skipped` with no rule reason - legacy / unknown -, no consent,
+ * disabled, ...) did NOT handle the text.
  */
 const HANDLED_CLAIM_OUTCOMES = new Set(["sent", "escalated", "opted_out", "auto_closed"]);
+
+/** Rules whose silent end counts as "handled" for rule 1. */
+export const SILENT_HANDLED_RULES = [0, 2, 4, 5, 8] as const;
+export type SilentHandledRule = (typeof SILENT_HANDLED_RULES)[number];
+
+/** The claim outcome that carries which rule ended a run silently. */
+export function silentSkipClaimOutcome(rule: SilentHandledRule): string {
+  return `skipped:rule_${rule}`;
+}
+
+function isHandledClaimOutcome(outcome: string | null | undefined): boolean {
+  if (!outcome) return false;
+  if (HANDLED_CLAIM_OUTCOMES.has(outcome)) return true;
+  return SILENT_HANDLED_RULES.some((rule) => outcome === silentSkipClaimOutcome(rule));
+}
 
 /**
  * "Live handler" (rule 1): a processing claim whose lease has not expired; a
  * claim that COMPLETED by sending a reply or flagging the property for a human
- * (judged by its outcome, not its status: a completed `skipped` claim handled
- * nothing); a retry whose scheduling was confirmed (claim parked
+ * (judged by its outcome, not its status: a completed bare `skipped` claim
+ * handled nothing; one that ended silently under rule 0/2/4/5/8 did); a retry whose scheduling was confirmed (claim parked
  * `retry_scheduled:*` AND the inbound carries a `delayed` stamp with its
  * workflow run id, written only after `start()` succeeded); or a reply delay
  * with a workflow id. The confirmed delay stamp counts alongside an expired
@@ -319,7 +386,7 @@ export function classifyNewerInboundHandler(args: {
 
   if (claim) {
     if (claim.status === "completed") {
-      return HANDLED_CLAIM_OUTCOMES.has(claim.outcome ?? "");
+      return isHandledClaimOutcome(claim.outcome);
     }
     if (claim.status === "processing") {
       const expires = claim.lease_expires_at ? Date.parse(claim.lease_expires_at) : Number.NaN;
