@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET } from "./route";
 
@@ -18,8 +18,14 @@ describe("GET /api/webhooks/replay/handshake", () => {
   it("answers 500 when the stub flag is set on a hosted deployment", async () => {
     process.env.SMS_PROVIDER_STUB = "1";
     process.env.VERCEL_ENV = "production";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await GET();
     expect(res.status).toBe(500);
+    // reason is logged server-side via the reporter
+    expect(JSON.stringify(spy.mock.calls)).toContain("VERCEL_ENV is set");
+    spy.mockRestore();
+    // fixed string only: the refusal reason (env details) must not leak
+    expect(await res.json()).toEqual({ error: "replay stub misconfigured" });
   });
   it("answers with the stub state when the stub is on", async () => {
     process.env.SMS_PROVIDER_STUB = "1";

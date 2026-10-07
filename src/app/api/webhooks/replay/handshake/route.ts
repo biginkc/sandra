@@ -12,8 +12,10 @@ export async function GET() {
     handshake = getReplayHandshake();
   } catch (error) {
     // Unsafe environment with SMS_PROVIDER_STUB=1: fail loudly, never 200/404.
+    const { reportError } = await import("@/lib/errors/report");
+    reportError(error, { tags: { surface: "replay_handshake" } });
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "replay stub misconfigured" },
+      { error: "replay stub misconfigured" },
       { status: 500, headers: { "Cache-Control": "no-store" } },
     );
   }

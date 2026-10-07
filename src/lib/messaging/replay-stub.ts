@@ -1,5 +1,7 @@
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 
+import { PROD_PROJECT_REF } from "./replay-prod-ref";
+
 /**
  * Messages v2 production-replay safety switch (docs/messages-v2-replay.md).
  *
@@ -34,8 +36,10 @@ export function isReplayStubEnabled(): boolean {
   } catch {
     return refuse("NEXT_PUBLIC_SUPABASE_URL is missing or invalid");
   }
+  const allowed = process.env.REPLAY_ALLOW_PROJECT_REF?.trim();
+  if (allowed === PROD_PROJECT_REF) refuse("REPLAY_ALLOW_PROJECT_REF is the production project ref");
+  if (host.toLowerCase().includes(PROD_PROJECT_REF)) refuse("Supabase host is the production project");
   if (!isLoopbackHost(host)) {
-    const allowed = process.env.REPLAY_ALLOW_PROJECT_REF?.trim();
     if (!allowed || host !== `${allowed}.supabase.co`) {
       refuse("Supabase host is not loopback and not the explicitly allowed project ref");
     }

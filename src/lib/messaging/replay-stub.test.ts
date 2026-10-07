@@ -7,6 +7,7 @@ import { TwilioMessagingProvider } from "./providers/twilio";
 import { DialpadMessagingProvider } from "./providers/dialpad";
 import { getMessagingProvider, getWebhookProvider } from "./registry";
 import { ConfigurationError } from "@/lib/errors/classes";
+import { PROD_PROJECT_REF } from "./replay-prod-ref";
 import { GET as handshakeGET } from "@/app/api/webhooks/replay/handshake/route";
 import {
   ReplayStubConfigurationError,
@@ -64,6 +65,35 @@ describe("isReplayStubEnabled", () => {
     process.env.SMS_PROVIDER_STUB = "1";
     expect(isReplayStubEnabled()).toBe(true);
   });
+});
+
+describe("isReplayStubEnabled hardening", () => {
+  beforeEach(() => {
+    process.env.SMS_PROVIDER_STUB = "1";
+  });
+  it("refuses an empty-string VERCEL_ENV", () => {
+    process.env.VERCEL_ENV = "";
+    expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+  });
+  it("refuses REPLAY_ALLOW_PROJECT_REF equal to the prod ref", () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = `https://${PROD_PROJECT_REF}.supabase.co`;
+    process.env.REPLAY_ALLOW_PROJECT_REF = PROD_PROJECT_REF;
+    expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+  });
+  it("refuses any Supabase host containing the prod ref", () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = `https://db.${PROD_PROJECT_REF}.supabase.co`;
+    expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+    process.env.NEXT_PUBLIC_SUPABASE_URL = `https://${PROD_PROJECT_REF}.evil.com`;
+    process.env.REPLAY_ALLOW_PROJECT_REF = "someotherref";
+    expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+  });
+  it.each(["http://127.0.0.1.evil.com:54331", "http://localhost.evil.com:54331", "http://[::ffff:127.0.0.1]:54331"])(
+    "refuses spoofed loopback host %s",
+    (url) => {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = url;
+      expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+    },
+  );
 });
 
 describe("real providers refuse the network under SMS_PROVIDER_STUB=1", () => {

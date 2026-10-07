@@ -7,8 +7,9 @@ import path from "node:path";
  * See docs/messages-v2-replay.md.
  */
 
-/** Sandra production Supabase project (README.md / MIGRATION-NOTES.md). */
-export const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
+import { PROD_PROJECT_REF } from "../../../src/lib/messaging/replay-prod-ref";
+
+export { PROD_PROJECT_REF };
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const HOSTED_SUPABASE_HOST = /^([a-z0-9]{20})\.supabase\.(?:co|in)$/;
