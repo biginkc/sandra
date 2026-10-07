@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event"
 import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
 
-import { CoachCallContext } from "./coach-call-context"
+import { CallScreenLinkContext, CoachCallContext } from "./coach-call-context"
 import { MyLeadsQueue } from "./queue"
 import {
   MY_LEAD_STAGE_ORDER,
@@ -765,5 +765,23 @@ describe("MyLeadsQueue deep-link focus", () => {
     const row = within(screen.getByTestId("my-lead-row-property-3"))
     await userEvent.click(row.getByRole("button", { name: "Call with coach" }))
     expect(coach).toHaveBeenCalledExactlyOnceWith("property-3")
+  })
+
+  it("offers Open call screen on a row only when the call screen is on (today there is no link to it anywhere)", async () => {
+    const { unmount } = render(<MyLeadsQueue {...buildProps()} />)
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
+    expect(screen.queryByText("Open call screen")).not.toBeInTheDocument()
+    unmount()
+
+    const open = vi.fn()
+    render(
+      <CallScreenLinkContext.Provider value={open}>
+        <MyLeadsQueue {...buildProps()} />
+      </CallScreenLinkContext.Provider>,
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
+    const row = within(screen.getByTestId("my-lead-row-property-3"))
+    await userEvent.click(row.getByRole("button", { name: "Open call screen" }))
+    expect(open).toHaveBeenCalledExactlyOnceWith("property-3")
   })
 })

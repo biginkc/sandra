@@ -297,7 +297,7 @@ function DeepLinkAcceptanceApp() {
         grants: [],
       }}
       postCallPrompt={autoPrompt}
-      callFeatures={{ clickToDial: true, autoPrompt, callbackAlert: false }}
+      callFeatures={{ clickToDial: true, autoPrompt, callbackAlert: false, callScreen: false }}
     />
   )
 }

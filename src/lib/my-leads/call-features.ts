@@ -11,17 +11,21 @@ export type MyLeadsCallFeatures = {
   autoPrompt: boolean;
   /** 2.8: the callback-due banner and strip pin. */
   callbackAlert: boolean;
+  /** The call screen route is on (`call_screen` flag): Call lands on it and rows offer "Open call screen". */
+  callScreen: boolean;
 };
 
-export const CALL_FEATURES_OFF: MyLeadsCallFeatures = { clickToDial: false, autoPrompt: false, callbackAlert: false };
+export const CALL_FEATURES_OFF: MyLeadsCallFeatures = { clickToDial: false, autoPrompt: false, callbackAlert: false, callScreen: false };
 
 export async function getMyLeadsCallFeatures(orgId: string): Promise<MyLeadsCallFeatures> {
   const gate = async (flag: "click_to_dial" | "auto_prompt" | "callback_alert", feature: "api_dial" | "ack_prompts" | "callbacks_due") =>
     (await getMyLeadsFlag(orgId, flag)) ? schemaReady(feature) : false;
-  const [clickToDial, autoPrompt, callbackAlert] = await Promise.all([
+  const [clickToDial, autoPrompt, callbackAlert, callScreen] = await Promise.all([
     gate("click_to_dial", "api_dial"),
     gate("auto_prompt", "ack_prompts"),
     gate("callback_alert", "callbacks_due"),
+    // The route itself only checks the flag (page.tsx), so the entry points do too.
+    getMyLeadsFlag(orgId, "call_screen"),
   ]);
-  return { clickToDial, autoPrompt, callbackAlert };
+  return { clickToDial, autoPrompt, callbackAlert, callScreen };
 }

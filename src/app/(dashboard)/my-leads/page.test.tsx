@@ -48,7 +48,7 @@ vi.mock("@/lib/my-leads/drip-queries", () => ({
   listMyLeadsInDrip: mocks.listMyLeadsInDrip,
 }));
 vi.mock("@/lib/my-leads/call-features", () => ({
-  CALL_FEATURES_OFF: { clickToDial: false, autoPrompt: false, callbackAlert: false },
+  CALL_FEATURES_OFF: { clickToDial: false, autoPrompt: false, callbackAlert: false, callScreen: false },
   getMyLeadsCallFeatures: mocks.getMyLeadsCallFeatures,
 }));
 vi.mock("@/lib/dialpad-cti/dispatch", () => ({
@@ -139,7 +139,7 @@ beforeEach(() => {
     counts: {},
   });
   mocks.loadDialpadCallingBootstrap.mockResolvedValue(null);
-  mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: true, autoPrompt: false, callbackAlert: false });
+  mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: true, autoPrompt: false, callbackAlert: false, callScreen: false });
 });
 
 describe("MyLeadsPage availability boundary", () => {
@@ -349,11 +349,11 @@ describe("MyLeadsPage availability boundary", () => {
           [Record<string, unknown>]
         >
       )[0]?.[0],
-    ).toMatchObject({ dialpad: bootstrap, callFeatures: { clickToDial: true, autoPrompt: false, callbackAlert: false } });
+    ).toMatchObject({ dialpad: bootstrap, callFeatures: { clickToDial: true, autoPrompt: false, callbackAlert: false, callScreen: false } });
   });
 
   it("never loads the Dialpad bootstrap while click_to_dial is off (the softphone branch stays)", async () => {
-    mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: false, autoPrompt: true, callbackAlert: true });
+    mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: false, autoPrompt: true, callbackAlert: true, callScreen: false });
 
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
 
@@ -364,7 +364,7 @@ describe("MyLeadsPage availability boundary", () => {
           [Record<string, unknown>]
         >
       )[0]?.[0],
-    ).toMatchObject({ dialpad: null, callFeatures: { clickToDial: false, autoPrompt: true, callbackAlert: true } });
+    ).toMatchObject({ dialpad: null, callFeatures: { clickToDial: false, autoPrompt: true, callbackAlert: true, callScreen: false } });
   });
 
   it("keeps the existing calling flow when the Dialpad bootstrap fails", async () => {

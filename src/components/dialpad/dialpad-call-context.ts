@@ -42,11 +42,17 @@ export type DialpadCallContextValue = {
   registerPageHandlers?: (handlers: DialpadPageHandlers) => () => void;
   /** Call activities whose outcome was saved this session; a stale poll must never reopen their prompt. */
   loggedCallActivityIds?: ReadonlySet<string>;
+  /**
+   * A prompt for this Sandra call was closed without saving. That means "later", never "dismissed": the
+   * call stays on the rep's "not logged" reminder until its outcome is saved (clearEndedCall).
+   */
+  markUnlogged?: (call: { callActivityId: string; propertyId: string; label: string }) => void;
   /** Open the Log outcome prompt for an ended call right where the rep is (no navigation). Absent when the viewer cannot log. */
   openLogOutcome?: (propertyId: string, callActivityId: string) => void;
   /** Server-derived: click_to_dial on, org connection active, viewer bound, api_dial schema ready. */
   enabled: boolean;
-  startCall: (request: DialpadCallRequest) => void;
+  /** Resolves true when the dial was accepted, false when it was refused (another call holds the lock, no contact, error, fallback). A page navigates to the call screen only on true. */
+  startCall: (request: DialpadCallRequest) => Promise<boolean>;
 };
 
 export const DialpadCallContext = createContext<DialpadCallContextValue | null>(null);
