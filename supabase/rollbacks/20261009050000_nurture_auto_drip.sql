@@ -4,7 +4,7 @@ begin;
 
 drop trigger if exists trg_hot_enrollment_takeover_fence on public.sequence_enrollments;
 drop function if exists public.fn_hot_enrollment_takeover_fence();
-alter table public.sequence_enrollments drop column if exists hot_fence_at;
+alter table public.sequence_enrollments drop column if exists hot_fence_message_id;
 drop trigger if exists trg_pause_hot_drip_on_person_assignment on public.properties;
 drop function if exists public.fn_pause_hot_drip_on_person_assignment();
 alter table public.properties drop column if exists last_person_takeover_at;

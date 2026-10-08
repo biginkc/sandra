@@ -91,15 +91,15 @@ end $$;
 alter table public.properties
   add column if not exists last_person_takeover_at timestamptz;
 
--- Atomic fence for the hot-lead enrolment. The dispatch passes `hot_fence_at` (the
--- triggering inbound's arrival time). If, at insert time, a person has taken over at/after
+-- Atomic fence for the hot-lead enrolment. The dispatch passes `hot_fence_message_id` (the
+-- triggering inbound); its arrival time is read here in SQL at full precision. If, at insert time, a person has taken over at/after
 -- it or the seller has sent a NEWER inbound, the row is born `paused` (never runnable),
 -- so no scheduler tick can send in a gap. The `for share` lock on the property row also
 -- orders this against the takeover marker write (which needs the row exclusively): a takeover
 -- either lands before the check (row born paused) or waits for the enrolment to commit and
 -- then pauses it.
 alter table public.sequence_enrollments
-  add column if not exists hot_fence_at timestamptz;
+  add column if not exists hot_fence_message_id uuid;
 
 create or replace function public.fn_hot_enrollment_takeover_fence()
 returns trigger
@@ -109,22 +109,27 @@ set search_path = public, pg_temp
 as $$
 declare
   v_takeover timestamptz;
+  v_fence timestamptz;
 begin
-  if new.auto_enrolled_route is distinct from 'hot_book_appointment' or new.hot_fence_at is null then
+  if new.auto_enrolled_route is distinct from 'hot_book_appointment' or new.hot_fence_message_id is null then
+    return new;
+  end if;
+  select m.created_at into v_fence from public.messages m where m.id = new.hot_fence_message_id;
+  if v_fence is null then
     return new;
   end if;
   select p.last_person_takeover_at into v_takeover
   from public.properties p
   where p.id = new.property_id
   for share;
-  if v_takeover is not null and v_takeover >= new.hot_fence_at then
+  if v_takeover is not null and v_takeover >= v_fence then
     new.status := 'paused';
     new.pause_reason := 'person_took_over';
   elsif exists (
     select 1 from public.messages m
     where m.property_id = new.property_id
       and m.direction = 'inbound'
-      and m.created_at > new.hot_fence_at
+      and m.created_at > v_fence
   ) then
     new.status := 'paused';
     new.pause_reason := 'inbound_reply';

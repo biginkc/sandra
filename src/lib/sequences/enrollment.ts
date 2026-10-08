@@ -54,8 +54,8 @@ export async function enrollLead(
      */
     firstSendNotBefore?: Date;
     /** Which auto-route created this enrolment (immutable identity used by takeover pauses). */
-    /** Hot-lead fence: born paused if a person took over / the seller replied again after this time (DB trigger). */
-    hotFenceAt?: Date;
+    /** Hot-lead fence: the triggering inbound. Born paused if a person took over / the seller replied again after it (DB trigger reads its time at full precision). */
+    hotFenceMessageId?: string;
     autoRoute?: "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
   },
 ): Promise<EnrollmentOutcome> {
@@ -234,7 +234,7 @@ export async function enrollLead(
       next_run_at: nextRunAt.toISOString(),
       enrolled_by_user_id: params.enrolledByUserId ?? null,
       ...(params.autoRoute ? { auto_enrolled_route: params.autoRoute } : {}),
-      ...(params.hotFenceAt ? { hot_fence_at: params.hotFenceAt.toISOString() } : {}),
+      ...(params.hotFenceMessageId ? { hot_fence_message_id: params.hotFenceMessageId } : {}),
     })
     .select("id")
     .single();

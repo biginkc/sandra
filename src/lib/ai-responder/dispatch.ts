@@ -987,9 +987,6 @@ async function classifyAndHandleNonRouteOutcomes(
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
-  // Fallback fence for the hot-lead enrolment (normally the triggering inbound's
-  // own arrival time is used: see enrollHotLeadInBookAppointment).
-  const dispatchFenceAt = new Date().toISOString();
   const classification = await classifyForDispatch(
     supabase,
     {
@@ -1087,7 +1084,6 @@ async function classifyAndHandleNonRouteOutcomes(
         propertyId: input.propertyId,
         sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
         inboundMessageId: input.inboundMessageId ?? null,
-        fallbackFenceAt: dispatchFenceAt,
         runCtx,
       });
       await completeClaim(supabase, input.propertyId, {
@@ -2590,7 +2586,7 @@ const ENROLL_THREW = "enroll_threw";
 
 async function enrollHotLeadInBookAppointment(
   supabase: SupabaseClient<Database>,
-  a: { propertyId: string; sequenceId: string | null; inboundMessageId: string | null; fallbackFenceAt: string; runCtx?: MaybeRunContext },
+  a: { propertyId: string; sequenceId: string | null; inboundMessageId: string | null; runCtx?: MaybeRunContext },
 ): Promise<void> {
   let detail: Record<string, unknown>;
   let result: "applied" | "error";
@@ -2599,24 +2595,14 @@ async function enrollHotLeadInBookAppointment(
       result = "error";
       detail = { why: "no_drip_configured", route: "hot_book_appointment" };
     } else {
-      // The fence is the triggering inbound's own arrival time, so a person taking
-      // over or the seller replying again at ANY point since (classification and
-      // config loads included) makes the enrolment be born paused (DB trigger).
-      let fenceAt = a.fallbackFenceAt;
-      if (a.inboundMessageId) {
-        const { data: inbound } = await supabase
-          .from("messages")
-          .select("created_at")
-          .eq("id", a.inboundMessageId)
-          .maybeSingle();
-        if (inbound?.created_at) fenceAt = inbound.created_at;
-      }
+      // Fence = the triggering inbound (its time is read in SQL at full precision): a person
+      // taking over or the seller replying again since makes the enrolment be born paused.
       const outcome = await enrollLead(supabase, {
         propertyId: a.propertyId,
         sequenceId: a.sequenceId,
         enrolledByUserId: null,
         autoRoute: "hot_book_appointment",
-        hotFenceAt: new Date(fenceAt),
+        ...(a.inboundMessageId ? { hotFenceMessageId: a.inboundMessageId } : {}),
       });
       if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
         result = "applied";

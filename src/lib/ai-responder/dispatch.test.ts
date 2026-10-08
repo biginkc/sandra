@@ -7028,7 +7028,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           enrolledByUserId: null,
           autoRoute: "hot_book_appointment",
           // Fenced at the triggering inbound's arrival: a takeover / newer reply since makes it be born paused.
-          hotFenceAt: expect.any(Date),
+          hotFenceMessageId: "inbound-hot",
         });
       });
 
