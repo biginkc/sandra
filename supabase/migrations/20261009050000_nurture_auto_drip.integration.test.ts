@@ -323,6 +323,20 @@ describe("nurture auto-drip switch", () => {
         await resume(property, users.owner);
         expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
       });
+      it("a seller reply during a call pause is authoritative: neither signed-in cleanup nor the system sweeper can resume it", async () => {
+        for (const uid of [users.owner, null]) {
+          const property = await seed(sequenceId, "hot_book_appointment");
+          await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+          const contact = (await db.query(`select contact_id from public.sequence_enrollments where property_id = $1`, [property])).rows[0].contact_id;
+          await db.query(
+            `insert into public.messages (org_id, property_id, contact_id, channel, direction, body, status, created_at)
+             values ($1, $2, $3, 'sms', 'inbound', 'reply during call', 'received', now() + interval '1 second')`,
+            [orgId, property, contact],
+          );
+          await resume(property, uid);
+          expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "inbound_reply" });
+        }
+      });
       it("with no takeover, the normal cleanup resume works, and other routes are untouched", async () => {
         const property = await seed(sequenceId, "hot_book_appointment");
         await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);

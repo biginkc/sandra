@@ -172,7 +172,7 @@ create trigger trg_hot_enrollment_takeover_fence
 
 -- A takeover is authoritative at RESUME time too. Whatever interleaving of call-start,
 -- call-cleanup and takeover happened, an automatic (system) resume of a hot enrolment is
--- refused once a person has taken over since it was created, and so is the resume of a
+-- refused once a person has taken over, or the seller has replied, since it was created, and so is the resume of a
 -- pause that only the call machinery sets (call_in_progress / norma_call), even from a
 -- signed-in softphone session (that is automatic cleanup, not a decision). A person's own
 -- deliberate resume of a person_took_over pause is still allowed: they own the lead.
@@ -196,6 +196,16 @@ begin
   if v_takeover is not null and v_takeover >= new.enrolled_at then
     new.status := 'paused';
     new.pause_reason := 'person_took_over';
+  elsif exists (
+    -- The seller replying also stops the drip, whatever temporary pause (a call) it sits in:
+    -- the inbound pause only touches ACTIVE rows, so cleanup must not undo the reply.
+    select 1 from public.messages m
+    where m.property_id = new.property_id
+      and m.direction = 'inbound'
+      and m.created_at > new.enrolled_at
+  ) then
+    new.status := 'paused';
+    new.pause_reason := 'inbound_reply';
   end if;
   return new;
 end;
