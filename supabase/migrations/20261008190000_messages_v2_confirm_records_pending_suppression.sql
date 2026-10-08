@@ -16,6 +16,17 @@
 -- ledger rows older than a threshold with no retried_ok, for confirmed
 -- opted_out/dnc reviews, in a rotating order so permanently failing rows cannot
 -- starve the batch.
+--
+-- Intentional behaviors (Fable round 1):
+--  (a) A confirm with dispo_applied = true relies on the suppression that was
+--      recorded at PROPOSAL time; this migration does not re-suppress there.
+--  (b) On the happy path a confirm briefly flips needs_human_attention to true
+--      (hold pointer written in the confirm transaction) until the TypeScript
+--      discharge suppresses the phone and clears it. That flicker is intentional:
+--      the hold must exist before any process can die between the two steps.
+--  (c) The auto-clear sweep only clears a hold with at least one PROVEN
+--      suppression (a resolved ledger id). Legacy bare 'suppression_incomplete'
+--      holds with no ids, or with only malformed ids, stay for a human Retry.
 
 begin;
 
@@ -388,6 +399,10 @@ create index if not exists properties_suppression_hold_idx
   on public.properties (id)
   where left(last_ai_escalation_reason, 22) = 'suppression_incomplete';
 
+create index if not exists lead_events_suppression_incomplete_created_idx
+  on public.lead_events (created_at)
+  where event_type = 'suppression_incomplete';
+
 create or replace function public.fn_list_resolvable_suppression_holds(p_limit integer default 25)
 returns table(property_id uuid)
 language sql
@@ -398,6 +413,12 @@ as $$
   select p.id
   from public.properties p
   where left(p.last_ai_escalation_reason, 22) = 'suppression_incomplete'
+    -- At least one proven suppression: a bare or all-malformed hold has nothing
+    -- suppressed and must never be auto-cleared (TCPA).
+    and exists (
+      select 1 from public.fn_suppression_ledger_state(p.id) s
+      where s.resolved
+    )
     and not exists (
       select 1 from public.fn_suppression_ledger_state(p.id) s
       where s.ledger_failed and not s.resolved

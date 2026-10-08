@@ -229,6 +229,7 @@ $$;
 
 drop function if exists public.fn_list_resolvable_suppression_holds(integer);
 drop index if exists public.properties_suppression_hold_idx;
+drop index if exists public.lead_events_suppression_incomplete_created_idx;
 drop function if exists public.fn_list_outstanding_suppression_obligations(integer, integer);
 drop function if exists public.fn_record_suppression_attempt_failure(uuid, uuid, uuid);
 drop function if exists public.fn_suppression_retry_backoff(integer);
