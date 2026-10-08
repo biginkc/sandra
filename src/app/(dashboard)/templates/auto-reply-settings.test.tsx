@@ -30,11 +30,19 @@ beforeEach(() => {
 describe("<AutoReplySettingsSection />", () => {
   it("lists only the outcomes that may be answered automatically", () => {
     render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
-    expect(screen.getByTestId("auto-reply-row-nurture")).toBeVisible();
-    expect(screen.getByTestId("auto-reply-row-not_interested")).toBeVisible();
-    for (const never of ["new_lead", "opted_out", "dnc", "wrong_number"]) {
+    for (const outcome of ["nurture", "not_interested", "wrong_number", "hostile"]) {
+      expect(screen.getByTestId(`auto-reply-row-${outcome}`)).toBeVisible();
+    }
+    for (const never of ["new_lead", "opted_out", "dnc"]) {
       expect(screen.queryByTestId(`auto-reply-row-${never}`)).not.toBeInTheDocument();
     }
+  });
+
+  it("tells the owner that wrong-number and hostile replies stop all texts to the number", () => {
+    render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
+    expect(screen.getByTestId("auto-reply-note-wrong_number")).toHaveTextContent("all future texts to the number stop");
+    expect(screen.getByTestId("auto-reply-note-hostile")).toHaveTextContent("always stops all future texts");
+    expect(screen.queryByTestId("auto-reply-note-nurture")).not.toBeInTheDocument();
   });
 
   it("offers approved templates only, defaulting to no automatic reply", () => {

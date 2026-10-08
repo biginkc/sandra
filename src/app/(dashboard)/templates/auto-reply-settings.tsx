@@ -10,6 +10,7 @@ import { type TemplateRow } from "./actions";
 import { setAutoReplyMapping } from "./auto-reply-actions";
 import {
   AUTO_REPLY_OUTCOMES,
+  autoReplyNote,
   type AutoReplyOutcome,
   type AutoReplySettings,
 } from "./auto-reply-types";
@@ -89,6 +90,11 @@ export function AutoReplySettingsSection({ settings, templates }: Props) {
                   </label>
                 )}
               </div>
+              {autoReplyNote(outcome) && (
+                <p className="text-muted-foreground text-xs" data-testid={`auto-reply-note-${outcome}`}>
+                  {autoReplyNote(outcome)}
+                </p>
+              )}
               {mapping && mapped && mapped.approved_for_auto_send !== true && (
                 <p className="text-xs text-amber-700 dark:text-amber-300" role="status">
                   This template is not approved, so nothing will be sent.

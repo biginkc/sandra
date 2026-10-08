@@ -18,6 +18,7 @@ import {
   applyKeywordEscalation,
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
+  ensureHostileSuppression,
   flagAndDeadLetter,
   inboundStampOutcomeOf,
   markPropertyNeedsAttention,
@@ -73,6 +74,7 @@ import {
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
+import { isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 
@@ -1225,6 +1227,7 @@ export async function handleInboundWebhook(
               { runContext: runCtx },
             );
             if (!preGates.ok) {
+              await suppressIfHostile(supabase, dispatchInput, runCtx);
               await stampAiResponderTerminalOutcome(supabase, {
                 messageId: insertOutcome.messageId,
                 conversationId: insertOutcome.conversationId,
@@ -1240,6 +1243,7 @@ export async function handleInboundWebhook(
               });
 
               if (keywordEscalation.escalated) {
+                await suppressIfHostile(supabase, dispatchInput, runCtx);
                 await stampAiResponderTerminalOutcome(supabase, {
                   messageId: insertOutcome.messageId,
                   conversationId: insertOutcome.conversationId,
@@ -1728,6 +1732,20 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
     (message.includes("processing_status") &&
       message.includes("check constraint"))
   );
+}
+
+/**
+ * A delayed-reply inbound that ends BEFORE dispatch (pre-gate block, keyword
+ * escalation) still stops all future texts to a hostile seller's number.
+ * No reply is attempted here. Never throws.
+ */
+async function suppressIfHostile(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  runCtx: Parameters<typeof ensureHostileSuppression>[2],
+): Promise<void> {
+  if (!isHostileInbound(input.inboundBody)) return;
+  await ensureHostileSuppression(supabase, input, runCtx);
 }
 
 async function dispatchAndStampAiResponder(
