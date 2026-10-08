@@ -354,6 +354,23 @@ describe("confirm records a durable suppression obligation", () => {
     expect(await prop()).toEqual({ n: true, r: "suppression_incomplete" });
   });
 
+  it("sweeper never auto-clears a two-id pointer where one id is resolved and the other is an unbacked outstanding id", async () => {
+    await seed();
+    await confirm();
+    await recordSuppressionRetriedOk({ propertyId, reviewId, actorId: null });
+    const other = randomUUID(); // no ledger row: only the pointer records it
+    const pointer = `suppression_incomplete:${reviewId},${other}`;
+    await db.query(
+      "update public.properties set needs_human_attention = true, last_ai_escalation_reason = $2 where id = $1",
+      [propertyId, pointer],
+    );
+    const listed = await db.query("select * from public.fn_list_resolvable_suppression_holds(100)");
+    expect(listed.rows.some((r) => r.property_id === propertyId)).toBe(false);
+    const out = await retryOutstandingSuppressionObligations(h.shim as never);
+    expect(out).toMatchObject({ holdsCleared: 0 });
+    expect(await prop()).toEqual({ n: true, r: pointer });
+  });
+
   it("sweeper never auto-clears a hold whose pointer ids are all malformed", async () => {
     await seed();
     await db.query(
