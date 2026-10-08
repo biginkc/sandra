@@ -53,6 +53,12 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "jev_wrong_number_all_needs_confirm",
   "model_opt_out_needs_confirm",
   "model_dnc_needs_confirm",
+  // Hostile / opt-out PHRASE wording (Jarrad 2026-10-08): held for a person.
+  "hostile_needs_confirm",
+  "optout_phrase_needs_confirm",
+  "sold_needs_human",
+  "wrong_number_suppression_failed",
+  "hostile_suppression_failed",
   "ai_disposition_replay_lookup_failed",
   "ai_disposition_missing_thread_identity",
   // Run outcomes / reasons.
@@ -101,6 +107,8 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "send_timeout:",
   "dead_letter_failed:",
   "suppression_incomplete:",
+  "hostile_needs_confirm:",
+  "optout_phrase_needs_confirm:",
   "jev_below_threshold:",
   "jev_automatic_failed:",
   "model:",

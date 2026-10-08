@@ -28,6 +28,12 @@ const mocks = vi.hoisted(() => ({
   recordThread: vi.fn(async () => undefined),
   deadLetter: vi.fn(async () => true),
   flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
+  optOut: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/messaging/opt-out-phone")>()),
+  applyPhoneLevelOptOut: mocks.optOut,
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -544,5 +550,41 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
     await runWebhook();
     expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+
+  describe("opt-out wording: only a bare carrier STOP suppresses automatically (Jarrad 2026-10-08)", () => {
+    const withBody = async (body: string) => {
+      const original = INPUT.body;
+      (INPUT as { body: string }).body = body;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      mocks.serviceClient = handlerClient([{ data: INSERTED, error: null }]).client;
+      try {
+        await handleInboundWebhook(
+          new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+          { includeFullUrl: true, provider: provider() as never },
+        );
+      } finally {
+        (INPUT as { body: string }).body = original;
+      }
+    };
+
+    it.each(["STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit"])("bare %j suppresses the number", async (body) => {
+      await withBody(body);
+      expect(mocks.optOut).toHaveBeenCalledTimes(1);
+      expect(mocks.optOut).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ surface: "stop" }));
+    });
+
+    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot"])(
+      "phrase %j does NOT suppress: it is held for a person, nothing dispatched",
+      async (body) => {
+        await withBody(body);
+        expect(mocks.optOut).not.toHaveBeenCalled();
+        expect(mocks.dispatchAi).not.toHaveBeenCalled();
+        expect(mocks.markAttention).toHaveBeenCalledTimes(1);
+        const reason = (mocks.markAttention.mock.calls[0] as unknown[])[2] as string;
+        expect(reason).toMatch(/^(hostile_needs_confirm|optout_phrase_needs_confirm):message-1$/);
+      },
+    );
   });
 });

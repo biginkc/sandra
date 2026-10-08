@@ -396,8 +396,8 @@ describe("hostile hold: Confirm do-not-contact", () => {
       draft: undefined,
       draft_held: false,
       sources: ["needs_attention"],
-      flag_reason: "hostile_needs_confirm",
-      seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-08T11:55:00+00:00" },
+      flag_reason: "hostile_needs_confirm:m1",
+      seen: { through: null, flagReason: "hostile_needs_confirm:m1", flagAt: "2026-10-08T11:55:00+00:00" },
     });
 
   it("is offered only on a hostile hold, and needs a second click to confirm", async () => {
@@ -411,7 +411,7 @@ describe("hostile hold: Confirm do-not-contact", () => {
     await waitFor(() =>
       expect(confirm).toHaveBeenCalledWith({
         propertyId: "p1",
-        seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-08T11:55:00+00:00" },
+        seen: { through: null, flagReason: "hostile_needs_confirm:m1", flagAt: "2026-10-08T11:55:00+00:00" },
       }),
     );
     expect(await screen.findByTestId("hold-status")).toHaveTextContent("reply sent, number suppressed");

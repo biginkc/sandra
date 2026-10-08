@@ -1392,11 +1392,11 @@ async function resolveAndApplyRoute(
     }
     route = resolveResponderOutcome(generated);
   }
-  if (isHostileInbound(input.inboundBody) && route.kind !== "opt_out") {
+  if (isHostileInbound(input.inboundBody)) {
     // Hostile wording: hold for a person, whatever else the classifier decided
-    // (close, nurture, wrong number, dnc, a generated reply). Only an explicit
-    // opt-out the classifier recognises keeps going through the existing
-    // opt-out path unchanged. A hostile "dnc" is NEVER applied automatically.
+    // (close, nurture, wrong number, opt-out, dnc, a generated reply). Jarrad
+    // (2026-10-08): no auto DNC decisions; only a bare carrier STOP keyword
+    // (handled in the webhook before dispatch) suppresses automatically.
     return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
   }
   const expectedDisposition: AiReviewDisposition | null =
@@ -5968,10 +5968,14 @@ async function holdHostileForConfirm(
     result: "block",
     detail: { reason: HOSTILE_NEEDS_CONFIRM_REASON },
   }, runCtx);
+  // The originating inbound id rides in the hold reason so "Confirm
+  // do-not-contact" acts on exactly this message's contact and number.
   const flagOk = await markPropertyNeedsAttention(
     supabase,
     input.propertyId,
-    HOSTILE_NEEDS_CONFIRM_REASON,
+    input.inboundMessageId
+      ? `${HOSTILE_NEEDS_CONFIRM_REASON}:${input.inboundMessageId}`
+      : HOSTILE_NEEDS_CONFIRM_REASON,
     runCtx,
   );
   await completeClaim(supabase, input.propertyId, {

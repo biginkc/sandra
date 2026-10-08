@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 
+import { isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
@@ -236,7 +237,7 @@ export function HoldActionControls({
       onReload,
     );
 
-  const hostileNeedsConfirm = !!hold.flag_reason?.startsWith("hostile_needs_confirm");
+  const hostileNeedsConfirm = isConfirmDncReason(hold.flag_reason);
   const [confirmingDnc, setConfirmingDnc] = useState(false);
 
   const confirmDnc = () =>
@@ -359,8 +360,9 @@ export function HoldActionControls({
           className="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100"
         >
           <span>
-            Hostile wording. Nothing was sent and the number is still active. Confirming stops all future texts to
-            this number and sends the approved hostile reply, if one is set up. Dismiss leaves the number active.
+            This text asks us to stop or is hostile. Nothing was sent and the number is still active. Confirming stops
+            all future texts to this number (and sends the approved hostile reply for hostile wording, if one is set
+            up). Dismiss leaves the number active.
           </span>
           {actions.confirmDoNotContact &&
             (confirmingDnc ? (

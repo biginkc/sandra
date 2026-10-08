@@ -2407,7 +2407,7 @@ describe("dispatchAiResponse debounce", () => {
       state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
       const supabase = createMockSupabase(state);
       installSendMock(state);
-      seedInboundMessage(state, { id: "inbound-above-threshold-opted-out", body: "STOP texting me" });
+      seedInboundMessage(state, { id: "inbound-above-threshold-opted-out", body: "Please send no more messages" });
       const originalFetch = globalThis.fetch;
       vi.stubGlobal("fetch", vi.fn(async () => ({
         ok: true, status: 200,
@@ -2416,7 +2416,7 @@ describe("dispatchAiResponse debounce", () => {
       try {
         const result = await dispatchAiResponse(supabase as never, {
           contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
-          inboundBody: "STOP texting me",
+          inboundBody: "Please send no more messages",
           inboundMessageId: "inbound-above-threshold-opted-out", propertyId: PROPERTY_ID,
         }, { anthropic: {} as never });
         expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
@@ -7456,9 +7456,9 @@ describe("Jev-only mode (reply_generation = off): the legacy generator is never 
   it("Jev opted_out with drafting off is deferred to a human, never applied", async () => {
     const state = offState("jev");
     state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
-    seedInboundMessage(state, { id: "inbound-off-6", body: "STOP texting me" });
+    seedInboundMessage(state, { id: "inbound-off-6", body: "Please send no more messages" });
     stubJev("opted_out", 0.99);
-    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-6", { inboundBody: "STOP texting me" }), anthropic);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-6", { inboundBody: "Please send no more messages" }), anthropic);
     expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
     expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
     expect(state.property.outreach_dispo).toBeNull();
@@ -7780,17 +7780,16 @@ describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", (
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
     });
 
-    it("explicit opt-out wording ('stop texting me') still goes through the existing opt-out path exactly once, with no hostile-path records", async () => {
+    it("opt-out PHRASE wording ('stop texting me') that Jev labels opted_out is HELD, never auto-suppressed (Jarrad: no auto DNC)", async () => {
       const state = createMockState();
       installSendMock(state);
       const result = await run(state, "in-h-stop", "stop texting me", { outcome: "opted_out", confidence: 0.99 });
-      expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
-      expect(suppressionCalls()).toHaveLength(1);
-      expect(suppressionCalls()[0]).toMatchObject({ source: "ai_responder", surface: "stop" });
-      expect(suppressionCalls().some((c) => String(c.source).includes("hostile"))).toBe(false);
-      expect(state.property.outreach_dispo).toBe("opted_out");
-      expect(state.property.last_ai_escalation_reason ?? "").not.toContain("hostile");
-      expect(recordLeadEvent.mock.calls.filter(([e]) => e?.eventType === "opted_out")).toHaveLength(0); // the helper (mocked) owns that event
+      expect(result).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+      expect(suppressionCalls()).toHaveLength(0);
+      expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.last_ai_escalation_reason).toBe("hostile_needs_confirm:in-h-stop");
     });
 
     it("hostile wording Jev labels dnc ('do not contact me') is held: ZERO suppression calls, nothing sent", async () => {
