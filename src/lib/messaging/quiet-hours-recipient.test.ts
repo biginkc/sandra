@@ -142,6 +142,9 @@ describe("checkRecipientQuietHours", () => {
       ["+14585550100", "2026-10-07T14:30:00Z", false], // 458 OR overlay
       ["+12705550100", "2026-10-08T01:30:00Z", false], // 270 KY: 9:30pm Eastern (Elizabethtown)
       ["+14235550100", "2026-10-07T12:30:00Z", false], // 423 TN: 7:30am Central
+      ["+19315550100", "2026-10-08T01:30:00Z", false], // 931 TN: 8:30pm Central = 9:30pm Eastern (Crossville)
+      ["+16065550100", "2026-10-07T12:00:00Z", false], // 606 KY: 8:00am Eastern = 7:00am Central (Albany)
+      ["+16065550100", "2026-10-07T13:30:00Z", true],
       ["+17755550100", "2026-10-07T14:30:00Z", false], // 775 NV: West Wendover
       ["+19285550100", "2026-10-08T03:30:00Z", false], // 928 AZ: 8:30pm Phoenix = 9:30pm Navajo (DST)
       ["+19075550100", "2026-10-07T16:30:00Z", false], // 907 AK: 8:30am Anchorage = 7:30am Adak
@@ -163,7 +166,7 @@ describe("checkRecipientQuietHours", () => {
     expect([...MULTI_ZONE_AREA_CODES].sort()).toEqual(
       [
         "208", "270", "308", "364", "423", "448", "458", "541", "574", "605", "620", "701", "775", "785",
-        "812", "850", "906", "907", "928", "930", "986",
+        "606", "812", "850", "906", "907", "928", "930", "931", "986",
       ].sort(),
     );
     for (const code of MULTI_ZONE_AREA_CODES) {

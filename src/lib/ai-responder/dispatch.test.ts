@@ -6736,6 +6736,57 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(state.deadLetters).toEqual([expect.objectContaining({ body: TEMPLATE_BODY })]);
   });
 
+  it("provider accepted the template but the process died BEFORE recordClaimTemplateSent: a second attempt for the same claim does not send again", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.crashOnApply = true;
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(TEMPLATE);
+    try {
+      // First attempt: the marker write never lands (the process is gone).
+      const supabase = createMockSupabase(state);
+      const realFrom = supabase.from.bind(supabase);
+      (supabase as { from: unknown }).from = (table: string) => {
+        const q = realFrom(table) as Record<string, unknown>;
+        if (table !== "ai_response_claims") return q;
+        const update = q.update as (v: Record<string, unknown>) => unknown;
+        q.update = (v: Record<string, unknown>) => {
+          if (v && "outbound_message_id" in v) throw new Error("process died before the marker write");
+          return update.call(q, v);
+        };
+        return q;
+      };
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+      seedInboundMessage(state, { id: "inbound-tpl-nomarker", body: "later" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 }, escalation_reason: { choice: "not_applicable" } } }),
+      })));
+      const input = {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "later",
+        inboundMessageId: "inbound-tpl-nomarker", propertyId: PROPERTY_ID,
+      };
+      try {
+        await expect(dispatchAiResponse(supabase as never, input, { anthropic: {} as never })).rejects.toThrow("function died");
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      // The dead process left no marker on the claim, and could not have flagged anything.
+      expect(state.aiClaims[0]!.outbound_message_id ?? null).toBeNull();
+      state.property.needs_human_attention = false;
+      state.crashOnApply = false;
+      state.aiClaims[0]!.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+
+      // Second attempt on the same inbound: the already-replied guard blocks a re-send.
+      const rerun = await runNurture(state, "inbound-tpl-nomarker");
+      expect(rerun).toMatchObject({ outcome: "skipped", reason: "already_replied" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" });
+    }
+  });
+
   it("an unreadable claim fails closed: the template is not sent a second time", async () => {
     const state = createMockState();
     installSendMock(state);
