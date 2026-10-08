@@ -13,10 +13,13 @@ import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
 import type { AiStructuredOutput } from "./types";
 
-const { recordLeadEvent, reportErrorMock } = vi.hoisted(() => ({
+const { recordLeadEvent, reportErrorMock, adminHolder } = vi.hoisted(() => ({
   recordLeadEvent: vi.fn(),
   reportErrorMock: vi.fn(),
+  adminHolder: { client: {} as unknown },
 }));
+
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => adminHolder.client }));
 
 vi.mock("@/lib/errors/report", () => ({ reportError: reportErrorMock }));
 
@@ -134,6 +137,7 @@ type AiClaimRow = {
 type MockState = {
   aiDispositionRpcCalls: number;
   aiDispositionRpcErrorsRemaining: number;
+  aiDispoReviewUpdates?: number;
   aiDispoReviews: Array<{
     conversationId: string;
     disposition: string;
@@ -863,6 +867,7 @@ function createMockSupabase(state: MockState) {
     const query = {
       update(value: Record<string, unknown>) {
         pendingUpdate = value;
+        state.aiDispoReviewUpdates = (state.aiDispoReviewUpdates ?? 0) + 1;
         return query;
       },
       then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
@@ -1242,6 +1247,7 @@ function createMockSupabase(state: MockState) {
           disposition: String(args.p_disposition),
           inboundMessageId: String(args.p_source_inbound_message_id),
           reason: String(args.p_ai_reason),
+          ...(args.p_wrong_scope ? { wrong_scope: String(args.p_wrong_scope) } : {}),
         });
         return Promise.resolve({
           data: { status: "proposed", reviewId: "review-jev-deferred" },
@@ -1325,6 +1331,7 @@ function createMockSupabase(state: MockState) {
         disposition,
         inboundMessageId,
         reason: String(args.p_ai_reason),
+        ...(args.p_wrong_scope ? { wrong_scope: String(args.p_wrong_scope) } : {}),
       });
       return Promise.resolve({
         data: { status: "applied", reviewId: "review-1" },
@@ -1797,6 +1804,7 @@ describe("dispatchAiResponse debounce", () => {
         disposition: "wrong_number",
         inboundMessageId: "inbound-low-confidence",
         reason: "model:wrong_number",
+        wrong_scope: "this_property",
       },
     ]);
     expect(recordLeadEvent).not.toHaveBeenCalled();
@@ -2430,7 +2438,100 @@ describe("dispatchAiResponse debounce", () => {
         expect(state.aiDispoReviews).toEqual([
           expect.objectContaining({ disposition: "wrong_number", wrong_scope: "all" }),
         ]);
+        // Written by the review-creating RPC itself (no second update that a
+        // human confirm could beat).
+        expect(state.aiDispoReviewUpdates ?? 0).toBe(0);
       } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+
+    it("end to end: Jev wrong_number scope=all -> review -> human confirms -> phone suppressed with the texting number -> obligation discharged -> hold cleared", async () => {
+      const { applySuppressionForConfirmedReview } = await import("./confirm-suppression");
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "wrong_number", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-wn-e2e", body: "wrong number, never owned anything" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "wrong_number", confidence: 0.99 }, wrong_scope: { choice: "all" } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "wrong number, never owned anything",
+          inboundFromPhone: "+18165550001",
+          inboundMessageId: "inbound-wn-e2e", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+
+      // Dispatch: this property only, nothing suppressed, held for a human.
+      const review = state.aiDispoReviews[0]!;
+      expect(review).toMatchObject({ disposition: "wrong_number", wrong_scope: "all" });
+      expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+      expect(state.property.needs_human_attention).toBe(true);
+
+      // The human confirm RPC (SQL-tested in 300200) records the durable
+      // obligation: ledger row + suppression pointer replacing the hold.
+      const reviewId = "review-e2e";
+      state.property.last_ai_escalation_reason = `suppression_incomplete:${reviewId}`;
+      const adminInserts: Array<Record<string, unknown>> = [];
+      const adminRpcs: string[] = [];
+      adminHolder.client = {
+        from: () => {
+          const c: Record<string, unknown> = {};
+          c.select = () => c;
+          c.eq = () => c;
+          c.maybeSingle = async () => ({ data: { id: "ledger-1", org_id: "org-1" }, error: null });
+          c.insert = async (row: Record<string, unknown>) => {
+            adminInserts.push(row);
+            return { error: null };
+          };
+          return c;
+        },
+        rpc: async (name: string) => {
+          adminRpcs.push(name);
+          if (name === "fn_clear_suppression_hold_if_resolved" && adminInserts.some((r) => r.event_type === "suppression_retried_ok")) {
+            state.property.needs_human_attention = false;
+            state.property.last_ai_escalation_reason = null;
+          }
+          return { data: [{ cleared: true }], error: null };
+        },
+      };
+      const lookup = {
+        from: (table: string) => {
+          const c: Record<string, unknown> = {};
+          c.select = () => c;
+          c.eq = () => c;
+          c.maybeSingle = async () => ({
+            data:
+              table === "ai_disposition_reviews"
+                ? { property_id: PROPERTY_ID, org_id: "org-1", disposition: review.disposition, ai_reason: review.reason,
+                    source_inbound_message_id: review.inboundMessageId, wrong_scope: review.wrong_scope }
+                : table === "properties"
+                  ? { homeowner_contact_id: CONTACT_ID }
+                  : table === "messages"
+                    ? { from_address: "+18165550001" }
+                    : { phone_1: "+18165550999" },
+            error: null,
+          });
+          return c;
+        },
+      };
+      const result = await applySuppressionForConfirmedReview(lookup, reviewId, "user-1", { discharge: true });
+
+      expect(result).toEqual({ ok: true });
+      expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+      expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ fromPhone: "+18165550001", contactId: CONTACT_ID, surface: "dnc", source: "ai_responder_wrong_number" }),
+      );
+      expect(adminInserts).toEqual([expect.objectContaining({ event_type: "suppression_retried_ok", source_id: reviewId })]);
+      expect(adminRpcs).toContain("fn_clear_suppression_hold_if_resolved");
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(state.property.last_ai_escalation_reason).toBeNull();
     });
 
     it("below-threshold wrong_number scope=all stays a pending review with wrong_scope recorded and the confirm hold set, nothing suppressed", async () => {

@@ -2640,7 +2640,7 @@ export type Database = {
           },
         ]
       }
-      // Hand-inserted for migration 20261008280100_jev_action_undo.sql.
+      // Hand-inserted for migration 20261008300100_jev_action_undo.sql.
       jev_action_undo: {
         Row: {
           action: string
@@ -7857,6 +7857,7 @@ export type Database = {
           p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -7915,6 +7916,7 @@ export type Database = {
           p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }

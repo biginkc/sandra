@@ -1,41 +1,10 @@
--- 20261008280000_jev_opted_out_human_only.sql
--- Jarrad (2026-10-07, verbatim): "I don't want you making any DNC decisions.
--- I don't want Jev making any DNC decisions."
---
--- Server-side hard rule: jev_outcome_thresholds.automation_enabled can never
--- be true for opted_out (dnc is not a thresholdable outcome at all).
---   1. Force any row still true to false (production was already flipped by
---      hand; this makes every other environment match) and write a history
---      row so the change is auditable.
---   2. CHECK constraint so no writer can set it back.
---   3. fn_set_jev_outcome_threshold refuses p_automation_enabled = true for
---      opted_out (HUMAN_ONLY_OUTCOME) and never defaults/keeps it on.
-
+-- Rollback for 20261008300000_jev_opted_out_human_only: drops the CHECK
+-- constraint and restores the 143200 function body. (Rows forced to
+-- automation off stay off.)
 begin;
-
-set local lock_timeout = '5s';
-set local statement_timeout = '60s';
-
-with flipped as (
-  update public.jev_outcome_thresholds t
-  set automation_enabled = false,
-      version = t.version + 1,
-      updated_at = now()
-  where t.outcome = 'opted_out' and t.automation_enabled = true
-  returning t.id, t.org_id, t.min_confidence, t.version
-)
-insert into public.jev_outcome_threshold_history (
-  threshold_id, org_id, outcome, previous_min_confidence, new_min_confidence,
-  previous_automation_enabled, new_automation_enabled, version
-)
-select id, org_id, 'opted_out', min_confidence, min_confidence, true, false, version
-from flipped;
 
 alter table public.jev_outcome_thresholds
   drop constraint if exists jev_outcome_thresholds_opted_out_human_only;
-alter table public.jev_outcome_thresholds
-  add constraint jev_outcome_thresholds_opted_out_human_only
-  check (outcome <> 'opted_out' or automation_enabled = false);
 
 create or replace function public.fn_set_jev_outcome_threshold(
   p_org_id uuid,
@@ -75,11 +44,6 @@ begin
     raise exception 'INVALID_CONFIDENCE' using errcode = '22023';
   end if;
   p_min_confidence := round(p_min_confidence, 3);
-  -- HARD RULE (Jarrad, 2026-10-07: "I don't want Jev making any DNC
-  -- decisions."): opted_out can never be automated, whatever the caller asks.
-  if p_outcome = 'opted_out' and p_automation_enabled is true then
-    raise exception 'HUMAN_ONLY_OUTCOME' using errcode = '22023';
-  end if;
 
   if not exists (
     select 1
@@ -138,10 +102,7 @@ begin
 
   -- null = leave unchanged (or, for a brand-new row, the production-
   -- preserving default: on for everything except new_lead).
-  v_new_automation := coalesce(p_automation_enabled, v_previous_automation, p_outcome not in ('new_lead', 'opted_out'));
-  if p_outcome = 'opted_out' then
-    v_new_automation := false;
-  end if;
+  v_new_automation := coalesce(p_automation_enabled, v_previous_automation, p_outcome <> 'new_lead');
   v_new_version := v_current_version + 1;
 
   if v_threshold_id is null then

@@ -33,7 +33,7 @@ export const THRESHOLDABLE_OUTCOMES: ReadonlySet<ThresholdableOutcome> = new Set
  * ALWAYS human-gated here, whatever its confidence and whatever
  * `automation_enabled` says. `dnc` is already never thresholdable. The
  * `fn_set_jev_outcome_threshold` RPC refuses to switch automation on for
- * these outcomes too (20261008280000). The only automatic suppression left
+ * these outcomes too (20261008300000). The only automatic suppression left
  * in the system is the deterministic carrier STOP keyword path in
  * `messaging/inbound.ts`.
  */

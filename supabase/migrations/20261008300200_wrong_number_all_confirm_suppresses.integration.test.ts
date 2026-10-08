@@ -8,19 +8,19 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261008280200: confirming a wrong_number review scoped to all records the
+ * 20261008300200: confirming a wrong_number review scoped to all records the
  * durable phone-suppression obligation (ledger row + hold pointer), in both the
  * deferred and the already-applied branch; this_property records nothing; the
  * sweeper feed includes it. Local-only, rolled-back transaction per test, on a
- * DB with the chain through 20261008280100 applied.
+ * DB with the chain through 20261008300100 applied.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008280200_wrong_number_all_confirm_suppresses.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008300200_wrong_number_all_confirm_suppresses.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261008280200_wrong_number_all_confirm_suppresses.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261008300200_wrong_number_all_confirm_suppresses.sql"), "utf8"),
 );
 
 const db = new Client({ connectionString: url });
@@ -157,5 +157,113 @@ describe("fn_confirm_ai_disposition_review for wrong_number", () => {
       `select 1 from information_schema.columns where table_name = 'ai_disposition_reviews' and column_name = 'wrong_scope'`,
     );
     expect(col.rowCount).toBe(0);
+  });
+});
+
+describe("scope is written by the review-creating RPC itself (no window to confirm first)", () => {
+  async function thread() {
+    const contactId = randomUUID();
+    const propertyId = randomUUID();
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    await db.query(
+      `insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'Home', $3, 'mobile')`,
+      [contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`],
+    );
+    await db.query(
+      `insert into public.properties (id, org_id, address, state, status, outreach_dispo, homeowner_contact_id)
+       values ($1, $2, 'RPC St', 'TX', 'new_lead', null, $3)`,
+      [propertyId, orgId, contactId],
+    );
+    await db.query(
+      `insert into public.message_threads (org_id, channel, contact_id, property_id, conversation_id) values ($1, 'sms', $2, $3, $4)`,
+      [orgId, contactId, propertyId, conversationId],
+    );
+    await db.query(
+      `insert into public.messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body)
+       values ($1, $2, $3, $4, $5, 'sms', 'inbound', 'wrong number')`,
+      [messageId, orgId, propertyId, conversationId, contactId],
+    );
+    const runId = randomUUID();
+    await db.query(
+      `insert into public.sms_classification_runs
+         (id, org_id, property_id, conversation_id, source_inbound_message_id, provider, model, schema_version, policy_version, state_hash, state_version, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'jev', 'jev-1.13.0', 2, 'p', $6, 1, '{}'::jsonb, 'wrong_number')`,
+      [runId, orgId, propertyId, conversationId, messageId, randomUUID()],
+    );
+    return { propertyId, conversationId, messageId, runId };
+  }
+  const asService = async <T,>(fn: () => Promise<T>) => {
+    await db.query("set local role service_role");
+    await db.query("select set_config('request.jwt.claim.role', 'service_role', true)");
+    try {
+      return await fn();
+    } finally {
+      await db.query("select set_config('request.jwt.claim.role', '', true)");
+      await db.query("reset role");
+    }
+  };
+  const revision = async (propertyId: string) =>
+    (await db.query("select decision_context_revision from public.properties where id = $1", [propertyId])).rows[0]
+      .decision_context_revision;
+  const reviewFor = async (messageId: string) =>
+    (await db.query("select id, wrong_scope, dispo_applied from public.ai_disposition_reviews where source_inbound_message_id = $1", [messageId])).rows[0];
+
+  it("fn_apply_ai_disposition_with_review stores the scope on the new review, and the review is confirmable only with it already set", async () => {
+    const t = await thread();
+    await asService(async () =>
+      db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'model:wrong_number', $4, 'all')`, [
+        t.propertyId, t.conversationId, t.messageId, await revision(t.propertyId),
+      ]),
+    );
+    const r = await reviewFor(t.messageId);
+    expect(r.wrong_scope).toBe("all");
+    await confirm(r.id);
+    expect(await ledger(r.id)).toBe(1);
+  });
+
+  it("fn_propose_deferred_ai_disposition_review stores the scope on the new pending review", async () => {
+    const t = await thread();
+    await asService(async () =>
+      db.query(`select public.fn_propose_deferred_ai_disposition_review($1, $2, $3, $4, 'wrong_number', 'model:wrong_number', $5, 'all')`, [
+        t.propertyId, t.conversationId, t.messageId, t.runId, await revision(t.propertyId),
+      ]),
+    );
+    const r = await reviewFor(t.messageId);
+    expect(r).toMatchObject({ wrong_scope: "all", dispo_applied: false });
+    await confirm(r.id);
+    expect(await ledger(r.id)).toBe(1);
+  });
+
+  it("omitting the scope leaves it null, a non-wrong_number disposition ignores it, and a bad value is rejected", async () => {
+    const a = await thread();
+    await asService(async () =>
+      db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'x', $4)`, [
+        a.propertyId, a.conversationId, a.messageId, await revision(a.propertyId),
+      ]),
+    );
+    expect((await reviewFor(a.messageId)).wrong_scope).toBeNull();
+    const b = await thread();
+    await asService(async () =>
+      db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'not_interested', 'x', $4, 'all')`, [
+        b.propertyId, b.conversationId, b.messageId, await revision(b.propertyId),
+      ]),
+    );
+    expect((await reviewFor(b.messageId)).wrong_scope).toBeNull();
+    const c = await thread();
+    const rev = await revision(c.propertyId);
+    let message = "";
+    await asService(async () => {
+      await db.query("savepoint bad");
+      try {
+        await db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'x', $4, 'everything')`, [
+          c.propertyId, c.conversationId, c.messageId, rev,
+        ]);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      await db.query("rollback to savepoint bad");
+    });
+    expect(message).toMatch(/invalid wrong scope/);
   });
 });

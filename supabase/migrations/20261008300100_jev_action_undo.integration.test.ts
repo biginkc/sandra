@@ -8,14 +8,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261008280100: fn_undo_jev_action restores what Jev's auto-applied action
+ * 20261008300100: fn_undo_jev_action restores what Jev's auto-applied action
  * overwrote. Local-only; rolled-back transaction per test.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008280100_jev_action_undo.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008300100_jev_action_undo.sql"), "utf8"));
 
 const db = new Client({ connectionString: url });
 let orgId: string;

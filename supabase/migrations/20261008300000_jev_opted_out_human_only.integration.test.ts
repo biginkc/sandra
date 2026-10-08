@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261008280000: opted_out can never be automated (Jarrad 2026-10-07).
+ * 20261008300000: opted_out can never be automated (Jarrad 2026-10-07).
  * Local-only; each test runs in a rolled-back transaction on a DB with the
  * chain through 20261008230000 applied.
  */
@@ -16,9 +16,9 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008280000_jev_opted_out_human_only.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008300000_jev_opted_out_human_only.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261008280000_jev_opted_out_human_only.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261008300000_jev_opted_out_human_only.sql"), "utf8"),
 );
 
 const db = new Client({ connectionString: url });
@@ -77,7 +77,7 @@ const setThreshold = (outcome: string, expectedVersion: number, automation: bool
     ]),
   );
 
-describe("20261008280000", () => {
+describe("20261008300000", () => {
   it("forces an existing opted_out row that has automation on back to off, with a history row", async () => {
     // Simulate the pre-migration state (the scratch DB may already carry the constraint).
     await db.query(`alter table public.jev_outcome_thresholds drop constraint if exists jev_outcome_thresholds_opted_out_human_only`);
