@@ -234,6 +234,7 @@ export async function enrollLead(
       next_run_at: nextRunAt.toISOString(),
       enrolled_by_user_id: params.enrolledByUserId ?? null,
       ...(params.autoRoute ? { auto_enrolled_route: params.autoRoute } : {}),
+      ...(params.firstSendNotBefore ? { first_send_not_before: params.firstSendNotBefore.toISOString() } : {}),
       ...(params.hotFenceMessageId ? { hot_fence_message_id: params.hotFenceMessageId } : {}),
     })
     .select("id")

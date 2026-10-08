@@ -201,6 +201,30 @@ describe("nurture auto-drip switch", () => {
       await assignAs(users.owner, property);
       expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
     });
+    describe("the approved first-send delay survives pause/resume (floor stored on the enrolment)", () => {
+      for (const days of [14, 30, 60, 180]) {
+        it(`+${days} days: a resume with a zero-delay first step does not make it due now`, async () => {
+          const property = await seed(sequenceId, "maybe_later");
+          await db.query(
+            `update public.sequence_enrollments set first_send_not_before = now() + ($2 || ' days')::interval, next_run_at = now() + ($2 || ' days')::interval where property_id = $1`,
+            [property, String(days)],
+          );
+          await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+          // what resume does: status back to active and next_run_at = now() (+ a zero first-step delay)
+          await db.query(`update public.sequence_enrollments set status = 'active', pause_reason = null, next_run_at = now() where property_id = $1`, [property]);
+          const { rows } = await db.query(`select extract(epoch from (next_run_at - now())) / 86400 as d from public.sequence_enrollments where property_id = $1`, [property]);
+          expect(Math.round(Number(rows[0].d))).toBe(days);
+        });
+      }
+      it("no floor: resume timing is unchanged (the button path)", async () => {
+        const property = await seed(sequenceId, null);
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+        await db.query(`update public.sequence_enrollments set status = 'active', pause_reason = null, next_run_at = now() where property_id = $1`, [property]);
+        const { rows } = await db.query(`select extract(epoch from (next_run_at - now())) as s from public.sequence_enrollments where property_id = $1`, [property]);
+        expect(Math.abs(Number(rows[0].s))).toBeLessThan(5);
+      });
+    });
+
     describe("hot enrolment fence (born paused when a takeover or newer seller reply happened since the triggering inbound)", () => {
       async function seedProperty() {
         const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T',$2) returning id`, [orgId, randomUUID()])).rows[0].id;
@@ -286,6 +310,16 @@ describe("nurture auto-drip switch", () => {
         const property = await seed(sequenceId, "hot_book_appointment");
         await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'person_took_over' where property_id = $1`, [property]);
         await takeOver(property);
+        await resume(property, users.owner);
+        expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+      });
+      it("call cleanup from a signed-in softphone session cannot resume a call-paused hot enrolment after a takeover (cleanup is not a decision)", async () => {
+        const property = await seed(sequenceId, "hot_book_appointment");
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+        await takeOver(property);
+        await resume(property, users.owner);
+        expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+        // ...but the person's deliberate resume of the person_took_over pause works.
         await resume(property, users.owner);
         expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
       });

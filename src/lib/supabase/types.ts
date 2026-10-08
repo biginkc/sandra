@@ -4469,6 +4469,7 @@ export type Database = {
           enrolled_at: string
           auto_enrolled_route: string | null
           enrolled_by_user_id: string | null
+          first_send_not_before: string | null
           hot_fence_message_id: string | null
           id: string
           next_run_at: string | null
@@ -4486,6 +4487,7 @@ export type Database = {
           enrolled_at?: string
           auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          first_send_not_before?: string | null
           hot_fence_message_id?: string | null
           id?: string
           next_run_at?: string | null
@@ -4503,6 +4505,7 @@ export type Database = {
           enrolled_at?: string
           auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          first_send_not_before?: string | null
           hot_fence_message_id?: string | null
           id?: string
           next_run_at?: string | null

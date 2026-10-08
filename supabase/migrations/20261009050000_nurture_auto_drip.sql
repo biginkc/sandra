@@ -91,6 +91,33 @@ end $$;
 alter table public.properties
   add column if not exists last_person_takeover_at timestamptz;
 
+-- The approved first-text delay must survive pause/resume: resume recomputes next_run_at from
+-- "now + step delay", which would make a +180 day enrolment due immediately after a call
+-- cleanup. The floor is stored on the enrolment and enforced on every activation of step 0.
+alter table public.sequence_enrollments
+  add column if not exists first_send_not_before timestamptz;
+
+create or replace function public.fn_enrollment_first_send_floor()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.first_send_not_before is not null
+    and new.status = 'active'
+    and new.current_step_index = 0
+    and (new.next_run_at is null or new.next_run_at < new.first_send_not_before)
+  then
+    new.next_run_at := new.first_send_not_before;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_enrollment_first_send_floor on public.sequence_enrollments;
+create trigger trg_enrollment_first_send_floor
+  before insert or update of status, next_run_at on public.sequence_enrollments
+  for each row execute function public.fn_enrollment_first_send_floor();
+
 -- Atomic fence for the hot-lead enrolment. The dispatch passes `hot_fence_message_id` (the
 -- triggering inbound); its arrival time is read here in SQL at full precision. If, at insert time, a person has taken over at/after
 -- it or the seller has sent a NEWER inbound, the row is born `paused` (never runnable),
@@ -145,8 +172,10 @@ create trigger trg_hot_enrollment_takeover_fence
 
 -- A takeover is authoritative at RESUME time too. Whatever interleaving of call-start,
 -- call-cleanup and takeover happened, an automatic (system) resume of a hot enrolment is
--- refused once a person has taken over since it was created. A person's own resume
--- (a signed-in session) is still allowed: they own the lead.
+-- refused once a person has taken over since it was created, and so is the resume of a
+-- pause that only the call machinery sets (call_in_progress / norma_call), even from a
+-- signed-in softphone session (that is automatic cleanup, not a decision). A person's own
+-- deliberate resume of a person_took_over pause is still allowed: they own the lead.
 create or replace function public.fn_hot_enrollment_resume_guard()
 returns trigger
 language plpgsql
@@ -159,7 +188,7 @@ begin
   if new.auto_enrolled_route is distinct from 'hot_book_appointment'
     or old.status is distinct from 'paused'
     or new.status is distinct from 'active'
-    or auth.uid() is not null
+    or (auth.uid() is not null and old.pause_reason not in ('call_in_progress', 'norma_call'))
   then
     return new;
   end if;

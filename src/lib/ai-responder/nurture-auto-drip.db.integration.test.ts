@@ -236,6 +236,17 @@ describe("enrollNurtureInDrip (real database, real enrollLead)", () => {
   });
 });
 
+describe("first-send floor is stored on the enrolment", () => {
+  it("enrollLead persists firstSendNotBefore so a later resume cannot make the first text due early", async () => {
+    const sequenceId = await seedSequence({ delayMinutes: 0 });
+    const propertyId = await seedProperty("Floor", { dispo: null });
+    const at = new Date(Date.now() + 30 * 86_400_000);
+    expect((await enrollLead(db, { propertyId, sequenceId, enrolledByUserId: null, firstSendNotBefore: at })).status).toBe("enrolled");
+    const { data } = await db.from("sequence_enrollments").select("first_send_not_before").eq("property_id", propertyId).single();
+    expect(new Date(data!.first_send_not_before!).getTime()).toBe(at.getTime());
+  });
+});
+
 describe("Book appointment enrolment (hot lead) stops on its own", () => {
   it("the enrolment records the route it was created with", async () => {
     const sequenceId = await seedSequence();

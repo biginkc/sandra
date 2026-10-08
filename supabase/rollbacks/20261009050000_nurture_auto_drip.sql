@@ -2,6 +2,9 @@
 -- their constraint and the owner-only RPC. Idempotent.
 begin;
 
+drop trigger if exists trg_enrollment_first_send_floor on public.sequence_enrollments;
+drop function if exists public.fn_enrollment_first_send_floor();
+alter table public.sequence_enrollments drop column if exists first_send_not_before;
 drop trigger if exists trg_hot_enrollment_resume_guard on public.sequence_enrollments;
 drop function if exists public.fn_hot_enrollment_resume_guard();
 drop trigger if exists trg_hot_enrollment_takeover_fence on public.sequence_enrollments;
