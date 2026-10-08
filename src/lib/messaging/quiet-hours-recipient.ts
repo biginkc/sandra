@@ -108,6 +108,8 @@ const LA = "America/Los_Angeles";
  *   MI 906       Upper Peninsula: Eastern + 4 Central counties on the Wisconsin line
  *   KY 270/364   Eastern (Hardin, Meade, Larue...) + western Central counties
  *   TN 423       Eastern + Central (Marion, Bledsoe, Sequatchie counties)
+ *   TN 931       Central + Eastern (Cumberland County / Crossville)
+ *   KY 606       Eastern + Central (Clinton County / Albany)
  *   KS 620/785   Central + the four western Mountain counties
  *   NE 308       Central + Mountain panhandle
  *   SD 605       Central (east river) + Mountain (west river)
@@ -132,6 +134,8 @@ const AREA_CODE_ZONES: Readonly<Record<string, readonly string[]>> = {
   "270": [CHI, NY],
   "364": [CHI, NY], // 270 overlay
   "423": [NY, CHI],
+  "931": [CHI, NY], // TN: Cumberland County (Crossville) is Eastern
+  "606": [NY, CHI], // KY: Clinton County (Albany) is Central
   "865": [NY],
   "620": [CHI, DEN],
   "785": [CHI, DEN],

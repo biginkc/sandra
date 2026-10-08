@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * Template auto-send approval + outcome mapping (20261008200000). Local-only;
+ * Template auto-send approval + outcome mapping (20261008240000). Local-only;
  * each test runs in a transaction that is rolled back. Requires a DB with the
  * chain through 20261008144200 applied (the migration itself is applied here
  * so the rollback can be exercised too).
@@ -17,9 +17,9 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008200000_auto_reply_templates.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008240000_auto_reply_templates.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261008200000_auto_reply_templates.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261008240000_auto_reply_templates.sql"), "utf8"),
 );
 
 const db = new Client({ connectionString: url });

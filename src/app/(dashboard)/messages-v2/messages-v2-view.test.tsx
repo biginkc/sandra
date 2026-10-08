@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
     realtime: { setAuth: vi.fn() },
     channel: vi.fn(() => channel),
     removeChannel: vi.fn(),
+    rpc: vi.fn(async () => ({ data: [], error: null })),
     from: vi.fn(() => {
       const q: Record<string, unknown> = {};
       q.select = () => q;
@@ -174,6 +175,30 @@ describe("MessagesV2View", () => {
     expect(
       within(screen.getByLabelText("Legend")).getAllByRole("listitem"),
     ).toHaveLength(6);
+  });
+
+  it("renders the shadow scorecard from server rows instead of the placeholder", async () => {
+    await mount({
+      ...props(),
+      scorecardRows: [
+        {
+          outcome: "nurture",
+          runs: 7,
+          auto_applied: 5,
+          held: 2,
+          auto_settled: 0,
+          auto_agreed: 0,
+          held_decided: 0,
+          held_agreed: 0,
+          threshold: 0.9,
+          automation_enabled: true,
+          samples: [],
+        },
+      ],
+    });
+    const card = screen.getByLabelText("Shadow scorecard");
+    expect(within(card).getByText(/7 runs/)).toBeInTheDocument();
+    expect(screen.queryByText(/available after 2h/i)).not.toBeInTheDocument();
   });
 
   it("subscribes on messages-v2:feed with the session token, every subscription filtered to the org", async () => {
@@ -385,5 +410,26 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("header-status")).toHaveTextContent(
       "holds count unavailable",
     );
+  });
+  describe("replay batch badge", () => {
+    it("shows for owner with a batch id", async () => {
+      await mount({ ...props(), replayBatchId: "2026-10-07" });
+      expect(screen.getByTestId("replay-batch-badge")).toHaveTextContent(
+        "Replay batch 2026-10-07",
+      );
+    });
+    it("hidden for non-owner even with an id", async () => {
+      await mount({ ...props(), isOwner: false, replayBatchId: "2026-10-07" });
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+    });
+    it("hidden when id is null or undefined", async () => {
+      const { unmount } = render(
+        <MessagesV2View {...props()} replayBatchId={null} />,
+      );
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+      unmount();
+      render(<MessagesV2View {...props()} />);
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+    });
   });
 });

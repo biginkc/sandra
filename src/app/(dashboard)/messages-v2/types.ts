@@ -142,6 +142,11 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   sources: HoldSource[];
   /** ISO time the oldest underlying item opened; null when unknown (never guessed from updated_at). */
   since: string | null;
+  /**
+   * When the hold began, for alert eligibility only. null = unknown (a property
+   * flagged before start times were tracked): such a hold never alerts.
+   */
+  alert_since?: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;

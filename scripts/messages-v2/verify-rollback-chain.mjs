@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008150300 -- 45 migrations: 28 inherited Jev + 13 messages-v2 + 4 Phase 1 holds/alerts).
+// (20261008140000 .. 20261008210000 -- 46 migrations: 28 inherited Jev + 13 messages-v2 + 4 Phase 1 holds/alerts + 1 new-only alert watermark).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 44 rollbacks in REVERSE order,
+//   3. applies the 46 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 45 migrations forward again.
+//   5. re-applies the 46 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008200000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 46); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 templates (200000)
+const LAST = process.env.CHAIN_LAST ?? "20261008240000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 49); // 48 on main (through 210000 new-only watermark) + 1 templates (240000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -69,7 +69,7 @@ function phase(name, files, dir) {
 
 // Every jev_/pipeline_/ai_reply_ object (tables, views, functions, triggers,
 // policies, indexes, sequences, types) that must be gone after the rollback.
-// Phase 4 (templates, 20261008200000) objects: the mapping + approval-audit
+// Phase 4 (templates, 20261008240000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
 const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check";
@@ -81,7 +81,7 @@ select kind || ' ' || name from (
   union all
   select 'function', n.nspname || '.' || p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'public' and (p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|fn_resolve_hold)' or p.proname ~ '(${TPL})')
+   where n.nspname = 'public' and (p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|fn_resolve_hold|fn_messages_v2_)' or p.proname ~ '(${TPL})')
   union all
   select 'trigger', c.relname || '.' || t.tgname
     from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace

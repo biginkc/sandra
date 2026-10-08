@@ -4615,7 +4615,7 @@ export type Database = {
         Relationships: []
       }
       // Hand-inserted 2026-10-08 for migration
-      // 20261008200000_auto_reply_templates.sql (Messages v2 Phase 4).
+      // 20261008240000_auto_reply_templates.sql (Messages v2 Phase 4).
       auto_reply_templates: {
         Row: {
           active: boolean
@@ -7954,7 +7954,7 @@ export type Database = {
         Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
       }
       // Hand-inserted 2026-10-08 for migration
-      // 20261008200000_auto_reply_templates.sql (Messages v2 Phase 4).
+      // 20261008240000_auto_reply_templates.sql (Messages v2 Phase 4).
       fn_set_template_auto_send_approval: {
         Args: {
           p_approved: boolean

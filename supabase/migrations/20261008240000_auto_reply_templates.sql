@@ -1,4 +1,4 @@
--- 20261008200000_auto_reply_templates.sql
+-- 20261008240000_auto_reply_templates.sql
 -- Messages v2 Phase 4 (PLAN D5 / section 4.6 / Q7). Only a template a human
 -- has approved in the Templates UI may ever be sent automatically. This
 -- migration adds:

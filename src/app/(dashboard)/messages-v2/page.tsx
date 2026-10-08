@@ -18,6 +18,12 @@ import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
 import { MessagesV2View } from "./messages-v2-view";
+import {
+  fetchScorecardRows,
+  type RpcClient,
+  type ScorecardRow,
+} from "./scorecard";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -51,6 +57,18 @@ async function loadCoverage(
   }
 }
 
+/** 7-day scorecard for first paint; null lets the client card load/retry itself. */
+async function loadScorecard(
+  supabase: LooseSupabase,
+  orgId: string,
+): Promise<ScorecardRow[] | null> {
+  try {
+    return await fetchScorecardRows(supabase as unknown as RpcClient, orgId, 7);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Live feed of every inbound SMS the pipeline processed (gates, Jev judgment,
  * applied actions, replies, holds), plus the holds rail with its Phase 1
@@ -63,9 +81,11 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [loaded, coverage] = await Promise.all([
+  const [loaded, coverage, scorecardRows, replayBatchId] = await Promise.all([
     loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
+    loadScorecard(supabase, orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -89,6 +109,7 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
@@ -98,6 +119,7 @@ export default async function MessagesV2Page() {
         stepsUnavailable={data.stepsUnavailable}
         badgesError={data.badgesError}
         badges={data.badges}
+        scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
         actions={{

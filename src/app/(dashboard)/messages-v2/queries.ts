@@ -19,6 +19,8 @@ export type HoldPropertyRow = {
   last_ai_escalation_at: string | null;
   last_ai_escalation_reason: string | null;
   updated_at: string | null;
+  /** When the flag last went false -> true (trigger-maintained). null = unknown (flagged before the column existed). */
+  needs_human_attention_since?: string | null;
 };
 export type HoldDecisionRow = {
   property_id: string;
@@ -76,11 +78,20 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   reviews: readonly HoldReviewRow[];
   /** Pending ai_reply_drafts rows: a hold source of their own. Body is never read. */
   drafts?: readonly HoldDraftRow[];
+  /**
+   * Alert cron only: newest inbound seller message per property since the alert
+   * watermark. It counts as fresh activity on a flagged lead, so a lead flagged
+   * before alerts existed still alerts when the seller writes again. Applied to every
+   * hold, flagged or carried only by a pending decision/review/draft.
+   */
+  inboundAfter?: ReadonlyMap<string, string>;
   runs: readonly T[];
 }): OpenHold<T>[] {
   type Acc = {
     sources: Set<HoldSource>;
     times: string[];
+    /** Reliable start instants (flag start, decision/review/draft created_at) for alert eligibility. */
+    alertTimes: string[];
     conversations: Set<string>;
     messages: Set<string>;
     notes: string[];
@@ -98,6 +109,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       a = {
         sources: new Set(),
         times: [],
+        alertTimes: [],
         conversations: new Set(),
         messages: new Set(),
         notes: [],
@@ -115,6 +127,9 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
     a.flagAt = p.last_ai_escalation_at;
+    // Unknown flag start (flagged before the column existed) simply adds no instant here;
+    // new activity (pending rows, a later seller message) is what can still make it alert.
+    if (p.needs_human_attention_since) a.alertTimes.push(p.needs_human_attention_since);
     a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
@@ -125,6 +140,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(d.property_id);
     a.sources.add("jev_decision");
     a.times.push(d.created_at);
+    a.alertTimes.push(d.created_at);
     a.rowTimes.push(d.created_at);
     a.conversations.add(d.conversation_id);
     a.messages.add(d.source_inbound_message_id);
@@ -133,6 +149,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(r.property_id);
     a.sources.add("disposition_review");
     a.times.push(r.created_at);
+    a.alertTimes.push(r.created_at);
     a.rowTimes.push(r.created_at);
     a.conversations.add(r.conversation_id);
     a.messages.add(r.source_inbound_message_id);
@@ -157,6 +174,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     if (propertyId === null) a.noProperty = true;
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
+    a.alertTimes.push(d.created_at);
     a.rowTimes.push(d.created_at);
     // Sorted oldest first above, so the last assignment is the newest draft.
     a.draft = d;
@@ -187,9 +205,18 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
         run = candidate;
       }
     }
+    // A seller text after the watermark restarts ANY hold (flagged or not): a hold carried
+    // only by an older pending decision/review/draft still alerts on fresh seller activity.
+    const inbound = input.inboundAfter?.get(propertyId);
+    if (inbound) a.alertTimes.push(inbound);
     const since =
       [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
+    // The hold's effective start, for alerting only: the NEWEST reliable instant (flag start,
+    // pending decision/review/draft, later seller message). Null = nothing reliable known.
+    // Old activity stays silent; anything at or after the watermark alerts.
+    const alertSince =
+      [...a.alertTimes].sort((x, y) => compareInstants(y, x))[0] ?? null;
     const labels =
       sources
         .filter((s) => s !== "pending_draft")
@@ -220,6 +247,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
+      alert_since: alertSince,
       ...(a.flagReason ? { flag_reason: a.flagReason } : {}),
       reason:
         a.notes.length > 0
@@ -420,6 +448,8 @@ export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
 
 const STEP_CHUNK = 40;
 const PROPERTY_RPC_CHUNK = 200;
+/** Explicit row limit for the chunked .in() lookups (>= chunk size); hitting it counts as failed. */
+const BY_IDS_LIMIT = 1000;
 
 function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
   const out: T[][] = [];
@@ -428,6 +458,161 @@ function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
   return out;
 }
 const HOLD_LIMIT = 200;
+const ALERT_ROW_CAP = 1000;
+/**
+ * The alert lookback never grows past this, however old the watermark is. The 1h nudge
+ * therefore needs the hold to still be in-window: a hold whose triggering activity is older
+ * than this drops out of the lookback and is not nudged.
+ */
+export const ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const PROPERTY_COLUMNS =
+  "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since";
+const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
+const REVIEW_COLUMNS = "property_id, conversation_id, source_inbound_message_id, disposition, created_at";
+const draftColumns = (includeBody: boolean) =>
+  includeBody
+    ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
+    : "id, property_id, conversation_id, inbound_message_id, run_id, created_at";
+
+type AlertSources = {
+  properties: HoldPropertyRow[];
+  decisions: HoldDecisionRow[];
+  reviews: HoldReviewRow[];
+  drafts: HoldDraftRow[];
+  /** Newest inbound seller message per property at/after the watermark. */
+  inboundAfter: Map<string, string>;
+  failed: boolean;
+};
+
+/**
+ * Alert cron only: the leads that could have NEW activity since `sinceIso`, found
+ * directly (never through the page's oldest-first HOLD_LIMIT window, which a large
+ * backlog would fill). Eligible = flagged at/after the watermark, OR a seller
+ * message at/after it (newest ALERT_ROW_CAP, org-wide, indexed), OR a decision /
+ * review / draft created at/after it. For exactly that set, every currently open
+ * source row is then loaded so the hold derives the same as on the page.
+ */
+async function loadAlertSources(
+  supabase: LooseSupabase,
+  orgId: string,
+  sinceIso: string,
+  includeDraftBody: boolean,
+  nowMs: number,
+): Promise<AlertSources> {
+  let failed = false;
+  // Lower bound = max(watermark, now - 7 days): the window stops growing even though
+  // the watermark never advances. The newest rows win the cap (every query is ordered desc).
+  const watermarkMs = Date.parse(sinceIso);
+  const lowerMs = Number.isFinite(watermarkMs) ? Math.max(watermarkMs, nowMs - ALERT_LOOKBACK_MS) : nowMs - ALERT_LOOKBACK_MS;
+  const lowerIso = new Date(lowerMs).toISOString();
+  // A result at the cap may be truncated: that is an incomplete load, never a clean one.
+  const rows = async <T,>(
+    q: PromiseLike<{ data?: unknown; error?: unknown }>,
+    cap: number = ALERT_ROW_CAP,
+  ): Promise<T[]> => {
+    const res = await q;
+    if (res.error) {
+      failed = true;
+      return [];
+    }
+    const data = (res.data ?? []) as T[];
+    if (data.length >= cap) failed = true;
+    return data;
+  };
+  const fresh = (table: string, cols: string) =>
+    supabase.from(table).select(cols).eq("org_id", orgId).eq("status", "pending").gte("created_at", lowerIso).order("created_at", { ascending: false });
+  const [newlyFlagged, inbound, newDecisions, newReviews, newDrafts] = await Promise.all([
+    rows<{ id: string }>(
+      supabase
+        .from("properties")
+        .select("id")
+        .eq("org_id", orgId)
+        .eq("needs_human_attention", true)
+        .gte("needs_human_attention_since", lowerIso)
+        .order("needs_human_attention_since", { ascending: false })
+        .limit(ALERT_ROW_CAP),
+    ),
+    rows<{ property_id: string | null; created_at: string }>(
+      supabase
+        .from("messages")
+        .select("property_id, created_at")
+        .eq("org_id", orgId)
+        .eq("direction", "inbound")
+        .gte("created_at", lowerIso)
+        .order("created_at", { ascending: false })
+        .limit(ALERT_ROW_CAP),
+    ),
+    rows<{ property_id: string | null }>(fresh("jev_lead_decisions", "property_id").limit(ALERT_ROW_CAP)),
+    rows<{ property_id: string | null }>(fresh("ai_disposition_reviews", "property_id").limit(ALERT_ROW_CAP)),
+    rows<{ property_id: string | null }>(fresh("ai_reply_drafts", "property_id").limit(ALERT_ROW_CAP)),
+  ]);
+
+  const inboundAfter = new Map<string, string>();
+  for (const r of inbound) {
+    if (!r.property_id) continue;
+    const prev = inboundAfter.get(r.property_id);
+    if (!prev || compareInstants(r.created_at, prev) > 0) inboundAfter.set(r.property_id, r.created_at);
+  }
+  const eligible = [
+    ...new Set(
+      [
+        ...newlyFlagged.map((r) => r.id),
+        ...inboundAfter.keys(),
+        ...[...newDecisions, ...newReviews, ...newDrafts].flatMap((r) => (r.property_id ? [r.property_id] : [])),
+      ],
+    ),
+  ];
+  const byIds = <T,>(table: string, cols: string, col: string, pending: boolean) =>
+    Promise.all(
+      chunked(eligible, PROPERTY_RPC_CHUNK).map((ids) => {
+        let q = supabase.from(table).select(cols).eq("org_id", orgId).in(col, ids);
+        q = pending ? q.eq("status", "pending") : q.eq("needs_human_attention", true);
+        return rows<T>(q.limit(BY_IDS_LIMIT), BY_IDS_LIMIT);
+      }),
+    ).then((parts) => parts.flat());
+  const [properties, decisions, reviews, drafts] = await Promise.all([
+    byIds<HoldPropertyRow>("properties", PROPERTY_COLUMNS, "id", false),
+    byIds<HoldDecisionRow>("jev_lead_decisions", DECISION_COLUMNS, "property_id", true),
+    byIds<HoldReviewRow>("ai_disposition_reviews", REVIEW_COLUMNS, "property_id", true),
+    byIds<HoldDraftRow>("ai_reply_drafts", draftColumns(includeDraftBody), "property_id", true),
+  ]);
+  return { properties, decisions, reviews, drafts, inboundAfter, failed };
+}
+
+/**
+ * Which of `propertyIds` are held right now (flagged, or with a pending decision,
+ * review or draft). Used by the alert cron to archive delivery rows whose hold
+ * closed. Returns null when any lookup failed: a failure must never read as
+ * "closed".
+ */
+export async function loadHeldPropertyIds(
+  supabase: LooseSupabase,
+  orgId: string,
+  propertyIds: readonly string[],
+): Promise<Set<string> | null> {
+  const held = new Set<string>();
+  let failed = false;
+  const lookups = chunked(propertyIds, PROPERTY_RPC_CHUNK).flatMap((ids) => [
+    supabase.from("properties").select("id").eq("org_id", orgId).eq("needs_human_attention", true).in("id", ids).limit(BY_IDS_LIMIT),
+    ...(["jev_lead_decisions", "ai_disposition_reviews", "ai_reply_drafts"] as const).map((table) =>
+      supabase.from(table).select("property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", ids).limit(BY_IDS_LIMIT),
+    ),
+  ]);
+  for (const res of await Promise.all(lookups)) {
+    if (res.error) {
+      failed = true;
+      continue;
+    }
+    const data = (res.data ?? []) as Array<{ id?: string; property_id?: string | null }>;
+    // A result at the limit may be truncated: a missing id must never read as "closed".
+    if (data.length >= BY_IDS_LIMIT) failed = true;
+    for (const r of data) {
+      const id = r.id ?? r.property_id;
+      if (id) held.add(id);
+    }
+  }
+  return failed ? null : held;
+}
 
 /**
  * Server loader. Every query is org-scoped explicitly (RLS also applies).
@@ -446,6 +631,11 @@ export async function loadMessagesV2Data(
      * carry no message text).
      */
     includeDraftBody?: boolean;
+    /**
+     * Alert cron: the org's alert watermark. Holds are derived only for leads
+     * with activity at/after it, found directly rather than through HOLD_LIMIT.
+     */
+    alertsSince?: string;
   } = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
@@ -479,7 +669,7 @@ export async function loadMessagesV2Data(
       supabase
         .from("properties")
         .select(
-          "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at",
+          "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since",
         )
         .eq("org_id", orgId)
         .eq("needs_human_attention", true)
@@ -561,18 +751,27 @@ export async function loadMessagesV2Data(
   const windowRuns = (
     windowRes.error ? [] : (windowRes.data ?? [])
   ) as PipelineRun[];
+  // Alert cron: the eligible set is looked up directly, not taken from the page's
+  // HOLD_LIMIT window (which a large backlog fills with old holds).
+  const alertSources = opts.alertsSince
+    ? await loadAlertSources(supabase, orgId, opts.alertsSince, !!opts.includeDraftBody, nowMs)
+    : null;
   // A failed query is reported as failed, never silently as "no holds".
   const properties = (
-    flaggedRes.error ? [] : (flaggedRes.data ?? [])
+    alertSources
+      ? alertSources.properties
+      : flaggedRes.error
+        ? []
+        : (flaggedRes.data ?? [])
   ) as HoldPropertyRow[];
   const decisions = (
-    decisionRes.error ? [] : (decisionRes.data ?? [])
+    alertSources ? alertSources.decisions : decisionRes.error ? [] : (decisionRes.data ?? [])
   ) as HoldDecisionRow[];
   const reviews = (
-    reviewRes.error ? [] : (reviewRes.data ?? [])
+    alertSources ? alertSources.reviews : reviewRes.error ? [] : (reviewRes.data ?? [])
   ) as HoldReviewRow[];
   const drafts = (
-    draftRes.error ? [] : (draftRes.data ?? [])
+    alertSources ? alertSources.drafts : draftRes.error ? [] : (draftRes.data ?? [])
   ) as HoldDraftRow[];
 
   // Runs for the hold cards: by property and by source inbound message, so a
@@ -636,6 +835,7 @@ export async function loadMessagesV2Data(
     decisions,
     reviews,
     drafts,
+    inboundAfter: alertSources?.inboundAfter,
     runs: [...pool.values()],
   });
 
@@ -834,7 +1034,22 @@ export async function loadMessagesV2Data(
     shown: openHolds.length,
     deadLetterUnavailable,
     contextErrors,
-    sources: [
+    sources: alertSources
+      ? [
+          {
+            source: "needs_attention",
+            ids: properties.map((r) => r.id),
+            failed: alertSources.failed,
+          },
+          { source: "jev_decision", ids: decisions.map((r) => r.property_id), failed: alertSources.failed },
+          { source: "disposition_review", ids: reviews.map((r) => r.property_id), failed: alertSources.failed },
+          {
+            source: "pending_draft",
+            ids: drafts.map((r) => r.property_id ?? `draft:${r.id}`),
+            failed: alertSources.failed,
+          },
+        ]
+      : [
       {
         source: "needs_attention",
         ids: keysOf(flaggedIds, (r) => r.id),
