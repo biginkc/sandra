@@ -237,6 +237,14 @@ describe("enrollNurtureInDrip (real database, real enrollLead)", () => {
 });
 
 describe("Book appointment enrolment (hot lead) stops on its own", () => {
+  it("the enrolment records the route it was created with", async () => {
+    const sequenceId = await seedSequence();
+    const propertyId = await seedProperty("Route", { dispo: null });
+    expect((await enrollLead(db, { propertyId, sequenceId, enrolledByUserId: null, autoRoute: "hot_book_appointment" })).status).toBe("enrolled");
+    const { data } = await db.from("sequence_enrollments").select("auto_enrolled_route").eq("property_id", propertyId).single();
+    expect(data).toEqual({ auto_enrolled_route: "hot_book_appointment" });
+  });
+
   async function hotEnrol(label: string) {
     const sequenceId = await seedSequence({ delayMinutes: 24 * 60 });
     // A hot lead is NOT nurture (no dispo is set); enrolment is the same shared enrollLead, no offset.

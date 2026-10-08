@@ -23,6 +23,7 @@ import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { pauseHotEnrollmentIfTakenOverSince } from "@/lib/sequences/hot-lead-takeover";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
@@ -1056,6 +1057,7 @@ async function classifyAndHandleNonRouteOutcomes(
         })
       : null;
     if (dripRoute?.kind === "person") {
+      const hotStartedAt = new Date().toISOString();
       if (input.inboundMessageId) {
         await proposeJevLeadDecision(supabase, {
           propertyId: input.propertyId,
@@ -1083,6 +1085,7 @@ async function classifyAndHandleNonRouteOutcomes(
       await enrollHotLeadInBookAppointment(supabase, {
         propertyId: input.propertyId,
         sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
+        startedAt: hotStartedAt,
         runCtx,
       });
       await completeClaim(supabase, input.propertyId, {
@@ -2585,7 +2588,7 @@ const ENROLL_THREW = "enroll_threw";
 
 async function enrollHotLeadInBookAppointment(
   supabase: SupabaseClient<Database>,
-  a: { propertyId: string; sequenceId: string | null; runCtx?: MaybeRunContext },
+  a: { propertyId: string; sequenceId: string | null; startedAt: string; runCtx?: MaybeRunContext },
 ): Promise<void> {
   let detail: Record<string, unknown>;
   let result: "applied" | "error";
@@ -2598,7 +2601,13 @@ async function enrollHotLeadInBookAppointment(
         propertyId: a.propertyId,
         sequenceId: a.sequenceId,
         enrolledByUserId: null,
+        autoRoute: "hot_book_appointment",
       });
+      if (outcome.status === "enrolled") {
+        // A person may have taken over while this dispatch was running: their
+        // takeover found nothing to pause. Settle that race now.
+        await pauseHotEnrollmentIfTakenOverSince({ propertyId: a.propertyId, since: a.startedAt });
+      }
       if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
         result = "applied";
         detail = {
@@ -2649,6 +2658,7 @@ async function runNurtureAutoDripStep(
       propertyId: a.propertyId,
       sequenceId: a.cfg.sequences[drip],
       delayDays,
+      route: drip,
     });
   } catch (error) {
     reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });

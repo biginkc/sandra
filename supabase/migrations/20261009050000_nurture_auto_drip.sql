@@ -70,10 +70,31 @@ create trigger trg_guard_nurture_mapped_sequence_delete
   before delete on public.sequences
   for each row execute function public.fn_guard_nurture_mapped_sequence_delete();
 
+-- Which auto-route created an enrolment. Immutable identity for takeover pauses:
+-- remapping the owner's Book appointment drip later must not strip protection from
+-- enrolments already running.
+alter table public.sequence_enrollments
+  add column if not exists auto_enrolled_route text;
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'sequence_enrollments_auto_route_check') then
+    alter table public.sequence_enrollments
+      add constraint sequence_enrollments_auto_route_check
+      check (auto_enrolled_route is null or auto_enrolled_route in
+        ('maybe_later', 'check_in_60', 'listed_not_selling', 'hot_book_appointment'));
+  end if;
+end $$;
+
+-- Durable "a person took over" marker. Takeover writes it BEFORE pausing; the hot-lead
+-- enrolment checks it AFTER inserting. Whichever order a race lands in, the
+-- enrolment ends up paused.
+alter table public.properties
+  add column if not exists last_person_takeover_at timestamptz;
+
 -- A PERSON assigning a lead takes over: pause the auto-enrolled "Book appointment"
 -- drip ("stops the moment a person takes over"). Only a signed-in person counts
--- (auth.uid() is null for the service role / system), and only the org's mapped
--- Book appointment drip is touched; every other drip is left running.
+-- (auth.uid() is null for the service role / system), and only enrolments created
+-- by the hot Book appointment route are touched; every other drip keeps running.
 create or replace function public.fn_pause_hot_drip_on_person_assignment()
 returns trigger
 language plpgsql
@@ -87,14 +108,13 @@ begin
   then
     return new;
   end if;
+  update public.properties set last_person_takeover_at = now() where id = new.id;
   with paused as (
     update public.sequence_enrollments e
     set status = 'paused', pause_reason = 'person_took_over', updated_at = now()
-    from public.ai_responder_configs c
     where e.property_id = new.id
       and e.status = 'active'
-      and c.org_id = e.org_id
-      and c.nurture_drip_hot_book_appointment_sequence_id = e.sequence_id
+      and e.auto_enrolled_route = 'hot_book_appointment'
     returning e.sequence_id
   )
   -- Same lead event the app's pause path writes (pausePropertyEnrollments).

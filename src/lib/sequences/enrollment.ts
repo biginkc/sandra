@@ -53,6 +53,8 @@ export async function enrollLead(
      * (the button path).
      */
     firstSendNotBefore?: Date;
+    /** Which auto-route created this enrolment (immutable identity used by takeover pauses). */
+    autoRoute?: "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
   },
 ): Promise<EnrollmentOutcome> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
@@ -229,6 +231,7 @@ export async function enrollLead(
       current_step_index: 0,
       next_run_at: nextRunAt.toISOString(),
       enrolled_by_user_id: params.enrolledByUserId ?? null,
+      ...(params.autoRoute ? { auto_enrolled_route: params.autoRoute } : {}),
     })
     .select("id")
     .single();

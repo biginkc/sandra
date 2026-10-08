@@ -3859,6 +3859,7 @@ export type Database = {
           homeowner_contact_id: string | null
           id: string
           is_dnc_locked: boolean
+          last_person_takeover_at: string | null
           is_training: boolean
           is_residential: boolean | null
           is_seasonal: boolean | null
@@ -3932,6 +3933,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          last_person_takeover_at?: string | null
           is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
@@ -4005,6 +4007,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          last_person_takeover_at?: string | null
           is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
@@ -4464,6 +4467,7 @@ export type Database = {
           contact_id: string | null
           current_step_index: number
           enrolled_at: string
+          auto_enrolled_route: string | null
           enrolled_by_user_id: string | null
           id: string
           next_run_at: string | null
@@ -4479,6 +4483,7 @@ export type Database = {
           contact_id?: string | null
           current_step_index?: number
           enrolled_at?: string
+          auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
           id?: string
           next_run_at?: string | null
@@ -4494,6 +4499,7 @@ export type Database = {
           contact_id?: string | null
           current_step_index?: number
           enrolled_at?: string
+          auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
           id?: string
           next_run_at?: string | null

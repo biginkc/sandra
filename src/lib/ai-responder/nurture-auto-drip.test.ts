@@ -116,6 +116,11 @@ describe("enrollNurtureInDrip", () => {
     expect(mocks.enrollLead).toHaveBeenCalledTimes(1);
     expect(mocks.enrollLead).toHaveBeenCalledWith(supabase, { propertyId: "p1", sequenceId: "s1", enrolledByUserId: null, firstSendNotBefore: expect.any(Date) });
   });
+  it("records the originating route on the enrolment (immutable identity)", async () => {
+    mocks.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "e1", sequenceLabel: "x" });
+    await enrollNurtureInDrip(supabase, { propertyId: "p1", sequenceId: "s1", delayDays: 30, route: "maybe_later" });
+    expect(mocks.enrollLead).toHaveBeenCalledWith(supabase, expect.objectContaining({ autoRoute: "maybe_later" }));
+  });
   it("the first text is held back by the route's delay (firstSendNotBefore = now + days)", async () => {
     mocks.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "e1", sequenceLabel: "x" });
     const before = Date.now();

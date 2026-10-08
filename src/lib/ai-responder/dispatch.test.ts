@@ -93,7 +93,8 @@ vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => {
   return { ...actual, applyPhoneLevelOptOut: vi.fn() };
 });
 
-const hotEnroll = vi.hoisted(() => ({ enrollLead: vi.fn() }));
+const hotEnroll = vi.hoisted(() => ({ enrollLead: vi.fn(), reconcile: vi.fn(async (..._a: unknown[]) => ({ paused: 0 })) }));
+vi.mock("@/lib/sequences/hot-lead-takeover", () => ({ pauseHotEnrollmentIfTakenOverSince: hotEnroll.reconcile }));
 vi.mock("@/lib/sequences/enrollment", () => ({
   pauseContactEnrollments: vi.fn(),
   pausePropertyEnrollments: vi.fn(),
@@ -6659,6 +6660,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     nurtureDrip.loadConfig.mockReset().mockResolvedValue({ enabled: false });
     nurtureDrip.enroll.mockReset();
     hotEnroll.enrollLead.mockReset();
+    hotEnroll.reconcile.mockClear();
     nurtureAnswers = {};
   });
   afterEach(() => {
@@ -6859,7 +6861,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
       expect(order).toEqual(["send", "enroll(dispo=nurture)"]);
       expect(nurtureDrip.enroll).toHaveBeenCalledTimes(1);
-      expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-60", delayDays: 60 });
+      expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-60", delayDays: 60, route: "check_in_60" });
       expect(state.property.needs_human_attention).toBe(false);
     });
 
@@ -6976,7 +6978,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           await runNurture(state, `inbound-route-${name.replaceAll(" ", "-")}`);
 
           expect(sendSmsToContact).toHaveBeenCalledTimes(1);
-          expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: seq, delayDays: days });
+          expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: seq, delayDays: days, route: expect.any(String) });
           expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
         });
       }
@@ -7014,7 +7016,9 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         ]);
         // Book appointment drip: the drip's own schedule, no extra offset, no human actor.
         expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
-        expect(hotEnroll.enrollLead).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-hot", enrolledByUserId: null });
+        expect(hotEnroll.enrollLead).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-hot", enrolledByUserId: null, autoRoute: "hot_book_appointment" });
+        // Race with a person taking over: re-checked right after the enrolment exists.
+        expect(hotEnroll.reconcile).toHaveBeenCalledWith({ propertyId: PROPERTY_ID, since: expect.any(String) });
       });
 
       it("an enrolment problem never undoes the hold: still hot_lead, error recorded", async () => {

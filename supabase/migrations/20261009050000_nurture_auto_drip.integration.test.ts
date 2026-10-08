@@ -149,23 +149,16 @@ describe("nurture auto-drip switch", () => {
   });
 
   describe("a person assigning the lead pauses the Book appointment drip", () => {
-    async function seed(sequenceForEnrollment: string, mapAsHot: boolean) {
-      const hot = mapAsHot ? sequenceForEnrollment : sequenceId;
-      await db.query(
-        `update public.ai_responder_configs set nurture_auto_drip = true,
-           nurture_drip_maybe_later_sequence_id = $2, nurture_drip_check_in_60_sequence_id = $2,
-           nurture_drip_listed_not_selling_sequence_id = $2, nurture_drip_hot_book_appointment_sequence_id = $3 where id = $1`,
-        [configId, sequenceId, hot],
-      );
+    async function seed(sequenceForEnrollment: string, route: string | null) {
       const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T','T') returning id`, [orgId])).rows[0].id;
       const property = (await db.query(
         `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1, '1 Test', 'MO', 'new_lead', $2) returning id`,
         [orgId, contact],
       )).rows[0].id;
       await db.query(
-        `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at)
-         values ($1, $2, $3, $4, 'active', 0, now())`,
-        [orgId, sequenceForEnrollment, property, contact],
+        `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at, auto_enrolled_route)
+         values ($1, $2, $3, $4, 'active', 0, now(), $5)`,
+        [orgId, sequenceForEnrollment, property, contact, route],
       );
       return property as string;
     }
@@ -177,7 +170,7 @@ describe("nurture auto-drip switch", () => {
     };
 
     it("a signed-in person assigning pauses the hot enrolment with reason person_took_over", async () => {
-      const property = await seed(sequenceId, true);
+      const property = await seed(sequenceId, "hot_book_appointment");
       await assignAs(users.owner, property);
       expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
       // The same lead event the app's pause path writes.
@@ -186,16 +179,33 @@ describe("nurture auto-drip switch", () => {
       expect(ev[0]).toMatchObject({ actor_type: "user", actor_id: users.owner, payload: { count: 1, reason: "person_took_over", permanent: false } });
     });
     it("the system (no signed-in person) assigning leaves it running", async () => {
-      const property = await seed(sequenceId, true);
+      const property = await seed(sequenceId, "hot_book_appointment");
       await assignAs(null, property);
       expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
       expect((await db.query(`select 1 from public.lead_events where property_id = $1`, [property])).rows).toEqual([]);
     });
     it("a person assigning a lead in any OTHER drip leaves it running", async () => {
       const other = (await db.query(`insert into public.sequences (org_id, name, active) values ($1, 'Other drip', true) returning id`, [orgId])).rows[0].id;
-      const property = await seed(other, false);
+      const property = await seed(other, "maybe_later");
       await assignAs(users.owner, property);
       expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+    });
+    it("remapping the owner's Book appointment drip later does not strip protection: the route the enrolment was created with decides", async () => {
+      const property = await seed(sequenceId, "hot_book_appointment");
+      const other = (await db.query(`insert into public.sequences (org_id, name, active) values ($1, 'Remapped', true) returning id`, [orgId])).rows[0].id;
+      await db.query(
+        `update public.ai_responder_configs set nurture_auto_drip = true, nurture_drip_maybe_later_sequence_id = $2, nurture_drip_check_in_60_sequence_id = $2,
+           nurture_drip_listed_not_selling_sequence_id = $2, nurture_drip_hot_book_appointment_sequence_id = $2 where id = $1`,
+        [configId, other],
+      );
+      await assignAs(users.owner, property);
+      expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+    });
+    it("a person assigning also leaves the durable takeover marker (the enrol-vs-takeover race fence)", async () => {
+      const property = await seed(sequenceId, null);
+      await assignAs(users.owner, property);
+      const { rows } = await db.query(`select last_person_takeover_at from public.properties where id = $1`, [property]);
+      expect(rows[0].last_person_takeover_at).not.toBeNull();
     });
   });
 
