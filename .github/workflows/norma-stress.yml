@@ -27,6 +27,7 @@ on:
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
       - "vitest.norma-stress.config.ts"
+      - "vitest.norma-cutover.config.ts"
       - "scripts/ci/provision-disposable-stack.mjs"
       - ".github/workflows/norma-stress.yml"
   workflow_dispatch: {}
@@ -63,10 +64,19 @@ jobs:
       - name: Provision disposable stack (schema without the Norma migrations)
         run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*'
 
-      - name: Run the stress gate
+      # Cutover stage 1 disables the legacy claim (20261009010000). This suite (including the teeth mutants) was
+      # written for, and dials through, the legacy claim, so it runs on the schema it was written for: the same
+      # chain WITHOUT that one migration. The post-disable schema is covered by the next step. Nothing is skipped.
+      - name: Run the stress gate (legacy suite, pre-disable schema)
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          NORMA_STRESS_EXCLUDE_MIGRATIONS: 20261009010000_norma_legacy_claim_disable.sql
         run: npm run test:norma-stress
+
+      - name: Run the cutover gate (post-disable schema, current runtime)
+        env:
+          NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npm run test:norma-cutover
 
       - name: Stop disposable stack
         if: always() && env.E2E_LOCAL_WORKDIR != ''
