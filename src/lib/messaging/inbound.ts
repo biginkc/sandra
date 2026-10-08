@@ -1216,7 +1216,13 @@ export async function handleInboundWebhook(
               })
             : 0;
 
-          if (delaySeconds === 0) {
+          // A reply is dispatched synchronously inside the webhook ONLY when the
+          // org has no reply delay at all (max = 0, or no active config). With a
+          // non-zero max, a computed 0 (no property state, quiet-hours clamp, low
+          // random draw) still goes through the delay workflow so approved
+          // template replies are never sent from the webhook request itself.
+          const replyDelayConfigured = (delayConfig?.delayMaxSeconds ?? 0) > 0;
+          if (delaySeconds === 0 && !replyDelayConfigured) {
             await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
