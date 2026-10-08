@@ -1,6 +1,9 @@
 -- Rollback for 20261008300200: restores the 190000 confirm RPC and sweeper feed, drops wrong_scope.
 begin;
 
+drop trigger if exists trg_ai_disposition_reviews_clear_needs_confirm_hold on public.ai_disposition_reviews;
+drop function if exists public.fn_clear_needs_confirm_hold_on_review_resolved();
+
 drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text);
 create or replace function public.fn_apply_ai_disposition_with_review(
   p_property_id uuid,

@@ -25,6 +25,43 @@ alter table public.ai_disposition_reviews
 comment on column public.ai_disposition_reviews.wrong_scope is
   'The model''s wrong-number scope. all = a human confirming the review must suppress the phone everywhere.';
 
+-- A review that is superseded (or confirmed without owing a suppression) must not
+-- leave its jev_*/model_*_needs_confirm hold stuck: when no pending review
+-- remains for the property, clear that hold. A suppression_incomplete pointer is
+-- never touched (the merge in the confirm RPC runs after this and re-raises it).
+create or replace function public.fn_clear_needs_confirm_hold_on_review_resolved()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if new.status in ('superseded', 'confirmed') and old.status is distinct from new.status
+     and not exists (
+       select 1 from public.ai_disposition_reviews r
+       where r.property_id = new.property_id and r.org_id = new.org_id and r.status = 'pending'
+     )
+  then
+    update public.properties
+    set needs_human_attention = false,
+        last_ai_escalation_reason = null,
+        updated_at = now()
+    where id = new.property_id and org_id = new.org_id
+      and last_ai_escalation_reason in (
+        'jev_dnc_needs_confirm', 'jev_opted_out_needs_confirm',
+        'jev_wrong_number_all_needs_confirm',
+        'model_opt_out_needs_confirm', 'model_dnc_needs_confirm');
+  end if;
+  return null;
+end;
+$$;
+revoke all on function public.fn_clear_needs_confirm_hold_on_review_resolved() from public, anon, authenticated;
+
+drop trigger if exists trg_ai_disposition_reviews_clear_needs_confirm_hold on public.ai_disposition_reviews;
+create trigger trg_ai_disposition_reviews_clear_needs_confirm_hold
+  after update of status on public.ai_disposition_reviews
+  for each row execute function public.fn_clear_needs_confirm_hold_on_review_resolved();
+
 -- The scope is written by the SAME call that creates the review, so a human can
 -- never confirm a scope = all review before its scope is recorded.
 drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint);

@@ -8,5 +8,5 @@ alter table public.jev_lead_decisions
 alter table public.jev_lead_decisions
   add constraint jev_lead_decisions_resolved_outcome_check
   check (resolved_outcome is null or resolved_outcome in
-    ('new_lead', 'nurture', 'wrong_number', 'not_interested'));
+    ('new_lead', 'nurture', 'wrong_number', 'not_interested', 'opted_out', 'dnc'));
 commit;

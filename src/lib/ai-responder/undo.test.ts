@@ -33,7 +33,7 @@ describe("recordJevActionUndo", () => {
     const supabase = {
       from: vi.fn((table: string) =>
         table === "properties"
-          ? { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { follow_up_at: "2026-10-25T00:00:00Z" }, error: null }) }) }) }
+          ? { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { follow_up_at: "2026-10-25T00:00:00Z", decision_context_revision: 7 }, error: null }) }) }) }
           : { insert },
       ),
     };
@@ -53,6 +53,7 @@ describe("recordJevActionUndo", () => {
         prior_outreach_dispo: "nurture",
         prior_follow_up_at: "2026-10-20T00:00:00Z",
         applied_follow_up_at: "2026-10-25T00:00:00Z",
+        recorded_revision: 7,
         paused_enrollment_ids: ["e1", "e2"],
       }),
     );

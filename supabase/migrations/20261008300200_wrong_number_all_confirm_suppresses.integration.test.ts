@@ -266,4 +266,25 @@ describe("scope is written by the review-creating RPC itself (no window to confi
     });
     expect(message).toMatch(/invalid wrong scope/);
   });
+
+  it("superseding the only pending review clears a stuck needs-confirm hold, but not a suppression pointer, and not while another review is pending", async () => {
+    const a = await review({ scope: "all", applied: false, hold: "jev_wrong_number_all_needs_confirm" });
+    await db.query(`update public.ai_disposition_reviews set status = 'superseded', resolved_at = now(), superseded_reason = 'x' where id = $1`, [a.reviewId]);
+    expect(await prop(a.propertyId)).toMatchObject({ needs_human_attention: false, last_ai_escalation_reason: null });
+
+    const b = await review({ scope: "all", applied: false, hold: `suppression_incomplete:${randomUUID()}` });
+    await db.query(`update public.ai_disposition_reviews set status = 'superseded', resolved_at = now(), superseded_reason = 'x' where id = $1`, [b.reviewId]);
+    expect((await prop(b.propertyId)).needs_human_attention).toBe(true);
+
+    const c = await review({ scope: "all", applied: false, hold: "jev_dnc_needs_confirm" });
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `insert into public.ai_disposition_reviews (org_id, property_id, conversation_id, source_inbound_message_id, disposition, ai_reason, status)
+       values ($1, $2, $3, $4, 'dnc', 'x', 'pending')`,
+      [orgId, c.propertyId, randomUUID(), (await db.query(`insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body) values (gen_random_uuid(), $1, $2, gen_random_uuid(), 'sms', 'inbound', 'x') returning id`, [orgId, c.propertyId])).rows[0].id],
+    );
+    await db.query("set local session_replication_role = origin");
+    await db.query(`update public.ai_disposition_reviews set status = 'superseded', resolved_at = now(), superseded_reason = 'x' where id = $1`, [c.reviewId]);
+    expect(await prop(c.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "jev_dnc_needs_confirm" });
+  });
 });

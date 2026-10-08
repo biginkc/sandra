@@ -2654,6 +2654,7 @@ export type Database = {
           prior_follow_up_at: string | null
           prior_outreach_dispo: string | null
           property_id: string
+          recorded_revision: number | null
           source_inbound_message_id: string
           undone_at: string | null
           undone_by: string | null
@@ -2670,6 +2671,7 @@ export type Database = {
           prior_follow_up_at?: string | null
           prior_outreach_dispo?: string | null
           property_id: string
+          recorded_revision?: number | null
           source_inbound_message_id: string
           undone_at?: string | null
           undone_by?: string | null
@@ -2686,6 +2688,7 @@ export type Database = {
           prior_follow_up_at?: string | null
           prior_outreach_dispo?: string | null
           property_id?: string
+          recorded_revision?: number | null
           source_inbound_message_id?: string
           undone_at?: string | null
           undone_by?: string | null

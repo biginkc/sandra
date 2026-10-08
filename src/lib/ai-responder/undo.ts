@@ -57,7 +57,7 @@ export async function recordJevActionUndo(
   // The follow-up date AS JEV LEFT IT: undo refuses if a person edited it since.
   const { data: after, error: afterError } = await supabase
     .from("properties")
-    .select("follow_up_at")
+    .select("follow_up_at, decision_context_revision")
     .eq("id", args.propertyId)
     .maybeSingle();
   if (afterError || !after) {
@@ -77,6 +77,7 @@ export async function recordJevActionUndo(
     prior_outreach_dispo: args.snapshot.outreachDispo,
     prior_follow_up_at: args.snapshot.followUpAt,
     applied_follow_up_at: after.follow_up_at ?? null,
+    recorded_revision: after.decision_context_revision ?? null,
     paused_enrollment_ids: args.pausedEnrollmentIds ?? [],
   });
   // 23505 = already recorded for this inbound (retry): that is fine.

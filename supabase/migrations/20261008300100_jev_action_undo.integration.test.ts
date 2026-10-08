@@ -21,6 +21,7 @@ const db = new Client({ connectionString: url });
 let orgId: string;
 let ownerId: string;
 let outsiderId: string;
+let acqId: string;
 let propertyId: string;
 let messageId: string;
 
@@ -37,17 +38,22 @@ beforeEach(async () => {
   orgId = randomUUID();
   ownerId = randomUUID();
   outsiderId = randomUUID();
+  acqId = randomUUID();
   propertyId = randomUUID();
   messageId = randomUUID();
   const conversationId = randomUUID();
   await db.query("insert into public.organizations (id, name) values ($1, 'undo')", [orgId]);
   await db.query("set local session_replication_role = replica");
-  for (const id of [ownerId, outsiderId]) {
+  for (const id of [ownerId, outsiderId, acqId]) {
     await db.query(`insert into auth.users (id, email) values ($1, $2)`, [id, `u-${id}@test.local`]);
   }
   await db.query(
     `insert into public.memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active')`,
     [orgId, ownerId],
+  );
+  await db.query(
+    `insert into public.memberships (org_id, user_id, role, access_status, acquisitions_enabled) values ($1, $2, 'member', 'active', true)`,
+    [orgId, acqId],
   );
   await db.query(
     `insert into public.properties (id, org_id, address, state, status, outreach_dispo, follow_up_at)
@@ -81,14 +87,14 @@ async function as<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function recordUndo(over: { action?: string; appliedFollowUp?: string | null; applied?: string; prior?: string | null; followUp?: string | null; enrollments?: string[] } = {}) {
+async function recordUndo(over: { revision?: number | null; action?: string; appliedFollowUp?: string | null; applied?: string; prior?: string | null; followUp?: string | null; enrollments?: string[] } = {}) {
   const id = randomUUID();
   await db.query(
     `insert into public.jev_action_undo
        (id, org_id, property_id, source_inbound_message_id, action, applied_dispo,
-        prior_outreach_dispo, prior_follow_up_at, applied_follow_up_at, paused_enrollment_ids)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [id, orgId, propertyId, messageId, over.action ?? "wrong_number", over.applied ?? "wrong_number", "prior" in over ? over.prior : "nurture", "followUp" in over ? over.followUp : "2026-10-20T00:00:00Z", "appliedFollowUp" in over ? over.appliedFollowUp : null, over.enrollments ?? []],
+        prior_outreach_dispo, prior_follow_up_at, applied_follow_up_at, paused_enrollment_ids, recorded_revision)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [id, orgId, propertyId, messageId, over.action ?? "wrong_number", over.applied ?? "wrong_number", "prior" in over ? over.prior : "nurture", "followUp" in over ? over.followUp : "2026-10-20T00:00:00Z", "appliedFollowUp" in over ? over.appliedFollowUp : null, over.enrollments ?? [], over.revision ?? null],
   );
   return id;
 }
@@ -184,5 +190,113 @@ describe("fn_undo_jev_action", () => {
     await expect(
       db.query(`update public.jev_action_undo set undone_by = $2 where id = $1`, [id, ownerId]),
     ).rejects.toThrow(/jev_action_undo_undone_pair/);
+  });
+
+  it("an acquisitions-only (non-owner) member can undo; a plain member without access cannot", async () => {
+    const id = await recordUndo();
+    await expect(undo(outsiderId, id)).rejects.toThrow(/FORBIDDEN/);
+    await undo(acqId, id);
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("nurture");
+  });
+
+  it("refuses (STATE_CHANGED) when a human already confirmed the review", async () => {
+    const id = await recordUndo();
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `insert into public.ai_disposition_reviews (org_id, property_id, conversation_id, source_inbound_message_id, disposition, ai_reason, status, resolved_at, reviewed_by)
+       values ($1, $2, $3, $4, 'wrong_number', 'x', 'confirmed', now(), $5)`,
+      [orgId, propertyId, randomUUID(), messageId, ownerId],
+    );
+    await db.query("set local session_replication_role = origin");
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("does NOT refuse for an auto-accepted review (no human involved)", async () => {
+    const id = await recordUndo();
+    await db.query("set local session_replication_role = replica");
+    const runId = randomUUID();
+    const conv = randomUUID();
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'wrong_number')`,
+      [runId, orgId, propertyId, conv, messageId],
+    );
+    await db.query(
+      `insert into public.ai_disposition_reviews (org_id, property_id, conversation_id, source_inbound_message_id, disposition, ai_reason, status, resolved_at, classification_run_id)
+       values ($1, $2, $3, $4, 'wrong_number', 'x', 'auto_accepted', now(), $5)`,
+      [orgId, propertyId, conv, messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    expect((await undo(ownerId, id)).status).toBe("undone");
+  });
+
+  it("refuses when the homeowner contact is opted out or do-not-contact", async () => {
+    for (const col of ["sms_opted_out", "do_not_contact"]) {
+      const contactId = randomUUID();
+      await db.query("set local session_replication_role = replica");
+      await db.query(`insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`, [
+        contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`,
+      ]);
+      await db.query(`update public.contacts set ${col} = true where id = $1`, [contactId]);
+      await db.query(`update public.properties set homeowner_contact_id = $2 where id = $1`, [propertyId, contactId]);
+      await db.query("set local session_replication_role = origin");
+      await db.query("delete from public.jev_action_undo where property_id = $1", [propertyId]);
+      const id = await recordUndo();
+      await expect(undo(ownerId, id), col).rejects.toThrow(/STATE_CHANGED/);
+    }
+  });
+
+  it("refuses when the texting phone is in sms_phone_suppressions", async () => {
+    const phone = `+1555${Math.floor(1000000 + Math.random() * 8999999)}`;
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.messages set from_address = $2 where id = $1`, [messageId, phone]);
+    await db.query(`insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1, 'sms', $2, 'test')`, [orgId, phone]);
+    await db.query("set local session_replication_role = origin");
+    const id = await recordUndo();
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("refuses when the decision-context revision moved since the action was recorded (e.g. a newer inbound)", async () => {
+    const rev = (await db.query(`select decision_context_revision r from public.properties where id = $1`, [propertyId])).rows[0].r;
+    const id = await recordUndo({ revision: Number(rev) });
+    await db.query(`update public.properties set decision_context_revision = decision_context_revision + 1 where id = $1`, [propertyId]);
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("succeeds when the recorded revision is unchanged", async () => {
+    const rev = (await db.query(`select decision_context_revision r from public.properties where id = $1`, [propertyId])).rows[0].r;
+    const id = await recordUndo({ revision: Number(rev) });
+    expect((await undo(ownerId, id)).status).toBe("undone");
+  });
+
+  it("the widened resolved_outcome check keeps opted_out/dnc: a human opted_out correction of a Jev nurture decision still works", async () => {
+    await db.query("set local session_replication_role = replica");
+    const contactId = randomUUID();
+    await db.query(`insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`, [
+      contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`,
+    ]);
+    await db.query(`update public.properties set homeowner_contact_id = $2, outreach_dispo = null where id = $1`, [propertyId, contactId]);
+    const runId = randomUUID();
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'nurture')`,
+      [runId, orgId, propertyId, randomUUID(), messageId],
+    );
+    const decisionId = randomUUID();
+    await db.query(
+      `insert into public.jev_lead_decisions (id, org_id, property_id, conversation_id, source_inbound_message_id, classification_run_id, proposed_outcome)
+       values ($1, $2, $3, $4, $5, $6, 'nurture')`,
+      [decisionId, orgId, propertyId, randomUUID(), messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    for (const outcome of ["opted_out", "dnc"]) {
+      const r = await as(ownerId, async () =>
+        (await db.query(`select public.fn_apply_and_record_jev_lead_decision_correction($1, $2, 'human')`, [decisionId, outcome])).rows[0],
+      );
+      expect(JSON.stringify(r)).toMatch(/corrected|resolvedOutcome/);
+    }
+    const d = (await db.query(`select resolved_outcome from public.jev_lead_decisions where id = $1`, [decisionId])).rows[0];
+    expect(d.resolved_outcome).toBe("dnc");
   });
 });

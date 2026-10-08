@@ -16,13 +16,15 @@ begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
 
--- 'undone' is a valid resolution for a nurture decision a person reversed.
+-- 'undone' is a valid resolution for a nurture decision a person reversed. Every
+-- value allowed since 20261008140300 (incl. opted_out/dnc for human corrections)
+-- is kept; only 'undone' is appended.
 alter table public.jev_lead_decisions
   drop constraint if exists jev_lead_decisions_resolved_outcome_check;
 alter table public.jev_lead_decisions
   add constraint jev_lead_decisions_resolved_outcome_check
   check (resolved_outcome is null or resolved_outcome in
-    ('new_lead', 'nurture', 'wrong_number', 'not_interested', 'undone'));
+    ('new_lead', 'nurture', 'wrong_number', 'not_interested', 'opted_out', 'dnc', 'undone'));
 
 create table if not exists public.jev_action_undo (
   id uuid primary key default gen_random_uuid(),
@@ -35,6 +37,7 @@ create table if not exists public.jev_action_undo (
   prior_outreach_dispo text,
   prior_follow_up_at timestamptz,
   applied_follow_up_at timestamptz,
+  recorded_revision bigint,
   paused_enrollment_ids uuid[] not null default '{}',
   created_at timestamptz not null default now(),
   undone_at timestamptz,
@@ -78,6 +81,9 @@ declare
   v_current_follow timestamptz;
   v_decision_id uuid;
   v_review_id uuid;
+  v_revision bigint;
+  v_contact_id uuid;
+  v_phones text[];
 begin
   if v_actor is null then
     raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
@@ -98,7 +104,8 @@ begin
     return jsonb_build_object('status', 'already_undone', 'enrollmentIds', '[]'::jsonb);
   end if;
 
-  select p.outreach_dispo, p.follow_up_at into v_current, v_current_follow
+  select p.outreach_dispo, p.follow_up_at, p.decision_context_revision, p.homeowner_contact_id
+  into v_current, v_current_follow, v_revision, v_contact_id
   from public.properties p
   where p.id = v_undo.property_id and p.org_id = v_undo.org_id
   for update;
@@ -109,6 +116,45 @@ begin
      or v_current_follow is distinct from v_undo.applied_follow_up_at then
     -- A person (or a later decision) changed the disposition or the follow-up
     -- date since: never overwrite that.
+    raise exception 'STATE_CHANGED' using errcode = '40001';
+  end if;
+
+  -- Something decision-relevant happened since (newer inbound text, status or
+  -- disposition write, booked appointment): a person must look at it again.
+  if v_undo.recorded_revision is not null and v_revision is distinct from v_undo.recorded_revision then
+    raise exception 'STATE_CHANGED' using errcode = '40001';
+  end if;
+
+  -- A person already confirmed Jev's decision: that is a human decision now.
+  if exists (
+    select 1 from public.ai_disposition_reviews r
+    where r.source_inbound_message_id = v_undo.source_inbound_message_id
+      and r.org_id = v_undo.org_id and r.status = 'confirmed' and r.reviewed_by is not null
+  ) or exists (
+    select 1 from public.jev_lead_decisions d
+    where d.source_inbound_message_id = v_undo.source_inbound_message_id
+      and d.org_id = v_undo.org_id and d.status = 'confirmed' and d.resolved_by is not null
+  ) then
+    raise exception 'STATE_CHANGED' using errcode = '40001';
+  end if;
+
+  -- Never undo into a state where the number is opted out / suppressed.
+  if v_contact_id is not null and exists (
+    select 1 from public.contacts c
+    where c.id = v_contact_id and (c.sms_opted_out or c.do_not_contact)
+  ) then
+    raise exception 'STATE_CHANGED' using errcode = '40001';
+  end if;
+  select array_remove(array[
+           (select m.from_address from public.messages m where m.id = v_undo.source_inbound_message_id),
+           c.phone_1, c.phone_2, c.phone_3], null)
+  into v_phones
+  from (select 1) one
+  left join public.contacts c on c.id = v_contact_id;
+  if coalesce(cardinality(v_phones), 0) > 0 and exists (
+    select 1 from public.sms_phone_suppressions sp
+    where sp.org_id = v_undo.org_id and sp.channel = 'sms' and sp.phone_e164 = any(v_phones)
+  ) then
     raise exception 'STATE_CHANGED' using errcode = '40001';
   end if;
 
