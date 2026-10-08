@@ -1024,6 +1024,7 @@ export type Database = {
           model: string
           org_id: string
           outbound_mode: string
+          reply_generation: string
           reply_delay_max_seconds: number
           reply_delay_min_seconds: number
           system_prompt: string
@@ -1044,6 +1045,7 @@ export type Database = {
           model?: string
           org_id: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt: string
@@ -1064,6 +1066,7 @@ export type Database = {
           model?: string
           org_id?: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt?: string

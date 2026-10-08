@@ -31,6 +31,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "template_sent_outcome_missing",
   "draft_persist_failed",
   "reply_pending",
+  "needs_reply",
   "send_timeout",
   "send_timeout_then_sent",
   "send_timeout_unparseable",
