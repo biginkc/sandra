@@ -195,6 +195,8 @@ type MockState = {
   claimUpdateFailures?: number;
   /** fn_auto_apply_jev_lead_decision throws (simulates the function dying after the template send). */
   crashOnApply?: boolean;
+  /** Throw on the post-send message metadata update (a crash right after provider acceptance). */
+  crashOnMetadataUpdate?: boolean;
   /** Drafts' select/update errors. */
   draftLookupError?: boolean;
   /** Called with the 1-based index of each ai_reply_drafts SELECT; may pause it. */
@@ -545,6 +547,7 @@ function createMockSupabase(state: MockState) {
         return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
       update(value: Partial<MessageRow>) {
+        if (state.crashOnMetadataUpdate && "metadata" in value) throw new Error("died after provider accepted");
         updateData = value;
         return query;
       },
@@ -6919,6 +6922,75 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(sendSmsToContact).toHaveBeenCalledTimes(1);
   });
 
+  describe("final checks inside the provider fence (after the SMS preflight reads)", () => {
+    /** Runs `during` after the pre-send checks passed but before the fence is consulted. */
+    function withPreflightDrift(state: MockState, during: () => void, ownRowId?: string) {
+      installSendMock(state);
+      const real = vi.mocked(sendSmsToContact).getMockImplementation()!;
+      vi.mocked(sendSmsToContact).mockImplementation(async (sb, input) => {
+        during();
+        if (ownRowId) {
+          // This attempt's own pending row exists by the time the fence runs.
+          state.messages.push({
+            id: ownRowId, body: input.body, channel: "sms", contact_id: input.contactId,
+            conversation_id: CONVERSATION_ID, created_at: new Date().toISOString(),
+            direction: "outbound", metadata: null, property_id: input.propertyId,
+            to_address: "+18135550001", sent_at: null, status: "pending",
+          } as never);
+          if (input.beforeProviderSubmit && !(await input.beforeProviderSubmit({ messageId: ownRowId } as never))) {
+            return { status: "blocked_before_provider", messageId: ownRowId, retired: true } as never;
+          }
+          return { externalId: "ext-own", messageId: ownRowId, status: "sent" } as never;
+        }
+        return real(sb, input);
+      });
+    }
+
+    it("approval revoked during the preflight reads: refused at the fence, nothing sent, nurture still applies", async () => {
+      const state = createMockState();
+      withPreflightDrift(state, () => {
+        state.smsTemplateRow = { content: TEMPLATE_BODY, approved_for_auto_send: false, approved_content: null, deleted_at: null };
+      });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      const result = await runNurture(state, "inbound-tpl-fence-revoked");
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(state.messages.filter((m) => m.direction === "outbound" && m.status === "sent")).toHaveLength(0);
+      expect(state.property.outreach_dispo).toBe("nurture");
+    });
+
+    it("recipient window closes during the preflight reads: refused at the fence, nothing sent, nurture still applies", async () => {
+      vi.setSystemTime(new Date("2026-06-13T23:59:58.000Z")); // 7:59:58pm Tampa, window open (Florida closes 8pm)
+      const state = createMockState();
+      state.contact.phone_1 = "+18135550001";
+      withPreflightDrift(state, () => vi.setSystemTime(new Date("2026-06-14T00:00:02.000Z"))); // 8:00:02pm Tampa
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      const result = await runNurture(state, "inbound-tpl-fence-window");
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(state.messages.filter((m) => m.direction === "outbound" && m.status === "sent")).toHaveLength(0);
+      expect(state.property.outreach_dispo).toBe("nurture");
+    });
+
+    it("the Florida cap at the fence does not count this attempt's own pending row", async () => {
+      const state = createMockState();
+      state.contact.phone_1 = "+18135550001";
+      const earlier = (n: number) => ({
+        id: `earlier-${n}`, body: "earlier", channel: "sms", contact_id: CONTACT_ID,
+        conversation_id: CONVERSATION_ID, created_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(),
+        direction: "outbound" as const, metadata: null, property_id: PROPERTY_ID, to_address: "+18135550001",
+        sent_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(), status: "delivered",
+      });
+      state.messages.push(earlier(2), earlier(5)); // two earlier + own pending row = three rows, only two count
+      withPreflightDrift(state, () => {}, "pending-own");
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      await runNurture(state, "inbound-tpl-fence-cap");
+      expect(state.messages.find((m) => m.id === "pending-own")).toBeTruthy();
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(sendSmsToContact).mock.results[0]!.type).toBe("return");
+      const out = await vi.mocked(sendSmsToContact).mock.results[0]!.value;
+      expect(out).toMatchObject({ status: "sent", messageId: "pending-own" });
+    });
+  });
+
   describe("the number actually texted drives quiet hours and the Florida cap", () => {
     const outboundTo = (to: string, n: number) => ({
       id: `earlier-${to}-${n}`, body: "earlier", channel: "sms", contact_id: CONTACT_ID,
@@ -7085,6 +7157,24 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     }
   });
 
+  it("the claim marker is written before the post-send metadata update: a crash right after provider acceptance still leaves the marker", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.crashOnMetadataUpdate = true;
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(TEMPLATE);
+    try {
+      await expect(runNurture(state, "inbound-tpl-early-marker")).rejects.toThrow("died after provider accepted");
+      const sentId = state.messages.find((m) => m.direction === "outbound")?.id;
+      expect(sentId).toBeTruthy();
+      expect(state.aiClaims[0]).toMatchObject({
+        outcome: "template_sent_outcome_pending",
+        outbound_message_id: sentId,
+      });
+    } finally {
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" });
+    }
+  });
+
   it("a refusal inside the send path (send blocked, property flagged) does not stop nurture from applying", async () => {
     const state = createMockState();
     installSendMock(state);
@@ -7221,7 +7311,8 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     const result = await runNurture(state, "inbound-tpl-revoked");
     expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
-    expect(sendSmsToContact).not.toHaveBeenCalled();
+    // The fence inside sendSmsToContact refuses; nothing reaches the provider.
+    expect(state.messages.filter((m) => m.direction === "outbound" && m.status === "sent")).toHaveLength(0);
     expect(state.property.outreach_dispo).toBe("nurture");
   });
 
@@ -7231,7 +7322,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     state.smsTemplateRow = { content: `${TEMPLATE_BODY} Call us!`, approved_for_auto_send: true, approved_content: TEMPLATE_BODY, deleted_at: null };
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     await runNurture(state, "inbound-tpl-edited");
-    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.messages.filter((m) => m.direction === "outbound" && m.status === "sent")).toHaveLength(0);
     expect(state.property.outreach_dispo).toBe("nurture");
   });
 

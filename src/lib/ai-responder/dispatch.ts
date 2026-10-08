@@ -269,6 +269,8 @@ export type AiDispatchInput = {
    * an approved-template reply is dropped (the outcome still applies).
    */
   replyDelayBypassed?: boolean;
+  /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; default `delay_unavailable`. */
+  replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied";
 };
 
 export type AiDispatchOptions = {
@@ -2203,6 +2205,7 @@ type TemplateStepResult =
  */
 /** Silent (unflagged) skip reason: the template was revoked / edited before the send. */
 const TEMPLATE_APPROVAL_CHANGED = "template_approval_changed";
+const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
@@ -2261,7 +2264,7 @@ async function runApprovedTemplateStep(
         outcome: a.outcome,
         templateId: resolved.templateId,
         mappingId: resolved.mappingId,
-        reason: TEMPLATE_DROP_DELAY_UNAVAILABLE,
+        reason: input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE,
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
@@ -2308,6 +2311,8 @@ async function runApprovedTemplateStep(
     return { kind: "continue", outboundMessageId: alreadySent === "error" ? null : alreadySent };
   }
 
+  let recorded = true;
+  let markerWrites = 0;
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
@@ -2322,13 +2327,22 @@ async function runApprovedTemplateStep(
     claimStartedAt: ctx.claimStartedAt,
     outboundMode: ctx.outboundMode,
     replyKind: "send_reply",
+    // Written the instant the provider accepts, ahead of every other
+    // post-send write, so the sweeper can see a crash from here on.
+    onProviderAccepted: async (messageId) => {
+      markerWrites += 1;
+      recorded = await recordClaimTemplateSent(supabase, {
+        claimId: claim.claimId,
+        outboundMessageId: messageId,
+      });
+    },
   });
   // Durable BEFORE anything else (even the trace) once the provider accepted:
   // this is the only thing that lets the sweeper see a crash from here on. If
   // the write fails the sweeper cannot see one, so tell a human now rather
   // than risk silence.
-  let recorded = true;
-  if (sent.outcome === "sent") {
+  if (sent.outcome === "sent" && markerWrites === 0) {
+    // The send path did not report acceptance (should not happen); record now.
     recorded = await recordClaimTemplateSent(supabase, {
       claimId: claim.claimId,
       outboundMessageId: sent.messageId,
@@ -3149,6 +3163,13 @@ type ResponderSendArgs = {
   /** deescalate_close only: the route reason for the follow-up disposition. */
   closeReason?: string;
   /**
+   * Called with the outbound message id the instant the provider has accepted
+   * the send, BEFORE any metadata update / trace / run update / lease release.
+   * Used by the template step to make the sent message durable on its claim.
+   * Must not throw.
+   */
+  onProviderAccepted?: (messageId: string) => Promise<void>;
+  /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
    * write could not be proven.
@@ -3785,6 +3806,9 @@ async function renewSend(
  * full lease so the bounded provider call cannot outlive it). Anything else
  * refuses, and the provider is never called.
  */
+const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
+const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
   attempt: SendAttempt,
@@ -3841,6 +3865,27 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
+  if (args.source === "approved_template") {
+    // The last word before the provider, AFTER every preflight read in
+    // sendSmsToContact: the owner may have revoked / edited / deleted the
+    // template and the recipient's window (or the Florida cap) may have
+    // closed while those reads ran. This attempt's own pending row is
+    // excluded from the cap count.
+    const window = await evaluateRecipientWindow(supabase, args.input, ctx.messageId);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    const approved = await templateStillApproved(supabase, args);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
   attempt.providerStarted = true;
   return true;
 }
@@ -3906,11 +3951,15 @@ async function countRecentOutboundTexts(
   supabase: SupabaseClient<Database>,
   contactId: string,
   destinationPhone: string,
+  /** This attempt's own pending row, which must not count against its own cap. */
+  excludeMessageId?: string,
 ): Promise<number | null> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count, error } = await supabase
+  let countQuery = supabase
     .from("messages")
-    .select("*", { count: "exact", head: true })
+    .select("*", { count: "exact", head: true });
+  if (excludeMessageId) countQuery = countQuery.neq("id", excludeMessageId);
+  const { count, error } = await countQuery
     .eq("contact_id", contactId)
     .eq("to_address", destinationPhone)
     .eq("channel", "sms")
@@ -3941,6 +3990,7 @@ type RecipientWindowVerdict =
 async function evaluateRecipientWindow(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
+  excludeMessageId?: string,
 ): Promise<RecipientWindowVerdict> {
   const phone = await resolveSendDestinationPhone(supabase, input);
   const window = checkRecipientQuietHours(phone);
@@ -3949,7 +3999,7 @@ async function evaluateRecipientWindow(
   }
   if (window.florida) {
     const cap = checkFloridaCap(
-      phone ? await countRecentOutboundTexts(supabase, input.contactId, phone) : null,
+      phone ? await countRecentOutboundTexts(supabase, input.contactId, phone, excludeMessageId) : null,
     );
     if (!cap.ok) return { ok: false, why: cap.reason, state: window.state, localTime: window.localTime };
   }
@@ -4871,25 +4921,6 @@ async function leasedSend(
     return await holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
   }
 
-  if (args.source === "approved_template") {
-    // Last checks before the provider call, under the lease: the reservation
-    // wait and preflight reads can take long enough for the recipient's window
-    // to close or for the owner to revoke / edit / delete the template.
-    const refused = await refuseOutsideRecipientWindow(supabase, args);
-    assertLive(attempt);
-    if (refused) return refused;
-    if (!(await templateStillApproved(supabase, args))) {
-      assertLive(attempt);
-      await trace(supabase, {
-        kind: "gate",
-        name: "template_approval_changed",
-        result: "block",
-        detail: { templateId: args.templateId ?? null },
-      }, args.runContext);
-      return { outcome: "skipped", reason: TEMPLATE_APPROVAL_CHANGED };
-    }
-  }
-
   return deliverResponderMessage(supabase, args, attempt);
 }
 
@@ -4975,6 +5006,27 @@ async function deliverResponderMessage(
       const reason = "send_blocked:abort_unconfirmed";
       await flagAndDeadLetterFor(supabase, args, reason, { guard });
       return { outcome: "escalated", reason };
+    }
+    if (
+      attempt.fenceRefusal === "revalidate" &&
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+    ) {
+      // The template must not go out now. Nothing was sent; drop it silently
+      // (the outcome still applies, same as the earlier pre-send drops).
+      guard();
+      await trace(supabase, {
+        kind: "gate",
+        name: "provider_fence_refused",
+        result: "block",
+        detail: { reason: attempt.fenceReason },
+      }, args.runContext);
+      return {
+        outcome: "skipped",
+        reason:
+          attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
+            ? TEMPLATE_APPROVAL_CHANGED
+            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+      };
     }
     if (attempt.fenceRefusal === "error") {
       return failClosed(supabase, args, "send_check_failed", undefined, guard);
@@ -5093,6 +5145,7 @@ async function deliverResponderMessage(
   // never get here, and the assertion keeps it so.
   if (!attempt.providerStarted) guard();
   const messageId = sendResult.messageId;
+  if (args.onProviderAccepted) await args.onProviderAccepted(messageId);
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
     ...(args.input.inboundMessageId
