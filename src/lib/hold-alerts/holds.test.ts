@@ -45,6 +45,7 @@ function openHold(over: Partial<OpenHold<PipelineRun>> = {}): OpenHold<PipelineR
     conversation_id: "conv-1",
     sources: ["jev_decision"],
     since: "2026-10-08T10:00:00.000Z",
+    alert_since: "2026-10-08T10:00:00.000Z",
     reason: "Jev decision pending",
     run: run(),
     ...over,
@@ -141,9 +142,15 @@ describe("toAlertHolds", () => {
       holdKey: "prop-1:jev_decision",
       propertyId: "prop-1",
       since: "2026-10-08T10:00:00.000Z",
+      startedAt: "2026-10-08T10:00:00.000Z",
       name: "Dana",
       hot: false,
     });
+  });
+
+  it("carries an unknown start through as null (backlog never alerts)", () => {
+    const [h] = toAlertHolds([openHold({ alert_since: null })], labels);
+    expect(h.startedAt).toBeNull();
   });
 
   it("falls back to an unknown-sender label when no label was loaded", () => {

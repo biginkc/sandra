@@ -67,12 +67,16 @@ afterEach(async () => {
 async function seed(org = orgId, at = CUTOVER) {
   await db.query(`insert into public.messages_v2_settings (org_id, backlog_before) values ($1, $2)`, [org, at]);
 }
-async function flagged(escalatedAt: string | null, org = orgId): Promise<string> {
+async function flagged(
+  escalatedAt: string | null,
+  org = orgId,
+  since: string | null = null,
+): Promise<string> {
   const id = randomUUID();
   await db.query(
-    `insert into public.properties (id, org_id, address, state, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at)
-     values ($1, $2, '1 Test St', 'MO', true, 'provider_billing', $3)`,
-    [id, org, escalatedAt],
+    `insert into public.properties (id, org_id, address, state, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at, needs_human_attention_since)
+     values ($1, $2, '1 Test St', 'MO', true, 'provider_billing', $3, $4)`,
+    [id, org, escalatedAt, since],
   );
   return id;
 }
@@ -272,20 +276,43 @@ describe("messages_v2_hold_buckets", () => {
     expect(ids(await buckets("new"))).toEqual([p]);
   });
 
-  it("orders oldest first and pages with limit/offset; counts stay exact", async () => {
+  it("the 'new' bucket pages NEWEST first (a cap never drops the newest) but returns each page oldest first; counts stay exact", async () => {
     await seed();
     const a = await flagged("2026-10-09T01:00:00Z");
     const b = await flagged("2026-10-09T02:00:00Z");
     const c = await flagged("2026-10-09T03:00:00Z");
     const first = await buckets("new", 2, 0);
     const rest = await buckets("new", 2, 2);
-    expect(ids(first)).toEqual([a, b]);
-    expect(ids(rest)).toEqual([c]);
+    expect(ids(first)).toEqual([b, c]);
+    expect(ids(rest)).toEqual([a]);
     expect(first.new_total).toBe(3);
     const countsOnly = await buckets("new", 0, 0);
     expect(countsOnly.rows).toEqual([]);
     expect(countsOnly.new_total).toBe(3);
     expect(countsOnly.backlog_total).toBe(0);
+  });
+
+  it("the 'backlog' bucket still pages oldest first from an offset", async () => {
+    await seed();
+    const a = await flagged("2026-05-01T01:00:00Z");
+    const b = await flagged("2026-05-01T02:00:00Z");
+    const c = await flagged("2026-05-01T03:00:00Z");
+    expect(ids(await buckets("backlog", 2, 0))).toEqual([a, b]);
+    expect(ids(await buckets("backlog", 2, 2))).toEqual([c]);
+  });
+
+  it("flag time is needs_human_attention_since; last_ai_escalation_at only when since is NULL", async () => {
+    await seed();
+    // Flagged after the cutover through a path that never stamped last_ai_escalation_at.
+    const unstamped = await flagged(null, orgId, AFTER);
+    // since wins over a stale escalation stamp in both directions.
+    const staleStamp = await flagged(BEFORE, orgId, AFTER);
+    const oldSince = await flagged(AFTER, orgId, BEFORE);
+    // since NULL: falls back to the escalation stamp.
+    const fallbackNew = await flagged(AFTER);
+    const fallbackOld = await flagged(BEFORE);
+    expect(ids(await buckets("new")).sort()).toEqual([unstamped, staleStamp, fallbackNew].sort());
+    expect(ids(await buckets("backlog")).sort()).toEqual([oldSince, fallbackOld].sort());
   });
 
   it("only counts its own org", async () => {

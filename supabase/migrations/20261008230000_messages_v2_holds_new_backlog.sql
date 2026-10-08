@@ -8,10 +8,15 @@
 --
 -- messages_v2_hold_buckets(org, bucket, limit, offset): classifies every open
 -- hold property in one pass and returns exact counts plus one page of ids.
--- Effective start = newest of: the flag's last_ai_escalation_at, the newest
+-- Effective start = newest of: the flag time (properties.needs_human_attention_since,
+-- the trigger-maintained flip time; last_ai_escalation_at only when that is NULL,
+-- because some flag paths never stamp last_ai_escalation_at), the newest
 -- pending Jev decision / disposition review / reply draft created_at, and the
 -- newest inbound message at or after the cutover. SECURITY INVOKER: the
 -- caller's RLS applies to every table it reads.
+-- Paging: the 'new' bucket pages NEWEST first (so a cap never drops the newest
+-- holds); the 'backlog' bucket pages oldest first. Either way the returned page
+-- is sorted oldest first for display.
 --
 -- Select: owner || acquisitions. Write: service_role, or an org owner.
 
@@ -106,7 +111,8 @@ begin
   end if;
 
   with src as (
-    select p.id as property_id, p.last_ai_escalation_at as ts
+    select p.id as property_id,
+           coalesce(p.needs_human_attention_since, p.last_ai_escalation_at) as ts
     from public.properties p
     where p.org_id = p_org_id and p.needs_human_attention = true
     union all
@@ -156,7 +162,11 @@ begin
     select c.property_id, c.effective_start
     from classified c
     where c.is_new = (p_bucket = 'new')
-    order by c.effective_start asc nulls first, c.property_id asc
+    order by
+      case when p_bucket = 'new' then c.effective_start end desc,
+      case when p_bucket = 'backlog' then c.effective_start end asc nulls first,
+      case when p_bucket = 'new' then c.property_id end desc,
+      c.property_id asc
     limit greatest(p_limit, 0) offset greatest(p_offset, 0)
   )
   select jsonb_build_object(

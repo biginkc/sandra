@@ -190,6 +190,7 @@ export function toAlertHolds(
       holdKey: holdKeyFor(hold.property_id, holdReasonKey(hold)),
       propertyId: hold.property_id,
       since: hold.since,
+      startedAt: hold.alert_since ?? null,
       name: label?.name ?? "Unknown sender",
       hot: isHotHold(hold, hotReasons),
     });

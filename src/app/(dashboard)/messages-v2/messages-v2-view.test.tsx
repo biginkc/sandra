@@ -374,4 +374,25 @@ describe("MessagesV2View", () => {
       "holds count unavailable",
     );
   });
+  describe("replay batch badge", () => {
+    it("shows for owner with a batch id", async () => {
+      await mount({ ...props(), replayBatchId: "2026-10-07" });
+      expect(screen.getByTestId("replay-batch-badge")).toHaveTextContent(
+        "Replay batch 2026-10-07",
+      );
+    });
+    it("hidden for non-owner even with an id", async () => {
+      await mount({ ...props(), isOwner: false, replayBatchId: "2026-10-07" });
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+    });
+    it("hidden when id is null or undefined", async () => {
+      const { unmount } = render(
+        <MessagesV2View {...props()} replayBatchId={null} />,
+      );
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+      unmount();
+      render(<MessagesV2View {...props()} />);
+      expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
+    });
+  });
 });

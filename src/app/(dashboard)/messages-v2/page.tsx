@@ -20,6 +20,7 @@ import { loadMessagesV2Split, type LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
 import { loadBacklogHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -68,9 +69,10 @@ export default async function MessagesV2Page() {
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
-  const [loaded, coverage] = await Promise.all([
+  const [loaded, coverage, replayBatchId] = await Promise.all([
     loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -94,6 +96,7 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}

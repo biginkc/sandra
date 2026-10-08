@@ -12,7 +12,16 @@ import type {
 export class FakeStore implements DeliveryStore {
   rows: Array<DeliveryRow & { sentAt: string | null; sendingAt?: string | null; orgId: string }> = [];
   private seq = 0;
+  /** Per-org watermark; pre-seed (`watermarks.set(org, iso)`) to simulate an already-initialised org. */
+  watermarks = new Map<string, string>();
   constructor(private readonly clock: () => Date) {}
+
+  async getOrInitAlertsSince(orgId: string, nowIso: string) {
+    const existing = this.watermarks.get(orgId);
+    if (existing) return { alertsSince: existing, created: false };
+    this.watermarks.set(orgId, nowIso);
+    return { alertsSince: nowIso, created: true };
+  }
 
   async ensure(input: EnsureInput): Promise<DeliveryRow> {
     const existing = this.rows.find(
@@ -71,15 +80,23 @@ export class FakeStore implements DeliveryStore {
       )?.sentAt ?? null
     );
   }
-  async archiveClosed(orgId: string, openPropertyIds: readonly string[]) {
+  async archiveClosed(orgId: string, openPropertyIds: readonly string[], candidatePropertyIds?: readonly string[]) {
     const open = new Set(openPropertyIds);
+    const candidates = candidatePropertyIds ? new Set(candidatePropertyIds) : null;
     let n = 0;
     for (const r of this.rows) {
-      if (r.orgId !== orgId || !r.propertyId || open.has(r.propertyId) || r.holdKey.includes(":closed:")) continue;
+      if (r.orgId !== orgId || !r.propertyId || open.has(r.propertyId) || (candidates && !candidates.has(r.propertyId)) || r.holdKey.includes(":closed:")) continue;
       r.holdKey = `${r.holdKey}:closed:${r.id}`;
       n += 1;
     }
     return n;
+  }
+  async deliveredPropertyIds(orgId: string) {
+    const ids = new Set<string>();
+    for (const r of this.rows) {
+      if (r.orgId === orgId && r.propertyId && !r.holdKey.includes(":closed:")) ids.add(r.propertyId);
+    }
+    return { ids: [...ids], complete: true };
   }
   async markSent(id: string) {
     const r = this.rows.find((x) => x.id === id)!;
@@ -118,6 +135,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
     holdKey: "prop-1:draft_held",
     propertyId: "prop-1",
     since: "2026-10-08T10:00:00.000Z",
+    startedAt: "2026-10-08T10:00:00.000Z",
     name: "Dana",
     hot: false,
     ...over,
@@ -127,11 +145,13 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
 export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string; idempotencyKey?: string };
 
 export function makeDeps(
-  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string } = {},
+  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string; noWatermark?: boolean } = {},
 ) {
   let nowIso = over.nowIso ?? "2026-10-08T10:02:00.000Z";
   const clock = () => new Date(nowIso);
   const store = (over.store as FakeStore | undefined) ?? new FakeStore(clock);
+  // Existing tests model an org whose alerts were enabled long ago; watermark tests clear this.
+  if (!over.noWatermark && store instanceof FakeStore && !store.watermarks.has(ORG)) store.watermarks.set(ORG, "2026-10-01T00:00:00.000Z");
   const sent: Sent[] = [];
   const results: Record<"slack" | "sms" | "email", ChannelResult> = {
     slack: { status: "sent" },
@@ -144,6 +164,11 @@ export function makeDeps(
     baseUrl: "https://app.example.com",
     emailEnabled: false,
     loadHolds: async () => ({ holds: over.holds ?? [hold()], complete: over.holdsComplete ?? true }),
+    // Default: a property is held while the (possibly swapped) loadHolds still returns it.
+    loadHeldPropertyIds: async (org, ids) => {
+      const held = new Set((await deps.loadHolds(org, "")).holds.map((h) => h.propertyId));
+      return new Set(ids.filter((id) => held.has(id)));
+    },
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,
     sendSlack: async (userId, text) => {
