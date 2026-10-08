@@ -12,6 +12,11 @@ import {
   loadHeldPropertyIds,
   formatHoldsTotal,
   loadMessagesV2Data,
+  loadMessagesV2Split,
+  loadBacklogHolds,
+  loadHoldBuckets,
+  formatSplitTotal,
+  NEW_HOLD_CAP,
   type HoldDraftRow,
   type LooseSupabase,
 } from "./queries";
@@ -398,7 +403,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit", "not", "gte"]) {
+      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -1186,6 +1191,200 @@ describe("deriveOpenHolds seen (the stale-click guard's view of the card)", () =
       runs: [],
     });
     expect(holds[0]!.draft).toMatchObject({ body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" });
+  });
+});
+
+describe("New / Backlog split loader", () => {
+  const bucketsResult = (over: Record<string, unknown> = {}) => ({
+    cutover: "2026-10-08T12:00:00+00:00",
+    new_total: 2,
+    backlog_total: 2504,
+    rows: [
+      { property_id: "p-new-1", effective_start: iso("13:00:00") },
+      { property_id: "p-new-2", effective_start: iso("14:00:00") },
+    ],
+    ...over,
+  });
+  const flagRow = (id: string, at: string) => ({
+    id,
+    last_ai_escalation_at: at,
+    last_ai_escalation_reason: "keyword",
+    updated_at: at,
+  });
+
+  it("loadHoldBuckets asks the SQL classifier for one bucket page and parses it", async () => {
+    const { client, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+    });
+    const out = await loadHoldBuckets(client, "org", "backlog", 200, 400);
+    expect(rpcCalls[0]).toEqual({
+      fn: "messages_v2_hold_buckets",
+      args: { p_org_id: "org", p_bucket: "backlog", p_limit: 200, p_offset: 400 },
+    });
+    expect(out).toEqual({
+      cutover: "2026-10-08T12:00:00+00:00",
+      newTotal: 2,
+      backlogTotal: 2504,
+      propertyIds: ["p-new-1", "p-new-2"],
+    });
+  });
+
+  it("loadHoldBuckets is null on an error or an empty payload (never 'no holds')", async () => {
+    const bad = fakeSupabase({ messages_v2_hold_buckets: () => ({ error: { message: "boom" } }) });
+    expect(await loadHoldBuckets(bad.client, "org", "new", 10)).toBeNull();
+    const empty = fakeSupabase({ messages_v2_hold_buckets: () => ({ data: null }) });
+    expect(await loadHoldBuckets(empty.client, "org", "new", 10)).toBeNull();
+  });
+
+  it("loads the New holds by id (no oldest-200 window, no distinct-id count queries) and reports exact totals", async () => {
+    const { client, queries, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({
+        data: [flagRow("p-new-1", iso("13:00:00")), flagRow("p-new-2", iso("14:00:00"))],
+      }),
+    });
+    const data = await loadMessagesV2Split(client, "org", Date.parse(iso("15:00:00")));
+    expect(rpcCalls[0].args).toMatchObject({ p_bucket: "new", p_limit: NEW_HOLD_CAP, p_offset: 0 });
+    expect(data.holds.map((h) => h.id)).toEqual(["p-new-1", "p-new-2"]);
+    expect(data.split).toEqual({
+      backlogBefore: "2026-10-08T12:00:00+00:00",
+      newTotal: 2,
+      newShown: 2,
+      backlogTotal: 2504,
+    });
+    const props = queries.filter((q) => q[0]?.table === "properties");
+    expect(props).toHaveLength(1);
+    expect(props[0].find((c) => c.method === "in")!.args).toEqual(["id", ["p-new-1", "p-new-2"]]);
+    expect(queries.some(isHead)).toBe(false);
+    expect(data.holdsMeta).toMatchObject({ total: 2506, shown: 2, truncated: true, totalState: "exact", failed: [] });
+  });
+
+  it("displays the New holds oldest-first even though the classifier selects the newest page", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({
+        data: bucketsResult({
+          new_total: 450,
+          rows: [
+            { property_id: "p-new-2", effective_start: iso("14:00:00") },
+            { property_id: "p-new-1", effective_start: iso("13:00:00") },
+          ],
+        }),
+      }),
+      properties: () => ({
+        data: [flagRow("p-new-2", iso("14:00:00")), flagRow("p-new-1", iso("13:00:00"))],
+      }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.holds.map((h) => h.id)).toEqual(["p-new-1", "p-new-2"]);
+    expect(data.split).toMatchObject({ newTotal: 450, newShown: 2 });
+  });
+
+  it("loads needs_human_attention_since with the scoped hold rows (the flag time the classifier uses)", async () => {
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({ data: [flagRow("p-new-1", iso("13:00:00"))] }),
+    });
+    await loadMessagesV2Split(client, "org");
+    const props = queries.find((q) => q[0]?.table === "properties")!;
+    expect(props.find((c) => c.method === "select")!.args[0]).toContain("needs_human_attention_since");
+  });
+
+  it("says 'showing N of M' data when New exceeds the cap", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ new_total: 450 }) }),
+      properties: () => ({ data: [flagRow("p-new-1", iso("13:00:00")), flagRow("p-new-2", iso("14:00:00"))] }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.split).toMatchObject({ newTotal: 450, newShown: 2 });
+  });
+
+  it("chunks the id filters so GET urls stay short", async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => ({ property_id: `p${i}`, effective_start: iso("13:00:00") }));
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows, new_total: 250 }) }),
+    });
+    await loadMessagesV2Split(client, "org");
+    const props = queries.filter((q) => q[0]?.table === "properties");
+    expect(props).toHaveLength(3);
+    expect(props.map((q) => (q.find((c) => c.method === "in")!.args[1] as string[]).length)).toEqual([100, 100, 50]);
+  });
+
+  it("always loads pending drafts tied to no property into New", async () => {
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows: [], new_total: 0 }) }),
+      ai_reply_drafts: (calls) =>
+        calls.some((c) => c.method === "is")
+          ? {
+              data: [
+                { id: "d1", property_id: null, conversation_id: null, inbound_message_id: null, run_id: null, created_at: iso("13:30:00") },
+              ],
+            }
+          : { data: [] },
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(queries.some((q) => q[0]?.table === "ai_reply_drafts" && q.some((c) => c.method === "is" && c.args[0] === "property_id"))).toBe(true);
+    expect(data.holds.map((h) => h.id)).toEqual(["draft:d1"]);
+    expect(data.split).toMatchObject({ newTotal: 1, newShown: 1 });
+  });
+
+  it("a classifier failure is reported, never shown as 'no holds'", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ error: { message: "settings missing" } }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.holds).toEqual([]);
+    expect(data.split.error).toBeTruthy();
+    expect(formatSplitTotal(data.split)).toBe("holds unavailable");
+  });
+
+  it("Backlog pages are loaded oldest-first from an offset, hold rows only (no feed window or badge queries)", async () => {
+    const rows = [{ property_id: "p-old-1", effective_start: iso("01:00:00") }];
+    const { client, queries, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows, backlog_total: 2504 }) }),
+      properties: () => ({ data: [flagRow("p-old-1", iso("01:00:00"))] }),
+    });
+    const page = await loadBacklogHolds(client, "org", 200, 200);
+    expect(rpcCalls[0].args).toMatchObject({ p_bucket: "backlog", p_limit: 200, p_offset: 200 });
+    expect(page).toMatchObject({ backlogTotal: 2504, hasMore: true, failed: false, nextOffset: 201 });
+    expect(page!.holds.map((h) => h.id)).toEqual(["p-old-1"]);
+    const tables = queries.map((q) => q[0]?.table);
+    expect(tables).not.toContain("pipeline_runs");
+    expect(tables).not.toContain("ai_responder_configs");
+    expect(tables).not.toContain("jev_outcome_thresholds");
+  });
+
+  it("the last Backlog page reports hasMore=false; an empty page returns no holds", async () => {
+    const last = fakeSupabase({
+      messages_v2_hold_buckets: () => ({
+        data: bucketsResult({ backlog_total: 201, rows: [{ property_id: "p-old-201", effective_start: iso("01:00:00") }] }),
+      }),
+      properties: () => ({ data: [flagRow("p-old-201", iso("01:00:00"))] }),
+    });
+    expect((await loadBacklogHolds(last.client, "org", 200, 200))!.hasMore).toBe(false);
+    const empty = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows: [], backlog_total: 0 }) }),
+    });
+    expect(await loadBacklogHolds(empty.client, "org", 0, 200)).toMatchObject({ holds: [], hasMore: false, nextOffset: 0 });
+  });
+
+  it("a failed Backlog hold query is flagged, not silently empty", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({ error: { message: "boom" } }),
+    });
+    expect((await loadBacklogHolds(client, "org", 0, 200))!.failed).toBe(true);
+  });
+
+  it("the default loader (alert cron) keeps the oldest-200 window untouched", async () => {
+    const { client, rpcCalls } = fakeSupabase({});
+    await loadMessagesV2Data(client, "org");
+    expect(rpcCalls.some((c) => c.fn === "messages_v2_hold_buckets")).toBe(false);
+  });
+
+  it("formats the header total", () => {
+    expect(
+      formatSplitTotal({ backlogBefore: "x", newTotal: 6, newShown: 6, backlogTotal: 2504 }),
+    ).toBe("6 new · 2,504 backlog");
   });
 });
 

@@ -1,7 +1,7 @@
 import type { TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
 
-import type { HoldSeen } from "./types";
+import type { HoldSeen, OpenHold, RunLabel, RunWithSteps } from "./types";
 
 /** The draft as the clicker saw it: the exact text (edit included) and its edit version. */
 export type SeenDraft = { body: string; editedAt: string | null };
@@ -21,3 +21,19 @@ export type HoldActionsApi = {
   retrySuppression?(input: { propertyId: string }): Promise<Result<{ cleared: boolean; remaining: number }>>;
   listAssignees(input: { propertyId: string }): Promise<Result<TeamMember[]>>;
 };
+
+/** One page of Backlog holds for the collapsed rail section. */
+export type BacklogPage = {
+  holds: OpenHold<RunWithSteps>[];
+  labels: Array<[string, RunLabel]>;
+  backlogTotal: number;
+  hasMore: boolean;
+  /** Offset to request next: counts property ids consumed, not cards rendered. */
+  nextOffset: number;
+};
+
+/** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
+export type LoadBacklog = (input: {
+  offset: number;
+  limit?: number;
+}) => Promise<Result<BacklogPage>>;
