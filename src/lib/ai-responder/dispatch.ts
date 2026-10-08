@@ -6154,6 +6154,44 @@ function assertNeverRoute(value: never): never {
   throw new Error(`Unhandled responder route: ${JSON.stringify(value)}`);
 }
 
+/**
+ * markPropertyNeedsAttention never overwrites an existing flag, so a property
+ * already held for something else (a draft, a price escalation) would lose the
+ * actionable, message-specific confirm-DNC reason. Upgrade the reason to this
+ * message's confirm hold, guarded on the value just read. A suppression
+ * recovery pointer is preserved (it carries its own retry action).
+ */
+export async function flagConfirmDncHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+): Promise<boolean> {
+  const flagged = await markPropertyNeedsAttention(supabase, propertyId, reason);
+  if (!flagged) return false;
+  const { data, error } = await supabase
+    .from("properties")
+    .select("needs_human_attention, last_ai_escalation_reason")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (error || !data) return false;
+  const current = data.last_ai_escalation_reason ?? null;
+  if (data.needs_human_attention !== true) return false;
+  if (current === reason) return true;
+  if (current && (current === "suppression_incomplete" || current.startsWith("suppression_incomplete:"))) return true;
+  const base = supabase
+    .from("properties")
+    .update({ last_ai_escalation_reason: reason, last_ai_escalation_at: new Date().toISOString() })
+    .eq("id", propertyId)
+    .eq("needs_human_attention", true);
+  const { data: updated, error: updateError } = await (current === null
+    ? base.is("last_ai_escalation_reason", null)
+    : base.eq("last_ai_escalation_reason", current)
+  ).select("id");
+  if (updateError) return false;
+  return Array.isArray(updated) ? updated.length > 0 : Boolean(updated);
+}
+
+
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
   propertyId: string,

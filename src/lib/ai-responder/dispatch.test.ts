@@ -7,7 +7,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
-import { dispatchAiResponse, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning } from "./dispatch";
+import { dispatchAiResponse, flagConfirmDncHold, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
@@ -7938,5 +7938,40 @@ describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", (
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(state.property.outreach_dispo).toBeNull();
     });
+  });
+});
+
+describe("flagConfirmDncHold (real persistence against an already-flagged property)", () => {
+  it.each(["draft_held", "price_or_offer", "send_timeout:abc"])("upgrades an existing %s hold to the message-specific confirm hold", async (existing) => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = existing;
+    const ok = await flagConfirmDncHold(createMockSupabase(state) as never, PROPERTY_ID, "hostile_needs_confirm:msg-9");
+    expect(ok).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("hostile_needs_confirm:msg-9");
+    expect(state.property.needs_human_attention).toBe(true);
+  });
+
+  it("flags an unflagged property directly", async () => {
+    const state = createMockState();
+    expect(await flagConfirmDncHold(createMockSupabase(state) as never, PROPERTY_ID, "optout_phrase_needs_confirm:msg-1")).toBe(true);
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("optout_phrase_needs_confirm:msg-1");
+  });
+
+  it("preserves a suppression-recovery pointer (it has its own retry action) and still reports a hold", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "suppression_incomplete:rev-1";
+    expect(await flagConfirmDncHold(createMockSupabase(state) as never, PROPERTY_ID, "hostile_needs_confirm:msg-9")).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("suppression_incomplete:rev-1");
+  });
+
+  it("a newer hostile message moves the pointer to the newer message", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "hostile_needs_confirm:msg-1";
+    await flagConfirmDncHold(createMockSupabase(state) as never, PROPERTY_ID, "hostile_needs_confirm:msg-2");
+    expect(state.property.last_ai_escalation_reason).toBe("hostile_needs_confirm:msg-2");
   });
 });

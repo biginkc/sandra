@@ -19,6 +19,7 @@ import {
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
   flagAndDeadLetter,
+  flagConfirmDncHold,
   inboundStampOutcomeOf,
   markPropertyNeedsAttention,
   type AiDispatchInput,
@@ -1764,7 +1765,7 @@ async function holdPhraseOptOut(
     } catch (e) {
       reportError(e, { tags: { surface: `${args.surface}_webhook_sequence_pause_opt_out_phrase` }, extra: { propertyId: args.propertyId } });
     }
-    return await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    return await flagConfirmDncHold(supabase, args.propertyId, reason);
   } catch (e) {
     reportError(e, { tags: { surface: `${args.surface}_webhook_opt_out_phrase_hold` }, extra: { propertyId: args.propertyId } });
     return false;

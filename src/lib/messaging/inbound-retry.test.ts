@@ -88,6 +88,7 @@ vi.mock("@/lib/ai-responder/dispatch", () => ({
   dispatchAiResponse: mocks.dispatchAi,
   flagAndDeadLetter: mocks.flagAndDeadLetter,
   markPropertyNeedsAttention: mocks.markAttention,
+  flagConfirmDncHold: mocks.markAttention,
 }));
 
 vi.mock("@/lib/messaging/inbound-state", () => ({
