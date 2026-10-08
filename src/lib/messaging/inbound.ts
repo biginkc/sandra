@@ -1224,7 +1224,14 @@ export async function handleInboundWebhook(
           // template replies are never sent from the webhook request itself.
           const replyDelayConfigured = (delayConfig?.delayMaxSeconds ?? 0) > 0;
           if (delaySeconds === 0 && !replyDelayConfigured) {
-            await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
+            // A null config is "no delay configured" only when the lookup
+            // really found none; a failed lookup also returns null, so never
+            // let a template go out instantly on that path.
+            await dispatchAndStampAiResponder(
+              supabase,
+              delayConfig ? dispatchInput : { ...dispatchInput, replyDelayBypassed: true },
+              runCtx,
+            );
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
               supabase,

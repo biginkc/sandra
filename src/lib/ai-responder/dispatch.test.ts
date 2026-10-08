@@ -146,6 +146,8 @@ type AiClaimRow = {
 };
 
 type MockState = {
+  /** Final pre-send template re-check row; undefined = approved, matching the default template body. */
+  smsTemplateRow?: Record<string, unknown> | null;
   aiDispositionRpcCalls: number;
   aiDispositionRpcErrorsRemaining: number;
   aiDispoReviewUpdates?: number;
@@ -977,6 +979,21 @@ function createMockSupabase(state: MockState) {
       }
       if (table === "contacts") {
         return buildContactsQuery();
+      }
+      if (table === "sms_templates") {
+        const DEFAULT_BODY = "Hi Sam, this is Mel. Thanks for letting us know.";
+        const q = {
+          select: () => q,
+          eq: () => q,
+          maybeSingle: async () => ({
+            data:
+              state.smsTemplateRow === undefined
+                ? { content: DEFAULT_BODY, approved_for_auto_send: true, approved_content: DEFAULT_BODY, deleted_at: null }
+                : state.smsTemplateRow,
+            error: null,
+          }),
+        };
+        return q;
       }
       if (table === "sms_phone_suppressions") {
         const q = {
@@ -7195,6 +7212,27 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(state.property.outreach_dispo).toBe("nurture");
     expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+  });
+
+  it("approval revoked while the send waited: nothing is sent and nurture still applies", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.smsTemplateRow = { content: TEMPLATE_BODY, approved_for_auto_send: false, approved_content: null, deleted_at: null };
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    const result = await runNurture(state, "inbound-tpl-revoked");
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBe("nurture");
+  });
+
+  it("template edited after approval (content no longer equals approved text) is not sent", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.smsTemplateRow = { content: `${TEMPLATE_BODY} Call us!`, approved_for_auto_send: true, approved_content: TEMPLATE_BODY, deleted_at: null };
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    await runNurture(state, "inbound-tpl-edited");
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBe("nurture");
   });
 
   it("replyDelayBypassed (delay workflow could not start): the template is dropped, nothing is sent, and nurture still applies", async () => {

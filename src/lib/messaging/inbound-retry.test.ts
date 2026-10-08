@@ -534,4 +534,12 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     await runWebhook();
     expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).not.toHaveProperty("replyDelayBypassed");
   });
+
+  it("a failed delay-config lookup (null) dispatches inline but marked bypassed, so no template goes out instantly", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(null);
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
 });

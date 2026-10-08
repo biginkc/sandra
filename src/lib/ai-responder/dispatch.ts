@@ -2201,6 +2201,9 @@ type TemplateStepResult =
  * it past its lease is swept and flagged (`template_sent_outcome_missing`),
  * and a re-dispatch of the same claim never sends the template twice.
  */
+/** Silent (unflagged) skip reason: the template was revoked / edited before the send. */
+const TEMPLATE_APPROVAL_CHANGED = "template_approval_changed";
+
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
@@ -2320,6 +2323,17 @@ async function runApprovedTemplateStep(
     outboundMode: ctx.outboundMode,
     replyKind: "send_reply",
   });
+  // Durable BEFORE anything else (even the trace) once the provider accepted:
+  // this is the only thing that lets the sweeper see a crash from here on. If
+  // the write fails the sweeper cannot see one, so tell a human now rather
+  // than risk silence.
+  let recorded = true;
+  if (sent.outcome === "sent") {
+    recorded = await recordClaimTemplateSent(supabase, {
+      claimId: claim.claimId,
+      outboundMessageId: sent.messageId,
+    });
+  }
   const detail = {
     templateId: resolved.templateId,
     mappingId: resolved.mappingId,
@@ -2343,12 +2357,6 @@ async function runApprovedTemplateStep(
   }, runCtx);
 
   if (sent.outcome === "sent") {
-    // Durable BEFORE the outcome is applied. If this write fails the sweeper
-    // cannot see a crash, so tell a human now rather than risk silence.
-    const recorded = await recordClaimTemplateSent(supabase, {
-      claimId: claim.claimId,
-      outboundMessageId: sent.messageId,
-    });
     if (!recorded) {
       await markPropertyNeedsAttention(supabase, input.propertyId, "template_sent_outcome_missing", runCtx);
     }
@@ -4863,7 +4871,51 @@ async function leasedSend(
     return await holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
   }
 
+  if (args.source === "approved_template") {
+    // Last checks before the provider call, under the lease: the reservation
+    // wait and preflight reads can take long enough for the recipient's window
+    // to close or for the owner to revoke / edit / delete the template.
+    const refused = await refuseOutsideRecipientWindow(supabase, args);
+    assertLive(attempt);
+    if (refused) return refused;
+    if (!(await templateStillApproved(supabase, args))) {
+      assertLive(attempt);
+      await trace(supabase, {
+        kind: "gate",
+        name: "template_approval_changed",
+        result: "block",
+        detail: { templateId: args.templateId ?? null },
+      }, args.runContext);
+      return { outcome: "skipped", reason: TEMPLATE_APPROVAL_CHANGED };
+    }
+  }
+
   return deliverResponderMessage(supabase, args, attempt);
+}
+
+/** Is the template still approved for exactly the text about to be sent? Fails closed. */
+async function templateStillApproved(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+): Promise<boolean> {
+  if (!args.templateId) return false;
+  try {
+    const { data, error } = await supabase
+      .from("sms_templates")
+      .select("content, approved_for_auto_send, approved_content, deleted_at")
+      .eq("id", args.templateId)
+      .maybeSingle();
+    if (error || !data) return false;
+    return (
+      data.deleted_at == null &&
+      data.approved_for_auto_send === true &&
+      data.approved_content !== null &&
+      data.approved_content === data.content &&
+      data.approved_content === args.body
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function deliverResponderMessage(
