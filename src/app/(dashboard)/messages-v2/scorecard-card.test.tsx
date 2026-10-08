@@ -96,6 +96,19 @@ describe("ScorecardCard", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows opted_out as always human and not switchable, even if the row says automation is on", () => {
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[row("opted_out", { runs: 5, held: 5, threshold: 0.95, automation_enabled: true, samples: batch(0.9, 5, 5) })]}
+        load={vi.fn()}
+      />,
+    );
+    const el = within(section("opted_out"));
+    expect(el.getByText(/always human \(locked\)/i)).toBeInTheDocument();
+    expect(el.queryByText(/automation on/i)).toBeNull();
+  });
+
   it("shows every outcome even with no data, with n/a rates", () => {
     render(<ScorecardCard orgId="o" initialRows={[]} load={vi.fn()} />);
     for (const o of [

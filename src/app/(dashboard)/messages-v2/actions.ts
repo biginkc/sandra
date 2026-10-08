@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { sendHumanDraft } from "@/lib/ai-responder/dispatch";
+import { undoJevAction as undoJevActionCore } from "@/lib/ai-responder/undo";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
@@ -179,5 +180,52 @@ export async function setReplyGenerationAction(input: {
   } catch (e) {
     reportError(e, { tags: { surface: "messages_v2_reply_generation" } });
     return err({ code: "SET_FAILED", message: "Could not change AI drafts. Nothing was changed." });
+  }
+}
+
+/**
+ * One-click undo for an action Jev auto-applied (wrong_number, not_interested,
+ * nurture): restores the disposition and follow-up date and resumes the drips
+ * that action paused. Refuses if a person changed the lead since.
+ */
+export async function undoJevAppliedAction(undoId: string): Promise<Result<{ resumed: number }>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  const id = String(undoId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    return err({ code: "VALIDATION", message: "Invalid undo id" });
+  }
+  try {
+    const supabase = await createClient();
+    const result = await undoJevActionCore(supabase, id);
+    if (!result.ok) return err({ code: result.code, message: result.message });
+    revalidatePath("/messages-v2");
+    return { ok: true, data: { resumed: result.resumed } };
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_undo_jev_action" }, extra: { undoId: id } });
+    return err({ code: "FAILED", message: "Could not undo. Try again." });
+  }
+}
+
+/** The still-undoable record for an inbound message's Jev action, or null. */
+export async function findJevUndoAction(inboundMessageId: string): Promise<string | null> {
+  const auth = await authorize();
+  if (!auth.ok) return null;
+  const id = String(inboundMessageId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("jev_action_undo")
+      .select("id")
+      .eq("source_inbound_message_id", id)
+      .eq("org_id", auth.data.orgId)
+      .is("undone_at", null)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data?.id ?? null;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_find_jev_undo" }, extra: { inboundMessageId: id } });
+    return null;
   }
 }

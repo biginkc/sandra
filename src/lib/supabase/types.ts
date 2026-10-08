@@ -2637,6 +2637,55 @@ export type Database = {
           },
         ]
       }
+      // Hand-inserted for migration 20261008280100_jev_action_undo.sql.
+      jev_action_undo: {
+        Row: {
+          action: string
+          applied_dispo: string
+          classification_run_id: string | null
+          created_at: string
+          id: string
+          org_id: string
+          paused_enrollment_ids: string[]
+          prior_follow_up_at: string | null
+          prior_outreach_dispo: string | null
+          property_id: string
+          source_inbound_message_id: string
+          undone_at: string | null
+          undone_by: string | null
+        }
+        Insert: {
+          action: string
+          applied_dispo: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id: string
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id: string
+          source_inbound_message_id: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Update: {
+          action?: string
+          applied_dispo?: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id?: string
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id?: string
+          source_inbound_message_id?: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Relationships: []
+      }
       jev_lead_decisions: {
         Row: {
           classification_run_id: string
@@ -7861,6 +7910,10 @@ export type Database = {
       pipeline_runs_latest_for_properties: {
         Args: { p_org_id: string; p_property_ids: string[] }
         Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
+      }
+      fn_undo_jev_action: {
+        Args: { p_undo_id: string }
+        Returns: Json
       }
       fn_set_jev_outcome_threshold: {
         Args: {

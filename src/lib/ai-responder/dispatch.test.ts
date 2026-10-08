@@ -188,6 +188,7 @@ type MockState = {
   messageLookupError?: "inbound" | "outbound";
   /** Hook run once inside fn_reserve_ai_send's winner path (race injection). */
   onReserved?: () => void;
+  jevActionUndo?: Array<Record<string, unknown>>;
   jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number; version?: number; automation_enabled?: boolean }>;
   jevLeadDecisionCalls: Array<{ rpc: string; args: Record<string, unknown> }>;
   contact: {
@@ -1056,6 +1057,14 @@ function createMockSupabase(state: MockState) {
           },
         };
       }
+      if (table === "jev_action_undo") {
+        return {
+          insert: async (row: Record<string, unknown>) => {
+            (state.jevActionUndo ??= []).push(row);
+            return { error: null };
+          },
+        };
+      }
       if (table === "ai_reply_drafts") {
         const drafts = () => (state.aiReplyDrafts ??= []);
         const filters = new Map<string, unknown>();
@@ -1860,7 +1869,7 @@ describe("dispatchAiResponse debounce", () => {
     });
   });
 
-  it("keeps opt-out suppression while surfacing a persistent review-write failure", async () => {
+  it("legacy opt_out never suppresses, even when the review write would fail: it holds for a human", async () => {
     const state = createMockState();
     state.aiDispositionRpcErrorsRemaining = 2;
     const supabase = createMockSupabase(state);
@@ -1884,16 +1893,17 @@ describe("dispatchAiResponse debounce", () => {
       { anthropic: {} as never },
     );
 
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.aiDispositionRpcCalls).toBe(0);
     expect(outcome).toEqual({
       outcome: "escalated",
-      reason: "disposition_write_failed",
+      reason: "model_opt_out_needs_confirm",
     });
     expect(state.property.needs_human_attention).toBe(true);
-    expect(state.aiClaims[0]).toMatchObject({ status: "error" });
+    expect(state.property.last_ai_escalation_reason).toBe("model_opt_out_needs_confirm");
   });
 
-  it("keeps DNC suppression while surfacing a persistent review-write failure", async () => {
+  it("legacy DNC never suppresses, even when the review write would fail: it holds for a human", async () => {
     const state = createMockState();
     state.aiDispositionRpcErrorsRemaining = 2;
     const supabase = createMockSupabase(state);
@@ -1917,13 +1927,14 @@ describe("dispatchAiResponse debounce", () => {
       { anthropic: {} as never },
     );
 
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.aiDispositionRpcCalls).toBe(0);
     expect(outcome).toEqual({
       outcome: "escalated",
-      reason: "disposition_write_failed",
+      reason: "model_dnc_needs_confirm",
     });
     expect(state.property.needs_human_attention).toBe(true);
-    expect(state.aiClaims[0]).toMatchObject({ status: "error" });
+    expect(state.property.last_ai_escalation_reason).toBe("model_dnc_needs_confirm");
   });
 
   it("does not apply drifted wrong-number side effects when a retry preserved not-interested", async () => {
@@ -1967,7 +1978,7 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
   });
 
-  it("still suppresses opt-out when a retry preserves an earlier not-interested review", async () => {
+  it("legacy opt_out over an earlier not-interested review holds only: no suppression, disposition untouched", async () => {
     const state = createMockState();
     state.property.outreach_dispo = "not_interested";
     state.aiDispoReviews.push({
@@ -1998,18 +2009,15 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({
-      outcome: "skipped",
-      reason: "replayed_other_disposition",
+      outcome: "escalated",
+      reason: "model_opt_out_needs_confirm",
     });
     expect(state.property.outreach_dispo).toBe("not_interested");
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-      supabase,
-      expect.objectContaining({ source: "ai_responder", surface: "stop" }),
-    );
-    expect(state.aiDispositionRpcCalls).toBe(1);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.aiDispositionRpcCalls).toBe(0);
   });
 
-  it("still suppresses DNC when a retry preserves an earlier not-interested review", async () => {
+  it("legacy DNC over an earlier not-interested review holds only: no suppression, disposition untouched", async () => {
     const state = createMockState();
     state.property.outreach_dispo = "not_interested";
     state.aiDispoReviews.push({
@@ -2040,21 +2048,15 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({
-      outcome: "skipped",
-      reason: "replayed_other_disposition",
+      outcome: "escalated",
+      reason: "model_dnc_needs_confirm",
     });
     expect(state.property.outreach_dispo).toBe("not_interested");
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-      supabase,
-      expect.objectContaining({
-        source: "ai_responder_threat",
-        surface: "dnc",
-      }),
-    );
-    expect(state.aiDispositionRpcCalls).toBe(1);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.aiDispositionRpcCalls).toBe(0);
   });
 
-  it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
+  it("legacy opt_out (any confidence) holds for a human: no suppression, no disposition, no review row", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -2078,33 +2080,18 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({
-      outcome: "opted_out",
-      reason: "model:opt_out",
+      outcome: "escalated",
+      reason: "model_opt_out_needs_confirm",
     });
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-      supabase,
-      expect.objectContaining({
-        contactId: CONTACT_ID,
-        fromPhone: "+18165550001",
-        source: "ai_responder",
-        surface: "stop",
-      }),
-    );
-    expect(state.property.outreach_dispo).toBe("opted_out");
-    expect(state.property.needs_human_attention).toBe(false);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("model_opt_out_needs_confirm");
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
-    expect(state.aiDispoReviews).toEqual([
-      {
-        conversationId: CONVERSATION_ID,
-        disposition: "opted_out",
-        inboundMessageId: "inbound-low-confidence-opt-out",
-        reason: "model:opt_out",
-      },
-    ]);
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(state.aiDispoReviews).toEqual([]);
   });
 
-  it("close_dnc writes a suppressed DNC disposition and does not send", async () => {
+  it("legacy close_dnc holds for a human: no suppression, no disposition, no send", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -2128,29 +2115,15 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({
-      outcome: "auto_closed",
-      reason: "model:threat_dnc",
+      outcome: "escalated",
+      reason: "model_dnc_needs_confirm",
     });
-    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-      supabase,
-      expect.objectContaining({
-        contactId: CONTACT_ID,
-        fromPhone: "+18165550001",
-        source: "ai_responder_threat",
-        surface: "dnc",
-      }),
-    );
-    expect(state.property.outreach_dispo).toBe("dnc");
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("model_dnc_needs_confirm");
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
-    expect(state.aiDispoReviews).toEqual([
-      {
-        conversationId: CONVERSATION_ID,
-        disposition: "dnc",
-        inboundMessageId: "inbound-threat",
-        reason: "model:threat_dnc",
-      },
-    ]);
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(state.aiDispoReviews).toEqual([]);
   });
 
   it("promotes a Jev new lead through qualifyProperty when at/above the org's configured threshold", async () => {
@@ -2333,7 +2306,7 @@ describe("dispatchAiResponse debounce", () => {
       },
     );
 
-    it("applies wrong_number/not_interested/opted_out immediately (unchanged legacy behavior) when AT/ABOVE the org's configured threshold", async () => {
+    it("opted_out is NEVER auto-applied, even at 0.99 confidence with automation enabled (Jarrad 2026-10-07)", async () => {
       const state = createMockState();
       state.config.classifier_provider = "jev";
       state.config.classifier_mode = "automatic";
@@ -2353,9 +2326,78 @@ describe("dispatchAiResponse debounce", () => {
           inboundMessageId: "inbound-above-threshold-opted-out", propertyId: PROPERTY_ID,
         }, { anthropic: {} as never });
         expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
-        expect(state.property.outreach_dispo).toBe("opted_out");
-        expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
-        expect(state.property.needs_human_attention).toBe(false);
+        expect(state.property.outreach_dispo).toBeNull();
+        expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        expect(state.jevActionUndo ?? []).toEqual([]);
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(state.property.last_ai_escalation_reason).toBe("jev_opted_out_needs_confirm");
+        expect(state.aiDispoReviews).toEqual([
+          expect.objectContaining({ disposition: "opted_out" }),
+        ]);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+
+    it("applies wrong_number to this property only when AT/ABOVE threshold with scope this_property", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "wrong_number", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-wn-this", body: "not the owner" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "wrong_number", confidence: 0.99 }, wrong_scope: { choice: "this_property" } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "not the owner",
+          inboundMessageId: "inbound-wn-this", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(state.property.outreach_dispo).toBe("wrong_number");
+        expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        // Reversible: the prior state is recorded for the one-click Undo.
+        expect(state.jevActionUndo).toEqual([
+          expect.objectContaining({
+            property_id: PROPERTY_ID,
+            source_inbound_message_id: "inbound-wn-this",
+            action: "wrong_number",
+            applied_dispo: "wrong_number",
+            prior_outreach_dispo: null,
+          }),
+        ]);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+
+    it("wrong_number scope=all applies the disposition for this property only, never suppresses the phone, and holds for a human", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "wrong_number", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-wn-all", body: "wrong number, never owned anything" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "wrong_number", confidence: 0.99 }, wrong_scope: { choice: "all" } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "wrong number, never owned anything",
+          inboundFromPhone: "+18165550001",
+          inboundMessageId: "inbound-wn-all", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(state.property.outreach_dispo).toBe("wrong_number");
+        expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(state.property.last_ai_escalation_reason).toBe("jev_wrong_number_all_needs_confirm");
+        expect(state.aiDispoReviews).toEqual([
+          expect.objectContaining({ disposition: "wrong_number" }),
+        ]);
       } finally { vi.stubGlobal("fetch", originalFetch); }
     });
   });
@@ -2525,7 +2567,7 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
-  it("jev-driven close_dnc suppresses the phone immediately but writes no outreach_dispo until confirmed", async () => {
+  it("jev-driven close_dnc writes NOTHING (no suppression, no outreach_dispo): pending review + jev_dnc_needs_confirm hold until a human confirms", async () => {
     // Regression test for Astra's BLOCKING PR-review finding (2026-09-20,
     // "Option B" resolution): DNC's suppression effect must happen right
     // away (halting it would mean continuing to text someone who just
@@ -2566,15 +2608,10 @@ describe("dispatchAiResponse debounce", () => {
       // automatic-mode orgs" override).
       expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
 
-      // PLAN §8 Q4 OPEN: prod behaviour preserved — immediate suppression.
-      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          surface: "dnc",
-          idempotencyKey: `ai-responder-dnc-proposed:${PROPERTY_ID}:${CONTACT_ID}:model:threat_dnc`,
-        }),
-      );
+      // Jarrad 2026-10-07: "I don't want Jev making any DNC decisions."
+      // No suppression of any kind until a human confirms the review.
+      expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+      expect(state.property.last_ai_escalation_reason).toBe("jev_dnc_needs_confirm");
 
       // The entire point of the fix: outreach_dispo is NOT written yet.
       expect(state.property.outreach_dispo).toBeNull();
@@ -2769,7 +2806,7 @@ describe("dispatchAiResponse debounce", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("a consent outcome (opted_out) still overwrites booked_appointment, same precedence as over nurture/callback_requested", async () => {
+  it("a legacy opt_out over booked_appointment holds for a human and leaves the booked appointment untouched", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -2795,8 +2832,8 @@ describe("dispatchAiResponse debounce", () => {
       { anthropic: {} as never },
     );
 
-    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
-    expect(state.property.outreach_dispo).toBe("opted_out");
+    expect(outcome).toEqual({ outcome: "escalated", reason: "model_opt_out_needs_confirm" });
+    expect(state.property.outreach_dispo).toBe("booked_appointment");
   });
 });
 
@@ -6363,14 +6400,15 @@ describe("Jev-only mode (reply_generation = off): the legacy generator is never 
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
-  it("Jev still applies opted_out with drafting off", async () => {
+  it("Jev opted_out with drafting off is deferred to a human, never applied", async () => {
     const state = offState("jev");
     state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
     seedInboundMessage(state, { id: "inbound-off-6", body: "STOP texting me" });
     stubJev("opted_out", 0.99);
     const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-6", { inboundBody: "STOP texting me" }), anthropic);
     expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
-    expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+    expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBeNull();
     expect(generateAiReply).not.toHaveBeenCalled();
   });
 
