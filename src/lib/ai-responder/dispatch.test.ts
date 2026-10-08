@@ -6853,6 +6853,17 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(state.property.outreach_dispo).toBe("nurture");
     expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
   });
+
+  it("replyDelayBypassed (delay workflow could not start): the template is dropped, nothing is sent, and nurture still applies", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    const result = await runNurture(state, "inbound-tpl-bypassed", 0.97, "not_applicable", { replyDelayBypassed: true });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBe("nurture");
+    expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+  });
 });
 
 describe("Jev-only mode (reply_generation = off): the legacy generator is never called", () => {

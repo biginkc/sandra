@@ -1320,7 +1320,9 @@ export async function handleInboundWebhook(
                   try {
                     await dispatchAndStampAiResponder(
                       supabase,
-                      dispatchInput,
+                      // No randomized delay on this path: template replies are
+                      // dropped (the outcome still applies).
+                      { ...dispatchInput, replyDelayBypassed: true },
                       runCtx,
                     );
                   } catch (fallbackError) {

@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008240000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 52); // 51 on main (28 inherited Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay harness + durable suppression 190000 + new-only watermark + Jev-only mode 220000 + New/Backlog 230000) + 1 templates (240000)
+const LAST = process.env.CHAIN_LAST ?? "20261008310000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 52); // 51 on main (28 inherited Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay harness + durable suppression 190000 + new-only watermark + Jev-only mode 220000 + New/Backlog 230000) + 1 templates (310000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -69,7 +69,7 @@ function phase(name, files, dir) {
 
 // Every jev_/pipeline_/ai_reply_ object (tables, views, functions, triggers,
 // policies, indexes, sequences, types) that must be gone after the rollback.
-// Phase 4 (templates, 20261008240000) objects: the mapping + approval-audit
+// Phase 4 (templates, 20261008310000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
 const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check";

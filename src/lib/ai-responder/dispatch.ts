@@ -259,6 +259,12 @@ export type AiDispatchInput = {
    * call) nor re-generates: it re-sends exactly this text. Never log it.
    */
   retryReply?: RetryReply;
+  /**
+   * Set by the webhook's inline fallback when the delay workflow could not be
+   * started: this dispatch is running without the randomized reply delay, so
+   * an approved-template reply is dropped (the outcome still applies).
+   */
+  replyDelayBypassed?: boolean;
 };
 
 export type AiDispatchOptions = {
@@ -2201,6 +2207,24 @@ async function runApprovedTemplateStep(
         detail: { outcome: a.outcome, reason: resolved.reason },
       }, runCtx);
     }
+    return { kind: "continue", outboundMessageId: null };
+  }
+
+  // The randomized reply delay was bypassed (workflow could not start): never
+  // send a template instantly. Drop it; the outcome still applies.
+  if (input.replyDelayBypassed) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: "delay_unavailable",
+        disposition: "dropped_outcome_applies",
+      },
+    }, runCtx);
     return { kind: "continue", outboundMessageId: null };
   }
 

@@ -1,4 +1,4 @@
--- Rollback for 20261008240000_auto_reply_templates. Drops the template
+-- Rollback for 20261008310000_auto_reply_templates. Drops the template
 -- auto-send approval columns, the approval audit table, the outcome ->
 -- template mapping and both RPCs, and removes the reset_tenant_tables patch.
 -- Destructive for approval/mapping data by design: with the feature gone,
