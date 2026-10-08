@@ -143,6 +143,40 @@ create trigger trg_hot_enrollment_takeover_fence
   before insert on public.sequence_enrollments
   for each row execute function public.fn_hot_enrollment_takeover_fence();
 
+-- A takeover is authoritative at RESUME time too. Whatever interleaving of call-start,
+-- call-cleanup and takeover happened, an automatic (system) resume of a hot enrolment is
+-- refused once a person has taken over since it was created. A person's own resume
+-- (a signed-in session) is still allowed: they own the lead.
+create or replace function public.fn_hot_enrollment_resume_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_takeover timestamptz;
+begin
+  if new.auto_enrolled_route is distinct from 'hot_book_appointment'
+    or old.status is distinct from 'paused'
+    or new.status is distinct from 'active'
+    or auth.uid() is not null
+  then
+    return new;
+  end if;
+  select p.last_person_takeover_at into v_takeover from public.properties p where p.id = new.property_id;
+  if v_takeover is not null and v_takeover >= new.enrolled_at then
+    new.status := 'paused';
+    new.pause_reason := 'person_took_over';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_hot_enrollment_resume_guard on public.sequence_enrollments;
+create trigger trg_hot_enrollment_resume_guard
+  before update of status on public.sequence_enrollments
+  for each row execute function public.fn_hot_enrollment_resume_guard();
+
 -- A PERSON assigning a lead takes over: pause the auto-enrolled "Book appointment"
 -- drip ("stops the moment a person takes over"). Only a signed-in person counts
 -- (auth.uid() is null for the service role / system), and only enrolments created

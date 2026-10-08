@@ -72,7 +72,7 @@ function phase(name, files, dir) {
 // Phase 4 (templates, 20261008310000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
-const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|fn_guard_nurture_mapped_sequence_delete|fn_pause_hot_drip_on_person_assignment|trg_pause_hot_drip_on_person_assignment|trg_guard_nurture_mapped_sequence_delete|ai_responder_configs_nurture_auto_drip_sequences_check";
+const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|fn_guard_nurture_mapped_sequence_delete|fn_hot_enrollment_resume_guard|trg_hot_enrollment_resume_guard|fn_pause_hot_drip_on_person_assignment|trg_pause_hot_drip_on_person_assignment|trg_guard_nurture_mapped_sequence_delete|ai_responder_configs_nurture_auto_drip_sequences_check";
 const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name

@@ -266,6 +266,42 @@ describe("nurture auto-drip switch", () => {
       });
     });
 
+    describe("a takeover is authoritative at resume time", () => {
+      const resume = async (property: string, userId: string | null) => {
+        await db.query("select set_config('request.jwt.claim.sub', $1, true)", [userId ?? ""]);
+        await db.query(`update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = $1`, [property]);
+      };
+      const takeOver = (property: string) =>
+        db.query(`update public.properties set last_person_takeover_at = now() + interval '1 second' where id = $1`, [property]);
+
+      it("an automatic (system) resume after a takeover is refused: stays paused/person_took_over (call-start vs takeover race)", async () => {
+        const property = await seed(sequenceId, "hot_book_appointment");
+        // call starts and pauses the drip; the person takes over; the call ends and cleanup resumes it
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+        await takeOver(property);
+        await resume(property, null);
+        expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+      });
+      it("a person's own resume is allowed", async () => {
+        const property = await seed(sequenceId, "hot_book_appointment");
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'person_took_over' where property_id = $1`, [property]);
+        await takeOver(property);
+        await resume(property, users.owner);
+        expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+      });
+      it("with no takeover, the normal cleanup resume works, and other routes are untouched", async () => {
+        const property = await seed(sequenceId, "hot_book_appointment");
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [property]);
+        await resume(property, null);
+        expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+        const other = await seed(sequenceId, "maybe_later");
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'call_in_progress' where property_id = $1`, [other]);
+        await takeOver(other);
+        await resume(other, null);
+        expect(await enrollment(other)).toEqual({ status: "active", pause_reason: null });
+      });
+    });
+
     it("a person assigning during a call/Norma pause re-labels it so call cleanup can never resume the drip", async () => {
       for (const temp of ["call_in_progress", "norma_call"]) {
         const property = await seed(sequenceId, "hot_book_appointment");
