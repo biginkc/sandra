@@ -16,7 +16,7 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-import { setLabelRule } from "./threshold-actions";
+import { setLabelRule, setNurtureAutoDrip } from "./threshold-actions";
 
 const input = {
   orgId: "org-1",
@@ -74,5 +74,26 @@ describe("setLabelRule", () => {
     expect(await setLabelRule(input)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/Someone else/) } });
     mocks.rpcResult = { data: null, error: { message: "FORBIDDEN" } };
     expect(await setLabelRule(input)).toMatchObject({ ok: false, error: { message: "Only an org owner can change these rules." } });
+  });
+});
+
+describe("setNurtureAutoDrip", () => {
+  it("passes the owner's choice to the owner-only RPC", async () => {
+    mocks.rpcResult = { data: { id: "c", nurtureAutoDrip: true, sequenceId: "seq-1" }, error: null };
+    const r = await setNurtureAutoDrip({ configId: "c", enabled: true, sequenceId: "seq-1" });
+    expect(r).toEqual({ ok: true, data: { enabled: true, sequenceId: "seq-1" } });
+    expect(mocks.rpcCalls).toEqual([
+      expect.objectContaining({ name: "fn_set_nurture_auto_drip", p_config_id: "c", p_enabled: true, p_sequence_id: "seq-1" }),
+    ]);
+  });
+  it("refuses 'on' with no drip before any database call", async () => {
+    const r = await setNurtureAutoDrip({ configId: "c", enabled: true, sequenceId: null });
+    expect(r.ok).toBe(false);
+    expect(mocks.rpcCalls).toEqual([]);
+  });
+  it("maps a non-owner to a plain message", async () => {
+    mocks.rpcResult = { data: null, error: { message: "FORBIDDEN" } };
+    const r = await setNurtureAutoDrip({ configId: "c", enabled: false, sequenceId: null });
+    expect(r).toMatchObject({ ok: false, error: { message: "Only an org owner can change this." } });
   });
 });

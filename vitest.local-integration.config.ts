@@ -101,6 +101,8 @@ export default defineConfig({
       "scripts/messages-v2/replay/replay.integration.test.ts",
       "supabase/migrations/20261008240000_auto_reply_templates.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
+      "supabase/migrations/20261008260000_nurture_auto_drip.integration.test.ts",
+      "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",

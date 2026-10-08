@@ -4,6 +4,7 @@ import { after } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { enrollNurtureInDrip, loadNurtureAutoDripConfig } from "./nurture-auto-drip";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import { applyPhoneLevelOptOut, isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
@@ -978,6 +979,8 @@ async function classifyAndHandleNonRouteOutcomes(
     // disposition that suppresses automated sends, so the reply must go out
     // before the outcome is applied.
     let templateMessageId: string | null = null;
+    // Why no nurture reply went out (drip enrolment needs one first).
+    let templateNotSentReason: string | null = templateCtx ? null : "no_reply_path";
     if (templateCtx) {
       const step = await runApprovedTemplateStep(supabase, {
         input,
@@ -991,6 +994,7 @@ async function classifyAndHandleNonRouteOutcomes(
       });
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
       templateMessageId = step.outboundMessageId;
+      templateNotSentReason = step.outboundMessageId ? null : (step.notSentReason ?? "not_sent");
     }
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
@@ -1022,6 +1026,14 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: null, to: "nurture", reason: "model:nurture" },
         });
       }
+      // Strictly AFTER the nurture reply was accepted and the outcome applied.
+      await runNurtureAutoDripStep(supabase, {
+        propertyId: input.propertyId,
+        orgId: property.org_id,
+        replySent: templateMessageId !== null,
+        notSentReason: templateNotSentReason ?? "not_sent",
+        runCtx,
+      });
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
@@ -2078,7 +2090,7 @@ type TemplateStepResult =
    * template went out. A template that was refused or held (quiet hours, hold
    * mode, any gate) also continues, with no message id: see the doc below.
    */
-  | { kind: "continue"; outboundMessageId: string | null }
+  | { kind: "continue"; outboundMessageId: string | null; notSentReason?: string }
   /** A contended send was parked for retry: do NOT apply the outcome yet (the re-dispatch re-runs this step). */
   | { kind: "stop"; outcome: AiDispatchOutcome | AiRetryOutcome };
 
@@ -2157,7 +2169,7 @@ async function runApprovedTemplateStep(
         detail: { outcome: a.outcome, reason: resolved.reason },
       }, runCtx);
     }
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, notSentReason: resolved.reason };
   }
 
   // Cannot send right now (owner's draft-only switch, or the recipient's clock /
@@ -2180,7 +2192,7 @@ async function runApprovedTemplateStep(
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, notSentReason: dropReason };
   }
 
   // A crashed earlier run of this claim may already have sent the template:
@@ -2197,7 +2209,11 @@ async function runApprovedTemplateStep(
         templateId: resolved.templateId,
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: alreadySent === "error" ? null : alreadySent };
+    return {
+      kind: "continue",
+      outboundMessageId: alreadySent === "error" ? null : alreadySent,
+      ...(alreadySent === "error" ? { notSentReason: "claim_unreadable" } : {}),
+    };
   }
 
   const sent = await sendResponderMessage(supabase, {
@@ -2251,7 +2267,10 @@ async function runApprovedTemplateStep(
   }
   // Nothing was sent. Held (hold mode / recipient window / any gate) or
   // silently refused: the outcome still applies (see the doc above).
-  if (sent.outcome !== "retry") return { kind: "continue", outboundMessageId: null };
+  if (sent.outcome !== "retry") {
+    const why = "reason" in sent && sent.reason ? `${sent.outcome}:${sent.reason}` : sent.outcome;
+    return { kind: "continue", outboundMessageId: null, notSentReason: why.replace(/\s+/g, "_") };
+  }
 
   // A retry drops its carried reply so the re-dispatch classifies again and
   // re-runs this step with the outcome still unapplied (a carried template
@@ -2265,6 +2284,77 @@ async function runApprovedTemplateStep(
       runContext: runCtx,
     }),
   };
+}
+
+/**
+ * Nurture auto-drip step (per-org switch `nurture_auto_drip`, default off).
+ * Order is strict: the approved nurture reply must have been accepted by the
+ * provider, THEN the lead is enrolled. When the reply did not go out (quiet
+ * hours, gate refusal, outbound hold, no approved/mapped template) nothing is
+ * enrolled and a person is asked to reply and start the drip
+ * (`nurture_reply_not_sent:<reason>`). A refused enrolment leaves the lead as
+ * nurture and raises `drip_enroll_failed:<reason>`. With the switch off this is
+ * a no-op: no read beyond the config, no step recorded.
+ */
+async function runNurtureAutoDripStep(
+  supabase: SupabaseClient<Database>,
+  a: {
+    propertyId: string;
+    orgId: string;
+    replySent: boolean;
+    notSentReason: string;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<void> {
+  const cfg = await loadNurtureAutoDripConfig(supabase, a.orgId);
+  if (cfg && !cfg.enabled) return;
+  if (!cfg) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: "config_unreadable" },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(supabase, a.propertyId, "drip_enroll_failed:config_unreadable", a.runCtx);
+    return;
+  }
+  if (!a.replySent) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { reason: "reply_not_sent", detail: a.notSentReason },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(supabase, a.propertyId, `nurture_reply_not_sent:${a.notSentReason}`, a.runCtx);
+    return;
+  }
+  let result: Awaited<ReturnType<typeof enrollNurtureInDrip>>;
+  try {
+    result = await enrollNurtureInDrip(supabase, { propertyId: a.propertyId, sequenceId: cfg.sequenceId });
+  } catch (error) {
+    reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });
+    result = { status: "refused", reason: "enroll_failed" };
+  }
+  if (result.status === "refused") {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: result.reason },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(supabase, a.propertyId, `drip_enroll_failed:${result.reason}`, a.runCtx);
+    return;
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "drip_enrolled",
+    result: "applied",
+    detail: {
+      status: result.status,
+      sequenceId: result.sequenceId,
+      ...(result.status === "enrolled" ? { enrollmentId: result.enrollmentId } : {}),
+    },
+  }, a.runCtx);
 }
 
 /**

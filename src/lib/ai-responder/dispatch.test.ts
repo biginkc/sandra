@@ -12,6 +12,7 @@ import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
 import { resolveApprovedTemplateReply } from "./template-reply";
+import { isKnownHoldReason } from "@/lib/hold-alerts/holds";
 import type { AiStructuredOutput } from "./types";
 
 const { recordLeadEvent, reportErrorMock } = vi.hoisted(() => ({
@@ -101,6 +102,25 @@ vi.mock("./humanize", () => ({
 
 vi.mock("./safety", () => ({
   validateAiReplyBody: vi.fn(),
+}));
+
+const pipelineSteps = vi.hoisted(() => ({
+  recordStep: vi.fn(async (..._args: unknown[]) => undefined),
+}));
+vi.mock("@/lib/pipeline-runs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/pipeline-runs")>();
+  // Steps are only recorded when a test passes a runContext; the recorder itself
+  // is stubbed so the order of recorded steps can be asserted.
+  return { ...actual, recordStep: pipelineSteps.recordStep, updateRun: vi.fn(async () => undefined) };
+});
+
+const nurtureDrip = vi.hoisted(() => ({
+  loadConfig: vi.fn(async () => ({ enabled: false }) as { enabled: boolean; sequenceId?: string | null } | null),
+  enroll: vi.fn(),
+}));
+vi.mock("./nurture-auto-drip", () => ({
+  loadNurtureAutoDripConfig: nurtureDrip.loadConfig,
+  enrollNurtureInDrip: nurtureDrip.enroll,
 }));
 
 vi.mock("./template-reply", () => ({
@@ -6283,13 +6303,16 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
     vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
     vi.mocked(resolveApprovedTemplateReply).mockClear();
+    // Default: the nurture auto-drip switch is OFF (today's behaviour).
+    nurtureDrip.loadConfig.mockReset().mockResolvedValue({ enabled: false });
+    nurtureDrip.enroll.mockReset();
   });
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
   });
 
-  async function runNurture(state: MockState, id: string, confidence = 0.97, reason = "not_applicable", extra: Record<string, unknown> = {}) {
+  async function runNurture(state: MockState, id: string, confidence = 0.97, reason = "not_applicable", extra: Record<string, unknown> = {}, deps: Record<string, unknown> = {}) {
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
     state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
@@ -6305,7 +6328,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
         inboundBody: "Not right now, maybe check back later",
         inboundMessageId: id, propertyId: PROPERTY_ID, ...extra,
-      }, { anthropic: {} as never });
+      }, { anthropic: {} as never, ...deps } as never);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   }
 
@@ -6446,6 +6469,173 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
     expect(state.property.outreach_dispo).toBeNull();
+  });
+
+  describe("nurture auto-drip (per-org switch): the reply is sent FIRST, then the lead is enrolled", () => {
+    const ON = { enabled: true, sequenceId: "seq-1" };
+    beforeEach(() => {
+      vi.mocked(resolveApprovedTemplateReply).mockReset().mockResolvedValue({ kind: "none", reason: "no_mapping" } as never);
+      nurtureDrip.loadConfig.mockReset().mockResolvedValue({ enabled: false });
+      nurtureDrip.enroll.mockReset().mockResolvedValue({ status: "enrolled", sequenceId: "seq-1", enrollmentId: "enr-1" });
+    });
+
+    it("switch ON: enrols exactly once, after the template send and after nurture is applied", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      const order: string[] = [];
+      const send = vi.mocked(sendSmsToContact).getMockImplementation()!;
+      vi.mocked(sendSmsToContact).mockImplementation(async (...args) => {
+        order.push("send");
+        return send(...args);
+      });
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      nurtureDrip.enroll.mockImplementation(async () => {
+        order.push(`enroll(dispo=${state.property.outreach_dispo})`);
+        return { status: "enrolled", sequenceId: "seq-1", enrollmentId: "enr-1" };
+      });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      const result = await runNurture(state, "inbound-drip-on");
+
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(order).toEqual(["send", "enroll(dispo=nurture)"]);
+      expect(nurtureDrip.enroll).toHaveBeenCalledTimes(1);
+      expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-1" });
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    it("switch OFF: never enrols and changes nothing (today's behaviour)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      const result = await runNurture(state, "inbound-drip-off");
+
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+
+    for (const [name, setup, expected] of [
+      ["no approved/mapped template", () => undefined, "nurture_reply_not_sent:no_mapping"],
+      ["outbound hold mode", (s: MockState) => { s.config.outbound_mode = "hold"; vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE); }, "nurture_reply_not_sent:outbound_mode_hold"],
+      ["recipient quiet hours", () => { vi.setSystemTime(new Date("2026-06-14T05:00:00.000Z")); vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE); }, "nurture_reply_not_sent:quiet_hours_recipient"],
+    ] as Array<[string, (s: MockState) => void, string]>) {
+      it(`switch ON, ${name}: NOT enrolled, nurture still applies, a person is asked to reply (${expected})`, async () => {
+        const state = createMockState();
+        installSendMock(state);
+        nurtureDrip.loadConfig.mockResolvedValue(ON);
+        setup(state);
+
+        const result = await runNurture(state, `inbound-drip-${name.replaceAll(" ", "-")}`);
+
+        expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+        expect(state.property.outreach_dispo).toBe("nurture");
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(state.property.last_ai_escalation_reason).toMatch(new RegExp(`^${expected}`));
+        expect(isKnownHoldReason(state.property.last_ai_escalation_reason!)).toBe(true);
+      });
+    }
+
+    it("switch ON, but a gate refuses the send: NOT enrolled; the send path's own hold already asks a person (it is not overwritten)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(sendSmsToContact).mockResolvedValue({ ok: false, error: "provider said no" } as never);
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      await runNurture(state, "inbound-drip-refused-send");
+
+      expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toMatch(/^send_blocked:/);
+    });
+
+    it("switch ON, enrolment refused: lead stays nurture and a drip_enroll_failed hold is raised", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      nurtureDrip.enroll.mockResolvedValue({ status: "refused", reason: "no_consent" });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      const result = await runNurture(state, "inbound-drip-refused");
+
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      expect(state.property.outreach_dispo).toBe("nurture");
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toBe("drip_enroll_failed:no_consent");
+    });
+
+    it("switch ON but no drip configured: refusal path, never silent", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue({ enabled: true, sequenceId: null });
+      nurtureDrip.enroll.mockResolvedValue({ status: "refused", reason: "no_drip_configured" });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      await runNurture(state, "inbound-drip-nodrip");
+
+      expect(state.property.last_ai_escalation_reason).toBe("drip_enroll_failed:no_drip_configured");
+    });
+
+    it("an unreadable switch fails closed with a hold (never a silent skip)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue(null);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+
+      await runNurture(state, "inbound-drip-cfg");
+
+      expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+      expect(state.property.last_ai_escalation_reason).toBe("drip_enroll_failed:config_unreadable");
+    });
+
+    it("records template_reply (sent) THEN drip_enrolled (applied) as pipeline steps, in that order", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      pipelineSteps.recordStep.mockClear();
+
+      await runNurture(state, "inbound-drip-steps", 0.97, "not_applicable", {}, { runContext: { runId: "run-1", orgId: "org-1", seq: 0 } });
+
+      const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; result: string });
+      const names = steps.map((s) => `${s.name}:${s.result}`);
+      expect(names.indexOf("template_reply:sent")).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf("drip_enrolled:applied")).toBeGreaterThan(names.indexOf("template_reply:sent"));
+      expect(names.indexOf("drip_enrolled:applied")).toBeGreaterThan(names.indexOf("apply_nurture:applied"));
+    });
+
+    it("records drip_enrolled as skipped (reply_not_sent) when no reply went out, and as error when enrolment is refused", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      pipelineSteps.recordStep.mockClear();
+      await runNurture(state, "inbound-drip-steps-skip", 0.97, "not_applicable", {}, { runContext: { runId: "run-1", orgId: "org-1", seq: 0 } });
+      const skipped = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; result: string; detail: Record<string, unknown> }).find((s) => s.name === "drip_enrolled");
+      expect(skipped).toMatchObject({ result: "skipped", detail: { reason: "reply_not_sent" } });
+
+      const state2 = createMockState();
+      installSendMock(state2);
+      nurtureDrip.enroll.mockResolvedValue({ status: "refused", reason: "no_phone" });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      pipelineSteps.recordStep.mockClear();
+      await runNurture(state2, "inbound-drip-steps-err", 0.97, "not_applicable", {}, { runContext: { runId: "run-2", orgId: "org-1", seq: 0 } });
+      const failed = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; result: string; detail: Record<string, unknown> }).find((s) => s.name === "drip_enrolled");
+      expect(failed).toMatchObject({ result: "error", detail: { reason: "no_phone" } });
+    });
+
+    it("below-threshold nurture (a person decides) never enrols", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      nurtureDrip.loadConfig.mockResolvedValue(ON);
+      await runNurture(state, "inbound-drip-below", 0.5);
+      expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+    });
   });
 
   it("outbound hold mode drops the template (no draft, no flag) and STILL applies nurture: hold stops sends, not dispositions", async () => {

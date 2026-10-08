@@ -81,6 +81,11 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "no_property",
   "no_contact",
   "ai_responder_exception",
+  // Nurture auto-drip step reasons (the hold flags themselves are the
+  // `nurture_reply_not_sent:` / `drip_enroll_failed:` prefix families below).
+  "config_unreadable",
+  "reply_not_sent",
+  "enroll_failed",
 ];
 
 /** Families with a variable tail: `keyword:<tier>`, `safety:<reason>`, `dead_letter_failed:<reason>` ... */
@@ -94,6 +99,8 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "dead_letter_failed:",
   "suppression_incomplete:",
   "jev_below_threshold:",
+  "nurture_reply_not_sent:",
+  "drip_enroll_failed:",
   "jev_automatic_failed:",
   "model:",
   "already_flagged:",

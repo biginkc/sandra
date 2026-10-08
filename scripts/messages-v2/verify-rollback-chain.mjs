@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008230000 -- 49 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog).
+// (20261008140000 .. 20261008260000 -- 51 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog + 1 templates + 1 nurture auto-drip).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 49 rollbacks in REVERSE order,
+//   3. applies the 51 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 49 migrations forward again.
+//   5. re-applies the 51 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008240000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 50); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + 1 templates (240000)
+const LAST = process.env.CHAIN_LAST ?? "20261008260000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 51); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + 1 templates (240000) + 1 nurture auto-drip (260000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -72,7 +72,7 @@ function phase(name, files, dir) {
 // Phase 4 (templates, 20261008240000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
-const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check";
+const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|ai_responder_configs_nurture_auto_drip_sequence_check";
 const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name
@@ -94,7 +94,8 @@ select kind || ' ' || name from (
    where n.nspname = 'public' and t.typname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_)' and t.typtype <> 'c'
   union all
   select 'column', table_name || '.' || column_name from information_schema.columns
-   where table_schema = 'public' and table_name = 'sms_templates' and column_name ~ '^approved_'
+   where table_schema = 'public' and ((table_name = 'sms_templates' and column_name ~ '^approved_')
+      or (table_name = 'ai_responder_configs' and column_name ~ '^nurture_auto_drip'))
   union all
   select 'constraint', conrelid::regclass::text || '.' || conname from pg_constraint
    where conname ~ '(${TPL})'

@@ -12,6 +12,7 @@ import { appendStep, upsertRun } from "./feed-state";
 import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
 import { HoldsRail } from "./holds-rail";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
+import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
 import {
   computeHeaderStats,
@@ -40,6 +41,8 @@ export type MessagesV2ViewProps = {
   orgId: string;
   /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
   isOwner?: boolean;
+  /** Owner-only nurture auto-drip switch; absent = not shown. */
+  nurtureAutoDrip?: NurtureAutoDripState | null;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
   runs: RunWithSteps[];
@@ -326,6 +329,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
               </Badge>
             ),
           )}
+          {isOwner && props.nurtureAutoDrip && <NurtureAutoDripSwitch state={props.nurtureAutoDrip} />}
         </div>
         <p
           className="ml-auto text-sm text-muted-foreground"

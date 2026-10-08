@@ -1022,6 +1022,8 @@ export type Database = {
           max_turns: number
           min_confidence: number
           model: string
+          nurture_auto_drip: boolean
+          nurture_auto_drip_sequence_id: string | null
           org_id: string
           outbound_mode: string
           reply_delay_max_seconds: number
@@ -1042,6 +1044,8 @@ export type Database = {
           max_turns?: number
           min_confidence?: number
           model?: string
+          nurture_auto_drip?: boolean
+          nurture_auto_drip_sequence_id?: string | null
           org_id: string
           outbound_mode?: string
           reply_delay_max_seconds?: number
@@ -1062,6 +1066,8 @@ export type Database = {
           max_turns?: number
           min_confidence?: number
           model?: string
+          nurture_auto_drip?: boolean
+          nurture_auto_drip_sequence_id?: string | null
           org_id?: string
           outbound_mode?: string
           reply_delay_max_seconds?: number
@@ -8040,6 +8046,10 @@ export type Database = {
       // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
       fn_update_jev_automatic_classification: {
         Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
+      fn_set_nurture_auto_drip: {
+        Args: { p_config_id: string; p_enabled: boolean; p_sequence_id: string }
         Returns: Json
       }
       fn_confirm_jev_lead_decision: {

@@ -176,3 +176,14 @@ describe("payloads never carry seller message text", () => {
     expect(JSON.stringify(t.store.rows)).not.toContain("SELLER SAID");
   });
 });
+
+describe("nurture auto-drip hold reasons are known", () => {
+  it("recognises nurture_reply_not_sent:<reason> and drip_enroll_failed:<reason>, but not an empty tail", async () => {
+    const { isKnownHoldReason } = await import("./holds");
+    expect(isKnownHoldReason("nurture_reply_not_sent:quiet_hours_recipient:closed")).toBe(true);
+    expect(isKnownHoldReason("nurture_reply_not_sent:no_mapping")).toBe(true);
+    expect(isKnownHoldReason("drip_enroll_failed:no_consent")).toBe(true);
+    expect(isKnownHoldReason("drip_enroll_failed:")).toBe(false);
+    expect(isKnownHoldReason("drip_enroll_failed:has space")).toBe(false);
+  });
+});
