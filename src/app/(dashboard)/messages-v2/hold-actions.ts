@@ -580,13 +580,26 @@ export async function confirmDoNotContact(
       return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
     }
 
+    // The held conversation's own inbound, not "the property's latest inbound
+    // from anyone": the run that raised this hold (the latest run that started
+    // at or before the flag) names the inbound message, and that message names
+    // the contact and the number that texted.
+    const { data: run } = await d.admin
+      .from("pipeline_runs")
+      .select("inbound_message_id")
+      .eq("property_id", input.propertyId)
+      .lte("started_at", current.last_ai_escalation_at ?? new Date().toISOString())
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const heldInboundId = (run as { inbound_message_id: string | null } | null)?.inbound_message_id ?? null;
+    if (!heldInboundId) return fail("INBOUND_NOT_FOUND", "Could not find the seller text or number. Nothing was changed.");
     const { data: inbound, error: inboundError } = await d.admin
       .from("messages")
       .select("id, contact_id, conversation_id, from_address")
+      .eq("id", heldInboundId)
       .eq("property_id", input.propertyId)
       .eq("direction", "inbound")
-      .order("created_at", { ascending: false })
-      .limit(1)
       .maybeSingle();
     const msg = inbound as
       | { id: string; contact_id: string | null; conversation_id: string | null; from_address: string | null }

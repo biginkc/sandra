@@ -1507,10 +1507,10 @@ async function resolveAndApplyRoute(
         classification.eligibleForAutoAccept &&
         classification.wrongScope === "this_property"
       ) {
-        // Approved wrong-number reply. "Take this number off our list" means
-        // this property: the wrong_number disposition applied below is the
-        // whole effect. NO phone-level suppression here (Jarrad: no automatic
-        // DNC decisions). Never sent for a scope other than an explicit
+        // Approved wrong-number reply (no promise to remove the number). The
+        // wrong_number disposition applied below, for this property only, is
+        // the whole effect. NO phone-level suppression here (Jarrad: no
+        // automatic DNC decisions; phone-wide blocking is a person's call). Never sent for a scope other than an explicit
         // this_property (RULES-PROPOSAL 2.2 "Must NOT fire").
         const step = await runApprovedTemplateStep(supabase, {
           input,

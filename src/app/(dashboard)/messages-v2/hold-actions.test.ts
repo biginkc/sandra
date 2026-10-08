@@ -88,7 +88,7 @@ function baseReply(over: Partial<Record<string, Reply>> = {}) {
       if (calls.some((c) => c.method === "update")) return { data: [{ id: "prop-1" }] };
       return { data: { id: "prop-1", org_id: "org-1" } };
     }
-    if (table === "pipeline_runs") return { data: { id: "run-1" } };
+    if (table === "pipeline_runs") return { data: { id: "run-1", inbound_message_id: "msg-1" } };
     if (table === "rpc:fn_reserve_ai_send") return { data: true };
     if (table === "rpc:fn_release_ai_send") return { data: true };
     if (table === "rpc:fn_resolve_hold") {
@@ -565,6 +565,48 @@ describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
     ]);
     expect(audited).not.toContain("APPROVED HOSTILE TEXT");
     expect(audited).not.toContain("+1816");
+  });
+
+  it("uses the held conversation's own inbound (its contact and number), not the property's latest inbound from anyone", async () => {
+    // Contact B texted most recently on the property, but the hold was raised by contact A's message msg-A.
+    const A = { id: "msg-A", contact_id: "contact-A", conversation_id: "conv-A", from_address: "+18165550001" };
+    const base = hostileReply();
+    const seenQueries: Array<{ table: string; calls: Call[] }> = [];
+    const { d } = deps({ resolveHostileReply: vi.fn().mockResolvedValue("TEXT") }, (table, calls) => {
+      seenQueries.push({ table, calls });
+      if (table === "pipeline_runs") return { data: { id: "run-A", inbound_message_id: "msg-A" } };
+      if (table === "messages") {
+        // Only a lookup pinned to the held message may return A; anything else would be B.
+        return has(calls, "eq", "id", "msg-A")
+          ? { data: A }
+          : { data: { id: "msg-B", contact_id: "contact-B", conversation_id: "conv-B", from_address: "+18165559999" } };
+      }
+      return base(table, calls);
+    });
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toMatchObject({ ok: true });
+    expect(d.suppressNumber).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      contactId: "contact-A",
+      phone: "+18165550001",
+      inboundMessageId: "msg-A",
+    });
+    expect(d.sendHumanDraft).toHaveBeenCalledWith(
+      d.admin,
+      expect.objectContaining({ contactId: "contact-A", inboundFromPhone: "+18165550001", inboundMessageId: "msg-A" }),
+    );
+    const run = seenQueries.find((q) => q.table === "pipeline_runs")!;
+    expect(has(run.calls, "lte", "started_at", HOSTILE_ROW.last_ai_escalation_at)).toBe(true);
+  });
+
+  it("refuses when the held message cannot be found", async () => {
+    const base = hostileReply();
+    const { d } = deps({}, (t, c) => (t === "pipeline_runs" ? { data: null } : base(t, c)));
+    expect(await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+      ok: false,
+      error: { code: "INBOUND_NOT_FOUND" },
+    });
+    expect(d.suppressNumber).not.toHaveBeenCalled();
   });
 
   it("no approved/mapped hostile template: nothing is sent, the number is still suppressed", async () => {

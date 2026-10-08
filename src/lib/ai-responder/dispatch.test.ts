@@ -7047,7 +7047,7 @@ describe("sendHumanDraft (Messages v2 Phase 1 hold Send)", () => {
 
 describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", () => {
   const WRONG_NUMBER_BODY =
-    "Sorry about that, my mistake. I'll take this number off our list. Any chance you know who owns the place?";
+    "Sorry about that, my mistake. Any chance you know who owns the place?";
   const tpl = (outcome: "wrong_number" | "not_interested" | "nurture", body: string) => ({
     kind: "template" as const,
     templateId: `tpl-${outcome}`,

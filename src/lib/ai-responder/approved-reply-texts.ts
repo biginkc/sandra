@@ -15,7 +15,7 @@ export const APPROVED_REPLY_TEXTS = {
     "Sounds good, thanks for letting me know. If anything changes in the next 6-12 months, mind if I check back?",
   hostile: "Terribly sorry for the inconvenience. We've updated our records.",
   wrong_number:
-    "Sorry about that, my mistake. I'll take this number off our list. Any chance you know who owns the place?",
+    "Sorry about that, my mistake. Any chance you know who owns the place?",
   nurture: "Fantastic! We will keep in touch.",
 } as const;
 

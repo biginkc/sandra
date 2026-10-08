@@ -9,7 +9,7 @@ describe("approved reply texts (Jarrad, 2026-10-07)", () => {
     );
     expect(APPROVED_REPLY_TEXTS.hostile).toBe("Terribly sorry for the inconvenience. We've updated our records.");
     expect(APPROVED_REPLY_TEXTS.wrong_number).toBe(
-      "Sorry about that, my mistake. I'll take this number off our list. Any chance you know who owns the place?",
+      "Sorry about that, my mistake. Any chance you know who owns the place?",
     );
     expect(APPROVED_REPLY_TEXTS.nurture).toBe("Fantastic! We will keep in touch.");
     expect(Object.keys(APPROVED_REPLY_TEXTS).sort()).toEqual(["hostile", "not_interested", "nurture", "wrong_number"]);
