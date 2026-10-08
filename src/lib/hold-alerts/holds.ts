@@ -31,6 +31,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "template_sent_outcome_missing",
   "draft_persist_failed",
   "reply_pending",
+  "needs_reply",
   "send_timeout",
   "send_timeout_then_sent",
   "send_timeout_unparseable",
@@ -45,6 +46,13 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "jev_unexpected_send_route",
   "jev_new_lead_promotion_failed",
   "jev_unclear_no_action",
+  // Model judgments about opt-out / DNC / phone-wide wrong number never act
+  // on their own (Jarrad 2026-10-07); a human confirms each one.
+  "jev_dnc_needs_confirm",
+  "jev_opted_out_needs_confirm",
+  "jev_wrong_number_all_needs_confirm",
+  "model_opt_out_needs_confirm",
+  "model_dnc_needs_confirm",
   "ai_disposition_replay_lookup_failed",
   "ai_disposition_missing_thread_identity",
   // Run outcomes / reasons.

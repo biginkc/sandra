@@ -5,15 +5,15 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Messages v2 Phase 3: fn_messages_v2_scorecard (20261008160000). Local-only:
- * replays the 20261008140000..20261008160000 chain inside a rolled-back
+ * Messages v2 Phase 3: fn_messages_v2_scorecard (20261008211000). Local-only:
+ * replays the 20261008140000..20261008211000 chain inside a rolled-back
  * transaction, seeds runs / decisions / reviews / lead_events at known ages,
  * and asserts the per-outcome counts, agreement verdicts, samples, and that
  * the function is SECURITY INVOKER (another org's member sees zeros).
  */
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const CHAIN = readdirSync(__dirname)
-  .filter((f) => /^20261008\d{6}_.*\.sql$/.test(f) && f >= "20261008140000" && f <= "20261008160000_zz")
+  .filter((f) => /^20261008\d{6}_.*\.sql$/.test(f) && f >= "20261008140000" && f <= "20261008211000_zz")
   .sort()
   .map((f) =>
     readFileSync(path.join(__dirname, f), "utf8").replace(/^begin;$/m, "").replace(/^commit;$/m, ""),

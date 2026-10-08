@@ -286,6 +286,110 @@ describe("suppression incomplete hold", () => {
   });
 });
 
+describe("Luna suggestion on the hold card", () => {
+  const luna = (outcome = "nurture", confidence = 0.836) => ({
+    id: "ls1",
+    outcome,
+    confidence,
+    inbound_message_id: "m1",
+  });
+  const lunaApi = (over: Partial<HoldActionsApi> = {}) =>
+    api({
+      lunaApply: vi.fn().mockResolvedValue(ok({ status: "applied", resolvedOutcome: "nurture" })),
+      lunaReject: vi.fn().mockResolvedValue(ok(null)),
+      ...over,
+    });
+
+  it("renders the label and rounded percent", () => {
+    renderRail(hold({ luna: luna() }), lunaApi());
+    expect(screen.getByTestId("luna-suggestion")).toHaveTextContent("Luna suggests: Nurture (84%)");
+  });
+
+  it("Apply calls lunaApply with the suggestion id, shows status and reloads", async () => {
+    const onReload = vi.fn();
+    const actions = lunaApi();
+    renderRail(hold({ luna: luna() }), actions, onReload);
+    await userEvent.click(button("Apply"));
+    expect(actions.lunaApply).toHaveBeenCalledWith({ suggestionId: "ls1" });
+    expect(await screen.findByTestId("luna-status")).toHaveTextContent("Applied Luna's pick: Nurture");
+    expect(onReload).toHaveBeenCalled();
+  });
+
+  it("shows the warning text when apply returns one", async () => {
+    const actions = lunaApi({
+      lunaApply: vi.fn().mockResolvedValue(ok({ status: "applied", resolvedOutcome: "nurture", warning: "reply not cancelled" })),
+    });
+    renderRail(hold({ luna: luna() }), actions);
+    await userEvent.click(button("Apply"));
+    expect(await screen.findByTestId("luna-status")).toHaveTextContent("reply not cancelled");
+  });
+
+  it("Not this calls lunaReject, then hides the block", async () => {
+    const actions = lunaApi();
+    renderRail(hold({ luna: luna() }), actions);
+    await userEvent.click(button("Not this"));
+    expect(actions.lunaReject).toHaveBeenCalledWith({ suggestionId: "ls1" });
+    expect(await screen.findByTestId("luna-status")).toHaveTextContent("Dismissed Luna's suggestion");
+    expect(screen.queryByTestId("luna-suggestion")).not.toBeInTheDocument();
+    expect(button("Send")).toBeInTheDocument();
+  });
+
+  it.each(["opted_out", "dnc"])("%s has no Apply, a review link, and still Not this", (outcome) => {
+    renderRail(hold({ luna: luna(outcome) }), lunaApi());
+    expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review opt-out" })).toHaveAttribute("href", "/jev/needs-decision");
+    expect(button("Not this")).toBeInTheDocument();
+  });
+
+  it("shows an error verbatim and keeps the buttons; no reload for a generic error", async () => {
+    const onReload = vi.fn();
+    const actions = lunaApi({
+      lunaApply: vi.fn().mockResolvedValue(fail("LUNA_HUMAN_CONFIRM_REQUIRED", "LUNA_HUMAN_CONFIRM_REQUIRED")),
+    });
+    renderRail(hold({ luna: luna() }), actions, onReload);
+    await userEvent.click(button("Apply"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("LUNA_HUMAN_CONFIRM_REQUIRED");
+    expect(screen.queryByTestId("luna-status")).not.toBeInTheDocument();
+    expect(button("Apply")).toBeEnabled();
+    expect(onReload).not.toHaveBeenCalled();
+  });
+
+  it.each(["LUNA_ALREADY_RESOLVED", "LUNA_NO_PENDING_ITEM"])("%s reloads the page data", async (code) => {
+    const onReload = vi.fn();
+    const actions = lunaApi({ lunaApply: vi.fn().mockResolvedValue(fail(code, code)) });
+    renderRail(hold({ luna: luna() }), actions, onReload);
+    await userEvent.click(button("Apply"));
+    await waitFor(() => expect(onReload).toHaveBeenCalled());
+    expect(await screen.findByRole("alert")).toHaveTextContent(code);
+  });
+
+  it("is absent when the hold has no suggestion", () => {
+    renderRail(hold(), lunaApi());
+    expect(screen.queryByTestId("luna-suggestion")).not.toBeInTheDocument();
+  });
+
+  it("renders no buttons when the luna actions are absent", () => {
+    renderRail(hold({ luna: luna() }), api());
+    expect(screen.getByTestId("luna-suggestion")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Not this" })).not.toBeInTheDocument();
+  });
+
+  it("is not shown on informational (muted) holds", () => {
+    renderRail(
+      hold({
+        luna: luna(),
+        sources: ["needs_attention"],
+        flag_reason: "send_timeout_then_sent",
+        draft: undefined,
+        draft_held: false,
+      }),
+      lunaApi(),
+    );
+    expect(screen.queryByTestId("luna-suggestion")).not.toBeInTheDocument();
+  });
+});
+
 describe("hostile hold: Confirm do-not-contact", () => {
   const hostileHold = () =>
     hold({

@@ -7,6 +7,8 @@ import { reportError } from "@/lib/errors/report";
 import { THRESHOLDABLE_OUTCOMES, type ThresholdableOutcome } from "@/lib/sms-classification/thresholds";
 import { createClient } from "@/lib/supabase/server";
 
+import { isNeverAuto, NEVER_AUTO_NOTE } from "./rule-policy";
+
 export type SetLabelRuleInput = {
   orgId: string;
   outcome: ThresholdableOutcome;
@@ -46,6 +48,12 @@ export async function setLabelRule(input: SetLabelRuleInput): Promise<Result<Set
   }
   if (typeof input.automationEnabled !== "boolean") {
     return { ok: false, error: { code: "VALIDATION", message: "Automation must be on or off." } };
+  }
+  if (input.automationEnabled && isNeverAuto(input.outcome)) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: `${input.outcome} cannot be automated. ${NEVER_AUTO_NOTE}.` },
+    };
   }
   if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
     return { ok: false, error: { code: "VALIDATION", message: "Missing rule version." } };

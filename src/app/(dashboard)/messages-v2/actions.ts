@@ -4,9 +4,9 @@ import { revalidatePath } from "next/cache";
 
 import { sendHumanDraft } from "@/lib/ai-responder/dispatch";
 import { resolveApprovedTemplateReply } from "@/lib/ai-responder/template-reply";
+import { undoJevAction as undoJevActionCore } from "@/lib/ai-responder/undo";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
-import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -17,7 +17,7 @@ import { createClient } from "@/lib/supabase/server";
 
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
-import { messagesV2OrgId } from "./access";
+import { authorizeMessagesV2 } from "./authorize";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
@@ -28,6 +28,7 @@ import {
   takeOverHold,
   type HoldActionDeps,
 } from "./hold-actions";
+import { setReplyGeneration, type ReplyGeneration, type ReplyGenerationSetting } from "./reply-generation";
 import type { HoldSeen } from "./types";
 
 /**
@@ -37,30 +38,9 @@ import type { HoldSeen } from "./types";
  */
 
 async function authorize(): Promise<Result<HoldActionDeps>> {
-  let userId: string | null = null;
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    userId = user?.id ?? null;
-  } catch {
-    userId = null;
-  }
-  if (!userId) {
-    return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
-  }
-  let orgId: string | null = null;
-  try {
-    // Only this user's own memberships count.
-    const memberships = (await getCallerMembershipsOrThrow()).filter((m) => m.user_id === userId);
-    orgId = messagesV2OrgId(memberships);
-  } catch {
-    orgId = null;
-  }
-  if (!orgId) {
-    return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
-  }
+  const auth = await authorizeMessagesV2();
+  if (!auth.ok) return auth;
+  const { orgId, userId } = auth.data;
   const admin = createAdminClient();
   return {
     ok: true,
@@ -207,4 +187,75 @@ export async function listHoldAssigneesAction(input: {
   const auth = await authorize();
   if (!auth.ok) return auth;
   return listPropertyOrgUsers(String(input.propertyId));
+}
+
+/**
+ * Owner-only "AI drafts" switch. The caller's own session runs the RPC (it
+ * needs auth.uid()); the database re-checks active-owner for the config's org.
+ */
+export async function setReplyGenerationAction(input: {
+  configId: string;
+  mode: ReplyGeneration;
+}): Promise<Result<ReplyGenerationSetting>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  try {
+    const supabase = await createClient();
+    const result = await setReplyGeneration(
+      supabase as unknown as Parameters<typeof setReplyGeneration>[0],
+      { configId: String(input.configId), mode: String(input.mode) },
+    );
+    if (result.ok) revalidatePath("/messages-v2");
+    return result;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_reply_generation" } });
+    return err({ code: "SET_FAILED", message: "Could not change AI drafts. Nothing was changed." });
+  }
+}
+
+/**
+ * One-click undo for an action Jev auto-applied (wrong_number, not_interested,
+ * nurture): restores the disposition and follow-up date and resumes the drips
+ * that action paused. Refuses if a person changed the lead since.
+ */
+export async function undoJevAppliedAction(undoId: string): Promise<Result<{ resumed: number }>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  const id = String(undoId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    return err({ code: "VALIDATION", message: "Invalid undo id" });
+  }
+  try {
+    const supabase = await createClient();
+    const result = await undoJevActionCore(supabase, id);
+    if (!result.ok) return err({ code: result.code, message: result.message });
+    revalidatePath("/messages-v2");
+    return { ok: true, data: { resumed: result.resumed } };
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_undo_jev_action" }, extra: { undoId: id } });
+    return err({ code: "FAILED", message: "Could not undo. Try again." });
+  }
+}
+
+/** The still-undoable record for an inbound message's Jev action, or null. */
+export async function findJevUndoAction(inboundMessageId: string): Promise<string | null> {
+  const auth = await authorize();
+  if (!auth.ok) return null;
+  const id = String(inboundMessageId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("jev_action_undo")
+      .select("id")
+      .eq("source_inbound_message_id", id)
+      .eq("org_id", auth.data.orgId)
+      .is("undone_at", null)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data?.id ?? null;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_find_jev_undo" }, extra: { inboundMessageId: id } });
+    return null;
+  }
 }

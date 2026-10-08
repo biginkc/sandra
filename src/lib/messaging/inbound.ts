@@ -74,23 +74,15 @@ import {
 } from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
+import { DNC_KEYWORDS, matchesStopKeyword } from "./stop-signals";
 import type { MessagingProvider } from "./types";
 
-const UNAMBIGUOUS_STOP_KEYWORDS =
-  /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me|take me off|delete my (?:number|info)|leave me alone|quit bothering me|do not contact me|don'?t text me again|lose (?:this|my) number|never contact me)\b|\bstop\b(?!\s+by\b)/i;
-const AMBIGUOUS_STOP_KEYWORDS = /^\s*(end|cancel|quit|remove)\s*$/i;
+export { matchesStopKeyword };
+
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
-const DNC_KEYWORDS =
-  /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out|please delete my (number|info)|delete my (number|info)|lose (this|my) number|never contact me/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
-
-export function matchesStopKeyword(body: string) {
-  return (
-    UNAMBIGUOUS_STOP_KEYWORDS.test(body) || AMBIGUOUS_STOP_KEYWORDS.test(body)
-  );
-}
 
 export function classifyWrongNumberScope(
   body: string,
@@ -494,6 +486,15 @@ export async function handleInboundWebhook(
         continue;
       }
 
+      // Automatic phone suppression driven by an inbound text is limited to
+      // deterministic phrase matches, never a model judgment: this carrier/legal
+      // STOP match (CTIA / TCPA revocation) is the one that is kept. The
+      // DNC_KEYWORDS match and the wrong-number "all" scope below are ALSO
+      // still automatic, pending Jarrad's ruling on whether they should become
+      // hold-only. Jarrad (2026-10-07): "I don't want you making any DNC
+      // decisions. I don't want Jev making any DNC decisions." Every
+      // Jev/legacy-classifier opt-out or DNC opens a human review instead
+      // (see ai-responder/dispatch.ts).
       if (matchesStopKeyword(bodyTrimmed)) {
         if (!orgId) {
           throw new Error(
@@ -1216,8 +1217,26 @@ export async function handleInboundWebhook(
               })
             : 0;
 
-          if (delaySeconds === 0) {
-            await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
+          // A reply is dispatched synchronously inside the webhook ONLY when the
+          // org has no reply delay at all (max = 0, or no active config). With a
+          // non-zero max, a computed 0 (no property state, quiet-hours clamp, low
+          // random draw) still goes through the delay workflow so approved
+          // template replies are never sent from the webhook request itself.
+          const replyDelayConfigured = (delayConfig?.delayMaxSeconds ?? 0) > 0;
+          if (delaySeconds === 0 && !replyDelayConfigured) {
+            // Jarrad: replies must use the random delay. An inline dispatch has
+            // none (org max = 0, or the lookup failed and returned null), so
+            // approved-template replies are dropped here; the outcome still
+            // applies and LLM / identity replies are unchanged.
+            await dispatchAndStampAiResponder(
+              supabase,
+              {
+                ...dispatchInput,
+                replyDelayBypassed: true,
+                replyDelayBypassReason: delayConfig ? "delay_not_configured" : "delay_unavailable",
+              },
+              runCtx,
+            );
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
               supabase,
@@ -1314,7 +1333,9 @@ export async function handleInboundWebhook(
                   try {
                     await dispatchAndStampAiResponder(
                       supabase,
-                      dispatchInput,
+                      // No randomized delay on this path: template replies are
+                      // dropped (the outcome still applies).
+                      { ...dispatchInput, replyDelayBypassed: true },
                       runCtx,
                     );
                   } catch (fallbackError) {

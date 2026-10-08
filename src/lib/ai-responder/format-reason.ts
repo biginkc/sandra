@@ -119,6 +119,8 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return `send pipeline blocked (${detail.replace(/_/g, " ")})`;
     case "generate_error":
       return "model call failed";
+    case "needs_reply":
+      return "Seller replied — needs a human reply";
     case "dead_letter_failed":
       if (detail.startsWith("send_timeout")) {
         return "Reply timed out at the provider AND its text could not be saved - check the pipeline run";
@@ -130,6 +132,16 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return "Reply accepted by provider late — do not re-send";
     case "suppression_incomplete":
       return "Confirmed opt-out saved, but the number may not be suppressed yet - retry suppression";
+    case "jev_dnc_needs_confirm":
+      return "Jev flagged do-not-contact - nothing was suppressed. Confirm or reject the review";
+    case "jev_opted_out_needs_confirm":
+      return "Jev flagged an opt-out - nothing was suppressed. Confirm or reject the review";
+    case "jev_wrong_number_all_needs_confirm":
+      return "Jev says this is a wrong number for every property - marked wrong number here only. Confirm before suppressing the phone";
+    case "model_opt_out_needs_confirm":
+      return "The AI flagged an opt-out - nothing was suppressed. A person must decide";
+    case "model_dnc_needs_confirm":
+      return "The AI flagged do-not-contact - nothing was suppressed. A person must decide";
     case "provider_billing":
       return "Anthropic credits exhausted - AI responder down until topped up";
     case "provider_auth":
@@ -155,6 +167,8 @@ function formatShortLabel(gate: string): string {
       return "Send blocked";
     case "generate_error":
       return "AI error";
+    case "needs_reply":
+      return "Needs reply";
     case "dead_letter_failed":
       return "Reply text not saved";
     case "send_timeout":
@@ -163,6 +177,14 @@ function formatShortLabel(gate: string): string {
       return "Sent late";
     case "suppression_incomplete":
       return "Suppression incomplete";
+    case "jev_dnc_needs_confirm":
+    case "model_dnc_needs_confirm":
+      return "Confirm DNC";
+    case "jev_opted_out_needs_confirm":
+    case "model_opt_out_needs_confirm":
+      return "Confirm opt-out";
+    case "jev_wrong_number_all_needs_confirm":
+      return "Confirm phone-wide";
     case "provider_billing":
       return "API credits out";
     case "provider_auth":

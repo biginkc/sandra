@@ -52,6 +52,13 @@ async function dispatchStep(
       inboundBody: params.inboundBody,
       inboundMessageId: params.inboundMessageId,
       ...(params.runId ? { runId: params.runId } : {}),
+      // The webhook only schedules this workflow when a delay is configured
+      // (max > 0). A computed 0 (quiet-hours clamp, low draw) means no delay
+      // was applied, so an approved-template reply is dropped, never sent
+      // instantly (the outcome still applies).
+      ...(params.delaySeconds <= 0
+        ? { replyDelayBypassed: true, replyDelayBypassReason: "delay_not_applied" as const }
+        : {}),
       ...(params.retryAttempt ? { retryAttempt: params.retryAttempt } : {}),
       ...(params.retryReply ? { retryReply: params.retryReply } : {}),
     },

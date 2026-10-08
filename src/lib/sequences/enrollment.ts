@@ -303,7 +303,7 @@ export async function pausePropertyEnrollments(
     permanent?: boolean;
     actor?: SequenceEventActor;
   },
-): Promise<{ paused: number }> {
+): Promise<{ paused: number; enrollmentIds: string[] }> {
   const newStatus = params.permanent ? "opted_out" : "paused";
   let pauseQuery = client
     .from("sequence_enrollments")
@@ -337,7 +337,7 @@ export async function pausePropertyEnrollments(
       },
     });
   }
-  return { paused };
+  return { paused, enrollmentIds: (pausedRows ?? []).map((row) => row.id) };
 }
 
 /**

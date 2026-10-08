@@ -113,3 +113,19 @@ describe("computeReplyDelaySeconds", () => {
     ).toBe(0);
   });
 });
+
+describe("quiet-hours clamp (templates must not send instantly)", () => {
+  it("Missouri 20:59 local with a 20-45s delay configured computes 0, the case the workflow marks delay_not_applied", () => {
+    // 20:59 America/Chicago (CDT) = 01:59Z next day.
+    expect(
+      computeReplyDelaySeconds({
+        minSeconds: 20,
+        maxSeconds: 45,
+        inboundLength: 80,
+        propertyState: "MO",
+        now: new Date("2026-07-02T01:59:00.000Z"),
+        random: () => 0.5,
+      }),
+    ).toBe(0);
+  });
+});
