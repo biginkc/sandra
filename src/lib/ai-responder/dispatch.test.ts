@@ -93,8 +93,7 @@ vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => {
   return { ...actual, applyPhoneLevelOptOut: vi.fn() };
 });
 
-const hotEnroll = vi.hoisted(() => ({ enrollLead: vi.fn(), reconcile: vi.fn(async (..._a: unknown[]) => ({ paused: 0 })) }));
-vi.mock("@/lib/sequences/hot-lead-takeover", () => ({ pauseHotEnrollmentIfTakenOverSince: hotEnroll.reconcile }));
+const hotEnroll = vi.hoisted(() => ({ enrollLead: vi.fn() }));
 vi.mock("@/lib/sequences/enrollment", () => ({
   pauseContactEnrollments: vi.fn(),
   pausePropertyEnrollments: vi.fn(),
@@ -6660,7 +6659,6 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     nurtureDrip.loadConfig.mockReset().mockResolvedValue({ enabled: false });
     nurtureDrip.enroll.mockReset();
     hotEnroll.enrollLead.mockReset();
-    hotEnroll.reconcile.mockClear();
     nurtureAnswers = {};
   });
   afterEach(() => {
@@ -6908,11 +6906,19 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       nurtureDrip.loadConfig.mockResolvedValue(ON);
       vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
 
-      await runNurture(state, "inbound-drip-refused-send");
+      pipelineSteps.recordStep.mockClear();
+      await runNurture(state, "inbound-drip-refused-send", 0.97, "not_applicable", {}, { runContext: { runId: "run-r", orgId: "org-1", seq: 0 } });
 
       expect(nurtureDrip.enroll).not.toHaveBeenCalled();
       expect(state.property.needs_human_attention).toBe(true);
+      // The flag is first-writer-wins (a person was already told, by the send path)...
       expect(state.property.last_ai_escalation_reason).toMatch(/^send_blocked:/);
+      // ...but the run's hold evidence still carries the required nurture_reply_not_sent:<reason>.
+      const holds = pipelineSteps.recordStep.mock.calls
+        .map((c) => c[2] as { name: string; kind: string; detail?: { reason?: string } })
+        .filter((s) => s.kind === "hold" && s.name === "needs_attention")
+        .map((s) => s.detail?.reason);
+      expect(holds.some((r) => typeof r === "string" && r.startsWith("nurture_reply_not_sent:"))).toBe(true);
     });
 
     it("switch ON, enrolment refused: lead stays nurture and a drip_enroll_failed hold is raised", async () => {
@@ -7016,9 +7022,14 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         ]);
         // Book appointment drip: the drip's own schedule, no extra offset, no human actor.
         expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
-        expect(hotEnroll.enrollLead).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-hot", enrolledByUserId: null, autoRoute: "hot_book_appointment" });
-        // Race with a person taking over: re-checked right after the enrolment exists.
-        expect(hotEnroll.reconcile).toHaveBeenCalledWith({ propertyId: PROPERTY_ID, since: expect.any(String) });
+        expect(hotEnroll.enrollLead).toHaveBeenCalledWith(expect.anything(), {
+          propertyId: PROPERTY_ID,
+          sequenceId: "seq-hot",
+          enrolledByUserId: null,
+          autoRoute: "hot_book_appointment",
+          // Fenced at the triggering inbound's arrival: a takeover / newer reply since makes it be born paused.
+          hotFenceAt: expect.any(Date),
+        });
       });
 
       it("an enrolment problem never undoes the hold: still hot_lead, error recorded", async () => {

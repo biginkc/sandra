@@ -36,7 +36,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import { pauseHotBookAppointmentOnTakeover, pauseHotEnrollmentIfTakenOverSince } from "./hot-lead-takeover";
+import { pauseHotBookAppointmentOnTakeover } from "./hot-lead-takeover";
 
 const actor = { actorType: "user", actorId: "u1" } as const;
 
@@ -68,26 +68,5 @@ describe("pauseHotBookAppointmentOnTakeover", () => {
     expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: [], actor })).toEqual({ paused: 0 });
     mocks.fail = true;
     await expect(pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).resolves.toEqual({ paused: 0 });
-  });
-});
-
-describe("pauseHotEnrollmentIfTakenOverSince (the enrol-vs-takeover race)", () => {
-  const since = "2026-10-08T12:00:00.000Z";
-  it("pauses when a person took over after the dispatch started (their pause found nothing)", async () => {
-    mocks.marker = { last_person_takeover_at: "2026-10-08T12:00:01.000Z" };
-    expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 1 });
-    expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "person_took_over" });
-  });
-  it("pauses (inbound_reply) when the seller replied again while the dispatch ran", async () => {
-    mocks.newerInbound = [{ id: "m2" }];
-    expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 1 });
-    expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "inbound_reply" });
-  });
-  it("leaves it running when the last takeover was before the dispatch started, or never", async () => {
-    mocks.marker = { last_person_takeover_at: "2026-10-08T11:59:00.000Z" };
-    expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 0 });
-    mocks.marker = { last_person_takeover_at: null };
-    expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 0 });
-    expect(mocks.pause).not.toHaveBeenCalled();
   });
 });

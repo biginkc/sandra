@@ -4469,6 +4469,7 @@ export type Database = {
           enrolled_at: string
           auto_enrolled_route: string | null
           enrolled_by_user_id: string | null
+          hot_fence_at: string | null
           id: string
           next_run_at: string | null
           org_id: string
@@ -4485,6 +4486,7 @@ export type Database = {
           enrolled_at?: string
           auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          hot_fence_at?: string | null
           id?: string
           next_run_at?: string | null
           org_id: string
@@ -4501,6 +4503,7 @@ export type Database = {
           enrolled_at?: string
           auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          hot_fence_at?: string | null
           id?: string
           next_run_at?: string | null
           org_id?: string

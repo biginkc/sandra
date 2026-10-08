@@ -17,9 +17,11 @@ import { pausePropertyEnrollments, type SequenceEventActor } from "./enrollment"
  * enrolments already running. Every other drip is left alone.
  *
  * Order matters for the race with a concurrent hot-lead enrolment: the durable
- * marker `properties.last_person_takeover_at` is written FIRST, then the
- * pause; the enrolment side inserts first and then checks the marker
- * (`pauseHotEnrollmentIfTakenOverSince`). Either order ends paused.
+ * marker `properties.last_person_takeover_at` is written FIRST (it needs the
+ * property row exclusively, so it waits for an in-flight enrolment insert to
+ * commit), then the pause. The enrolment itself is fenced atomically by the
+ * `trg_hot_enrollment_takeover_fence` trigger (born paused when a takeover or a
+ * newer seller reply happened since the triggering inbound).
  *
  * Best-effort and never throws: the person's own action must not fail because
  * of this. A failure is reported.
@@ -56,47 +58,4 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
     reportError(e, { tags: { surface: "hot_lead_takeover_pause" }, extra: { count: a.propertyIds.length } });
   }
   return { paused };
-}
-
-/**
- * Called by the hot-lead dispatch right after it inserted the enrolment: if a
- * person took over, or the seller sent a newer inbound, at or after `since`
- * (their pause ran before the enrolment existed and so found nothing), pause it
- * now. `since` is taken before classification starts.
- */
-export async function pauseHotEnrollmentIfTakenOverSince(a: {
-  propertyId: string;
-  since: string;
-}): Promise<{ paused: number }> {
-  try {
-    const admin = createAdminClient();
-    const { data, error } = await admin
-      .from("properties")
-      .select("last_person_takeover_at")
-      .eq("id", a.propertyId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    const at = data?.last_person_takeover_at;
-    if (at && new Date(at).getTime() >= new Date(a.since).getTime()) {
-      return await pausePropertyEnrollments(admin, { propertyId: a.propertyId, reason: "person_took_over" });
-    }
-    // The seller replied again while this dispatch ran: the inbound pause found
-    // no enrolment yet. The triggering inbound predates `since`, so any inbound
-    // after it is a newer reply.
-    const { data: newer, error: newerError } = await admin
-      .from("messages")
-      .select("id")
-      .eq("property_id", a.propertyId)
-      .eq("direction", "inbound")
-      .gt("created_at", a.since)
-      .limit(1);
-    if (newerError) throw new Error(newerError.message);
-    if (newer && newer.length > 0) {
-      return await pausePropertyEnrollments(admin, { propertyId: a.propertyId, reason: "inbound_reply" });
-    }
-    return { paused: 0 };
-  } catch (e) {
-    reportError(e, { tags: { surface: "hot_lead_takeover_reconcile" }, extra: { propertyId: a.propertyId } });
-    return { paused: 0 };
-  }
 }

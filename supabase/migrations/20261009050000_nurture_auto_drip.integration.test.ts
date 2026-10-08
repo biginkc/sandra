@@ -201,6 +201,58 @@ describe("nurture auto-drip switch", () => {
       await assignAs(users.owner, property);
       expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
     });
+    describe("hot enrolment fence (born paused when a takeover or newer seller reply happened since the triggering inbound)", () => {
+      async function seedProperty() {
+        const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T',$2) returning id`, [orgId, randomUUID()])).rows[0].id;
+        const property = (await db.query(
+          `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1, '1 Test', 'MO', 'new_lead', $2) returning id`,
+          [orgId, contact],
+        )).rows[0].id;
+        return { contact: contact as string, property: property as string };
+      }
+      const insertEnrollment = async (p: { contact: string; property: string }, fence: string | null, route = "hot_book_appointment") => {
+        await db.query(
+          `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at, auto_enrolled_route, hot_fence_at)
+           values ($1, $2, $3, $4, 'active', 0, now(), $5, $6)`,
+          [orgId, sequenceId, p.property, p.contact, route, fence],
+        );
+        return enrollment(p.property);
+      };
+      const FENCE = "2026-10-08 12:00:00+00";
+
+      it("no takeover and no newer reply: born active", async () => {
+        const p = await seedProperty();
+        expect(await insertEnrollment(p, FENCE)).toEqual({ status: "active", pause_reason: null });
+      });
+      it("a person took over after the fence (before the enrolment existed): born paused", async () => {
+        const p = await seedProperty();
+        await db.query(`update public.properties set last_person_takeover_at = '2026-10-08 12:00:05+00' where id = $1`, [p.property]);
+        expect(await insertEnrollment(p, FENCE)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+      });
+      it("a takeover BEFORE the fence does not count", async () => {
+        const p = await seedProperty();
+        await db.query(`update public.properties set last_person_takeover_at = '2026-10-08 11:00:00+00' where id = $1`, [p.property]);
+        expect(await insertEnrollment(p, FENCE)).toEqual({ status: "active", pause_reason: null });
+      });
+      it("the seller replied again after the fence: born paused (inbound_reply)", async () => {
+        const p = await seedProperty();
+        await db.query(
+          `insert into public.messages (org_id, property_id, contact_id, channel, direction, body, status, created_at)
+           values ($1, $2, $3, 'sms', 'inbound', 'second reply', 'received', '2026-10-08 12:00:09+00')`,
+          [orgId, p.property, p.contact],
+        );
+        expect(await insertEnrollment(p, FENCE)).toEqual({ status: "paused", pause_reason: "inbound_reply" });
+      });
+      it("no fence, or any other route: untouched", async () => {
+        const p = await seedProperty();
+        await db.query(`update public.properties set last_person_takeover_at = now() where id = $1`, [p.property]);
+        expect(await insertEnrollment(p, null)).toEqual({ status: "active", pause_reason: null });
+        const q = await seedProperty();
+        await db.query(`update public.properties set last_person_takeover_at = now() where id = $1`, [q.property]);
+        expect(await insertEnrollment(q, FENCE, "maybe_later")).toEqual({ status: "active", pause_reason: null });
+      });
+    });
+
     it("a person assigning also leaves the durable takeover marker (the enrol-vs-takeover race fence)", async () => {
       const property = await seed(sequenceId, null);
       await assignAs(users.owner, property);

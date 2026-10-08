@@ -23,7 +23,6 @@ import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
-import { pauseHotEnrollmentIfTakenOverSince } from "@/lib/sequences/hot-lead-takeover";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
@@ -988,8 +987,8 @@ async function classifyAndHandleNonRouteOutcomes(
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
-  // Fence for the hot-lead enrolment: anything a person or the seller does from
-  // here on (classification and config loads included) must pause it.
+  // Fallback fence for the hot-lead enrolment (normally the triggering inbound's
+  // own arrival time is used: see enrollHotLeadInBookAppointment).
   const dispatchFenceAt = new Date().toISOString();
   const classification = await classifyForDispatch(
     supabase,
@@ -1087,7 +1086,8 @@ async function classifyAndHandleNonRouteOutcomes(
       await enrollHotLeadInBookAppointment(supabase, {
         propertyId: input.propertyId,
         sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
-        startedAt: dispatchFenceAt,
+        inboundMessageId: input.inboundMessageId ?? null,
+        fallbackFenceAt: dispatchFenceAt,
         runCtx,
       });
       await completeClaim(supabase, input.propertyId, {
@@ -2590,7 +2590,7 @@ const ENROLL_THREW = "enroll_threw";
 
 async function enrollHotLeadInBookAppointment(
   supabase: SupabaseClient<Database>,
-  a: { propertyId: string; sequenceId: string | null; startedAt: string; runCtx?: MaybeRunContext },
+  a: { propertyId: string; sequenceId: string | null; inboundMessageId: string | null; fallbackFenceAt: string; runCtx?: MaybeRunContext },
 ): Promise<void> {
   let detail: Record<string, unknown>;
   let result: "applied" | "error";
@@ -2599,17 +2599,25 @@ async function enrollHotLeadInBookAppointment(
       result = "error";
       detail = { why: "no_drip_configured", route: "hot_book_appointment" };
     } else {
+      // The fence is the triggering inbound's own arrival time, so a person taking
+      // over or the seller replying again at ANY point since (classification and
+      // config loads included) makes the enrolment be born paused (DB trigger).
+      let fenceAt = a.fallbackFenceAt;
+      if (a.inboundMessageId) {
+        const { data: inbound } = await supabase
+          .from("messages")
+          .select("created_at")
+          .eq("id", a.inboundMessageId)
+          .maybeSingle();
+        if (inbound?.created_at) fenceAt = inbound.created_at;
+      }
       const outcome = await enrollLead(supabase, {
         propertyId: a.propertyId,
         sequenceId: a.sequenceId,
         enrolledByUserId: null,
         autoRoute: "hot_book_appointment",
+        hotFenceAt: new Date(fenceAt),
       });
-      if (outcome.status === "enrolled") {
-        // A person may have taken over while this dispatch was running: their
-        // takeover found nothing to pause. Settle that race now.
-        await pauseHotEnrollmentIfTakenOverSince({ propertyId: a.propertyId, since: a.startedAt });
-      }
       if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
         result = "applied";
         detail = {
@@ -2618,6 +2626,15 @@ async function enrollHotLeadInBookAppointment(
           sequenceId: a.sequenceId,
           ...(outcome.status === "enrolled" ? { enrollmentId: outcome.enrollmentId } : {}),
         };
+        if (outcome.status === "enrolled") {
+          // The fence may have created it paused (a takeover / newer seller reply happened first).
+          const { data: row } = await supabase
+            .from("sequence_enrollments")
+            .select("status, pause_reason")
+            .eq("id", outcome.enrollmentId)
+            .maybeSingle();
+          if (row && row.status !== "active") detail = { ...detail, status: "enrolled_paused", pausedBecause: row.pause_reason };
+        }
       } else {
         result = "error";
         detail = { why: outcome.status === "failed" ? "enroll_failed" : outcome.status, route: "hot_book_appointment" };

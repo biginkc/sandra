@@ -91,6 +91,53 @@ end $$;
 alter table public.properties
   add column if not exists last_person_takeover_at timestamptz;
 
+-- Atomic fence for the hot-lead enrolment. The dispatch passes `hot_fence_at` (the
+-- triggering inbound's arrival time). If, at insert time, a person has taken over at/after
+-- it or the seller has sent a NEWER inbound, the row is born `paused` (never runnable),
+-- so no scheduler tick can send in a gap. The `for share` lock on the property row also
+-- orders this against the takeover marker write (which needs the row exclusively): a takeover
+-- either lands before the check (row born paused) or waits for the enrolment to commit and
+-- then pauses it.
+alter table public.sequence_enrollments
+  add column if not exists hot_fence_at timestamptz;
+
+create or replace function public.fn_hot_enrollment_takeover_fence()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_takeover timestamptz;
+begin
+  if new.auto_enrolled_route is distinct from 'hot_book_appointment' or new.hot_fence_at is null then
+    return new;
+  end if;
+  select p.last_person_takeover_at into v_takeover
+  from public.properties p
+  where p.id = new.property_id
+  for share;
+  if v_takeover is not null and v_takeover >= new.hot_fence_at then
+    new.status := 'paused';
+    new.pause_reason := 'person_took_over';
+  elsif exists (
+    select 1 from public.messages m
+    where m.property_id = new.property_id
+      and m.direction = 'inbound'
+      and m.created_at > new.hot_fence_at
+  ) then
+    new.status := 'paused';
+    new.pause_reason := 'inbound_reply';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_hot_enrollment_takeover_fence on public.sequence_enrollments;
+create trigger trg_hot_enrollment_takeover_fence
+  before insert on public.sequence_enrollments
+  for each row execute function public.fn_hot_enrollment_takeover_fence();
+
 -- A PERSON assigning a lead takes over: pause the auto-enrolled "Book appointment"
 -- drip ("stops the moment a person takes over"). Only a signed-in person counts
 -- (auth.uid() is null for the service role / system), and only enrolments created
