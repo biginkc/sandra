@@ -9,6 +9,7 @@ import { reportError } from "@/lib/errors/report";
 import { recordLeadEvent } from "@/lib/events";
 import { recordStep, resumeRun } from "@/lib/pipeline-runs";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
