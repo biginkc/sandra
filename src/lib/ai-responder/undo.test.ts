@@ -30,7 +30,13 @@ describe("captureUndoSnapshot", () => {
 describe("recordJevActionUndo", () => {
   it("stores prior state and the paused enrollment ids", async () => {
     const insert = vi.fn(async () => ({ error: null }));
-    const supabase = { from: vi.fn(() => ({ insert })) };
+    const supabase = {
+      from: vi.fn((table: string) =>
+        table === "properties"
+          ? { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { follow_up_at: "2026-10-25T00:00:00Z" }, error: null }) }) }) }
+          : { insert },
+      ),
+    };
     await recordJevActionUndo(supabase as never, {
       orgId: "o",
       propertyId: "p",
@@ -46,6 +52,7 @@ describe("recordJevActionUndo", () => {
       expect.objectContaining({
         prior_outreach_dispo: "nurture",
         prior_follow_up_at: "2026-10-20T00:00:00Z",
+        applied_follow_up_at: "2026-10-25T00:00:00Z",
         paused_enrollment_ids: ["e1", "e2"],
       }),
     );

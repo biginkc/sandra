@@ -844,6 +844,7 @@ export type Database = {
           source_inbound_message_id: string
           status: string
           superseded_reason: string | null
+          wrong_scope: string | null
         }
         Insert: {
           ai_reason: string
@@ -866,6 +867,7 @@ export type Database = {
           source_inbound_message_id: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Update: {
           ai_reason?: string
@@ -888,6 +890,7 @@ export type Database = {
           source_inbound_message_id?: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Relationships: [
           {
@@ -2646,6 +2649,7 @@ export type Database = {
           created_at: string
           id: string
           org_id: string
+          applied_follow_up_at: string | null
           paused_enrollment_ids: string[]
           prior_follow_up_at: string | null
           prior_outreach_dispo: string | null
@@ -2661,6 +2665,7 @@ export type Database = {
           created_at?: string
           id?: string
           org_id: string
+          applied_follow_up_at?: string | null
           paused_enrollment_ids?: string[]
           prior_follow_up_at?: string | null
           prior_outreach_dispo?: string | null
@@ -2676,6 +2681,7 @@ export type Database = {
           created_at?: string
           id?: string
           org_id?: string
+          applied_follow_up_at?: string | null
           paused_enrollment_ids?: string[]
           prior_follow_up_at?: string | null
           prior_outreach_dispo?: string | null

@@ -81,14 +81,14 @@ async function as<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function recordUndo(over: { applied?: string; prior?: string | null; followUp?: string | null; enrollments?: string[] } = {}) {
+async function recordUndo(over: { action?: string; appliedFollowUp?: string | null; applied?: string; prior?: string | null; followUp?: string | null; enrollments?: string[] } = {}) {
   const id = randomUUID();
   await db.query(
     `insert into public.jev_action_undo
        (id, org_id, property_id, source_inbound_message_id, action, applied_dispo,
-        prior_outreach_dispo, prior_follow_up_at, paused_enrollment_ids)
-     values ($1, $2, $3, $4, 'wrong_number', $5, $6, $7, $8)`,
-    [id, orgId, propertyId, messageId, over.applied ?? "wrong_number", "prior" in over ? over.prior : "nurture", "followUp" in over ? over.followUp : "2026-10-20T00:00:00Z", over.enrollments ?? []],
+        prior_outreach_dispo, prior_follow_up_at, applied_follow_up_at, paused_enrollment_ids)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [id, orgId, propertyId, messageId, over.action ?? "wrong_number", over.applied ?? "wrong_number", "prior" in over ? over.prior : "nurture", "followUp" in over ? over.followUp : "2026-10-20T00:00:00Z", "appliedFollowUp" in over ? over.appliedFollowUp : null, over.enrollments ?? []],
   );
   return id;
 }
@@ -139,5 +139,50 @@ describe("fn_undo_jev_action", () => {
     await undo(ownerId, id);
     const p = (await db.query(`select outreach_dispo, follow_up_at from public.properties where id = $1`, [propertyId])).rows[0];
     expect(p).toEqual({ outreach_dispo: null, follow_up_at: null });
+  });
+
+  it("refuses with STATE_CHANGED when a person edited the follow-up date since Jev acted", async () => {
+    const id = await recordUndo({ appliedFollowUp: null });
+    await db.query(`update public.properties set follow_up_at = '2026-11-01T00:00:00Z' where id = $1`, [propertyId]);
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("wrong_number");
+  });
+
+  it("undoing a nurture marks its jev_lead_decisions row corrected/undone and writes the correction event the scorecard reads", async () => {
+    await db.query(`update public.properties set outreach_dispo = 'nurture' where id = $1`, [propertyId]);
+    const runId = randomUUID();
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'nurture')`,
+      [runId, orgId, propertyId, randomUUID(), messageId],
+    );
+    const decisionId = randomUUID();
+    await db.query(
+      `insert into public.jev_lead_decisions (id, org_id, property_id, conversation_id, source_inbound_message_id, classification_run_id, proposed_outcome, status, resolved_outcome, resolved_at)
+       values ($1, $2, $3, $4, $5, $6, 'nurture', 'confirmed', 'nurture', now())`,
+      [decisionId, orgId, propertyId, randomUUID(), messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    const id = await recordUndo({ action: "nurture", applied: "nurture", prior: null, followUp: null });
+    await undo(ownerId, id);
+    const d = (await db.query(`select status, resolved_outcome from public.jev_lead_decisions where id = $1`, [decisionId])).rows[0];
+    expect(d).toEqual({ status: "corrected", resolved_outcome: "undone" });
+    const ev = (
+      await db.query(
+        `select payload from public.lead_events where event_type = 'jev_lead_decision_corrected' and payload ->> 'decision_id' = $1`,
+        [decisionId],
+      )
+    ).rows;
+    expect(ev).toHaveLength(1);
+    expect(ev[0].payload.previous_resolved_outcome).toBe("nurture");
+  });
+
+  it("the undone_by CHECK refuses an actor without a timestamp", async () => {
+    const id = await recordUndo();
+    await expect(
+      db.query(`update public.jev_action_undo set undone_by = $2 where id = $1`, [id, ownerId]),
+    ).rejects.toThrow(/jev_action_undo_undone_pair/);
   });
 });

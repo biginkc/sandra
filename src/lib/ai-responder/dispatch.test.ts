@@ -133,6 +133,7 @@ type MockState = {
     disposition: string;
     inboundMessageId: string;
     reason: string;
+    wrong_scope?: string;
   }>;
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
@@ -536,8 +537,15 @@ function createMockSupabase(state: MockState) {
     let gteId: string | null = null;
     let ltId: string | null = null;
     let listLimit: number | null = null;
+    let skipSuppressionPointer = false;
 
     const matchesCurrentProperty = () => {
+      if (
+        skipSuppressionPointer &&
+        (state.property.last_ai_escalation_reason ?? "").startsWith("suppression_incomplete")
+      ) {
+        return false;
+      }
       for (const [field, value] of eqFilters) {
         if (state.property[field as keyof MockState["property"]] !== value) {
           return false;
@@ -658,6 +666,10 @@ function createMockSupabase(state: MockState) {
         return Promise.resolve(execute());
       },
       or(filter: string) {
+        if (filter.includes("suppression_incomplete%")) {
+          skipSuppressionPointer = true;
+          return query;
+        }
         if (filter.includes("send_timeout:%")) {
           orphanMode = true;
           eqFilters.delete("needs_human_attention");
@@ -841,7 +853,21 @@ function createMockSupabase(state: MockState) {
 
   function buildAiDispositionReviewsQuery() {
     const eqFilters = new Map<string, unknown>();
+    let pendingUpdate: Record<string, unknown> | null = null;
     const query = {
+      update(value: Record<string, unknown>) {
+        pendingUpdate = value;
+        return query;
+      },
+      then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
+        if (pendingUpdate) {
+          const review = state.aiDispoReviews.find(
+            (row) => row.inboundMessageId === eqFilters.get("source_inbound_message_id"),
+          );
+          if (review) Object.assign(review, pendingUpdate);
+        }
+        return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+      },
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
         return query;
@@ -2396,8 +2422,56 @@ describe("dispatchAiResponse debounce", () => {
         expect(state.property.needs_human_attention).toBe(true);
         expect(state.property.last_ai_escalation_reason).toBe("jev_wrong_number_all_needs_confirm");
         expect(state.aiDispoReviews).toEqual([
-          expect.objectContaining({ disposition: "wrong_number" }),
+          expect.objectContaining({ disposition: "wrong_number", wrong_scope: "all" }),
         ]);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+
+    it("below-threshold wrong_number scope=all stays a pending review with wrong_scope recorded and the confirm hold set, nothing suppressed", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "wrong_number", min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-wn-all-low", body: "wrong number" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "wrong_number", confidence: 0.4 }, wrong_scope: { choice: "all" } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "wrong number", inboundMessageId: "inbound-wn-all-low", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(state.property.outreach_dispo).toBeNull();
+        expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        expect(state.property.last_ai_escalation_reason).toBe("jev_wrong_number_all_needs_confirm");
+        expect(state.aiDispoReviews).toEqual([expect.objectContaining({ wrong_scope: "all" })]);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+
+    it("never overwrites an existing suppression_incomplete pointer with a needs-confirm hold reason", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
+      state.property.last_ai_escalation_reason = "suppression_incomplete:11111111-1111-4111-8111-111111111111";
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-keep-pointer", body: "stop" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "opted_out", confidence: 0.99 } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "stop", inboundMessageId: "inbound-keep-pointer", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(state.property.last_ai_escalation_reason).toBe("suppression_incomplete:11111111-1111-4111-8111-111111111111");
       } finally { vi.stubGlobal("fetch", originalFetch); }
     });
   });

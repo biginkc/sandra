@@ -1466,6 +1466,7 @@ async function resolveAndApplyRoute(
             dispo: "wrong_number",
             reason: route.reason,
             expectedRevision: jevRevision!,
+            wrongScope: route.scope,
           })
         : await applyWrongNumber(supabase, {
           runContext: runCtx,
@@ -5107,6 +5108,30 @@ async function holdModelOptOutForHuman(
 }
 
 /**
+ * Records the model's wrong-number scope on the review so confirming a
+ * scope = "all" review runs the human phone-wide suppression. Best effort:
+ * on failure the lead is flagged so a person still sees it.
+ */
+async function recordReviewWrongScope(
+  supabase: SupabaseClient<Database>,
+  args: { propertyId: string; inboundMessageId: string | null; runContext?: MaybeRunContext },
+): Promise<void> {
+  if (!args.inboundMessageId) return;
+  const { error } = await supabase
+    .from("ai_disposition_reviews")
+    .update({ wrong_scope: "all" })
+    .eq("source_inbound_message_id", args.inboundMessageId)
+    .eq("disposition", "wrong_number");
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_review_wrong_scope" },
+      extra: { propertyId: args.propertyId },
+    });
+    await markPropertyNeedsAttention(supabase, args.propertyId, "disposition_write_failed", args.runContext);
+  }
+}
+
+/**
  * The review RPCs flip `needs_human_attention` themselves, so
  * `markPropertyNeedsAttention` (which only writes when the flag is still
  * false) would never record WHY. This sets the reason on an already-held
@@ -5132,7 +5157,10 @@ async function stampHoldReason(
       updated_at: now,
     })
     .eq("id", propertyId)
-    .eq("needs_human_attention", true);
+    .eq("needs_human_attention", true)
+    // Never overwrite a suppression_incomplete pointer: it names reviews whose
+    // phone suppression is still owed and drives the sweeper/clear logic.
+    .or("last_ai_escalation_reason.is.null,last_ai_escalation_reason.not.like.suppression_incomplete%");
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_stamp_hold_reason" },
@@ -5168,6 +5196,8 @@ async function proposeDeferredJevDisposition(
     expectedRevision: number;
     /** Recorded as the hold reason once the pending review exists. */
     holdReason?: string;
+    /** wrong_number only: scope "all" makes a human confirm suppress the phone. */
+    wrongScope?: AiWrongScope;
   },
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
@@ -5210,7 +5240,14 @@ async function proposeDeferredJevDisposition(
   // "proposed" and "replayed" both mean a pending review now exists —
   // same convention as proposeJevDncForReview's `updated: true`. The
   // outreach_dispo write itself is intentionally still pending.
-  if (args.holdReason) {
+  if (args.dispo === "wrong_number" && args.wrongScope === "all") {
+    await recordReviewWrongScope(supabase, {
+      propertyId: args.propertyId,
+      inboundMessageId: args.inboundMessageId,
+      runContext: args.runContext,
+    });
+    await stampHoldReason(supabase, args.propertyId, HOLD_JEV_WRONG_NUMBER_ALL_NEEDS_CONFIRM, args.runContext);
+  } else if (args.holdReason) {
     await stampHoldReason(supabase, args.propertyId, args.holdReason, args.runContext);
   }
   return { updated: true };
@@ -5245,6 +5282,11 @@ async function applyWrongNumber(
     undo: args.undo,
   });
   if (args.scope === "all" && result.updated) {
+    await recordReviewWrongScope(supabase, {
+      propertyId: args.propertyId,
+      inboundMessageId: args.inboundMessageId,
+      runContext: args.runContext,
+    });
     const flagged = await markPropertyNeedsAttention(
       supabase,
       args.propertyId,

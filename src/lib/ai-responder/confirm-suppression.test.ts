@@ -41,6 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   applyPhoneLevelOptOut.mockResolvedValue(undefined);
   recordLeadEvent.mockResolvedValue(undefined);
+  createAdminClient.mockReturnValue({ admin: true } as never);
 });
 
 describe("applyConfirmedSuppression", () => {
@@ -175,6 +176,67 @@ describe("applySuppressionForConfirmedReview", () => {
   it("confirmed dnc review suppresses on the dnc surface", async () => {
     await applySuppressionForConfirmedReview(lookupClient("dnc"), "review-1", "user-1");
     expect(applyPhoneLevelOptOut).toHaveBeenCalledWith({ admin: true }, expect.objectContaining({ surface: "dnc" }));
+  });
+
+  it("confirmed wrong_number scoped to all suppresses the phone on the dnc surface and discharges the obligation", async () => {
+    const a = {
+      inserts: [] as Array<Record<string, unknown>>,
+      rpcs: [] as string[],
+    };
+    const chain = (table: string) => {
+      const c: Record<string, unknown> = {};
+      c.select = () => c;
+      c.eq = () => c;
+      c.maybeSingle = async () => ({ data: table === "lead_events" ? { id: "ev-1" } : { org_id: "org-1" }, error: null });
+      c.insert = async (values: Record<string, unknown>) => {
+        a.inserts.push(values);
+        return { error: null };
+      };
+      return c;
+    };
+    createAdminClient.mockReturnValue({
+      from: chain,
+      rpc: async (name: string) => {
+        a.rpcs.push(name);
+        return { error: null };
+      },
+    } as never);
+    const result = await applySuppressionForConfirmedReview(
+      lookupClient("wrong_number", {
+        ai_disposition_reviews: {
+          property_id: "property-1", org_id: "org-1", disposition: "wrong_number",
+          ai_reason: "wrong number", source_inbound_message_id: "msg-1", wrong_scope: "all",
+        },
+      }),
+      "review-1",
+      "user-1",
+      { discharge: true },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ surface: "dnc", source: "ai_responder_wrong_number" }),
+    );
+    expect(a.inserts[0]).toMatchObject({ event_type: "suppression_retried_ok", source_id: "review-1" });
+    expect(a.rpcs).toEqual(["fn_clear_suppression_hold_if_resolved"]);
+  });
+
+  it("confirmed wrong_number scoped to this_property (or unscoped) never suppresses the phone", async () => {
+    for (const scope of ["this_property", null]) {
+      await applySuppressionForConfirmedReview(
+        lookupClient("wrong_number", {
+          ai_disposition_reviews: {
+            property_id: "property-1", org_id: "org-1", disposition: "wrong_number",
+            ai_reason: "wrong number", source_inbound_message_id: "msg-1", wrong_scope: scope,
+          },
+        }),
+        "review-1",
+        "user-1",
+        { discharge: true },
+      );
+    }
+    expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
   });
 
   it("confirmed not_interested review does not suppress", async () => {

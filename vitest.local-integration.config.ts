@@ -96,6 +96,7 @@ export default defineConfig({
       "supabase/migrations/20261008210000_hold_alerts_new_only.integration.test.ts",
       "supabase/migrations/20261008230000_messages_v2_holds_new_backlog.integration.test.ts",
       "supabase/migrations/20261008280100_jev_action_undo.integration.test.ts",
+      "supabase/migrations/20261008280200_wrong_number_all_confirm_suppresses.integration.test.ts",
       "supabase/migrations/20261008280000_jev_opted_out_human_only.integration.test.ts",
       "src/app/(dashboard)/messages-v2/hold-actions.rpc.integration.test.ts",
       "src/lib/hold-alerts/store.integration.test.ts",

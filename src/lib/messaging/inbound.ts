@@ -494,13 +494,15 @@ export async function handleInboundWebhook(
         continue;
       }
 
-      // The ONLY automatic phone suppression driven by an inbound text, together
-      // with the DNC_KEYWORDS / wrong-number phrase matches above and below:
-      // all three are deterministic carrier/legal phrase matches (CTIA STOP
-      // handling and TCPA revocation), never a model judgment. Jarrad
-      // (2026-10-07): "I don't want you making any DNC decisions. I don't want
-      // Jev making any DNC decisions." so every Jev/Luna/legacy-classifier
-      // opt-out or DNC opens a human review instead (see ai-responder/dispatch.ts).
+      // Automatic phone suppression driven by an inbound text is limited to
+      // deterministic phrase matches, never a model judgment: this carrier/legal
+      // STOP match (CTIA / TCPA revocation) is the one that is kept. The
+      // DNC_KEYWORDS match and the wrong-number "all" scope below are ALSO
+      // still automatic, pending Jarrad's ruling on whether they should become
+      // hold-only. Jarrad (2026-10-07): "I don't want you making any DNC
+      // decisions. I don't want Jev making any DNC decisions." Every
+      // Jev/legacy-classifier opt-out or DNC opens a human review instead
+      // (see ai-responder/dispatch.ts).
       if (matchesStopKeyword(bodyTrimmed)) {
         if (!orgId) {
           throw new Error(

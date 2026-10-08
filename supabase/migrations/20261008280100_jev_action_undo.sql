@@ -16,6 +16,14 @@ begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
 
+-- 'undone' is a valid resolution for a nurture decision a person reversed.
+alter table public.jev_lead_decisions
+  drop constraint if exists jev_lead_decisions_resolved_outcome_check;
+alter table public.jev_lead_decisions
+  add constraint jev_lead_decisions_resolved_outcome_check
+  check (resolved_outcome is null or resolved_outcome in
+    ('new_lead', 'nurture', 'wrong_number', 'not_interested', 'undone'));
+
 create table if not exists public.jev_action_undo (
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null references public.organizations(id) on delete cascade,
@@ -26,12 +34,15 @@ create table if not exists public.jev_action_undo (
   applied_dispo text not null,
   prior_outreach_dispo text,
   prior_follow_up_at timestamptz,
+  applied_follow_up_at timestamptz,
   paused_enrollment_ids uuid[] not null default '{}',
   created_at timestamptz not null default now(),
   undone_at timestamptz,
   undone_by uuid references auth.users(id) on delete set null,
+  -- undone_by may go null later (user deleted, on delete set null), but an
+  -- actor can never be recorded without a timestamp.
   constraint jev_action_undo_undone_pair
-    check ((undone_at is null) = (undone_by is null) or undone_at is not null)
+    check (undone_by is null or undone_at is not null)
 );
 comment on table public.jev_action_undo is
   'Prior state captured when Jev auto-applied a reversible action, so a human can undo it from the Messages v2 live feed.';
@@ -64,6 +75,9 @@ declare
   v_actor uuid := auth.uid();
   v_undo public.jev_action_undo%rowtype;
   v_current text;
+  v_current_follow timestamptz;
+  v_decision_id uuid;
+  v_review_id uuid;
 begin
   if v_actor is null then
     raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
@@ -84,15 +98,17 @@ begin
     return jsonb_build_object('status', 'already_undone', 'enrollmentIds', '[]'::jsonb);
   end if;
 
-  select p.outreach_dispo into v_current
+  select p.outreach_dispo, p.follow_up_at into v_current, v_current_follow
   from public.properties p
   where p.id = v_undo.property_id and p.org_id = v_undo.org_id
   for update;
   if not found then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
-  if v_current is distinct from v_undo.applied_dispo then
-    -- A person (or a later decision) changed it since: never overwrite that.
+  if v_current is distinct from v_undo.applied_dispo
+     or v_current_follow is distinct from v_undo.applied_follow_up_at then
+    -- A person (or a later decision) changed the disposition or the follow-up
+    -- date since: never overwrite that.
     raise exception 'STATE_CHANGED' using errcode = '40001';
   end if;
 
@@ -102,14 +118,55 @@ begin
       updated_at = now()
   where id = v_undo.property_id and org_id = v_undo.org_id;
 
-  update public.ai_disposition_reviews
-  set status = 'superseded',
-      resolved_at = now(),
-      reviewed_by = null,
-      superseded_reason = 'jev_action_undone'
-  where source_inbound_message_id = v_undo.source_inbound_message_id
-    and org_id = v_undo.org_id
-    and status = 'confirmed';
+  -- Make the scorecard count the undo as a disagreement with Jev.
+  if v_undo.action = 'nurture' then
+    select d.id into v_decision_id
+    from public.jev_lead_decisions d
+    where d.source_inbound_message_id = v_undo.source_inbound_message_id
+      and d.org_id = v_undo.org_id and d.status = 'confirmed'
+    for update;
+    if v_decision_id is not null then
+      update public.jev_lead_decisions
+      set status = 'corrected',
+          resolved_outcome = 'undone',
+          resolved_at = now(),
+          resolved_by = v_actor,
+          resolution_reason = 'undone from Messages v2'
+      where id = v_decision_id;
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload
+      ) values (
+        v_undo.org_id, v_undo.property_id, 'user', v_actor,
+        'jev_lead_decision_corrected',
+        jsonb_build_object(
+          'decision_id', v_decision_id,
+          'proposed_outcome', 'nurture',
+          'previous_resolved_outcome', 'nurture',
+          'corrected_outcome', 'undone',
+          'reason', 'undone from Messages v2'
+        )
+      );
+    end if;
+  else
+    select r.id into v_review_id
+    from public.ai_disposition_reviews r
+    where r.source_inbound_message_id = v_undo.source_inbound_message_id
+      and r.org_id = v_undo.org_id;
+    if v_review_id is not null then
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload
+      ) values (
+        v_undo.org_id, v_undo.property_id, 'user', v_actor,
+        'ai_disposition_review_corrected',
+        jsonb_build_object(
+          'review_id', v_review_id,
+          'previous_disposition', v_undo.applied_dispo,
+          'corrected_disposition', 'undone',
+          'reason', 'undone from Messages v2'
+        )
+      );
+    end if;
+  end if;
 
   update public.jev_action_undo
   set undone_at = now(), undone_by = v_actor

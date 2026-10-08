@@ -54,6 +54,19 @@ export async function recordJevActionUndo(
   },
 ): Promise<void> {
   if (!args.inboundMessageId || !args.snapshot) return;
+  // The follow-up date AS JEV LEFT IT: undo refuses if a person edited it since.
+  const { data: after, error: afterError } = await supabase
+    .from("properties")
+    .select("follow_up_at")
+    .eq("id", args.propertyId)
+    .maybeSingle();
+  if (afterError || !after) {
+    reportError(new Error(afterError?.message ?? "property not found"), {
+      tags: { surface: "jev_undo_record_after_state" },
+      extra: { propertyId: args.propertyId },
+    });
+    return;
+  }
   const { error } = await supabase.from("jev_action_undo").insert({
     org_id: args.orgId,
     property_id: args.propertyId,
@@ -63,6 +76,7 @@ export async function recordJevActionUndo(
     applied_dispo: args.appliedDispo,
     prior_outreach_dispo: args.snapshot.outreachDispo,
     prior_follow_up_at: args.snapshot.followUpAt,
+    applied_follow_up_at: after.follow_up_at ?? null,
     paused_enrollment_ids: args.pausedEnrollmentIds ?? [],
   });
   // 23505 = already recorded for this inbound (retry): that is fine.
