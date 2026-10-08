@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008330000 -- 51 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog + 1 templates + 1 nurture auto-drip).
+// (20261008140000 .. 20261009050000 -- 60 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200) + 1 templates (310000) + 1 wrong-number/hostile mapping keys (320000) + 1 nurture auto-drip (20261009050000)).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 51 rollbacks in REVERSE order,
+//   3. applies the 60 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 51 migrations forward again.
+//   5. re-applies the 60 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008330000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 51); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + 1 templates (240000) + 1 nurture auto-drip (330000)
+const LAST = process.env.CHAIN_LAST ?? "20261009050000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 60); // 55 on main (through 300200) + templates (310000) + 2 Norma queue migrations (20261009010000/010100) + wrong-number/hostile mapping keys (20261009040000) + nurture auto-drip (20261009050000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -69,7 +69,7 @@ function phase(name, files, dir) {
 
 // Every jev_/pipeline_/ai_reply_ object (tables, views, functions, triggers,
 // policies, indexes, sequences, types) that must be gone after the rollback.
-// Phase 4 (templates, 20261008240000) objects: the mapping + approval-audit
+// Phase 4 (templates, 20261008310000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
 const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|fn_guard_nurture_mapped_sequence_delete|fn_pause_hot_drip_on_person_assignment|trg_pause_hot_drip_on_person_assignment|trg_guard_nurture_mapped_sequence_delete|ai_responder_configs_nurture_auto_drip_sequences_check";
@@ -77,21 +77,21 @@ const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'public' and (c.relname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|idx_jev_|idx_pipeline_|idx_ai_reply_|idx_hold_alert_)' or c.relname ~ '(${TPL})')
+   where n.nspname = 'public' and (c.relname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_|idx_jev_|idx_pipeline_|idx_ai_reply_|idx_hold_alert_|idx_luna_)' or c.relname ~ '(${TPL})')
   union all
   select 'function', n.nspname || '.' || p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'public' and (p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|messages_v2_|fn_messages_v2_|fn_resolve_hold)' or p.proname ~ '(${TPL})')
+   where n.nspname = 'public' and (p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|messages_v2_|luna_|fn_messages_v2_|fn_resolve_hold)' or p.proname ~ '(${TPL})')
   union all
   select 'trigger', c.relname || '.' || t.tgname
     from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'public' and not t.tgisinternal and t.tgname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|auto_reply_templates|sms_templates_guard_approval)'
+   where n.nspname = 'public' and not t.tgisinternal and t.tgname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_|auto_reply_templates|sms_templates_guard_approval)'
   union all
   select 'policy', tablename || '.' || policyname from pg_policies
-   where schemaname = 'public' and (policyname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|auto_reply_templates|sms_template_approval_events)' or tablename ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|auto_reply_templates|sms_template_approval_events)')
+   where schemaname = 'public' and (policyname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_|auto_reply_templates|sms_template_approval_events)' or tablename ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_|auto_reply_templates|sms_template_approval_events)')
   union all
   select 'type', t.typname from pg_type t join pg_namespace n on n.oid = t.typnamespace
-   where n.nspname = 'public' and t.typname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_)' and t.typtype <> 'c'
+   where n.nspname = 'public' and t.typname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_)' and t.typtype <> 'c'
   union all
   select 'column', table_name || '.' || column_name from information_schema.columns
    where table_schema = 'public' and ((table_name = 'sms_templates' and column_name ~ '^approved_')

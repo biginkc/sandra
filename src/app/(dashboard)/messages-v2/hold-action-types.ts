@@ -17,8 +17,17 @@ export type HoldActionsApi = {
   takeOver(input: { propertyId: string; seen: HoldSeen }): Promise<Result<{ leadHref: string }>>;
   assign(input: { propertyId: string; assigneeId: string | null }): Promise<Result<null>>;
   dismiss(input: { propertyId: string; reason: string; seen: HoldSeen }): Promise<Result<null>>;
+  /** Hostile hold only: send the approved hostile reply (if any), then suppress the number. */
+  confirmDoNotContact?(input: {
+    propertyId: string;
+    seen: HoldSeen;
+  }): Promise<Result<{ replySent: boolean; replyNote: string | null }>>;
   /** Optional: re-run suppression for a `suppression_incomplete` hold (the lead banner's action). */
   retrySuppression?(input: { propertyId: string }): Promise<Result<{ cleared: boolean; remaining: number }>>;
+  /** Optional: apply Luna's pending suggestion (never offered for opt-out outcomes). */
+  lunaApply?(input: { suggestionId: string }): Promise<Result<{ status: string; resolvedOutcome: string; warning?: string }>>;
+  /** Optional: dismiss Luna's pending suggestion. */
+  lunaReject?(input: { suggestionId: string }): Promise<Result<null>>;
   listAssignees(input: { propertyId: string }): Promise<Result<TeamMember[]>>;
 };
 

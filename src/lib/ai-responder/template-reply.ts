@@ -30,15 +30,29 @@ import type {
  */
 
 /**
- * Outcomes an owner may map to a template (mirrors the
+ * Jev outcomes an owner may map to a template (mirrors the
  * `auto_reply_templates_outcome_check` constraint). new_lead (PLAN D5: a new
- * lead never auto-replies), opted_out, dnc and wrong_number are never
- * answered automatically.
+ * lead never auto-replies), opted_out and dnc are never answered
+ * automatically. wrong_number is mappable: the approved text goes out and the
+ * wrong_number disposition closes that property (no phone-wide suppression).
  */
 export const TEMPLATE_REPLY_OUTCOMES: ReadonlySet<JevOutcome> = new Set([
   "nurture",
   "not_interested",
+  "wrong_number",
 ]);
+
+/**
+ * Mapping key for the hostile reply. Not a Jev outcome: hostile wording is
+ * detected in code (`hostile.ts`), so it has no confidence, no escalation
+ * answer and no per-label automation switch. The responder NEVER sends it
+ * automatically: only the "Confirm do-not-contact" hold action does, after a
+ * person decides.
+ */
+export const HOSTILE_REPLY_KEY = "hostile" as const;
+
+/** Every key `auto_reply_templates.outcome` may hold. */
+export type TemplateReplyKey = JevOutcome | typeof HOSTILE_REPLY_KEY;
 
 export type TemplateRow = {
   content: string;
@@ -115,7 +129,7 @@ export type TemplateReplyResolution =
       templateId: string;
       mappingId: string;
       body: string;
-      outcome: JevOutcome;
+      outcome: TemplateReplyKey;
     }
   | { kind: "none"; reason: TemplateSkipReason };
 
@@ -133,7 +147,7 @@ export async function resolveApprovedTemplateReply(
     orgId: string;
     propertyId: string;
     contactId: string;
-    outcome: JevOutcome;
+    outcome: TemplateReplyKey;
     outcomeConfidence: number | null;
     /**
      * Jev's human-follow-up answer for this message. REQUIRED (no default):
@@ -148,28 +162,34 @@ export async function resolveApprovedTemplateReply(
     thresholds?: ThresholdMap;
   },
 ): Promise<TemplateReplyResolution> {
-  if (!TEMPLATE_REPLY_OUTCOMES.has(args.outcome)) {
+  const hostile = args.outcome === HOSTILE_REPLY_KEY;
+  if (!hostile && !TEMPLATE_REPLY_OUTCOMES.has(args.outcome as JevOutcome)) {
     return { kind: "none", reason: "outcome_not_templatable" };
   }
 
-  if (args.escalationReason !== "not_applicable") {
-    return { kind: "none", reason: "human_follow_up" };
-  }
+  // Hostile is decided by wording in code, not by Jev: no follow-up answer,
+  // confidence or label switch applies. Everything else (approved text, active
+  // mapping, send gates) is identical.
+  if (!hostile) {
+    if (args.escalationReason !== "not_applicable") {
+      return { kind: "none", reason: "human_follow_up" };
+    }
 
-  // The label's own switch and cutoff are re-read live: an owner who just
-  // turned a label off stops its template replies on the very next inbound.
-  const thresholds = args.thresholds ?? (await loadOrgThresholdMap(supabase, args.orgId));
-  const decision = resolveThresholdDecision(
-    { outcome: args.outcome, outcomeConfidence: args.outcomeConfidence },
-    thresholds,
-  );
-  if (decision.status === "human_gated") {
-    return {
-      kind: "none",
-      reason: decision.reason === "automation_disabled" ? "automation_disabled" : "threshold_unavailable",
-    };
+    // The label's own switch and cutoff are re-read live: an owner who just
+    // turned a label off stops its template replies on the very next inbound.
+    const thresholds = args.thresholds ?? (await loadOrgThresholdMap(supabase, args.orgId));
+    const decision = resolveThresholdDecision(
+      { outcome: args.outcome as JevOutcome, outcomeConfidence: args.outcomeConfidence },
+      thresholds,
+    );
+    if (decision.status === "human_gated") {
+      return {
+        kind: "none",
+        reason: decision.reason === "automation_disabled" ? "automation_disabled" : "threshold_unavailable",
+      };
+    }
+    if (decision.status === "needs_decision") return { kind: "none", reason: "below_threshold" };
   }
-  if (decision.status === "needs_decision") return { kind: "none", reason: "below_threshold" };
 
   const { data, error } = await supabase
     .from("auto_reply_templates")

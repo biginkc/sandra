@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * Nurture auto-drip switch (20261008330000). Local-only; each test runs in a
+ * Nurture auto-drip switch (20261009050000). Local-only; each test runs in a
  * transaction that is rolled back. The migration (and its rollback) is applied
  * inside the test, so it only needs the base tables (ai_responder_configs,
  * sequences, memberships).
@@ -17,8 +17,8 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008330000_nurture_auto_drip.sql"), "utf8"));
-const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261008330000_nurture_auto_drip.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261009050000_nurture_auto_drip.sql"), "utf8"));
+const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261009050000_nurture_auto_drip.sql"), "utf8"));
 
 const db = new Client({ connectionString: url });
 let orgId: string;

@@ -135,8 +135,17 @@ describe("setAutoReplyMapping", () => {
     ]);
   });
 
+  it("accepts wrong_number and hostile as mapping keys (suppression accompanies both)", async () => {
+    for (const outcome of ["wrong_number", "hostile"]) {
+      mocks.rpcCalls.length = 0;
+      const r = await setAutoReplyMapping({ outcome, templateId: "t1", active: true });
+      expect(r.ok).toBe(true);
+      expect(mocks.rpcCalls).toEqual([expect.objectContaining({ p_outcome: outcome, p_template_id: "t1" })]);
+    }
+  });
+
   it("rejects outcomes that must never be answered automatically", async () => {
-    for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear"]) {
+    for (const outcome of ["new_lead", "opted_out", "dnc", "unclear"]) {
       const r = await setAutoReplyMapping({ outcome, templateId: "t1", active: true });
       expect(r.ok).toBe(false);
     }

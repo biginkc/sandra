@@ -21,6 +21,7 @@ import {
   type ThresholdableOutcome,
 } from "@/lib/sms-classification/thresholds";
 
+import { isNeverAuto, NEVER_AUTO_NOTE, NEW_LEAD_AUTO_NOTE } from "./rule-policy";
 import { formatConfidence, formatRuleText, parseConfidenceInput } from "./rule-text";
 import { setLabelRule } from "./threshold-actions";
 import type { ModeBadge } from "./types";
@@ -55,6 +56,7 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
   const [enabled, setEnabled] = useState<boolean | null>(rule.automationEnabled);
   const [cutoff, setCutoff] = useState(rule.minConfidence === null ? "" : formatConfidence(rule.minConfidence));
   const groupName = useId();
+  const neverAuto = isNeverAuto(badge.label);
 
   const parsed = parseConfidenceInput(cutoff);
   const current =
@@ -77,7 +79,7 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
   };
 
   const apply = () => {
-    if (!parsed.ok || enabled === null) return;
+    if (!parsed.ok || enabled === null || (neverAuto && enabled)) return;
     startTransition(async () => {
       const result = await callAction(
         setLabelRule({
@@ -137,6 +139,7 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
                 type="radio"
                 name={groupName}
                 checked={enabled === true}
+                disabled={neverAuto}
                 onChange={() => setEnabled(true)}
               />
               On
@@ -151,6 +154,16 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
               Off
             </label>
           </fieldset>
+          {neverAuto && (
+            <p data-testid="never-auto-note" className="text-xs text-muted-foreground">
+              {NEVER_AUTO_NOTE}. Only the cutoff can be set.
+            </p>
+          )}
+          {badge.label === "new_lead" && enabled === true && (
+            <p data-testid="new-lead-auto-note" className="text-xs text-amber-700 dark:text-amber-300">
+              {NEW_LEAD_AUTO_NOTE}.
+            </p>
+          )}
 
           <label className="flex flex-col gap-1 text-sm">
             Native confidence cutoff (0 to 1)
@@ -185,7 +198,7 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
             <Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>
               Cancel
             </Button>
-            <Button onClick={apply} disabled={pending || next === null || unchanged} data-testid="apply-rule">
+            <Button onClick={apply} disabled={pending || next === null || unchanged || (neverAuto && enabled === true)} data-testid="apply-rule">
               {pending ? "Saving…" : unchanged ? "No change" : "Apply this rule"}
             </Button>
           </DialogFooter>

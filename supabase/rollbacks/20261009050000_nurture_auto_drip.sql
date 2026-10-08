@@ -1,4 +1,4 @@
--- Rollback for 20261008330000_nurture_auto_drip. Drops the switch columns,
+-- Rollback for 20261009050000_nurture_auto_drip. Drops the switch columns,
 -- their constraint and the owner-only RPC. Idempotent.
 begin;
 

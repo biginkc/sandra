@@ -844,6 +844,7 @@ export type Database = {
           source_inbound_message_id: string
           status: string
           superseded_reason: string | null
+          wrong_scope: string | null
         }
         Insert: {
           ai_reason: string
@@ -866,6 +867,7 @@ export type Database = {
           source_inbound_message_id: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Update: {
           ai_reason?: string
@@ -888,6 +890,7 @@ export type Database = {
           source_inbound_message_id?: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Relationships: [
           {
@@ -1029,6 +1032,7 @@ export type Database = {
           nurture_drip_maybe_later_sequence_id: string | null
           org_id: string
           outbound_mode: string
+          reply_generation: string
           reply_delay_max_seconds: number
           reply_delay_min_seconds: number
           system_prompt: string
@@ -1054,6 +1058,7 @@ export type Database = {
           nurture_drip_maybe_later_sequence_id?: string | null
           org_id: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt: string
@@ -1079,6 +1084,7 @@ export type Database = {
           nurture_drip_maybe_later_sequence_id?: string | null
           org_id?: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt?: string
@@ -2649,6 +2655,61 @@ export type Database = {
           },
         ]
       }
+      // Hand-inserted for migration 20261008300100_jev_action_undo.sql.
+      jev_action_undo: {
+        Row: {
+          action: string
+          applied_dispo: string
+          classification_run_id: string | null
+          created_at: string
+          id: string
+          org_id: string
+          applied_follow_up_at: string | null
+          paused_enrollment_ids: string[]
+          prior_follow_up_at: string | null
+          prior_outreach_dispo: string | null
+          property_id: string
+          recorded_revision: number | null
+          source_inbound_message_id: string
+          undone_at: string | null
+          undone_by: string | null
+        }
+        Insert: {
+          action: string
+          applied_dispo: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id: string
+          recorded_revision?: number | null
+          source_inbound_message_id: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Update: {
+          action?: string
+          applied_dispo?: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id?: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id?: string
+          recorded_revision?: number | null
+          source_inbound_message_id?: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Relationships: []
+      }
       jev_lead_decisions: {
         Row: {
           classification_run_id: string
@@ -3042,6 +3103,70 @@ export type Database = {
             columns: ["related_import_id"]
             isOneToOne: false
             referencedRelation: "csv_imports"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      luna_suggestions: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          applied_outcome: string | null
+          confidence: number
+          created_at: string
+          id: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at: string | null
+          rejected_by: string | null
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence: number
+          created_at?: string
+          id?: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence?: number
+          created_at?: string
+          id?: string
+          inbound_message_id?: string
+          model?: string
+          org_id?: string
+          outcome?: string
+          property_id?: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "luna_suggestions_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "luna_suggestions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -4630,7 +4755,7 @@ export type Database = {
         Relationships: []
       }
       // Hand-inserted 2026-10-08 for migration
-      // 20261008240000_auto_reply_templates.sql (Messages v2 Phase 4).
+      // 20261008310000_auto_reply_templates.sql (Messages v2 Phase 4).
       auto_reply_templates: {
         Row: {
           active: boolean
@@ -7844,6 +7969,7 @@ export type Database = {
           p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -7902,6 +8028,7 @@ export type Database = {
           p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -7943,6 +8070,18 @@ export type Database = {
         }
         Returns: boolean
       }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      fn_luna_suggestion_stats: {
+        Args: { p_org_id: string; p_window_days: number }
+        Returns: {
+          outcome: string
+          shown: number
+          accepted: number
+          rejected: number
+          agreed_manually: number
+          open: number
+        }[]
+      }
       fn_resolve_hold: {
         Args: {
           p_org_id: string
@@ -7969,7 +8108,7 @@ export type Database = {
         Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
       }
       // Hand-inserted 2026-10-08 for migration
-      // 20261008240000_auto_reply_templates.sql (Messages v2 Phase 4).
+      // 20261008310000_auto_reply_templates.sql (Messages v2 Phase 4).
       fn_set_template_auto_send_approval: {
         Args: {
           p_approved: boolean
@@ -7989,6 +8128,10 @@ export type Database = {
           p_reply_intent: string | null
           p_template_id: string | null
         }
+        Returns: Json
+      }
+      fn_undo_jev_action: {
+        Args: { p_undo_id: string }
         Returns: Json
       }
       fn_set_jev_outcome_threshold: {

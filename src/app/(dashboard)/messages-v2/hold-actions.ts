@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { HOSTILE_NEEDS_CONFIRM_REASON, confirmDncInboundId, isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import type { HumanDraftSendInput, HumanDraftSendResult } from "@/lib/ai-responder/dispatch";
 import { err, ok, type Result } from "@/lib/errors/result";
 import type { LeadEventType, RecordLeadEventInput } from "@/lib/events";
@@ -39,6 +40,21 @@ export type HoldActionDeps = {
   recordLeadEvent: (input: RecordLeadEventInput) => Promise<void>;
   resumeRun: (admin: Admin, runId: string | null | undefined) => Promise<MaybeRunContext>;
   recordStep: (admin: Admin, ctx: MaybeRunContext, step: RecordStepInput) => Promise<void>;
+  /**
+   * The human suppression path for "Confirm do-not-contact": phone-level
+   * suppression, drips ended, consent event, lead event (actor = the clicker).
+   */
+  suppressNumber: (input: {
+    propertyId: string;
+    contactId: string;
+    phone: string;
+    inboundMessageId: string | null;
+  }) => Promise<Result<null>>;
+  /**
+   * The approved + mapped hostile template, rendered, or null when there is
+   * none (nothing is sent then; the number is still suppressed).
+   */
+  resolveHostileReply: (input: { propertyId: string; contactId: string }) => Promise<string | null>;
   /** The existing lead assignment action (leads/actions.ts). */
   updateLeadAssignee: (propertyId: string, userId: string | null) => Promise<Result<null>>;
   reportError: (error: unknown, context?: { tags?: Record<string, string>; extra?: Record<string, unknown> }) => void;
@@ -514,4 +530,144 @@ export async function assignHold(
     [],
   );
   return ok(null);
+}
+
+export type ConfirmDoNotContactResult = {
+  /** The approved hostile reply went out. */
+  replySent: boolean;
+  /** Why no reply went out (no approved template, or a send gate refused it). */
+  replyNote: string | null;
+};
+
+/**
+ * "Confirm do-not-contact" on a `hostile_needs_confirm` hold: the human's
+ * decision. It (a) sends the approved hostile reply, if one is approved and
+ * mapped, through `sendHumanDraft` (the single responder chokepoint: Q8 gate,
+ * reservation, consent, quiet hours), then (b) runs the human suppression path
+ * (phone-level suppression, drips ended, consent event) and clears the hold.
+ *
+ * Order note: the reply goes BEFORE the suppression only because every send
+ * path (manual included) refuses a suppressed number; both happen inside this
+ * one click, under the property lease. If the reply is refused or there is no
+ * approved template the number is STILL suppressed. If suppression fails the
+ * hold stays open so the click can be repeated (the reply is never re-sent:
+ * the one-reply-per-inbound guard refuses it).
+ */
+export async function confirmDoNotContact(
+  d: HoldActionDeps,
+  input: { propertyId: string; seen: HoldSeen },
+): Promise<Result<ConfirmDoNotContactResult>> {
+  const property = await loadProperty(d, input.propertyId);
+  if (!property.ok) return property;
+  return withPropertyLease(d, input.propertyId, null, async () => {
+    const { data: row, error: rowError } = await d.admin
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    const current = row as
+      | { needs_human_attention: boolean | null; last_ai_escalation_reason: string | null; last_ai_escalation_at: string | null }
+      | null;
+    if (rowError || !current) return fail("HOLD_LOOKUP_FAILED", "Could not load that hold. Nothing was changed.");
+    const reason = current.last_ai_escalation_reason ?? "";
+    if (!current.needs_human_attention || !isConfirmDncReason(reason)) {
+      return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
+    }
+    if (
+      (input.seen.flagReason ?? null) !== reason ||
+      (input.seen.flagAt ?? null) !== (current.last_ai_escalation_at ?? null)
+    ) {
+      return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
+    }
+
+    // Exactly the message that raised the hold: its id rides in the hold
+    // reason. A hold without one is refused (fail closed), never guessed.
+    const heldInboundId = confirmDncInboundId(reason);
+    if (!heldInboundId) return fail("INBOUND_NOT_FOUND", "Could not find the seller text or number. Nothing was changed.");
+    const { data: inbound, error: inboundError } = await d.admin
+      .from("messages")
+      .select("id, contact_id, conversation_id, from_address")
+      .eq("id", heldInboundId)
+      .eq("property_id", input.propertyId)
+      .eq("direction", "inbound")
+      .maybeSingle();
+    const msg = inbound as
+      | { id: string; contact_id: string | null; conversation_id: string | null; from_address: string | null }
+      | null;
+    if (inboundError || !msg?.contact_id || !msg.from_address) {
+      return fail("INBOUND_NOT_FOUND", "Could not find the seller text or number. Nothing was changed.");
+    }
+
+    const ctx = await latestRunContext(d, input.propertyId);
+    let replySent = false;
+    let replyNote: string | null = null;
+    // The approved hostile reply is only for hostile wording; a plain opt-out
+    // phrase is just suppressed.
+    const hostileHold = reason.startsWith(HOSTILE_NEEDS_CONFIRM_REASON);
+    const body = hostileHold
+      ? await d.resolveHostileReply({ propertyId: input.propertyId, contactId: msg.contact_id })
+      : null;
+    if (body === null) {
+      replyNote = hostileHold ? "no approved hostile reply is mapped" : null;
+    } else {
+      const sent = await d.sendHumanDraft(d.admin, {
+        orgId: d.orgId,
+        propertyId: input.propertyId,
+        contactId: msg.contact_id,
+        conversationId: msg.conversation_id,
+        inboundMessageId: msg.id,
+        inboundFromPhone: msg.from_address,
+        body,
+        userId: d.userId,
+        edited: false,
+        runContext: ctx,
+      });
+      if (sent.status === "sent") replySent = true;
+      else replyNote = `reply not sent: ${sent.reason.replace(/[_:]+/g, " ")}`;
+    }
+
+    const suppressed = await d.suppressNumber({
+      propertyId: input.propertyId,
+      contactId: msg.contact_id,
+      phone: msg.from_address,
+      inboundMessageId: msg.id,
+    });
+    if (!suppressed.ok) {
+      await audit(d, ctx, { kind: "hold", name: "confirm_dnc", result: "error", detail: { replySent } }, []);
+      return fail(
+        "SUPPRESSION_FAILED",
+        "Could not finish the do-not-contact. This number may still be texted; click again to retry.",
+        { replySent },
+      );
+    }
+
+    const now = new Date().toISOString();
+    const events: HoldEvent[] = [];
+    try {
+      const { data: cleared, error } = await d.admin
+        .from("properties")
+        .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: now })
+        .eq("id", input.propertyId)
+        .eq("needs_human_attention", true)
+        .eq("last_ai_escalation_reason", reason)
+        .select("id");
+      if (error) throw new Error(error.message);
+      if (Array.isArray(cleared) && cleared.length > 0) {
+        events.push({
+          propertyId: input.propertyId,
+          eventType: "ai_escalation_cleared",
+          payload: { from: true, to: false, via: "messages_v2", action: "confirm_dnc" },
+        });
+      }
+    } catch (e) {
+      d.reportError(e, { tags: { surface: "hold_action_confirm_dnc_clear" }, extra: { propertyId: input.propertyId } });
+    }
+    await audit(
+      d,
+      ctx,
+      { kind: "hold", name: "confirm_dnc", result: "applied", detail: { replySent, hasNote: replyNote !== null } },
+      events,
+    );
+    return ok({ replySent, replyNote });
+  });
 }

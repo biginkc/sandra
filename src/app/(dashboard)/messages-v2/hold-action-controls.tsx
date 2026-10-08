@@ -2,13 +2,15 @@
 
 import { useRef, useState } from "react";
 
+import { isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
 
 import type { HoldActionsApi, SeenDraft } from "./hold-action-types";
-import type { HoldSeen, OpenHold, RunWithSteps } from "./types";
+import { LUNA_HUMAN_CONFIRM_OUTCOMES, lunaOutcomeLabel } from "./luna-labels";
+import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./types";
 
 type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
@@ -39,6 +41,101 @@ export function effectiveDraftBody(hold: OpenHold<RunWithSteps>): string | null 
 
 function errorText<T>(result: Result<T>): string {
   return result.ok ? "" : result.error.message || "That did not work.";
+}
+
+const LUNA_RELOAD_CODES = new Set(["LUNA_ALREADY_RESOLVED", "LUNA_NO_PENDING_ITEM"]);
+
+/**
+ * Luna's pick for this hold. A suggestion only: Apply is the human's click, and
+ * opt-out outcomes (opted_out, dnc) have no Apply, only the existing review flow.
+ */
+function LunaSuggestionBlock({
+  luna,
+  actions,
+  onReload,
+}: {
+  luna: LunaHoldSuggestion;
+  actions: HoldActionsApi;
+  onReload?: () => void;
+}) {
+  const [status, setStatus] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const busy = useRef(false);
+  const label = lunaOutcomeLabel(luna.outcome);
+  const humanConfirm = LUNA_HUMAN_CONFIRM_OUTCOMES.has(luna.outcome);
+
+  async function run<T>(call: () => Promise<Result<T>>, onOk: (data: T) => string, reloadOnOk: boolean) {
+    if (busy.current) return;
+    busy.current = true;
+    setPending(true);
+    setError(null);
+    let result: Result<T>;
+    try {
+      result = await call();
+    } catch {
+      result = { ok: false, error: { code: "NETWORK", message: "Could not confirm: the server did not answer. Check before retrying." } };
+    }
+    busy.current = false;
+    setPending(false);
+    if (result.ok) {
+      setStatus(onOk(result.data));
+      if (reloadOnOk) onReload?.();
+    } else {
+      setError(errorText(result));
+      if (LUNA_RELOAD_CODES.has(result.error.code)) onReload?.();
+    }
+  }
+
+  const apply = () =>
+    actions.lunaApply &&
+    run(
+      () => actions.lunaApply!({ suggestionId: luna.id }),
+      (data) => `Applied Luna's pick: ${label}${data.warning ? ` (${data.warning})` : ""}`,
+      true,
+    );
+  const reject = () =>
+    actions.lunaReject &&
+    run(() => actions.lunaReject!({ suggestionId: luna.id }), () => "Dismissed Luna's suggestion", false);
+
+  if (status) {
+    return (
+      <p data-testid="luna-status" aria-live="polite" className="text-xs font-medium">
+        {status}
+      </p>
+    );
+  }
+
+  return (
+    <div data-testid="luna-suggestion" className="flex flex-col gap-2 rounded-lg border p-2 text-sm">
+      <p>
+        Luna suggests: {label} ({Math.round(luna.confidence * 100)}%)
+      </p>
+      {error && (
+        <p role="alert" className="rounded-lg border border-red-300 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+          {error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {humanConfirm ? (
+          <a href="/jev/needs-decision" className="text-xs text-sky-700 underline dark:text-sky-300">
+            Review opt-out
+          </a>
+        ) : (
+          actions.lunaApply && (
+            <Button type="button" size="xs" disabled={pending} onClick={apply}>
+              Apply
+            </Button>
+          )
+        )}
+        {actions.lunaReject && (
+          <Button type="button" size="xs" variant="outline" disabled={pending} onClick={reject}>
+            Not this
+          </Button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -140,6 +237,23 @@ export function HoldActionControls({
       onReload,
     );
 
+  const hostileNeedsConfirm = isConfirmDncReason(hold.flag_reason);
+  const [confirmingDnc, setConfirmingDnc] = useState(false);
+
+  const confirmDnc = () =>
+    propertyId &&
+    actions.confirmDoNotContact &&
+    perform(
+      "Confirming do-not-contact…",
+      () => actions.confirmDoNotContact!({ propertyId, seen: seenHold }),
+      (data) => ({
+        text: data.replySent
+          ? "Do-not-contact confirmed: reply sent, number suppressed"
+          : `Do-not-contact confirmed: number suppressed${data.replyNote ? ` (${data.replyNote})` : ""}`,
+      }),
+      onReload,
+    );
+
   const takeOver = () =>
     propertyId &&
     perform(
@@ -224,6 +338,8 @@ export function HoldActionControls({
         </p>
       )}
 
+      {hold.luna && <LunaSuggestionBlock key={hold.luna.id} luna={hold.luna} actions={actions} onReload={onReload} />}
+
       {suppressionIncomplete && (
         <div
           data-testid="suppression-incomplete-warning"
@@ -235,6 +351,36 @@ export function HoldActionControls({
               Retry suppression
             </Button>
           )}
+        </div>
+      )}
+
+      {hostileNeedsConfirm && (
+        <div
+          data-testid="hostile-confirm"
+          className="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100"
+        >
+          <span>
+            This text asks us to stop or is hostile. Nothing was sent and the number is still active. Confirming stops
+            all future texts to this number (and sends the approved hostile reply for hostile wording, if one is set
+            up). Dismiss leaves the number active.
+          </span>
+          {actions.confirmDoNotContact &&
+            (confirmingDnc ? (
+              <div className="flex gap-2">
+                <Button type="button" size="xs" disabled={!propertyId} onClick={confirmDnc}>
+                  Yes, stop all texts to this number
+                </Button>
+                <Button type="button" size="xs" variant="ghost" onClick={() => setConfirmingDnc(false)}>
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <div>
+                <Button type="button" size="xs" disabled={!propertyId} onClick={() => setConfirmingDnc(true)}>
+                  Confirm do-not-contact
+                </Button>
+              </div>
+            ))}
         </div>
       )}
 

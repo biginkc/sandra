@@ -135,4 +135,34 @@ describe("<LabelRuleEditor />", () => {
     await open(user);
     expect(screen.getByText(/not in automatic mode/)).toBeVisible();
   });
+
+  it("opted_out: On is disabled, the policy note shows, and only the cutoff can be saved", async () => {
+    const b = badge({ label: "opted_out" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
+    render(<LabelRuleEditor orgId="org-1" badge={b} text="opted_out [HELD]" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Edit rule for opted_out" }));
+    expect(screen.getByRole("radio", { name: "On" })).toBeDisabled();
+    expect(screen.getByTestId("never-auto-note")).toHaveTextContent("Held for a person by policy");
+    const input = screen.getByTestId("rule-cutoff-input");
+    await user.clear(input);
+    await user.type(input, "0.9");
+    await user.click(screen.getByTestId("apply-rule"));
+    await waitFor(() =>
+      expect(setLabelRule).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "opted_out", minConfidence: 0.9, automationEnabled: false }),
+      ),
+    );
+  });
+
+  it("new_lead: turning On shows the Jev-promotes-leads confirmation line; Off does not", async () => {
+    const b = badge({ label: "new_lead" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
+    render(<LabelRuleEditor orgId="org-1" badge={b} text="new_lead [HELD]" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Edit rule for new_lead" }));
+    expect(screen.queryByTestId("new-lead-auto-note")).toBeNull();
+    await user.click(screen.getByRole("radio", { name: "On" }));
+    expect(screen.getByTestId("new-lead-auto-note")).toHaveTextContent("Jev will promote leads automatically");
+    await user.click(screen.getByRole("radio", { name: "Off" }));
+    expect(screen.queryByTestId("new-lead-auto-note")).toBeNull();
+  });
 });

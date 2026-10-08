@@ -6,14 +6,16 @@ import type { Database } from "@/lib/supabase/types";
 import { createBlandClient, type BlandClient } from "./bland";
 import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig } from "./config";
 import { evaluateNormaGate } from "./gate";
-import { sendNormaPrecallSms, type PrecallDeps } from "./precall-sms";
+import { readPrecallSmsEnabled, sendNormaPrecallSms, type PrecallDeps } from "./precall-sms";
+import { readNormaQueueConfig, type NormaQueueConfig } from "./queue/config";
+import { shouldSendNormaPrecallSms } from "./queue/precall-policy";
 import {
   bindNormaCallId,
   checkNormaEligibility,
-  claimNormaDispatch,
+  claimNormaDispatchV2,
   markNormaDispatchRejected,
   markNormaDispatchUnknown,
-  presendNormaFence,
+  markNormaSending,
 } from "./rpc";
 
 type Client = SupabaseClient<Database>;
@@ -26,6 +28,8 @@ export type DispatchResult =
   | { status: "unknown"; reason: string }
   /** Another worker already owns, or already finished, this request. */
   | { status: "not_claimed" }
+  /** The shared capacity gate refused (account concurrency, daily cap, or this number was just dialled). Nothing was written. */
+  | { status: "busy"; reason: "capacity_concurrency" | "capacity_daily" | "number_busy" }
   | { status: "not_found" };
 
 export type DispatchDeps = {
@@ -35,7 +39,14 @@ export type DispatchDeps = {
   gate?: NormaGateConfig;
   /** Pre-call text overrides (tests); production reads NORMA_PRECALL_SMS_ENABLED and the template constant. */
   precallSms?: PrecallDeps;
+  /** Queue switch and capacity limits fed to claim_dispatch_v2 (tests); production reads the NORMA_QUEUE_* env. */
+  queueConfig?: NormaQueueConfig;
+  /** Clock (ms) for claim_dispatch_v2's single time input (tests). */
+  now?: () => number;
 };
+
+/** Row columns added by the queue migration; not in the generated types yet. */
+type QueueColumns = { queue_entry_id?: string | null; queue_dispatch_token?: string | null; queue_lease_token?: string | null };
 
 const PRESEND_FENCE_RESPONSE_BUDGET_MS = 5_000;
 
@@ -52,13 +63,18 @@ const PRESEND_FENCE_RESPONSE_BUDGET_MS = 5_000;
 export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): Promise<DispatchResult> {
   const { client } = deps;
 
-  const { data: row, error } = await client
+  const { data: loaded, error } = await client
     .from("norma_call_requests")
-    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context, attempt")
+    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context, attempt, queue_entry_id, queue_dispatch_token" as never)
     .eq("id", requestId)
     .maybeSingle();
   if (error) throw new Error(`norma dispatch load failed: ${error.message}`);
-  if (!row) return { status: "not_found" };
+  if (!loaded) return { status: "not_found" };
+  const row = loaded as unknown as {
+    id: string; status: string; org_id: string; phone_e164: string; property_id: string; contact_id: string | null;
+    idempotency_key: string; rep_context: string | null; attempt: number | null;
+  } & QueueColumns;
+  const isQueueRow = Boolean(row.queue_entry_id);
   if (row.status !== "requested") return { status: "not_claimed" };
   const attempt = row.attempt ?? 1;
 
@@ -77,10 +93,44 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     return { status: "rejected", reason: "bland_not_configured" };
   }
 
-  // ---- claim: requested -> dispatching ------------------------------------
+  // ---- claim: requested -> dispatching, under the shared capacity gate ------
   // Fenced on the attempt read above: every later decision (pre-call text, metadata) uses
   // that same value, so a stale snapshot can never act for a different attempt.
-  if (!(await claimNormaDispatch(client, requestId, attempt))) return { status: "not_claimed" };
+  // The limits are required by the database: without them nothing is admitted (fail closed).
+  const queueConfig = deps.queueConfig ?? readNormaQueueConfig(process.env);
+  if (queueConfig.maxConcurrent === null || queueConfig.dailyCap === null) {
+    const closed = await markNormaDispatchRejected(client, requestId, "queue_limits_not_configured", "requested", attempt);
+    if (closed !== "dispatch_rejected") return { status: "not_claimed" };
+    return { status: "rejected", reason: "queue_limits_not_configured" };
+  }
+  const claim = await claimNormaDispatchV2(client, requestId, {
+    expectedAttempt: attempt,
+    now: new Date((deps.now ?? Date.now)()).toISOString(),
+    queueEnabled: queueConfig.enabled,
+    maxConcurrent: queueConfig.maxConcurrent,
+    dailyCap: queueConfig.dailyCap,
+    capTz: queueConfig.capTz,
+  });
+  if (claim !== "claimed") {
+    if (claim === "capacity_concurrency" || claim === "capacity_daily" || claim === "number_busy") {
+      // Button request, first attempt: the rep was told "No call was placed", so the request is closed here and
+      // reconcile can never dial it later. Queue rows stay with the queue tick; a call-twice retry (attempt 2)
+      // keeps waiting for its next try.
+      if (!isQueueRow && attempt === 1) {
+        const closed = await markNormaDispatchRejected(client, requestId, claim, "requested", attempt);
+        // Another worker claimed it between our read and the close: it owns the row now.
+        if (closed !== "dispatch_rejected") return { status: "not_claimed" };
+      }
+      return { status: "busy", reason: claim };
+    }
+    if (claim.startsWith("queue_refused:")) return { status: "rejected", reason: claim };
+    if (claim.startsWith("ineligible:")) {
+      // Button: close the request here. Queue: the request stays `requested`; the tick settles the entry and the request together.
+      if (!isQueueRow) await markNormaDispatchRejected(client, requestId, claim, undefined, attempt);
+      return { status: "rejected", reason: claim };
+    }
+    return { status: "not_claimed" };
+  }
 
   // ---- pre-send (a failure here means nothing was sent) --------------------
   // The dial-time eligibility recheck is the LAST thing before the send: lead
@@ -92,7 +142,14 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     const recheck = () =>
       checkNormaEligibility(client, { propertyId: row.property_id, contactId: row.contact_id ?? "", phoneE164: row.phone_e164 });
     let eligibility = await recheck();
-    if (eligibility.eligible && attempt === 1) {
+    if (
+      eligibility.eligible &&
+      shouldSendNormaPrecallSms({
+        queueEntryId: row.queue_entry_id,
+        attempt,
+        precallEnabled: deps.precallSms?.enabled ?? readPrecallSmsEnabled(),
+      })
+    ) {
       // Call twice: the retry (attempt 2) never texts again. The text is a
       // best-effort extra: refused, failed or slow, the call is still placed.
       // After it, eligibility is read once more so the check stays the LAST
@@ -120,13 +177,28 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   // ---- send ----------------------------------------------------------------
   const bland = deps.bland ?? createBlandClient(blandConfig);
   const fenceStartedAt = performance.now();
-  let fencePassed = false;
+  let admission: string | null = null;
   try {
-    fencePassed = await presendNormaFence(client, requestId, attempt);
+    admission = await markNormaSending(client, requestId, {
+      ...(isQueueRow && row.queue_dispatch_token ? { dispatchToken: row.queue_dispatch_token } : {}),
+      expectedAttempt: attempt,
+    });
   } catch (fenceError) {
     reportError(fenceError, { tags: { surface: "norma_dispatch_presend_fence" }, extra: { requestId, attempt } });
   }
-  if (!fencePassed || performance.now() - fenceStartedAt > PRESEND_FENCE_RESPONSE_BUDGET_MS) return { status: "not_claimed" };
+  if (admission === null || performance.now() - fenceStartedAt > PRESEND_FENCE_RESPONSE_BUDGET_MS) return { status: "not_claimed" };
+  if (admission !== "sending") {
+    if (!admission.startsWith("refused:")) return { status: "not_claimed" };
+    const reason = admission.slice("refused:".length);
+    // Queue rows: SQL already closed the request; the tick settles the entry from the reported reason.
+    if (isQueueRow) return { status: "rejected", reason };
+    // Button rows: eligibility / consent refusals close the request; fence-type refusals leave it for reconcile (#793).
+    if (reason.startsWith("ineligible:")) {
+      await markNormaDispatchRejected(client, requestId, reason, undefined, attempt);
+      return { status: "rejected", reason };
+    }
+    return { status: "not_claimed" };
+  }
   const result = await bland.sendCall({
     phoneNumber: row.phone_e164,
     requestId,

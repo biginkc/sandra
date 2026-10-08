@@ -22,7 +22,9 @@ import {
   formatModeBadge,
   type LooseSupabase,
 } from "./queries";
-import { RunCard } from "./run-card";
+import { RunCard, type UndoControls } from "./run-card";
+import type { ReplyGeneration } from "./reply-generation";
+import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
 import { ScorecardCard } from "./scorecard-card";
 import type { ScorecardRow } from "./scorecard";
 import type {
@@ -43,6 +45,12 @@ export type MessagesV2ViewProps = {
   isOwner?: boolean;
   /** Owner-only nurture auto-drip switch; absent = not shown. */
   nurtureAutoDrip?: NurtureAutoDripState | null;
+  /** The org's "AI drafts" setting; null/absent hides the control. */
+  replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
+  setReplyGeneration?: SetReplyGenerationAction;
+  /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
+  undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { message: string } }>;
+  findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
   runs: RunWithSteps[];
@@ -71,6 +79,8 @@ export type MessagesV2ViewProps = {
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
+  /** Luna suggestions are on: show the scorecard's Luna row. */
+  lunaEnabled?: boolean;
 };
 
 const LEGEND = [
@@ -105,6 +115,20 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(next);
   }, []);
   const [labels, setLabels] = useState(() => new Map(props.labels));
+  const { undoJevAction, findJevUndo } = props;
+  const undoControls = useMemo<UndoControls | undefined>(
+    () =>
+      undoJevAction && findJevUndo
+        ? {
+            find: findJevUndo,
+            undo: async (id) => {
+              const r = await undoJevAction(id);
+              return r.ok ? { ok: true } : { ok: false, message: r.error.message };
+            },
+          }
+        : undefined,
+    [undoJevAction, findJevUndo],
+  );
   const [nowMs, setNowMs] = useState(props.nowMs);
   const [live, setLive] = useState(false);
   if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
@@ -331,6 +355,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           )}
           {isOwner && props.nurtureAutoDrip && <NurtureAutoDripSwitch state={props.nurtureAutoDrip} />}
         </div>
+        <ReplyGenerationToggle
+          configId={props.replyGeneration?.configId ?? null}
+          replyGeneration={props.replyGeneration?.replyGeneration ?? null}
+          isOwner={isOwner}
+          action={props.setReplyGeneration}
+        />
         <p
           className="ml-auto text-sm text-muted-foreground"
           data-testid="header-status"
@@ -410,6 +440,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   run={run}
                   label={labels.get(run.id)}
                   isOwner={isOwner}
+                  undoControls={undoControls}
                 />
               ))
             )}
@@ -434,7 +465,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         data-testid="scorecard-slot"
         className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
       >
-        <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
+        <ScorecardCard
+          orgId={orgId}
+          initialRows={props.scorecardRows ?? null}
+          lunaEnabled={props.lunaEnabled ?? false}
+        />
       </div>
 
       <ul

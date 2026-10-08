@@ -75,6 +75,18 @@ describe("setLabelRule", () => {
     mocks.rpcResult = { data: null, error: { message: "FORBIDDEN" } };
     expect(await setLabelRule(input)).toMatchObject({ ok: false, error: { message: "Only an org owner can change these rules." } });
   });
+
+  it("refuses to enable a never-automate label server-side, before the RPC", async () => {
+    const r = await setLabelRule({ ...input, outcome: "opted_out", automationEnabled: true });
+    expect(r.ok).toBe(false);
+    expect(mocks.rpcCalls).toHaveLength(0);
+  });
+
+  it("still lets opted_out's cutoff be set while automation stays off", async () => {
+    const r = await setLabelRule({ ...input, outcome: "opted_out", automationEnabled: false });
+    expect(r.ok).toBe(true);
+    expect(mocks.rpcCalls).toHaveLength(1);
+  });
 });
 
 describe("setNurtureAutoDrip", () => {
