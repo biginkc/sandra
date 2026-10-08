@@ -6955,6 +6955,40 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
     expect((state.phoneSuppressions ?? []).length).toBe(0);
   });
 
+  it("already held for another reason: the number-source reply is still tracked, so the next inbound is surfaced (reason kept, hold refreshed), not quietly skipped", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("nurture");
+    // A person is already needed for something else when the seller asks.
+    state.property.needs_human_attention = false;
+    await run(state, "inbound-ns-held1", "how did you get my number?", answers("nurture", "yes"));
+    // Simulate "held for another reason first": the hold reason is not ours.
+    state.property.last_ai_escalation_reason = "price_or_offer";
+    state.property.last_ai_escalation_at = "2026-01-01T00:00:00.000Z";
+    vi.mocked(sendSmsToContact).mockClear();
+
+    const { result } = await run(state, "inbound-ns-held2", "yes take me off", answers("opted_out", "no", 0.99));
+
+    expect(result).toEqual({ outcome: "skipped", reason: "number_source_answer_received" });
+    expect(state.property.last_ai_escalation_reason).toBe("price_or_offer");
+    expect(state.property.last_ai_escalation_at).not.toBe("2026-01-01T00:00:00.000Z");
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("a replay of the ORIGINAL question is not treated as the seller's answer", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("nurture");
+    await run(state, "inbound-ns-replay", "how did you get my number?", answers("nurture", "yes"));
+    const supabase = createMockSupabase(state);
+    const replay = await dispatchAiResponse(supabase as never, {
+      contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+      inboundBody: "how did you get my number?", inboundMessageId: "inbound-ns-replay", propertyId: PROPERTY_ID,
+    }, { anthropic: {} as never });
+    expect(replay).toMatchObject({ outcome: "skipped" });
+    expect(replay).not.toMatchObject({ reason: "number_source_answer_received" });
+  });
+
   it("yes on a not_interested: one number-source reply, then the close, then the hold", async () => {
     const state = createMockState();
     installSendMock(state);
@@ -7157,12 +7191,17 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       expect(state.property.needs_human_attention).toBe(false);
     });
 
-    it("no approved number_source template: no extra classifier call at all, identity reply as today", async () => {
+    // KNOWN EDGE (pinned, not a bug): with no sendable number_source template we
+    // do not spend a classifier call on a "who is this" message, so a seller who
+    // also asked how we got the number gets the identity reply and NO hold. Only
+    // when a template is mapped can we know they asked.
+    it("no approved number_source template: no extra classifier call at all, identity reply as today, no hold", async () => {
       const state = createMockState();
       installSendMock(state);
       const { fetchMock } = await run(state, "inbound-id-notpl", WHO_AND_NUMBER, answers("nurture", "yes"));
       expect(fetchMock).not.toHaveBeenCalled();
       expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
+      expect(state.property.needs_human_attention).toBe(false);
     });
 
     it("yes but the template cannot render: the identity reply goes out and a person is told the question went unanswered", async () => {

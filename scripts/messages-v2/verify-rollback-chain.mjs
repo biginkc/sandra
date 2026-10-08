@@ -26,7 +26,7 @@ const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
 const LAST = process.env.CHAIN_LAST ?? "20261008340000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 52); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + templates (240000) + wrong-number/hostile mapping keys (270000) + number-source mapping key (290000)
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 52); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + templates (240000) + wrong-number/hostile mapping keys (320000) + number-source mapping key (340000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");

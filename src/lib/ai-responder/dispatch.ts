@@ -396,27 +396,27 @@ export async function checkAiResponderDispatchPreGates(
       outcome: { outcome: "skipped", reason: "property_not_found" },
     };
   }
-  if (
-    property.needs_human_attention &&
-    property.last_ai_escalation_reason === NUMBER_SOURCE_AWAITING_ANSWER_REASON
-  ) {
+  if (property.needs_human_attention && (await isAnswerToNumberSourceReply(supabase, input))) {
     // The seller is answering "want me to take you off the list?". The property
     // is already held, but the answer must not vanish into a silent
     // already-terminal exit: refresh the hold so a person sees there is a new
-    // message. Nothing is sent and nothing is suppressed automatically.
+    // message. When the hold is our own awaiting marker its reason becomes
+    // `number_source_answer_received`; when the property was already held for
+    // another reason that reason is kept (a person still needs it) and only the
+    // hold's timestamp moves. Nothing is sent and nothing is suppressed.
     const now = new Date().toISOString();
-    const { data: refreshed } = await supabase
+    const own = property.last_ai_escalation_reason === NUMBER_SOURCE_AWAITING_ANSWER_REASON;
+    let q = supabase
       .from("properties")
       .update({
-        last_ai_escalation_reason: NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
+        ...(own ? { last_ai_escalation_reason: NUMBER_SOURCE_ANSWER_RECEIVED_REASON } : {}),
         last_ai_escalation_at: now,
         updated_at: now,
       })
       .eq("id", input.propertyId)
-      .eq("needs_human_attention", true)
-      .eq("last_ai_escalation_reason", NUMBER_SOURCE_AWAITING_ANSWER_REASON)
-      .select("id")
-      .maybeSingle();
+      .eq("needs_human_attention", true);
+    if (own) q = q.eq("last_ai_escalation_reason", NUMBER_SOURCE_AWAITING_ANSWER_REASON);
+    const { data: refreshed } = await q.select("id").maybeSingle();
     await blocked(NUMBER_SOURCE_ANSWER_RECEIVED_REASON);
     if (refreshed) {
       return { ok: false, outcome: flaggedSkip(NUMBER_SOURCE_ANSWER_RECEIVED_REASON) };
@@ -475,6 +475,31 @@ export async function checkAiResponderDispatchPreGates(
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
   return { ok: true, property };
+}
+
+/**
+ * True when this inbound is a seller's answer to our number-source reply: the
+ * latest outbound message is that reply (`reply_key`, so this works whatever
+ * reason the property is held for) and it was not sent in answer to THIS inbound
+ * (a replay of the original question is not an answer). Fails closed (false).
+ */
+async function isAnswerToNumberSourceReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "outbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return false;
+  const meta = (data.metadata ?? {}) as { reply_key?: unknown; inbound_message_id?: unknown };
+  if (meta.reply_key !== NUMBER_SOURCE_REPLY_KEY) return false;
+  if (input.inboundMessageId && meta.inbound_message_id === input.inboundMessageId) return false;
+  return true;
 }
 
 export async function dispatchAiResponse(
@@ -786,6 +811,7 @@ async function dispatchAiResponseCore(
         turn: currentTurn + 1,
         source: "approved_template",
         templateId: numberSource.templateId,
+        replyKey: NUMBER_SOURCE_REPLY_KEY,
         orgId: property.org_id,
         claimStartedAt,
         outboundMode: config!.outbound_mode,
@@ -2492,6 +2518,7 @@ export async function runApprovedTemplateStep(
     turn: ctx.currentTurn + 1,
     source: "approved_template",
     templateId: resolved.templateId,
+    replyKey,
     orgId: property.org_id,
     claimStartedAt: ctx.claimStartedAt,
     outboundMode: ctx.outboundMode,
@@ -3394,6 +3421,8 @@ type ResponderSendArgs = {
   approvedBy?: { userId: string; edited: boolean };
   /** The library template behind an `approved_template` send (evidence + message metadata). */
   templateId?: string | null;
+  /** Mapping key of that template (`number_source` etc.), stored as `reply_key` so a later inbound can tell it is answering that reply. */
+  replyKey?: string | null;
   orgId: string;
   /** When this run took its claim; null when unknown (check skipped). */
   claimStartedAt: string | null;
@@ -5305,7 +5334,11 @@ async function deliverResponderMessage(
     sentiment: args.sentiment,
     turn: args.turn,
     ...(args.source === "approved_template"
-      ? { reply_source: "approved_template" as const, template_id: args.templateId ?? null }
+      ? {
+          reply_source: "approved_template" as const,
+          template_id: args.templateId ?? null,
+          ...(args.replyKey ? { reply_key: args.replyKey } : {}),
+        }
       : {}),
   };
   const { data: messageRow, error: messageLookupError } = await supabase

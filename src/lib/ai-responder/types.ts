@@ -125,6 +125,8 @@ export type AiMessageMetadata = {
   /** Set on template auto-replies (Messages v2 Phase 4): the library template that was sent. */
   reply_source?: "approved_template";
   template_id?: string | null;
+  /** Mapping key of the template (`number_source`, ...); present for approved-template sends. */
+  reply_key?: string | null;
 };
 
 export type AiReplyDelayProcessingMetadata = {

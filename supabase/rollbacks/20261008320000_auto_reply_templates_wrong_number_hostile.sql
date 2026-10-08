@@ -1,4 +1,4 @@
--- Rollback for 20261008270000_auto_reply_templates_wrong_number_hostile.
+-- Rollback for 20261008320000_auto_reply_templates_wrong_number_hostile.
 -- Restores the Phase 4 allow-list (nurture, not_interested only). Mappings for
 -- wrong_number / hostile cannot exist under the restored constraint, so they
 -- are deleted (the feature that reads them is rolled back with the code).
