@@ -2202,6 +2202,9 @@ type TemplateStepResult =
  * it past its lease is swept and flagged (`template_sent_outcome_missing`),
  * and a re-dispatch of the same claim never sends the template twice.
  */
+/** Trace-only drop reason (not a hold/flag reason). */
+const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
+
 async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
@@ -2256,7 +2259,7 @@ async function runApprovedTemplateStep(
         outcome: a.outcome,
         templateId: resolved.templateId,
         mappingId: resolved.mappingId,
-        reason: "delay_unavailable",
+        reason: TEMPLATE_DROP_DELAY_UNAVAILABLE,
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);

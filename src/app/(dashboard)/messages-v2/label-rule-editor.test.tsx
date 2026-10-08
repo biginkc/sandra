@@ -137,7 +137,7 @@ describe("<LabelRuleEditor />", () => {
   });
 
   it("opted_out: On is disabled, the policy note shows, and only the cutoff can be saved", async () => {
-    const b = badge({ label: "opted_out" as never, rule: { automationEnabled: false } }) as never;
+    const b = badge({ label: "opted_out" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
     render(<LabelRuleEditor orgId="org-1" badge={b} text="opted_out [HELD]" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Edit rule for opted_out" }));
@@ -155,7 +155,7 @@ describe("<LabelRuleEditor />", () => {
   });
 
   it("new_lead: turning On shows the Jev-promotes-leads confirmation line; Off does not", async () => {
-    const b = badge({ label: "new_lead" as never, rule: { automationEnabled: false } }) as never;
+    const b = badge({ label: "new_lead" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
     render(<LabelRuleEditor orgId="org-1" badge={b} text="new_lead [HELD]" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Edit rule for new_lead" }));
