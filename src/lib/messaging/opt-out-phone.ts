@@ -35,8 +35,10 @@ export type ApplyPhoneLevelOptOutInput = {
   idempotencyKey: string;
   leadEvent?: {
     propertyId: string;
-    actorType: "ai" | "system";
-    trigger: "ai_responder" | "inbound_keyword";
+    actorType: "ai" | "system" | "user";
+    /** Required when actorType is "user". */
+    actorId?: string;
+    trigger: "ai_responder" | "inbound_keyword" | "human_confirmed_hostile";
   };
 };
 
@@ -180,8 +182,9 @@ async function recordPrimaryLeadOptOutEvent(
     consentEventId: string;
     orgId: string;
     propertyId: string;
-    actorType: "ai" | "system";
-    trigger: "ai_responder" | "inbound_keyword";
+    actorType: "ai" | "system" | "user";
+    actorId?: string;
+    trigger: "ai_responder" | "inbound_keyword" | "human_confirmed_hostile";
   },
 ): Promise<void> {
   const { data: property, error } = await supabase
@@ -200,10 +203,22 @@ async function recordPrimaryLeadOptOutEvent(
   }
   if (!property) return;
 
+  const actor =
+    input.actorType === "user"
+      ? input.actorId
+        ? ({ actorType: "user", actorId: input.actorId } as const)
+        : null
+      : ({ actorType: input.actorType } as const);
+  if (!actor) {
+    reportError(new Error("opt-out lead event: user actor without actorId"), {
+      tags: { surface: "lead_event_opt_out_actor" },
+    });
+    return;
+  }
   await recordLeadEvent({
     propertyId: input.propertyId,
     eventType: LEAD_EVENT_TYPES.OPTED_OUT,
-    actorType: input.actorType,
+    ...actor,
     payload: { channel: "sms", trigger: input.trigger },
     sourceType: "consent_events.opt_out",
     sourceId: input.consentEventId,

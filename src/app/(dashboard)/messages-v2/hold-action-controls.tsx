@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 
+import { isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
@@ -236,6 +237,23 @@ export function HoldActionControls({
       onReload,
     );
 
+  const hostileNeedsConfirm = isConfirmDncReason(hold.flag_reason);
+  const [confirmingDnc, setConfirmingDnc] = useState(false);
+
+  const confirmDnc = () =>
+    propertyId &&
+    actions.confirmDoNotContact &&
+    perform(
+      "Confirming do-not-contact…",
+      () => actions.confirmDoNotContact!({ propertyId, seen: seenHold }),
+      (data) => ({
+        text: data.replySent
+          ? "Do-not-contact confirmed: reply sent, number suppressed"
+          : `Do-not-contact confirmed: number suppressed${data.replyNote ? ` (${data.replyNote})` : ""}`,
+      }),
+      onReload,
+    );
+
   const takeOver = () =>
     propertyId &&
     perform(
@@ -333,6 +351,36 @@ export function HoldActionControls({
               Retry suppression
             </Button>
           )}
+        </div>
+      )}
+
+      {hostileNeedsConfirm && (
+        <div
+          data-testid="hostile-confirm"
+          className="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100"
+        >
+          <span>
+            This text asks us to stop or is hostile. Nothing was sent and the number is still active. Confirming stops
+            all future texts to this number (and sends the approved hostile reply for hostile wording, if one is set
+            up). Dismiss leaves the number active.
+          </span>
+          {actions.confirmDoNotContact &&
+            (confirmingDnc ? (
+              <div className="flex gap-2">
+                <Button type="button" size="xs" disabled={!propertyId} onClick={confirmDnc}>
+                  Yes, stop all texts to this number
+                </Button>
+                <Button type="button" size="xs" variant="ghost" onClick={() => setConfirmingDnc(false)}>
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <div>
+                <Button type="button" size="xs" disabled={!propertyId} onClick={() => setConfirmingDnc(true)}>
+                  Confirm do-not-contact
+                </Button>
+              </div>
+            ))}
         </div>
       )}
 

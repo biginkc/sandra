@@ -82,7 +82,9 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
-import { resolveApprovedTemplateReply } from "./template-reply";
+import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
+import { SOLD_NEEDS_HUMAN_REASON, isSoldInbound } from "./sold";
+import { resolveApprovedTemplateReply, type TemplateReplyKey } from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
@@ -728,7 +730,15 @@ async function dispatchAiResponseCore(
     return refusedClaimOutcome(supabase, input, responseClaim.reason, property.org_id, deps.runContext);
   }
 
-  if (isIdentityQuestion(input.inboundBody)) {
+  // Hostile wording (approved phrase list) never auto-suppresses and never
+  // auto-replies: it is held for a person (`hostile_needs_confirm`) once the
+  // classification has run, and every automatic template is blocked for the
+  // message. An explicit opt-out the classifier recognises still goes through
+  // the existing opt-out path untouched. The identity shortcut is skipped so
+  // an automated "who is this" answer can never go to a hostile seller.
+  const hostileInbound = isHostileInbound(input.inboundBody);
+
+  if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
@@ -798,6 +808,7 @@ async function dispatchAiResponseCore(
     outboundMode: config!.outbound_mode,
     currentTurn,
     claimStartedAt,
+    ...(hostileInbound ? { hostile: true } : {}),
   };
   const classificationResult = await classifyAndHandleNonRouteOutcomes(
     supabase,
@@ -1017,6 +1028,9 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_nurture") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // Root review of dbbb12e6, finding 1: effect + revision guard +
     // audit insert now happen atomically inside ONE RPC call — see
     // applyJevLeadDecisionAtomically's doc comment.
@@ -1025,7 +1039,7 @@ async function classifyAndHandleNonRouteOutcomes(
     // disposition that suppresses automated sends, so the reply must go out
     // before the outcome is applied.
     let templateMessageId: string | null = null;
-    if (templateCtx) {
+    if (templateCtx && !templateCtx.hostile) {
       const step = await runApprovedTemplateStep(supabase, {
         input,
         property,
@@ -1106,6 +1120,9 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_needs_decision") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // Below the org's configured threshold, missing/invalid native
     // confidence, or no threshold configured at all for an outcome with no
     // existing pending-review path to fall back on (currently only
@@ -1136,6 +1153,9 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_promote_new_lead") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // new_lead at/above the org's configured threshold. Promote via the
     // atomic RPC (root review of dbbb12e6, finding 1) — never appointment
     // booking, never a raw properties.status write here. qualifyProperty
@@ -1214,6 +1234,9 @@ async function classifyAndHandleNonRouteOutcomes(
   // flagged. Deterministic STOP is unaffected — it's handled entirely
   // upstream of classification, in inbound.ts's matchesStopKeyword.
   if (classification.kind === "jev_no_action") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     const reason = "jev_unclear_no_action";
     const flagOk4 = await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeClaim(supabase, input.propertyId, {
@@ -1308,7 +1331,11 @@ async function resolveAndApplyRoute(
     // use_legacy — jev_no_action is handled inline above (returns
     // handled: true before reaching resolveAndApplyRoute), so only
     // use_legacy falls through to the existing combined Claude
-    // classify+generate call, unchanged from today.
+    // classify+generate call, unchanged from today. A hostile inbound is held
+    // BEFORE the model is called: no LLM call, no automatic decision.
+    if (isHostileInbound(input.inboundBody)) {
+      return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
+    }
     const conversation = await loadConversation(
       supabase,
       input.propertyId,
@@ -1364,6 +1391,13 @@ async function resolveAndApplyRoute(
       return { outcome: "escalated", reason };
     }
     route = resolveResponderOutcome(generated);
+  }
+  if (isHostileInbound(input.inboundBody)) {
+    // Hostile wording: hold for a person, whatever else the classifier decided
+    // (close, nurture, wrong number, opt-out, dnc, a generated reply). Jarrad
+    // (2026-10-08): no auto DNC decisions; only a bare carrier STOP keyword
+    // (handled in the webhook before dispatch) suppresses automatically.
+    return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
   }
   const expectedDisposition: AiReviewDisposition | null =
     route.kind === "opt_out"
@@ -1533,6 +1567,32 @@ async function resolveAndApplyRoute(
       return dncOutcome;
     }
     case "auto_close_wrong_number":
+      let wrongNumberTemplateMessageId: string | null = null;
+      if (
+        templateCtx &&
+        !templateCtx.hostile &&
+        classification.kind === "jev_route" &&
+        classification.eligibleForAutoAccept &&
+        classification.wrongScope === "this_property"
+      ) {
+        // Approved wrong-number reply (no promise to remove the number). The
+        // wrong_number disposition applied below, for this property only, is
+        // the whole effect. NO phone-level suppression here (Jarrad: no
+        // automatic DNC decisions; phone-wide blocking is a person's call). Never sent for a scope other than an explicit
+        // this_property (RULES-PROPOSAL 2.2 "Must NOT fire").
+        const step = await runApprovedTemplateStep(supabase, {
+          input,
+          property,
+          ctx: templateCtx,
+          claim: responseClaim,
+          outcome: "wrong_number",
+          nativeConfidence: classification.nativeConfidence,
+          escalationReason: classification.escalationReason,
+          runCtx,
+        });
+        if (step.kind === "stop") return step.outcome;
+        wrongNumberTemplateMessageId = step.outboundMessageId;
+      }
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
         ? await proposeDeferredJevDisposition(supabase, {
@@ -1584,11 +1644,45 @@ async function resolveAndApplyRoute(
         claimId: responseClaim.claimId,
         outcome: claimOutcomeOf(wrongNumberOutcome),
         errorMessage: dispositionClaimError(wrongNumberResult),
+        ...(wrongNumberTemplateMessageId ? { outboundMessageId: wrongNumberTemplateMessageId } : {}),
       });
       return wrongNumberOutcome;
     case "auto_close":
       let autoCloseTemplateMessageId: string | null = null;
-      if (templateCtx && classification.kind === "jev_route" && classification.eligibleForAutoAccept) {
+      if (
+        classification.kind === "jev_route" &&
+        classification.eligibleForAutoAccept &&
+        isSoldInbound(input.inboundBody)
+      ) {
+        // "Sold" wording (RULES-PROPOSAL 2.1, NI-1 "Must NOT fire"): the
+        // not-interested check-back ask is wrong for a home that is gone, so
+        // neither the template nor the automatic close goes out; a person
+        // looks at it.
+        await trace(supabase, {
+          kind: "gate",
+          name: "sold_hold",
+          result: "block",
+          detail: { reason: SOLD_NEEDS_HUMAN_REASON },
+        }, runCtx);
+        const soldFlagOk = await markPropertyNeedsAttention(
+          supabase,
+          input.propertyId,
+          SOLD_NEEDS_HUMAN_REASON,
+          runCtx,
+        );
+        await completeClaim(supabase, input.propertyId, {
+          claimId: responseClaim.claimId,
+          outcome: "escalated",
+          flagOk: soldFlagOk,
+        });
+        return { outcome: "escalated", reason: SOLD_NEEDS_HUMAN_REASON };
+      }
+      if (
+        templateCtx &&
+        !templateCtx.hostile &&
+        classification.kind === "jev_route" &&
+        classification.eligibleForAutoAccept
+      ) {
         // Approved-template reply before the terminal not-interested
         // disposition, which would suppress it (see runApprovedTemplateStep).
         const step = await runApprovedTemplateStep(supabase, {
@@ -2156,6 +2250,11 @@ type TemplateStepContext = {
   outboundMode?: string | null;
   currentTurn: number;
   claimStartedAt: string | null;
+  /**
+   * The inbound is hostile (`isHostileInbound`): the not-interested, nurture
+   * and wrong-number templates must never go out for this message.
+   */
+  hostile?: boolean;
 };
 
 type TemplateStepResult =
@@ -2217,7 +2316,7 @@ async function runApprovedTemplateStep(
     property: AiDispatchPropertyGateRow;
     ctx: TemplateStepContext;
     claim: { claimId: string | null };
-    outcome: "nurture" | "not_interested";
+    outcome: Extract<TemplateReplyKey, "nurture" | "not_interested" | "wrong_number">;
     nativeConfidence: number | null;
     /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
     escalationReason: JevEscalationReason | null;
@@ -2780,12 +2879,19 @@ async function loadSilentExit(
   if (humanActor) {
     // Engineering policy: a human Send is exempt
     // from the "already flagged" check ONLY when the flag is exactly
-    // `draft_held` (the flag that put the draft on the rail). Any other flag
+    // `draft_held` (the flag that put the draft on the rail) or a hostile
+    // hold being confirmed (`hostile_needs_confirm[:<id>]`). Any other flag
     // reason still refuses, with the reason shown.
     if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })) {
       return { ok: true, reason: "already_terminal" };
     }
-    if (property.needs_human_attention && property.last_ai_escalation_reason !== HUMAN_SEND_EXEMPT_FLAG_REASON) {
+    const humanExempt =
+      property.last_ai_escalation_reason === HUMAN_SEND_EXEMPT_FLAG_REASON ||
+      // "Confirm do-not-contact" on a hostile hold: the click is the human
+      // decision, validated by the hold action (reason + inbound id + org).
+      // Every other gate (Q8, consent, quiet hours, fence) still applies.
+      (property.last_ai_escalation_reason ?? "").startsWith(HOSTILE_NEEDS_CONFIRM_REASON);
+    if (property.needs_human_attention && !humanExempt) {
       return {
         ok: true,
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
@@ -5852,6 +5958,41 @@ async function applyWrongNumber(
   return result;
 }
 
+/**
+ * Hold a hostile conversation for a person. Nothing is suppressed and nothing
+ * is sent: only a human click ("Confirm do-not-contact" on the hold card)
+ * suppresses the number and then sends the approved hostile reply.
+ */
+async function holdHostileForConfirm(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  responseClaim: { claimId: string | null },
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "gate",
+    name: "hostile_hold",
+    result: "block",
+    detail: { reason: HOSTILE_NEEDS_CONFIRM_REASON },
+  }, runCtx);
+  // The originating inbound id rides in the hold reason so "Confirm
+  // do-not-contact" acts on exactly this message's contact and number.
+  const flagOk = await markPropertyNeedsAttention(
+    supabase,
+    input.propertyId,
+    input.inboundMessageId
+      ? `${HOSTILE_NEEDS_CONFIRM_REASON}:${input.inboundMessageId}`
+      : HOSTILE_NEEDS_CONFIRM_REASON,
+    runCtx,
+  );
+  await completeClaim(supabase, input.propertyId, {
+    claimId: responseClaim.claimId,
+    outcome: "escalated",
+    flagOk,
+  });
+  return { outcome: "escalated", reason: HOSTILE_NEEDS_CONFIRM_REASON };
+}
+
 async function loadContactPhone(
   supabase: SupabaseClient<Database>,
   contactId: string,
@@ -6012,6 +6153,44 @@ async function loadInboundBusinessNumber(
 function assertNeverRoute(value: never): never {
   throw new Error(`Unhandled responder route: ${JSON.stringify(value)}`);
 }
+
+/**
+ * markPropertyNeedsAttention never overwrites an existing flag, so a property
+ * already held for something else (a draft, a price escalation) would lose the
+ * actionable, message-specific confirm-DNC reason. Upgrade the reason to this
+ * message's confirm hold, guarded on the value just read. A suppression
+ * recovery pointer is preserved (it carries its own retry action).
+ */
+export async function flagConfirmDncHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+): Promise<boolean> {
+  const flagged = await markPropertyNeedsAttention(supabase, propertyId, reason);
+  if (!flagged) return false;
+  const { data, error } = await supabase
+    .from("properties")
+    .select("needs_human_attention, last_ai_escalation_reason")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (error || !data) return false;
+  const current = data.last_ai_escalation_reason ?? null;
+  if (data.needs_human_attention !== true) return false;
+  if (current === reason) return true;
+  if (current && (current === "suppression_incomplete" || current.startsWith("suppression_incomplete:"))) return true;
+  const base = supabase
+    .from("properties")
+    .update({ last_ai_escalation_reason: reason, last_ai_escalation_at: new Date().toISOString() })
+    .eq("id", propertyId)
+    .eq("needs_human_attention", true);
+  const { data: updated, error: updateError } = await (current === null
+    ? base.is("last_ai_escalation_reason", null)
+    : base.eq("last_ai_escalation_reason", current)
+  ).select("id");
+  if (updateError) return false;
+  return Array.isArray(updated) ? updated.length > 0 : Boolean(updated);
+}
+
 
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,

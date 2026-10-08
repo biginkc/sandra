@@ -12,6 +12,7 @@ import {
   listHoldAssigneesAction,
   sendHeldDraftAction,
   takeOverHoldAction,
+  confirmDoNotContactAction,
   retrySuppressionHoldAction,
   setReplyGenerationAction,
   undoJevAppliedAction,
@@ -182,6 +183,7 @@ export default async function MessagesV2Page() {
           assign: assignHoldAction,
           dismiss: dismissHoldAction,
           retrySuppression: retrySuppressionHoldAction,
+          confirmDoNotContact: confirmDoNotContactAction,
           listAssignees: listHoldAssigneesAction,
           ...(lunaEnabled
             ? {

@@ -19,6 +19,7 @@ import {
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
   flagAndDeadLetter,
+  flagConfirmDncHold,
   inboundStampOutcomeOf,
   markPropertyNeedsAttention,
   type AiDispatchInput,
@@ -73,8 +74,9 @@ import {
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
+import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
-import { DNC_KEYWORDS, matchesStopKeyword } from "./stop-signals";
+import { DNC_KEYWORDS, isCarrierStopKeyword, matchesStopKeyword } from "./stop-signals";
 import type { MessagingProvider } from "./types";
 
 export { matchesStopKeyword };
@@ -402,43 +404,22 @@ export async function handleInboundWebhook(
         continue;
       }
 
-      if (DNC_KEYWORDS.test(ev.body)) {
-        if (!orgId) {
-          throw new Error(
-            "DNC webhook could not resolve org for phone suppression",
-          );
-        }
-        await applyPhoneLevelOptOut(supabase, {
-          contactId,
-          fromPhone: ev.from,
-          orgId,
-          source,
-          sourceDetail: {
-            externalId: ev.externalId,
-            from: ev.from,
-            keyword: "dnc",
-          },
-          occurredAt: ev.receivedAt,
-          providerId: provider.providerId,
-          surface: "dnc",
-          idempotencyKey: ev.externalId,
-          ...(propertyId
-            ? {
-                leadEvent: {
-                  propertyId,
-                  actorType: "system" as const,
-                  trigger: "inbound_keyword" as const,
-                },
-              }
-            : {}),
-        });
-        if (propertyId) {
-          await setInboundDisposition(supabase, {
-            propertyId,
-            disposition: "dnc",
-            sourceId: resumeDecision.webhookEventId,
-          });
-        }
+      // Jarrad (2026-10-08): "I don't want to make any auto DNC decisions. It
+      // should go to hold." Only a bare carrier keyword (STOP, STOPALL,
+      // UNSUBSCRIBE, CANCEL, END, QUIT as the whole message) suppresses a
+      // number automatically (the STOP gate below). Every PHRASE match
+      // ("stop texting me", "do not contact me", "leave me alone", "remove
+      // me", a longer message containing "stop") is held for a person, who
+      // can click "Confirm do-not-contact" on the hold card.
+      if (
+        !isCarrierStopKeyword(bodyTrimmed) &&
+        (DNC_KEYWORDS.test(ev.body) ||
+          matchesStopKeyword(bodyTrimmed) ||
+          // ANY hostile wording is held here, ahead of every generic exit
+          // (price escalation, drafting off, reply pacing) that would hold
+          // it without the Confirm do-not-contact action.
+          isHostileInbound(ev.body))
+      ) {
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
           externalId: ev.externalId,
@@ -450,8 +431,25 @@ export async function handleInboundWebhook(
           conversationId,
           inboundIntentId: intentClaim.intentId,
           attributedOutboundMessageId,
-          metadata: { ...jsonObject(baseMetadata), keyword: "dnc" } as Json,
+          metadata: { ...jsonObject(baseMetadata), keyword: "opt_out_phrase" } as Json,
         });
+        if (!insertOutcome.error && propertyId) {
+          const held = await holdPhraseOptOut(supabase, {
+            propertyId,
+            body: ev.body,
+            inboundMessageId: insertOutcome.messageId ?? null,
+            surface: provider.providerId,
+          });
+          if (!held) {
+            await markWebhookEventError(
+              supabase,
+              provider.providerId,
+              ev.externalId,
+              "opt-out hold could not be saved",
+            );
+            return NextResponse.json({ error: "opt-out hold failed" }, { status: 500 });
+          }
+        }
         if (insertOutcome.error) {
           await markWebhookEventError(
             supabase,
@@ -470,8 +468,8 @@ export async function handleInboundWebhook(
             insertOutcome,
             body: ev.body,
             gate: "dnc_keyword",
-            status: "closed",
-            reason: "dnc_keyword",
+            status: "held",
+            reason: "optout_phrase_needs_confirm",
           });
         }
         await markWebhookEventProcessed(
@@ -486,16 +484,12 @@ export async function handleInboundWebhook(
         continue;
       }
 
-      // Automatic phone suppression driven by an inbound text is limited to
-      // deterministic phrase matches, never a model judgment: this carrier/legal
-      // STOP match (CTIA / TCPA revocation) is the one that is kept. The
-      // DNC_KEYWORDS match and the wrong-number "all" scope below are ALSO
-      // still automatic, pending Jarrad's ruling on whether they should become
-      // hold-only. Jarrad (2026-10-07): "I don't want you making any DNC
-      // decisions. I don't want Jev making any DNC decisions." Every
-      // Jev/legacy-classifier opt-out or DNC opens a human review instead
-      // (see ai-responder/dispatch.ts).
-      if (matchesStopKeyword(bodyTrimmed)) {
+      // The ONLY automatic phone suppression driven by an inbound text: a bare
+      // carrier / legal STOP keyword as the whole message (CTIA / TCPA).
+      // Jarrad (2026-10-08): "I don't want to make any auto DNC decisions. It
+      // should go to hold." Phrase matches are held above; model / Jev
+      // opt-outs and DNCs open a human review (see ai-responder/dispatch.ts).
+      if (isCarrierStopKeyword(bodyTrimmed)) {
         if (!orgId) {
           throw new Error(
             "STOP webhook could not resolve org for phone suppression",
@@ -642,13 +636,18 @@ export async function handleInboundWebhook(
 
       if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
         const wrongScope = classifyWrongNumberScope(ev.body);
+        // Hostile wording takes precedence: no wrong_number disposition is
+        // applied; the conversation is held for a person instead.
+        const hostileWrongNumber = isHostileInbound(ev.body);
         if (propertyId) {
-          await setInboundDisposition(supabase, {
-            propertyId,
-            disposition: "wrong_number",
-            sourceId: resumeDecision.webhookEventId,
-            allowedCurrent: new Set([null, "not_interested"]),
-          });
+          if (!hostileWrongNumber) {
+            await setInboundDisposition(supabase, {
+              propertyId,
+              disposition: "wrong_number",
+              sourceId: resumeDecision.webhookEventId,
+              allowedCurrent: new Set([null, "not_interested"]),
+            });
+          }
           try {
             await pausePropertyEnrollments(supabase, {
               propertyId,
@@ -662,38 +661,6 @@ export async function handleInboundWebhook(
               extra: { propertyId, externalId: ev.externalId },
             });
           }
-        }
-        if (wrongScope === "all") {
-          if (!orgId) {
-            throw new Error(
-              "wrong-number webhook could not resolve org for phone suppression",
-            );
-          }
-          await applyPhoneLevelOptOut(supabase, {
-            contactId,
-            fromPhone: ev.from,
-            orgId,
-            source,
-            sourceDetail: {
-              externalId: ev.externalId,
-              from: ev.from,
-              keyword: "wrong_number",
-              wrong_scope: wrongScope,
-            },
-            occurredAt: ev.receivedAt,
-            providerId: provider.providerId,
-            surface: "dnc",
-            idempotencyKey: ev.externalId,
-            ...(propertyId
-              ? {
-                  leadEvent: {
-                    propertyId,
-                    actorType: "system" as const,
-                    trigger: "inbound_keyword" as const,
-                  },
-                }
-              : {}),
-          });
         }
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
@@ -712,6 +679,28 @@ export async function handleInboundWebhook(
             wrong_scope: wrongScope,
           } as Json,
         });
+        if (!insertOutcome.error && propertyId && (wrongScope === "all" || hostileWrongNumber)) {
+          // "Wrong person for everything" is a phone-wide claim, and hostile
+          // wording is never an automatic decision: a person decides whether
+          // to block the number (no automatic suppression). Hostile wording
+          // keeps the hostile reason (so the approved reply can be sent).
+          const held = await holdPhraseOptOut(supabase, {
+            propertyId,
+            body: ev.body,
+            inboundMessageId: insertOutcome.messageId ?? null,
+            surface: provider.providerId,
+            ...(hostileWrongNumber ? {} : { forceReason: OPTOUT_PHRASE_NEEDS_CONFIRM_REASON }),
+          });
+          if (!held) {
+            await markWebhookEventError(
+              supabase,
+              provider.providerId,
+              ev.externalId,
+              "opt-out hold could not be saved",
+            );
+            return NextResponse.json({ error: "opt-out hold failed" }, { status: 500 });
+          }
+        }
         if (insertOutcome.error) {
           await markWebhookEventError(
             supabase,
@@ -1751,6 +1740,38 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
   );
 }
 
+/**
+ * Hold an opt-out PHRASE match for a person (no suppression). Drips are paused
+ * (reversible, like any inbound reply) and the property is flagged with the
+ * originating inbound message id, so "Confirm do-not-contact" acts on exactly
+ * that message's contact and number. Hostile wording gets the hostile reason.
+ * Never throws.
+ */
+async function holdPhraseOptOut(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    body: string;
+    inboundMessageId: string | null;
+    surface: string;
+    forceReason?: string;
+  },
+): Promise<boolean> {
+  try {
+    const base = args.forceReason ?? (isHostileInbound(args.body) ? HOSTILE_NEEDS_CONFIRM_REASON : OPTOUT_PHRASE_NEEDS_CONFIRM_REASON);
+    const reason = args.inboundMessageId ? `${base}:${args.inboundMessageId}` : base;
+    try {
+      await pausePropertyEnrollments(supabase, { propertyId: args.propertyId, reason: "inbound_reply" });
+    } catch (e) {
+      reportError(e, { tags: { surface: `${args.surface}_webhook_sequence_pause_opt_out_phrase` }, extra: { propertyId: args.propertyId } });
+    }
+    return await flagConfirmDncHold(supabase, args.propertyId, reason);
+  } catch (e) {
+    reportError(e, { tags: { surface: `${args.surface}_webhook_opt_out_phrase_hold` }, extra: { propertyId: args.propertyId } });
+    return false;
+  }
+}
+
 async function dispatchAndStampAiResponder(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -1880,7 +1901,7 @@ async function recordKeywordExitRun(
     body: string;
     gate:
       "stop_keyword" | "dnc_keyword" | "help_keyword" | "wrong_number_keyword";
-    status: "closed" | "skipped";
+    status: "closed" | "skipped" | "held";
     reason: string;
   },
 ): Promise<void> {

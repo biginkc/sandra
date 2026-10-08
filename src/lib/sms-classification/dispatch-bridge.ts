@@ -78,6 +78,10 @@ export type ClassificationBridgeResult =
        *  so the approved-template step can fail closed on anything but
        *  `not_applicable` (PLAN D5: price / distress never auto-reply). */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** Jev's raw wrong-contact scope (`route.scope` folds uncertain into
+       *  this_property). The approved wrong-number reply fires only on an
+       *  explicit `this_property`. */
+      wrongScope: SmsClassificationDecision["wrongScope"];
       thresholdAtDecision: number | null;
       /** The threshold SETTINGS ROW'S version actually used at decision
        *  time — null exactly when thresholdAtDecision is null (root
@@ -430,6 +434,7 @@ export async function classifyForDispatch(
       eligibleForAutoAccept: false,
       nativeConfidence,
       escalationReason: decision.escalationReason,
+      wrongScope: decision.wrongScope,
       thresholdAtDecision,
       thresholdVersion,
       evaluationRevision,
@@ -458,6 +463,7 @@ export async function classifyForDispatch(
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
     escalationReason: decision.escalationReason,
+    wrongScope: decision.wrongScope,
   };
 }
 
