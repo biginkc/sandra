@@ -1721,6 +1721,18 @@ describe("loadMessagesV2Data luna suggestions", () => {
     expect(data.holds[0].luna).toBeUndefined();
   });
 
+  it("hides a suggestion whose inbound message no longer has a pending decision or review", async () => {
+    const { client, queries } = fakeSupabase({
+      jev_lead_decisions: (calls) =>
+        isHead(calls) ? {} : { data: [{ ...decision, source_inbound_message_id: "m2" }] },
+      luna_suggestions: () => ({ data: [lunaRow({ inbound_message_id: "m1" })] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holds[0].luna).toBeUndefined();
+    const q = queries.find((c) => c[0]?.table === "luna_suggestions")!;
+    expect(q.find((c) => c.method === "in" && c.args[0] === "inbound_message_id")!.args[1]).toEqual(["m2"]);
+  });
+
   it("skips holds that do not come from a jev decision or disposition review", async () => {
     const { client, queries } = fakeSupabase({
       ai_reply_drafts: () => ({

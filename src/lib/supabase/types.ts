@@ -7898,6 +7898,18 @@ export type Database = {
         }
         Returns: boolean
       }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      fn_luna_suggestion_stats: {
+        Args: { p_org_id: string; p_window_days: number }
+        Returns: {
+          outcome: string
+          shown: number
+          accepted: number
+          rejected: number
+          agreed_manually: number
+          open: number
+        }[]
+      }
       fn_resolve_hold: {
         Args: {
           p_org_id: string

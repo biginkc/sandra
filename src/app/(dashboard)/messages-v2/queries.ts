@@ -1120,12 +1120,18 @@ export async function loadMessagesV2Data(
     const eligible = openHolds.filter(
       (h) => h.sources.includes("jev_decision") || h.sources.includes("disposition_review"),
     );
-    const idsFor = (h: OpenHold<PipelineRun>) => [
-      ...new Set([
-        ...(h.message_ids ?? []),
-        ...(h.run?.inbound_message_id ? [h.run.inbound_message_id] : []),
-      ]),
-    ];
+    // Only inbound messages that still have a pending decision / review count:
+    // after a dismiss, takeover or fn_resolve_hold the suggestion is stale and
+    // must not show (Apply would fail with "nothing is waiting").
+    const pendingMsgsByProperty = new Map<string, Set<string>>();
+    for (const r of [...decisions, ...reviews]) {
+      if (!r.property_id || !r.source_inbound_message_id) continue;
+      const set = pendingMsgsByProperty.get(r.property_id) ?? new Set<string>();
+      set.add(r.source_inbound_message_id);
+      pendingMsgsByProperty.set(r.property_id, set);
+    }
+    const idsFor = (h: OpenHold<PipelineRun>) =>
+      h.property_id ? [...(pendingMsgsByProperty.get(h.property_id) ?? [])] : [];
     const allIds = [...new Set(eligible.flatMap(idsFor))];
     if (allIds.length > 0) {
       const rows: Array<LunaHoldSuggestion & { created_at: string }> = [];
