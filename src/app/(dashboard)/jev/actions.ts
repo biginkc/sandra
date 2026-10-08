@@ -8,6 +8,8 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { applySuppressionForConfirmedReview } from "@/lib/ai-responder/confirm-suppression";
+import { recordLunaResolutionForItem } from "@/lib/sms-classification/luna/resolution";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import { getCorrectionHistory, getNeedsDecisionQueue, type CorrectionHistoryEntry, type JevQueueItem } from "./queries";
@@ -43,6 +45,26 @@ export async function fetchCorrectionHistory(
   } catch (e) {
     reportError(e, { tags: { surface: "jev_fetch_correction_history" }, extra: { source, id } });
     return errFromUnknown(e, "JEV_HISTORY_FAILED");
+  }
+}
+
+/**
+ * Best-effort Luna bookkeeping after a human resolved an item through the normal
+ * controls (see recordLunaResolutionForItem). Never throws or fails the action.
+ */
+async function recordLunaResolution(
+  reader: Awaited<ReturnType<typeof createClient>>,
+  args: {
+    source: "ai_disposition_review" | "jev_lead_decision";
+    itemId: string;
+    appliedOutcome: string | null;
+    userId: string;
+  },
+): Promise<void> {
+  try {
+    await recordLunaResolutionForItem(reader, createAdminClient(), args);
+  } catch (e) {
+    reportError(e, { tags: { surface: "jev_luna_record_resolution" } });
   }
 }
 
@@ -108,6 +130,14 @@ export async function confirmJevQueueItem(
         const suppression = await applySuppressionForConfirmedReview(supabase as never, id, user.id);
         if (!suppression.ok) warning = suppression.warning;
       }
+      if (status === "confirmed") {
+        await recordLunaResolution(supabase, {
+          source: "ai_disposition_review",
+          itemId: id,
+          appliedOutcome: null,
+          userId: user.id,
+        });
+      }
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
       return ok(warning ? { status, warning } : { status });
@@ -125,6 +155,14 @@ export async function confirmJevQueueItem(
       }
       const status = (data as { status?: string } | null)?.status;
       if (!status) return { ok: false, error: { code: "JEV_CONFIRM_FAILED", message: "Unexpected response" } };
+      if (status === "confirmed") {
+        await recordLunaResolution(supabase, {
+          source: "jev_lead_decision",
+          itemId: id,
+          appliedOutcome: null,
+          userId: user.id,
+        });
+      }
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
       return ok({ status });
@@ -303,6 +341,14 @@ export async function correctJevQueueItem(
       if (!result?.status || !resolvedOutcome) {
         return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Unexpected response" } };
       }
+      if (result.status === "corrected") {
+        await recordLunaResolution(supabase, {
+          source,
+          itemId: id,
+          appliedOutcome: correctedOutcome,
+          userId: user.id,
+        });
+      }
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
       return ok({ status: result.status, resolvedOutcome });
@@ -339,6 +385,15 @@ export async function correctJevQueueItem(
         homeownerContactId: result.homeownerContactId ?? null,
         dispo: correctedOutcome,
         actorId: user.id,
+      });
+    }
+
+    if (result.status === "corrected") {
+      await recordLunaResolution(supabase, {
+        source,
+        itemId: id,
+        appliedOutcome: correctedOutcome,
+        userId: user.id,
       });
     }
 

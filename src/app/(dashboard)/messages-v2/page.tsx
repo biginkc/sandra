@@ -14,6 +14,9 @@ import {
   takeOverHoldAction,
   retrySuppressionHoldAction,
 } from "./actions";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
+
+import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
@@ -80,9 +83,10 @@ export default async function MessagesV2Page() {
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
+  const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const [loaded, coverage, scorecardRows, replayBatchId] = await Promise.all([
-    loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
+    loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
@@ -122,6 +126,7 @@ export default async function MessagesV2Page() {
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
+        lunaEnabled={lunaEnabled}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,
@@ -130,6 +135,12 @@ export default async function MessagesV2Page() {
           dismiss: dismissHoldAction,
           retrySuppression: retrySuppressionHoldAction,
           listAssignees: listHoldAssigneesAction,
+          ...(lunaEnabled
+            ? {
+                lunaApply: applyLunaSuggestionAction,
+                lunaReject: rejectLunaSuggestionAction,
+              }
+            : {}),
         }}
       />
     </div>

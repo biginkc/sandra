@@ -74,23 +74,15 @@ import {
 } from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
+import { DNC_KEYWORDS, matchesStopKeyword } from "./stop-signals";
 import type { MessagingProvider } from "./types";
 
-const UNAMBIGUOUS_STOP_KEYWORDS =
-  /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me|take me off|delete my (?:number|info)|leave me alone|quit bothering me|do not contact me|don'?t text me again|lose (?:this|my) number|never contact me)\b|\bstop\b(?!\s+by\b)/i;
-const AMBIGUOUS_STOP_KEYWORDS = /^\s*(end|cancel|quit|remove)\s*$/i;
+export { matchesStopKeyword };
+
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
-const DNC_KEYWORDS =
-  /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out|please delete my (number|info)|delete my (number|info)|lose (this|my) number|never contact me/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
-
-export function matchesStopKeyword(body: string) {
-  return (
-    UNAMBIGUOUS_STOP_KEYWORDS.test(body) || AMBIGUOUS_STOP_KEYWORDS.test(body)
-  );
-}
 
 export function classifyWrongNumberScope(
   body: string,

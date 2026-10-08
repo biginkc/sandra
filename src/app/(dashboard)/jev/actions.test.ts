@@ -18,6 +18,9 @@ const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
   applySuppressionForConfirmedReview: vi.fn(),
 }));
 vi.mock("@/lib/ai-responder/confirm-suppression", () => ({ applySuppressionForConfirmedReview }));
+const { recordLunaResolutionForItem } = vi.hoisted(() => ({ recordLunaResolutionForItem: vi.fn() }));
+vi.mock("@/lib/sms-classification/luna/resolution", () => ({ recordLunaResolutionForItem }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ admin: true }) }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({
@@ -64,6 +67,8 @@ import {
 } from "./actions";
 
 beforeEach(() => {
+  recordLunaResolutionForItem.mockReset();
+  recordLunaResolutionForItem.mockResolvedValue(undefined);
   applySuppressionForConfirmedReview.mockReset();
   applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
   mocks.user = { id: "user-1" };
@@ -394,5 +399,42 @@ describe("fetchCorrectionHistory — root final-review P2", () => {
     mocks.correctionHistoryResult = { entries: [], error: "connection reset" };
     const result = await fetchCorrectionHistory("prop-1", "jev_lead_decision", "decision-1");
     expect(result).toEqual({ ok: false, error: { code: "JEV_HISTORY_FAILED", message: "connection reset" } });
+  });
+});
+
+describe("Luna bookkeeping after a human resolves an item through the normal controls", () => {
+  it("records the corrected outcome (a different pick counts as a rejection downstream)", async () => {
+    mocks.rpcResult = { data: { status: "corrected", resolvedOutcome: "wrong_number" }, error: null };
+    const result = await correctJevQueueItem("jev_lead_decision", "decision-1", "wrong_number", null);
+    expect(result.ok).toBe(true);
+    expect(recordLunaResolutionForItem).toHaveBeenCalledWith(
+      expect.anything(),
+      { admin: true },
+      { source: "jev_lead_decision", itemId: "decision-1", appliedOutcome: "wrong_number", userId: "user-1" },
+    );
+  });
+
+  it("records a confirm with no explicit outcome (read from the item)", async () => {
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    await confirmJevQueueItem("jev_lead_decision", "decision-1");
+    expect(recordLunaResolutionForItem).toHaveBeenCalledWith(
+      expect.anything(),
+      { admin: true },
+      { source: "jev_lead_decision", itemId: "decision-1", appliedOutcome: null, userId: "user-1" },
+    );
+  });
+
+  it("records nothing when the decision RPC fails", async () => {
+    mocks.rpcResult = { data: null, error: { message: "nope" } };
+    await confirmJevQueueItem("ai_disposition_review", "review-1");
+    await correctJevQueueItem("jev_lead_decision", "decision-1", "nurture", null);
+    expect(recordLunaResolutionForItem).not.toHaveBeenCalled();
+  });
+
+  it("never fails the action that already happened", async () => {
+    recordLunaResolutionForItem.mockRejectedValue(new Error("luna bookkeeping down"));
+    mocks.rpcResult = { data: { status: "corrected", resolvedOutcome: "nurture" }, error: null };
+    const result = await correctJevQueueItem("jev_lead_decision", "decision-1", "nurture", null);
+    expect(result).toEqual({ ok: true, data: { status: "corrected", resolvedOutcome: "nurture" } });
   });
 });

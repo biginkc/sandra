@@ -3,6 +3,7 @@ import type {
   HeaderStats,
   HoldsMeta,
   HoldSource,
+  LunaHoldSuggestion,
   ModeBadge,
   OpenHold,
   PipelineCoverage,
@@ -433,6 +434,14 @@ export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
     : `${openCount} holds`;
 }
 
+const LUNA_SUGGESTION_OUTCOMES = [
+  "new_lead",
+  "nurture",
+  "not_interested",
+  "wrong_number",
+  "opted_out",
+  "dnc",
+] as const;
 const STEP_CHUNK = 40;
 const PROPERTY_RPC_CHUNK = 200;
 /** Explicit row limit for the chunked .in() lookups (>= chunk size); hitting it counts as failed. */
@@ -623,6 +632,8 @@ export async function loadMessagesV2Data(
      * with activity at/after it, found directly rather than through HOLD_LIMIT.
      */
     alertsSince?: string;
+    /** Attach Luna's pending suggestion to jev/disposition holds. Off = zero extra queries. */
+    includeLuna?: boolean;
   } = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
@@ -1006,6 +1017,58 @@ export async function loadMessagesV2Data(
       }
     }
   }
+  // Luna's pending suggestion per hold (page only; the alert cron never asks).
+  const lunaByHold = new Map<string, LunaHoldSuggestion>();
+  if (opts.includeLuna) {
+    const eligible = openHolds.filter(
+      (h) => h.sources.includes("jev_decision") || h.sources.includes("disposition_review"),
+    );
+    const idsFor = (h: OpenHold<PipelineRun>) => [
+      ...new Set([
+        ...(h.message_ids ?? []),
+        ...(h.run?.inbound_message_id ? [h.run.inbound_message_id] : []),
+      ]),
+    ];
+    const allIds = [...new Set(eligible.flatMap(idsFor))];
+    if (allIds.length > 0) {
+      const rows: Array<LunaHoldSuggestion & { created_at: string }> = [];
+      const lunaResults = await Promise.all(
+        chunked(allIds, PROPERTY_RPC_CHUNK).map((ids) =>
+          supabase
+            .from("luna_suggestions")
+            .select("id, outcome, confidence, inbound_message_id, created_at")
+            .eq("org_id", orgId)
+            .is("accepted_at", null)
+            .is("rejected_at", null)
+            .is("applied_outcome", null)
+            .in("outcome", [...LUNA_SUGGESTION_OUTCOMES])
+            .in("inbound_message_id", ids)
+            .limit(BY_IDS_LIMIT),
+        ),
+      );
+      let failed = false;
+      for (const res of lunaResults) {
+        if (res.error) failed = true;
+        else rows.push(...((res.data ?? []) as typeof rows));
+      }
+      if (failed) contextErrors.push("luna lookup");
+      else {
+        for (const h of eligible) {
+          const mine = new Set(idsFor(h));
+          const best = rows
+            .filter((r) => mine.has(r.inbound_message_id))
+            .sort((a, b) => compareInstants(b.created_at, a.created_at))[0];
+          if (best)
+            lunaByHold.set(h.id, {
+              id: best.id,
+              outcome: best.outcome,
+              confidence: Number(best.confidence),
+              inbound_message_id: best.inbound_message_id,
+            });
+        }
+      }
+    }
+  }
   const deadLettersFor = (h: OpenHold<PipelineRun>): DeadLetterInfo[] =>
     groups
       .filter(
@@ -1074,6 +1137,7 @@ export async function loadMessagesV2Data(
         ...(isDead(h) ? { dead_letter: true } : {}),
         ...(dls.some((d) => d.late) ? { dead_letter_late: true } : {}),
         ...(dls.length ? { dead_letters: dls } : {}),
+        ...(lunaByHold.has(h.id) ? { luna: lunaByHold.get(h.id) } : {}),
         ...(h.property_id && alertByProperty.has(h.property_id)
           ? { alert: alertByProperty.get(h.property_id) }
           : {}),
