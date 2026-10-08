@@ -29,6 +29,9 @@ import {
   classifyForDispatch,
   type ClassificationBridgeResult,
 } from "@/lib/sms-classification/dispatch-bridge";
+import { jevOutcomeForLunaHold } from "@/lib/sms-classification/luna/hold";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
+import { requestLunaSuggestion } from "@/lib/sms-classification/luna/suggest";
 
 import {
   claimAiResponse,
@@ -925,7 +928,14 @@ async function classifyAndHandleNonRouteOutcomes(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   property: AiDispatchPropertyGateRow,
-  config: { classifier_provider?: string | null; classifier_mode?: string | null } | null | undefined,
+  config:
+    | {
+        classifier_provider?: string | null;
+        classifier_mode?: string | null;
+        escalation_keywords?: ReadonlyArray<string> | null;
+      }
+    | null
+    | undefined,
   responseClaim: { claimId: string | null },
   runCtx?: MaybeRunContext,
 ): Promise<
@@ -952,6 +962,31 @@ async function classifyAndHandleNonRouteOutcomes(
       runContext: runCtx,
     },
   );
+
+  // Luna fallback SUGGESTION for a below-threshold hold. Fire-and-forget after
+  // the response: it never delays or blocks this pipeline, never applies
+  // anything, and is a no-op unless LUNA_SUGGESTIONS_ENABLED=1 with a key.
+  const lunaJevOutcome = jevOutcomeForLunaHold(classification);
+  if (lunaJevOutcome && input.inboundMessageId && lunaSuggestionsEnabled()) {
+    const inboundMessageId = input.inboundMessageId;
+    runAfterResponse(async () => {
+      await requestLunaSuggestion(
+        supabase,
+        {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId,
+          inboundBody: input.inboundBody,
+          jevOutcome: lunaJevOutcome,
+          escalationKeywords: config?.escalation_keywords ?? null,
+          runContext: runCtx,
+        },
+        { fetch },
+      );
+    });
+  }
 
   if (classification.kind === "jev_nurture") {
     // Root review of dbbb12e6, finding 1: effect + revision guard +

@@ -139,6 +139,14 @@ export type HoldSeen = {
   flagAt: string | null;
 };
 
+/** Luna's pending pick for a hold (a suggestion only; never auto-applied). */
+export type LunaHoldSuggestion = {
+  id: string;
+  outcome: string;
+  confidence: number;
+  inbound_message_id: string;
+};
+
 export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Property id (one hold per property). */
   id: string;
@@ -188,6 +196,8 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   alert?: { status: "pending" | "sending" | "sent" | "failed" | "skipped"; reason: string | null };
   /** The property's raw last_ai_escalation_reason (e.g. `send_timeout_then_sent`); null/absent when none. */
   flag_reason?: string | null;
+  /** Luna's pending suggestion for this hold (only when the Luna flag is on). */
+  luna?: LunaHoldSuggestion;
 };
 
 export type PipelineCoverage = { inboundMessages: number; runs: number };

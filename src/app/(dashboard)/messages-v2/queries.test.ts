@@ -1668,3 +1668,97 @@ describe("loadHeldPropertyIds", () => {
     expect(await loadHeldPropertyIds(client, "org", ["a"])).toBeNull();
   });
 });
+
+describe("loadMessagesV2Data luna suggestions", () => {
+  const decision = {
+    property_id: "p1",
+    conversation_id: "c1",
+    source_inbound_message_id: "m1",
+    created_at: iso("02:00:00"),
+  };
+  const lunaRow = (over: Record<string, unknown> = {}) => ({
+    id: "l1",
+    outcome: "nurture",
+    confidence: "0.8",
+    inbound_message_id: "m1",
+    created_at: iso("03:00:00"),
+    ...over,
+  });
+  const build = (luna: () => Result, extra: Record<string, (c: Call) => Result> = {}) =>
+    fakeSupabase({
+      jev_lead_decisions: (calls) => (isHead(calls) ? {} : { data: [decision] }),
+      luna_suggestions: luna,
+      ...extra,
+    });
+
+  it("does zero luna queries by default", async () => {
+    const { client, queries } = build(() => ({ data: [lunaRow()] }));
+    const data = await loadMessagesV2Data(client, "org");
+    expect(queries.some((q) => q[0]?.table === "luna_suggestions")).toBe(false);
+    expect(data.holds[0].luna).toBeUndefined();
+  });
+
+  it("attaches the newest pending suggestion when includeLuna is set, filtered to pending rows", async () => {
+    const { client, queries } = build(() => ({
+      data: [lunaRow(), lunaRow({ id: "l2", outcome: "not_interested", confidence: 0.9, created_at: iso("04:00:00") })],
+    }));
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holds[0].luna).toEqual({
+      id: "l2",
+      outcome: "not_interested",
+      confidence: 0.9,
+      inbound_message_id: "m1",
+    });
+    const q = queries.find((c) => c[0]?.table === "luna_suggestions")!;
+    const isCols = q.filter((c) => c.method === "is").map((c) => c.args[0]);
+    expect(isCols).toEqual(["accepted_at", "rejected_at", "applied_outcome"]);
+    expect(q.find((c) => c.method === "eq")!.args).toEqual(["org_id", "org"]);
+  });
+
+  it("ignores suggestions for other messages", async () => {
+    const { client } = build(() => ({ data: [lunaRow({ inbound_message_id: "other" })] }));
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holds[0].luna).toBeUndefined();
+  });
+
+  it("hides a suggestion whose inbound message no longer has a pending decision or review", async () => {
+    const { client, queries } = fakeSupabase({
+      jev_lead_decisions: (calls) =>
+        isHead(calls) ? {} : { data: [{ ...decision, source_inbound_message_id: "m2" }] },
+      luna_suggestions: () => ({ data: [lunaRow({ inbound_message_id: "m1" })] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holds[0].luna).toBeUndefined();
+    const q = queries.find((c) => c[0]?.table === "luna_suggestions")!;
+    expect(q.find((c) => c.method === "in" && c.args[0] === "inbound_message_id")!.args[1]).toEqual(["m2"]);
+  });
+
+  it("skips holds that do not come from a jev decision or disposition review", async () => {
+    const { client, queries } = fakeSupabase({
+      ai_reply_drafts: () => ({
+        data: [
+          {
+            id: "d1",
+            property_id: "p9",
+            conversation_id: null,
+            inbound_message_id: "m1",
+            run_id: null,
+            created_at: iso("03:00:00"),
+          },
+        ],
+      }),
+      luna_suggestions: () => ({ data: [lunaRow()] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holds[0].sources).toEqual(["pending_draft"]);
+    expect(data.holds[0].luna).toBeUndefined();
+    expect(queries.some((q) => q[0]?.table === "luna_suggestions")).toBe(false);
+  });
+
+  it("adds 'luna lookup' to contextErrors and shows no suggestion when the lookup fails", async () => {
+    const { client } = build(() => ({ data: null, error: { message: "x" } }));
+    const data = await loadMessagesV2Data(client, "org", undefined, { includeLuna: true });
+    expect(data.holdsMeta.contextErrors).toContain("luna lookup");
+    expect(data.holds[0].luna).toBeUndefined();
+  });
+});

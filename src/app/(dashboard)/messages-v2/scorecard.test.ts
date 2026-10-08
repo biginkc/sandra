@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildLunaStats,
   buildScorecard,
+  fetchLunaStatRows,
+  parseLunaStatRows,
   formatRuleText,
   parseScorecardRows,
   SCORECARD_OUTCOMES,
@@ -294,5 +297,31 @@ describe("parseScorecardRows", () => {
   it("returns [] for non-array input", () => {
     expect(parseScorecardRows(null)).toEqual([]);
     expect(parseScorecardRows({})).toEqual([]);
+  });
+});
+
+describe("luna stats", () => {
+  it("coerces bigint strings and aggregates totals", () => {
+    const rows = parseLunaStatRows([
+      { outcome: "nurture", shown: "10", accepted: "4", rejected: "2", agreed_manually: "1", open: "3" },
+      { outcome: "dnc", shown: 5, accepted: 0, rejected: 5, agreed_manually: 0, open: 0 },
+    ]);
+    const s = buildLunaStats(rows);
+    expect(s).toMatchObject({ shown: 15, accepted: 4, rejected: 7, agreedManually: 1, open: 3 });
+    expect(s.acceptedRate).toBeCloseTo(4 / 15);
+    expect(s.byOutcome[0]).toMatchObject({ outcome: "nurture", shown: 10, accepted: 4 });
+    expect(s.byOutcome[0].acceptedRate).toBeCloseTo(0.4);
+  });
+  it("has a null rate (not zero) when nothing was shown", () => {
+    expect(buildLunaStats([]).acceptedRate).toBeNull();
+    expect(parseLunaStatRows("nope")).toEqual([]);
+  });
+  it("calls fn_luna_suggestion_stats and throws on error", async () => {
+    const calls: unknown[] = [];
+    const ok = { rpc: (fn: string, args: Record<string, unknown>) => { calls.push([fn, args]); return Promise.resolve({ data: [], error: null }); } };
+    await fetchLunaStatRows(ok, "org", 30);
+    expect(calls).toEqual([["fn_luna_suggestion_stats", { p_org_id: "org", p_window_days: 30 }]]);
+    const bad = { rpc: () => Promise.resolve({ data: null, error: { message: "boom" } }) };
+    await expect(fetchLunaStatRows(bad, "org", 7)).rejects.toThrow("boom");
   });
 });

@@ -2,6 +2,7 @@
 
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { err, type Result } from "@/lib/errors/result";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { createClient } from "@/lib/supabase/server";
 
 import { messagesV2OrgId } from "./access";
@@ -48,7 +49,9 @@ export async function loadBacklogHoldsAction(input: {
   const offset = clampInt(input?.offset, 0, 1_000_000);
   const limit = Math.max(1, clampInt(input?.limit, BACKLOG_PAGE, MAX_PAGE));
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const page = await loadBacklogHolds(supabase, orgId, offset, limit);
+  const page = await loadBacklogHolds(supabase, orgId, offset, limit, undefined, {
+    includeLuna: lunaSuggestionsEnabled(),
+  });
   if (!page || page.failed) {
     return err({ code: "BACKLOG_UNAVAILABLE", message: "Backlog holds could not be loaded." });
   }

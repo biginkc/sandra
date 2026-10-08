@@ -25,6 +25,12 @@ vi.mock("@/lib/sms-classification/dispatch-bridge", async (importOriginal) => {
   return { ...actual, classifyForDispatch: vi.fn(actual.classifyForDispatch) };
 });
 
+const lunaSuggest = vi.hoisted(() => ({ request: vi.fn() }));
+
+vi.mock("@/lib/sms-classification/luna/suggest", () => ({
+  requestLunaSuggestion: lunaSuggest.request,
+}));
+
 vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
     AI_ESCALATED: "ai_escalated",
@@ -2357,6 +2363,120 @@ describe("dispatchAiResponse debounce", () => {
         expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
         expect(state.property.needs_human_attention).toBe(false);
       } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+  });
+
+  describe("Luna fallback suggestion on below-threshold holds (never applied, never blocking)", () => {
+    const LUNA_ENV = { LUNA_SUGGESTIONS_ENABLED: "1", OPENAI_API_KEY: "sk-test-key" };
+
+    async function dispatchBelowThreshold(choice: string, body: string, id: string) {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: choice, min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id, body });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice, confidence: 0.5 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: body, inboundMessageId: id, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        return { result, state };
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    }
+
+    beforeEach(() => {
+      lunaSuggest.request.mockReset();
+      lunaSuggest.request.mockResolvedValue({ status: "stored", outcome: "nurture", confidence: 0.9 });
+    });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it.each([
+      { choice: "nurture", jev: "nurture" },
+      { choice: "not_interested", jev: "not_interested" },
+      { choice: "wrong_number", jev: "wrong_number" },
+    ])("asks Luna once for a below-threshold Jev $choice hold and leaves the dispatch result unchanged", async ({ choice, jev }) => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      const { result, state } = await dispatchBelowThreshold(choice, "maybe, not sure", `inbound-luna-${choice}`);
+      await vi.waitFor(() => expect(lunaSuggest.request).toHaveBeenCalledTimes(1));
+      expect(lunaSuggest.request).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ jevOutcome: jev, inboundMessageId: `inbound-luna-${choice}`, propertyId: PROPERTY_ID }),
+        expect.anything(),
+      );
+      // Still held for a human; Luna applied nothing.
+      expect(result.outcome).not.toBe("sent");
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+    });
+
+    it("does not wait for a Luna call that never finishes", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      lunaSuggest.request.mockImplementation(() => new Promise(() => undefined));
+      const { result } = await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-hang");
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
+      await vi.waitFor(() => expect(lunaSuggest.request).toHaveBeenCalledTimes(1));
+    });
+
+    it("schedules the Luna call after the response when a request scope exists, not inline", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      afterTasks.capture = true;
+      afterTasks.fns.length = 0;
+      try {
+        await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-after");
+        expect(lunaSuggest.request).not.toHaveBeenCalled();
+        expect(afterTasks.fns.length).toBeGreaterThan(0);
+        for (const task of afterTasks.fns) await task();
+        expect(lunaSuggest.request).toHaveBeenCalledTimes(1);
+      } finally {
+        afterTasks.capture = false;
+        afterTasks.fns.length = 0;
+      }
+    });
+
+    it("never asks Luna when the flag is off or the key is missing", async () => {
+      vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "");
+      vi.stubEnv("OPENAI_API_KEY", "sk-test-key");
+      await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-off");
+      vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "1");
+      vi.stubEnv("OPENAI_API_KEY", "");
+      await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-nokey");
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
+    });
+
+    it.each(["opted_out", "dnc"])("never asks Luna about Jev's own below-threshold %s call", async (choice) => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      await dispatchBelowThreshold(choice, "whatever the reply is", `inbound-luna-${choice}`);
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
+    });
+
+    it("never asks Luna for a Jev decision that auto-applies", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-luna-auto", body: "not right now" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "not right now", inboundMessageId: "inbound-luna-auto", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
     });
   });
 
