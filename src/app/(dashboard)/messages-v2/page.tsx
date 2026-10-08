@@ -17,8 +17,16 @@ import {
 } from "./actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
-import { loadMessagesV2Data, type LooseSupabase } from "./queries";
+import { loadMessagesV2Split, type LooseSupabase } from "./queries";
+import { ensureMessagesV2Settings } from "./settings";
+import { loadBacklogHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
+import {
+  fetchScorecardRows,
+  type RpcClient,
+  type ScorecardRow,
+} from "./scorecard";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -85,6 +93,18 @@ async function loadReplyGeneration(
   }
 }
 
+/** 7-day scorecard for first paint; null lets the client card load/retry itself. */
+async function loadScorecard(
+  supabase: LooseSupabase,
+  orgId: string,
+): Promise<ScorecardRow[] | null> {
+  try {
+    return await fetchScorecardRows(supabase as unknown as RpcClient, orgId, 7);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Live feed of every inbound SMS the pipeline processed (gates, Jev judgment,
  * applied actions, replies, holds), plus the holds rail with its Phase 1
@@ -97,9 +117,14 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [loaded, coverage, replySetting] = await Promise.all([
-    loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
+  // First load fixes the New / Backlog cutover at now() (never moved after);
+  // it must exist before the hold classification runs.
+  await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
+  const [loaded, coverage, scorecardRows, replayBatchId, replySetting] = await Promise.all([
+    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
+    loadScorecard(supabase, orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
     loadReplyGeneration(supabase, orgId),
   ]);
   // The hold queries are windowed; the version each card sends back is read
@@ -126,15 +151,19 @@ export default async function MessagesV2Page() {
         isOwner={isOwner}
         replyGeneration={replySetting}
         setReplyGeneration={setReplyGenerationAction}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
+        holdsSplit={data.split}
+        loadBacklog={loadBacklogHoldsAction}
         runs={data.runs}
         holds={data.holds}
         feedError={data.feedError}
         stepsUnavailable={data.stepsUnavailable}
         badgesError={data.badgesError}
         badges={data.badges}
+        scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
         actions={{

@@ -9,8 +9,14 @@ import {
   groupStepsByRun,
   HOLDS_COUNT_CAP,
   buildHoldsMeta,
+  loadHeldPropertyIds,
   formatHoldsTotal,
   loadMessagesV2Data,
+  loadMessagesV2Split,
+  loadBacklogHolds,
+  loadHoldBuckets,
+  formatSplitTotal,
+  NEW_HOLD_CAP,
   type HoldDraftRow,
   type LooseSupabase,
 } from "./queries";
@@ -397,7 +403,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit", "not"]) {
+      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -1185,5 +1191,480 @@ describe("deriveOpenHolds seen (the stale-click guard's view of the card)", () =
       runs: [],
     });
     expect(holds[0]!.draft).toMatchObject({ body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" });
+  });
+});
+
+describe("New / Backlog split loader", () => {
+  const bucketsResult = (over: Record<string, unknown> = {}) => ({
+    cutover: "2026-10-08T12:00:00+00:00",
+    new_total: 2,
+    backlog_total: 2504,
+    rows: [
+      { property_id: "p-new-1", effective_start: iso("13:00:00") },
+      { property_id: "p-new-2", effective_start: iso("14:00:00") },
+    ],
+    ...over,
+  });
+  const flagRow = (id: string, at: string) => ({
+    id,
+    last_ai_escalation_at: at,
+    last_ai_escalation_reason: "keyword",
+    updated_at: at,
+  });
+
+  it("loadHoldBuckets asks the SQL classifier for one bucket page and parses it", async () => {
+    const { client, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+    });
+    const out = await loadHoldBuckets(client, "org", "backlog", 200, 400);
+    expect(rpcCalls[0]).toEqual({
+      fn: "messages_v2_hold_buckets",
+      args: { p_org_id: "org", p_bucket: "backlog", p_limit: 200, p_offset: 400 },
+    });
+    expect(out).toEqual({
+      cutover: "2026-10-08T12:00:00+00:00",
+      newTotal: 2,
+      backlogTotal: 2504,
+      propertyIds: ["p-new-1", "p-new-2"],
+    });
+  });
+
+  it("loadHoldBuckets is null on an error or an empty payload (never 'no holds')", async () => {
+    const bad = fakeSupabase({ messages_v2_hold_buckets: () => ({ error: { message: "boom" } }) });
+    expect(await loadHoldBuckets(bad.client, "org", "new", 10)).toBeNull();
+    const empty = fakeSupabase({ messages_v2_hold_buckets: () => ({ data: null }) });
+    expect(await loadHoldBuckets(empty.client, "org", "new", 10)).toBeNull();
+  });
+
+  it("loads the New holds by id (no oldest-200 window, no distinct-id count queries) and reports exact totals", async () => {
+    const { client, queries, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({
+        data: [flagRow("p-new-1", iso("13:00:00")), flagRow("p-new-2", iso("14:00:00"))],
+      }),
+    });
+    const data = await loadMessagesV2Split(client, "org", Date.parse(iso("15:00:00")));
+    expect(rpcCalls[0].args).toMatchObject({ p_bucket: "new", p_limit: NEW_HOLD_CAP, p_offset: 0 });
+    expect(data.holds.map((h) => h.id)).toEqual(["p-new-1", "p-new-2"]);
+    expect(data.split).toEqual({
+      backlogBefore: "2026-10-08T12:00:00+00:00",
+      newTotal: 2,
+      newShown: 2,
+      backlogTotal: 2504,
+    });
+    const props = queries.filter((q) => q[0]?.table === "properties");
+    expect(props).toHaveLength(1);
+    expect(props[0].find((c) => c.method === "in")!.args).toEqual(["id", ["p-new-1", "p-new-2"]]);
+    expect(queries.some(isHead)).toBe(false);
+    expect(data.holdsMeta).toMatchObject({ total: 2506, shown: 2, truncated: true, totalState: "exact", failed: [] });
+  });
+
+  it("displays the New holds oldest-first even though the classifier selects the newest page", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({
+        data: bucketsResult({
+          new_total: 450,
+          rows: [
+            { property_id: "p-new-2", effective_start: iso("14:00:00") },
+            { property_id: "p-new-1", effective_start: iso("13:00:00") },
+          ],
+        }),
+      }),
+      properties: () => ({
+        data: [flagRow("p-new-2", iso("14:00:00")), flagRow("p-new-1", iso("13:00:00"))],
+      }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.holds.map((h) => h.id)).toEqual(["p-new-1", "p-new-2"]);
+    expect(data.split).toMatchObject({ newTotal: 450, newShown: 2 });
+  });
+
+  it("loads needs_human_attention_since with the scoped hold rows (the flag time the classifier uses)", async () => {
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({ data: [flagRow("p-new-1", iso("13:00:00"))] }),
+    });
+    await loadMessagesV2Split(client, "org");
+    const props = queries.find((q) => q[0]?.table === "properties")!;
+    expect(props.find((c) => c.method === "select")!.args[0]).toContain("needs_human_attention_since");
+  });
+
+  it("says 'showing N of M' data when New exceeds the cap", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ new_total: 450 }) }),
+      properties: () => ({ data: [flagRow("p-new-1", iso("13:00:00")), flagRow("p-new-2", iso("14:00:00"))] }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.split).toMatchObject({ newTotal: 450, newShown: 2 });
+  });
+
+  it("chunks the id filters so GET urls stay short", async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => ({ property_id: `p${i}`, effective_start: iso("13:00:00") }));
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows, new_total: 250 }) }),
+    });
+    await loadMessagesV2Split(client, "org");
+    const props = queries.filter((q) => q[0]?.table === "properties");
+    expect(props).toHaveLength(3);
+    expect(props.map((q) => (q.find((c) => c.method === "in")!.args[1] as string[]).length)).toEqual([100, 100, 50]);
+  });
+
+  it("always loads pending drafts tied to no property into New", async () => {
+    const { client, queries } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows: [], new_total: 0 }) }),
+      ai_reply_drafts: (calls) =>
+        calls.some((c) => c.method === "is")
+          ? {
+              data: [
+                { id: "d1", property_id: null, conversation_id: null, inbound_message_id: null, run_id: null, created_at: iso("13:30:00") },
+              ],
+            }
+          : { data: [] },
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(queries.some((q) => q[0]?.table === "ai_reply_drafts" && q.some((c) => c.method === "is" && c.args[0] === "property_id"))).toBe(true);
+    expect(data.holds.map((h) => h.id)).toEqual(["draft:d1"]);
+    expect(data.split).toMatchObject({ newTotal: 1, newShown: 1 });
+  });
+
+  it("a classifier failure is reported, never shown as 'no holds'", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ error: { message: "settings missing" } }),
+    });
+    const data = await loadMessagesV2Split(client, "org");
+    expect(data.holds).toEqual([]);
+    expect(data.split.error).toBeTruthy();
+    expect(formatSplitTotal(data.split)).toBe("holds unavailable");
+  });
+
+  it("Backlog pages are loaded oldest-first from an offset, hold rows only (no feed window or badge queries)", async () => {
+    const rows = [{ property_id: "p-old-1", effective_start: iso("01:00:00") }];
+    const { client, queries, rpcCalls } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows, backlog_total: 2504 }) }),
+      properties: () => ({ data: [flagRow("p-old-1", iso("01:00:00"))] }),
+    });
+    const page = await loadBacklogHolds(client, "org", 200, 200);
+    expect(rpcCalls[0].args).toMatchObject({ p_bucket: "backlog", p_limit: 200, p_offset: 200 });
+    expect(page).toMatchObject({ backlogTotal: 2504, hasMore: true, failed: false, nextOffset: 201 });
+    expect(page!.holds.map((h) => h.id)).toEqual(["p-old-1"]);
+    const tables = queries.map((q) => q[0]?.table);
+    expect(tables).not.toContain("pipeline_runs");
+    expect(tables).not.toContain("ai_responder_configs");
+    expect(tables).not.toContain("jev_outcome_thresholds");
+  });
+
+  it("the last Backlog page reports hasMore=false; an empty page returns no holds", async () => {
+    const last = fakeSupabase({
+      messages_v2_hold_buckets: () => ({
+        data: bucketsResult({ backlog_total: 201, rows: [{ property_id: "p-old-201", effective_start: iso("01:00:00") }] }),
+      }),
+      properties: () => ({ data: [flagRow("p-old-201", iso("01:00:00"))] }),
+    });
+    expect((await loadBacklogHolds(last.client, "org", 200, 200))!.hasMore).toBe(false);
+    const empty = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows: [], backlog_total: 0 }) }),
+    });
+    expect(await loadBacklogHolds(empty.client, "org", 0, 200)).toMatchObject({ holds: [], hasMore: false, nextOffset: 0 });
+  });
+
+  it("a failed Backlog hold query is flagged, not silently empty", async () => {
+    const { client } = fakeSupabase({
+      messages_v2_hold_buckets: () => ({ data: bucketsResult() }),
+      properties: () => ({ error: { message: "boom" } }),
+    });
+    expect((await loadBacklogHolds(client, "org", 0, 200))!.failed).toBe(true);
+  });
+
+  it("the default loader (alert cron) keeps the oldest-200 window untouched", async () => {
+    const { client, rpcCalls } = fakeSupabase({});
+    await loadMessagesV2Data(client, "org");
+    expect(rpcCalls.some((c) => c.fn === "messages_v2_hold_buckets")).toBe(false);
+  });
+
+  it("formats the header total", () => {
+    expect(
+      formatSplitTotal({ backlogBefore: "x", newTotal: 6, newShown: 6, backlogTotal: 2504 }),
+    ).toBe("6 new · 2,504 backlog");
+  });
+});
+
+describe("deriveOpenHolds alert_since (when the hold began, for alert eligibility)", () => {
+  const prop = (over: Partial<{ id: string; since: string | null }> = {}) => ({
+    id: over.id ?? "p1",
+    last_ai_escalation_at: iso("01:00:00"),
+    last_ai_escalation_reason: "needs_review",
+    updated_at: iso("02:00:00"),
+    needs_human_attention_since: over.since === undefined ? iso("09:00:00") : over.since,
+  });
+  const decision = (createdAt: string) => ({
+    property_id: "p1",
+    conversation_id: "c1",
+    source_inbound_message_id: "m1",
+    created_at: createdAt,
+  });
+
+  it("is the flag's tracked start, not last_ai_escalation_at or updated_at", () => {
+    const [h] = deriveOpenHolds({ properties: [prop()], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBe(iso("09:00:00"));
+  });
+
+  it("is null for a flagged property with no tracked start (the backlog)", () => {
+    const [h] = deriveOpenHolds({ properties: [prop({ since: null })], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBeNull();
+  });
+
+  it("backlog flag with only old pending activity: alert_since is that old activity (pre-watermark, silent)", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [decision(iso("03:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("03:00:00"));
+  });
+
+  it("backlog flag with nothing reliable known is null", () => {
+    const [h] = deriveOpenHolds({ properties: [prop({ since: null })], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBeNull();
+  });
+
+  it("backlog flag plus a newer pending decision starts at the decision", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [decision(iso("11:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("11:00:00"));
+  });
+
+  it("backlog flag plus a seller message after the watermark starts at that message", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [],
+      reviews: [],
+      inboundAfter: new Map([["p1", iso("12:30:00")]]),
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("12:30:00"));
+  });
+
+  it("a decision-only hold (no flag) with a seller text after the watermark starts at that text", () => {
+    const [h] = deriveOpenHolds({
+      properties: [],
+      decisions: [decision(iso("08:00:00"))],
+      reviews: [],
+      inboundAfter: new Map([["p1", iso("12:30:00")]]),
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("12:30:00"));
+  });
+
+  it("a flag raised after an old pending decision starts at the flag, not the older decision", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: iso("09:00:00") })],
+      decisions: [decision(iso("08:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("09:00:00"));
+  });
+
+  it("a flag raised after an old pending draft starts at the flag, not the older draft", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: iso("09:00:00") })],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: iso("02:00:00") },
+      ],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("09:00:00"));
+  });
+
+  it("is the decision's created_at for a hold with no flagged property", () => {
+    const [h] = deriveOpenHolds({ properties: [], decisions: [decision(iso("11:00:00"))], reviews: [], runs: [] });
+    expect(h.alert_since).toBe(iso("11:00:00"));
+  });
+});
+
+describe("loadMessagesV2Data alertsSince (eligible set found directly, not through HOLD_LIMIT)", () => {
+  const flagged = (id: string, since: string | null) => ({
+    id,
+    last_ai_escalation_at: iso("01:00:00"),
+    last_ai_escalation_reason: "needs_review",
+    updated_at: iso("01:00:00"),
+    needs_human_attention_since: since,
+  });
+  const WM = iso("10:00:00");
+  const NOW = Date.parse(iso("13:00:00"));
+  const WM_ISO = new Date(WM).toISOString();
+  const has = (c: Call, method: string, col?: string) =>
+    c.some((x) => x.method === method && (col === undefined || x.args[0] === col));
+  const arg = (c: Call, method: string) => c.find((x) => x.method === method)!.args;
+  const backlog = Array.from({ length: 250 }, (_, i) => flagged(`b${i}`, null));
+
+  /** Page window (200 oldest backlog) + the alert lookups, keyed by what each query asks for. */
+  const world = (opts: {
+    newlyFlagged?: string[];
+    inbound?: Array<{ property_id: string; created_at: string }>;
+    flaggedRows?: ReturnType<typeof flagged>[];
+    decisions?: unknown[];
+    messagesError?: boolean;
+  }) =>
+    fakeSupabase({
+      properties: (c) => {
+        if (has(c, "gte", "needs_human_attention_since"))
+          return { data: (opts.newlyFlagged ?? []).map((id) => ({ id })) };
+        if (has(c, "in", "id")) {
+          const ids = arg(c, "in")[1] as string[];
+          return { data: (opts.flaggedRows ?? []).filter((r) => ids.includes(r.id)) };
+        }
+        return isHead(c) ? { data: [] } : { data: backlog.slice(0, 200) };
+      },
+      messages: () =>
+        opts.messagesError ? { error: { message: "boom" } } : { data: opts.inbound ?? [] },
+      jev_lead_decisions: (c) => (has(c, "in", "property_id") || has(c, "gte") ? { data: opts.decisions ?? [] } : { data: [] }),
+    });
+
+  it("finds a post-watermark seller text on a lead the page window never reaches (2,504-style backlog)", async () => {
+    const { client, queries } = world({
+      inbound: [{ property_id: "late", created_at: iso("12:00:00") }],
+      flaggedRows: [flagged("late", null)],
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => h.id)).toEqual(["late"]);
+    expect(data.holds[0]!.alert_since).toBe(iso("12:00:00"));
+    const msg = queries.filter((q) => q[0]?.table === "messages");
+    expect(msg).toHaveLength(1);
+    expect(has(msg[0]!, "in")).toBe(false); // org-wide, not chunked by property
+    expect(arg(msg[0]!, "gte")).toEqual(["created_at", WM_ISO]);
+    expect(arg(msg[0]!, "limit")).toEqual([1000]);
+    expect(arg(msg[0]!, "order")[1]).toMatchObject({ ascending: false });
+    expect(msg[0]!.some((c) => c.method === "eq" && c.args[0] === "direction" && c.args[1] === "inbound")).toBe(true);
+  });
+
+  it("a lead flagged 1 minute BEFORE the watermark that gets a seller text after it starts at that text", async () => {
+    const { client } = world({
+      inbound: [{ property_id: "edge", created_at: iso("10:05:00") }],
+      flaggedRows: [flagged("edge", iso("09:59:00"))],
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => h.id)).toEqual(["edge"]);
+    expect(data.holds[0]!.alert_since).toBe(iso("10:05:00"));
+    expect(Date.parse(data.holds[0]!.alert_since!)).toBeGreaterThanOrEqual(Date.parse(WM));
+  });
+
+  it("the same pre-watermark flag with no later text is not eligible at all", async () => {
+    const { client } = world({ flaggedRows: [flagged("edge", iso("09:59:00"))] });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds).toEqual([]);
+  });
+
+  it("a lead flagged after the watermark is found by its flag start", async () => {
+    const { client, queries } = world({ newlyFlagged: ["fresh"], flaggedRows: [flagged("fresh", iso("11:00:00"))] });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.id, h.alert_since])).toEqual([["fresh", iso("11:00:00")]]);
+    const q = queries.find((x) => x[0]?.table === "properties" && has(x, "gte", "needs_human_attention_since"))!;
+    expect(arg(q, "gte")).toEqual(["needs_human_attention_since", WM_ISO]);
+  });
+
+  it("a pending decision created after the watermark makes its lead eligible", async () => {
+    const decision = { property_id: "d1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: iso("11:30:00") };
+    const { client } = world({ decisions: [decision] });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.property_id, h.alert_since])).toEqual([["d1", iso("11:30:00")]]);
+  });
+
+
+  it("a decision-only hold on an unflagged lead takes the post-watermark seller text as its start", async () => {
+    const decision = { property_id: "d2", conversation_id: "c2", source_inbound_message_id: "m2", created_at: iso("08:00:00") };
+    const { client } = fakeSupabase({
+      messages: () => ({ data: [{ property_id: "d2", created_at: iso("12:00:00") }] }),
+      jev_lead_decisions: (c) => (has(c, "in", "property_id") ? { data: [decision] } : { data: [] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.property_id, h.alert_since])).toEqual([["d2", iso("12:00:00")]]);
+  });
+
+  it("orders all four fresh lookups newest-first and bounds the lower edge at max(watermark, now - 7 days)", async () => {
+    const OLD_WM = "2026-09-01T00:00:00.000Z";
+    const now = Date.parse("2026-10-08T13:00:00.000Z");
+    const lower = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { client, queries } = world({});
+    await loadMessagesV2Data(client, "org", now, { alertsSince: OLD_WM });
+    const lookups = queries.filter(
+      (q) => has(q, "gte") && !has(q, "in") && q[0]?.table !== undefined && !isHead(q),
+    );
+    expect(lookups.length).toBe(5);
+    for (const q of lookups) {
+      expect(arg(q, "gte")[1]).toBe(lower);
+      expect(arg(q, "order")[1]).toMatchObject({ ascending: false });
+    }
+    expect(arg(lookups.find((q) => q[0]?.table === "properties")!, "order")[0]).toBe("needs_human_attention_since");
+    // A recent watermark is never pushed earlier than itself.
+    const recent = world({});
+    await loadMessagesV2Data(recent.client, "org", now, { alertsSince: WM });
+    expect(recent.queries.filter((q) => has(q, "gte") && !has(q, "in")).every((q) => arg(q, "gte")[1] === WM_ISO)).toBe(true);
+  });
+
+  it("a lookup that returns the row cap marks the load incomplete (failed), never clean", async () => {
+    const full = Array.from({ length: 1000 }, (_, i) => ({ id: `n${i}` }));
+    const { client } = fakeSupabase({
+      properties: (c) => (has(c, "gte", "needs_human_attention_since") ? { data: full } : { data: [] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
+  });
+
+  it("a chunked .in() lookup carries an explicit limit, and hitting it marks the load incomplete", async () => {
+    const { client, queries } = world({ inbound: [{ property_id: "late", created_at: iso("12:00:00") }] });
+    await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    const ins = queries.filter((q) => has(q, "in"));
+    expect(ins.length).toBeGreaterThan(0);
+    for (const q of ins) expect(arg(q, "limit")[0]).toBeGreaterThanOrEqual(200);
+    const capped = fakeSupabase({
+      messages: () => ({ data: [{ property_id: "late", created_at: iso("12:00:00") }] }),
+      properties: (c) =>
+        has(c, "in", "id") ? { data: Array.from({ length: 1000 }, (_, i) => flagged(`late${i}`, null)) } : { data: [] },
+    });
+    const data = await loadMessagesV2Data(capped.client, "org", NOW, { alertsSince: WM });
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
+  });
+
+  it("makes no messages query without alertsSince (the page)", async () => {
+    const { client, queries } = world({});
+    await loadMessagesV2Data(client, "org");
+    expect(queries.some((q) => q[0]?.table === "messages")).toBe(false);
+  });
+
+  it("a failed eligibility lookup is reported as failed, never as no holds", async () => {
+    const { client } = world({ messagesError: true });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
+  });
+});
+
+describe("loadHeldPropertyIds", () => {
+  it("returns the properties still flagged or with a pending decision, review or draft", async () => {
+    const { client } = fakeSupabase({
+      properties: () => ({ data: [{ id: "a" }] }),
+      jev_lead_decisions: () => ({ data: [{ property_id: "b" }] }),
+      ai_disposition_reviews: () => ({ data: [] }),
+      ai_reply_drafts: () => ({ data: [{ property_id: "c" }] }),
+    });
+    expect([...(await loadHeldPropertyIds(client, "org", ["a", "b", "c", "d"]))!].sort()).toEqual(["a", "b", "c"]);
+  });
+  it("is null when a lookup hits its explicit limit (a truncated answer must not read as closed)", async () => {
+    const { client, queries } = fakeSupabase({
+      jev_lead_decisions: () => ({ data: Array.from({ length: 1000 }, (_, i) => ({ property_id: `p${i}` })) }),
+    });
+    expect(await loadHeldPropertyIds(client, "org", ["a"])).toBeNull();
+    for (const q of queries) expect(q.some((c) => c.method === "limit" && (c.args[0] as number) >= 200)).toBe(true);
+  });
+  it("is null (never 'closed') when a lookup fails", async () => {
+    const { client } = fakeSupabase({ ai_reply_drafts: () => ({ error: { message: "x" } }) });
+    expect(await loadHeldPropertyIds(client, "org", ["a"])).toBeNull();
   });
 });

@@ -76,6 +76,19 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       };
     },
 
+    async getOrInitAlertsSince(orgId, nowIso) {
+      const settings = () => db.from("hold_alert_settings");
+      const inserted = await settings()
+        .upsert({ org_id: orgId, alerts_since: nowIso }, { onConflict: "org_id", ignoreDuplicates: true })
+        .select("alerts_since");
+      if (inserted.error) fail("watermark insert", inserted.error);
+      const created = Array.isArray(inserted.data) && inserted.data.length === 1;
+      if (created) return { alertsSince: (inserted.data as Array<{ alerts_since: string }>)[0]!.alerts_since, created };
+      const { data, error } = await settings().select("alerts_since").eq("org_id", orgId).single();
+      if (error || !data) fail("watermark select", error);
+      return { alertsSince: (data as { alerts_since: string }).alerts_since, created: false };
+    },
+
     async claim(row) {
       const { data, error } = await table()
         .update({ attempts: row.attempts + 1, status: "sending", sending_at: new Date().toISOString() })
@@ -110,8 +123,9 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return (data as { sent_at: string | null } | null)?.sent_at ?? null;
     },
 
-    async archiveClosed(orgId, openPropertyIds) {
+    async archiveClosed(orgId, openPropertyIds, candidatePropertyIds) {
       const open = new Set(openPropertyIds);
+      const candidates = candidatePropertyIds ? new Set(candidatePropertyIds) : null;
       let archived = 0;
       // Page by id cursor: still-open rows are skipped client-side, so they can
       // never fill the window and starve closed rows behind them.
@@ -129,7 +143,7 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         if (error) fail("archive select", error);
         const rows = (data ?? []) as Array<{ id: string; property_id: string | null; hold_key: string }>;
         // One set-based update per page; the function skips rows a concurrent pass already archived.
-        const closedIds = rows.filter((r) => r.property_id && !open.has(r.property_id)).map((r) => r.id);
+        const closedIds = rows.filter((r) => r.property_id && !open.has(r.property_id) && (!candidates || candidates.has(r.property_id))).map((r) => r.id);
         if (closedIds.length > 0) {
           const { data: n, error: rpcError } = await db.rpc("hold_alert_archive_rows", {
             p_org_id: orgId,
@@ -142,6 +156,28 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         cursor = rows[rows.length - 1]!.id;
       }
       return archived;
+    },
+
+    async deliveredPropertyIds(orgId) {
+      const ids = new Set<string>();
+      let cursor: string | null = null;
+      for (let page = 0; page < ARCHIVE_MAX_PAGES; page += 1) {
+        let q = table()
+          .select("id, property_id")
+          .eq("org_id", orgId)
+          .not("property_id", "is", null)
+          .not("hold_key", "like", "%:closed:%")
+          .order("id", { ascending: true })
+          .limit(ARCHIVE_BATCH);
+        if (cursor) q = q.gt("id", cursor);
+        const { data, error } = await q;
+        if (error) fail("delivered select", error);
+        const rows = (data ?? []) as Array<{ id: string; property_id: string | null }>;
+        for (const r of rows) if (r.property_id) ids.add(r.property_id);
+        if (rows.length < ARCHIVE_BATCH) return { ids: [...ids], complete: true };
+        cursor = rows[rows.length - 1]!.id;
+      }
+      return { ids: [...ids], complete: false };
     },
 
     async markSent(id) {

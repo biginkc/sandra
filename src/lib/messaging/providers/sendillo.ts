@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
+import { assertRealProviderAllowed, isReplayStubEnabled, recordReplayOutbound } from "../replay-stub";
 import type {
   DialpadFromOption,
   MessagingProvider,
@@ -87,6 +88,8 @@ export class SendilloMessagingProvider implements MessagingProvider {
     input: SmsOutboundInput,
     opts: SendilloSendOptions = {},
   ): Promise<SmsSendResult> {
+    // Replay harness: the real client never reaches the network under the stub flag.
+    assertRealProviderAllowed("sendillo", "sendSms");
     const from = input.from?.trim() || this.fromNumber?.trim() || null;
     if (!from) {
       throw new ProviderError(
@@ -362,6 +365,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
     endpoint: string,
     label: string,
   ): Promise<JsonObject[]> {
+    assertRealProviderAllowed("sendillo", `catalog read (${label})`);
     let response: Response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
@@ -536,6 +540,27 @@ export class SendilloMessagingProvider implements MessagingProvider {
   }
 }
 
+/**
+ * Replay-harness stand-in (SMS_PROVIDER_STUB=1). It extends the real client so
+ * inbound parsing and webhook-secret verification are the production code, but
+ * `sendSms` records the would-be send to `replay_outbound_log` and returns a
+ * fake receipt. The inherited network methods still throw under the flag.
+ */
+export class SendilloReplayStubProvider extends SendilloMessagingProvider {
+  override async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
+    const externalId = `replay-stub-${crypto.randomUUID()}`;
+    await recordReplayOutbound({
+      provider: "sendillo",
+      from: input.from?.trim() || this.getDefaultFromNumber(),
+      to: input.to,
+      body: input.body,
+      externalId,
+      batchId: process.env.REPLAY_BATCH_ID?.trim() || null,
+    });
+    return { externalId, providerStatus: "accepted", raw: { replayStub: true } };
+  }
+}
+
 export function sendilloFromEnv(): SendilloMessagingProvider {
   return sendilloFromEnvWithOptions();
 }
@@ -547,6 +572,14 @@ export function sendilloFromEnv(): SendilloMessagingProvider {
  * substituted when that grant is stale or missing.
  */
 export function sendilloFromEnvWithOptions(options: { requireDefaultFrom?: boolean } = {}): SendilloMessagingProvider {
+  if (isReplayStubEnabled()) {
+    return new SendilloReplayStubProvider(
+      "replay-stub-no-key",
+      process.env.SENDILLO_FROM_NUMBER?.trim() || "+18165550100",
+      process.env.SENDILLO_WEBHOOK_SECRET ?? null,
+      sendilloConfiguredAccountId(),
+    );
+  }
   const apiKey = process.env.SENDILLO_API_KEY;
   const fromNumber = process.env.SENDILLO_FROM_NUMBER?.trim() || null;
   const webhookSecret = process.env.SENDILLO_WEBHOOK_SECRET ?? null;

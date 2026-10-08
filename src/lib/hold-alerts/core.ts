@@ -1,3 +1,4 @@
+import { reportError } from "@/lib/errors/report";
 import { digestMessage, holdsLink, slackFirstText, slackNudgeText, smsText } from "./messages";
 import {
   MAX_ATTEMPTS,
@@ -6,6 +7,7 @@ import {
   type EmailMessage,
   type EnsureInput,
   type HoldAlertDeps,
+  type HoldInfo,
   type OrgAlertSummary,
 } from "./types";
 
@@ -23,6 +25,13 @@ type Task = {
   /** Asked before the row is even created; false = nothing to do yet. */
   eligible?: () => Promise<boolean>;
 };
+
+/** A hold may alert only when it began at or after the watermark. No known start never does. */
+export function isNewHold(hold: Pick<HoldInfo, "startedAt">, alertsSinceMs: number): boolean {
+  if (!hold.startedAt || !Number.isFinite(alertsSinceMs)) return false;
+  const startedMs = Date.parse(hold.startedAt);
+  return Number.isFinite(startedMs) && startedMs >= alertsSinceMs;
+}
 
 const emptySummary = (): OrgAlertSummary => ({
   holds: 0,
@@ -59,13 +68,34 @@ export async function runHoldAlertsForOrg(
     new Date(startMs - ROUTE_MAX_DURATION_MS).toISOString(),
   );
 
-  const loaded = await deps.loadHolds(orgId);
-  const holds = loaded.holds;
+  // Alerts are for holds that START after they were enabled. The first run for an
+  // org only records the watermark and sends nothing; everything open right now is
+  // backlog and stays silent.
+  const mark = await deps.store.getOrInitAlertsSince(orgId, deps.now().toISOString());
+  if (mark.created) return summary;
+  const alertsSinceMs = Date.parse(mark.alertsSince);
+
+  const loaded = await deps.loadHolds(orgId, mark.alertsSince);
+  // An incomplete load (a query failed or hit its row cap) may be missing holds: say so, once per run.
+  if (!loaded.complete) {
+    reportError(new Error("hold alerts: alert-source load incomplete; some holds may not have alerted"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+  }
+  const holds = loaded.holds.filter((h) => isNewHold(h, alertsSinceMs));
   // Archive-on-clear: a property that is no longer held closes its delivery
-  // rows so a re-opened hold gets fresh keys. Only on a COMPLETE load, or a
-  // truncated / failed query would "close" holds that are still open.
-  if (loaded.complete) {
-    summary.archived = await deps.store.archiveClosed(orgId, [...new Set(holds.map((h) => h.propertyId))]);
+  // rows so a re-opened hold gets fresh keys. Bounded and independent of the
+  // alert load: look only at properties that have live delivery rows, ask which
+  // are still held, and archive the rest. Any incomplete answer archives nothing.
+  const delivered = await deps.store.deliveredPropertyIds(orgId);
+  if (delivered.complete && delivered.ids.length > 0) {
+    const held = await deps.loadHeldPropertyIds(orgId, delivered.ids);
+    if (held) {
+      // Scope to what THIS run saw as delivered and not open: rows a concurrent run
+      // ensured after the listing are never candidates, so they cannot be archived here.
+      const open = new Set([...held, ...loaded.holds.map((h) => h.propertyId)]);
+      summary.archived = await deps.store.archiveClosed(orgId, [...open], delivered.ids);
+    }
   }
   summary.holds = holds.length;
   if (holds.length === 0) return summary;
