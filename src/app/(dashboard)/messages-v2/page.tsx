@@ -17,6 +17,9 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
+
+import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Split, type LooseSupabase } from "./queries";
@@ -118,12 +121,13 @@ export default async function MessagesV2Page() {
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
+  const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
   const [loaded, coverage, scorecardRows, replayBatchId, replySetting] = await Promise.all([
-    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
+    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
@@ -170,6 +174,7 @@ export default async function MessagesV2Page() {
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
+        lunaEnabled={lunaEnabled}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,
@@ -178,6 +183,12 @@ export default async function MessagesV2Page() {
           dismiss: dismissHoldAction,
           retrySuppression: retrySuppressionHoldAction,
           listAssignees: listHoldAssigneesAction,
+          ...(lunaEnabled
+            ? {
+                lunaApply: applyLunaSuggestionAction,
+                lunaReject: rejectLunaSuggestionAction,
+              }
+            : {}),
         }}
       />
     </div>

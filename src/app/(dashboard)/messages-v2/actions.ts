@@ -4,7 +4,6 @@ import { revalidatePath } from "next/cache";
 
 import { sendHumanDraft } from "@/lib/ai-responder/dispatch";
 import { undoJevAction as undoJevActionCore } from "@/lib/ai-responder/undo";
-import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -15,7 +14,7 @@ import { createClient } from "@/lib/supabase/server";
 
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
-import { messagesV2OrgId } from "./access";
+import { authorizeMessagesV2 } from "./authorize";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
@@ -35,30 +34,9 @@ import type { HoldSeen } from "./types";
  */
 
 async function authorize(): Promise<Result<HoldActionDeps>> {
-  let userId: string | null = null;
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    userId = user?.id ?? null;
-  } catch {
-    userId = null;
-  }
-  if (!userId) {
-    return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
-  }
-  let orgId: string | null = null;
-  try {
-    // Only this user's own memberships count.
-    const memberships = (await getCallerMembershipsOrThrow()).filter((m) => m.user_id === userId);
-    orgId = messagesV2OrgId(memberships);
-  } catch {
-    orgId = null;
-  }
-  if (!orgId) {
-    return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
-  }
+  const auth = await authorizeMessagesV2();
+  if (!auth.ok) return auth;
+  const { orgId, userId } = auth.data;
   return {
     ok: true,
     data: {

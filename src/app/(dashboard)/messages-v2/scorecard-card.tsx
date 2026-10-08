@@ -7,12 +7,17 @@ import { createClient } from "@/lib/supabase/client";
 import { isHumanOnlyOutcome } from "@/lib/sms-classification/thresholds";
 import { cn } from "@/lib/utils";
 
+import { lunaOutcomeLabel } from "./luna-labels";
 import {
+  buildLunaStats,
   buildScorecard,
+  fetchLunaStatRows,
   fetchScorecardRows,
   formatRuleText,
   MIN_SUGGESTION_SAMPLES,
   TARGET_AGREEMENT_PERCENT,
+  type LunaStatRow,
+  type LunaStats,
   type OutcomeScorecard,
   type RouteAgreement,
   type RpcClient,
@@ -27,6 +32,14 @@ export type ScorecardLoader = (
   orgId: string,
   windowDays: ScorecardWindow,
 ) => Promise<ScorecardRow[]>;
+
+export type LunaStatsLoader = (
+  orgId: string,
+  windowDays: ScorecardWindow,
+) => Promise<LunaStatRow[]>;
+
+const defaultLunaLoad: LunaStatsLoader = (orgId, windowDays) =>
+  fetchLunaStatRows(createClient() as unknown as RpcClient, orgId, windowDays);
 
 const defaultLoad: ScorecardLoader = (orgId, windowDays) =>
   fetchScorecardRows(createClient() as unknown as RpcClient, orgId, windowDays);
@@ -204,6 +217,95 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
   );
 }
 
+type LunaWindowState = LunaStats | "error" | null;
+
+function LunaWindow({ days, state }: { days: ScorecardWindow; state: LunaWindowState }) {
+  return (
+    <div data-testid={`luna-stats-${days}`} className="flex flex-col gap-1 rounded-lg border p-3 text-sm">
+      <h5 className="font-medium">Last {days} days</h5>
+      {state === null ? (
+        <p className="text-muted-foreground">Loading…</p>
+      ) : state === "error" ? (
+        <p role="alert" className="text-xs text-amber-900 dark:text-amber-200">
+          Luna stats unavailable
+        </p>
+      ) : (
+        <>
+          <Stat label="Suggestions shown" value={String(state.shown)} />
+          <Stat
+            label="Accepted"
+            value={pct(state.acceptedRate)}
+            detail={`${state.accepted}/${state.shown}`}
+          />
+          <Stat label="Rejected" value={String(state.rejected)} />
+          <Stat label="Agreed manually" value={String(state.agreedManually)} />
+          <Stat label="Still open" value={String(state.open)} />
+          {state.byOutcome.length > 0 && (
+            <ul className="mt-1 flex flex-col gap-0.5 text-xs text-muted-foreground">
+              {state.byOutcome.map((o) => (
+                <li key={o.outcome} data-testid={`luna-outcome-${days}-${o.outcome}`}>
+                  {lunaOutcomeLabel(o.outcome)}: {o.shown} shown, {o.accepted} accepted
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Luna suggestion stats, 7d and 30d side by side. A failed window shows "unavailable", never zeros. */
+function LunaStatsRow({
+  orgId,
+  load,
+  pollMs,
+}: {
+  orgId: string;
+  load: LunaStatsLoader;
+  pollMs: number;
+}) {
+  const [states, setStates] = useState<Record<ScorecardWindow, LunaWindowState>>({ 7: null, 30: null });
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
+  const refresh = useCallback(async () => {
+    await Promise.all(
+      WINDOWS.map(async (d) => {
+        let next: LunaWindowState;
+        try {
+          next = buildLunaStats(await loadRef.current(orgId, d));
+        } catch {
+          next = "error";
+        }
+        setStates((prev) => ({ ...prev, [d]: next }));
+      }),
+    );
+  }, [orgId]);
+
+  useEffect(() => {
+    void refresh();
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void refresh();
+    }, pollMs);
+    return () => window.clearInterval(id);
+  }, [refresh, pollMs]);
+
+  return (
+    <div data-testid="luna-stats" className="flex flex-col gap-2">
+      <h4 className="font-medium">Luna suggestions</h4>
+      <div className="grid gap-2 md:grid-cols-2">
+        {WINDOWS.map((d) => (
+          <LunaWindow key={d} days={d} state={states[d]} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /**
  * Shadow scorecard: how often Jev's per-outcome calls survive human review,
  * and the lowest confidence cutoff that would have held >= 95% agreement.
@@ -215,6 +317,8 @@ export function ScorecardCard({
   initialWindow = 7,
   load = defaultLoad,
   pollMs = POLL_MS,
+  lunaEnabled = false,
+  lunaLoad = defaultLunaLoad,
 }: {
   orgId: string;
   /** Server-loaded rows for `initialWindow`; null/undefined means load on mount. */
@@ -222,6 +326,9 @@ export function ScorecardCard({
   initialWindow?: ScorecardWindow;
   load?: ScorecardLoader;
   pollMs?: number;
+  /** Show the Luna suggestions row (the page passes the feature flag). */
+  lunaEnabled?: boolean;
+  lunaLoad?: LunaStatsLoader;
 }) {
   const [windowDays, setWindowDays] = useState<ScorecardWindow>(initialWindow);
   const [rows, setRows] = useState<ScorecardRow[] | null>(initialRows);
@@ -327,6 +434,7 @@ export function ScorecardCard({
           <p className="text-sm text-muted-foreground">Loading scorecard…</p>
         )
       )}
+      {lunaEnabled && <LunaStatsRow orgId={orgId} load={lunaLoad} pollMs={pollMs} />}
     </section>
   );
 }

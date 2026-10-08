@@ -75,6 +75,8 @@ export type MessagesV2ViewProps = {
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
+  /** Luna suggestions are on: show the scorecard's Luna row. */
+  lunaEnabled?: boolean;
 };
 
 const LEGEND = [
@@ -446,7 +448,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         data-testid="scorecard-slot"
         className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
       >
-        <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
+        <ScorecardCard
+          orgId={orgId}
+          initialRows={props.scorecardRows ?? null}
+          lunaEnabled={props.lunaEnabled ?? false}
+        />
       </div>
 
       <ul
