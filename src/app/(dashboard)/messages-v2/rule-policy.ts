@@ -3,7 +3,7 @@
  * disables "On" for them and `setLabelRule` refuses to enable them server-side
  * (before the RPC), so the policy holds even against a hand-built request.
  */
-export const NEVER_AUTO: ReadonlySet<string> = new Set(["opted_out", "dnc"]);
+export const NEVER_AUTO: ReadonlySet<string> = new Set(["opted_out"]);
 
 export const isNeverAuto = (outcome: string): boolean => NEVER_AUTO.has(outcome);
 

@@ -844,6 +844,7 @@ export type Database = {
           source_inbound_message_id: string
           status: string
           superseded_reason: string | null
+          wrong_scope: string | null
         }
         Insert: {
           ai_reason: string
@@ -866,6 +867,7 @@ export type Database = {
           source_inbound_message_id: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Update: {
           ai_reason?: string
@@ -888,6 +890,7 @@ export type Database = {
           source_inbound_message_id?: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Relationships: [
           {
@@ -2636,6 +2639,61 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      // Hand-inserted for migration 20261008300100_jev_action_undo.sql.
+      jev_action_undo: {
+        Row: {
+          action: string
+          applied_dispo: string
+          classification_run_id: string | null
+          created_at: string
+          id: string
+          org_id: string
+          applied_follow_up_at: string | null
+          paused_enrollment_ids: string[]
+          prior_follow_up_at: string | null
+          prior_outreach_dispo: string | null
+          property_id: string
+          recorded_revision: number | null
+          source_inbound_message_id: string
+          undone_at: string | null
+          undone_by: string | null
+        }
+        Insert: {
+          action: string
+          applied_dispo: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id: string
+          recorded_revision?: number | null
+          source_inbound_message_id: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Update: {
+          action?: string
+          applied_dispo?: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id?: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id?: string
+          recorded_revision?: number | null
+          source_inbound_message_id?: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Relationships: []
       }
       jev_lead_decisions: {
         Row: {
@@ -7896,6 +7954,7 @@ export type Database = {
           p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -7954,6 +8013,7 @@ export type Database = {
           p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -8053,6 +8113,10 @@ export type Database = {
           p_reply_intent: string | null
           p_template_id: string | null
         }
+        Returns: Json
+      }
+      fn_undo_jev_action: {
+        Args: { p_undo_id: string }
         Returns: Json
       }
       fn_set_jev_outcome_threshold: {

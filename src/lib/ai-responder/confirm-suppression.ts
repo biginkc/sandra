@@ -154,11 +154,17 @@ export async function applyConfirmedSuppression(input: {
   aiReason?: string | null;
   /** Sweeper: skip the per-failure reportError; the caller throttles reports. */
   quiet?: boolean;
+  /**
+   * A wrong_number the model scoped to every property (wrong_scope = "all"):
+   * suppresses the phone on the dnc surface once a human confirmed the review.
+   */
+  phoneWide?: boolean;
 }): Promise<ConfirmedSuppressionResult> {
-  if (input.disposition !== "opted_out" && input.disposition !== "dnc") {
+  const phoneWideWrongNumber = input.disposition === "wrong_number" && input.phoneWide === true;
+  if (input.disposition !== "opted_out" && input.disposition !== "dnc" && !phoneWideWrongNumber) {
     return { ok: true };
   }
-  const isDnc = input.disposition === "dnc";
+  const isDnc = input.disposition === "dnc" || phoneWideWrongNumber;
   try {
     if (!input.phone) throw new Error("applyConfirmedSuppression: no phone on contact");
     // recordSmsPhoneSuppression returns silently for an un-normalizable phone,
@@ -172,7 +178,11 @@ export async function applyConfirmedSuppression(input: {
       contactId: input.contactId,
       fromPhone: input.phone,
       orgId: input.orgId,
-      source: isDnc ? "ai_responder_threat" : "ai_responder",
+      source: phoneWideWrongNumber
+        ? "ai_responder_wrong_number"
+        : isDnc
+          ? "ai_responder_threat"
+          : "ai_responder",
       sourceDetail: {
         propertyId: input.propertyId,
         reason,
@@ -182,7 +192,9 @@ export async function applyConfirmedSuppression(input: {
       occurredAt: new Date(),
       providerId: "ai_responder",
       surface: isDnc ? "dnc" : "stop",
-      idempotencyKey: isDnc
+      idempotencyKey: phoneWideWrongNumber
+        ? `ai-responder-wrong-number:${input.propertyId}:${input.contactId}`
+        : isDnc
         ? `ai-responder-dnc:${input.propertyId}:${input.contactId}:${reason}`
         : `ai-responder:${input.propertyId}:${input.contactId}:${reason}`,
     });
@@ -365,13 +377,14 @@ export async function applySuppressionForConfirmedReview(
   try {
     const { data: review, error } = await supabase
       .from("ai_disposition_reviews")
-      .select("property_id, org_id, disposition, ai_reason, source_inbound_message_id")
+      .select("property_id, org_id, disposition, ai_reason, source_inbound_message_id, wrong_scope")
       .eq("id", reviewId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!review) throw new Error("review not found");
     heldPropertyId = review.property_id;
-    if (review.disposition !== "opted_out" && review.disposition !== "dnc") {
+    const phoneWide = review.disposition === "wrong_number" && review.wrong_scope === "all";
+    if (review.disposition !== "opted_out" && review.disposition !== "dnc" && !phoneWide) {
       return { ok: true };
     }
     const { data: property, error: propError } = await supabase
@@ -416,6 +429,7 @@ export async function applySuppressionForConfirmedReview(
       actorId,
       aiReason: review.ai_reason,
       quiet: options.quiet,
+      phoneWide,
     });
     // First-attempt callers and the sweeper discharge the obligation the confirm
     // RPC recorded; the manual retry action does its own record + clear.

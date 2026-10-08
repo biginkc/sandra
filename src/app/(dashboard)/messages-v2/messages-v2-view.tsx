@@ -21,7 +21,7 @@ import {
   formatModeBadge,
   type LooseSupabase,
 } from "./queries";
-import { RunCard } from "./run-card";
+import { RunCard, type UndoControls } from "./run-card";
 import type { ReplyGeneration } from "./reply-generation";
 import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
 import { ScorecardCard } from "./scorecard-card";
@@ -45,6 +45,9 @@ export type MessagesV2ViewProps = {
   /** The org's "AI drafts" setting; null/absent hides the control. */
   replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
   setReplyGeneration?: SetReplyGenerationAction;
+  /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
+  undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { message: string } }>;
+  findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
   runs: RunWithSteps[];
@@ -109,6 +112,20 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(next);
   }, []);
   const [labels, setLabels] = useState(() => new Map(props.labels));
+  const { undoJevAction, findJevUndo } = props;
+  const undoControls = useMemo<UndoControls | undefined>(
+    () =>
+      undoJevAction && findJevUndo
+        ? {
+            find: findJevUndo,
+            undo: async (id) => {
+              const r = await undoJevAction(id);
+              return r.ok ? { ok: true } : { ok: false, message: r.error.message };
+            },
+          }
+        : undefined,
+    [undoJevAction, findJevUndo],
+  );
   const [nowMs, setNowMs] = useState(props.nowMs);
   const [live, setLive] = useState(false);
   if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
@@ -419,6 +436,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   run={run}
                   label={labels.get(run.id)}
                   isOwner={isOwner}
+                  undoControls={undoControls}
                 />
               ))
             )}

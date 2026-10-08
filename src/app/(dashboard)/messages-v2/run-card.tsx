@@ -2,6 +2,7 @@
 
 import { format } from "date-fns/format";
 import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -116,14 +117,86 @@ export function openThreadHref(
   return null;
 }
 
+/** Action steps Jev applies on its own that a person can reverse. */
+const UNDOABLE_ACTION_STEPS = new Set(["wrong_number", "not_interested", "apply_nurture"]);
+
+export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean {
+  return run.steps.some(
+    (s) => s.kind === "action" && s.result === "applied" && UNDOABLE_ACTION_STEPS.has(s.name),
+  );
+}
+
+export type UndoControls = {
+  /** Returns the undo record id while the action is still undoable, else null. */
+  find: (inboundMessageId: string) => Promise<string | null>;
+  undo: (undoId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+};
+
+function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
+  const [undoId, setUndoId] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    controls
+      .find(inboundMessageId)
+      .then((id) => {
+        if (alive) setUndoId(id);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [controls, inboundMessageId]);
+
+  if (state === "done") {
+    return (
+      <p data-testid="undo-done" className="mt-2 text-xs text-muted-foreground">
+        Undone. The lead is back the way it was before Jev acted.
+      </p>
+    );
+  }
+  if (!undoId) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        data-testid="undo-jev-action"
+        disabled={state === "busy"}
+        onClick={async () => {
+          setState("busy");
+          setError(null);
+          const r = await controls.undo(undoId);
+          if (r.ok) setState("done");
+          else {
+            setState("idle");
+            setError(r.message);
+          }
+        }}
+        className="rounded-md border px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
+      >
+        {state === "busy" ? "Undoing..." : "Undo Jev's action"}
+      </button>
+      {error && (
+        <span role="alert" data-testid="undo-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function RunCard({
   run,
   label,
   isOwner = false,
+  undoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   isOwner?: boolean;
+  undoControls?: UndoControls;
 }) {
   const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
@@ -191,6 +264,10 @@ export function RunCard({
           </li>
         )}
       </ul>
+
+      {undoControls && hasUndoableJevAction(run) && (
+        <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
+      )}
 
       {threadHref && (
         <a

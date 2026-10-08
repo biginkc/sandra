@@ -77,10 +77,8 @@ describe("setLabelRule", () => {
   });
 
   it("refuses to enable a never-automate label server-side, before the RPC", async () => {
-    for (const outcome of ["opted_out", "dnc"] as const) {
-      const r = await setLabelRule({ ...input, outcome: outcome as never, automationEnabled: true });
-      expect(r.ok).toBe(false);
-    }
+    const r = await setLabelRule({ ...input, outcome: "opted_out", automationEnabled: true });
+    expect(r.ok).toBe(false);
     expect(mocks.rpcCalls).toHaveLength(0);
   });
 

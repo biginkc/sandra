@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008250000 -- 52 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions).
+// (20261008140000 .. 20261008300200 -- 55 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200)).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 52 rollbacks in REVERSE order,
+//   3. applies the 55 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 52 migrations forward again.
+//   5. re-applies the 55 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -26,7 +26,7 @@ const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
 const LAST = process.env.CHAIN_LAST ?? "20261008310000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 53); // 52 on main (28 inherited Jev + 13 messages-v2 + 4 Phase 1 + replay harness 180000 + new-only 210000 + scorecard 211000 + suppression 212000 + Jev-only 220000 + New/Backlog 230000 + Luna 250000) + 1 templates (310000)
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 56); // 55 on main (through 300200) + 1 templates (310000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
