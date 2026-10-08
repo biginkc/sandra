@@ -174,12 +174,10 @@ describe("HoldsRail", () => {
     }
   });
 
-  it("shows the empty state and the shadow scorecard placeholder", () => {
+  it("shows the empty state", () => {
     render(<HoldsRail holds={[]} labels={new Map()} nowMs={NOW} />);
     expect(screen.getByText(/no open holds/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/available after 2h of shadow traffic/i),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/shadow scorecard/i)).not.toBeInTheDocument();
   });
 });
 

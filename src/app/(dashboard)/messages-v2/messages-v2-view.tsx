@@ -20,6 +20,8 @@ import {
   type LooseSupabase,
 } from "./queries";
 import { RunCard } from "./run-card";
+import { ScorecardCard } from "./scorecard-card";
+import type { ScorecardRow } from "./scorecard";
 import type {
   HoldsMeta,
   ModeBadge,
@@ -52,6 +54,8 @@ export type MessagesV2ViewProps = {
   /** Mode badge queries failed (reason text). */
   badgesError?: string | null;
   badges: ModeBadge[];
+  /** Scorecard rows (7d) loaded on the server; null means the card loads them itself. */
+  scorecardRows?: ScorecardRow[] | null;
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
   nowMs: number;
@@ -338,7 +342,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         </p>
       </header>
 
-      <div className="grid gap-6 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
+      <div className="grid gap-6 lg:min-h-[20rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
         <section
           aria-label="Live feed"
           className="flex min-w-0 flex-col gap-3 lg:min-h-0"
@@ -394,6 +398,15 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           actions={props.actions}
           onReload={() => router.refresh()}
         />
+      </div>
+
+      {/* lg: the scorecard gets a bounded, scrollable slice so the feed and holds
+          columns above always keep their height (min 20rem). */}
+      <div
+        data-testid="scorecard-slot"
+        className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
+      >
+        <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
       </div>
 
       <ul
