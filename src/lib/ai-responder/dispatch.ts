@@ -66,6 +66,7 @@ import {
   type RetryReason,
   type RetryReply,
 } from "./retry";
+import { retryOutstandingSuppressionObligations } from "./confirm-suppression";
 import { classifyAiSkip } from "./classify";
 import {
   classifyProviderFailure,
@@ -4607,6 +4608,7 @@ export async function sweepLateSends(
   nextCursor: LateSendSweepCursor | null;
   orphanMalformed: number;
   orphanBackingFailed: number;
+  suppressionRetried: { attempted: number; succeeded: number; failed: number; holdsCleared: number };
 }> {
   const windowStartMs = Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000);
   const pageSize = options.pageSize ?? 100;
@@ -4617,11 +4619,13 @@ export async function sweepLateSends(
   let exhaustedA = false;
   let orphanMalformed = 0;
   let orphanBackingFailed = 0;
+  let suppressionRetried = { attempted: 0, succeeded: 0, failed: 0, holdsCleared: 0 };
   const done = () => ({
     scanned,
     reconciled,
     orphanMalformed,
     orphanBackingFailed,
+    suppressionRetried,
     nextCursor: exhaustedA ? null : { a: cursorA },
   });
   const resolveUnreconcilable = async (id: string, reason: string): Promise<boolean> => {
@@ -4657,6 +4661,14 @@ export async function sweepLateSends(
       extra: { orphanMalformed },
     });
   }
+
+  // Durable phone-suppression obligations recorded by the confirm RPC (or a
+  // failed first attempt): retry the ones older than 2 minutes. Bounded, and
+  // idempotent with a concurrent human Retry. Never throws.
+  suppressionRetried = await retryOutstandingSuppressionObligations(supabase as never, {
+    olderThanSeconds: 120,
+    limit: 25,
+  });
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase
