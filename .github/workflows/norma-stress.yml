@@ -66,14 +66,14 @@ jobs:
 
       # Cutover stage 1 disables the legacy claim (20261009010000). This suite (including the teeth mutants) was
       # written for, and dials through, the legacy claim, so it runs on the schema it was written for: the same
-      # chain WITHOUT that one migration. The post-disable schema is covered by the next step. Nothing is skipped.
-      - name: Run the stress gate (legacy suite, pre-disable schema)
+      # chain WITHOUT the two cutover schemas (stage 1 and stage 2). The post-migration schema is covered by the next step. Nothing is skipped.
+      - name: Run the stress gate (legacy suite, pre-cutover schema)
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-          NORMA_STRESS_EXCLUDE_MIGRATIONS: 20261009010000_norma_legacy_claim_disable.sql
+          NORMA_STRESS_EXCLUDE_MIGRATIONS: 20261009010000_norma_legacy_claim_disable.sql,20261009010100_norma_call_queue.sql
         run: npm run test:norma-stress
 
-      - name: Run the cutover gate (post-disable schema, current runtime)
+      - name: Run the cutover gate (stage 1 + stage 2 schema, current runtime)
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
         run: npm run test:norma-cutover
