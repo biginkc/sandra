@@ -287,4 +287,36 @@ describe("scope is written by the review-creating RPC itself (no window to confi
     await db.query(`update public.ai_disposition_reviews set status = 'superseded', resolved_at = now(), superseded_reason = 'x' where id = $1`, [c.reviewId]);
     expect(await prop(c.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "jev_dnc_needs_confirm" });
   });
+
+  it("rollback REFUSES while a confirmed scope=all review has an undischarged suppression obligation, or a phone-wide review is pending; allows it once discharged/resolved", async () => {
+    const run = async () => {
+      await db.query("savepoint rb");
+      try {
+        await db.query(ROLLBACK);
+        await db.query("release savepoint rb");
+        return null;
+      } catch (e) {
+        await db.query("rollback to savepoint rb");
+        return (e as Error).message;
+      }
+    };
+    // pending phone-wide review
+    const a = await review({ scope: "all", applied: false });
+    expect(await run()).toMatch(/ROLLBACK_REFUSED/);
+    // confirmed, obligation recorded but not discharged
+    await confirm(a.reviewId);
+    expect(await ledger(a.reviewId)).toBe(1);
+    expect(await run()).toMatch(/ROLLBACK_REFUSED/);
+    // discharged
+    await db.query(
+      `insert into public.lead_events (org_id, property_id, actor_type, event_type, payload, source_type, source_id)
+       values ($1, $2, 'system', 'suppression_retried_ok', '{}'::jsonb, 'ai_disposition_reviews.suppression_retried', $3)`,
+      [orgId, a.propertyId, a.reviewId],
+    );
+    expect(await run()).toBeNull();
+    const col = await db.query(
+      `select 1 from information_schema.columns where table_name = 'ai_disposition_reviews' and column_name = 'wrong_scope'`,
+    );
+    expect(col.rowCount).toBe(0);
+  });
 });

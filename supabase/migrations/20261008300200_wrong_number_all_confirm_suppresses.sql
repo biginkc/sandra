@@ -65,6 +65,7 @@ create trigger trg_ai_disposition_reviews_clear_needs_confirm_hold
 -- The scope is written by the SAME call that creates the review, so a human can
 -- never confirm a scope = all review before its scope is recorded.
 drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint);
+drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text);
 create or replace function public.fn_apply_ai_disposition_with_review(
   p_property_id uuid,
   p_conversation_id uuid,
@@ -72,7 +73,11 @@ create or replace function public.fn_apply_ai_disposition_with_review(
   p_disposition text,
   p_ai_reason text,
   p_expected_revision bigint default null,
-  p_wrong_scope text default null
+  p_wrong_scope text default null,
+  -- Jev auto-apply only: record the prior state for Undo INSIDE this transaction,
+  -- under the property row lock, so a human edit can never be captured as
+  -- "what Jev applied".
+  p_undo_classification_run_id uuid default null
 )
 returns jsonb
 language plpgsql
@@ -87,6 +92,7 @@ declare
   v_review public.ai_disposition_reviews%rowtype;
   v_current_severity integer;
   v_next_severity integer;
+  v_after record;
 begin
   if p_wrong_scope is not null and p_wrong_scope not in ('this_property', 'all') then
     raise exception 'invalid wrong scope' using errcode = '22023';
@@ -134,7 +140,7 @@ begin
       using errcode = '23514';
   end if;
 
-  select p.org_id, p.outreach_dispo, p.needs_human_attention, p.decision_context_revision
+  select p.org_id, p.outreach_dispo, p.needs_human_attention, p.decision_context_revision, p.follow_up_at
   into v_property
   from public.properties p
   where p.id = p_property_id
@@ -245,7 +251,21 @@ begin
         last_ai_escalation_reason = null,
         updated_at = now()
     where id = p_property_id
-      and org_id = v_message.org_id;
+      and org_id = v_message.org_id
+    returning decision_context_revision, follow_up_at into v_after;
+
+    if p_undo_classification_run_id is not null and p_disposition in ('wrong_number', 'not_interested') then
+      insert into public.jev_action_undo (
+        org_id, property_id, source_inbound_message_id, classification_run_id,
+        action, applied_dispo, prior_outreach_dispo, prior_follow_up_at,
+        applied_follow_up_at, recorded_revision
+      ) values (
+        v_message.org_id, p_property_id, p_source_inbound_message_id, p_undo_classification_run_id,
+        p_disposition, p_disposition, v_property.outreach_dispo, v_property.follow_up_at,
+        v_after.follow_up_at, v_after.decision_context_revision
+      )
+      on conflict (source_inbound_message_id) do nothing;
+    end if;
   end if;
 
   insert into public.ai_disposition_reviews (
@@ -293,9 +313,9 @@ begin
   );
 end;
 $$;
-revoke all on function public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text)
+revoke all on function public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text, uuid)
   from public, anon, authenticated;
-grant execute on function public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text) to service_role;
+grant execute on function public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text, uuid) to service_role;
 
 drop function if exists public.fn_propose_deferred_ai_disposition_review(uuid, uuid, uuid, uuid, text, text, bigint);
 create or replace function public.fn_propose_deferred_ai_disposition_review(

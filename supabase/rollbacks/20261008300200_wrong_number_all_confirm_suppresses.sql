@@ -1,10 +1,46 @@
 -- Rollback for 20261008300200: restores the 190000 confirm RPC and sweeper feed, drops wrong_scope.
 begin;
 
+-- SAFETY: this rollback drops wrong_scope and the sweeper's inclusion of
+-- wrong_number/all reviews. Refuse while that would orphan a phone-suppression
+-- duty: a human-confirmed scope=all review whose suppression is not yet proven
+-- (no retried_ok), or a still-pending phone-wide review.
+do $$
+declare
+  v_confirmed integer := 0;
+  v_pending integer := 0;
+begin
+  -- Idempotent: once wrong_scope is gone there is nothing left to protect.
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'ai_disposition_reviews' and column_name = 'wrong_scope'
+  ) then
+    execute $q$
+      select count(*) from public.ai_disposition_reviews r
+      where r.disposition = 'wrong_number' and r.wrong_scope = 'all' and r.status = 'confirmed'
+        and not exists (
+          select 1 from public.lead_events ok
+          where ok.event_type = 'suppression_retried_ok'
+            and ok.source_type = 'ai_disposition_reviews.suppression_retried'
+            and ok.source_id = r.id
+        )$q$ into v_confirmed;
+    execute $q$
+      select count(*) from public.ai_disposition_reviews r
+      where r.disposition = 'wrong_number' and r.wrong_scope = 'all' and r.status = 'pending'$q$
+      into v_pending;
+  end if;
+  if v_confirmed > 0 or v_pending > 0 then
+    raise exception
+      'ROLLBACK_REFUSED: % confirmed wrong_number/all review(s) with undischarged phone suppression and % pending phone-wide review(s); discharge or resolve them first',
+      v_confirmed, v_pending
+      using errcode = 'P0001';
+  end if;
+end $$;
+
 drop trigger if exists trg_ai_disposition_reviews_clear_needs_confirm_hold on public.ai_disposition_reviews;
 drop function if exists public.fn_clear_needs_confirm_hold_on_review_resolved();
 
-drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text);
+drop function if exists public.fn_apply_ai_disposition_with_review(uuid, uuid, uuid, text, text, bigint, text, uuid);
 create or replace function public.fn_apply_ai_disposition_with_review(
   p_property_id uuid,
   p_conversation_id uuid,

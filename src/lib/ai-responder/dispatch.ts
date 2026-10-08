@@ -12,7 +12,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
-import { captureUndoSnapshot, recordJevActionUndo } from "./undo";
+import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
@@ -993,7 +993,6 @@ async function classifyAndHandleNonRouteOutcomes(
     // Root review of dbbb12e6, finding 1: effect + revision guard +
     // audit insert now happen atomically inside ONE RPC call — see
     // applyJevLeadDecisionAtomically's doc comment.
-    const nurtureUndoSnapshot = await captureUndoSnapshot(supabase, input.propertyId);
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1017,15 +1016,6 @@ async function classifyAndHandleNonRouteOutcomes(
         detail: { status: applyResult.status },
       }, runCtx);
       if (applyResult.status === "applied") {
-        await recordJevActionUndo(supabase, {
-          orgId: property.org_id,
-          propertyId: input.propertyId,
-          inboundMessageId: input.inboundMessageId,
-          classificationRunId: classification.classificationRunId,
-          action: "nurture",
-          appliedDispo: "nurture",
-          snapshot: nurtureUndoSnapshot,
-        });
         await recordLeadEvent({
           propertyId: input.propertyId,
           actorType: "ai",
@@ -4749,9 +4739,6 @@ async function setResponderDispo(
     return { updated: false, reason: "db_error" };
   }
 
-  const undoSnapshot = args.undo
-    ? await captureUndoSnapshot(supabase, args.propertyId)
-    : null;
   let failureMessage = "AI disposition RPC failed";
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const { data, error } = await supabase.rpc(
@@ -4766,6 +4753,9 @@ async function setResponderDispo(
         ...(args.dispo === "wrong_number" && args.wrongScope
           ? { p_wrong_scope: args.wrongScope }
           : {}),
+        // The undo record (prior state + what Jev applied) is written by the
+        // RPC itself, in its transaction, under the property row lock.
+        ...(args.undo ? { p_undo_classification_run_id: args.undo.classificationRunId } : {}),
       },
     );
     if (error) {
@@ -4808,15 +4798,9 @@ async function setResponderDispo(
       });
       pausedEnrollmentIds = pauseResult?.enrollmentIds ?? [];
     }
-    if (args.undo && status === "applied") {
-      await recordJevActionUndo(supabase, {
-        orgId: args.undo.orgId,
-        propertyId: args.propertyId,
+    if (args.undo && status === "applied" && pausedEnrollmentIds.length > 0) {
+      await recordPausedEnrollmentsForUndo(supabase, {
         inboundMessageId: args.inboundMessageId,
-        classificationRunId: args.undo.classificationRunId,
-        action: args.dispo,
-        appliedDispo: args.dispo,
-        snapshot: undoSnapshot,
         pausedEnrollmentIds,
       });
     }

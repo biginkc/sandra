@@ -1,76 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { captureUndoSnapshot, recordJevActionUndo, undoJevAction } from "./undo";
+import { recordPausedEnrollmentsForUndo, undoJevAction } from "./undo";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const UNDO_ID = "11111111-1111-4111-8111-111111111111";
 
-describe("captureUndoSnapshot", () => {
-  it("reads the prior disposition and follow-up date", async () => {
+describe("recordPausedEnrollmentsForUndo", () => {
+  it("stores the enrollment ids Jev's wrong_number paused on the undo row (state itself is written by the RPC)", async () => {
+    const calls: Array<{ values: unknown; filters: Array<[string, unknown]> }> = [];
     const supabase = {
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({
-              data: { outreach_dispo: null, follow_up_at: "2026-10-20T00:00:00Z" },
-              error: null,
-            }),
-          }),
-        }),
+      from: vi.fn(() => {
+        const rec = { values: undefined as unknown, filters: [] as Array<[string, unknown]> };
+        const c: Record<string, unknown> = {};
+        c.update = (v: unknown) => {
+          rec.values = v;
+          calls.push(rec);
+          return c;
+        };
+        c.eq = (k: string, v: unknown) => (rec.filters.push([k, v]), c);
+        c.is = (k: string, v: unknown) => (rec.filters.push([k, v]), Promise.resolve({ error: null }));
+        return c;
       }),
     };
-    expect(await captureUndoSnapshot(supabase as never, "p1")).toEqual({
-      outreachDispo: null,
-      followUpAt: "2026-10-20T00:00:00Z",
-    });
-  });
-});
-
-describe("recordJevActionUndo", () => {
-  it("stores prior state and the paused enrollment ids", async () => {
-    const insert = vi.fn(async () => ({ error: null }));
-    const supabase = {
-      from: vi.fn((table: string) =>
-        table === "properties"
-          ? { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { follow_up_at: "2026-10-25T00:00:00Z", decision_context_revision: 7 }, error: null }) }) }) }
-          : { insert },
-      ),
-    };
-    await recordJevActionUndo(supabase as never, {
-      orgId: "o",
-      propertyId: "p",
-      inboundMessageId: "m",
-      classificationRunId: "c",
-      action: "wrong_number",
-      appliedDispo: "wrong_number",
-      snapshot: { outreachDispo: "nurture", followUpAt: "2026-10-20T00:00:00Z" },
-      pausedEnrollmentIds: ["e1", "e2"],
-    });
+    await recordPausedEnrollmentsForUndo(supabase as never, { inboundMessageId: "m", pausedEnrollmentIds: ["e1", "e2"] });
     expect(supabase.from).toHaveBeenCalledWith("jev_action_undo");
-    expect(insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        prior_outreach_dispo: "nurture",
-        prior_follow_up_at: "2026-10-20T00:00:00Z",
-        applied_follow_up_at: "2026-10-25T00:00:00Z",
-        recorded_revision: 7,
-        paused_enrollment_ids: ["e1", "e2"],
-      }),
-    );
+    expect(calls[0]).toEqual({
+      values: { paused_enrollment_ids: ["e1", "e2"] },
+      filters: [["source_inbound_message_id", "m"], ["undone_at", null]],
+    });
   });
 
-  it("writes nothing without a snapshot or inbound message", async () => {
-    const insert = vi.fn();
-    const supabase = { from: () => ({ insert }) };
-    await recordJevActionUndo(supabase as never, {
-      orgId: "o", propertyId: "p", inboundMessageId: "m", classificationRunId: null,
-      action: "nurture", appliedDispo: "nurture", snapshot: null,
-    });
-    await recordJevActionUndo(supabase as never, {
-      orgId: "o", propertyId: "p", inboundMessageId: null, classificationRunId: null,
-      action: "nurture", appliedDispo: "nurture", snapshot: { outreachDispo: null, followUpAt: null },
-    });
-    expect(insert).not.toHaveBeenCalled();
+  it("writes nothing when there is nothing to record", async () => {
+    const supabase = { from: vi.fn() };
+    await recordPausedEnrollmentsForUndo(supabase as never, { inboundMessageId: "m", pausedEnrollmentIds: [] });
+    await recordPausedEnrollmentsForUndo(supabase as never, { inboundMessageId: null, pausedEnrollmentIds: ["e"] });
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 });
 

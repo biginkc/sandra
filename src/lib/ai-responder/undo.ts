@@ -10,81 +10,29 @@ import type { Database } from "@/lib/supabase/types";
  * (with the sequence enrollments Jev's own action paused) so a person can undo
  * it from the Messages v2 live feed (fn_undo_jev_action + resumeJevPausedEnrollments).
  */
-export type UndoSnapshot = {
-  outreachDispo: string | null;
-  followUpAt: string | null;
-};
-
-export type JevUndoAction = "wrong_number" | "not_interested" | "nurture";
-
-export async function captureUndoSnapshot(
+/**
+ * The undo record (prior disposition / follow_up_at, what Jev applied, and the
+ * decision_context_revision) is written INSIDE the apply RPCs
+ * (fn_apply_ai_disposition_with_review, fn_auto_apply_jev_lead_decision), in
+ * the same transaction and under the property row lock, so a human edit can
+ * never be captured as "what Jev applied". Only the sequence enrollments Jev's
+ * wrong_number paused are known after that commit; this stores them.
+ * Best effort and idempotent; never fails the action it describes.
+ */
+export async function recordPausedEnrollmentsForUndo(
   supabase: SupabaseClient<Database>,
-  propertyId: string,
-): Promise<UndoSnapshot | null> {
-  const { data, error } = await supabase
-    .from("properties")
-    .select("outreach_dispo, follow_up_at")
-    .eq("id", propertyId)
-    .maybeSingle();
-  if (error || !data) {
-    reportError(new Error(error?.message ?? "property not found"), {
-      tags: { surface: "jev_undo_capture" },
-      extra: { propertyId },
-    });
-    return null;
-  }
-  return {
-    outreachDispo: data.outreach_dispo ?? null,
-    followUpAt: data.follow_up_at ?? null,
-  };
-}
-
-/** Best effort and idempotent per inbound message: never fails the action it describes. */
-export async function recordJevActionUndo(
-  supabase: SupabaseClient<Database>,
-  args: {
-    orgId: string;
-    propertyId: string;
-    inboundMessageId: string | null | undefined;
-    classificationRunId: string | null | undefined;
-    action: JevUndoAction;
-    appliedDispo: string;
-    snapshot: UndoSnapshot | null;
-    pausedEnrollmentIds?: string[];
-  },
+  args: { inboundMessageId: string | null | undefined; pausedEnrollmentIds: string[] },
 ): Promise<void> {
-  if (!args.inboundMessageId || !args.snapshot) return;
-  // The follow-up date AS JEV LEFT IT: undo refuses if a person edited it since.
-  const { data: after, error: afterError } = await supabase
-    .from("properties")
-    .select("follow_up_at, decision_context_revision")
-    .eq("id", args.propertyId)
-    .maybeSingle();
-  if (afterError || !after) {
-    reportError(new Error(afterError?.message ?? "property not found"), {
-      tags: { surface: "jev_undo_record_after_state" },
-      extra: { propertyId: args.propertyId },
-    });
-    return;
-  }
-  const { error } = await supabase.from("jev_action_undo").insert({
-    org_id: args.orgId,
-    property_id: args.propertyId,
-    source_inbound_message_id: args.inboundMessageId,
-    classification_run_id: args.classificationRunId ?? null,
-    action: args.action,
-    applied_dispo: args.appliedDispo,
-    prior_outreach_dispo: args.snapshot.outreachDispo,
-    prior_follow_up_at: args.snapshot.followUpAt,
-    applied_follow_up_at: after.follow_up_at ?? null,
-    recorded_revision: after.decision_context_revision ?? null,
-    paused_enrollment_ids: args.pausedEnrollmentIds ?? [],
-  });
-  // 23505 = already recorded for this inbound (retry): that is fine.
-  if (error && (error as { code?: string }).code !== "23505") {
+  if (!args.inboundMessageId || args.pausedEnrollmentIds.length === 0) return;
+  const { error } = await supabase
+    .from("jev_action_undo")
+    .update({ paused_enrollment_ids: args.pausedEnrollmentIds })
+    .eq("source_inbound_message_id", args.inboundMessageId)
+    .is("undone_at", null);
+  if (error) {
     reportError(new Error(error.message), {
-      tags: { surface: "jev_undo_record" },
-      extra: { propertyId: args.propertyId, action: args.action },
+      tags: { surface: "jev_undo_record_paused" },
+      extra: { inboundMessageId: args.inboundMessageId },
     });
   }
 }

@@ -1324,6 +1324,17 @@ function createMockSupabase(state: MockState) {
         });
       }
 
+      if (args.p_undo_classification_run_id) {
+        // The real RPC writes the undo record in its own transaction.
+        (state.jevActionUndo ??= []).push({
+          property_id: String(args.p_property_id),
+          source_inbound_message_id: inboundMessageId,
+          action: disposition,
+          applied_dispo: disposition,
+          prior_outreach_dispo: current,
+          classification_run_id: String(args.p_undo_classification_run_id),
+        });
+      }
       state.property.outreach_dispo = disposition;
       state.property.needs_human_attention = false;
       state.aiDispoReviews.push({

@@ -299,4 +299,111 @@ describe("fn_undo_jev_action", () => {
     const d = (await db.query(`select resolved_outcome from public.jev_lead_decisions where id = $1`, [decisionId])).rows[0];
     expect(d.resolved_outcome).toBe("dnc");
   });
+
+  describe("the undo record is written inside the apply RPC (no window for a human edit to be captured as 'applied')", () => {
+    async function thread(followUp: string | null = "2026-10-20T00:00:00Z", dispo: string | null = null) {
+      const contactId = randomUUID();
+      const pid = randomUUID();
+      const conv = randomUUID();
+      const mid = randomUUID();
+      const runId = randomUUID();
+      await db.query(
+        `insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`,
+        [contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`],
+      );
+      await db.query(
+        `insert into public.properties (id, org_id, address, state, status, outreach_dispo, follow_up_at, homeowner_contact_id)
+         values ($1, $2, 'Apply St', 'TX', 'prospect', $3, $4, $5)`,
+        [pid, orgId, dispo, followUp, contactId],
+      );
+      await db.query(
+        `insert into public.message_threads (org_id, channel, contact_id, property_id, conversation_id) values ($1, 'sms', $2, $3, $4)`,
+        [orgId, contactId, pid, conv],
+      );
+      await db.query(
+        `insert into public.messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body) values ($1, $2, $3, $4, $5, 'sms', 'inbound', 'x')`,
+        [mid, orgId, pid, conv, contactId],
+      );
+      await db.query(
+        `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, provider, model, schema_version, policy_version, state_hash, state_version, decision, resolved_outcome)
+         values ($1, $2, $3, $4, $5, 'jev', 'jev-1.13.0', 2, 'p', $6, 1, '{}'::jsonb, $7)`,
+        [runId, orgId, pid, conv, mid, randomUUID(), "wrong_number"],
+      );
+      return { pid, conv, mid, runId };
+    }
+    const svc = async <T,>(fn: () => Promise<T>) => {
+      await db.query("set local role service_role");
+      await db.query("select set_config('request.jwt.claim.role', 'service_role', true)");
+      try {
+        return await fn();
+      } finally {
+        await db.query("select set_config('request.jwt.claim.role', '', true)");
+        await db.query("reset role");
+      }
+    };
+    const rev = async (pid: string) =>
+      (await db.query("select decision_context_revision r from public.properties where id = $1", [pid])).rows[0].r;
+    const undoRow = async (mid: string) =>
+      (await db.query("select * from public.jev_action_undo where source_inbound_message_id = $1", [mid])).rows[0];
+
+    it("wrong_number apply records the exact prior state, applied follow-up and revision in one transaction; a later human edit makes undo refuse", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await svc(async () =>
+        db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'm', $4, 'this_property', $5)`, [
+          t.pid, t.conv, t.mid, await rev(t.pid), t.runId,
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      expect(row).toMatchObject({ action: "wrong_number", applied_dispo: "wrong_number", prior_outreach_dispo: null });
+      expect(new Date(row.prior_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(new Date(row.applied_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(String(row.recorded_revision)).toBe(String(await rev(t.pid)));
+      // a human edits the follow-up date AFTER Jev acted: undo must refuse, not overwrite
+      await db.query(`update public.properties set follow_up_at = '2026-11-05T00:00:00Z' where id = $1`, [t.pid]);
+      await expect(undo(ownerId, row.id)).rejects.toThrow(/STATE_CHANGED/);
+      const p = (await db.query("select outreach_dispo, follow_up_at from public.properties where id = $1", [t.pid])).rows[0];
+      expect(p.outreach_dispo).toBe("wrong_number");
+      expect(new Date(p.follow_up_at).toISOString()).toBe("2026-11-05T00:00:00.000Z");
+    });
+
+    it("no undo record for a non-Jev call (no run id) or when nothing changed", async () => {
+      const t = await thread(null, null);
+      await svc(async () =>
+        db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'm', $4)`, [t.pid, t.conv, t.mid, await rev(t.pid)]),
+      );
+      expect(await undoRow(t.mid)).toBeUndefined();
+    });
+
+    it("nurture auto-apply records prior state (incl. the cleared follow_up_at) atomically; undo restores it, and a human edit in between makes it refuse", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await db.query(`update public.sms_classification_runs set resolved_outcome = 'nurture' where id = $1`, [t.runId]);
+      await svc(async () =>
+        db.query(`select public.fn_auto_apply_jev_lead_decision($1, $2, $3, $4, 'nurture', 0.99, 0.9, 1, $5)`, [
+          t.pid, t.conv, t.mid, t.runId, await rev(t.pid),
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      expect(row).toMatchObject({ action: "nurture", applied_dispo: "nurture", prior_outreach_dispo: null, applied_follow_up_at: null });
+      expect(new Date(row.prior_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(String(row.recorded_revision)).toBe(String(await rev(t.pid)));
+      // happy path restores
+      await undo(ownerId, row.id);
+      const p = (await db.query("select outreach_dispo, follow_up_at from public.properties where id = $1", [t.pid])).rows[0];
+      expect(p.outreach_dispo).toBeNull();
+      expect(new Date(p.follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+    });
+
+    it("nurture: a human sets a follow-up after Jev cleared it -> undo refuses", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await db.query(`update public.sms_classification_runs set resolved_outcome = 'nurture' where id = $1`, [t.runId]);
+      await svc(async () =>
+        db.query(`select public.fn_auto_apply_jev_lead_decision($1, $2, $3, $4, 'nurture', 0.99, 0.9, 1, $5)`, [
+          t.pid, t.conv, t.mid, t.runId, await rev(t.pid),
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      await db.query(`update public.properties set follow_up_at = '2026-12-01T00:00:00Z' where id = $1`, [t.pid]);
+      await expect(undo(ownerId, row.id)).rejects.toThrow(/STATE_CHANGED/);
+    });
+  });
 });
