@@ -141,6 +141,7 @@ describe("toAlertHolds", () => {
     expect(h).toEqual({
       holdKey: "prop-1:jev_decision",
       propertyId: "prop-1",
+      reasonLabel: "Jev flagged it",
       since: "2026-10-08T10:00:00.000Z",
       startedAt: "2026-10-08T10:00:00.000Z",
       name: "Dana",
@@ -174,5 +175,22 @@ describe("payloads never carry seller message text", () => {
       expect(s.text).not.toContain("Oak St");
     }
     expect(JSON.stringify(t.store.rows)).not.toContain("SELLER SAID");
+  });
+});
+
+import { holdReasonLabel, leadLink, slackNudgeText } from "./messages";
+import { hold as mkHold } from "./test-support";
+
+describe("alert labels and links", () => {
+  it("maps known reasons to plain labels", () => {
+    expect(holdReasonLabel("price_or_offer")).toBe("price talk");
+    expect(holdReasonLabel("call_request")).toBe("call request");
+    expect(holdReasonLabel("weird+unknown")).toBe("needs review");
+  });
+  it("nudge links the lead and keeps the label", () => {
+    const text = slackNudgeText(mkHold({ propertyId: "p-7", reasonLabel: "call request" }), "https://x.test/");
+    expect(text).toContain("https://x.test/leads/p-7");
+    expect(text).toContain("call request");
+    expect(leadLink("https://x.test/", "a b")).toBe("https://x.test/leads/a%20b");
   });
 });
