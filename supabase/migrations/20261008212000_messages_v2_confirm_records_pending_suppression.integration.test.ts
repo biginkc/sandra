@@ -9,8 +9,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 /**
  * Codex round 14: the confirm RPC records a durable phone-suppression
- * obligation in the SAME transaction (20261008190000). Local-only. Replays the
- * 20261008140000..20261008190000 chain inside a rolled-back transaction and runs
+ * obligation in the SAME transaction (20261008212000). Local-only. Replays the
+ * 20261008140000..20261008212000 chain inside a rolled-back transaction and runs
  * the real TypeScript helpers against it through a pg-backed client shim.
  * Phone-level opt-out itself is stubbed with an idempotency-keyed recorder.
  */
@@ -45,11 +45,11 @@ h.als = new AsyncLocalStorage();
 const dir = __dirname;
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
 const CHAIN = readdirSync(dir)
-  .filter((f) => /^20261008\d{6}_.*\.sql$/.test(f) && f >= "20261008140000" && f <= "20261008190000_zz")
+  .filter((f) => /^20261008\d{6}_.*\.sql$/.test(f) && f >= "20261008140000" && f <= "20261008212000_zz")
   .sort()
   .map((f) => strip(readFileSync(path.join(dir, f), "utf8")));
 const ROLLBACK = strip(
-  readFileSync(path.join(dir, "../rollbacks/20261008190000_messages_v2_confirm_records_pending_suppression.sql"), "utf8"),
+  readFileSync(path.join(dir, "../rollbacks/20261008212000_messages_v2_confirm_records_pending_suppression.sql"), "utf8"),
 );
 
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });

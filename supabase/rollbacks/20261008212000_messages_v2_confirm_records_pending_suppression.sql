@@ -1,4 +1,4 @@
--- Rollback for 20261008190000_messages_v2_confirm_records_pending_suppression.
+-- Rollback for 20261008212000_messages_v2_confirm_records_pending_suppression.
 -- Restores the exact 20261008142700 body of fn_confirm_ai_disposition_review and
 -- drops the obligation-listing function added by 190000.
 begin;
