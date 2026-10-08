@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { Harness } from "./harness";
@@ -35,6 +38,18 @@ beforeAll(async () => {
   const legacyDb = await import("./db");
   const legacy = await legacyDb.createScratchDb();
   legacyDrop = legacy.drop;
+  // The reference must be genuinely pre-disable in EVERY config. Where the source already holds the full chain the exclusion
+  // switch cannot remove 20261009010000 from the clone, so put the original definition back from the migration that last
+  // defined it (20261008090100, the same block the forward-recovery file restores), then refuse to continue unless the
+  // reference really has the original body: the comparison below can never pass against a reference that is itself disabled.
+  const original = readFileSync(path.join(process.cwd(), "supabase/migrations/20261008090100_norma_retry_next_step_union_reviewed.sql"), "utf8");
+  const block = /create or replace function public\.fn_norma_claim_dispatch\(p_request_id uuid, p_expected_attempt integer default null\)[\s\S]*?grant execute on function public\.fn_norma_claim_dispatch\(uuid, integer\) to service_role;/i.exec(original);
+  if (!block) throw new Error("legacy-claim reference: original fn_norma_claim_dispatch block not found in 20261008090100");
+  const isDisabled = async () => /return false/i.test(String((await legacy.pool.query(FN_META_SQL)).rows[0].prosrc));
+  if (await isDisabled()) await legacy.pool.query(block[0]);
+  if (await isDisabled()) throw new Error("legacy-claim reference still has the disabled body: the pre-disable comparison would be vacuous");
+  const referenceBody = String((await legacy.pool.query(FN_META_SQL)).rows[0].prosrc);
+  if (!/update public\.norma_call_requests/i.test(referenceBody)) throw new Error("legacy-claim reference does not look like the original claim");
   legacyMeta = (await legacy.pool.query(FN_META_SQL)).rows[0];
 });
 afterAll(async () => {
