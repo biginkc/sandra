@@ -412,7 +412,12 @@ export async function handleInboundWebhook(
       // can click "Confirm do-not-contact" on the hold card.
       if (
         !isCarrierStopKeyword(bodyTrimmed) &&
-        (DNC_KEYWORDS.test(ev.body) || matchesStopKeyword(bodyTrimmed))
+        (DNC_KEYWORDS.test(ev.body) ||
+          matchesStopKeyword(bodyTrimmed) ||
+          // ANY hostile wording is held here, ahead of every generic exit
+          // (price escalation, drafting off, reply pacing) that would hold
+          // it without the Confirm do-not-contact action.
+          isHostileInbound(ev.body))
       ) {
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,

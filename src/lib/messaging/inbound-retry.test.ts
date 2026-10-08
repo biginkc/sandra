@@ -579,6 +579,16 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
       },
     );
 
+    it.each(["Your $50k offer is a scam", "you idiot", "this is spam, go to hell"])(
+      "any hostile text %j is held at the webhook before generic exits: exact hold reason, no dispatch, no suppression",
+      async (body) => {
+        await run(body);
+        expect(reasonOf()).toBe("hostile_needs_confirm:message-1");
+        expect(mocks.dispatchAi).not.toHaveBeenCalled();
+        expect(mocks.optOut).not.toHaveBeenCalled();
+      },
+    );
+
     it("a plain 'wrong person' (scope all) is held with the non-hostile reason", async () => {
       await run("you have the wrong person");
       expect(reasonOf()).toBe("optout_phrase_needs_confirm:message-1");
