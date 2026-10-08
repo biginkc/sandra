@@ -40,7 +40,6 @@ import {
  */
 const TABLE = "norma_followup_reassignments";
 const KEY = "slack_notice";
-const SCAN_LIMIT = 200;
 const BATCH = 10;
 const ABSENT_CODES = new Set(["42P01", "PGRST205"]);
 
@@ -115,24 +114,36 @@ export async function drainNormaFollowupNotices(deps: NormaFollowupNoticeDeps): 
   const budgetMs = deps.budgetMs ?? NORMA_NOTIFICATION_RUN_BUDGET_MS;
   const newToken = deps.newToken ?? (() => crypto.randomUUID());
 
-  // Newest first: rows already announced (and still unresolved) can never starve a new one.
-  const { data, error } = await deps.client
-    .from(TABLE)
-    .select("id, org_id, request_id, property_id, kind, payload, status, created_at")
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(SCAN_LIMIT);
-  if (error) {
-    if (isAbsent(error)) {
-      summary.tableAbsent = true;
-      return summary;
+  // Eligibility is decided IN the query, before any limit, so announced (or backing-off) rows can never crowd out a due one:
+  // never noticed, or a retry whose time has come, or a lease that expired. Oldest first within each. (ISO timestamps written by
+  // this worker compare correctly as text.)
+  const nowIso = new Date(now).toISOString();
+  const base = () =>
+    deps.client
+      .from(TABLE)
+      .select("id, org_id, request_id, property_id, kind, payload, status, created_at")
+      .eq("status", "open")
+      .order("created_at", { ascending: true })
+      .limit(BATCH);
+  const results = await Promise.all([
+    base().is(`payload->${KEY}`, null),
+    base().eq(`payload->${KEY}->>state`, "pending").lte(`payload->${KEY}->>next_attempt_at`, nowIso),
+    base().eq(`payload->${KEY}->>state`, "leased").lte(`payload->${KEY}->>lease_until`, nowIso),
+  ]);
+  const byId = new Map<string, Row>();
+  for (const { data, error } of results) {
+    if (error) {
+      if (isAbsent(error)) {
+        summary.tableAbsent = true;
+        return summary;
+      }
+      throw new Error(`norma followup notice scan failed: ${error.message}`);
     }
-    throw new Error(`norma followup notice scan failed: ${error.message}`);
+    for (const row of (data ?? []) as Row[]) byId.set(row.id, row);
   }
-
-  const due = ((data ?? []) as Row[])
+  const due = [...byId.values()]
     .filter((row) => (row.kind === "callback_task" || row.kind === "review_task") && isDue(readNotice(row.payload), now))
-    .reverse()
+    .sort((x, y) => x.created_at.localeCompare(y.created_at))
     .slice(0, BATCH);
 
   for (const [index, row] of due.entries()) {
@@ -142,16 +153,27 @@ export async function drainNormaFollowupNotices(deps: NormaFollowupNoticeDeps): 
     }
     summary.scanned += 1;
     const previous = readNotice(row.payload);
-    const attemptsBefore = previous?.attempts ?? 0;
+    // The attempt is counted when the lease is taken, so a run that dies, or whose backoff write fails, still spends it.
+    const attempts = (previous?.attempts ?? 0) + 1;
     const token = newToken();
-    const leased: Notice = {
-      state: "leased",
-      lease_token: token,
-      lease_until: new Date(now + NORMA_NOTIFICATION_LEASE_MS).toISOString(),
-      attempts: attemptsBefore,
-    };
-    if (!(await swap(deps.client, row, previous, leased))) {
+    const giveUpNow = attempts > NORMA_NOTIFICATION_MAX_ATTEMPTS;
+    const leased: Notice = giveUpNow
+      ? { state: "gave_up", lease_token: token, attempts: attempts - 1, last_error: previous?.last_error ?? "lease expired repeatedly" }
+      : { state: "leased", lease_token: token, lease_until: new Date(now + NORMA_NOTIFICATION_LEASE_MS).toISOString(), attempts };
+    try {
+      if (!(await swap(deps.client, row, previous, leased))) {
+        summary.skipped += 1;
+        continue;
+      }
+    } catch (leaseError) {
+      // One row's failed lease write must not abort the batch.
+      reportError(leaseError, { tags: { surface: "norma_followup_notice_lease" }, extra: { reassignmentId: row.id } });
       summary.skipped += 1;
+      continue;
+    }
+    if (giveUpNow) {
+      reportError(new Error("norma followup notice gave up after repeated expired leases"), { tags: { surface: "norma_followup_notice" }, extra: { reassignmentId: row.id } });
+      summary.gaveUp += 1;
       continue;
     }
 
@@ -160,7 +182,6 @@ export async function drainNormaFollowupNotices(deps: NormaFollowupNoticeDeps): 
       const message = await buildFollowupMessage(deps.client, row, deps.env);
       ({ ts } = await deps.post(message));
     } catch (failure) {
-      const attempts = attemptsBefore + 1;
       const giveUp = attempts >= NORMA_NOTIFICATION_MAX_ATTEMPTS;
       reportError(failure, { tags: { surface: "norma_followup_notice" }, extra: { reassignmentId: row.id, attempts } });
       const next: Notice = {
@@ -179,7 +200,7 @@ export async function drainNormaFollowupNotices(deps: NormaFollowupNoticeDeps): 
 
     // Slack has the message: a bookkeeping error must never back the row off into a re-post.
     try {
-      const recorded = await recordSent(deps.client, row, leased, { state: "sent", lease_token: token, attempts: attemptsBefore + 1, slack_ts: ts, last_error: null });
+      const recorded = await recordSent(deps.client, row, leased, { state: "sent", lease_token: token, attempts, slack_ts: ts, last_error: null });
       if (recorded) summary.sent += 1;
       else {
         // The row changed under us (e.g. a callback superseded a review task): its new payload gets its own notice.

@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { drainNormaFollowupNotices } from "@/lib/norma/followup-notice";
-import { createNormaSlackPoster, drainNormaNotifications, readNormaSlackConfig } from "@/lib/norma/slack-worker";
+import { runNormaNotificationsCron } from "@/lib/norma/notifications-cron";
+import { createNormaSlackPoster, readNormaSlackConfig } from "@/lib/norma/slack-worker";
 
+// Keep equal to NORMA_CRON_MAX_DURATION_MS (the shared deadline in notifications-cron.ts is derived from it).
 export const maxDuration = 60;
 
 /**
@@ -22,17 +23,11 @@ async function handle(request: Request) {
   }
   try {
     const config = readNormaSlackConfig();
-    const client = createAdminClient();
-    const post = config ? createNormaSlackPoster(config) : null;
-    const summary = await drainNormaNotifications({ client, post });
-    // Follow-up reassignment notices ride the same cron and poster. A failure here must never hide the call-summary drain.
-    let followups: Awaited<ReturnType<typeof drainNormaFollowupNotices>> | { error: string };
-    try {
-      followups = await drainNormaFollowupNotices({ client, post });
-    } catch (followupError) {
-      reportError(followupError, { tags: { surface: "cron_norma_followup_notices" } });
-      followups = { error: "followup_notice_failed" };
-    }
+    const { summary, followups } = await runNormaNotificationsCron({
+      client: createAdminClient(),
+      post: config ? createNormaSlackPoster(config) : null,
+      onFollowupError: (followupError) => reportError(followupError, { tags: { surface: "cron_norma_followup_notices" } }),
+    });
     return NextResponse.json({ ok: true, ...summary, followups });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_norma_notifications" } });

@@ -2,64 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { drainNormaFollowupNotices, buildNormaFollowupBlocks } from "./followup-notice";
+import { makeClient, type Row } from "./followup-notice.fake";
 import { NORMA_NOTIFICATION_LEASE_MS, NORMA_NOTIFICATION_MAX_ATTEMPTS } from "./slack-worker";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
-type Row = Record<string, unknown>;
 const NOW = Date.parse("2026-10-09T15:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
-
-/** Reads `a->b->>c` paths the way PostgREST does. */
-function pathValue(row: Row, col: string): unknown {
-  const [head, ...rest] = col.split(/->>?/);
-  let v: unknown = row[head!];
-  for (const key of rest) v = v && typeof v === "object" ? (v as Row)[key] : undefined;
-  return v;
-}
-
-/** In-memory double with the filter surface the worker uses; every write lands only in the table it names. */
-function makeClient(tables: Record<string, Row[] | "absent">, hooks: { beforeWrite?: () => void } = {}) {
-  const writes: { table: string; values: Row }[] = [];
-  function from(table: string) {
-    const source = tables[table];
-    // Filters run when the statement executes (not when it is built), like Postgres re-checking a row after waiting for its lock.
-    const filters: ((r: Row) => boolean)[] = [];
-    let sorter: ((a: Row, b: Row) => number) | null = null;
-    let max = Infinity;
-    let pending: Row | null = null;
-    const run = () => {
-      let rows: Row[] = source === "absent" ? [] : (source ?? []);
-      rows = rows.filter((r) => filters.every((f) => f(r)));
-      if (sorter) rows = [...rows].sort(sorter);
-      return rows.slice(0, max);
-    };
-    const api: Record<string, unknown> = {
-      select: () => api,
-      eq: (col: string, val: unknown) => (filters.push((r) => pathValue(r, col) === val), api),
-      is: (col: string, val: null) => (filters.push((r) => (pathValue(r, col) ?? null) === val), api),
-      order: (col: string, o?: { ascending?: boolean }) => ((sorter = (a, b) => String(a[col]).localeCompare(String(b[col])) * (o?.ascending === false ? -1 : 1)), api),
-      limit: (n: number) => ((max = n), api),
-      update: (values: Row) => ((pending = values), api),
-      maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
-      then: (resolve: (v: unknown) => unknown) => {
-        if (source === "absent") return resolve({ data: null, error: { code: "42P01", message: `relation "${table}" does not exist` } });
-        const rows = run();
-        if (pending) {
-          hooks.beforeWrite?.();
-          // The hook may change a row between the statement being issued and applied; re-check, as Postgres does.
-          const still = rows.filter((r) => filters.every((f) => f(r)));
-          writes.push({ table, values: pending });
-          for (const row of still) Object.assign(row, pending);
-          return resolve({ data: still.map((r) => ({ id: r.id })), error: null });
-        }
-        return resolve({ data: rows, error: null });
-      },
-    };
-    return api;
-  }
-  return { client: { from } as unknown as SupabaseClient, writes, tables };
-}
 
 const reassignment = (o: Row = {}): Row => ({
   id: "f1", org_id: "o1", request_id: "r1", property_id: "p1", kind: "callback_task", status: "open",
@@ -89,7 +38,8 @@ describe("drainNormaFollowupNotices", () => {
   });
 
   it("treats the PostgREST schema-cache miss (PGRST205) as absent too", async () => {
-    const client = { from: () => ({ select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: null, error: { code: "PGRST205", message: "Could not find the table" } }) }) }) }) }) } as unknown as SupabaseClient;
+    const chain: unknown = new Proxy({}, { get: (_t, key) => (key === "then" ? (res: (v: unknown) => unknown) => res({ data: null, error: { code: "PGRST205", message: "Could not find the table" } }) : () => chain) });
+    const client = { from: () => chain } as unknown as SupabaseClient;
     const summary = await drainNormaFollowupNotices({ client, post: vi.fn(), now: NOW });
     expect(summary.tableAbsent).toBe(true);
   });
@@ -233,6 +183,63 @@ describe("drainNormaFollowupNotices", () => {
     await drainNormaFollowupNotices({ client: t.client, post, now: NOW, newToken: tok });
     expect(calls).toEqual([{ id: "r1", status: "completed", outcome: "callback_requested" }]);
     expect(t.writes.every((w) => w.table === "norma_followup_reassignments")).toBe(true);
+  });
+});
+
+describe("scan fairness and bounded retries", () => {
+  const sentRow = (i: number): Row => reassignment({ id: `s${i}`, request_id: `rs${i}`, created_at: iso(NOW + i * 1000), payload: { title: "x", slack_notice: { state: "sent", lease_token: `t${i}`, attempts: 1, slack_ts: "1.1" } } });
+
+  it("200+ newer sent rows never starve an older pending row that is due", async () => {
+    const newer = Array.from({ length: 230 }, (_, i) => sentRow(i));
+    const older = reassignment({ id: "old", request_id: "rold", created_at: iso(NOW - 86_400_000), payload: { title: "x", slack_notice: { state: "pending", lease_token: "p", attempts: 1, next_attempt_at: iso(NOW - 1000) } } });
+    const t = makeClient(world([...newer, older]));
+    const { post, posts } = poster();
+    const summary = await drainNormaFollowupNotices({ client: t.client, post, now: NOW, newToken: tok });
+    expect(summary).toMatchObject({ sent: 1 });
+    expect(posts).toHaveLength(1);
+    expect(notice((t.tables.norma_followup_reassignments as Row[]).find((r) => r.id === "old")!)?.state).toBe("sent");
+  });
+
+  it("an old review row superseded to a callback (original created_at, no notice) is still reached behind 200+ newer sent rows", async () => {
+    const newer = Array.from({ length: 230 }, (_, i) => sentRow(i));
+    const superseded = reassignment({ id: "old", request_id: "rold", kind: "callback_task", created_at: iso(NOW - 86_400_000), payload: { title: "Call seller back" } });
+    const t = makeClient(world([...newer, superseded]));
+    const { post, posts } = poster();
+    expect(await drainNormaFollowupNotices({ client: t.client, post, now: NOW, newToken: tok })).toMatchObject({ sent: 1 });
+    expect(posts[0]!.text).toContain("callback task");
+  });
+
+  it("an expired lease behind 200+ newer sent rows is reached too", async () => {
+    const newer = Array.from({ length: 230 }, (_, i) => sentRow(i));
+    const dead = reassignment({ id: "old", request_id: "rold", created_at: iso(NOW - 86_400_000), payload: { title: "x", slack_notice: { state: "leased", lease_token: "dead", lease_until: iso(NOW - 1), attempts: 1 } } });
+    const t = makeClient(world([...newer, dead]));
+    const { post } = poster();
+    expect(await drainNormaFollowupNotices({ client: t.client, post, now: NOW, newToken: tok })).toMatchObject({ sent: 1 });
+  });
+
+  it("a failed lease write skips that row and the rest of the batch still goes out", async () => {
+    let failed = false;
+    const t = makeClient(world([reassignment({ created_at: iso(NOW - 2000) }), reassignment({ id: "f2", request_id: "r2", created_at: iso(NOW - 1000) })]), {
+      failWrite: () => (failed ? false : (failed = true)),
+    });
+    const { post, posts } = poster();
+    const summary = await drainNormaFollowupNotices({ client: t.client, post, now: NOW, newToken: tok });
+    expect(summary).toMatchObject({ skipped: 1, sent: 1 });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("retries stay bounded even when the backoff write keeps failing", async () => {
+    const t = makeClient(world([reassignment()]), { failWrite: (values) => ((values.payload as Row).slack_notice as Row).state === "pending" });
+    const post = vi.fn(async () => {
+      throw new Error("down");
+    });
+    let now = NOW;
+    for (let i = 0; i < NORMA_NOTIFICATION_MAX_ATTEMPTS + 5; i += 1) {
+      await drainNormaFollowupNotices({ client: t.client, post, now, newToken: tok });
+      now += NORMA_NOTIFICATION_LEASE_MS + 1000;
+    }
+    expect(post.mock.calls.length).toBeLessThanOrEqual(NORMA_NOTIFICATION_MAX_ATTEMPTS);
+    expect(notice((t.tables.norma_followup_reassignments as Row[])[0]!)?.state).toBe("gave_up");
   });
 });
 
