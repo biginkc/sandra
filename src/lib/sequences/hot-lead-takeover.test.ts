@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   updates: [] as Array<Record<string, unknown>>,
   filters: [] as Array<[string, unknown]>,
   fail: false,
+  onUpdate: null as null | ((v: Record<string, unknown>) => void),
 }));
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -19,6 +20,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       b.select = () => b;
       b.update = (v: Record<string, unknown>) => {
         mocks.updates.push(v);
+        mocks.onUpdate?.(v);
         return b;
       };
       b.in = () => b;
@@ -45,6 +47,7 @@ beforeEach(() => {
   mocks.updates = [];
   mocks.filters = [];
   mocks.fail = false;
+  mocks.onUpdate = null;
   mocks.live = [{ property_id: "p1" }];
   mocks.marker = { last_person_takeover_at: null };
   mocks.newerInbound = [];
@@ -58,20 +61,29 @@ describe("pauseHotBookAppointmentOnTakeover", () => {
     expect(mocks.filters).toContainEqual(["auto_enrolled_route", "hot_book_appointment"]);
     expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "person_took_over", actor });
   });
-  it("re-labels a TEMPORARY pause (call in progress / Norma call) so call cleanup can never resume it", async () => {
-    mocks.live = [{ id: "e1", property_id: "p1", status: "paused", pause_reason: "call_in_progress" }];
+  it("re-labels a TEMPORARY pause (call in progress / Norma call) BEFORE pausing active rows, by database predicate, so a cleanup in between cannot undo the takeover", async () => {
+    mocks.live = [{ property_id: "p1" }]; // e.g. a cleanup resumed it between the two steps
+    const order: string[] = [];
+    mocks.onUpdate = (v) => order.push(`update:${String(v.pause_reason ?? "marker")}`);
+    mocks.pause.mockImplementationOnce(async () => {
+      order.push("pause");
+      return { paused: 1 };
+    });
     await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor });
-    expect(mocks.updates).toContainEqual(expect.objectContaining({ pause_reason: "person_took_over" }));
+    expect(order).toEqual(["update:marker", "update:person_took_over", "pause"]);
+    // Predicates are evaluated by the database, not from an earlier snapshot.
+    expect(mocks.filters).toEqual(expect.arrayContaining([["status", "paused"], ["auto_enrolled_route", "hot_book_appointment"]]));
   });
   it("leaves a seller-reply pause (inbound_reply) as it is", async () => {
-    mocks.live = [{ id: "e1", property_id: "p1", status: "paused", pause_reason: "inbound_reply" }];
+    mocks.live = [];
     await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor });
-    expect(mocks.updates.filter((u) => "pause_reason" in u)).toEqual([]);
+    // Only call_in_progress / norma_call are re-labelled; inbound_reply is never in the predicate.
+    expect(mocks.filters).not.toContainEqual(["pause_reason", "inbound_reply"]);
   });
   it("still records the marker when there is nothing to pause, and leaves other drips alone", async () => {
     mocks.live = [];
     expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 0 });
-    expect(mocks.updates).toHaveLength(1);
+    expect(mocks.updates[0]).toHaveProperty("last_person_takeover_at");
     expect(mocks.pause).not.toHaveBeenCalled();
   });
   it("does nothing for no leads, and never throws on a read failure", async () => {

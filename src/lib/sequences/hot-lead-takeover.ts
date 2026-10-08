@@ -39,11 +39,24 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
       .update({ last_person_takeover_at: new Date().toISOString() })
       .in("id", a.propertyIds);
     if (markError) throw new Error(markError.message);
+    // 1) Re-label a TEMPORARY pause (a call in progress, a Norma call) FIRST, with the
+    //    status/reason predicates evaluated by the database at update time (no snapshot):
+    //    call cleanup resumes only a row still carrying its own reason, so a cleanup that
+    //    runs after this can no longer undo the takeover.
+    const { error: upgradeError } = await admin
+      .from("sequence_enrollments")
+      .update({ pause_reason: "person_took_over", updated_at: new Date().toISOString() })
+      .in("property_id", a.propertyIds)
+      .eq("auto_enrolled_route", "hot_book_appointment")
+      .eq("status", "paused")
+      .in("pause_reason", ["call_in_progress", "norma_call"]);
+    if (upgradeError) throw new Error(upgradeError.message);
+    // 2) Then pause whatever is (or just became, via a cleanup between the two steps) active.
     const { data: live, error } = await admin
       .from("sequence_enrollments")
-      .select("id, property_id, status, pause_reason")
+      .select("property_id")
       .in("property_id", a.propertyIds)
-      .in("status", ["active", "paused"])
+      .eq("status", "active")
       .eq("auto_enrolled_route", "hot_book_appointment");
     if (error) throw new Error(error.message);
     for (const propertyId of new Set((live ?? []).map((r) => r.property_id))) {
@@ -53,20 +66,6 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
         actor: a.actor,
       });
       paused += result.paused;
-    }
-    // A TEMPORARY pause (a call in progress, a Norma call) would be
-    // resumed automatically by its own cleanup. A person taking over makes it
-    // permanent-until-a-person-resumes: re-label it so nothing auto-resumes it.
-    const temporary = (live ?? []).filter(
-      (r) => r.status === "paused" && ["call_in_progress", "norma_call"].includes(r.pause_reason ?? ""),
-    );
-    if (temporary.length > 0) {
-      const { error: upgradeError } = await admin
-        .from("sequence_enrollments")
-        .update({ pause_reason: "person_took_over", updated_at: new Date().toISOString() })
-        .in("id", temporary.map((r) => r.id))
-        .eq("status", "paused");
-      if (upgradeError) throw new Error(upgradeError.message);
     }
   } catch (e) {
     reportError(e, { tags: { surface: "hot_lead_takeover_pause" }, extra: { count: a.propertyIds.length } });
