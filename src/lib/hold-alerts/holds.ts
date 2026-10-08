@@ -1,5 +1,6 @@
 import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages-v2/types";
 
+import { holdReasonLabel } from "./messages";
 import type { HoldInfo } from "./types";
 
 /**
@@ -202,6 +203,7 @@ export function toAlertHolds(
       since: hold.since,
       startedAt: hold.alert_since ?? null,
       name: label?.name ?? "Unknown sender",
+      reasonLabel: holdReasonLabel(holdReasonKey(hold)),
       hot: isHotHold(hold, hotReasons),
     });
   }
