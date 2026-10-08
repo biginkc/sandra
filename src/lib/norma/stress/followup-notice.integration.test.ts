@@ -241,3 +241,25 @@ describe("failure and concurrency", () => {
     expect(JSON.stringify(await reassignments())).toBe(before);
   });
 });
+
+describe("scan fairness against the real table", () => {
+  it("205 newer sent rows never starve an older unannounced row (a callback that superseded an old review keeps its created_at)", async () => {
+    const call = await buttonRequest();
+    await departCallbackAssignee();
+    await sendAndFinish(call);
+    const [old] = await reassignments();
+    await pool().query("update public.norma_followup_reassignments set created_at = now() - interval '2 days' where id = $1", [old!.id]);
+    // 205 newer rows already announced; request_id is unique per row, the property may repeat.
+    await pool().query(
+      `insert into public.norma_followup_reassignments (org_id, request_id, property_id, kind, payload, created_at)
+       select $1, gen_random_uuid(), $2, 'callback_task', '{"title":"x","slack_notice":{"state":"sent","lease_token":"t","attempts":1,"slack_ts":"1.1"}}'::jsonb, now() - (g || ' seconds')::interval
+         from generate_series(1, 205) g`,
+      [h.world.org, call.ctx.lead.property],
+    );
+    const slack = poster();
+    expect(await sweep(slack.post)).toMatchObject({ sent: 1 });
+    expect(slack.posts).toHaveLength(1);
+    expect(JSON.stringify(slack.posts[0]!.blocks)).toContain(call.ctx.lead.address);
+    expect(await sweep(slack.post, Date.now() + 3_600_000)).toMatchObject({ scanned: 0 });
+  });
+});
