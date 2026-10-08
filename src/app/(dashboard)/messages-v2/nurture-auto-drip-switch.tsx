@@ -49,7 +49,7 @@ function initialDrips(state: NurtureAutoDripState): Record<keyof NurtureDripMap,
  * Owner-only switch beside the per-label rules: when on, a nurture outcome that
  * Jev applies automatically also enrols the lead in the drip the owner mapped to
  * its route, but only after the approved nurture reply was sent. Off by default;
- * cannot be turned on until all three routes have a drip. Never picks a drip
+ * cannot be turned on until all four routes have a drip. Never picks a drip
  * for the owner (name matches are only pre-selected).
  */
 export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }) {

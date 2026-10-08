@@ -4,6 +4,8 @@ import { ProviderError } from "@/lib/errors/classes";
 
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 const adminRpc = vi.hoisted(() => vi.fn());
+const takeover = vi.hoisted(() => ({ pause: vi.fn(async (..._a: unknown[]) => ({ paused: 0 })) }));
+vi.mock("@/lib/sequences/hot-lead-takeover", () => ({ pauseHotBookAppointmentOnTakeover: takeover.pause }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ rpc: adminRpc }),
 }));
@@ -119,6 +121,7 @@ const PROPERTY_ROW = {
 };
 
 beforeEach(() => {
+  takeover.pause.mockClear();
   vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
   vi.mocked(getConsentState).mockResolvedValue("can_send_marketing");
   vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: true, state: "can_send_marketing" });
@@ -313,6 +316,8 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+    // A person's manual text is a takeover: the auto-enrolled Book appointment drip stops.
+    expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
   });
 });
 
@@ -491,6 +496,8 @@ describe("releaseQueuedMessage — claimed payload", () => {
       error: 'Opening SMS must identify the sender as "Mel with BMH".',
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
+    // Nothing was sent, so nothing was taken over.
+    expect(takeover.pause).not.toHaveBeenCalled();
   });
 
   it("checks the BMH phone pair before an unmarked first send", async () => {

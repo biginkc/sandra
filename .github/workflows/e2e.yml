@@ -493,7 +493,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008260000_nurture_auto_drip.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008330000_nurture_auto_drip.integration.test.ts
 
       - name: Messages v2 nurture auto-drip enrolment idempotency (disposable DB)
         env:

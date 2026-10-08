@@ -537,6 +537,31 @@ export async function sendSmsToContact(
   input: SendSmsInput,
   manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
 ): Promise<SendSmsOutcome> {
+  const outcome = await sendSmsToContactInner(supabase, input, manualDispatch);
+  if (input.origin === "manual" && outcome.status === "sent" && input.propertyId) {
+    // A person texting the seller is a person taking over: stop an auto-enrolled
+    // Book appointment drip. Best-effort (the helper never throws); imported
+    // lazily so the send path keeps its module graph.
+    try {
+      const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+      const auth = await Promise.resolve(supabase.auth?.getUser()).catch(() => null);
+      const userId = auth?.data?.user?.id;
+      await pauseHotBookAppointmentOnTakeover({
+        propertyIds: [input.propertyId],
+        actor: userId ? { actorType: "user", actorId: userId } : { actorType: "system" },
+      });
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function sendSmsToContactInner(
+  supabase: SupabaseClient<Database>,
+  input: SendSmsInput,
+  manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
+): Promise<SendSmsOutcome> {
   await assertNotTrainingTarget(supabase, { propertyId: input.propertyId, contactId: input.contactId });
   if (manualDispatch && (input.origin !== "manual" || input.queueOnly || input.campaignId)) {
     throw new Error("Assigned senders support immediate manual messages only.");

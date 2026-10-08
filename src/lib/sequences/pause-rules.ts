@@ -23,6 +23,7 @@ export type PauseEvent =
 export type PauseReason =
   | "inbound_reply"
   | "rep_sms_human_takeover"
+  | "person_took_over"
   | "status_terminal"
   | "status_acquisition_active"
   | "consent_revoked"

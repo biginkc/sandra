@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * Nurture auto-drip switch (20261008260000). Local-only; each test runs in a
+ * Nurture auto-drip switch (20261008330000). Local-only; each test runs in a
  * transaction that is rolled back. The migration (and its rollback) is applied
  * inside the test, so it only needs the base tables (ai_responder_configs,
  * sequences, memberships).
@@ -17,8 +17,8 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008260000_nurture_auto_drip.sql"), "utf8"));
-const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261008260000_nurture_auto_drip.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008330000_nurture_auto_drip.sql"), "utf8"));
+const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261008330000_nurture_auto_drip.sql"), "utf8"));
 
 const db = new Client({ connectionString: url });
 let orgId: string;
@@ -138,7 +138,60 @@ describe("nurture auto-drip switch", () => {
 
   it("deleting the chosen drip while the switch is on is refused, so 'on' can never point at nothing", async () => {
     await asUser(users.owner, setSwitch(true, sequenceId));
-    await expect(db.query(`delete from public.sequences where id = $1`, [sequenceId])).rejects.toThrow();
+    await expect(db.query(`delete from public.sequences where id = $1`, [sequenceId])).rejects.toThrow(/NURTURE_DRIP_IN_USE: .*Turn the switch off/);
+  });
+
+  it("deleting a mapped drip is fine once the switch is off", async () => {
+    await asUser(users.owner, setSwitch(true, sequenceId));
+    await asUser(users.owner, setSwitch(false, sequenceId));
+    await db.query(`delete from public.sequences where id = $1`, [sequenceId]);
+    expect((await cfg()).ml).toBeNull();
+  });
+
+  describe("a person assigning the lead pauses the Book appointment drip", () => {
+    async function seed(sequenceForEnrollment: string, mapAsHot: boolean) {
+      const hot = mapAsHot ? sequenceForEnrollment : sequenceId;
+      await db.query(
+        `update public.ai_responder_configs set nurture_auto_drip = true,
+           nurture_drip_maybe_later_sequence_id = $2, nurture_drip_check_in_60_sequence_id = $2,
+           nurture_drip_listed_not_selling_sequence_id = $2, nurture_drip_hot_book_appointment_sequence_id = $3 where id = $1`,
+        [configId, sequenceId, hot],
+      );
+      const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T','T') returning id`, [orgId])).rows[0].id;
+      const property = (await db.query(
+        `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1, '1 Test', 'MO', 'new_lead', $2) returning id`,
+        [orgId, contact],
+      )).rows[0].id;
+      await db.query(
+        `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at)
+         values ($1, $2, $3, $4, 'active', 0, now())`,
+        [orgId, sequenceForEnrollment, property, contact],
+      );
+      return property as string;
+    }
+    const enrollment = async (property: string) =>
+      (await db.query(`select status, pause_reason from public.sequence_enrollments where property_id = $1`, [property])).rows[0];
+    const assignAs = async (userId: string | null, property: string) => {
+      await db.query("select set_config('request.jwt.claim.sub', $1, true)", [userId ?? ""]);
+      await db.query(`update public.properties set assigned_user_id = $2 where id = $1`, [property, users.member]);
+    };
+
+    it("a signed-in person assigning pauses the hot enrolment with reason person_took_over", async () => {
+      const property = await seed(sequenceId, true);
+      await assignAs(users.owner, property);
+      expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+    });
+    it("the system (no signed-in person) assigning leaves it running", async () => {
+      const property = await seed(sequenceId, true);
+      await assignAs(null, property);
+      expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+    });
+    it("a person assigning a lead in any OTHER drip leaves it running", async () => {
+      const other = (await db.query(`insert into public.sequences (org_id, name, active) values ($1, 'Other drip', true) returning id`, [orgId])).rows[0].id;
+      const property = await seed(other, false);
+      await assignAs(users.owner, property);
+      expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+    });
   });
 
   it("the rollback removes the columns, constraint and RPC", async () => {
@@ -147,7 +200,7 @@ describe("nurture auto-drip switch", () => {
       `select column_name from information_schema.columns where table_name = 'ai_responder_configs' and (column_name like 'nurture_auto_drip%' or column_name like 'nurture_drip_%')`,
     );
     expect(cols.rows).toEqual([]);
-    const fn = await db.query(`select 1 from pg_proc where proname = 'fn_set_nurture_auto_drip'`);
+    const fn = await db.query(`select 1 from pg_proc where proname in ('fn_set_nurture_auto_drip', 'fn_guard_nurture_mapped_sequence_delete')`);
     expect(fn.rows).toEqual([]);
   });
 });

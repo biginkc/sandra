@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
+import { pauseHotBookAppointmentOnTakeover } from "@/lib/sequences/hot-lead-takeover";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
@@ -125,6 +126,19 @@ export async function confirmJevQueueItem(
       }
       const status = (data as { status?: string } | null)?.status;
       if (!status) return { ok: false, error: { code: "JEV_CONFIRM_FAILED", message: "Unexpected response" } };
+      // A person confirming the proposed new_lead takes over: stop the auto-enrolled
+      // Book appointment drip (best-effort; never fails the confirmation).
+      const { data: decision } = await supabase
+        .from("jev_lead_decisions")
+        .select("property_id")
+        .eq("id", id)
+        .maybeSingle();
+      if (decision?.property_id) {
+        await pauseHotBookAppointmentOnTakeover({
+          propertyIds: [decision.property_id],
+          actor: { actorType: "user", actorId: user.id },
+        });
+      }
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
       return ok({ status });

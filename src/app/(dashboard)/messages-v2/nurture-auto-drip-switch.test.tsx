@@ -47,7 +47,7 @@ describe("<NurtureAutoDripSwitch />", () => {
 
   it("will not save 'On' until all four drips are chosen, and never picks one for the owner", async () => {
     const user = userEvent.setup();
-    render(<NurtureAutoDripSwitch state={state()} />);
+    render(<NurtureAutoDripSwitch state={state({ sequences: FOUR })} />);
     await user.click(screen.getByRole("button", { name: "Edit nurture auto-drip" }));
     await user.click(screen.getByRole("radio", { name: "On" }));
     for (const key of ["maybeLater", "checkIn60", "listedNotSelling", "hotBookAppointment"]) {

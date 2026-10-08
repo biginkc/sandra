@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   recordConsentEventResult: { inserted: true, id: "consent-1" } as { inserted: true; id: string } | { inserted: false; id: string | null },
   pauseContactEnrollmentsCalls: [] as Array<{ contactId: string }>,
   recordLeadEventCalls: [] as Array<{ propertyId: string; eventType: string }>,
+  decisionRow: { property_id: "prop-9" } as { property_id: string } | null,
+  takeoverCalls: [] as Array<{ propertyIds: string[]; actor: unknown }>,
 }));
 
 const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
@@ -23,11 +25,24 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: { getUser: async () => ({ data: { user: mocks.user } }) },
+    from: () => {
+      const b: Record<string, unknown> = {};
+      b.select = () => b;
+      b.eq = () => b;
+      b.maybeSingle = async () => ({ data: mocks.decisionRow, error: null });
+      return b;
+    },
     rpc: async (name: string, args: Record<string, unknown>) => {
       mocks.rpcCalls.push({ name, args });
       return mocks.rpcResultsByName[name] ?? mocks.rpcResult;
     },
   }),
+}));
+vi.mock("@/lib/sequences/hot-lead-takeover", () => ({
+  pauseHotBookAppointmentOnTakeover: async (a: { propertyIds: string[]; actor: unknown }) => {
+    mocks.takeoverCalls.push(a);
+    return { paused: 1 };
+  },
 }));
 vi.mock("@/lib/messaging/consent", () => ({
   recordConsentEvent: async (_supabase: unknown, params: { contactId: string; eventType: string }) => {
@@ -124,6 +139,20 @@ describe("confirmJevQueueItem", () => {
     expect(mocks.rpcCalls).toEqual([
       { name: "fn_confirm_jev_lead_decision", args: { p_decision_id: "decision-1" } },
     ]);
+  });
+
+  it("confirming a proposed new_lead pauses the auto-enrolled Book appointment drip (a person took over)", async () => {
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    mocks.takeoverCalls = [];
+    await confirmJevQueueItem("jev_lead_decision", "decision-1");
+    expect(mocks.takeoverCalls).toEqual([{ propertyIds: ["prop-9"], actor: { actorType: "user", actorId: "user-1" } }]);
+  });
+
+  it("a failed confirmation does not pause anything", async () => {
+    mocks.rpcResult = { data: null, error: { message: "boom" } };
+    mocks.takeoverCalls = [];
+    await confirmJevQueueItem("jev_lead_decision", "decision-1");
+    expect(mocks.takeoverCalls).toEqual([]);
   });
 
   it("rejects a classifier_event source without calling any RPC", async () => {

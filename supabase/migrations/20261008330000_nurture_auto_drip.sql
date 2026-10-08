@@ -40,6 +40,69 @@ begin
   end if;
 end $$;
 
+-- Hard-deleting a drip the live switch points at would otherwise fail with a raw
+-- constraint error (set null + the check above). Say what to do instead.
+create or replace function public.fn_guard_nurture_mapped_sequence_delete()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if exists (
+    select 1 from public.ai_responder_configs c
+    where c.nurture_auto_drip
+      and old.id in (
+        c.nurture_drip_maybe_later_sequence_id,
+        c.nurture_drip_check_in_60_sequence_id,
+        c.nurture_drip_listed_not_selling_sequence_id,
+        c.nurture_drip_hot_book_appointment_sequence_id
+      )
+  ) then
+    raise exception 'NURTURE_DRIP_IN_USE: this drip is used by nurture auto-drip. Turn the switch off or pick another drip first.'
+      using errcode = '23503';
+  end if;
+  return old;
+end;
+$$;
+
+drop trigger if exists trg_guard_nurture_mapped_sequence_delete on public.sequences;
+create trigger trg_guard_nurture_mapped_sequence_delete
+  before delete on public.sequences
+  for each row execute function public.fn_guard_nurture_mapped_sequence_delete();
+
+-- A PERSON assigning a lead takes over: pause the auto-enrolled "Book appointment"
+-- drip ("stops the moment a person takes over"). Only a signed-in person counts
+-- (auth.uid() is null for the service role / system), and only the org's mapped
+-- Book appointment drip is touched; every other drip is left running.
+create or replace function public.fn_pause_hot_drip_on_person_assignment()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if auth.uid() is null
+    or new.assigned_user_id is null
+    or new.assigned_user_id is not distinct from old.assigned_user_id
+  then
+    return new;
+  end if;
+  update public.sequence_enrollments e
+  set status = 'paused', pause_reason = 'person_took_over', updated_at = now()
+  from public.ai_responder_configs c
+  where e.property_id = new.id
+    and e.status = 'active'
+    and c.org_id = e.org_id
+    and c.nurture_drip_hot_book_appointment_sequence_id = e.sequence_id;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_pause_hot_drip_on_person_assignment on public.properties;
+create trigger trg_pause_hot_drip_on_person_assignment
+  after update of assigned_user_id on public.properties
+  for each row execute function public.fn_pause_hot_drip_on_person_assignment();
+
 -- Owner-only write path (same authorization as fn_update_jev_automatic_classification).
 create or replace function public.fn_set_nurture_auto_drip(
   p_config_id uuid,

@@ -1,7 +1,7 @@
 import type { JevListingStatus, JevReadyTimeframe } from "@/lib/sms-classification/types";
 
 /** Pure routing data for the nurture auto-drip (safe to import from client code). */
-/** The three drips an owner maps, one per nurture route. */
+/** The four drips an owner maps, one per nurture route. */
 export type NurtureDripKey = "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
 
 /** Exact drip names pre-selected in the owner control when present. */

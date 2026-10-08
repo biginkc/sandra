@@ -6695,6 +6695,23 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
       });
 
+      it("J1 within_30_days alone cannot trigger the hot path: a below-threshold nurture call stays a normal needs-a-decision hold", async () => {
+        const state = createMockState();
+        installSendMock(state);
+        nurtureDrip.loadConfig.mockResolvedValue(ON);
+        nurtureAnswers = { ready_timeframe: { choice: "within_30_days" } };
+
+        const result = await runNurture(state, "inbound-hot-below", 0.5);
+
+        expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
+        expect(state.property.last_ai_escalation_reason).toBe("jev_below_threshold:nurture");
+        expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
+        expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        // The only proposal is the ordinary nurture one, never a new_lead.
+        expect(state.jevLeadDecisionCalls.map((c) => c.args.p_outcome)).toEqual(["nurture"]);
+      });
+
       it("switch OFF: within_30_days changes nothing (today's nurture behaviour)", async () => {
         const state = createMockState();
         vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
