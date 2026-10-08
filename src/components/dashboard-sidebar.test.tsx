@@ -39,8 +39,9 @@ describe("DashboardMobileNav", () => {
     expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(14);
+    expect(links).toHaveLength(15); // main's 14 + the Norma queue link
     expect(screen.getByRole("link", { name: "Norma callbacks" })).toHaveAttribute("href", "/norma/callbacks");
+    expect(screen.getByRole("link", { name: "Norma queue" })).toHaveAttribute("href", "/norma/queue");
     for (const link of links) {
       expect(link.className).toContain("shrink-0");
       expect(link.className).toContain("whitespace-nowrap");

@@ -90,6 +90,7 @@ import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 import { HaveNormaCallButton } from "./have-norma-call-button";
+import { NormaQueueChip, type NormaQueueChipEntry } from "./norma-queue-chip";
 import {
   NORMA_REQUEST_VIEW_COLUMNS,
   findLastCompletedNormaRequest,
@@ -483,6 +484,46 @@ export default async function LeadDetailPage({
   const openNormaRequest = findOpenNormaRequest(normaRequests);
   const lastNormaResult = findLastCompletedNormaRequest(normaRequests);
 
+  // Norma call queue state for this lead (members can read it). A read failure just hides the chip's state; enqueue and
+  // every control re-check server-side.
+  type LooseTable = {
+    select: (columns: string, options?: { count: "exact"; head: true }) => LooseTable;
+    eq: (column: string, value: string) => LooseTable;
+    order: (column: string, options: { ascending: boolean }) => LooseTable;
+    limit: (n: number) => PromiseLike<{ data: unknown; count?: number | null }> & LooseTable;
+  };
+  const looseFrom = (table: string) => (supabase as unknown as { from: (t: string) => LooseTable }).from(table);
+  let normaQueueEntry: NormaQueueChipEntry | null = null;
+  let normaQueueReassignment: { kind: string; status: string } | null = null;
+  try {
+    const { data: queueRows } = await looseFrom("norma_queue_entries")
+      .select("id, status, pause_reason, next_attempt_at, display_tz")
+      .eq("property_id", lead.id)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const queueRow = ((queueRows ?? []) as Array<{ id: string; status: string; pause_reason: string | null; next_attempt_at: string | null; display_tz: string | null }>)[0];
+    if (queueRow) {
+      const { count } = await looseFrom("norma_queue_attempts").select("id", { count: "exact", head: true }).eq("entry_id", queueRow.id).limit(1);
+      normaQueueEntry = {
+        id: queueRow.id,
+        status: queueRow.status,
+        pauseReason: queueRow.pause_reason,
+        nextAttemptAt: queueRow.next_attempt_at,
+        displayTz: queueRow.display_tz,
+        attemptCount: count ?? 0,
+      };
+    }
+    const { data: reassignRows } = await looseFrom("norma_followup_reassignments")
+      .select("kind, status")
+      .eq("property_id", lead.id)
+      .eq("status", "open")
+      .limit(1);
+    const reassignRow = ((reassignRows ?? []) as Array<{ kind: string; status: string }>)[0];
+    if (reassignRow) normaQueueReassignment = { kind: reassignRow.kind, status: reassignRow.status };
+  } catch {
+    normaQueueEntry = null;
+  }
+
   const usersPromise = loadOrgTeamMembers(lead.org_id, {
     includeInactiveMembers: true,
     historicalAssigneeIds: lead.assigned_user_id
@@ -738,6 +779,7 @@ export default async function LeadDetailPage({
         }
         lastResult={lastNormaResult ? { id: lastNormaResult.id, outcome: lastNormaResult.outcome } : null}
       /></fieldset>
+      <fieldset disabled={training} inert={training || undefined} className="contents"><NormaQueueChip propertyId={lead.id} entry={normaQueueEntry} reassignment={normaQueueReassignment} /></fieldset>
       {zillowHref ? (
         <a
           href={zillowHref}

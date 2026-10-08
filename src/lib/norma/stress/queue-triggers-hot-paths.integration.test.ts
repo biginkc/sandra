@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { Harness } from "../stress/harness";
-import { rng } from "../stress/trace";
+import { Harness } from "./harness";
+import { rng } from "./trace";
 
 /**
- * Stage 2 (20261009010100_norma_call_queue) on the full chain: main + stage 1 + stage 2. The new AFTER triggers sit on
- * hot tables (messages, properties, contacts, consent_events). These tests drive MAIN's current write paths against
+ * Queue schema (20261009010100_norma_call_queue) hot paths. The AFTER triggers sit on hot tables (messages, properties, contacts, consent_events). These tests drive the application's write paths against
  * them: the inbound-SMS insert (the column set of insertInboundMessage, src/lib/messaging/inbound.ts), the property
  * disposition/status updates, the contact DNC / STOP writes (the Harness helpers mirror the runtime statements), and
  * the consent event row recordConsentEvent writes (src/lib/messaging/consent.ts).
@@ -16,9 +15,13 @@ import { rng } from "../stress/trace";
  */
 let h: Harness;
 beforeAll(async () => {
+  vi.stubEnv("NORMA_QUEUE_MAX_CONCURRENT", "1000");
+  vi.stubEnv("NORMA_QUEUE_DAILY_CAP", "100000");
+  vi.stubEnv("NORMA_QUEUE_CAP_TZ", "America/Chicago");
   h = await Harness.create(rng(202));
 });
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await h?.close();
 });
 
@@ -179,34 +182,25 @@ describe("stage 2 triggers WITH queue entries: only the affected lead's entry mo
   });
 });
 
-describe("stage 2: the CURRENT runtime button path (legacy claim stays disabled)", () => {
-  it("stays requested, never dials, then reconcile rejects it and releases the drip pauses", async () => {
-    const ctx = await h.lead({ enrollments: ["active"] });
+describe("the button path on the queue schema (v2, no queue linkage)", () => {
+  it("dials once through v2, leaves every queue table untouched, and completes normally", async () => {
+    const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback", webhooksBeforeResponse: 0 });
     const reportsBefore = h.reports.length;
     const sendsBefore = h.bland.sends.length;
     const queueBefore = await queueSnapshot();
 
     const res = await h.requestCall(ctx, h.world.rep1);
-    expect(res).toMatchObject({ ok: false, code: "in_flight" });
-    const row = async () => (await pool().query("select id, status, bland_call_id from public.norma_call_requests where property_id=$1", [ctx.lead.property])).rows[0];
-    const first = await row();
-    expect(first).toMatchObject({ status: "requested", bland_call_id: null });
-    // The old path creates no queue linkage.
-    const linked = await pool().query("select queue_entry_id, queue_lease_token, queue_dispatch_token, send_attempted_at from public.norma_call_requests where id = $1", [first.id]);
-    expect(linked.rows[0]).toEqual({ queue_entry_id: null, queue_lease_token: null, queue_dispatch_token: null, send_attempted_at: null });
+    expect(res).toMatchObject({ ok: true, code: "calling" });
+    expect(h.bland.sends.length).toBe(sendsBefore + 1);
+    const row = async () => (await pool().query("select id, status, bland_call_id, queue_entry_id, queue_lease_token, queue_dispatch_token, send_attempted_at from public.norma_call_requests where property_id=$1", [ctx.lead.property])).rows[0];
+    const sent = await row();
+    expect(sent).toMatchObject({ status: "dispatched", queue_entry_id: null, queue_lease_token: null, queue_dispatch_token: null });
+    expect(sent.bland_call_id).toBeTruthy();
+    expect(sent.send_attempted_at).not.toBeNull();
 
-    await h.advance(2 * 60_000);
-    await h.reconcile();
-    expect((await row()).status).toBe("requested");
-    await h.advance(4 * 60_000);
-    await h.reconcile();
-    expect((await row()).status).toBe("dispatch_rejected");
-    const pauses = await pool().query("select released_at from public.norma_enrollment_pauses where request_id = $1", [first.id]);
-    expect(pauses.rows.length).toBeGreaterThan(0);
-    expect(pauses.rows.every((p) => p.released_at !== null)).toBe(true);
-    expect((await pool().query("select status from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0].status).toBe("active");
-
-    expect(h.bland.sends.length).toBe(sendsBefore);
+    await h.finish(ctx);
+    expect((await row()).status).toBe("completed");
+    expect(h.bland.sends.length).toBe(sendsBefore + 1);
     expect(h.reports.slice(reportsBefore)).toEqual([]);
     expect(await queueSnapshot()).toEqual(queueBefore);
   });

@@ -21,7 +21,6 @@
     "test:search-volume": "SEARCH_VOLUME=1 vitest run --config vitest.search-volume.config.ts",
     "test:inbox-ro-fixture": "node --test --test-concurrency=1 scripts/inbox-test-readonly-fixture.test.mjs",
     "test:norma-stress": "vitest run --config vitest.norma-stress.config.ts",
-    "test:norma-cutover": "vitest run --config vitest.norma-cutover.config.ts",
     "test:outbox-unit": "vitest run --config vitest.outbox.config.ts scripts/outbox-owned-rows.test.ts --maxWorkers=1 --no-file-parallelism && node --test scripts/outbox-run-record.test.mjs",
     "test:outbox-regression": "node scripts/outbox-run-record.mjs",
     "test:rtl": "vitest run --config vitest.rtl.config.ts",

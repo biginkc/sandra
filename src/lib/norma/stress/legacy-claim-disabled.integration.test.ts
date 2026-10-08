@@ -1,13 +1,17 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { Harness } from "../stress/harness";
-import { rng } from "../stress/trace";
+import { Harness } from "./harness";
+import { rng } from "./trace";
 
 /**
- * Stage 1 of the Norma queue cutover (20261009010000_norma_legacy_claim_disable) on the POST-disable schema.
- * Runs MAIN's current runtime (requestNormaCallCore, dispatchNormaCall, reconcileNormaCalls) against it, because the
- * deployed runtime is exactly what faces this schema between stage 1 and the queue runtime. The legacy stress suite
- * (which dials through the legacy claim) runs on the PRE-disable schema in its own workflow step.
+ * The legacy claim stays disabled (20261009010000_norma_legacy_claim_disable) and the queue runtime sends through the v2 claim.
+ * Schema half: fn_norma_claim_dispatch returns false and writes nothing, with signature, owner, grants and search_path identical
+ * to the pre-disable function. Runtime half: the button path (requestNormaCallCore -> dispatchNormaCall) dials once through v2 and
+ * never through the legacy claim. (The stage-time version of this file asserted the OLD runtime's in_flight -> dispatch_rejected
+ * path; that runtime is gone once this PR deploys.)
  */
 // Reference chain = main without BOTH cutover schemas (stage 2 is stacked on stage 1).
 const LEGACY_CLAIM = "20261009010000_norma_legacy_claim_disable.sql,20261009010100_norma_call_queue.sql";
@@ -23,17 +27,33 @@ let legacyDrop: (() => Promise<void>) | null = null;
 let legacyMeta: Record<string, unknown>;
 
 beforeAll(async () => {
+  // The runtime fails closed without queue limits (the workflow supplies the same test values).
+  vi.stubEnv("NORMA_QUEUE_MAX_CONCURRENT", "1000");
+  vi.stubEnv("NORMA_QUEUE_DAILY_CAP", "100000");
+  vi.stubEnv("NORMA_QUEUE_CAP_TZ", "America/Chicago");
   h = await Harness.create(rng(101));
   // Reference: the same chain WITHOUT stage 1, built through the harness's own exclusion switch.
   vi.stubEnv("NORMA_STRESS_EXCLUDE_MIGRATIONS", LEGACY_CLAIM);
   vi.resetModules();
-  const legacyDb = await import("../stress/db");
-  vi.unstubAllEnvs();
+  const legacyDb = await import("./db");
   const legacy = await legacyDb.createScratchDb();
   legacyDrop = legacy.drop;
+  // The reference must be genuinely pre-disable in EVERY config. Where the source already holds the full chain the exclusion
+  // switch cannot remove 20261009010000 from the clone, so put the original definition back from the migration that last
+  // defined it (20261008090100, the same block the forward-recovery file restores), then refuse to continue unless the
+  // reference really has the original body: the comparison below can never pass against a reference that is itself disabled.
+  const original = readFileSync(path.join(process.cwd(), "supabase/migrations/20261008090100_norma_retry_next_step_union_reviewed.sql"), "utf8");
+  const block = /create or replace function public\.fn_norma_claim_dispatch\(p_request_id uuid, p_expected_attempt integer default null\)[\s\S]*?grant execute on function public\.fn_norma_claim_dispatch\(uuid, integer\) to service_role;/i.exec(original);
+  if (!block) throw new Error("legacy-claim reference: original fn_norma_claim_dispatch block not found in 20261008090100");
+  const isDisabled = async () => /return false/i.test(String((await legacy.pool.query(FN_META_SQL)).rows[0].prosrc));
+  if (await isDisabled()) await legacy.pool.query(block[0]);
+  if (await isDisabled()) throw new Error("legacy-claim reference still has the disabled body: the pre-disable comparison would be vacuous");
+  const referenceBody = String((await legacy.pool.query(FN_META_SQL)).rows[0].prosrc);
+  if (!/update public\.norma_call_requests/i.test(referenceBody)) throw new Error("legacy-claim reference does not look like the original claim");
   legacyMeta = (await legacy.pool.query(FN_META_SQL)).rows[0];
 });
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await legacyDrop?.();
   await h?.close();
 });
@@ -96,50 +116,29 @@ describe("stage 1: fn_norma_claim_dispatch is disabled and nothing else about it
   });
 });
 
-describe("stage 1: the CURRENT runtime button path against the disabled claim", () => {
-  it("stays requested, never dials, then reconcile rejects it and releases the drip pauses", async () => {
-    const ctx = await h.lead({ enrollments: ["active"] });
-    const reportsBefore = h.reports.length;
+describe("the button path sends through v2, never the legacy claim", () => {
+  it("one call is dialled and bound; the legacy claim still says no for that very request and changes nothing", async () => {
+    const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback", webhooksBeforeResponse: 0 });
     const sendsBefore = h.bland.sends.length;
+    const reportsBefore = h.reports.length;
 
     const res = await h.requestCall(ctx, h.world.rep1);
-    // The rep sees an ordinary "call already in flight" answer; nothing throws.
-    expect(open(res)).toBe(false);
-    expect(res).toMatchObject({ ok: false, code: "in_flight" });
+    expect(res).toMatchObject({ ok: true, code: "calling" });
+    expect(h.bland.sends.length).toBe(sendsBefore + 1);
 
-    const row = async () =>
-      (await h.scratch.pool.query("select id, status, outcome, bland_call_id, dispatch_started_at from public.norma_call_requests where property_id=$1", [ctx.lead.property])).rows[0];
-    const first = await row();
-    expect(first.status).toBe("requested");
-    expect(first.bland_call_id).toBeNull();
-    expect(first.dispatch_started_at).toBeNull();
+    const row = (await h.scratch.pool.query("select id, status, bland_call_id, send_attempted_at, queue_entry_id from public.norma_call_requests where property_id=$1", [ctx.lead.property])).rows[0];
+    expect(row.status).toBe("dispatched");
+    expect(row.bland_call_id).toBeTruthy();
+    expect(row.send_attempted_at).not.toBeNull();
+    expect(row.queue_entry_id).toBeNull();
 
-    const pauses = async () =>
-      (await h.scratch.pool.query("select released_at from public.norma_enrollment_pauses where request_id = $1", [first.id])).rows;
-    const held = await pauses();
-    expect(held.length).toBeGreaterThan(0);
-    expect(held.every((x) => x.released_at === null)).toBe(true);
-    const enrollmentStatus = async () =>
-      (await h.scratch.pool.query("select status, pause_reason from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
-    expect((await enrollmentStatus()).status).toBe("paused");
+    const before = await snapshot(ctx.lead.property);
+    expect((await h.scratch.pool.query("select public.fn_norma_claim_dispatch($1::uuid, null) as v", [row.id])).rows[0].v).toBe(false);
+    expect(await snapshot(ctx.lead.property)).toEqual(before);
+    expect(h.bland.sends.length).toBe(sendsBefore + 1);
 
-    // Two minutes in: reconcile retries the dispatch, the claim still says no, the row is left waiting.
-    await h.advance(2 * 60_000);
-    await h.reconcile();
-    expect((await row()).status).toBe("requested");
-    expect((await enrollmentStatus()).status).toBe("paused");
-
-    // Past the five-minute stranded window: rejected, pauses released, drip back to active.
-    await h.advance(4 * 60_000);
-    await h.reconcile();
-    const done = await row();
-    expect(done.status).toBe("dispatch_rejected");
-    expect((await pauses()).every((x) => x.released_at !== null)).toBe(true);
-    expect((await enrollmentStatus()).status).toBe("active");
-
-    // Nothing was sent, nothing crashed.
-    expect(h.bland.sends.length).toBe(sendsBefore);
-    expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(0);
+    await h.finish(ctx);
+    expect((await h.scratch.pool.query("select status from public.norma_call_requests where id=$1", [row.id])).rows[0].status).toBe("completed");
     expect(h.reports.slice(reportsBefore)).toEqual([]);
   });
 });
