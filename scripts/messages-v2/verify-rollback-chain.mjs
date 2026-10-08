@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008230000 -- 48 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog).
+// (20261008140000 .. 20261008230000 -- 49 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 48 rollbacks in REVERSE order,
+//   3. applies the 49 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 48 migrations forward again.
+//   5. re-applies the 49 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -26,7 +26,7 @@ const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
 const LAST = process.env.CHAIN_LAST ?? "20261008230000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 48); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 replay harness (180000) + 1 new-only watermark (210000) + 1 New/Backlog (230000)
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 49); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 scorecard (160000) + 1 replay harness (180000) + 1 new-only watermark (210000) + 1 New/Backlog (230000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -77,7 +77,7 @@ select kind || ' ' || name from (
   union all
   select 'function', n.nspname || '.' || p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'public' and p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|messages_v2_|fn_resolve_hold)'
+   where n.nspname = 'public' and p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|messages_v2_|fn_messages_v2_|fn_resolve_hold)'
   union all
   select 'trigger', c.relname || '.' || t.tgname
     from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace
