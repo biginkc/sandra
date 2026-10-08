@@ -2879,12 +2879,19 @@ async function loadSilentExit(
   if (humanActor) {
     // Engineering policy: a human Send is exempt
     // from the "already flagged" check ONLY when the flag is exactly
-    // `draft_held` (the flag that put the draft on the rail). Any other flag
+    // `draft_held` (the flag that put the draft on the rail) or a hostile
+    // hold being confirmed (`hostile_needs_confirm[:<id>]`). Any other flag
     // reason still refuses, with the reason shown.
     if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })) {
       return { ok: true, reason: "already_terminal" };
     }
-    if (property.needs_human_attention && property.last_ai_escalation_reason !== HUMAN_SEND_EXEMPT_FLAG_REASON) {
+    const humanExempt =
+      property.last_ai_escalation_reason === HUMAN_SEND_EXEMPT_FLAG_REASON ||
+      // "Confirm do-not-contact" on a hostile hold: the click is the human
+      // decision, validated by the hold action (reason + inbound id + org).
+      // Every other gate (Q8, consent, quiet hours, fence) still applies.
+      (property.last_ai_escalation_reason ?? "").startsWith(HOSTILE_NEEDS_CONFIRM_REASON);
+    if (property.needs_human_attention && !humanExempt) {
       return {
         ok: true,
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,

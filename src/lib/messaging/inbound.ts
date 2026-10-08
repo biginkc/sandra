@@ -428,12 +428,21 @@ export async function handleInboundWebhook(
           metadata: { ...jsonObject(baseMetadata), keyword: "opt_out_phrase" } as Json,
         });
         if (!insertOutcome.error && propertyId) {
-          await holdPhraseOptOut(supabase, {
+          const held = await holdPhraseOptOut(supabase, {
             propertyId,
             body: ev.body,
             inboundMessageId: insertOutcome.messageId ?? null,
             surface: provider.providerId,
           });
+          if (!held) {
+            await markWebhookEventError(
+              supabase,
+              provider.providerId,
+              ev.externalId,
+              "opt-out hold could not be saved",
+            );
+            return NextResponse.json({ error: "opt-out hold failed" }, { status: 500 });
+          }
         }
         if (insertOutcome.error) {
           await markWebhookEventError(
@@ -621,13 +630,18 @@ export async function handleInboundWebhook(
 
       if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
         const wrongScope = classifyWrongNumberScope(ev.body);
+        // Hostile wording takes precedence: no wrong_number disposition is
+        // applied; the conversation is held for a person instead.
+        const hostileWrongNumber = isHostileInbound(ev.body);
         if (propertyId) {
-          await setInboundDisposition(supabase, {
-            propertyId,
-            disposition: "wrong_number",
-            sourceId: resumeDecision.webhookEventId,
-            allowedCurrent: new Set([null, "not_interested"]),
-          });
+          if (!hostileWrongNumber) {
+            await setInboundDisposition(supabase, {
+              propertyId,
+              disposition: "wrong_number",
+              sourceId: resumeDecision.webhookEventId,
+              allowedCurrent: new Set([null, "not_interested"]),
+            });
+          }
           try {
             await pausePropertyEnrollments(supabase, {
               propertyId,
@@ -659,16 +673,27 @@ export async function handleInboundWebhook(
             wrong_scope: wrongScope,
           } as Json,
         });
-        if (!insertOutcome.error && propertyId && wrongScope === "all") {
-          // "Wrong person for everything" is a phone-wide claim: a person
-          // decides whether to block the number (no automatic suppression).
-          await holdPhraseOptOut(supabase, {
+        if (!insertOutcome.error && propertyId && (wrongScope === "all" || hostileWrongNumber)) {
+          // "Wrong person for everything" is a phone-wide claim, and hostile
+          // wording is never an automatic decision: a person decides whether
+          // to block the number (no automatic suppression). Hostile wording
+          // keeps the hostile reason (so the approved reply can be sent).
+          const held = await holdPhraseOptOut(supabase, {
             propertyId,
             body: ev.body,
             inboundMessageId: insertOutcome.messageId ?? null,
             surface: provider.providerId,
-            forceReason: OPTOUT_PHRASE_NEEDS_CONFIRM_REASON,
+            ...(hostileWrongNumber ? {} : { forceReason: OPTOUT_PHRASE_NEEDS_CONFIRM_REASON }),
           });
+          if (!held) {
+            await markWebhookEventError(
+              supabase,
+              provider.providerId,
+              ev.externalId,
+              "opt-out hold could not be saved",
+            );
+            return NextResponse.json({ error: "opt-out hold failed" }, { status: 500 });
+          }
         }
         if (insertOutcome.error) {
           await markWebhookEventError(
@@ -1725,7 +1750,7 @@ async function holdPhraseOptOut(
     surface: string;
     forceReason?: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   try {
     const base = args.forceReason ?? (isHostileInbound(args.body) ? HOSTILE_NEEDS_CONFIRM_REASON : OPTOUT_PHRASE_NEEDS_CONFIRM_REASON);
     const reason = args.inboundMessageId ? `${base}:${args.inboundMessageId}` : base;
@@ -1734,9 +1759,10 @@ async function holdPhraseOptOut(
     } catch (e) {
       reportError(e, { tags: { surface: `${args.surface}_webhook_sequence_pause_opt_out_phrase` }, extra: { propertyId: args.propertyId } });
     }
-    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    return await markPropertyNeedsAttention(supabase, args.propertyId, reason);
   } catch (e) {
     reportError(e, { tags: { surface: `${args.surface}_webhook_opt_out_phrase_hold` }, extra: { propertyId: args.propertyId } });
+    return false;
   }
 }
 

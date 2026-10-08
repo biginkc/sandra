@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
   findTakeover: vi.fn(async () => null),
   recordTakeover: vi.fn(async () => undefined),
   persistTakeover: vi.fn(async () => undefined),
-  markAttention: vi.fn(async () => undefined),
+  markAttention: vi.fn(async () => true),
   recordThread: vi.fn(async () => undefined),
   deadLetter: vi.fn(async () => true),
   flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
@@ -550,6 +550,51 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
     await runWebhook();
     expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+
+  describe("hostile precedence and durable holds at the webhook", () => {
+    const run = async (body: string) => {
+      const original = INPUT.body;
+      (INPUT as { body: string }).body = body;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      mocks.serviceClient = handlerClient([{ data: INSERTED, error: null }]).client;
+      try {
+        return await handleInboundWebhook(
+          new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+          { includeFullUrl: true, provider: provider() as never },
+        );
+      } finally {
+        (INPUT as { body: string }).body = original;
+      }
+    };
+    const reasonOf = () => (mocks.markAttention.mock.calls[0] as unknown[])[2] as string;
+
+    it.each(["I am not the owner, you idiot", "Wrong number you idiot"])(
+      "hostile + wrong-number wording %j is held as hostile_needs_confirm (no wrong_number disposition, no suppression)",
+      async (body) => {
+        await run(body);
+        expect(reasonOf()).toBe("hostile_needs_confirm:message-1");
+        expect(mocks.optOut).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a plain 'wrong person' (scope all) is held with the non-hostile reason", async () => {
+      await run("you have the wrong person");
+      expect(reasonOf()).toBe("optout_phrase_needs_confirm:message-1");
+      expect(mocks.optOut).not.toHaveBeenCalled();
+    });
+
+    it("a hold that cannot be saved fails the webhook (retryable) instead of acknowledging the opt-out", async () => {
+      mocks.markAttention.mockResolvedValueOnce(false as never);
+      const response = await run("do not contact me");
+      expect(response.status).toBe(500);
+      expect(mocks.optOut).not.toHaveBeenCalled();
+      // A redelivery that can save the hold succeeds.
+      mocks.markAttention.mockResolvedValueOnce(true as never);
+      const retried = await run("do not contact me");
+      expect(retried.status).toBe(200);
+    });
   });
 
   describe("opt-out wording: only a bare carrier STOP suppresses automatically (Jarrad 2026-10-08)", () => {

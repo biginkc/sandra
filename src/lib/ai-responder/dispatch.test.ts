@@ -7667,6 +7667,26 @@ describe("sendHumanDraft (Messages v2 Phase 1 hold Send)", () => {
     }
   });
 
+  it("a human Send is allowed on a hostile hold (Confirm do-not-contact) but every other gate still applies", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "hostile_needs_confirm:inbound-h";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "you idiot" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "sent" });
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+
+    // Terminal disposition still refuses.
+    const blocked = createMockState();
+    blocked.property.needs_human_attention = true;
+    blocked.property.last_ai_escalation_reason = "hostile_needs_confirm:inbound-h";
+    blocked.property.outreach_dispo = "opted_out";
+    installSendMock(blocked);
+    seedInboundMessage(blocked, { id: "inbound-h", body: "you idiot" });
+    expect(await sendHumanDraft(createMockSupabase(blocked) as never, human())).toMatchObject({ status: "refused" });
+  });
+
   it("refuses a human Send when the property is flagged with no recorded reason", async () => {
     const state = createMockState();
     state.property.needs_human_attention = true;
