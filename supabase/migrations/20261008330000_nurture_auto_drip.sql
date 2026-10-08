@@ -87,13 +87,27 @@ begin
   then
     return new;
   end if;
-  update public.sequence_enrollments e
-  set status = 'paused', pause_reason = 'person_took_over', updated_at = now()
-  from public.ai_responder_configs c
-  where e.property_id = new.id
-    and e.status = 'active'
-    and c.org_id = e.org_id
-    and c.nurture_drip_hot_book_appointment_sequence_id = e.sequence_id;
+  with paused as (
+    update public.sequence_enrollments e
+    set status = 'paused', pause_reason = 'person_took_over', updated_at = now()
+    from public.ai_responder_configs c
+    where e.property_id = new.id
+      and e.status = 'active'
+      and c.org_id = e.org_id
+      and c.nurture_drip_hot_book_appointment_sequence_id = e.sequence_id
+    returning e.sequence_id
+  )
+  -- Same lead event the app's pause path writes (pausePropertyEnrollments).
+  insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload)
+  select new.org_id, new.id, 'user', auth.uid(), 'sequence_paused',
+         jsonb_build_object(
+           'count', count(*),
+           'sequence_ids', jsonb_agg(distinct sequence_id),
+           'reason', 'person_took_over',
+           'permanent', false
+         )
+  from paused
+  having count(*) > 0;
   return new;
 end;
 $$;

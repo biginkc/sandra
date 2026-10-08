@@ -486,6 +486,8 @@ export type SendSmsInput = {
   queueOnly?: boolean;
   scheduledFor?: Date | null;
   metadata?: Json | null;
+  /** The person behind a manual send, for the audit trail when a takeover pauses a drip. Defaults to the system actor. */
+  takeoverActorId?: string | null;
   campaignId?: string | null;
   /**
    * Bulk campaigns opt into a final destination check immediately before the
@@ -538,17 +540,24 @@ export async function sendSmsToContact(
   manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
 ): Promise<SendSmsOutcome> {
   const outcome = await sendSmsToContactInner(supabase, input, manualDispatch);
-  if (input.origin === "manual" && outcome.status === "sent" && input.propertyId) {
+  const meta = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? input.metadata : null;
+  if (
+    input.origin === "manual" &&
+    outcome.status === "sent" &&
+    input.propertyId &&
+    // A scheduled seller reminder is sent on a person's behalf by the system, not a takeover.
+    meta?.kind !== "seller_appointment_reminder"
+  ) {
     // A person texting the seller is a person taking over: stop an auto-enrolled
     // Book appointment drip. Best-effort (the helper never throws); imported
     // lazily so the send path keeps its module graph.
     try {
       const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
-      const auth = await Promise.resolve(supabase.auth?.getUser()).catch(() => null);
-      const userId = auth?.data?.user?.id;
       await pauseHotBookAppointmentOnTakeover({
         propertyIds: [input.propertyId],
-        actor: userId ? { actorType: "user", actorId: userId } : { actorType: "system" },
+        actor: input.takeoverActorId
+          ? { actorType: "user", actorId: input.takeoverActorId }
+          : { actorType: "system" },
       });
     } catch {
       // Never fails a send that already succeeded.

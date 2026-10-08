@@ -319,6 +319,48 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
     // A person's manual text is a takeover: the auto-enrolled Book appointment drip stops.
     expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
   });
+
+  const sentScript = () => ({
+    contacts: [{ data: CONTACT_ROW, error: null }],
+    properties: [{ data: PROPERTY_ROW, error: null }],
+    messages: [
+      { data: { id: "msg-2" }, error: null },
+      { data: { id: "msg-2" }, error: null },
+    ],
+    webhook_events: [{ data: [], error: null }],
+  });
+
+  it("takeover audit: the person is the actor when the caller passes one, else the system", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234", takeoverActorId: "user-7" });
+    expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "user", actorId: "user-7" } });
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234" });
+    expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "system" } });
+  });
+
+  it("a scheduled seller appointment reminder is not a takeover", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    const outcome = await sendSmsToContact(fakeSupabase(sentScript()), {
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234",
+      metadata: { kind: "seller_appointment_reminder", reminderId: "r1", taskId: "t1" },
+    });
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
+  });
+
+  it("an automated send never pauses the Book appointment drip", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    const script = sentScript();
+    const outcome = await sendSmsToContact(fakeSupabase({
+      ...script,
+      contacts: [...script.contacts, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [...script.properties, { data: PROPERTY_ROW, error: null }],
+    }), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234",
+    });
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
+  });
 });
 
 describe("sendSmsToContact — beforeProviderSubmit fence", () => {

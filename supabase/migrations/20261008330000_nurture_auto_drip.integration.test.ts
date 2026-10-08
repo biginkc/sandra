@@ -180,11 +180,16 @@ describe("nurture auto-drip switch", () => {
       const property = await seed(sequenceId, true);
       await assignAs(users.owner, property);
       expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+      // The same lead event the app's pause path writes.
+      const ev = (await db.query(`select actor_type, actor_id, payload from public.lead_events where property_id = $1 and event_type = 'sequence_paused'`, [property])).rows;
+      expect(ev).toHaveLength(1);
+      expect(ev[0]).toMatchObject({ actor_type: "user", actor_id: users.owner, payload: { count: 1, reason: "person_took_over", permanent: false } });
     });
     it("the system (no signed-in person) assigning leaves it running", async () => {
       const property = await seed(sequenceId, true);
       await assignAs(null, property);
       expect(await enrollment(property)).toEqual({ status: "active", pause_reason: null });
+      expect((await db.query(`select 1 from public.lead_events where property_id = $1`, [property])).rows).toEqual([]);
     });
     it("a person assigning a lead in any OTHER drip leaves it running", async () => {
       const other = (await db.query(`insert into public.sequences (org_id, name, active) values ($1, 'Other drip', true) returning id`, [orgId])).rows[0].id;
