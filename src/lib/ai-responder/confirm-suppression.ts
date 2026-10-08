@@ -1,3 +1,4 @@
+import { normalizePhone } from "@/lib/csv/normalize";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { suppressionReviewIdsFromReason } from "@/lib/ai-responder/format-reason";
@@ -99,7 +100,8 @@ export async function listOutstandingSuppressionReviews(
 export async function recordSuppressionRetriedOk(input: {
   propertyId: string;
   reviewId: string;
-  actorId: string;
+  /** Null for system actors (the sweeper when the review has no reviewer). */
+  actorId: string | null;
 }): Promise<void> {
   try {
     const admin = createAdminClient();
@@ -112,7 +114,7 @@ export async function recordSuppressionRetriedOk(input: {
     const { error } = await admin.from("lead_events").insert({
       org_id: property.org_id,
       property_id: input.propertyId,
-      actor_type: "user",
+      actor_type: input.actorId ? "user" : "system",
       actor_id: input.actorId,
       event_type: SUPPRESSION_RETRIED_OK_EVENT,
       payload: { reviewId: input.reviewId },
@@ -148,8 +150,10 @@ export async function applyConfirmedSuppression(input: {
   propertyId: string;
   orgId: string;
   disposition: string;
-  actorId: string;
+  actorId: string | null;
   aiReason?: string | null;
+  /** Sweeper: skip the per-failure reportError; the caller throttles reports. */
+  quiet?: boolean;
 }): Promise<ConfirmedSuppressionResult> {
   if (input.disposition !== "opted_out" && input.disposition !== "dnc") {
     return { ok: true };
@@ -157,6 +161,12 @@ export async function applyConfirmedSuppression(input: {
   const isDnc = input.disposition === "dnc";
   try {
     if (!input.phone) throw new Error("applyConfirmedSuppression: no phone on contact");
+    // recordSmsPhoneSuppression returns silently for an un-normalizable phone,
+    // which would otherwise look like proof of suppression and discharge the
+    // obligation. Fail instead so the hold stays up.
+    if (!normalizePhone(input.phone)) {
+      throw new Error("applyConfirmedSuppression: phone cannot be normalized");
+    }
     const reason = input.aiReason || input.reviewId;
     await applyPhoneLevelOptOut(createAdminClient(), {
       contactId: input.contactId,
@@ -179,8 +189,9 @@ export async function applyConfirmedSuppression(input: {
     await recordLeadEvent({
       propertyId: input.propertyId,
       eventType: LEAD_EVENT_TYPES.OPTED_OUT,
-      actorType: "user",
-      actorId: input.actorId,
+      ...(input.actorId
+        ? { actorType: "user" as const, actorId: input.actorId }
+        : { actorType: "system" as const }),
       payload: {
         channel: "sms",
         trigger: "human_confirmed_ai_review",
@@ -192,10 +203,12 @@ export async function applyConfirmedSuppression(input: {
     });
     return { ok: true };
   } catch (error) {
-    reportError(error, {
-      tags: { surface: "confirm_ai_disposition_suppression" },
-      extra: { reviewId: input.reviewId, disposition: input.disposition },
-    });
+    if (!input.quiet) {
+      reportError(error, {
+        tags: { surface: "confirm_ai_disposition_suppression" },
+        extra: { reviewId: input.reviewId, disposition: input.disposition },
+      });
+    }
     await raiseSuppressionIncompleteHold(input.propertyId, input.reviewId);
     return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
   }
@@ -295,6 +308,45 @@ async function raiseSuppressionIncompleteHold(
   }
 }
 
+/**
+ * Discharges the durable suppression obligation that fn_confirm_ai_disposition_review
+ * records in the same transaction as the confirm. Call ONLY after phone-level
+ * suppression succeeded. If a `suppression_incomplete` ledger row exists for the
+ * review it writes `suppression_retried_ok` (idempotent on the unique identity),
+ * then lets the database decide, under the property lock, whether the hold clears.
+ * No ledger row (a confirm that never needed phone suppression) writes nothing.
+ * Never throws.
+ */
+export async function dischargeSuppressionObligation(input: {
+  propertyId: string;
+  reviewId: string;
+  actorId: string | null;
+}): Promise<void> {
+  try {
+    const admin = createAdminClient();
+    const { data: ledgerRow, error: ledgerError } = await admin
+      .from("lead_events")
+      .select("id")
+      .eq("property_id", input.propertyId)
+      .eq("event_type", SUPPRESSION_INCOMPLETE_EVENT)
+      .eq("source_type", SUPPRESSION_FAILED_SOURCE)
+      .eq("source_id", input.reviewId)
+      .maybeSingle();
+    if (ledgerError) throw new Error(ledgerError.message);
+    if (!ledgerRow) return;
+    await recordSuppressionRetriedOk(input);
+    const { error: clearError } = await admin.rpc("fn_clear_suppression_hold_if_resolved", {
+      p_property_id: input.propertyId,
+    });
+    if (clearError) throw new Error(clearError.message);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "suppression_obligation_discharge" },
+      extra: { reviewId: input.reviewId, propertyId: input.propertyId },
+    });
+  }
+}
+
 type ReviewLookupClient = {
   from: (table: string) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
 };
@@ -306,7 +358,8 @@ type ReviewLookupClient = {
 export async function applySuppressionForConfirmedReview(
   supabase: ReviewLookupClient,
   reviewId: string,
-  actorId: string,
+  actorId: string | null,
+  options: { discharge?: boolean; quiet?: boolean } = {},
 ): Promise<ConfirmedSuppressionResult> {
   let heldPropertyId: string | null = null;
   try {
@@ -353,7 +406,7 @@ export async function applySuppressionForConfirmedReview(
       if (contactError) throw new Error(contactError.message);
       phone = contact?.phone_1 ?? null;
     }
-    return await applyConfirmedSuppression({
+    const result = await applyConfirmedSuppression({
       reviewId,
       contactId,
       phone,
@@ -362,13 +415,127 @@ export async function applySuppressionForConfirmedReview(
       disposition: review.disposition,
       actorId,
       aiReason: review.ai_reason,
+      quiet: options.quiet,
     });
+    // First-attempt callers and the sweeper discharge the obligation the confirm
+    // RPC recorded; the manual retry action does its own record + clear.
+    if (result.ok && options.discharge) {
+      await dischargeSuppressionObligation({ propertyId: review.property_id, reviewId, actorId });
+    }
+    return result;
   } catch (error) {
-    reportError(error, {
-      tags: { surface: "confirm_ai_disposition_suppression_lookup" },
-      extra: { reviewId },
-    });
+    if (!options.quiet) {
+      reportError(error, {
+        tags: { surface: "confirm_ai_disposition_suppression_lookup" },
+        extra: { reviewId },
+      });
+    }
     if (heldPropertyId) await raiseSuppressionIncompleteHold(heldPropertyId, reviewId);
     return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
+  }
+}
+
+/**
+ * Sweeper step: retry phone-level suppression for confirmed opted_out/dnc reviews
+ * whose durable obligation (ledger row from the confirm RPC or a failed attempt)
+ * is older than `olderThanSeconds`, not yet discharged and past its DB-side
+ * backoff (2m, 10m, 1h, 6h, then daily). Then re-run the hold-clear decision for
+ * holds whose ids are all resolved (a clear that failed after the ok write).
+ * Bounded batches. Safe to run concurrently with itself and with a human Retry:
+ * phone suppression is idempotent, the retried_ok insert collapses on its
+ * unique identity, and every clear decision is made by the database under the
+ * property lock. Writes as the system actor, never the original reviewer.
+ * Failures are counted in the database; reportError fires at most once per
+ * review per day after 3 failed attempts. Never throws.
+ */
+export async function retryOutstandingSuppressionObligations(
+  supabase: ReviewLookupClient & { rpc: (fn: string, args?: Record<string, unknown>) => any }, // eslint-disable-line @typescript-eslint/no-explicit-any
+  options: { olderThanSeconds?: number; limit?: number } = {},
+): Promise<{ attempted: number; succeeded: number; failed: number; holdsCleared: number }> {
+  const result = { attempted: 0, succeeded: 0, failed: 0, holdsCleared: 0 };
+  try {
+    const { data, error } = await supabase.rpc("fn_list_outstanding_suppression_obligations", {
+      p_older_than_seconds: options.olderThanSeconds ?? 120,
+      p_limit: options.limit ?? 25,
+    });
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Array<{
+      review_id: string;
+      property_id: string;
+      org_id: string;
+    }>;
+    for (const row of rows) {
+      result.attempted += 1;
+      const outcome = await applySuppressionForConfirmedReview(supabase, row.review_id, null, {
+        discharge: true,
+        quiet: true,
+      });
+      if (outcome.ok) {
+        result.succeeded += 1;
+        continue;
+      }
+      result.failed += 1;
+      await recordSweeperFailure(supabase, row);
+    }
+  } catch (e) {
+    reportError(e, { tags: { surface: "suppression_obligation_sweep" } });
+  }
+  try {
+    const { data, error } = await supabase.rpc("fn_list_resolvable_suppression_holds", {
+      p_limit: options.limit ?? 25,
+    });
+    if (error) throw new Error(error.message);
+    // One aggregated report per run so a property whose clear keeps failing
+    // cannot page every sweep once per property.
+    let clearFailures = 0;
+    let firstClear: { propertyId: string; message: string } | null = null;
+    for (const row of (data ?? []) as Array<{ property_id: string }>) {
+      const { data: cleared, error: clearError } = await supabase.rpc(
+        "fn_clear_suppression_hold_if_resolved",
+        { p_property_id: row.property_id },
+      );
+      if (clearError) {
+        clearFailures += 1;
+        firstClear ??= { propertyId: row.property_id, message: clearError.message };
+        continue;
+      }
+      const r = Array.isArray(cleared) ? cleared[0] : cleared;
+      if (r?.cleared) result.holdsCleared += 1;
+    }
+    if (clearFailures > 0 && firstClear) {
+      reportError(new Error(firstClear.message), {
+        tags: { surface: "suppression_hold_resolved_clear" },
+        extra: { failedCount: clearFailures, firstPropertyId: firstClear.propertyId },
+      });
+    }
+  } catch (e) {
+    reportError(e, { tags: { surface: "suppression_hold_resolved_sweep" } });
+  }
+  return result;
+}
+
+async function recordSweeperFailure(
+  supabase: { rpc: (fn: string, args?: Record<string, unknown>) => any }, // eslint-disable-line @typescript-eslint/no-explicit-any
+  row: { review_id: string; property_id: string; org_id: string },
+): Promise<void> {
+  try {
+    const { data, error } = await supabase.rpc("fn_record_suppression_attempt_failure", {
+      p_review_id: row.review_id,
+      p_property_id: row.property_id,
+      p_org_id: row.org_id,
+    });
+    if (error) throw new Error(error.message);
+    const r = Array.isArray(data) ? data[0] : data;
+    if (r?.should_report) {
+      reportError(new Error("suppression obligation keeps failing"), {
+        tags: { surface: "suppression_obligation_permanent_failure" },
+        extra: { reviewId: row.review_id, propertyId: row.property_id, attempts: r.attempt_count },
+      });
+    }
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "suppression_obligation_attempt_record" },
+      extra: { reviewId: row.review_id },
+    });
   }
 }

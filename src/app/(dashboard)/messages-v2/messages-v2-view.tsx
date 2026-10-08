@@ -21,6 +21,8 @@ import {
   type LooseSupabase,
 } from "./queries";
 import { RunCard } from "./run-card";
+import type { ReplyGeneration } from "./reply-generation";
+import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
 import { ScorecardCard } from "./scorecard-card";
 import type { ScorecardRow } from "./scorecard";
 import type {
@@ -39,6 +41,9 @@ export type MessagesV2ViewProps = {
   orgId: string;
   /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
   isOwner?: boolean;
+  /** The org's "AI drafts" setting; null/absent hides the control. */
+  replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
+  setReplyGeneration?: SetReplyGenerationAction;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
   runs: RunWithSteps[];
@@ -316,6 +321,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             </Badge>
           ))}
         </div>
+        <ReplyGenerationToggle
+          configId={props.replyGeneration?.configId ?? null}
+          replyGeneration={props.replyGeneration?.replyGeneration ?? null}
+          isOwner={isOwner}
+          action={props.setReplyGeneration}
+        />
         <p
           className="ml-auto text-sm text-muted-foreground"
           data-testid="header-status"

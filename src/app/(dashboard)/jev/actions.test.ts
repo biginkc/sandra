@@ -104,7 +104,7 @@ describe("confirmJevQueueItem", () => {
     mocks.rpcResult = { data: { status: "confirmed" }, error: null };
     await confirmJevQueueItem("ai_disposition_review", "review-1");
     expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
-    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "user-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "user-1", { discharge: true });
   });
 
   it("skips suppression when superseded, and for jev_lead_decision", async () => {

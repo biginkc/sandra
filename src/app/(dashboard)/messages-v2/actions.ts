@@ -22,6 +22,7 @@ import {
   takeOverHold,
   type HoldActionDeps,
 } from "./hold-actions";
+import { setReplyGeneration, type ReplyGeneration, type ReplyGenerationSetting } from "./reply-generation";
 import type { HoldSeen } from "./types";
 
 /**
@@ -132,4 +133,28 @@ export async function listHoldAssigneesAction(input: {
   const auth = await authorize();
   if (!auth.ok) return auth;
   return listPropertyOrgUsers(String(input.propertyId));
+}
+
+/**
+ * Owner-only "AI drafts" switch. The caller's own session runs the RPC (it
+ * needs auth.uid()); the database re-checks active-owner for the config's org.
+ */
+export async function setReplyGenerationAction(input: {
+  configId: string;
+  mode: ReplyGeneration;
+}): Promise<Result<ReplyGenerationSetting>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  try {
+    const supabase = await createClient();
+    const result = await setReplyGeneration(
+      supabase as unknown as Parameters<typeof setReplyGeneration>[0],
+      { configId: String(input.configId), mode: String(input.mode) },
+    );
+    if (result.ok) revalidatePath("/messages-v2");
+    return result;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_reply_generation" } });
+    return err({ code: "SET_FAILED", message: "Could not change AI drafts. Nothing was changed." });
+  }
 }

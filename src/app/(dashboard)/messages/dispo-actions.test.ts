@@ -92,7 +92,7 @@ describe("confirmAiDispositionReview", () => {
     responseQueue = [{ data: { status: "confirmed", reviewId: "review-1" } }];
     await confirmAiDispositionReview("review-1");
     expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
-    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "actor-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "actor-1", { discharge: true });
   });
 
   it("does not run suppression for a superseded review", async () => {
