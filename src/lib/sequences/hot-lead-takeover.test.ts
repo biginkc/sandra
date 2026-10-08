@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   live: [] as Array<{ property_id: string }>,
   marker: { last_person_takeover_at: null as string | null },
+  newerInbound: [] as Array<{ id: string }>,
   pause: vi.fn(async (..._a: unknown[]) => ({ paused: 1 })),
   updates: [] as Array<Record<string, unknown>>,
   filters: [] as Array<[string, unknown]>,
@@ -21,13 +22,15 @@ vi.mock("@/lib/supabase/admin", () => ({
         return b;
       };
       b.in = () => b;
+      b.gt = () => b;
+      b.limit = () => b;
       b.eq = (c: string, v: unknown) => {
         mocks.filters.push([c, v]);
         return b;
       };
       b.maybeSingle = async () => ({ data: mocks.marker, error: null });
       b.then = (resolve: (v: unknown) => unknown) =>
-        resolve(mocks.fail ? { data: null, error: { message: "db down" } } : { data: table === "sequence_enrollments" ? mocks.live : null, error: null });
+        resolve(mocks.fail ? { data: null, error: { message: "db down" } } : { data: table === "sequence_enrollments" ? mocks.live : table === "messages" ? mocks.newerInbound : null, error: null });
       return b;
     },
   }),
@@ -44,6 +47,7 @@ beforeEach(() => {
   mocks.fail = false;
   mocks.live = [{ property_id: "p1" }];
   mocks.marker = { last_person_takeover_at: null };
+  mocks.newerInbound = [];
 });
 
 describe("pauseHotBookAppointmentOnTakeover", () => {
@@ -73,6 +77,11 @@ describe("pauseHotEnrollmentIfTakenOverSince (the enrol-vs-takeover race)", () =
     mocks.marker = { last_person_takeover_at: "2026-10-08T12:00:01.000Z" };
     expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 1 });
     expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "person_took_over" });
+  });
+  it("pauses (inbound_reply) when the seller replied again while the dispatch ran", async () => {
+    mocks.newerInbound = [{ id: "m2" }];
+    expect(await pauseHotEnrollmentIfTakenOverSince({ propertyId: "p1", since })).toEqual({ paused: 1 });
+    expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "inbound_reply" });
   });
   it("leaves it running when the last takeover was before the dispatch started, or never", async () => {
     mocks.marker = { last_person_takeover_at: "2026-10-08T11:59:00.000Z" };

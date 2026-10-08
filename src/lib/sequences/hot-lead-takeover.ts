@@ -60,8 +60,9 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
 
 /**
  * Called by the hot-lead dispatch right after it inserted the enrolment: if a
- * person took over at or after `since` (their pause ran before the enrolment
- * existed and so found nothing), pause it now.
+ * person took over, or the seller sent a newer inbound, at or after `since`
+ * (their pause ran before the enrolment existed and so found nothing), pause it
+ * now. `since` is taken before classification starts.
  */
 export async function pauseHotEnrollmentIfTakenOverSince(a: {
   propertyId: string;
@@ -76,11 +77,24 @@ export async function pauseHotEnrollmentIfTakenOverSince(a: {
       .maybeSingle();
     if (error) throw new Error(error.message);
     const at = data?.last_person_takeover_at;
-    if (!at || new Date(at).getTime() < new Date(a.since).getTime()) return { paused: 0 };
-    return await pausePropertyEnrollments(admin, {
-      propertyId: a.propertyId,
-      reason: "person_took_over",
-    });
+    if (at && new Date(at).getTime() >= new Date(a.since).getTime()) {
+      return await pausePropertyEnrollments(admin, { propertyId: a.propertyId, reason: "person_took_over" });
+    }
+    // The seller replied again while this dispatch ran: the inbound pause found
+    // no enrolment yet. The triggering inbound predates `since`, so any inbound
+    // after it is a newer reply.
+    const { data: newer, error: newerError } = await admin
+      .from("messages")
+      .select("id")
+      .eq("property_id", a.propertyId)
+      .eq("direction", "inbound")
+      .gt("created_at", a.since)
+      .limit(1);
+    if (newerError) throw new Error(newerError.message);
+    if (newer && newer.length > 0) {
+      return await pausePropertyEnrollments(admin, { propertyId: a.propertyId, reason: "inbound_reply" });
+    }
+    return { paused: 0 };
   } catch (e) {
     reportError(e, { tags: { surface: "hot_lead_takeover_reconcile" }, extra: { propertyId: a.propertyId } });
     return { paused: 0 };

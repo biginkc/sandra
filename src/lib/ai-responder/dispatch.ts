@@ -988,6 +988,9 @@ async function classifyAndHandleNonRouteOutcomes(
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
+  // Fence for the hot-lead enrolment: anything a person or the seller does from
+  // here on (classification and config loads included) must pause it.
+  const dispatchFenceAt = new Date().toISOString();
   const classification = await classifyForDispatch(
     supabase,
     {
@@ -1057,7 +1060,6 @@ async function classifyAndHandleNonRouteOutcomes(
         })
       : null;
     if (dripRoute?.kind === "person") {
-      const hotStartedAt = new Date().toISOString();
       if (input.inboundMessageId) {
         await proposeJevLeadDecision(supabase, {
           propertyId: input.propertyId,
@@ -1085,7 +1087,7 @@ async function classifyAndHandleNonRouteOutcomes(
       await enrollHotLeadInBookAppointment(supabase, {
         propertyId: input.propertyId,
         sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
-        startedAt: hotStartedAt,
+        startedAt: dispatchFenceAt,
         runCtx,
       });
       await completeClaim(supabase, input.propertyId, {
