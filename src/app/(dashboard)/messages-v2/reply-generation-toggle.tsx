@@ -104,7 +104,7 @@ export function ReplyGenerationToggle({
             <DialogTitle>{on ? "Turn AI drafts off?" : "Turn AI drafts on?"}</DialogTitle>
             <DialogDescription>
               {on
-                ? "Jev keeps classifying and applying outcomes. The AI will stop writing replies: every seller message that needs an answer is held for a human as 'Seller replied — needs a human reply'."
+                ? "The AI will stop writing replies. If the classifier is in automatic mode, Jev keeps classifying and applying outcomes, and every seller message that needs an answer is held for a human as 'Seller replied — needs a human reply'. If the classifier is in shadow or legacy mode, every inbound message is held as 'needs a human reply' and Jev applies nothing. The fixed 'who is this?' identity reply still sends automatically (it is pre-approved canned text, not written by the AI)."
                 : "The AI responder may draft replies again, under the current send and hold rules."}
             </DialogDescription>
           </DialogHeader>

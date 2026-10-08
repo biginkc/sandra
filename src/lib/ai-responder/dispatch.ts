@@ -1894,12 +1894,6 @@ async function retryWithCarriedReply(
     }
   }
 
-  // Jev-only mode: a reply generated before drafting was turned off is not
-  // sent either; a human answers.
-  if (config?.reply_generation === "off") {
-    return holdForNeedsReply(supabase, input, claim.claimId, runCtx);
-  }
-
   const consentLookup = await getConsentStateStrict(supabase, input.contactId, "sms");
   const consentState = consentLookup.ok ? consentLookup.state : null;
   const countedTurns = await countAiTurnsInThread(
@@ -1986,6 +1980,13 @@ async function retryWithCarriedReply(
       outcome: silentSkipClaimOutcome(0),
     });
     return silentSkip(skip.reason, 0);
+  }
+
+  // Jev-only mode: a reply generated before drafting was turned off is not
+  // sent either; a human answers. Checked only after the skip gate so
+  // opt-out / suppression / takeover / disabled still end quietly.
+  if (config?.reply_generation === "off") {
+    return holdForNeedsReply(supabase, input, claim.claimId, runCtx);
   }
 
   await trace(supabase, {

@@ -6335,6 +6335,21 @@ describe("Jev-only mode (reply_generation = off): the legacy generator is never 
     expectHeld(state, result);
   });
 
+  it("STOP/suppression arriving during the retry gap with drafting off: ends quietly, no needs_reply hold", async () => {
+    const state = offState("legacy");
+    seedInboundMessage(state, { id: "inbound-off-4b", body: "Maybe, tell me more" });
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" } as never);
+    const result = await dispatchAiResponse(
+      createMockSupabase(state) as never,
+      inp("inbound-off-4b", { retryAttempt: 1, retryReply: CARRIED }),
+      anthropic,
+    );
+    expect(result).toEqual({ outcome: "skipped", reason: "disabled_per_property" });
+    expect(state.property.last_ai_escalation_reason).not.toBe("needs_reply");
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
   it("Jev still classifies and applies its outcome (not_interested) with drafting off; no generation, no send", async () => {
     const state = offState("jev");
     state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.9 }];
