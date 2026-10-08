@@ -39,7 +39,7 @@ describe("classifyWithJev", () => {
     expect(body.questions.outcome.instructions).toContain("latest inbound");
     expect(body.questions.outcome.criteria.new_lead).toContain("An outbound invitation alone");
     expect(body.questions.outcome.criteria.nurture).toContain("new_lead, not nurture");
-    expect(result).toMatchObject({ outcome: "new_lead", outcomeConfidence: 0.76, schemaVersion: "2" });
+    expect(result).toMatchObject({ outcome: "new_lead", outcomeConfidence: 0.76, schemaVersion: "3" });
     expect(result.probabilities.outcome.new_lead).toBe(0.9);
   });
 
@@ -184,6 +184,31 @@ describe("classifyWithJev", () => {
     );
     expect(result.replyIntentAvailable).toBe(true);
     expect(result.replyIntent).toBe("positive");
+  });
+});
+
+describe("asked_how_number_obtained", () => {
+  const withAnswer = (answer: unknown) =>
+    stubFetch([{ status: 200, body: { answers: { outcome: { choice: "nurture", confidence: 0.97 }, ...(answer === undefined ? {} : { asked_how_number_obtained: answer }) } } }]);
+
+  it("asks the question in the same Jev call", async () => {
+    const f = withAnswer({ choice: "yes" });
+    await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" });
+    const body = JSON.parse(String(vi.mocked(f).mock.calls[0][1]?.body));
+    expect(Object.keys(body.questions)).toContain("asked_how_number_obtained");
+  });
+
+  it("parses yes as true, no as false", async () => {
+    const yes = await classifyWithJev(baseInput(), { fetch: withAnswer({ choice: "yes", probabilities: { yes: 0.93 } }), apiKey: "k" });
+    expect(yes.askedHowNumberObtained).toBe(true);
+    expect(yes.probabilities.asked_how_number_obtained).toEqual({ yes: 0.93 });
+    const no = await classifyWithJev(baseInput(), { fetch: withAnswer({ choice: "no" }), apiKey: "k" });
+    expect(no.askedHowNumberObtained).toBe(false);
+  });
+
+  it.each([undefined, { choice: "maybe" }, { choice: 1 }, {}])("a missing or invalid answer (%j) is null, never yes", async (answer) => {
+    const r = await classifyWithJev(baseInput(), { fetch: withAnswer(answer), apiKey: "k" });
+    expect(r.askedHowNumberObtained).toBeNull();
   });
 });
 

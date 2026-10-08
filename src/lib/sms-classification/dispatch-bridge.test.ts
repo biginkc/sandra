@@ -324,10 +324,31 @@ describe("classifyForDispatch", () => {
       classificationRunId: "run-1",
       nativeConfidence: 0.95,
       escalationReason: null,
+      askedHowNumberObtained: false,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
       evaluationRevision: 7,
     });
+  });
+
+  it("carries Jev's number-source answer through nurture and not_interested: true only on an explicit yes", async () => {
+    for (const [outcome, kind] of [["nurture", "jev_nurture"], ["not_interested", "jev_route"]] as const) {
+      for (const [choice, expected] of [["yes", true], ["no", false], [undefined, false]] as const) {
+        const { fn } = stubFetch({
+          answers: {
+            outcome: { choice: outcome, confidence: 0.99 },
+            ...(choice ? { asked_how_number_obtained: { choice } } : {}),
+          },
+        });
+        const result = await classifyForDispatch(
+          stubSupabase({ thresholds: [{ outcome, min_confidence: 0.9 }] }),
+          baseInput,
+          { classifierProvider: "jev", classifierMode: "automatic" },
+          { fetch: fn, typesafeApiKey: "k" },
+        );
+        expect(result).toMatchObject({ kind, askedHowNumberObtained: expected });
+      }
+    }
   });
 
   it("carries Jev's human-follow-up reason through nurture and not_interested so the template step can fail closed", async () => {
@@ -402,6 +423,7 @@ describe("classifyForDispatch", () => {
     );
     expect(result).toEqual({
       kind: "jev_promote_new_lead",
+      askedHowNumberObtained: false,
       classificationRunId: "run-1",
       nativeConfidence: 0.9,
       thresholdAtDecision: 0.9,

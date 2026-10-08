@@ -4,6 +4,7 @@ import type { ThresholdMap } from "@/lib/sms-classification/thresholds";
 
 import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
 import {
+  hasSendableNumberSourceTemplate,
   isTemplateSendable,
   resolveApprovedTemplateReply,
   selectAutoReplyTemplate,
@@ -151,6 +152,7 @@ describe("resolveApprovedTemplateReply", () => {
       mappingId: "m1",
       body: "Hi Dana, this is Mel. Thanks for letting us know.",
       outcome: "nurture",
+      key: "nurture",
     });
     expect(from).toHaveBeenCalledWith("auto_reply_templates");
     expect(calls).toEqual(
@@ -296,6 +298,95 @@ describe("resolveApprovedTemplateReply", () => {
     const { client } = fakeSupabase({ data: [row({ sms_templates: [approved()] })], error: null });
     expect(await resolveApprovedTemplateReply(client, base)).toMatchObject({ kind: "template" });
   });
+
+  describe("number_source mapping key", () => {
+    it("reads the number_source mapping but runs every outcome check for the real outcome", async () => {
+      const { client, calls } = fakeSupabase({ data: [row()], error: null });
+      const out = await resolveApprovedTemplateReply(client, { ...base, mappingKey: "number_source" });
+      expect(out).toMatchObject({ kind: "template", templateId: "t1", outcome: "nurture", key: "number_source" });
+      expect(calls).toContainEqual(["outcome", "number_source"]);
+      expect(calls).not.toContainEqual(["outcome", "nurture"]);
+    });
+
+    it("never sends for a human follow-up reason, a switched-off label, a low cutoff or a non-templatable outcome", async () => {
+      const { client, from } = fakeSupabase({ data: [row()], error: null });
+      const args = { ...base, mappingKey: "number_source" as const };
+      expect(await resolveApprovedTemplateReply(client, { ...args, escalationReason: "price_or_offer" })).toEqual({
+        kind: "none",
+        reason: "human_follow_up",
+      });
+      expect(await resolveApprovedTemplateReply(client, { ...args, outcomeConfidence: 0.5 })).toEqual({
+        kind: "none",
+        reason: "below_threshold",
+      });
+      expect(
+        await resolveApprovedTemplateReply(client, {
+          ...args,
+          thresholds: { ...ON, nurture: { minConfidence: 0.95, version: 2, automationEnabled: false } },
+        }),
+      ).toEqual({ kind: "none", reason: "automation_disabled" });
+      for (const outcome of ["opted_out", "dnc", "wrong_number", "hostile", "new_lead", "unclear", "bad_number"] as const) {
+        expect(await resolveApprovedTemplateReply(client, { ...args, outcome })).toEqual({
+          kind: "none",
+          reason: "outcome_not_templatable",
+        });
+      }
+      expect(from).not.toHaveBeenCalled();
+    });
+
+    it("a blank property_address never renders: render_failed, nothing is sent", async () => {
+      const text = "Fair question. Your number came up tied to {{property_address}} in public records.";
+      loadTemplateVars.mockResolvedValue({ first_name: "Dana", my_first_name: "Mel", property_address: "  " });
+      const { client } = fakeSupabase({
+        data: [row({ sms_templates: approved({ content: text, approved_content: text }) })],
+        error: null,
+      });
+      expect(await resolveApprovedTemplateReply(client, { ...base, mappingKey: "number_source" })).toEqual({
+        kind: "none",
+        reason: "render_failed",
+      });
+    });
+
+    it("an unapproved or edited number_source template is inert", async () => {
+      const { client } = fakeSupabase({
+        data: [row({ sms_templates: approved({ approved_for_auto_send: false }) })],
+        error: null,
+      });
+      expect(await resolveApprovedTemplateReply(client, { ...base, mappingKey: "number_source" })).toEqual({
+        kind: "none",
+        reason: "template_unavailable",
+      });
+    });
+  });
+});
+
+describe("hasSendableNumberSourceTemplate", () => {
+  const row = (tpl: TemplateRow | null) => ({
+    id: "m1",
+    template_id: "t1",
+    reply_intent: null,
+    priority: 100,
+    sms_templates: tpl,
+  });
+
+  it("is true only for an active mapping to an approved, unedited template", async () => {
+    const ok = fakeSupabase({ data: [row(approved())], error: null });
+    expect(await hasSendableNumberSourceTemplate(ok.client, "org1")).toBe(true);
+    expect(ok.calls).toEqual(
+      expect.arrayContaining([
+        ["org_id", "org1"],
+        ["outcome", "number_source"],
+        ["active", true],
+      ]),
+    );
+    for (const data of [[], [row(null)], [row(approved({ approved_for_auto_send: false }))], [row(approved({ content: "changed" }))]]) {
+      expect(await hasSendableNumberSourceTemplate(fakeSupabase({ data, error: null }).client, "org1")).toBe(false);
+    }
+  });
+
+  it("fails closed on a lookup error", async () => {
+    expect(await hasSendableNumberSourceTemplate(fakeSupabase({ data: null, error: { message: "boom" } }).client, "org1")).toBe(false);
+  });
 });
 
 describe("wrong_number and hostile mapping keys", () => {
@@ -353,6 +444,7 @@ describe("wrong_number and hostile mapping keys", () => {
       mappingId: "m1",
       body: APPROVED_REPLY_TEXTS.hostile,
       outcome: "hostile",
+      key: "hostile",
     });
     expect(calls).toContainEqual(["outcome", "hostile"]);
     expect(calls).toContainEqual(["active", true]);

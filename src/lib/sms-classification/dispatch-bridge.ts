@@ -78,6 +78,8 @@ export type ClassificationBridgeResult =
        *  so the approved-template step can fail closed on anything but
        *  `not_applicable` (PLAN D5: price / distress never auto-reply). */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** Jev's "did the seller ask how we got their number" answer; true only on an explicit yes. */
+      askedHowNumberObtained: boolean;
       /** Jev's raw wrong-contact scope (`route.scope` folds uncertain into
        *  this_property). The approved wrong-number reply fires only on an
        *  explicit `this_property`. */
@@ -106,6 +108,8 @@ export type ClassificationBridgeResult =
       nativeConfidence: number | null;
       /** See `jev_route.escalationReason`. */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** See `jev_route.askedHowNumberObtained`. */
+      askedHowNumberObtained: boolean;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
       evaluationRevision: number;
@@ -151,6 +155,8 @@ export type ClassificationBridgeResult =
   | {
       kind: "jev_promote_new_lead";
       classificationRunId: string;
+      /** See `jev_route.askedHowNumberObtained`. */
+      askedHowNumberObtained: boolean;
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
@@ -395,7 +401,7 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, askedHowNumberObtained: decision.askedHowNumberObtained === true, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
@@ -420,6 +426,7 @@ export async function classifyForDispatch(
       return {
         kind: "jev_promote_new_lead",
         classificationRunId,
+        askedHowNumberObtained: decision.askedHowNumberObtained === true,
         nativeConfidence,
         thresholdAtDecision,
         thresholdVersion,
@@ -434,6 +441,7 @@ export async function classifyForDispatch(
       eligibleForAutoAccept: false,
       nativeConfidence,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained === true,
       wrongScope: decision.wrongScope,
       thresholdAtDecision,
       thresholdVersion,
@@ -463,6 +471,7 @@ export async function classifyForDispatch(
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
     escalationReason: decision.escalationReason,
+    askedHowNumberObtained: decision.askedHowNumberObtained === true,
     wrongScope: decision.wrongScope,
   };
 }
@@ -558,6 +567,7 @@ async function persistRun(
       outcomeConfidence: decision.outcomeConfidence ?? null,
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained ?? null,
       probabilities: decision.probabilities,
       // Root direct-review finding (2026-09-20): the wrong_number/
       // not_interested/opted_out/dnc review path had no persisted
