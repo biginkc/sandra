@@ -122,6 +122,7 @@ export default defineConfig({
       "supabase/migrations/20261008280000_jev_opted_out_human_only.integration.test.ts",
       "src/app/(dashboard)/messages-v2/hold-actions.rpc.integration.test.ts",
       "src/lib/hold-alerts/store.integration.test.ts",
+      "supabase/migrations/20261008190000_messages_v2_confirm_records_pending_suppression.integration.test.ts",
       "supabase/migrations/20261008160000_messages_v2_scorecard.integration.test.ts",
       "supabase/migrations/20261008180000_replay_harness.integration.test.ts",
       "scripts/messages-v2/replay/replay.integration.test.ts",

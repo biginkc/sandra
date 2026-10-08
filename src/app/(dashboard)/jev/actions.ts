@@ -105,7 +105,9 @@ export async function confirmJevQueueItem(
       // retry of this action after a warning is safe).
       let warning: string | undefined;
       if (status === "confirmed") {
-        const suppression = await applySuppressionForConfirmedReview(supabase as never, id, user.id);
+        const suppression = await applySuppressionForConfirmedReview(supabase as never, id, user.id, {
+          discharge: true,
+        });
         if (!suppression.ok) warning = suppression.warning;
       }
       revalidatePath("/jev/needs-decision");
