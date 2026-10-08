@@ -57,6 +57,21 @@ describe("isKnownHoldReason", () => {
   });
 });
 
+describe("needs-confirm hold reasons (no automated DNC decisions)", () => {
+  it("registers every HOLD_* constant dispatch.ts exports", () => {
+    const src = read("src/lib/ai-responder/dispatch.ts");
+    const consts = [...src.matchAll(/export const HOLD_[A-Z_]+ = "([a-z_]+)";/g)].map((m) => m[1]!);
+    expect(consts.sort()).toEqual([
+      "jev_dnc_needs_confirm",
+      "jev_opted_out_needs_confirm",
+      "jev_wrong_number_all_needs_confirm",
+      "model_dnc_needs_confirm",
+      "model_opt_out_needs_confirm",
+    ]);
+    for (const c of consts) expect(isKnownHoldReason(c), c).toBe(true);
+  });
+});
+
 describe("wildcard hot entries", () => {
   const hold = (flag_reason: string) => ({ flag_reason, sources: ["needs_attention"] }) as unknown as OpenHold<PipelineRun>;
   it("accepts prefix and :backed suffix wildcards, rejects others", () => {

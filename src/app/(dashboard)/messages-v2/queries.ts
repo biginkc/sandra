@@ -298,27 +298,40 @@ export type ThresholdRow = {
   min_confidence?: number | string | null;
   /** Missing / null is shown as UNKNOWN, never assumed enabled. */
   automation_enabled?: boolean | null;
+  /** Rule version; needed to edit the rule (stale-write guard). */
+  version?: number | null;
 };
 
 export function buildModeBadges(
   config: { classifier_provider: string; classifier_mode: string } | null,
   thresholds: readonly ThresholdRow[],
 ): ModeBadge[] {
-  return thresholds.map((t) => {
+  return thresholds.map((t): ModeBadge => {
+    const rawMin = t.min_confidence == null ? NaN : Number(t.min_confidence);
+    const rule: Pick<ModeBadge, "rule"> =
+      typeof t.version === "number"
+        ? {
+            rule: {
+              minConfidence: Number.isFinite(rawMin) ? rawMin : null,
+              automationEnabled: t.automation_enabled ?? null,
+              version: t.version,
+            },
+          }
+        : {};
     if (config?.classifier_provider !== "jev")
-      return { label: t.outcome, mode: "LEGACY" as const };
+      return { label: t.outcome, mode: "LEGACY", ...rule };
     if (config.classifier_mode !== "automatic")
-      return { label: t.outcome, mode: "SHADOW" as const };
+      return { label: t.outcome, mode: "SHADOW", ...rule };
     if (t.automation_enabled === false)
-      return { label: t.outcome, mode: "HELD" as const };
+      return { label: t.outcome, mode: "HELD", ...rule };
     // Never guess AUTO: a missing/null flag means we cannot tell if it is held.
     if (t.automation_enabled !== true)
-      return { label: t.outcome, mode: "UNKNOWN" as const };
-    const min = t.min_confidence == null ? NaN : Number(t.min_confidence);
+      return { label: t.outcome, mode: "UNKNOWN", ...rule };
     return {
       label: t.outcome,
-      mode: "AUTO" as const,
-      minConfidence: Number.isFinite(min) ? min : null,
+      mode: "AUTO",
+      minConfidence: Number.isFinite(rawMin) ? rawMin : null,
+      ...rule,
     };
   });
 }
@@ -811,7 +824,7 @@ export async function loadMessagesV2Data(
         ? NO_ROWS
         : supabase
             .from("jev_outcome_thresholds")
-            .select("outcome, min_confidence, automation_enabled")
+            .select("outcome, min_confidence, automation_enabled, version")
             .eq("org_id", orgId)
             .order("outcome", { ascending: true }),
     ]),

@@ -78,6 +78,16 @@ export type ModeBadge = {
   mode: "AUTO" | "HELD" | "SHADOW" | "LEGACY" | "UNKNOWN";
   /** Auto-apply confidence floor; only meaningful (and shown) for AUTO. */
   minConfidence?: number | null;
+  /**
+   * The stored rule behind this badge, for the owner-only editor. Present only
+   * when the rule row was read in full (version known); absent means the badge
+   * is display-only.
+   */
+  rule?: {
+    minConfidence: number | null;
+    automationEnabled: boolean | null;
+    version: number;
+  };
 };
 
 /** Health of the hold queries, so truncation and failures are never silent. */

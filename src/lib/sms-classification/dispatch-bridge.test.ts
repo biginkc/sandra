@@ -248,12 +248,26 @@ describe("classifyForDispatch", () => {
     }
   });
 
-  it("marks a non-dnc automatic decision eligible for auto-accept when at/above its configured threshold", async () => {
+  it("never marks opted_out eligible for auto-accept, even at 1.0 with automation on (Jarrad 2026-10-07 hard rule)", async () => {
     const { fn } = stubFetch({
-      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+      answers: { outcome: { choice: "opted_out", confidence: 1 } },
     });
     const result = await classifyForDispatch(
-      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95 }] }),
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.5 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind === "jev_route") expect(result.eligibleForAutoAccept).toBe(false);
+    else throw new Error("expected jev_route");
+  });
+
+  it("marks a non-dnc automatic decision eligible for auto-accept when at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "wrong_number", confidence: 0.95 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "wrong_number", min_confidence: 0.95 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
@@ -264,10 +278,10 @@ describe("classifyForDispatch", () => {
 
   it("persists the threshold settings row's own version (root final-review P2) — not just the numeric cutoff — alongside the decision", async () => {
     const { fn } = stubFetch({
-      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+      answers: { outcome: { choice: "wrong_number", confidence: 0.95 } },
     });
     const result = await classifyForDispatch(
-      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95, version: 7 }] }),
+      stubSupabase({ thresholds: [{ outcome: "wrong_number", min_confidence: 0.95, version: 7 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
@@ -323,10 +337,28 @@ describe("classifyForDispatch", () => {
       kind: "jev_nurture",
       classificationRunId: "run-1",
       nativeConfidence: 0.95,
+      escalationReason: null,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
       evaluationRevision: 7,
     });
+  });
+
+  it("carries Jev's human-follow-up reason through nurture and not_interested so the template step can fail closed", async () => {
+    for (const [outcome, kind] of [["nurture", "jev_nurture"], ["not_interested", "jev_route"]] as const) {
+      for (const reason of ["not_applicable", "price_or_offer", "distress"]) {
+        const { fn } = stubFetch({
+          answers: { outcome: { choice: outcome, confidence: 0.99 }, escalation_reason: { choice: reason } },
+        });
+        const result = await classifyForDispatch(
+          stubSupabase({ thresholds: [{ outcome, min_confidence: 0.9 }] }),
+          baseInput,
+          { classifierProvider: "jev", classifierMode: "automatic" },
+          { fetch: fn, typesafeApiKey: "k" },
+        );
+        expect(result).toMatchObject({ kind, escalationReason: reason });
+      }
+    }
   });
 
   it("returns jev_needs_decision (not jev_nurture) when nurture is below its configured threshold", async () => {

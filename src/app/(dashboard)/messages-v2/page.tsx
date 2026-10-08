@@ -14,6 +14,8 @@ import {
   takeOverHoldAction,
   retrySuppressionHoldAction,
   setReplyGenerationAction,
+  undoJevAppliedAction,
+  findJevUndoAction,
 } from "./actions";
 import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 
@@ -155,6 +157,8 @@ export default async function MessagesV2Page() {
         isOwner={isOwner}
         replyGeneration={replySetting}
         setReplyGeneration={setReplyGenerationAction}
+        undoJevAction={undoJevAppliedAction}
+        findJevUndo={findJevUndoAction}
         replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
