@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  live: [] as Array<{ property_id: string }>,
+  live: [] as Array<{ id?: string; property_id: string; status?: string; pause_reason?: string | null }>,
   marker: { last_person_takeover_at: null as string | null },
   newerInbound: [] as Array<{ id: string }>,
   pause: vi.fn(async (..._a: unknown[]) => ({ paused: 1 })),
@@ -57,6 +57,16 @@ describe("pauseHotBookAppointmentOnTakeover", () => {
     // Identified by the route it was created with, never by the org's current mapping.
     expect(mocks.filters).toContainEqual(["auto_enrolled_route", "hot_book_appointment"]);
     expect(mocks.pause).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", reason: "person_took_over", actor });
+  });
+  it("re-labels a TEMPORARY pause (call in progress / Norma call) so call cleanup can never resume it", async () => {
+    mocks.live = [{ id: "e1", property_id: "p1", status: "paused", pause_reason: "call_in_progress" }];
+    await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor });
+    expect(mocks.updates).toContainEqual(expect.objectContaining({ pause_reason: "person_took_over" }));
+  });
+  it("leaves a seller-reply pause (inbound_reply) as it is", async () => {
+    mocks.live = [{ id: "e1", property_id: "p1", status: "paused", pause_reason: "inbound_reply" }];
+    await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor });
+    expect(mocks.updates.filter((u) => "pause_reason" in u)).toEqual([]);
   });
   it("still records the marker when there is nothing to pause, and leaves other drips alone", async () => {
     mocks.live = [];

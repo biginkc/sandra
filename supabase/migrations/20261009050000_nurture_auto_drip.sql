@@ -161,6 +161,14 @@ begin
     return new;
   end if;
   update public.properties set last_person_takeover_at = now() where id = new.id;
+  -- A temporary pause (call in progress / Norma call) would be resumed by
+  -- its own cleanup: a person taking over re-labels it so nothing auto-resumes it.
+  update public.sequence_enrollments e
+  set pause_reason = 'person_took_over', updated_at = now()
+  where e.property_id = new.id
+    and e.status = 'paused'
+    and e.auto_enrolled_route = 'hot_book_appointment'
+    and e.pause_reason in ('call_in_progress', 'norma_call');
   with paused as (
     update public.sequence_enrollments e
     set status = 'paused', pause_reason = 'person_took_over', updated_at = now()

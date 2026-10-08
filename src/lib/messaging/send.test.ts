@@ -769,6 +769,8 @@ describe("releaseQueuedMessage — claimed payload", () => {
         },
         { data: { id: "queued-1", body: claimedBody }, error: null },
         { data: { id: "queued-1" }, error: null },
+        // takeover hook's read-back of the released row
+        { data: { property_id: PROPERTY_ID, metadata: { sendOrigin: "manual" } }, error: null },
       ],
       contacts: [{ data: CONTACT_ROW, error: null }],
       properties: [{ data: PROPERTY_ROW, error: null }],
@@ -782,6 +784,33 @@ describe("releaseQueuedMessage — claimed payload", () => {
       body: claimedBody,
       from: "+18165551234",
     });
+    // A person's queued text finally going out is a takeover: the Book appointment drip stops.
+    expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
+  });
+
+  it("a released AUTOMATED queue row is not a takeover", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-9", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "automated", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-9", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-9" }, error: null },
+        { data: { property_id: PROPERTY_ID, metadata: { sendOrigin: "automated" } }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }, { data: PROPERTY_ROW, error: null }],
+    });
+    const outcome = await releaseQueuedMessage(supabase, "queued-9");
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
   });
 
   it("rejects a claimed opener that loses its identity before provider dispatch", async () => {

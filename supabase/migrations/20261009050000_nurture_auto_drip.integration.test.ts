@@ -150,7 +150,7 @@ describe("nurture auto-drip switch", () => {
 
   describe("a person assigning the lead pauses the Book appointment drip", () => {
     async function seed(sequenceForEnrollment: string, route: string | null) {
-      const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T','T') returning id`, [orgId])).rows[0].id;
+      const contact = (await db.query(`insert into public.contacts (org_id, first_name, last_name) values ($1,'T',$2) returning id`, [orgId, randomUUID()])).rows[0].id;
       const property = (await db.query(
         `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1, '1 Test', 'MO', 'new_lead', $2) returning id`,
         [orgId, contact],
@@ -264,6 +264,21 @@ describe("nurture auto-drip switch", () => {
         await db.query(`update public.properties set last_person_takeover_at = now() where id = $1`, [q.property]);
         expect(await insertEnrollment(q, m, "maybe_later")).toEqual({ status: "active", pause_reason: null });
       });
+    });
+
+    it("a person assigning during a call/Norma pause re-labels it so call cleanup can never resume the drip", async () => {
+      for (const temp of ["call_in_progress", "norma_call"]) {
+        const property = await seed(sequenceId, "hot_book_appointment");
+        await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = $2 where property_id = $1`, [property, temp]);
+        await assignAs(users.owner, property);
+        expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "person_took_over" });
+      }
+    });
+    it("a seller-reply pause is left as it is (still reads as 'replied')", async () => {
+      const property = await seed(sequenceId, "hot_book_appointment");
+      await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where property_id = $1`, [property]);
+      await assignAs(users.owner, property);
+      expect(await enrollment(property)).toEqual({ status: "paused", pause_reason: "inbound_reply" });
     });
 
     it("a person assigning also leaves the durable takeover marker (the enrol-vs-takeover race fence)", async () => {

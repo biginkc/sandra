@@ -1590,6 +1590,32 @@ export async function releaseQueuedMessage(
   supabase: SupabaseClient<Database>,
   messageId: string,
 ): Promise<SendSmsOutcome> {
+  const outcome = await releaseQueuedMessageInner(supabase, messageId);
+  if (outcome.status === "sent") {
+    // A person's queued text finally going out is a takeover too (same rule as an
+    // immediate manual send); automated queue rows and seller reminders are not.
+    try {
+      const { data: row } = await supabase
+        .from("messages")
+        .select("property_id, metadata")
+        .eq("id", messageId)
+        .maybeSingle();
+      const meta = readMetadataRecord(row?.metadata ?? null);
+      if (row?.property_id && resolveQueuedSendOrigin(row.metadata ?? null) === "manual" && meta?.kind !== "seller_appointment_reminder") {
+        const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+        await pauseHotBookAppointmentOnTakeover({ propertyIds: [row.property_id], actor: { actorType: "system" } });
+      }
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function releaseQueuedMessageInner(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+): Promise<SendSmsOutcome> {
   let provider;
   try {
     provider = getMessagingProvider();
