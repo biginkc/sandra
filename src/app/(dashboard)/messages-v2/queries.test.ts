@@ -1345,7 +1345,7 @@ describe("New / Backlog split loader", () => {
     });
     const page = await loadBacklogHolds(client, "org", 200, 200);
     expect(rpcCalls[0].args).toMatchObject({ p_bucket: "backlog", p_limit: 200, p_offset: 200 });
-    expect(page).toMatchObject({ backlogTotal: 2504, hasMore: true, failed: false });
+    expect(page).toMatchObject({ backlogTotal: 2504, hasMore: true, failed: false, nextOffset: 201 });
     expect(page!.holds.map((h) => h.id)).toEqual(["p-old-1"]);
     const tables = queries.map((q) => q[0]?.table);
     expect(tables).not.toContain("pipeline_runs");
@@ -1364,7 +1364,7 @@ describe("New / Backlog split loader", () => {
     const empty = fakeSupabase({
       messages_v2_hold_buckets: () => ({ data: bucketsResult({ rows: [], backlog_total: 0 }) }),
     });
-    expect(await loadBacklogHolds(empty.client, "org", 0, 200)).toMatchObject({ holds: [], hasMore: false });
+    expect(await loadBacklogHolds(empty.client, "org", 0, 200)).toMatchObject({ holds: [], hasMore: false, nextOffset: 0 });
   });
 
   it("a failed Backlog hold query is flagged, not silently empty", async () => {

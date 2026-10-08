@@ -22,12 +22,12 @@ function fakeAdmin(error: unknown = null) {
 describe("ensureMessagesV2Settings", () => {
   it("seeds the cutover with insert-on-conflict-do-nothing (an existing cutover is never moved)", async () => {
     const { client, calls } = fakeAdmin();
-    const ok = await ensureMessagesV2Settings(client, "org-1", "2026-10-08T12:00:00.000Z");
+    const ok = await ensureMessagesV2Settings(client, "org-1");
     expect(ok).toBe(true);
     expect(calls).toEqual([
       {
         table: "messages_v2_settings",
-        row: { org_id: "org-1", backlog_before: "2026-10-08T12:00:00.000Z" },
+        row: { org_id: "org-1" },
         opts: { onConflict: "org_id", ignoreDuplicates: true },
       },
     ]);

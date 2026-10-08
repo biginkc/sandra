@@ -234,6 +234,7 @@ type BacklogState = {
   labels: Map<string, RunLabel>;
   total: number;
   hasMore: boolean;
+  nextOffset: number;
   /** The server data these cards were loaded against; a newer one makes them stale. */
   forKey: unknown;
   error: string | null;
@@ -263,7 +264,7 @@ function BacklogSection({
   const [state, setState] = useState<BacklogState | null>(null);
   const [moreBusy, setMoreBusy] = useState(false);
   const loadedRef = useRef(0);
-  const loadedCount = state?.holds.length ?? 0;
+  const loadedCount = state?.nextOffset ?? 0;
   useEffect(() => {
     loadedRef.current = loadedCount;
   }, [loadedCount]);
@@ -283,6 +284,7 @@ function BacklogSection({
                 labels: new Map(res.data.labels),
                 total: res.data.backlogTotal,
                 hasMore: res.data.hasMore,
+                nextOffset: res.data.nextOffset,
                 forKey: refreshKey,
                 error: null,
               }
@@ -291,6 +293,7 @@ function BacklogSection({
                 labels: new Map(),
                 total,
                 hasMore: false,
+                nextOffset: 0,
                 forKey: refreshKey,
                 error: res.error.message,
               },
@@ -303,6 +306,7 @@ function BacklogSection({
             labels: new Map(),
             total,
             hasMore: false,
+            nextOffset: 0,
             forKey: refreshKey,
             error: "Backlog holds could not be loaded.",
           });
@@ -318,7 +322,7 @@ function BacklogSection({
   const loadMore = () => {
     if (!loadBacklog || !state || moreBusy) return;
     setMoreBusy(true);
-    loadBacklog({ offset: state.holds.length, limit: BACKLOG_PAGE_SIZE })
+    loadBacklog({ offset: state.nextOffset, limit: BACKLOG_PAGE_SIZE })
       .then((res) => {
         setState((curr) => {
           if (!curr) return curr;
@@ -330,6 +334,7 @@ function BacklogSection({
             labels: new Map([...curr.labels, ...res.data.labels]),
             total: res.data.backlogTotal,
             hasMore: res.data.hasMore,
+            nextOffset: res.data.nextOffset,
             error: null,
           };
         });

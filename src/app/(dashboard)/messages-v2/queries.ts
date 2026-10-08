@@ -1193,7 +1193,7 @@ export type HoldBuckets = {
   cutover: string;
   newTotal: number;
   backlogTotal: number;
-  /** Property ids of the requested bucket page, of the requested bucket page (New pages newest-first, Backlog oldest-first). */
+  /** Property ids of the requested bucket page (New pages newest-first, Backlog oldest-first). */
   propertyIds: string[];
 };
 
@@ -1304,6 +1304,8 @@ export async function loadBacklogHolds(
   holds: OpenHold<RunWithSteps>[];
   backlogTotal: number;
   hasMore: boolean;
+  /** offset + property ids consumed; the next page starts here even if some ids rendered no card. */
+  nextOffset: number;
   failed: boolean;
 } | null> {
   const buckets = await loadHoldBuckets(supabase, orgId, "backlog", limit, offset);
@@ -1313,6 +1315,7 @@ export async function loadBacklogHolds(
       holds: [],
       backlogTotal: buckets.backlogTotal,
       hasMore: false,
+      nextOffset: offset,
       failed: false,
     };
   }
@@ -1325,6 +1328,7 @@ export async function loadBacklogHolds(
     holds: data.holds,
     backlogTotal: buckets.backlogTotal,
     hasMore: offset + buckets.propertyIds.length < buckets.backlogTotal,
+    nextOffset: offset + buckets.propertyIds.length,
     failed: data.holdsMeta.failed.length > 0,
   };
 }

@@ -3,8 +3,9 @@
 --
 -- messages_v2_settings: one row per org. backlog_before is the fixed cutover:
 -- holds whose effective start is before it are Backlog ("Flagged before
--- Messages v2 went live"); the rest are New. The page seeds the row to now()
--- on first load (insert ... on conflict do nothing), so the cutover never moves.
+-- Messages v2 went live"); the rest are New. The page seeds the row on first
+-- load with only org_id (insert ... on conflict do nothing); the column default
+-- now() stamps the cutover DB-side, so it never moves.
 --
 -- messages_v2_hold_buckets(org, bucket, limit, offset): classifies every open
 -- hold property in one pass and returns exact counts plus one page of ids.
@@ -27,7 +28,7 @@ set local statement_timeout = '60s';
 
 create table if not exists public.messages_v2_settings (
   org_id uuid primary key references public.organizations(id) on delete cascade,
-  backlog_before timestamptz not null,
+  backlog_before timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
 comment on table public.messages_v2_settings is

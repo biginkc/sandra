@@ -460,6 +460,7 @@ describe("HoldsRail New / Backlog split", () => {
     labels: ids.map((id) => [id, { name: `Seller ${id}`, address: null }]),
     backlogTotal: 2504,
     hasMore: false,
+    nextOffset: ids.length,
     ...over,
   });
   const ok = (data: BacklogPage) => ({ ok: true as const, data });
@@ -521,6 +522,21 @@ describe("HoldsRail New / Backlog split", () => {
     await waitFor(() => expect(within(backlog).getAllByTestId("hold-card")).toHaveLength(3));
     expect(load).toHaveBeenLastCalledWith({ offset: 2, limit: 200 });
     expect(within(backlog).queryByRole("button", { name: /Load more/ })).toBeNull();
+  });
+
+  it("Load more pages by property ids (nextOffset), not by how many cards rendered", async () => {
+    // 3 property ids on the first page but only 2 rendered cards (one had no hold row).
+    const load = vi
+      .fn<LoadBacklog>()
+      .mockResolvedValueOnce(ok(page(["o1", "o2"], { hasMore: true, nextOffset: 3 })))
+      .mockResolvedValueOnce(ok(page(["o4"], { hasMore: true, nextOffset: 6 })))
+      .mockResolvedValueOnce(ok(page(["o7"], { hasMore: false, nextOffset: 7 })));
+    rail(load);
+    await userEvent.click(screen.getByRole("button", { name: /Backlog/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Load more/ }));
+    await waitFor(() => expect(load).toHaveBeenLastCalledWith({ offset: 3, limit: 200 }));
+    await userEvent.click(await screen.findByRole("button", { name: /Load more/ }));
+    await waitFor(() => expect(load).toHaveBeenLastCalledWith({ offset: 6, limit: 200 }));
   });
 
   it("collapsing hides the cards again and re-opening does not refetch needlessly beyond the open effect", async () => {

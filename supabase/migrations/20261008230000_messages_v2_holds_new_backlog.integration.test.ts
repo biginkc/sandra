@@ -125,10 +125,20 @@ async function asUser<T>(userId: string, run: () => Promise<T>): Promise<T> {
 }
 
 describe("messages_v2_settings seed", () => {
+  it("an org_id-only insert stamps backlog_before from the column default (DB-side now())", async () => {
+    await db.query(`insert into public.messages_v2_settings (org_id) values ($1)`, [orgId]);
+    const r = await db.query(
+      `select abs(extract(epoch from (now() - backlog_before))) < 5 as fresh from public.messages_v2_settings where org_id = $1`,
+      [orgId],
+    );
+    expect(r.rows[0].fresh).toBe(true);
+    await db.query(`insert into public.messages_v2_settings (org_id) values ($1) on conflict (org_id) do nothing`, [orgId]);
+  });
+
   it("insert ... on conflict do nothing keeps the first cutover", async () => {
     await seed(orgId, CUTOVER);
     await db.query(
-      `insert into public.messages_v2_settings (org_id, backlog_before) values ($1, now()) on conflict (org_id) do nothing`,
+      `insert into public.messages_v2_settings (org_id) values ($1) on conflict (org_id) do nothing`,
       [orgId],
     );
     const r = await db.query(`select backlog_before from public.messages_v2_settings where org_id = $1`, [orgId]);

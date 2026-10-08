@@ -28,6 +28,8 @@ export type BacklogPage = {
   labels: Array<[string, RunLabel]>;
   backlogTotal: number;
   hasMore: boolean;
+  /** Offset to request next: counts property ids consumed, not cards rendered. */
+  nextOffset: number;
 };
 
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */

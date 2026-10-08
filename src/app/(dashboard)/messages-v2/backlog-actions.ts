@@ -69,6 +69,7 @@ export async function loadBacklogHoldsAction(input: {
       labels: [...labels.entries()],
       backlogTotal: page.backlogTotal,
       hasMore: page.hasMore,
+      nextOffset: page.nextOffset,
     },
   };
 }
