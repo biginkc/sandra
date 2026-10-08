@@ -9,7 +9,8 @@ import { rng } from "../stress/trace";
  * deployed runtime is exactly what faces this schema between stage 1 and the queue runtime. The legacy stress suite
  * (which dials through the legacy claim) runs on the PRE-disable schema in its own workflow step.
  */
-const LEGACY_CLAIM = "20261009010000_norma_legacy_claim_disable.sql";
+// Reference chain = main without BOTH cutover schemas (stage 2 is stacked on stage 1).
+const LEGACY_CLAIM = "20261009010000_norma_legacy_claim_disable.sql,20261009010100_norma_call_queue.sql";
 const FN = "public.fn_norma_claim_dispatch(uuid,integer)";
 const FN_META_SQL = `
   select p.prosecdef, p.proisstrict, p.provolatile, p.proretset, p.proconfig, p.proacl::text as acl,
