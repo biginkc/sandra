@@ -3031,6 +3031,70 @@ export type Database = {
           },
         ]
       }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      luna_suggestions: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          applied_outcome: string | null
+          confidence: number
+          created_at: string
+          id: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at: string | null
+          rejected_by: string | null
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence: number
+          created_at?: string
+          id?: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence?: number
+          created_at?: string
+          id?: string
+          inbound_message_id?: string
+          model?: string
+          org_id?: string
+          outcome?: string
+          property_id?: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "luna_suggestions_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "luna_suggestions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lead_events: {
         Row: {
           actor_id: string | null
