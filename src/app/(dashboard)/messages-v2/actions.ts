@@ -3,6 +3,9 @@
 import { revalidatePath } from "next/cache";
 
 import { sendHumanDraft } from "@/lib/ai-responder/dispatch";
+import { resolveApprovedTemplateReply } from "@/lib/ai-responder/template-reply";
+import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
+import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
@@ -18,6 +21,7 @@ import { messagesV2OrgId } from "./access";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
+  confirmDoNotContact,
   dismissHold,
   editAndSendHeldDraft,
   sendHeldDraft,
@@ -57,12 +61,52 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
   if (!orgId) {
     return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
   }
+  const admin = createAdminClient();
   return {
     ok: true,
     data: {
-      admin: createAdminClient(),
+      admin,
       orgId,
       userId,
+      suppressNumber: async ({ propertyId, contactId, phone, inboundMessageId }) => {
+        try {
+          // The existing human suppression path: phone-level suppression,
+          // opt-out consent event, contact flag, contact enrollments ended.
+          await applyPhoneLevelOptOut(admin, {
+            contactId,
+            fromPhone: phone,
+            orgId,
+            source: "human_confirmed_hostile",
+            sourceDetail: { propertyId, reason: "hostile_needs_confirm", confirmedBy: userId },
+            occurredAt: new Date(),
+            providerId: "messages_v2",
+            surface: "dnc",
+            idempotencyKey: `human-hostile:${propertyId}:${contactId}`,
+            leadEvent: { propertyId, actorType: "user", actorId: userId, trigger: "human_confirmed_hostile" },
+          });
+          await pausePropertyEnrollments(admin, {
+            propertyId,
+            reason: "consent_revoked",
+            permanent: true,
+            actor: { actorType: "user", actorId: userId },
+          });
+          return { ok: true, data: null };
+        } catch (e) {
+          reportError(e, { tags: { surface: "messages_v2_confirm_dnc_suppression" }, extra: { propertyId } });
+          return err({ code: "SUPPRESSION_FAILED", message: "Suppression failed" });
+        }
+      },
+      resolveHostileReply: async ({ propertyId, contactId }) => {
+        const resolved = await resolveApprovedTemplateReply(admin, {
+          orgId,
+          propertyId,
+          contactId,
+          outcome: "hostile",
+          outcomeConfidence: null,
+          escalationReason: null,
+        });
+        return resolved.kind === "template" ? resolved.body : null;
+      },
       sendHumanDraft,
       recordLeadEvent,
       resumeRun,
@@ -115,6 +159,14 @@ export async function editAndSendHeldDraftAction(input: { draftId: string; body:
 
 export async function takeOverHoldAction(input: { propertyId: string; seen: HoldSeen }) {
   return run((d) => takeOverHold(d, { propertyId: String(input.propertyId), seen: seenHold(input.seen) }));
+}
+
+/**
+ * "Confirm do-not-contact" on a hostile hold: sends the approved hostile reply
+ * (if any), then runs the human suppression path. Dismiss leaves the number active.
+ */
+export async function confirmDoNotContactAction(input: { propertyId: string; seen: HoldSeen }) {
+  return run((d) => confirmDoNotContact(d, { propertyId: String(input.propertyId), seen: seenHold(input.seen) }));
 }
 
 export async function dismissHoldAction(input: { propertyId: string; reason: string; seen: HoldSeen }) {

@@ -423,6 +423,7 @@ describe("classifyForDispatch", () => {
     );
     expect(result).toEqual({
       kind: "jev_promote_new_lead",
+      askedHowNumberObtained: false,
       classificationRunId: "run-1",
       nativeConfidence: 0.9,
       thresholdAtDecision: 0.9,

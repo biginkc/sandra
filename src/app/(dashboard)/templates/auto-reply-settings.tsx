@@ -91,7 +91,9 @@ export function AutoReplySettingsSection({ settings, templates }: Props) {
                 )}
               </div>
               {autoReplyNote(outcome) && (
-                <p className="text-muted-foreground text-xs">{autoReplyNote(outcome)}</p>
+                <p className="text-muted-foreground text-xs" data-testid={`auto-reply-note-${outcome}`}>
+                  {autoReplyNote(outcome)}
+                </p>
               )}
               {mapping && mapped && mapped.approved_for_auto_send !== true && (
                 <p className="text-xs text-amber-700 dark:text-amber-300" role="status">

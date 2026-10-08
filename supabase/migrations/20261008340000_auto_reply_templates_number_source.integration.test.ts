@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * number_source mapping key (20261008290000). Local-only; each test runs in a
+ * number_source mapping key (20261008340000). Local-only; each test runs in a
  * transaction that is rolled back. Requires a DB with the chain through
  * 20261008144200 applied; the Phase 4 migration (20261008240000) and this one
  * are re-applied here so the rollback can be exercised too.
@@ -19,8 +19,8 @@ const url = requireLoopbackPostgresUrl(
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
 const read = (rel: string) => strip(readFileSync(path.join(__dirname, rel), "utf8"));
 const PHASE4 = read("20261008240000_auto_reply_templates.sql");
-const MIGRATION = read("20261008290000_auto_reply_templates_number_source.sql");
-const ROLLBACK = read("../rollbacks/20261008290000_auto_reply_templates_number_source.sql");
+const MIGRATION = read("20261008340000_auto_reply_templates_number_source.sql");
+const ROLLBACK = read("../rollbacks/20261008340000_auto_reply_templates_number_source.sql");
 
 const db = new Client({ connectionString: url });
 let orgId: string;

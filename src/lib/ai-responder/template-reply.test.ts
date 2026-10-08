@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ThresholdMap } from "@/lib/sms-classification/thresholds";
 
+import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
 import {
   hasSendableNumberSourceTemplate,
   isTemplateSendable,
@@ -40,6 +41,7 @@ const cand = (over: Partial<TemplateCandidate> = {}): TemplateCandidate => ({
 const ON: ThresholdMap = {
   nurture: { minConfidence: 0.95, version: 2, automationEnabled: true },
   not_interested: { minConfidence: 0.9, version: 1, automationEnabled: true },
+  wrong_number: { minConfidence: 0.9, version: 1, automationEnabled: true },
   new_lead: { minConfidence: 0.9, version: 1, automationEnabled: true },
 };
 
@@ -248,7 +250,7 @@ describe("resolveApprovedTemplateReply", () => {
 
   it("outcomes that must never be answered automatically fall through before any lookup", async () => {
     const { client, from } = fakeSupabase({ data: [row()], error: null });
-    for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear", "bad_number"] as const) {
+    for (const outcome of ["new_lead", "opted_out", "dnc", "unclear", "bad_number"] as const) {
       expect(await resolveApprovedTemplateReply(client, { ...base, outcome })).toEqual({
         kind: "none",
         reason: "outcome_not_templatable",
@@ -323,13 +325,26 @@ describe("resolveApprovedTemplateReply", () => {
           thresholds: { ...ON, nurture: { minConfidence: 0.95, version: 2, automationEnabled: false } },
         }),
       ).toEqual({ kind: "none", reason: "automation_disabled" });
-      for (const outcome of ["opted_out", "dnc", "wrong_number", "new_lead", "unclear", "bad_number"] as const) {
+      for (const outcome of ["opted_out", "dnc", "wrong_number", "hostile", "new_lead", "unclear", "bad_number"] as const) {
         expect(await resolveApprovedTemplateReply(client, { ...args, outcome })).toEqual({
           kind: "none",
           reason: "outcome_not_templatable",
         });
       }
       expect(from).not.toHaveBeenCalled();
+    });
+
+    it("a blank property_address never renders: render_failed, nothing is sent", async () => {
+      const text = "Fair question. Your number came up tied to {{property_address}} in public records.";
+      loadTemplateVars.mockResolvedValue({ first_name: "Dana", my_first_name: "Mel", property_address: "  " });
+      const { client } = fakeSupabase({
+        data: [row({ sms_templates: approved({ content: text, approved_content: text }) })],
+        error: null,
+      });
+      expect(await resolveApprovedTemplateReply(client, { ...base, mappingKey: "number_source" })).toEqual({
+        kind: "none",
+        reason: "render_failed",
+      });
     });
 
     it("an unapproved or edited number_source template is inert", async () => {
@@ -371,5 +386,104 @@ describe("hasSendableNumberSourceTemplate", () => {
 
   it("fails closed on a lookup error", async () => {
     expect(await hasSendableNumberSourceTemplate(fakeSupabase({ data: null, error: { message: "boom" } }).client, "org1")).toBe(false);
+  });
+});
+
+describe("wrong_number and hostile mapping keys", () => {
+  const base = {
+    orgId: "org1",
+    propertyId: "p1",
+    contactId: "c1",
+    outcomeConfidence: 0.97,
+    escalationReason: "not_applicable" as const,
+    thresholds: ON,
+  };
+  const approvedRow = (text: string) => ({
+    id: "m1",
+    template_id: "t1",
+    reply_intent: null,
+    priority: 100,
+    sms_templates: approved({ content: text, approved_content: text }),
+  });
+
+  it("wrong_number is mappable and keeps every Jev gate (follow-up answer, switch, cutoff)", async () => {
+    const { client, calls } = fakeSupabase({ data: [approvedRow(APPROVED_REPLY_TEXTS.wrong_number)], error: null });
+    expect(await resolveApprovedTemplateReply(client, { ...base, outcome: "wrong_number" })).toMatchObject({
+      kind: "template",
+      outcome: "wrong_number",
+      body: APPROVED_REPLY_TEXTS.wrong_number,
+    });
+    expect(calls).toContainEqual(["outcome", "wrong_number"]);
+    expect(
+      await resolveApprovedTemplateReply(client, { ...base, outcome: "wrong_number", escalationReason: "third_party" }),
+    ).toEqual({ kind: "none", reason: "human_follow_up" });
+    expect(
+      await resolveApprovedTemplateReply(client, { ...base, outcome: "wrong_number", outcomeConfidence: 0.5 }),
+    ).toEqual({ kind: "none", reason: "below_threshold" });
+    expect(
+      await resolveApprovedTemplateReply(client, {
+        ...base,
+        outcome: "wrong_number",
+        thresholds: { ...ON, wrong_number: { minConfidence: 0.9, version: 1, automationEnabled: false } },
+      }),
+    ).toEqual({ kind: "none", reason: "automation_disabled" });
+  });
+
+  it("hostile is keyed on 'hostile', needs no Jev confidence, follow-up answer or label switch", async () => {
+    const { client, calls } = fakeSupabase({ data: [approvedRow(APPROVED_REPLY_TEXTS.hostile)], error: null });
+    const out = await resolveApprovedTemplateReply(client, {
+      ...base,
+      outcome: "hostile",
+      outcomeConfidence: null,
+      escalationReason: null,
+      thresholds: {},
+    });
+    expect(out).toEqual({
+      kind: "template",
+      templateId: "t1",
+      mappingId: "m1",
+      body: APPROVED_REPLY_TEXTS.hostile,
+      outcome: "hostile",
+      key: "hostile",
+    });
+    expect(calls).toContainEqual(["outcome", "hostile"]);
+    expect(calls).toContainEqual(["active", true]);
+  });
+
+  it("hostile still needs an approved, unchanged, mapped template", async () => {
+    const unapproved = { ...approvedRow(APPROVED_REPLY_TEXTS.hostile), sms_templates: approved({ content: APPROVED_REPLY_TEXTS.hostile, approved_content: null, approved_for_auto_send: false }) };
+    const { client } = fakeSupabase({ data: [unapproved], error: null });
+    expect(
+      await resolveApprovedTemplateReply(client, { ...base, outcome: "hostile", outcomeConfidence: null, escalationReason: null }),
+    ).toEqual({ kind: "none", reason: "template_unavailable" });
+    const none = fakeSupabase({ data: [], error: null });
+    expect(
+      await resolveApprovedTemplateReply(none.client, { ...base, outcome: "hostile", outcomeConfidence: null, escalationReason: null }),
+    ).toEqual({ kind: "none", reason: "no_mapping" });
+  });
+
+  it("new_lead, opted_out and dnc are still never answered", async () => {
+    const { client, from } = fakeSupabase({ data: [], error: null });
+    for (const outcome of ["new_lead", "opted_out", "dnc", "unclear"] as const) {
+      expect(await resolveApprovedTemplateReply(client, { ...base, outcome })).toEqual({
+        kind: "none",
+        reason: "outcome_not_templatable",
+      });
+    }
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("every approved text renders to itself byte for byte (no variables, no mangling)", async () => {
+    for (const [key, text] of Object.entries(APPROVED_REPLY_TEXTS)) {
+      const { client } = fakeSupabase({ data: [approvedRow(text)], error: null });
+      const outcome = key as "nurture" | "not_interested" | "wrong_number" | "hostile";
+      const out = await resolveApprovedTemplateReply(client, {
+        ...base,
+        outcome,
+        outcomeConfidence: outcome === "hostile" ? null : 0.99,
+        escalationReason: outcome === "hostile" ? null : "not_applicable",
+      });
+      expect(out).toMatchObject({ kind: "template", body: text });
+    }
   });
 });

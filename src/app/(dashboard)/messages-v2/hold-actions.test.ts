@@ -4,6 +4,7 @@ import { sendReservationTuning } from "@/lib/ai-responder/dispatch";
 
 import {
   assignHold,
+  confirmDoNotContact,
   dismissHold,
   editAndSendHeldDraft,
   SEND_LEASE_SECONDS,
@@ -87,7 +88,7 @@ function baseReply(over: Partial<Record<string, Reply>> = {}) {
       if (calls.some((c) => c.method === "update")) return { data: [{ id: "prop-1" }] };
       return { data: { id: "prop-1", org_id: "org-1" } };
     }
-    if (table === "pipeline_runs") return { data: { id: "run-1" } };
+    if (table === "pipeline_runs") return { data: { id: "run-1", inbound_message_id: "msg-1" } };
     if (table === "rpc:fn_reserve_ai_send") return { data: true };
     if (table === "rpc:fn_release_ai_send") return { data: true };
     if (table === "rpc:fn_resolve_hold") {
@@ -119,6 +120,8 @@ function deps(over: Partial<HoldActionDeps> = {}, reply = baseReply()) {
     resumeRun: vi.fn().mockResolvedValue({ runId: "run-1", orgId: "org-1", seq: 3 }),
     recordStep: vi.fn().mockResolvedValue(undefined),
     updateLeadAssignee: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    suppressNumber: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    resolveHostileReply: vi.fn().mockResolvedValue(null),
     reportError: vi.fn(),
     ...over,
   };
@@ -499,5 +502,171 @@ describe("review round 1: Dismiss / Take over from a stale view", () => {
     expect(vi.mocked(changed.d.recordLeadEvent).mock.calls.map((c) => c[0].eventType)).toEqual(
       expect.arrayContaining(["ai_escalation_cleared", "ai_responder_toggled"]),
     );
+  });
+});
+
+describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
+  const HOSTILE_SEEN = { through: null as string | null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-07T11:59:00+00:00" };
+  const HOSTILE_ROW = {
+    needs_human_attention: true,
+    last_ai_escalation_reason: "hostile_needs_confirm",
+    last_ai_escalation_at: "2026-10-07T11:59:00+00:00",
+  };
+  function hostileReply(propertyRow: Record<string, unknown> = HOSTILE_ROW) {
+    const base = baseReply();
+    return (table: string, calls: Call[]): Reply | undefined => {
+      if (table === "properties" && !calls.some((c) => c.method === "update")) {
+        return { data: { id: "prop-1", org_id: "org-1", ...propertyRow } };
+      }
+      return base(table, calls);
+    };
+  }
+
+  it("sends the approved hostile reply (all send gates), then suppresses the number, clears the hold and audits it", async () => {
+    const order: string[] = [];
+    const { d, log } = deps(
+      {
+        resolveHostileReply: vi.fn().mockResolvedValue("APPROVED HOSTILE TEXT"),
+        sendHumanDraft: vi.fn().mockImplementation(async () => {
+          order.push("send");
+          return { status: "sent", messageId: "out-9" };
+        }),
+        suppressNumber: vi.fn().mockImplementation(async () => {
+          order.push("suppress");
+          return { ok: true, data: null };
+        }),
+      },
+      hostileReply(),
+    );
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toEqual({ ok: true, data: { replySent: true, replyNote: null } });
+    expect(order).toEqual(["send", "suppress"]);
+    expect(d.sendHumanDraft).toHaveBeenCalledWith(
+      d.admin,
+      expect.objectContaining({ body: "APPROVED HOSTILE TEXT", userId: "user-1", edited: false, inboundMessageId: "msg-1" }),
+    );
+    expect(d.suppressNumber).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      contactId: "contact-1",
+      phone: "+18165550001",
+      inboundMessageId: "msg-1",
+    });
+    const clear = logFor(log, "properties", "update").at(-1)!;
+    expect(clear.calls.find((c) => c.method === "update")!.args[0]).toMatchObject({ needs_human_attention: false });
+    expect(d.recordStep).toHaveBeenCalledWith(
+      d.admin,
+      expect.anything(),
+      expect.objectContaining({ kind: "hold", name: "confirm_dnc", result: "applied" }),
+    );
+    // Neither the reply text nor the phone is ever written to the audit trail.
+    const audited = JSON.stringify([
+      vi.mocked(d.recordLeadEvent).mock.calls,
+      vi.mocked(d.recordStep).mock.calls.map((c) => c[2]),
+    ]);
+    expect(audited).not.toContain("APPROVED HOSTILE TEXT");
+    expect(audited).not.toContain("+1816");
+  });
+
+  it("uses the held conversation's own inbound (its contact and number), not the property's latest inbound from anyone", async () => {
+    // Contact B texted most recently on the property, but the hold was raised by contact A's message msg-A.
+    const A = { id: "msg-A", contact_id: "contact-A", conversation_id: "conv-A", from_address: "+18165550001" };
+    const base = hostileReply();
+    const seenQueries: Array<{ table: string; calls: Call[] }> = [];
+    const { d } = deps({ resolveHostileReply: vi.fn().mockResolvedValue("TEXT") }, (table, calls) => {
+      seenQueries.push({ table, calls });
+      if (table === "pipeline_runs") return { data: { id: "run-A", inbound_message_id: "msg-A" } };
+      if (table === "messages") {
+        // Only a lookup pinned to the held message may return A; anything else would be B.
+        return has(calls, "eq", "id", "msg-A")
+          ? { data: A }
+          : { data: { id: "msg-B", contact_id: "contact-B", conversation_id: "conv-B", from_address: "+18165559999" } };
+      }
+      return base(table, calls);
+    });
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toMatchObject({ ok: true });
+    expect(d.suppressNumber).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      contactId: "contact-A",
+      phone: "+18165550001",
+      inboundMessageId: "msg-A",
+    });
+    expect(d.sendHumanDraft).toHaveBeenCalledWith(
+      d.admin,
+      expect.objectContaining({ contactId: "contact-A", inboundFromPhone: "+18165550001", inboundMessageId: "msg-A" }),
+    );
+    const run = seenQueries.find((q) => q.table === "pipeline_runs")!;
+    expect(has(run.calls, "lte", "started_at", HOSTILE_ROW.last_ai_escalation_at)).toBe(true);
+  });
+
+  it("refuses when the held message cannot be found", async () => {
+    const base = hostileReply();
+    const { d } = deps({}, (t, c) => (t === "pipeline_runs" ? { data: null } : base(t, c)));
+    expect(await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+      ok: false,
+      error: { code: "INBOUND_NOT_FOUND" },
+    });
+    expect(d.suppressNumber).not.toHaveBeenCalled();
+  });
+
+  it("no approved/mapped hostile template: nothing is sent, the number is still suppressed", async () => {
+    const { d } = deps({}, hostileReply());
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toMatchObject({ ok: true, data: { replySent: false } });
+    expect(d.sendHumanDraft).not.toHaveBeenCalled();
+    expect(d.suppressNumber).toHaveBeenCalledTimes(1);
+  });
+
+  it("the reply is refused by a send gate: the number is still suppressed", async () => {
+    const { d } = deps(
+      {
+        resolveHostileReply: vi.fn().mockResolvedValue("TEXT"),
+        sendHumanDraft: vi.fn().mockResolvedValue({ status: "refused", reason: "quiet_hours", retryable: false, flagged: false }),
+      },
+      hostileReply(),
+    );
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toMatchObject({ ok: true, data: { replySent: false, replyNote: expect.stringContaining("quiet hours") } });
+    expect(d.suppressNumber).toHaveBeenCalledTimes(1);
+  });
+
+  it("a suppression failure keeps the hold open and says the number may still be texted", async () => {
+    const { d, log } = deps(
+      { suppressNumber: vi.fn().mockResolvedValue({ ok: false, error: { code: "X", message: "x" } }) },
+      hostileReply(),
+    );
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    expect(result).toMatchObject({ ok: false, error: { code: "SUPPRESSION_FAILED" } });
+    expect(logFor(log, "properties", "update")).toHaveLength(0);
+  });
+
+  it("refuses a hold that is not a hostile hold, or that changed since the card loaded, without sending or suppressing", async () => {
+    for (const row of [
+      { ...HOSTILE_ROW, last_ai_escalation_reason: "draft_held" },
+      { ...HOSTILE_ROW, needs_human_attention: false },
+      { ...HOSTILE_ROW, last_ai_escalation_at: "2026-10-07T12:30:00+00:00" },
+    ]) {
+      const { d } = deps({ resolveHostileReply: vi.fn().mockResolvedValue("TEXT") }, hostileReply(row));
+      expect(await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+        ok: false,
+        error: { code: "HOLD_STALE" },
+      });
+      expect(d.sendHumanDraft).not.toHaveBeenCalled();
+      expect(d.suppressNumber).not.toHaveBeenCalled();
+    }
+  });
+
+  it("will not act on a property outside the caller's org, and takes the property lease", async () => {
+    const other = deps({}, (t, c) => (t === "properties" ? { data: { id: "prop-1", org_id: "org-2" } } : baseReply()(t, c)));
+    expect(await confirmDoNotContact(other.d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+      ok: false,
+      error: { code: "PROPERTY_NOT_FOUND" },
+    });
+    const busy = deps({}, (t, c) => (t === "rpc:fn_reserve_ai_send" ? { data: false } : hostileReply()(t, c)));
+    expect(await confirmDoNotContact(busy.d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+      ok: false,
+      error: { code: "SEND_BUSY" },
+    });
+    expect(busy.d.suppressNumber).not.toHaveBeenCalled();
   });
 });

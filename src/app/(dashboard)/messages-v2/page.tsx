@@ -12,6 +12,7 @@ import {
   listHoldAssigneesAction,
   sendHeldDraftAction,
   takeOverHoldAction,
+  confirmDoNotContactAction,
   retrySuppressionHoldAction,
 } from "./actions";
 import { withFreshSeen } from "./hold-seen";
@@ -136,6 +137,7 @@ export default async function MessagesV2Page() {
           assign: assignHoldAction,
           dismiss: dismissHoldAction,
           retrySuppression: retrySuppressionHoldAction,
+          confirmDoNotContact: confirmDoNotContactAction,
           listAssignees: listHoldAssigneesAction,
         }}
       />
