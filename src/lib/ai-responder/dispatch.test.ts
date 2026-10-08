@@ -1488,6 +1488,9 @@ function installSendMock(state: MockState) {
       sent_at: timestamp,
       status: "sent",
     });
+    // The real send fires this right after provider acceptance.
+    await (input as { onProviderAccepted?: (c: { messageId: string; externalId: string }) => Promise<void> })
+      .onProviderAccepted?.({ messageId, externalId: `ext-${messageId}` });
     return {
       externalId: `ext-${messageId}`,
       messageId,
@@ -7302,6 +7305,19 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(state.property.outreach_dispo).toBe("nurture");
     expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+  });
+
+  it("replyDelayBypassed with reason delay_not_configured (org has no reply delay): template dropped, nurture applies", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    const result = await runNurture(state, "inbound-tpl-no-delay", 0.97, "not_applicable", {
+      replyDelayBypassed: true,
+      replyDelayBypassReason: "delay_not_configured",
+    });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBe("nurture");
   });
 
   it("approval revoked while the send waited: nothing is sent and nurture still applies", async () => {

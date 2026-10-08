@@ -269,8 +269,8 @@ export type AiDispatchInput = {
    * an approved-template reply is dropped (the outcome still applies).
    */
   replyDelayBypassed?: boolean;
-  /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; default `delay_unavailable`. */
-  replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied";
+  /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
+  replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
 };
 
 export type AiDispatchOptions = {
@@ -4976,6 +4976,7 @@ async function deliverResponderMessage(
     }
     assertLive(attempt);
   }
+  let hookFired = false;
   // The provider boundary is fenced inside sendSmsToContact: after every one
   // of ITS preflight awaits, `beforeProviderSubmit` re-validates the lease (and
   // the attempt deadline) and refuses the submission if either is gone.
@@ -4988,6 +4989,16 @@ async function deliverResponderMessage(
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
+    // Fired inside the send, right after the provider accepts and before its
+    // receipt persistence / reconciliation.
+    ...(args.onProviderAccepted
+      ? {
+          onProviderAccepted: async ({ messageId }: { messageId: string }) => {
+            hookFired = true;
+            await args.onProviderAccepted!(messageId);
+          },
+        }
+      : {}),
     metadata: args.input.inboundMessageId
       ? ({
           generated_by: "ai_responder_v1",
@@ -5145,7 +5156,7 @@ async function deliverResponderMessage(
   // never get here, and the assertion keeps it so.
   if (!attempt.providerStarted) guard();
   const messageId = sendResult.messageId;
-  if (args.onProviderAccepted) await args.onProviderAccepted(messageId);
+  if (args.onProviderAccepted && !hookFired) await args.onProviderAccepted(messageId);
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
     ...(args.input.inboundMessageId

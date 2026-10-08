@@ -1224,12 +1224,17 @@ export async function handleInboundWebhook(
           // template replies are never sent from the webhook request itself.
           const replyDelayConfigured = (delayConfig?.delayMaxSeconds ?? 0) > 0;
           if (delaySeconds === 0 && !replyDelayConfigured) {
-            // A null config is "no delay configured" only when the lookup
-            // really found none; a failed lookup also returns null, so never
-            // let a template go out instantly on that path.
+            // Jarrad: replies must use the random delay. An inline dispatch has
+            // none (org max = 0, or the lookup failed and returned null), so
+            // approved-template replies are dropped here; the outcome still
+            // applies and LLM / identity replies are unchanged.
             await dispatchAndStampAiResponder(
               supabase,
-              delayConfig ? dispatchInput : { ...dispatchInput, replyDelayBypassed: true },
+              {
+                ...dispatchInput,
+                replyDelayBypassed: true,
+                replyDelayBypassReason: delayConfig ? "delay_not_configured" : "delay_unavailable",
+              },
               runCtx,
             );
           } else {

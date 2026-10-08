@@ -510,6 +510,13 @@ export type SendSmsInput = {
    */
   beforeProviderSubmit?: (ctx?: { messageId: string }) => Promise<boolean>;
   /**
+   * Called once, immediately after the provider accepted the send and BEFORE
+   * receipt persistence, the status update and event reconciliation, so a
+   * caller can make "this message went out" durable ahead of any other
+   * post-send write. Errors are caught and reported; they never fail the send.
+   */
+  onProviderAccepted?: (ctx: { messageId: string; externalId: string }) => Promise<void>;
+  /**
    * Sequence first-touches can have no prior inbound and no campaign snapshot.
    * When true, the provider default may be used, but inventory-aware providers
    * still validate it against the approved sender catalog before any send.
@@ -1047,6 +1054,16 @@ export async function sendSmsToContact(
     });
     providerAccepted = true;
     acceptedExternalId = result.externalId;
+    if (input.onProviderAccepted) {
+      try {
+        await input.onProviderAccepted({ messageId: pending.id, externalId: result.externalId });
+      } catch (hookError) {
+        reportError(hookError, {
+          tags: { surface: "send_on_provider_accepted" },
+          extra: { messageId: pending.id },
+        });
+      }
+    }
     // Bind the provider receipt before updating the user-visible history row.
     // If that row update loses a race, the service ledger still records that
     // the provider accepted the request and a retry cannot issue a duplicate.
