@@ -1,12 +1,13 @@
 -- 20261008270000_auto_reply_templates_wrong_number_hostile.sql
 -- Messages v2: approved hostile and wrong-number replies (stacked on Phase 4,
 -- 20261008240000). Widens the outcome -> template mapping key:
---   * wrong_number: no longer an "unmappable" outcome. The responder only sends
---     the approved wrong-number text together with suppressing the number
---     (the text promises "I'll take this number off our list").
+--   * wrong_number: no longer an "unmappable" outcome. The approved
+--     wrong-number text is sent for a clear wrong number and the wrong_number
+--     disposition closes that property (no phone-wide suppression).
 --   * hostile: a mapping key that is NOT a Jev outcome. Hostile wording is
---     detected in code (src/lib/ai-responder/hostile.ts), so the mapping gets
---     its own key instead of abusing an outcome label.
+--     detected in code (src/lib/ai-responder/hostile.ts) and held for a
+--     person; the reply is sent only by the "Confirm do-not-contact" hold
+--     action. The mapping gets its own key instead of abusing an outcome label.
 -- new_lead, opted_out and dnc stay unmappable. No template text, mapping or
 -- approval is created here (texts are seeded UNAPPROVED by
 -- scripts/messages-v2/seed-reply-templates.ts; an owner approves and maps them

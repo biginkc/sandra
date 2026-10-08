@@ -33,9 +33,8 @@ import type {
  * Jev outcomes an owner may map to a template (mirrors the
  * `auto_reply_templates_outcome_check` constraint). new_lead (PLAN D5: a new
  * lead never auto-replies), opted_out and dnc are never answered
- * automatically. wrong_number is mappable because the send path suppresses
- * the phone whenever the approved text goes out (it promises "I'll take this
- * number off our list").
+ * automatically. wrong_number is mappable: the approved text goes out and the
+ * wrong_number disposition closes that property (no phone-wide suppression).
  */
 export const TEMPLATE_REPLY_OUTCOMES: ReadonlySet<JevOutcome> = new Set([
   "nurture",
@@ -46,7 +45,9 @@ export const TEMPLATE_REPLY_OUTCOMES: ReadonlySet<JevOutcome> = new Set([
 /**
  * Mapping key for the hostile reply. Not a Jev outcome: hostile wording is
  * detected in code (`hostile.ts`), so it has no confidence, no escalation
- * answer and no per-label automation switch.
+ * answer and no per-label automation switch. The responder NEVER sends it
+ * automatically: only the "Confirm do-not-contact" hold action does, after a
+ * person decides.
  */
 export const HOSTILE_REPLY_KEY = "hostile" as const;
 

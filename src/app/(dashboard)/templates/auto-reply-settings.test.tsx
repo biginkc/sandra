@@ -38,10 +38,10 @@ describe("<AutoReplySettingsSection />", () => {
     }
   });
 
-  it("tells the owner that wrong-number and hostile replies stop all texts to the number", () => {
+  it("explains that wrong number closes one property and hostile is only sent on a person's confirm", () => {
     render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
-    expect(screen.getByTestId("auto-reply-note-wrong_number")).toHaveTextContent("all future texts to the number stop");
-    expect(screen.getByTestId("auto-reply-note-hostile")).toHaveTextContent("always stops all future texts");
+    expect(screen.getByTestId("auto-reply-note-wrong_number")).toHaveTextContent("Closes this property only");
+    expect(screen.getByTestId("auto-reply-note-hostile")).toHaveTextContent("Never sent automatically");
     expect(screen.queryByTestId("auto-reply-note-nurture")).not.toBeInTheDocument();
   });
 

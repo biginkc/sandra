@@ -285,3 +285,54 @@ describe("suppression incomplete hold", () => {
     expect(screen.queryByTestId("suppression-incomplete-warning")).toBeNull();
   });
 });
+
+describe("hostile hold: Confirm do-not-contact", () => {
+  const hostileHold = () =>
+    hold({
+      draft: undefined,
+      draft_held: false,
+      sources: ["needs_attention"],
+      flag_reason: "hostile_needs_confirm",
+      seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-08T11:55:00+00:00" },
+    });
+
+  it("is offered only on a hostile hold, and needs a second click to confirm", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn().mockResolvedValue(ok({ replySent: true, replyNote: null }));
+    renderRail(hostileHold(), api({ confirmDoNotContact: confirm }));
+    expect(screen.getByTestId("hostile-confirm")).toHaveTextContent("number is still active");
+    await user.click(button("Confirm do-not-contact"));
+    expect(confirm).not.toHaveBeenCalled();
+    await user.click(button(/^Yes, stop all texts/));
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith({
+        propertyId: "p1",
+        seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-08T11:55:00+00:00" },
+      }),
+    );
+    expect(await screen.findByTestId("hold-status")).toHaveTextContent("reply sent, number suppressed");
+  });
+
+  it("says plainly when no reply went out but the number is suppressed", async () => {
+    const user = userEvent.setup();
+    renderRail(hostileHold(), api({ confirmDoNotContact: vi.fn().mockResolvedValue(ok({ replySent: false, replyNote: "no approved hostile reply is mapped" })) }));
+    await user.click(button("Confirm do-not-contact"));
+    await user.click(button(/^Yes, stop all texts/));
+    expect(await screen.findByTestId("hold-status")).toHaveTextContent("number suppressed (no approved hostile reply is mapped)");
+  });
+
+  it("Dismiss is still there and never calls the confirm action", async () => {
+    const user = userEvent.setup();
+    const actions = api({ confirmDoNotContact: vi.fn() });
+    renderRail(hostileHold(), actions);
+    expect(button(/^Dismiss/)).toBeEnabled();
+    expect(actions.confirmDoNotContact).not.toHaveBeenCalled();
+    void user;
+  });
+
+  it("is not shown for any other hold", () => {
+    renderRail(hold(), api({ confirmDoNotContact: vi.fn() }));
+    expect(screen.queryByTestId("hostile-confirm")).not.toBeInTheDocument();
+  });
+});
+

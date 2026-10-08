@@ -2,9 +2,10 @@
  * Keys an owner may map to an approved template for automatic replies.
  * Mirrors the `auto_reply_templates_outcome_check` constraint: new_lead (PLAN
  * D5), opted_out and dnc are never answered automatically. `wrong_number` is
- * mappable because the responder suppresses the number whenever that text goes
- * out. `hostile` is not a Jev label: it is detected from the seller's wording
- * (see `src/lib/ai-responder/hostile.ts`). Labels are UI captions only; no
+ * mappable: its reply applies the wrong_number disposition for that property
+ * only (no phone-wide suppression). `hostile` is not a Jev label: it is detected from the seller's wording
+ * (see `src/lib/ai-responder/hostile.ts`) and its reply is only ever sent by a
+ * person confirming do-not-contact. Labels are UI captions only; no
  * reply text lives here.
  */
 export const AUTO_REPLY_OUTCOMES = [
@@ -13,12 +14,12 @@ export const AUTO_REPLY_OUTCOMES = [
   {
     outcome: "wrong_number",
     label: "Wrong number",
-    note: "When this reply is sent, all future texts to the number stop.",
+    note: "Sent automatically for a clear wrong number. Closes this property only; the phone number itself is not blocked.",
   },
   {
     outcome: "hostile",
     label: "Hostile",
-    note: "Hostile wording always stops all future texts to the number, with or without a reply.",
+    note: "Never sent automatically. Sent only when a person clicks Confirm do-not-contact on a hostile hold, right before the number is blocked.",
   },
 ] as const;
 

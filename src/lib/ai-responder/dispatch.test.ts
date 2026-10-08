@@ -1895,7 +1895,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "please send no more messages",
+        inboundBody: "stop texting me",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-persistent-opt-out",
         propertyId: PROPERTY_ID,
@@ -1928,7 +1928,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "please send no more messages",
+        inboundBody: "do not contact me",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-persistent-dnc",
         propertyId: PROPERTY_ID,
@@ -2368,7 +2368,7 @@ describe("dispatchAiResponse debounce", () => {
       try {
         const result = await dispatchAiResponse(supabase as never, {
           contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
-          inboundBody: "Please send no more messages",
+          inboundBody: "STOP texting me",
           inboundMessageId: "inbound-above-threshold-opted-out", propertyId: PROPERTY_ID,
         }, { anthropic: {} as never });
         expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
@@ -2572,7 +2572,7 @@ describe("dispatchAiResponse debounce", () => {
         {
           contactId: CONTACT_ID,
           conversationId: CONVERSATION_ID,
-          inboundBody: "I will sue you, no more messages",
+          inboundBody: "I will sue you, stop contacting me",
           inboundFromPhone: "+18165550001",
           inboundMessageId: "inbound-jev-dnc",
           propertyId: PROPERTY_ID,
@@ -2678,7 +2678,7 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
-  it("deescalate_close sends the fixed named template without humanizer", async () => {
+  it("hostile wording ('is this a scam') is held for a person: not de-escalation-closed, not suppressed, nothing sent", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -2694,34 +2694,20 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "ugh this is so annoying",
+        inboundBody: "ugh is this a scam",
         inboundMessageId: "inbound-deescalate",
         propertyId: PROPERTY_ID,
       },
       { anthropic: {} as never },
     );
 
-    expect(outcome).toEqual({
-      outcome: "auto_closed",
-      reason: "model:deescalate_close",
-    });
-    expect(vi.mocked(humanizeReply)).not.toHaveBeenCalled();
-    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledWith(
-      supabase,
-      expect.objectContaining({
-        body: "So sorry to bug you. Sounds like you get a lot of these. Are you Sam? Just want to make sure we don't bother you again.",
-      }),
-    );
-    expect(state.property.outreach_dispo).toBe("not_interested");
-    expect(state.aiDispoReviews).toEqual([
-      {
-        conversationId: CONVERSATION_ID,
-        disposition: "not_interested",
-        inboundMessageId: "inbound-deescalate",
-        reason: "model:deescalate_close",
-      },
-    ]);
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.property.outreach_dispo).toBeNull(); // not closed as not_interested
+    expect(state.aiDispoReviews).toEqual([]);
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toContain("hostile_needs_confirm");
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled(); // number stays active
   });
 
   it("does not clobber a human-only disposition during the final write", async () => {
@@ -7059,11 +7045,10 @@ describe("sendHumanDraft (Messages v2 Phase 1 hold Send)", () => {
 });
 
 
-describe("approved hostile and wrong-number replies (Messages v2)", () => {
-  const HOSTILE_BODY = "Terribly sorry for the inconvenience. We've updated our records.";
+describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", () => {
   const WRONG_NUMBER_BODY =
     "Sorry about that, my mistake. I'll take this number off our list. Any chance you know who owns the place?";
-  const tpl = (outcome: "hostile" | "wrong_number" | "not_interested" | "nurture", body: string) => ({
+  const tpl = (outcome: "wrong_number" | "not_interested" | "nurture", body: string) => ({
     kind: "template" as const,
     templateId: `tpl-${outcome}`,
     mappingId: `map-${outcome}`,
@@ -7090,13 +7075,14 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
   });
 
   type Answers = { outcome: string; confidence?: number; reason?: string; scope?: string };
-  async function run(state: MockState, id: string, body: string, a: Answers, extra: Record<string, unknown> = {}) {
+  async function run(state: MockState, id: string, body: string, a: Answers) {
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
     state.jevOutcomeThresholds ??= [
       { outcome: "not_interested", min_confidence: 0.9 },
       { outcome: "wrong_number", min_confidence: 0.9 },
       { outcome: "nurture", min_confidence: 0.95 },
+      { outcome: "opted_out", min_confidence: 0.9 },
     ];
     const supabase = createMockSupabase(state);
     seedInboundMessage(state, { id, body });
@@ -7114,7 +7100,7 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
     try {
       return await dispatchAiResponse(supabase as never, {
         contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundFromPhone: "+18165550001",
-        inboundBody: body, inboundMessageId: id, propertyId: PROPERTY_ID, ...extra,
+        inboundBody: body, inboundMessageId: id, propertyId: PROPERTY_ID,
       }, { anthropic: {} as never });
     } finally { vi.stubGlobal("fetch", originalFetch); }
   }
@@ -7122,168 +7108,73 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
     vi.mocked(resolveApprovedTemplateReply).mock.calls.map(([, args]) => (args as { outcome: string }).outcome);
   const suppressionCalls = () => vi.mocked(applyPhoneLevelOptOut).mock.calls.map(([, input]) => input);
 
-  describe("hostile", () => {
-    it("approved + mapped hostile template: the reply goes out FIRST, then the number is suppressed, drips ended, lead event recorded; no NI template", async () => {
+  describe("hostile wording is held for a person, never auto-suppressed, never auto-replied", () => {
+    it.each([
+      ["not_interested", { outcome: "not_interested" }],
+      ["nurture", { outcome: "nurture", confidence: 0.99 }],
+      ["wrong_number", { outcome: "wrong_number", scope: "this_property" }],
+      ["unclear", { outcome: "unclear", confidence: 0.99 }],
+    ] as const)("Jev %s on a hostile inbound: hold hostile_needs_confirm, nothing sent, number NOT suppressed, no template asked", async (_name, answers) => {
       const state = createMockState();
       installSendMock(state);
-      vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
-        (args as { outcome: string }).outcome === "hostile" ? tpl("hostile", HOSTILE_BODY) : tpl("not_interested", "NI TEXT MUST NOT SEND"),
-      );
-      const order: string[] = [];
-      const send = vi.mocked(sendSmsToContact).getMockImplementation()!;
-      vi.mocked(sendSmsToContact).mockImplementation(async (...args) => { order.push("send"); return send(...args); });
-      vi.mocked(applyPhoneLevelOptOut).mockImplementation(async () => { order.push("suppress"); });
-
-      const result = await run(state, "in-h1", "this is a scam, you idiot", { outcome: "not_interested" });
-
-      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
-      expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: HOSTILE_BODY, origin: "automated" }));
-      expect(state.messages.find((m) => m.direction === "outbound")?.metadata).toMatchObject({
-        reply_source: "approved_template",
-        template_id: "tpl-hostile",
-      });
-      expect(order.indexOf("send")).toBeGreaterThanOrEqual(0);
-      expect(order.indexOf("suppress")).toBeGreaterThan(order.indexOf("send"));
-      expect(suppressionCalls()).toEqual([
-        expect.objectContaining({
-          contactId: CONTACT_ID,
-          fromPhone: "+18165550001",
-          orgId: "org-1",
-          source: "ai_responder_hostile",
-          idempotencyKey: `ai-responder-hostile:${PROPERTY_ID}:${CONTACT_ID}`,
-        }),
-      ]);
-      expect(pausePropertyEnrollments).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ propertyId: PROPERTY_ID, permanent: true, reason: "consent_revoked" }),
-      );
-      expect(recordLeadEvent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          propertyId: PROPERTY_ID,
-          eventType: "opted_out",
-          sourceType: "hostile_inbound",
-          sourceId: "in-h1",
-          payload: expect.objectContaining({ trigger: "hostile_inbound" }),
-        }),
-      );
-      // The not-interested template is never even looked up for this message.
-      expect(templateKeysAsked()).toEqual(["hostile"]);
-      expect(result.outcome).not.toBe("skipped");
-    });
-
-    it("hostile with NO approved/mapped template: suppression only, nothing sent", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      await run(state, "in-h2", "leave me alone", { outcome: "not_interested" });
-      expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(1);
-      expect(suppressionCalls()[0]).toMatchObject({ source: "ai_responder_hostile" });
-      expect(pausePropertyEnrollments).toHaveBeenCalledTimes(1);
-      expect(templateKeysAsked()).toEqual(["hostile"]);
-    });
-
-    it("hostile + nurture or wrong_number outcome: neither template is ever requested", async () => {
-      for (const [id, a] of [
-        ["in-h3a", { outcome: "nurture", confidence: 0.99 }],
-        ["in-h3b", { outcome: "wrong_number", scope: "this_property" }],
-      ] as const) {
-        vi.mocked(resolveApprovedTemplateReply).mockClear();
-        const state = createMockState();
-        installSendMock(state);
-        vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
-          (args as { outcome: string }).outcome === "hostile" ? tpl("hostile", HOSTILE_BODY) : tpl("nurture", "OTHER TEXT MUST NOT SEND"),
-        );
-        await run(state, id, "go to hell with your spam", a);
-        expect(templateKeysAsked()).toEqual(["hostile"]);
-        expect(vi.mocked(sendSmsToContact).mock.calls.every(([, i]) => i.body === HOSTILE_BODY)).toBe(true);
-        vi.mocked(sendSmsToContact).mockReset();
-      }
-    });
-
-    it("the reply cannot send (hold mode): the number is STILL suppressed", async () => {
-      const state = createMockState();
-      state.config.outbound_mode = "hold";
-      installSendMock(state);
-      vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
-        (args as { outcome: string }).outcome === "hostile" ? tpl("hostile", HOSTILE_BODY) : NONE,
-      );
-      await run(state, "in-h4", "you people harass me", { outcome: "not_interested" });
-      expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(1);
-    });
-
-    it("the reply is refused inside the send path (blocked): the number is STILL suppressed", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_no_phone", reason: "no phone" } as never);
-      vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
-        (args as { outcome: string }).outcome === "hostile" ? tpl("hostile", HOSTILE_BODY) : NONE,
-      );
-      await run(state, "in-h5", "quit texting", { outcome: "not_interested" });
-      expect(suppressionCalls()).toHaveLength(1);
-    });
-
-    it("the reply path throws: the number is STILL suppressed", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      vi.mocked(resolveApprovedTemplateReply).mockRejectedValue(new Error("lookup exploded"));
-      await run(state, "in-h6", "stalking me now", { outcome: "not_interested" });
-      expect(suppressionCalls()).toHaveLength(1);
-      expect(reportErrorMock).toHaveBeenCalled();
-    });
-
-    it("a reply that is not allowed on this path (max turns / business hours) still suppresses, with no reply attempt", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "max_turns_reached" });
-      state.config.classifier_provider = "jev";
-      state.config.classifier_mode = "automatic";
-      await dispatchAiResponse(createMockSupabase(state) as never, {
-        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundFromPhone: "+18165550001",
-        inboundBody: "Piss off", inboundMessageId: "in-h7", propertyId: PROPERTY_ID,
-      }, { anthropic: {} as never });
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(tpl("not_interested", "TEXT MUST NOT SEND"));
+      const result = await run(state, `in-h-${_name}`, "this is a scam, you idiot", answers);
+      expect(result).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(1);
-    });
-
-    it("a run that ends at a pre-gate (property already flagged for a human) still suppresses", async () => {
-      const state = createMockState();
-      state.property.needs_human_attention = true;
-      installSendMock(state);
-      const result = await dispatchAiResponse(createMockSupabase(state) as never, {
-        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundFromPhone: "+18165550001",
-        inboundBody: "F off", inboundMessageId: "in-h8", propertyId: PROPERTY_ID,
-      }, { anthropic: {} as never });
-      expect(result.outcome).toBe("skipped");
-      expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(1);
-      expect(suppressionCalls()[0]).toMatchObject({ source: "ai_responder_hostile", orgId: "org-1" });
-    });
-
-    it("suppression happens once per dispatch (no double write when the step already ran)", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      await run(state, "in-h9", "scam", { outcome: "not_interested" });
-      expect(suppressionCalls().filter((c) => c.source === "ai_responder_hostile")).toHaveLength(1);
-    });
-
-    it("a suppression failure flags the property for a person and is reported", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      vi.mocked(applyPhoneLevelOptOut).mockRejectedValue(new Error("db down"));
-      await run(state, "in-h10", "scam", { outcome: "unclear", confidence: 0.99 });
+      expect(suppressionCalls()).toHaveLength(0);
+      expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+      expect(state.property.outreach_dispo).toBeNull();
       expect(state.property.needs_human_attention).toBe(true);
-      expect(state.property.last_ai_escalation_reason).toContain("hostile_suppression_failed");
-      expect(reportErrorMock).toHaveBeenCalled();
+      expect(state.property.last_ai_escalation_reason).toContain("hostile_needs_confirm");
+      expect(state.aiClaims.at(-1)).toMatchObject({ outcome: "escalated" });
+    });
+
+    it("a hostile 'who is this' never gets the automated identity answer: it is held", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      const result = await run(state, "in-h-identity", "who is this you idiot", { outcome: "unclear", confidence: 0.99 });
+      expect(result).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.messages.filter((m) => m.direction === "outbound")).toEqual([]);
+    });
+
+    it("a non-hostile 'who is this' still gets the identity answer", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      await run(state, "in-id-ok", "who is this?", { outcome: "unclear", confidence: 0.99 });
+      expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
+    });
+
+    it("explicit opt-out wording ('stop texting me') still goes through the existing opt-out path exactly once, with no hostile-path records", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      const result = await run(state, "in-h-stop", "stop texting me", { outcome: "opted_out", confidence: 0.99 });
+      expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+      expect(suppressionCalls()).toHaveLength(1);
+      expect(suppressionCalls()[0]).toMatchObject({ source: "ai_responder", surface: "stop" });
+      expect(suppressionCalls().some((c) => String(c.source).includes("hostile"))).toBe(false);
+      expect(state.property.outreach_dispo).toBe("opted_out");
+      expect(state.property.last_ai_escalation_reason ?? "").not.toContain("hostile");
+      expect(recordLeadEvent.mock.calls.filter(([e]) => e?.eventType === "opted_out")).toHaveLength(0); // the helper (mocked) owns that event
+    });
+
+    it("explicit DNC wording ('do not contact me') keeps the existing close_dnc path: one suppression, no hostile hold", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      state.jevOutcomeThresholds = [{ outcome: "dnc", min_confidence: 0.5 }];
+      const result = await run(state, "in-h-dnc", "do not contact me again", { outcome: "dnc", confidence: 0.99 });
+      expect(result.outcome).not.toBe("sent");
+      expect(suppressionCalls().length).toBeLessThanOrEqual(1);
+      expect(state.property.last_ai_escalation_reason ?? "").not.toContain("hostile");
     });
 
     it("an ordinary message never takes the hostile path", async () => {
       const state = createMockState();
       installSendMock(state);
-      await run(state, "in-h11", "No thanks", { outcome: "not_interested" });
+      await run(state, "in-h-plain", "No thanks", { outcome: "not_interested" });
       expect(templateKeysAsked()).toEqual(["not_interested"]);
-      expect(suppressionCalls().filter((c) => c.source === "ai_responder_hostile")).toHaveLength(0);
+      expect(state.property.last_ai_escalation_reason ?? "").not.toContain("hostile");
     });
   });
 
@@ -7299,7 +7190,6 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
         expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
         expect(sendSmsToContact).not.toHaveBeenCalled();
         expect(state.property.outreach_dispo).toBeNull();
-        expect(state.property.needs_human_attention).toBe(true);
         expect(state.property.last_ai_escalation_reason).toContain("sold_needs_human");
         expect(suppressionCalls()).toHaveLength(0);
       },
@@ -7316,35 +7206,26 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
     });
   });
 
-  describe("wrong number", () => {
-    it("approved template sent: the number is suppressed in the same step (promise kept), then the close applies", async () => {
+  describe("wrong number: reply + this-property disposition, NO phone-level suppression", () => {
+    it("approved template sent, wrong_number disposition applied for the property, phone NOT suppressed", async () => {
       const state = createMockState();
       installSendMock(state);
       vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
         (args as { outcome: string }).outcome === "wrong_number" ? tpl("wrong_number", WRONG_NUMBER_BODY) : NONE,
       );
-      const order: string[] = [];
+      let dispoAtSend: string | null | undefined = "unset";
       const send = vi.mocked(sendSmsToContact).getMockImplementation()!;
-      vi.mocked(sendSmsToContact).mockImplementation(async (...args) => { order.push("send"); return send(...args); });
-      vi.mocked(applyPhoneLevelOptOut).mockImplementation(async () => { order.push("suppress"); });
-
+      vi.mocked(sendSmsToContact).mockImplementation(async (...args) => { dispoAtSend = state.property.outreach_dispo; return send(...args); });
       const result = await run(state, "in-w1", "wrong number, nobody here by that name", { outcome: "wrong_number", scope: "this_property" });
-
       expect(result).toMatchObject({ outcome: "auto_closed" });
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: WRONG_NUMBER_BODY }));
-      expect(order).toEqual(["send", "suppress"]);
-      expect(suppressionCalls()).toEqual([
-        expect.objectContaining({
-          fromPhone: "+18165550001",
-          source: "ai_responder_wrong_number",
-          idempotencyKey: `ai-responder-wrong-number:${PROPERTY_ID}:${CONTACT_ID}`,
-        }),
-      ]);
+      expect(dispoAtSend).toBeNull(); // reply first, then the property is closed
       expect(state.property.outreach_dispo).toBe("wrong_number");
+      expect(suppressionCalls()).toHaveLength(0);
       expect(templateKeysAsked()).toEqual(["wrong_number"]);
     });
 
-    it("template unavailable (not approved / not mapped): existing behaviour kept, this_property scope does NOT suppress", async () => {
+    it("template unavailable: nothing sent, disposition still applies, no suppression", async () => {
       const state = createMockState();
       installSendMock(state);
       const result = await run(state, "in-w2", "wrong number", { outcome: "wrong_number", scope: "this_property" });
@@ -7354,33 +7235,19 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
       expect(state.property.outreach_dispo).toBe("wrong_number");
     });
 
-    it("template dropped (hold mode): nothing sent, so nothing is promised and the number is not suppressed", async () => {
-      const state = createMockState();
-      state.config.outbound_mode = "hold";
-      installSendMock(state);
-      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(tpl("wrong_number", WRONG_NUMBER_BODY));
-      await run(state, "in-w3", "wrong number", { outcome: "wrong_number", scope: "this_property" });
-      expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(0);
+    it("scope 'all' and 'uncertain' never request the template", async () => {
+      for (const scope of ["all", "uncertain"]) {
+        vi.mocked(resolveApprovedTemplateReply).mockClear();
+        const state = createMockState();
+        installSendMock(state);
+        await run(state, `in-w-${scope}`, "you have the wrong person", { outcome: "wrong_number", scope });
+        expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        vi.mocked(sendSmsToContact).mockReset();
+      }
     });
 
-    it("scope 'all' (Jev auto-apply): existing suppression kept, and no template is requested", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      await run(state, "in-w4", "you have the wrong person", { outcome: "wrong_number", scope: "all" });
-      expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
-      expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toEqual([expect.objectContaining({ source: "ai_responder_wrong_number" })]);
-    });
-
-    it("uncertain scope never gets the template", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      await run(state, "in-w5", "wrong number maybe", { outcome: "wrong_number", scope: "uncertain" });
-      expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
-    });
-
-    it("third party / any human follow-up is left to the resolver (it returns none): no promise sent, no suppression", async () => {
+    it("a third-party follow-up is left to the resolver, which sends nothing", async () => {
       const state = createMockState();
       installSendMock(state);
       await run(state, "in-w6", "wrong number but my brother owns it", { outcome: "wrong_number", scope: "this_property", reason: "third_party" });
@@ -7389,31 +7256,15 @@ describe("approved hostile and wrong-number replies (Messages v2)", () => {
         expect.objectContaining({ outcome: "wrong_number", escalationReason: "third_party" }),
       );
       expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(0);
     });
 
-    it("below threshold: held for review, no template, no suppression", async () => {
+    it("below threshold: held for review, no template, nothing applied", async () => {
       const state = createMockState();
       installSendMock(state);
       vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(tpl("wrong_number", WRONG_NUMBER_BODY));
       await run(state, "in-w7", "wrong number", { outcome: "wrong_number", scope: "this_property", confidence: 0.5 });
       expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
       expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(suppressionCalls()).toHaveLength(0);
-      expect(state.property.outreach_dispo).toBeNull();
-    });
-
-    it("the promise went out but suppression failed: a person is flagged and the close is not applied", async () => {
-      const state = createMockState();
-      installSendMock(state);
-      vi.mocked(resolveApprovedTemplateReply).mockImplementation(async (_s, args) =>
-        (args as { outcome: string }).outcome === "wrong_number" ? tpl("wrong_number", WRONG_NUMBER_BODY) : NONE,
-      );
-      vi.mocked(applyPhoneLevelOptOut).mockRejectedValue(new Error("db down"));
-      const result = await run(state, "in-w8", "wrong number", { outcome: "wrong_number", scope: "this_property" });
-      expect(result).toEqual({ outcome: "escalated", reason: "wrong_number_suppression_failed" });
-      expect(state.property.needs_human_attention).toBe(true);
-      expect(state.property.last_ai_escalation_reason).toContain("wrong_number_suppression_failed");
       expect(state.property.outreach_dispo).toBeNull();
     });
   });

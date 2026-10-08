@@ -34,3 +34,11 @@ export function isHostileInbound(body: string | null | undefined): boolean {
   const text = body.toLowerCase();
   return HOSTILE_PHRASES.some((phrase) => text.includes(phrase));
 }
+
+/**
+ * Hold reason for a hostile conversation. Hostile wording is never an
+ * automatic do-not-contact decision: a person confirms it from the hold card
+ * ("Confirm do-not-contact"), which suppresses the number and then sends the
+ * approved hostile reply.
+ */
+export const HOSTILE_NEEDS_CONFIRM_REASON = "hostile_needs_confirm";

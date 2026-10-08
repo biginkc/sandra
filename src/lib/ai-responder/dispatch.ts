@@ -77,7 +77,7 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
-import { isHostileInbound } from "./hostile";
+import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { SOLD_NEEDS_HUMAN_REASON, isSoldInbound } from "./sold";
 import { resolveApprovedTemplateReply, type TemplateReplyKey } from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
@@ -450,12 +450,6 @@ export async function dispatchAiResponse(
   const runContext =
     deps.runContext ?? (input.runId ? await resumeRun(supabase, input.runId) : null);
   const result = await dispatchAiResponseCore(supabase, input, { ...deps, runContext });
-  // Hostile wording stops all future texts to the number even when this run
-  // ended before the hostile step could run (a pre-gate, keyword escalation,
-  // the 45s throttle, a lost claim, a carried retry). Idempotent.
-  if (isHostileInbound(input.inboundBody) && !hostileHandled.has(input)) {
-    await ensureHostileSuppression(supabase, input, runContext);
-  }
   // A silent exit (rule 0 / 2 / 4 / 5 / 8) that may have left no claim records
   // its outcome on the inbound row so a later run's rule 1 reads it as handled.
   if (result.outcome === "skipped" && input.inboundMessageId) {
@@ -466,9 +460,6 @@ export async function dispatchAiResponse(
   }
   return result;
 }
-
-/** Inputs whose hostile step (reply attempt + number suppression) has run. */
-const hostileHandled = new WeakSet<AiDispatchInput>();
 
 async function dispatchAiResponseCore(
   supabase: SupabaseClient<Database>,
@@ -594,12 +585,6 @@ async function dispatchAiResponseCore(
   );
 
   if (decision.skip) {
-    // A reply is not allowed here (consent, org off, property disabled, max
-    // turns, business hours), but a hostile inbound still stops all future
-    // texts to the number: suppression only, no reply attempt.
-    if (isHostileInbound(input.inboundBody)) {
-      await runHostileStep(supabase, { input, property, ctx: null, claim: null, runCtx: deps.runContext });
-    }
     // Classify/reply-eligibility decoupling (Jev workflow, 2026-09-20):
     // `decision.skip` governs whether Sandra may SEND an automated reply
     // (org-wide off, no consent, per-property AI-responder disabled —
@@ -732,28 +717,15 @@ async function dispatchAiResponseCore(
     return refusedClaimOutcome(supabase, input, responseClaim.reason, property.org_id, deps.runContext);
   }
 
+  // Hostile wording (approved phrase list) never auto-suppresses and never
+  // auto-replies: it is held for a person (`hostile_needs_confirm`) once the
+  // classification has run, and every automatic template is blocked for the
+  // message. An explicit opt-out the classifier recognises still goes through
+  // the existing opt-out path untouched. The identity shortcut is skipped so
+  // an automated "who is this" answer can never go to a hostile seller.
   const hostileInbound = isHostileInbound(input.inboundBody);
-  if (hostileInbound) {
-    // Approved hostile reply (if an owner approved and mapped one) under every
-    // existing send gate, THEN stop all future texts to the number, in this
-    // one step, whether or not the reply could go out. Runs before
-    // classification, so the not-interested / nurture / wrong-number
-    // templates (disabled below for a hostile inbound) can never fire.
-    await runHostileStep(supabase, {
-      input,
-      property,
-      ctx: {
-        model: config!.model,
-        outboundMode: config!.outbound_mode,
-        currentTurn,
-        claimStartedAt,
-      },
-      claim: responseClaim,
-      runCtx: deps.runContext,
-    });
-  }
 
-  if (isIdentityQuestion(input.inboundBody)) {
+  if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
@@ -1009,6 +981,9 @@ async function classifyAndHandleNonRouteOutcomes(
   );
 
   if (classification.kind === "jev_nurture") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // Root review of dbbb12e6, finding 1: effect + revision guard +
     // audit insert now happen atomically inside ONE RPC call — see
     // applyJevLeadDecisionAtomically's doc comment.
@@ -1098,6 +1073,9 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_needs_decision") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // Below the org's configured threshold, missing/invalid native
     // confidence, or no threshold configured at all for an outcome with no
     // existing pending-review path to fall back on (currently only
@@ -1128,6 +1106,9 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_promote_new_lead") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     // new_lead at/above the org's configured threshold. Promote via the
     // atomic RPC (root review of dbbb12e6, finding 1) — never appointment
     // booking, never a raw properties.status write here. qualifyProperty
@@ -1206,6 +1187,9 @@ async function classifyAndHandleNonRouteOutcomes(
   // flagged. Deterministic STOP is unaffected — it's handled entirely
   // upstream of classification, in inbound.ts's matchesStopKeyword.
   if (classification.kind === "jev_no_action") {
+    if (isHostileInbound(input.inboundBody)) {
+      return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
+    }
     const reason = "jev_unclear_no_action";
     const flagOk4 = await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeClaim(supabase, input.propertyId, {
@@ -1323,6 +1307,16 @@ async function resolveAndApplyRoute(
       return { outcome: "escalated", reason };
     }
     route = resolveResponderOutcome(generated);
+  }
+  if (
+    isHostileInbound(input.inboundBody) &&
+    route.kind !== "opt_out" &&
+    route.kind !== "close_dnc"
+  ) {
+    // Hostile wording: hold for a person, whatever else the classifier decided
+    // (close, nurture, wrong number, a generated reply). An opt-out / dnc the
+    // classifier recognises keeps going through the existing path unchanged.
+    return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
   }
   const expectedDisposition: AiReviewDisposition | null =
     route.kind === "opt_out"
@@ -1513,9 +1507,10 @@ async function resolveAndApplyRoute(
         classification.eligibleForAutoAccept &&
         classification.wrongScope === "this_property"
       ) {
-        // Approved wrong-number reply ("I'll take this number off our list").
-        // The reply is a promise, so the number is suppressed whenever it goes
-        // out (below), and it is never sent for a scope other than an explicit
+        // Approved wrong-number reply. "Take this number off our list" means
+        // this property: the wrong_number disposition applied below is the
+        // whole effect. NO phone-level suppression here (Jarrad: no automatic
+        // DNC decisions). Never sent for a scope other than an explicit
         // this_property (RULES-PROPOSAL 2.2 "Must NOT fire").
         const step = await runApprovedTemplateStep(supabase, {
           input,
@@ -1528,28 +1523,7 @@ async function resolveAndApplyRoute(
           runCtx,
         });
         if (step.kind === "stop") return step.outcome;
-        if (step.outboundMessageId) {
-          const suppressed = await suppressNumberForWrongNumberReply(supabase, {
-            runContext: runCtx,
-            propertyId: input.propertyId,
-            contactId: input.contactId,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
-            reason: route.reason,
-          });
-          if (!suppressed) {
-            // The promise went out without the suppression behind it. The
-            // helper already flagged the property for a person to finish it.
-            await completeClaim(supabase, input.propertyId, {
-              claimId: responseClaim.claimId,
-              outcome: "escalated",
-              errorMessage: "wrong_number_suppression_failed",
-              outboundMessageId: step.outboundMessageId,
-            });
-            return { outcome: "escalated", reason: "wrong_number_suppression_failed" };
-          }
-          wrongNumberTemplateMessageId = step.outboundMessageId;
-        }
+        wrongNumberTemplateMessageId = step.outboundMessageId;
       }
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
@@ -1693,15 +1667,6 @@ async function resolveAndApplyRoute(
       return autoCloseOutcome;
     case "send_reply":
     case "deescalate_close": {
-      if (templateCtx?.hostile) {
-        // Hostile inbound: the number is suppressed and the approved hostile
-        // reply (if any) already had its chance. No generated reply follows.
-        await completeClaim(supabase, input.propertyId, {
-          claimId: responseClaim.claimId,
-          outcome: silentSkipClaimOutcome(0),
-        });
-        return silentSkip("hostile_suppressed", 0);
-      }
       const bodyResult = await resolveOutboundBody(supabase, {
         route,
         contactId: input.contactId,
@@ -2257,12 +2222,7 @@ async function runApprovedTemplateStep(
     property: AiDispatchPropertyGateRow;
     ctx: TemplateStepContext;
     claim: { claimId: string | null };
-    outcome: Extract<TemplateReplyKey, "nurture" | "not_interested" | "wrong_number" | "hostile">;
-    /**
-     * A contended send is dropped instead of parked for retry. Used by the
-     * hostile reply, whose number suppression must not wait on a retry.
-     */
-    dropOnContention?: boolean;
+    outcome: Extract<TemplateReplyKey, "nurture" | "not_interested" | "wrong_number">;
     nativeConfidence: number | null;
     /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
     escalationReason: JevEscalationReason | null;
@@ -2389,7 +2349,7 @@ async function runApprovedTemplateStep(
   }
   // Nothing was sent. Held (hold mode / recipient window / any gate) or
   // silently refused: the outcome still applies (see the doc above).
-  if (sent.outcome !== "retry" || a.dropOnContention) return { kind: "continue", outboundMessageId: null };
+  if (sent.outcome !== "retry") return { kind: "continue", outboundMessageId: null };
 
   // A retry drops its carried reply so the re-dispatch classifies again and
   // re-runs this step with the outcome still unapplied (a carried template
@@ -5753,232 +5713,34 @@ async function applyWrongNumber(
 }
 
 /**
- * Hostile step: the approved hostile reply (when an owner approved and mapped
- * one) goes out under every existing send gate, then, in the same step and
- * whether or not the reply could send, all future texts to the number stop.
- * `ctx`/`claim` null = a reply is not allowed on this path (suppression only).
- *
- * The reply is never retried: suppression must not wait on a contended send.
- * A failure of the reply path can never skip the suppression.
+ * Hold a hostile conversation for a person. Nothing is suppressed and nothing
+ * is sent: only a human click ("Confirm do-not-contact" on the hold card)
+ * suppresses the number and then sends the approved hostile reply.
  */
-async function runHostileStep(
-  supabase: SupabaseClient<Database>,
-  a: {
-    input: AiDispatchInput;
-    property: AiDispatchPropertyGateRow;
-    ctx: TemplateStepContext | null;
-    claim: { claimId: string | null } | null;
-    runCtx?: MaybeRunContext;
-  },
-): Promise<void> {
-  hostileHandled.add(a.input);
-  await trace(supabase, {
-    kind: "gate",
-    name: "hostile_detected",
-    result: "block",
-    detail: { replyAllowed: a.ctx !== null },
-  }, a.runCtx);
-  if (a.ctx && a.claim) {
-    try {
-      await runApprovedTemplateStep(supabase, {
-        input: a.input,
-        property: a.property,
-        ctx: a.ctx,
-        claim: a.claim,
-        outcome: "hostile",
-        dropOnContention: true,
-        nativeConfidence: null,
-        escalationReason: null,
-        runCtx: a.runCtx,
-      });
-    } catch (e) {
-      reportError(e, {
-        tags: { surface: "ai_responder_hostile_reply" },
-        extra: { propertyId: a.input.propertyId },
-      });
-    }
-  }
-  await applyHostileSuppression(supabase, {
-    runContext: a.runCtx,
-    propertyId: a.input.propertyId,
-    contactId: a.input.contactId,
-    orgId: a.property.org_id,
-    inboundMessageId: a.input.inboundMessageId ?? null,
-    inboundFromPhone: a.input.inboundFromPhone ?? null,
-  });
-}
-
-/**
- * Suppression-only fallback for a run that ended before the hostile step (also
- * called by the inbound webhook for the exits that never reach dispatch).
- * Idempotent; never throws.
- */
-export async function ensureHostileSuppression(
+async function holdHostileForConfirm(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
+  responseClaim: { claimId: string | null },
   runCtx?: MaybeRunContext,
-): Promise<void> {
-  try {
-    const { data: property, error } = await supabase
-      .from("properties")
-      .select("org_id")
-      .eq("id", input.propertyId)
-      .maybeSingle();
-    if (error || !property) throw new Error(error?.message ?? "property not found");
-    hostileHandled.add(input);
-    await applyHostileSuppression(supabase, {
-      runContext: runCtx,
-      propertyId: input.propertyId,
-      contactId: input.contactId,
-      orgId: property.org_id,
-      inboundMessageId: input.inboundMessageId ?? null,
-      inboundFromPhone: input.inboundFromPhone ?? null,
-    });
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "ai_responder_hostile_suppression_fallback" },
-      extra: { propertyId: input.propertyId },
-    });
-  }
-}
-
-/**
- * Stops all future texts to a hostile seller's number: phone-level suppression
- * (the same helper STOP uses: durable `sms_phone_suppressions` row, opt-out
- * consent event, contact flag, contact enrollments), every active drip on the
- * lead ended, and a lead event. Never throws: a failure flags the property for
- * a person and returns false.
- */
-async function applyHostileSuppression(
-  supabase: SupabaseClient<Database>,
-  args: {
-    runContext?: MaybeRunContext;
-    propertyId: string;
-    contactId: string;
-    orgId: string;
-    inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-  },
-): Promise<boolean> {
-  try {
-    const contact = await loadContactPhone(supabase, args.contactId);
-    const fromPhone = args.inboundFromPhone ?? contact.phone ?? "";
-    if (!normalizePhone(fromPhone)) throw new Error("hostile suppression: no usable phone number");
-    await applyPhoneLevelOptOut(supabase, {
-      contactId: args.contactId,
-      fromPhone,
-      orgId: args.orgId,
-      source: "ai_responder_hostile",
-      sourceDetail: {
-        propertyId: args.propertyId,
-        reason: "hostile_inbound",
-        inboundMessageId: args.inboundMessageId,
-      } as Json,
-      occurredAt: new Date(),
-      providerId: "ai_responder",
-      surface: "dnc",
-      idempotencyKey: `ai-responder-hostile:${args.propertyId}:${args.contactId}`,
-    });
-    await pausePropertyEnrollments(supabase, {
-      propertyId: args.propertyId,
-      reason: "consent_revoked",
-      permanent: true,
-      actor: { actorType: "ai" },
-    });
-    const hostileEvent = {
-      propertyId: args.propertyId,
-      actorType: "ai" as const,
-      eventType: LEAD_EVENT_TYPES.OPTED_OUT,
-      payload: { channel: "sms", trigger: "hostile_inbound", reason: "hostile_inbound" },
-    };
-    await recordLeadEvent(
-      args.inboundMessageId
-        ? { ...hostileEvent, sourceType: "hostile_inbound", sourceId: args.inboundMessageId }
-        : hostileEvent,
-    );
-    await trace(supabase, {
-      kind: "action",
-      name: "hostile_suppress",
-      result: "applied",
-    }, args.runContext);
-    return true;
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "ai_responder_hostile_suppression" },
-      extra: { propertyId: args.propertyId, contactId: args.contactId },
-    });
-    await trace(supabase, {
-      kind: "action",
-      name: "hostile_suppress",
-      result: "error",
-    }, args.runContext);
-    await markPropertyNeedsAttention(supabase, args.propertyId, "hostile_suppression_failed", args.runContext);
-    return false;
-  }
-}
-
-/**
- * The approved wrong-number reply promises "I'll take this number off our
- * list", so the number is suppressed whenever that text went out, whatever
- * scope Jev reported. Same helper and idempotency key as the scope=all path.
- * Never throws: on failure the property is flagged for a person and false is
- * returned.
- */
-async function suppressNumberForWrongNumberReply(
-  supabase: SupabaseClient<Database>,
-  args: {
-    runContext?: MaybeRunContext;
-    propertyId: string;
-    contactId: string;
-    inboundFromPhone: string | null;
-    orgId: string;
-    reason: string;
-  },
-): Promise<boolean> {
-  try {
-    const contact = await loadContactPhone(supabase, args.contactId);
-    const fromPhone = args.inboundFromPhone ?? contact.phone ?? "";
-    if (!normalizePhone(fromPhone)) throw new Error("wrong number suppression: no usable phone number");
-    await applyPhoneLevelOptOut(supabase, {
-      contactId: args.contactId,
-      fromPhone,
-      orgId: args.orgId,
-      source: "ai_responder_wrong_number",
-      sourceDetail: {
-        propertyId: args.propertyId,
-        reason: args.reason,
-        wrong_scope: "this_property",
-        trigger: "approved_reply_sent",
-      } as Json,
-      occurredAt: new Date(),
-      providerId: "ai_responder",
-      surface: "dnc",
-      idempotencyKey: `ai-responder-wrong-number:${args.propertyId}:${args.contactId}`,
-      leadEvent: {
-        propertyId: args.propertyId,
-        actorType: "ai",
-        trigger: "ai_responder",
-      },
-    });
-    await trace(supabase, {
-      kind: "action",
-      name: "wrong_number_suppress",
-      result: "applied",
-    }, args.runContext);
-    return true;
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "ai_responder_wrong_number_suppression" },
-      extra: { propertyId: args.propertyId, contactId: args.contactId },
-    });
-    await trace(supabase, {
-      kind: "action",
-      name: "wrong_number_suppress",
-      result: "error",
-    }, args.runContext);
-    await markPropertyNeedsAttention(supabase, args.propertyId, "wrong_number_suppression_failed", args.runContext);
-    return false;
-  }
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "gate",
+    name: "hostile_hold",
+    result: "block",
+    detail: { reason: HOSTILE_NEEDS_CONFIRM_REASON },
+  }, runCtx);
+  const flagOk = await markPropertyNeedsAttention(
+    supabase,
+    input.propertyId,
+    HOSTILE_NEEDS_CONFIRM_REASON,
+    runCtx,
+  );
+  await completeClaim(supabase, input.propertyId, {
+    claimId: responseClaim.claimId,
+    outcome: "escalated",
+    flagOk,
+  });
+  return { outcome: "escalated", reason: HOSTILE_NEEDS_CONFIRM_REASON };
 }
 
 async function loadContactPhone(

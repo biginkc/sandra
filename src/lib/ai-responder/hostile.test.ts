@@ -40,6 +40,12 @@ describe("isHostileInbound", () => {
     expect(isHostileInbound("scammers")).toBe(true);
   });
 
+  it("is a plain substring match by approval, so innocent text can match (documented, list unchanged)", () => {
+    // Known false matches, e.g. "f off" inside "half off". Only Jarrad can change the list.
+    expect(isHostileInbound("we can take half off the price")).toBe(true);
+    expect(isHostileInbound("it is on the scampi menu")).toBe(true);
+  });
+
   it("does not match ordinary replies", () => {
     for (const body of [
       "no thanks",

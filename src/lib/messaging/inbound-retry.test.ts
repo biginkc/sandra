@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
   loadDelayConfig: vi.fn(async () => null as unknown),
   computeDelay: vi.fn(() => 0),
   preGates: vi.fn(async () => ({ ok: true }) as unknown),
-  ensureHostile: vi.fn(async () => undefined),
   dispatchAi: vi.fn(async () => ({
     outcome: "skipped" as const,
     reason: "no_config",
@@ -81,7 +80,6 @@ vi.mock("@/lib/ai-responder/dispatch", () => ({
   inboundStampOutcomeOf: (o: { outcome: string; reason?: string }) =>
     o.outcome === "skipped" && o.reason === "already_answered" ? "skipped:rule_2" : o.outcome,
   dispatchAiResponse: mocks.dispatchAi,
-  ensureHostileSuppression: mocks.ensureHostile,
   flagAndDeadLetter: mocks.flagAndDeadLetter,
   markPropertyNeedsAttention: mocks.markAttention,
 }));
@@ -451,50 +449,6 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
       "message-1",
       { aiResponder: expect.objectContaining({ outcome: "skipped:rule_2", reason: "already_answered" }) },
     );
-  });
-
-  it("a hostile inbound whose delayed run ends at a pre-gate still gets its number suppressed (no reply attempt)", async () => {
-    const original = INPUT.body;
-    (INPUT as { body: string }).body = "this is a scam";
-    try {
-      mocks.loadDelayConfig.mockResolvedValueOnce({
-        delayMinSeconds: 10,
-        delayMaxSeconds: 20,
-        propertyState: null,
-        escalationKeywords: [],
-      });
-      mocks.computeDelay.mockReturnValueOnce(15);
-      mocks.preGates.mockResolvedValueOnce({
-        ok: false,
-        outcome: { outcome: "skipped", reason: "already_flagged" },
-      });
-      await runWebhook();
-      expect(mocks.dispatchAi).not.toHaveBeenCalled();
-      expect(mocks.ensureHostile).toHaveBeenCalledTimes(1);
-      expect(mocks.ensureHostile).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ inboundBody: "this is a scam", propertyId: "property-1" }),
-        null,
-      );
-    } finally {
-      (INPUT as { body: string }).body = original;
-    }
-  });
-
-  it("a non-hostile inbound never triggers the suppression fallback", async () => {
-    mocks.loadDelayConfig.mockResolvedValueOnce({
-      delayMinSeconds: 10,
-      delayMaxSeconds: 20,
-      propertyState: null,
-      escalationKeywords: [],
-    });
-    mocks.computeDelay.mockReturnValueOnce(15);
-    mocks.preGates.mockResolvedValueOnce({
-      ok: false,
-      outcome: { outcome: "skipped", reason: "already_answered" },
-    });
-    await runWebhook();
-    expect(mocks.ensureHostile).not.toHaveBeenCalled();
   });
 
   it("a webhook redelivery of an inbound already stamped delayed does not dispatch again", async () => {
