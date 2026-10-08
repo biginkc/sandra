@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { isHumanOnlyOutcome } from "@/lib/sms-classification/thresholds";
 import { cn } from "@/lib/utils";
 
 import { lunaOutcomeLabel } from "./luna-labels";
@@ -111,16 +112,18 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
           <span
             className={cn(
               "rounded px-1.5 py-0.5",
-              o.automationEnabled
+              o.automationEnabled && !isHumanOnlyOutcome(o.outcome)
                 ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
                 : "bg-secondary",
             )}
           >
-            {o.automationEnabled === null
-              ? "automation not set"
-              : o.automationEnabled
-                ? "automation on"
-                : "automation off"}
+            {isHumanOnlyOutcome(o.outcome)
+              ? "always human (locked)"
+              : o.automationEnabled === null
+                ? "automation not set"
+                : o.automationEnabled
+                  ? "automation on"
+                  : "automation off"}
           </span>
         </span>
       </div>
