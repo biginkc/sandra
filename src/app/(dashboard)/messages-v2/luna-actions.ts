@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -19,6 +20,9 @@ import { applyLunaSuggestion, rejectLunaSuggestion, type LunaResolveDeps } from 
  * disposition, suppression or consent state itself.
  */
 async function authorize(): Promise<Result<LunaResolveDeps>> {
+  if (!lunaSuggestionsEnabled()) {
+    return err({ code: "LUNA_DISABLED", message: "Luna suggestions are not enabled." });
+  }
   let userId: string | null = null;
   try {
     const supabase = await createClient();

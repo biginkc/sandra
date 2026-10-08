@@ -9,13 +9,14 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
-import type { HoldActionsApi } from "./hold-action-types";
+import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
 import { HoldsRail } from "./holds-rail";
 import { loadRunLabels } from "./labels";
 import {
   computeHeaderStats,
   describeCoverage,
   formatHoldsTotal,
+  formatSplitTotal,
   formatModeBadge,
   type LooseSupabase,
 } from "./queries";
@@ -24,6 +25,7 @@ import { ScorecardCard } from "./scorecard-card";
 import type { ScorecardRow } from "./scorecard";
 import type {
   HoldsMeta,
+  HoldsSplit,
   ModeBadge,
   OpenHold,
   PipelineCoverage,
@@ -47,6 +49,10 @@ export type MessagesV2ViewProps = {
   /** The coverage query failed: show a degraded indicator, not nothing. */
   coverageUnavailable?: boolean;
   holdsMeta?: HoldsMeta;
+  /** New / Backlog split: `holds` are the New ones; Backlog loads on demand. */
+  holdsSplit?: HoldsSplit;
+  /** Server action that loads Backlog pages (the section stays collapsed without it). */
+  loadBacklog?: LoadBacklog;
   /** Feed window query failed (reason text, already prefixed "Feed unavailable"). */
   feedError?: string | null;
   /** Step lookup failed: cards may lack steps. */
@@ -124,9 +130,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     [runs, holds, nowMs],
   );
   const meta = props.holdsMeta;
-  const holdsLabel = meta
-    ? formatHoldsTotal(meta, stats.openHolds)
-    : `${stats.openHolds} holds`;
+  const holdsLabel = props.holdsSplit
+    ? formatSplitTotal(props.holdsSplit)
+    : meta
+      ? formatHoldsTotal(meta, stats.openHolds)
+      : `${stats.openHolds} holds`;
   const coverage = describeCoverage(props.coverage, props.coverageUnavailable);
 
   useEffect(() => {
@@ -397,6 +405,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           labels={labels}
           nowMs={nowMs}
           meta={meta}
+          split={props.holdsSplit}
+          loadBacklog={props.loadBacklog}
+          backlogRefreshKey={props.holds}
           actions={props.actions}
           onReload={() => router.refresh()}
         />

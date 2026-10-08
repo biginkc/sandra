@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   user: { id: "user-1" } as { id: string } | null,
@@ -403,6 +403,22 @@ describe("fetchCorrectionHistory — root final-review P2", () => {
 });
 
 describe("Luna bookkeeping after a human resolves an item through the normal controls", () => {
+  beforeEach(() => {
+    vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "1");
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does no Luna work at all when the flag is off", async () => {
+    vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "");
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    const result = await confirmJevQueueItem("jev_lead_decision", "decision-1");
+    expect(result.ok).toBe(true);
+    expect(recordLunaResolutionForItem).not.toHaveBeenCalled();
+  });
+
   it("records the corrected outcome (a different pick counts as a rejection downstream)", async () => {
     mocks.rpcResult = { data: { status: "corrected", resolvedOutcome: "wrong_number" }, error: null };
     const result = await correctJevQueueItem("jev_lead_decision", "decision-1", "wrong_number", null);

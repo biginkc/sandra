@@ -65,6 +65,18 @@ export async function requestLunaSuggestion(
       return { status: "skipped", reason: gate.reason };
     }
 
+    // Dispatch retry: a suggestion already exists, so do not pay for another call.
+    const { data: existing } = await supabase
+      .from("luna_suggestions")
+      .select("id")
+      .eq("inbound_message_id", input.inboundMessageId)
+      .limit(1)
+      .maybeSingle();
+    if (existing) {
+      await step("skipped", { reason: "already_suggested" });
+      return { status: "duplicate" };
+    }
+
     const { data: source } = await supabase
       .from("messages")
       .select("created_at")

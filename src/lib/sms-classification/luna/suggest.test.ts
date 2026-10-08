@@ -14,18 +14,31 @@ import { requestLunaSuggestion, type LunaSuggestInput } from "./suggest";
 
 const ENV = { LUNA_SUGGESTIONS_ENABLED: "1", OPENAI_API_KEY: "sk-test", LUNA_MODEL: "gpt-6-luna" };
 
-function fakeSupabase(opts: { source?: { created_at: string } | null; insertError?: { code?: string; message: string } | null } = {}) {
+function fakeSupabase(
+  opts: { source?: { created_at: string } | null; insertError?: { code?: string; message: string } | null; existing?: boolean } = {},
+) {
   const inserts: unknown[] = [];
-  const builder = {
-    select: () => builder,
-    eq: () => builder,
-    maybeSingle: async () => ({ data: opts.source === undefined ? { created_at: "2026-10-07T11:00:00Z" } : opts.source, error: null }),
-    insert: async (row: unknown) => {
-      inserts.push(row);
-      return { error: opts.insertError ?? null };
-    },
+  const existingReads: string[] = [];
+  const make = (table: string) => {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      limit: () => builder,
+      maybeSingle: async () => {
+        if (table === "luna_suggestions") {
+          existingReads.push(table);
+          return { data: opts.existing ? { id: "s-1" } : null, error: null };
+        }
+        return { data: opts.source === undefined ? { created_at: "2026-10-07T11:00:00Z" } : opts.source, error: null };
+      },
+      insert: async (row: unknown) => {
+        inserts.push(row);
+        return { error: opts.insertError ?? null };
+      },
+    };
+    return builder;
   };
-  return { client: { from: vi.fn(() => builder) } as never, inserts };
+  return { client: { from: vi.fn((t: string) => make(t)) } as never, inserts, existingReads };
 }
 
 const input: LunaSuggestInput = {
@@ -119,6 +132,15 @@ describe("requestLunaSuggestion", () => {
     const { client } = fakeSupabase({ insertError: { code: "23505", message: "dup" } });
     const r = await requestLunaSuggestion(client, input, { fetch: vi.fn() as never, env: ENV, classify: vi.fn(async () => okResult) });
     expect(r).toEqual({ status: "duplicate" });
+  });
+
+  it("makes no OpenAI call when a suggestion already exists for the message (dispatch retry)", async () => {
+    const { client, inserts } = fakeSupabase({ existing: true });
+    const classify = vi.fn();
+    const r = await requestLunaSuggestion(client, input, { fetch: vi.fn() as never, env: ENV, classify });
+    expect(r).toEqual({ status: "duplicate" });
+    expect(classify).not.toHaveBeenCalled();
+    expect(inserts).toEqual([]);
   });
 
   it("skips when the source message cannot be verified", async () => {

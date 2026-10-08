@@ -19,7 +19,9 @@ import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
-import { loadMessagesV2Data, type LooseSupabase } from "./queries";
+import { loadMessagesV2Split, type LooseSupabase } from "./queries";
+import { ensureMessagesV2Settings } from "./settings";
+import { loadBacklogHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
 import {
   fetchScorecardRows,
@@ -85,8 +87,11 @@ export default async function MessagesV2Page() {
 
   const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
+  // First load fixes the New / Backlog cutover at now() (never moved after);
+  // it must exist before the hold classification runs.
+  await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
   const [loaded, coverage, scorecardRows, replayBatchId] = await Promise.all([
-    loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
+    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
@@ -117,6 +122,8 @@ export default async function MessagesV2Page() {
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
+        holdsSplit={data.split}
+        loadBacklog={loadBacklogHoldsAction}
         runs={data.runs}
         holds={data.holds}
         feedError={data.feedError}

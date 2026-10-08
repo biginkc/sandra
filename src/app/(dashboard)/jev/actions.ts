@@ -8,6 +8,7 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { applySuppressionForConfirmedReview } from "@/lib/ai-responder/confirm-suppression";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { recordLunaResolutionForItem } from "@/lib/sms-classification/luna/resolution";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -61,6 +62,8 @@ async function recordLunaResolution(
     userId: string;
   },
 ): Promise<void> {
+  // Flag off: zero extra work (no admin client, no reads).
+  if (!lunaSuggestionsEnabled()) return;
   try {
     await recordLunaResolutionForItem(reader, createAdminClient(), args);
   } catch (e) {
