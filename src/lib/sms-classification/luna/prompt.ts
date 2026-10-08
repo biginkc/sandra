@@ -12,7 +12,7 @@
 import { buildQuestions, OUTCOME_CRITERIA } from "../questions";
 import type { JevOutcome } from "../types";
 
-// PENDING JARRAD APPROVAL — do not enable in production until approved.
+// Approved verbatim by Jarrad on 2026-10-07 (exact text used in the PR #846 replay test). Any change to this text needs his re-approval.
 // Text is identical to the draft in scripts/messages-v2/replay/luna-prompt.md (PR #846).
 export const LUNA_FRAMING = {
   role: "You are classifying the latest inbound text message in a two-way real-estate SMS conversation between a wholesaler and a property seller.",
