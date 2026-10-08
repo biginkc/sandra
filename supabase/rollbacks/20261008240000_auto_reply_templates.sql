@@ -16,9 +16,13 @@ begin
   v_def := pg_get_functiondef('public.reset_tenant_tables()'::regprocedure);
   v_new := replace(
     v_def,
+    E'    public.auto_reply_templates,\n'
+    || E'    public.sms_template_approval_events,\n',
+    ''
+  );
+  v_new := replace(
+    v_new,
     E'  perform set_config(''sandra.template_approval'', ''on'', true);\n'
-    || E'  delete from public.auto_reply_templates;\n'
-    || E'  delete from public.sms_template_approval_events;\n'
     || E'  update public.sms_templates set approved_for_auto_send = false, approved_by = null, approved_at = null, approved_content = null where approved_for_auto_send;\n'
     || E'  perform set_config(''sandra.template_approval'', ''off'', true);\n',
     ''

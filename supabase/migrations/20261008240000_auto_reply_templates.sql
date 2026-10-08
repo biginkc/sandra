@@ -409,23 +409,35 @@ do $$
 declare
   v_def text;
   v_new text;
-  v_anchor constant text := E'  delete from public.sms_templates\n';
+  v_anchor constant text := E'    public.ai_response_claims,\n';
+  v_anchor2 constant text := E'  delete from public.sms_templates\n';
 begin
   v_def := pg_get_functiondef('public.reset_tenant_tables()'::regprocedure);
   if position('auto_reply_templates' in v_def) > 0 then
     return;
   end if;
+  -- New tables join the existing truncate list (the reset runs under a
+  -- guard that rejects an unconditional DELETE); the approval-column clear
+  -- on system-managed templates is an UPDATE with a WHERE.
   v_new := replace(
     v_def,
     v_anchor,
-    E'  perform set_config(''sandra.template_approval'', ''on'', true);\n'
-    || E'  delete from public.auto_reply_templates;\n'
-    || E'  delete from public.sms_template_approval_events;\n'
-    || E'  update public.sms_templates set approved_for_auto_send = false, approved_by = null, approved_at = null, approved_content = null where approved_for_auto_send;\n'
-    || E'  perform set_config(''sandra.template_approval'', ''off'', true);\n'
+    E'    public.auto_reply_templates,\n'
+    || E'    public.sms_template_approval_events,\n'
     || v_anchor
   );
-  if v_new = v_def then raise exception 'reset_tenant_tables approval patch not applied'; end if;
+  v_new := replace(
+    v_new,
+    v_anchor2,
+    E'  perform set_config(''sandra.template_approval'', ''on'', true);\n'
+    || E'  update public.sms_templates set approved_for_auto_send = false, approved_by = null, approved_at = null, approved_content = null where approved_for_auto_send;\n'
+    || E'  perform set_config(''sandra.template_approval'', ''off'', true);\n'
+    || v_anchor2
+  );
+  if position('public.auto_reply_templates,' in v_new) = 0
+     or position('sandra.template_approval' in v_new) = 0 then
+    raise exception 'reset_tenant_tables approval patch not applied';
+  end if;
   execute v_new;
 end $$;
 

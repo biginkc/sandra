@@ -294,6 +294,30 @@ describe("auto_reply_templates", () => {
   });
 });
 
+describe("reset_tenant_tables", () => {
+  it("runs without error after the migration and clears mappings, audit events and approvals", async () => {
+    await asUser(users.owner, approve(true, TEXT));
+    await asUser(users.owner, setMapping("nurture", null));
+    await db.query(`update public.sms_templates set system_managed = true where id = $1`, [templateId]);
+    expect((await db.query(`select count(*)::int as n from public.auto_reply_templates`)).rows[0].n).toBeGreaterThan(0);
+
+    // The reset re-inserts memberships; the acquisitions designation guard
+    // rejects an INSERT with the flag on, so drop that seeded member first.
+    await db.query(`delete from public.memberships where user_id = $1`, [users.acq]);
+    await db.query(`select public.reset_tenant_tables()`);
+
+    expect((await db.query(`select count(*)::int as n from public.auto_reply_templates`)).rows[0].n).toBe(0);
+    expect((await db.query(`select count(*)::int as n from public.sms_template_approval_events`)).rows[0].n).toBe(0);
+    const r = await row();
+    expect(r.approved_for_auto_send).toBe(false);
+    expect(r.approved_content).toBeNull();
+    // Still wired after the rollback/re-apply round trip below.
+    const def = (await db.query(`select pg_get_functiondef('public.reset_tenant_tables()'::regprocedure) as d`)).rows[0].d;
+    expect(def).toContain("public.auto_reply_templates");
+    expect(def).not.toMatch(/^\s*delete from public\.(auto_reply_templates|sms_template_approval_events);/m);
+  });
+});
+
 describe("rollback", () => {
   it("removes the feature and the migration re-applies cleanly", async () => {
     expect(
