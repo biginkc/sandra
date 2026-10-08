@@ -20,6 +20,8 @@ import {
   type LooseSupabase,
 } from "./queries";
 import { RunCard } from "./run-card";
+import { ScorecardCard } from "./scorecard-card";
+import type { ScorecardRow } from "./scorecard";
 import type {
   HoldsMeta,
   ModeBadge,
@@ -35,6 +37,8 @@ export type MessagesV2ViewProps = {
   orgId: string;
   /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
   isOwner?: boolean;
+  /** Replay org only: newest replay batch id, shown to owners. */
+  replayBatchId?: string | null;
   runs: RunWithSteps[];
   /** Open holds from the server (flag / pending decision / pending review). */
   holds: OpenHold<RunWithSteps>[];
@@ -50,6 +54,8 @@ export type MessagesV2ViewProps = {
   /** Mode badge queries failed (reason text). */
   badgesError?: string | null;
   badges: ModeBadge[];
+  /** Scorecard rows (7d) loaded on the server; null means the card loads them itself. */
+  scorecardRows?: ScorecardRow[] | null;
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
   nowMs: number;
@@ -263,9 +269,23 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   }, [newestId]);
 
   return (
-    <div className="flex flex-col gap-4" data-testid="messages-v2">
+    // lg: fill the viewport below the dashboard chrome (md:pt-16 header + md:p-6 page padding = 7rem)
+    // so the live feed and the holds rail each scroll on their own.
+    <div
+      className="flex flex-col gap-4 lg:h-[calc(100dvh-7rem)]"
+      data-testid="messages-v2"
+    >
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="text-xl font-semibold">Messages v2</h1>
+        {isOwner && props.replayBatchId && (
+          <Badge
+            variant="outline"
+            data-testid="replay-batch-badge"
+            className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+          >
+            Replay batch {props.replayBatchId}
+          </Badge>
+        )}
         <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
           {props.badgesError && (
             <span
@@ -322,12 +342,16 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         </p>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <section aria-label="Live feed" className="flex min-w-0 flex-col gap-3">
+      <div className="grid gap-6 lg:min-h-[20rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
+        <section
+          aria-label="Live feed"
+          className="flex min-w-0 flex-col gap-3 lg:min-h-0"
+        >
           <h2 className="text-sm font-semibold">Live feed</h2>
           <div
             ref={feedRef}
-            className="flex max-h-[calc(100vh-14rem)] flex-col gap-3 overflow-y-auto pr-1"
+            data-testid="live-feed-scroll"
+            className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1"
           >
             {props.feedError && (
               <p
@@ -374,6 +398,15 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           actions={props.actions}
           onReload={() => router.refresh()}
         />
+      </div>
+
+      {/* lg: the scorecard gets a bounded, scrollable slice so the feed and holds
+          columns above always keep their height (min 20rem). */}
+      <div
+        data-testid="scorecard-slot"
+        className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
+      >
+        <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
       </div>
 
       <ul

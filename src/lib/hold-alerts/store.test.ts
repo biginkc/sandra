@@ -71,10 +71,45 @@ describe("DeliveryStore.archiveClosed", () => {
     expect(t.selects[1]).toContainEqual({ method: "gt", args: ["id", "a0499"] });
   });
 
+  it("with candidates, archives only candidate properties that are not open", async () => {
+    const t = fake([
+      [
+        { id: "r1", property_id: "open", hold_key: "open:k" },
+        { id: "r2", property_id: "gone", hold_key: "gone:k" },
+        { id: "r3", property_id: "newcomer", hold_key: "newcomer:k" },
+      ],
+    ]);
+    const n = await createSupabaseDeliveryStore(t.client).archiveClosed("org", ["open"], ["open", "gone"]);
+    expect(n).toBe(1);
+    expect(t.rpcs).toEqual([{ fn: "hold_alert_archive_rows", args: { p_org_id: "org", p_ids: ["r2"] } }]);
+  });
+
   it("surfaces an archive RPC error", async () => {
     const t = fake([[{ id: "r2", property_id: "gone", hold_key: "k" }]]);
     t.client.rpc = () => Promise.resolve({ data: null, error: { message: "boom" } });
     await expect(createSupabaseDeliveryStore(t.client).archiveClosed("org", [])).rejects.toThrow(/archive update failed: boom/);
+  });
+});
+
+describe("DeliveryStore.deliveredPropertyIds", () => {
+  it("returns distinct property ids from live per-hold rows, complete when the last page is short", async () => {
+    const t = fake([
+      [
+        { id: "r1", property_id: "a", hold_key: "a:x" },
+        { id: "r2", property_id: "a", hold_key: "a:y" },
+        { id: "r3", property_id: "b", hold_key: "b:x" },
+      ],
+    ]);
+    const got = await createSupabaseDeliveryStore(t.client).deliveredPropertyIds("org");
+    expect(got).toEqual({ ids: ["a", "b"], complete: true });
+    expect(t.selects[0]).toContainEqual({ method: "not", args: ["hold_key", "like", "%:closed:%"] });
+  });
+
+  it("is incomplete when the page cap is hit", async () => {
+    const page = (n: number) =>
+      Array.from({ length: 500 }, (_, i) => ({ id: `r${n}-${String(i).padStart(4, "0")}`, property_id: `p${n}-${i}`, hold_key: "k" }));
+    const t = fake(Array.from({ length: 20 }, (_, n) => page(n)));
+    expect((await createSupabaseDeliveryStore(t.client).deliveredPropertyIds("org")).complete).toBe(false);
   });
 });
 

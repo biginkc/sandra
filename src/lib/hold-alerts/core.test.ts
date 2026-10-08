@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { reportError } from "@/lib/errors/report";
+
 import { runHoldAlertsForOrg } from "./core";
 import { ACQ, hold, makeDeps, ORG, OWNER } from "./test-support";
+
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const HOUR = 60 * 60 * 1000;
 
@@ -441,7 +445,39 @@ describe("durability and idempotency", () => {
   });
 });
 
+describe("incomplete alert load", () => {
+  it("is reported once per run, and still alerts on what did load", async () => {
+    vi.mocked(reportError).mockClear();
+    const t = makeDeps({ holdsComplete: false });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(summary.holds).toBe(1);
+  });
+  it("a complete load reports nothing", async () => {
+    vi.mocked(reportError).mockClear();
+    await runHoldAlertsForOrg(makeDeps().deps, ORG);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+});
+
 describe("archive-on-clear (a re-opened hold alerts again)", () => {
+  it("archives only properties this run saw as delivered: a row ensured by an overlapping run is left alone", async () => {
+    const t = makeDeps();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const cleared = makeDeps({ store: t.store, holds: [] });
+    const realListing = t.store.deliveredPropertyIds.bind(t.store);
+    cleared.store.deliveredPropertyIds = async (org: string) => {
+      const listing = await realListing(org);
+      // An overlapping run ensures a fresh row AFTER this run listed delivered properties.
+      await t.store.ensure({ orgId: ORG, propertyId: "prop-2", holdKey: "prop-2:draft_held", recipientUserId: "owner-1", channel: "slack", stage: "first" });
+      return listing;
+    };
+    const summary = await runHoldAlertsForOrg(cleared.deps, ORG);
+    expect(summary.archived).toBe(2);
+    const fresh = t.store.rows.find((r) => r.propertyId === "prop-2")!;
+    expect(fresh.holdKey.includes(":closed:")).toBe(false);
+  });
+
   it("a hold that clears and re-opens gets a fresh first alert", async () => {
     const t = makeDeps({ nowIso: "2026-10-08T10:02:00.000Z" });
     await runHoldAlertsForOrg(t.deps, ORG);
@@ -475,13 +511,22 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
     expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
   });
 
-  it("an incomplete hold load (truncated or failed query) archives nothing", async () => {
+  it("a failed held-lookup, or an incomplete delivered-property list, archives nothing", async () => {
     const t = makeDeps();
     await runHoldAlertsForOrg(t.deps, ORG);
-    const partial = makeDeps({ store: t.store, holds: [], holdsComplete: false });
-    const summary = await runHoldAlertsForOrg(partial.deps, ORG);
-    expect(summary.archived).toBe(0);
+    const failed = makeDeps({ store: t.store, holds: [], loadHeldPropertyIds: async () => null });
+    expect((await runHoldAlertsForOrg(failed.deps, ORG)).archived).toBe(0);
+    const incomplete = makeDeps({ store: t.store, holds: [] });
+    t.store.deliveredPropertyIds = async () => ({ ids: ["prop-1"], complete: false });
+    expect((await runHoldAlertsForOrg(incomplete.deps, ORG)).archived).toBe(0);
     expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
+  });
+
+  it("archives a closed hold even when the alert load is incomplete or the backlog is huge", async () => {
+    const t = makeDeps();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const closed = makeDeps({ store: t.store, holds: [], holdsComplete: false });
+    expect((await runHoldAlertsForOrg(closed.deps, ORG)).archived).toBe(2);
   });
 
   it("archiving is idempotent: a repeat pass after a crash archives nothing more", async () => {

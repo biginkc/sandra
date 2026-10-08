@@ -205,18 +205,6 @@ export function HoldCard({
   );
 }
 
-export function ShadowScorecard() {
-  return (
-    <section
-      aria-label="Shadow scorecard"
-      className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground"
-    >
-      <h3 className="font-medium text-foreground">Shadow scorecard</h3>
-      <p className="mt-1">Available after 2h of shadow traffic.</p>
-    </section>
-  );
-}
-
 const SOURCE_NAME: Record<HoldSource, string> = {
   needs_attention: "needs-attention",
   jev_decision: "Jev decision",
@@ -251,8 +239,12 @@ export function HoldsRail({
             ? `(${meta.total}, ${meta.shown} shown)`
             : `(${holds.length})`;
   return (
-    <aside aria-label="Holds" className="flex flex-col gap-3">
-      <h2 className="text-sm font-semibold">
+    <aside
+      aria-label="Holds"
+      data-testid="holds-scroll"
+      className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1"
+    >
+      <h2 className="lg:sticky lg:top-0 z-10 bg-background pb-1 text-sm font-semibold">
         Holds <span className="text-muted-foreground">{count}</span>
       </h2>
       {holdFailures.length > 0 && (
@@ -302,7 +294,6 @@ export function HoldsRail({
           />
         ))
       )}
-      <ShadowScorecard />
     </aside>
   );
 }
