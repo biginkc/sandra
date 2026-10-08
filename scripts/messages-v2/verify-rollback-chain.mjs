@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008300200 -- 55 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 Jev-only mode (220000) + 1 luna suggestions (250000) + 1 durable suppression (190000) + 1 holds New/Backlog + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200)).
+// (20261008140000 .. 20261008300200 -- 55 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200)).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
@@ -26,7 +26,7 @@ const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
 const LAST = process.env.CHAIN_LAST ?? "20261008300200";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 55); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 scorecard (160000) + 1 replay harness (180000) + 1 durable suppression (190000) + 1 new-only watermark (210000) + 1 Jev-only mode (220000) + 1 New/Backlog (230000) + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200)
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 55); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 scorecard (211000) + 1 replay harness (180000) + 1 durable suppression (212000) + 1 new-only watermark (210000) + 1 Jev-only mode (220000) + 1 New/Backlog (230000) + 1 Luna suggestions (250000) + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
