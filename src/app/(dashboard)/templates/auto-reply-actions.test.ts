@@ -135,6 +135,12 @@ describe("setAutoReplyMapping", () => {
     ]);
   });
 
+  it("accepts the number_source mapping key", async () => {
+    const r = await setAutoReplyMapping({ outcome: "number_source", templateId: "t1", active: true });
+    expect(r.ok).toBe(true);
+    expect(mocks.rpcCalls[0]).toMatchObject({ p_outcome: "number_source" });
+  });
+
   it("rejects outcomes that must never be answered automatically", async () => {
     for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear"]) {
       const r = await setAutoReplyMapping({ outcome, templateId: "t1", active: true });

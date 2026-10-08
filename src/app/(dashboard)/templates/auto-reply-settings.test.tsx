@@ -32,9 +32,19 @@ describe("<AutoReplySettingsSection />", () => {
     render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
     expect(screen.getByTestId("auto-reply-row-nurture")).toBeVisible();
     expect(screen.getByTestId("auto-reply-row-not_interested")).toBeVisible();
+    expect(screen.getByTestId("auto-reply-row-number_source")).toBeVisible();
     for (const never of ["new_lead", "opted_out", "dnc", "wrong_number"]) {
       expect(screen.queryByTestId(`auto-reply-row-${never}`)).not.toBeInTheDocument();
     }
+  });
+
+  it("choosing a template for the number-source row saves the number_source mapping", async () => {
+    const user = userEvent.setup();
+    render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
+    await user.selectOptions(screen.getByTestId("auto-reply-select-number_source"), "a");
+    await waitFor(() =>
+      expect(setAutoReplyMapping).toHaveBeenCalledWith({ outcome: "number_source", templateId: "a", active: true }),
+    );
   });
 
   it("offers approved templates only, defaulting to no automatic reply", () => {

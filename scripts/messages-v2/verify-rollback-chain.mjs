@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261008230000 -- 49 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog).
+// (20261008140000 .. 20261008290000 -- 51 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 new-only alert watermark + 1 replay harness + 1 holds New/Backlog + 1 templates + 1 number-source mapping key).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 49 rollbacks in REVERSE order,
+//   3. applies the 51 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 49 migrations forward again.
+//   5. re-applies the 51 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008240000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 50); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + 1 templates (240000)
+const LAST = process.env.CHAIN_LAST ?? "20261008290000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 51); // 49 on main (28 Jev + 13 messages-v2 + 4 Phase 1 + scorecard + replay + new-only watermark + New/Backlog 230000) + templates (240000) + number-source mapping key (290000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");

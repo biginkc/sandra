@@ -32,6 +32,7 @@ import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
 import {
   classifyForDispatch,
+  peekNumberSourceAnswer,
   type ClassificationBridgeResult,
 } from "@/lib/sms-classification/dispatch-bridge";
 import type { JevEscalationReason } from "@/lib/sms-classification/types";
@@ -77,7 +78,11 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
-import { resolveApprovedTemplateReply } from "./template-reply";
+import {
+  hasSendableNumberSourceTemplate,
+  NUMBER_SOURCE_REPLY_KEY,
+  resolveApprovedTemplateReply,
+} from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
@@ -716,6 +721,60 @@ async function dispatchAiResponseCore(
   }
 
   if (isIdentityQuestion(input.inboundBody)) {
+    // "Who is this?" that is ALSO "how did you get my number?": send only the
+    // approved number-source template (it identifies the context) and skip the
+    // identity reply, so the seller gets ONE message. Needs the classifier, so
+    // it is attempted only when an approved template is mapped; every other
+    // case (and any failure) falls through to the identity reply below.
+    const numberSource = await resolveNumberSourceForIdentity(supabase, {
+      input,
+      orgId: property.org_id,
+      config: config!,
+      runCtx: deps.runContext,
+    });
+    if (numberSource) {
+      const sent = await sendResponderMessage(supabase, {
+        runContext: deps.runContext,
+        input,
+        body: numberSource.body,
+        model: config!.model,
+        confidence: numberSource.nativeConfidence ?? 1,
+        sentiment: "neutral",
+        turn: currentTurn + 1,
+        source: "approved_template",
+        templateId: numberSource.templateId,
+        orgId: property.org_id,
+        claimStartedAt,
+        outboundMode: config!.outbound_mode,
+        replyKind: "send_reply",
+      });
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result:
+          sent.outcome === "sent"
+            ? "sent"
+            : sent.outcome === "skipped"
+              ? "skipped"
+              : sent.outcome === "retry"
+                ? "block"
+                : "held",
+        detail: {
+          templateId: numberSource.templateId,
+          mappingId: numberSource.mappingId,
+          outcome: numberSource.outcome,
+          replyKey: numberSource.key,
+          via: "identity_interceptor",
+          sendOutcome: sent.outcome,
+        },
+      }, deps.runContext);
+      return settleClaimForSendOutcome(supabase, responseClaim.claimId, sent, {
+        orgId: property.org_id,
+        input,
+        body: numberSource.body,
+        runContext: deps.runContext,
+      });
+    }
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
@@ -987,6 +1046,7 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
         escalationReason: classification.escalationReason,
+        askedHowNumberObtained: classification.askedHowNumberObtained,
         runCtx,
       });
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
@@ -1524,6 +1584,7 @@ async function resolveAndApplyRoute(
           outcome: "not_interested",
           nativeConfidence: classification.nativeConfidence,
           escalationReason: classification.escalationReason,
+          askedHowNumberObtained: classification.askedHowNumberObtained,
           runCtx,
         });
         if (step.kind === "stop") return step.outcome;
@@ -2128,21 +2189,34 @@ async function runApprovedTemplateStep(
     nativeConfidence: number | null;
     /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
     escalationReason: JevEscalationReason | null;
+    /**
+     * Jev said the seller asked how we got their number. When true and an
+     * approved `number_source` template is mapped, THAT template is sent
+     * instead of the outcome's own (one reply, never two). Otherwise nothing
+     * changes.
+     */
+    askedHowNumberObtained?: boolean;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
   const { input, property, ctx, claim, runCtx } = a;
-  const resolved = await resolveApprovedTemplateReply(supabase, {
-    orgId: property.org_id,
-    propertyId: input.propertyId,
-    contactId: input.contactId,
-    outcome: a.outcome,
-    outcomeConfidence: a.nativeConfidence,
-    escalationReason: a.escalationReason,
-    // The responder does not ask Jev for a reply intent yet, so only
-    // any-intent mappings match until it does.
-    replyIntent: null,
-  });
+  const resolveFor = (mappingKey?: typeof NUMBER_SOURCE_REPLY_KEY) =>
+    resolveApprovedTemplateReply(supabase, {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      outcome: a.outcome,
+      ...(mappingKey ? { mappingKey } : {}),
+      outcomeConfidence: a.nativeConfidence,
+      escalationReason: a.escalationReason,
+      // The responder does not ask Jev for a reply intent yet, so only
+      // any-intent mappings match until it does.
+      replyIntent: null,
+    });
+  // The number-source template takes the outcome's place when it applies; if it
+  // is not approved / mapped / renderable, today's outcome template is used.
+  const numberSource = a.askedHowNumberObtained === true ? await resolveFor(NUMBER_SOURCE_REPLY_KEY) : null;
+  const resolved = numberSource?.kind === "template" ? numberSource : await resolveFor();
   if (resolved.kind === "none") {
     if (
       resolved.reason === "human_follow_up" ||
@@ -2219,6 +2293,7 @@ async function runApprovedTemplateStep(
     templateId: resolved.templateId,
     mappingId: resolved.mappingId,
     outcome: a.outcome,
+    ...(resolved.key === NUMBER_SOURCE_REPLY_KEY ? { replyKey: resolved.key } : {}),
     sendOutcome: sent.outcome,
     ...(sent.outcome === "sent" ? { outboundMessageId: sent.messageId } : {}),
     ...("reason" in sent && sent.reason ? { reason: sent.reason } : {}),
@@ -2265,6 +2340,57 @@ async function runApprovedTemplateStep(
       runContext: runCtx,
     }),
   };
+}
+
+/**
+ * Identity-interceptor helper: returns the rendered number-source template when
+ * this inbound both asks who we are and asks how we got the number, and the
+ * same gates the classified path applies all pass (a nurture / not-interested
+ * outcome, no human follow-up, label switch on, confidence at the cutoff, an
+ * approved + mapped template). Otherwise null. Read-only: nothing is persisted
+ * and no outcome is applied (the identity path never applied one either).
+ */
+async function resolveNumberSourceForIdentity(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    orgId: string;
+    config: { classifier_provider?: string | null; classifier_mode?: string | null };
+    runCtx?: MaybeRunContext;
+  },
+): Promise<
+  | (Extract<Awaited<ReturnType<typeof resolveApprovedTemplateReply>>, { kind: "template" }> & {
+      nativeConfidence: number | null;
+    })
+  | null
+> {
+  const { input } = a;
+  if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return null;
+  if (!(await hasSendableNumberSourceTemplate(supabase, a.orgId))) return null;
+  const peek = await peekNumberSourceAnswer(
+    supabase,
+    {
+      orgId: a.orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
+  );
+  if (!peek || !peek.askedHowNumberObtained) return null;
+  const resolved = await resolveApprovedTemplateReply(supabase, {
+    orgId: a.orgId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    outcome: peek.outcome,
+    mappingKey: NUMBER_SOURCE_REPLY_KEY,
+    outcomeConfidence: peek.nativeConfidence,
+    escalationReason: peek.escalationReason,
+    replyIntent: null,
+  });
+  return resolved.kind === "template" ? { ...resolved, nativeConfidence: peek.nativeConfidence } : null;
 }
 
 /**

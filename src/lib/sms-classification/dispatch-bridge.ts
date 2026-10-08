@@ -78,6 +78,8 @@ export type ClassificationBridgeResult =
        *  so the approved-template step can fail closed on anything but
        *  `not_applicable` (PLAN D5: price / distress never auto-reply). */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** Jev's "did the seller ask how we got their number" answer; true only on an explicit yes. */
+      askedHowNumberObtained: boolean;
       thresholdAtDecision: number | null;
       /** The threshold SETTINGS ROW'S version actually used at decision
        *  time — null exactly when thresholdAtDecision is null (root
@@ -102,6 +104,8 @@ export type ClassificationBridgeResult =
       nativeConfidence: number | null;
       /** See `jev_route.escalationReason`. */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** See `jev_route.askedHowNumberObtained`. */
+      askedHowNumberObtained: boolean;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
       evaluationRevision: number;
@@ -391,7 +395,7 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, askedHowNumberObtained: decision.askedHowNumberObtained === true, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
@@ -430,6 +434,7 @@ export async function classifyForDispatch(
       eligibleForAutoAccept: false,
       nativeConfidence,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained === true,
       thresholdAtDecision,
       thresholdVersion,
       evaluationRevision,
@@ -458,7 +463,85 @@ export async function classifyForDispatch(
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
     escalationReason: decision.escalationReason,
+    askedHowNumberObtained: decision.askedHowNumberObtained === true,
   };
+}
+
+/**
+ * What the identity interceptor needs to decide whether a "who is this?" message
+ * is ALSO a "how did you get my number?" one. A read-only look at Jev's answer
+ * for the current inbound: nothing is persisted, no outcome is applied, and it
+ * never throws (any failure is `null`, i.e. the caller sends the identity reply
+ * exactly as before).
+ */
+export type NumberSourcePeek = {
+  askedHowNumberObtained: boolean;
+  outcome: SmsClassificationDecision["outcome"];
+  nativeConfidence: number | null;
+  escalationReason: SmsClassificationDecision["escalationReason"];
+};
+
+export async function peekNumberSourceAnswer(
+  supabase: SupabaseClient<Database>,
+  input: ClassificationBridgeInput,
+  deps: { fetch: typeof fetch; typesafeApiKey: string; runContext?: MaybeRunContext },
+): Promise<NumberSourcePeek | null> {
+  try {
+    const sourceCreatedAt = input.inboundMessageId
+      ? await readSourceMessageCreatedAt(supabase, input.inboundMessageId, input.propertyId)
+      : null;
+    if (input.inboundMessageId && sourceCreatedAt === null) return null;
+    const priorThread = await buildTwoWayThreadState(supabase, {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      excludeMessageId: input.inboundMessageId,
+      sourceCreatedAt,
+    });
+    const thread = [
+      ...priorThread,
+      { direction: "inbound" as const, body: input.inboundBody, sentAt: sourceCreatedAt ?? new Date().toISOString() },
+    ];
+    const decision = await classifyWithJev(
+      {
+        conversationId: input.conversationId ?? input.propertyId,
+        thread,
+        state: { propertyId: input.propertyId },
+        includeReplyIntent: false,
+      },
+      { fetch: deps.fetch, apiKey: deps.typesafeApiKey },
+    );
+    const nativeConfidence =
+      typeof decision.outcomeConfidence === "number" &&
+      Number.isFinite(decision.outcomeConfidence) &&
+      decision.outcomeConfidence >= 0 &&
+      decision.outcomeConfidence <= 1
+        ? decision.outcomeConfidence
+        : null;
+    await recordStep(supabase, deps.runContext, {
+      kind: "jev",
+      name: "number_source_peek",
+      result: "pass",
+      detail: {
+        outcome: decision.outcome,
+        askedHowNumberObtained: decision.askedHowNumberObtained ?? null,
+        nativeConfidence,
+        model: decision.model,
+      },
+    });
+    return {
+      askedHowNumberObtained: decision.askedHowNumberObtained === true,
+      outcome: decision.outcome,
+      nativeConfidence,
+      escalationReason: decision.escalationReason,
+    };
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "sms_classification_number_source_peek" },
+      extra: { propertyId: input.propertyId },
+    });
+    return null;
+  }
 }
 
 async function readDecisionContextRevision(
@@ -552,6 +635,7 @@ async function persistRun(
       outcomeConfidence: decision.outcomeConfidence ?? null,
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained ?? null,
       probabilities: decision.probabilities,
       // Root direct-review finding (2026-09-20): the wrong_number/
       // not_interested/opted_out/dnc review path had no persisted

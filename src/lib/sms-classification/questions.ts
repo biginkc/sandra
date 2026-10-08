@@ -1,7 +1,7 @@
 import type { JevOutcome } from "./types";
 
 /** Version the rubric as well as the response shape: old scores are not interchangeable. */
-export const JEV_SCHEMA_VERSION = "2";
+export const JEV_SCHEMA_VERSION = "3";
 export const JEV_POLICY_VERSION = "2026-09-20-new-lead-review";
 export const JEV_MODEL = "jev-1.13.0";
 
@@ -28,6 +28,21 @@ export const OUTCOME_CRITERIA: Record<JevOutcome, string> = {
     "Explicit formal/legal demand: attorney/lawyer, legal action, Do Not Call registry, TCPA, or a legal demand to cease all contact. Hostility alone is not dnc. Takes precedence over earlier selling interest.",
   unclear:
     "The available evidence does not support a category, is contradictory, or lacks necessary context. Do not invent facts or treat an outbound-only invitation as seller interest.",
+};
+
+/**
+ * Jev question id for "did the seller ask how we got their number". The
+ * instructions and criteria below are human-approved text (Jarrad, 2026-10-07)
+ * and pinned verbatim by tests; do not edit them without a new approval.
+ */
+export const NUMBER_SOURCE_QUESTION_ID = "asked_how_number_obtained";
+export const NUMBER_SOURCE_QUESTION: ChoiceQuestion = {
+  type: "choice",
+  instructions: "Did the seller ask anything about how we obtained the phone number?",
+  criteria: {
+    yes: "The seller asks how, where or from whom we got their number.",
+    no: "The seller does not ask about this.",
+  },
 };
 
 export function buildQuestions(includeReplyIntent: boolean): Record<string, ChoiceQuestion> {
@@ -63,6 +78,7 @@ export function buildQuestions(includeReplyIntent: boolean): Record<string, Choi
         uncertain: "Insufficient evidence to choose a reason.",
       },
     },
+    [NUMBER_SOURCE_QUESTION_ID]: NUMBER_SOURCE_QUESTION,
   };
   if (includeReplyIntent) questions.reply_intent = {
     type: "choice",

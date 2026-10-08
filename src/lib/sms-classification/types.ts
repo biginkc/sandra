@@ -34,6 +34,11 @@ export type SmsClassificationDecision = {
   wrongScope: JevWrongScope | null;
   escalationReason: JevEscalationReason | null;
   replyIntent: JevReplyIntent | null;
+  /**
+   * Jev's `asked_how_number_obtained` answer: true = yes, false = no, null/absent
+   * = not answered or unreadable (treated as "no": fail closed).
+   */
+  askedHowNumberObtained?: boolean | null;
   replyIntentAvailable: boolean;
   /** Per-question probabilities as returned by the provider, keyed by question id. */
   probabilities: Record<string, Record<string, number>>;

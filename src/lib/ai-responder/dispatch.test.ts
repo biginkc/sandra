@@ -11,7 +11,7 @@ import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
-import { resolveApprovedTemplateReply } from "./template-reply";
+import { hasSendableNumberSourceTemplate, resolveApprovedTemplateReply } from "./template-reply";
 import type { AiStructuredOutput } from "./types";
 
 const { recordLeadEvent, reportErrorMock } = vi.hoisted(() => ({
@@ -106,6 +106,8 @@ vi.mock("./safety", () => ({
 vi.mock("./template-reply", () => ({
   // Default: no mapping, i.e. today's behaviour. Template tests override per call.
   resolveApprovedTemplateReply: vi.fn(async () => ({ kind: "none", reason: "no_mapping" })),
+  NUMBER_SOURCE_REPLY_KEY: "number_source",
+  hasSendableNumberSourceTemplate: vi.fn(async () => false),
 }));
 
 type MessageRow = {
@@ -6851,6 +6853,238 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(state.property.outreach_dispo).toBe("nurture");
     expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+  });
+});
+
+describe("approved number-source reply (asked_how_number_obtained)", () => {
+  const NUMBER_BODY = "Fair question. Your number came up tied to 123 Main St in public records. Want me to take you off the list?";
+  const OUTCOME_BODY = "Hi Sam, this is Mel. Thanks for letting us know.";
+  const tpl = (body: string, key: string, outcome: string) => ({
+    kind: "template" as const,
+    templateId: `tpl-${key}`,
+    mappingId: `map-${key}`,
+    body,
+    outcome: outcome as never,
+    key: key as never,
+  });
+  // Mapping-aware resolver: number_source and the outcome each have an approved template.
+  const bothMapped = (outcome: string) =>
+    vi.mocked(resolveApprovedTemplateReply).mockImplementation((async (_s: unknown, a: { mappingKey?: string }) =>
+      a.mappingKey === "number_source"
+        ? tpl(NUMBER_BODY, "number_source", outcome)
+        : tpl(OUTCOME_BODY, outcome, outcome)) as never);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z")); // 1pm Central
+    vi.mocked(getConsentState).mockResolvedValue({} as never);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+    vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+    vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+    vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    vi.mocked(resolveApprovedTemplateReply).mockReset();
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" } as never);
+    vi.mocked(hasSendableNumberSourceTemplate).mockReset();
+    vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(false);
+  });
+
+  async function run(
+    state: MockState,
+    id: string,
+    body: string,
+    answers: Record<string, unknown>,
+    thresholds: Array<{ outcome: string; min_confidence: number }> = [
+      { outcome: "nurture", min_confidence: 0.95 },
+      { outcome: "not_interested", min_confidence: 0.9 },
+    ],
+  ) {
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = thresholds;
+    const supabase = createMockSupabase(state);
+    seedInboundMessage(state, { id, body });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ answers }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: body, inboundMessageId: id, propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      return { result, fetchMock };
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  }
+  const answers = (outcome: string, asked: "yes" | "no" | undefined, confidence = 0.97) => ({
+    outcome: { choice: outcome, confidence },
+    escalation_reason: { choice: "not_applicable" },
+    ...(asked ? { asked_how_number_obtained: { choice: asked } } : {}),
+  });
+  const sentBodies = () => vi.mocked(sendSmsToContact).mock.calls.map((c) => (c[1] as { body: string }).body);
+
+  it("yes on a nurture: sends the number-source template as approved_template, ONCE, then applies nurture", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("nurture");
+    const { result } = await run(state, "inbound-ns-nurture", "how did you get my number?", answers("nurture", "yes"));
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(sentBodies()).toEqual([NUMBER_BODY]);
+    expect(vi.mocked(resolveApprovedTemplateReply)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ outcome: "nurture", mappingKey: "number_source", escalationReason: "not_applicable" }),
+    );
+    // The outcome's own template is never also sent.
+    expect(vi.mocked(resolveApprovedTemplateReply).mock.calls.filter(([, a]) => !(a as { mappingKey?: string }).mappingKey)).toHaveLength(0);
+    expect(state.messages.find((m) => m.direction === "outbound")?.metadata).toMatchObject({
+      reply_source: "approved_template",
+      template_id: "tpl-number_source",
+    });
+    expect(state.property.outreach_dispo).toBe("nurture");
+  });
+
+  it("yes on a not_interested: one number-source reply, then the close", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("not_interested");
+    const { result } = await run(state, "inbound-ns-ni", "who gave you my number", answers("not_interested", "yes", 0.95));
+    expect(result).toMatchObject({ outcome: "auto_closed" });
+    expect(sentBodies()).toEqual([NUMBER_BODY]);
+    expect(state.property.outreach_dispo).toBe("not_interested");
+  });
+
+  it("yes but no approved number_source template: falls back to the outcome template exactly as before", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(resolveApprovedTemplateReply).mockImplementation((async (_s: unknown, a: { mappingKey?: string }) =>
+      a.mappingKey === "number_source"
+        ? { kind: "none", reason: "no_mapping" }
+        : tpl(OUTCOME_BODY, "nurture", "nurture")) as never);
+    await run(state, "inbound-ns-fallback", "how did you get my number?", answers("nurture", "yes"));
+    expect(sentBodies()).toEqual([OUTCOME_BODY]);
+  });
+
+  it("yes and nothing mapped at all: nothing is sent (today's behaviour)", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    const { result } = await run(state, "inbound-ns-none", "how did you get my number?", answers("nurture", "yes"));
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("no (or an unanswered question): the number-source mapping is never consulted", async () => {
+    for (const asked of ["no", undefined] as const) {
+      const state = createMockState();
+      installSendMock(state);
+      bothMapped("nurture");
+      vi.mocked(resolveApprovedTemplateReply).mockClear();
+      vi.mocked(sendSmsToContact).mockClear();
+      await run(state, `inbound-ns-no-${asked}`, "Not right now", answers("nurture", asked));
+      expect(sentBodies()).toEqual([OUTCOME_BODY]);
+      expect(vi.mocked(resolveApprovedTemplateReply).mock.calls.every(([, a]) => !(a as { mappingKey?: string }).mappingKey)).toBe(true);
+    }
+  });
+
+  it.each(["opted_out", "dnc", "wrong_number"])(
+    "yes with a %s outcome: no template is sent and the existing path handles it",
+    async (outcome) => {
+      const state = createMockState();
+      installSendMock(state);
+      bothMapped(outcome);
+      const { result } = await run(
+        state,
+        `inbound-ns-${outcome}`,
+        "how did you get my number, stop texting me",
+        { ...answers(outcome, "yes", 0.99), wrong_scope: { choice: "this_property" } },
+        [{ outcome, min_confidence: 0.9 }],
+      );
+      expect(result).toBeDefined();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
+    },
+  );
+
+  it("yes with a human follow-up reason (price, distress, ...) gets no number-source reply: the resolver refuses it", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    const actual = await vi.importActual<typeof import("./template-reply")>("./template-reply");
+    vi.mocked(resolveApprovedTemplateReply).mockImplementation(actual.resolveApprovedTemplateReply as never);
+    await run(
+      state,
+      "inbound-ns-price",
+      "how did you get my number? I'd want 300k",
+      { ...answers("nurture", "yes"), escalation_reason: { choice: "price_or_offer" } },
+    );
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  describe("identity interceptor", () => {
+    const WHO_AND_NUMBER = "Who is this? How did you get my number?";
+    const idRun = (state: MockState, id: string, body: string, ans: Record<string, unknown>) => run(state, id, body, ans);
+
+    it("who-is-this AND how-did-you-get-my-number: exactly ONE reply, the number-source template, not the identity copy", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      const { result } = await idRun(state, "inbound-id-ns", WHO_AND_NUMBER, answers("nurture", "yes"));
+      expect(result).toMatchObject({ outcome: "sent" });
+      expect(sentBodies()).toEqual([NUMBER_BODY]);
+      expect(sentBodies()).not.toContain(IDENTITY_REPLY_BODY);
+      expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(1);
+      expect(state.messages.find((m) => m.direction === "outbound")?.metadata).toMatchObject({ reply_source: "approved_template" });
+    });
+
+    it("who-is-this only (Jev says no): the identity reply, once", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      await idRun(state, "inbound-id-only", "Who is this?", answers("unclear", "no"));
+      expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
+    });
+
+    it("no approved number_source template: no extra classifier call at all, identity reply as today", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      const { fetchMock } = await idRun(state, "inbound-id-notpl", WHO_AND_NUMBER, answers("nurture", "yes"));
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
+    });
+
+    it("the classifier says yes but the outcome is a stop request: identity reply path, no number-source template", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      // The real resolver is the gate on the outcome (opted_out is never templatable).
+      const actual = await vi.importActual<typeof import("./template-reply")>("./template-reply");
+      vi.mocked(resolveApprovedTemplateReply).mockImplementation(actual.resolveApprovedTemplateReply as never);
+      await idRun(state, "inbound-id-optout", WHO_AND_NUMBER, answers("opted_out", "yes", 0.99));
+      expect(sentBodies()).not.toContain(NUMBER_BODY);
+      expect(sentBodies().length).toBeLessThanOrEqual(1);
+    });
+
+    it("a classifier outage falls back to the identity reply", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      const supabase = createMockSupabase(state);
+      seedInboundMessage(state, { id: "inbound-id-out", body: WHO_AND_NUMBER });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 401, text: async () => "no", json: async () => ({}) })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: WHO_AND_NUMBER, inboundMessageId: "inbound-id-out", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
+    });
   });
 });
 
