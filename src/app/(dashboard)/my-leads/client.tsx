@@ -37,6 +37,7 @@ import { reasonLabel } from "./_components/call-next-reason";
 import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
 import { PostCallPrompt } from "./_components/post-call-prompt";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { saveExtrasRequest, type ExtrasRequest } from "./_components/extras-saver";
 import type {
   AcquisitionCallReferenceOption,
@@ -374,7 +375,9 @@ export function MyLeadsClient({
   });
   type Opening = {
     action: MyLeadAction;
-    row: QueueRow;
+    // A completed call survives pagination and queue refreshes. Its property ID is
+    // enough to request an authoritative row; a displayed row also pins the episode.
+    row: Pick<QueueRow, "propertyId"> & Partial<Pick<QueueRow, "assignmentEpisodeId">>;
     scope: string;
     focusGeneration: number;
     callActivityId?: string | null;
@@ -657,7 +660,8 @@ export function MyLeadsClient({
     // Never silently move an opening into a different assignment episode.
     if (
       !fresh ||
-      fresh.assignmentEpisodeId !== opening.row.assignmentEpisodeId
+      (opening.row.assignmentEpisodeId !== undefined &&
+        fresh.assignmentEpisodeId !== opening.row.assignmentEpisodeId)
     ) {
       setOpeningStatus({
         opening,
@@ -710,7 +714,21 @@ export function MyLeadsClient({
     callActivityId?: string | null,
   ) => {
     const row = rawRow(id);
-    if (!row) return;
+    if (!row) {
+      // The persistent call banner can outlive the row's loaded page. Resolve the
+      // lead through the same authorized lookup instead of treating pagination as denial.
+      if (kind === "log-attempt" && callActivityId) {
+        cancelOpening();
+        void finishOpening({
+          action: kind,
+          row: { propertyId: id },
+          scope: openingScope,
+          focusGeneration,
+          callActivityId,
+        });
+      }
+      return;
+    }
     cancelOpening();
     if (kind === "start-call" && dialpad) {
       // An active Dialpad connection routes calls through the audited API dial; the server re-derives org and rep and revalidates at dispatch.
@@ -988,10 +1006,6 @@ export function MyLeadsClient({
   useEffect(() => {
     pageHandlerRef.current = {
       onLogOutcome: (propertyId, callActivityId) => {
-        if (!rawRow(propertyId)) {
-          setError("This lead is no longer in your queue.");
-          return;
-        }
         action("log-attempt", propertyId, callActivityId);
       },
       onEnded: () => {
@@ -1256,7 +1270,22 @@ export function MyLeadsClient({
       : canonicalRetryHref;
   return (
     <CoachCallContext.Provider value={coachCall}>
-      {openingStatus && (
+      {openingStatus && (openingStatus.opening.callActivityId ? (
+        <Dialog open onOpenChange={(open) => { if (!open) cancelOpening(); }}>
+          <DialogContent>
+            <DialogTitle>Log call outcome</DialogTitle>
+            <div role="status" aria-live="polite">{openingStatus.message}</div>
+            {!openingStatus.busy && (
+              <Button type="button" variant="outline" onClick={retryOpening}>
+                Retry opening
+              </Button>
+            )}
+            <Button type="button" variant="ghost" onClick={cancelOpening}>
+              Cancel opening
+            </Button>
+          </DialogContent>
+        </Dialog>
+      ) : (
         <div role="status" className="mb-4 rounded border p-3">
           {openingStatus.message}
           {!openingStatus.busy && (
@@ -1268,7 +1297,7 @@ export function MyLeadsClient({
             Cancel opening
           </Button>
         </div>
-      )}
+      ))}
       {viewer.isOwner && (
         <details className="mb-4 rounded-lg border p-4">
           <summary className="cursor-pointer font-medium">
