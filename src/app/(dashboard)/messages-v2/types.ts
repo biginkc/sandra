@@ -101,6 +101,22 @@ export type HoldsMeta = {
   deadLetterUnavailable?: boolean;
 };
 
+/**
+ * New / Backlog split of the Holds rail. `holds` on the page are the New ones
+ * (up to a cap); Backlog is counted and loaded on demand.
+ */
+export type HoldsSplit = {
+  /** Fixed per-org cutover; holds whose latest activity is before it are Backlog. Null when classification failed. */
+  backlogBefore: string | null;
+  /** Exact number of New holds (may exceed `newShown` when capped). */
+  newTotal: number;
+  newShown: number;
+  /** Exact number of Backlog holds. */
+  backlogTotal: number;
+  /** Classification query failed: counts are unknown, not zero. */
+  error?: string;
+};
+
 export type HoldSource =
   "needs_attention" | "jev_decision" | "disposition_review" | "pending_draft";
 
@@ -117,6 +133,20 @@ export type DeadLetterInfo = {
   late: boolean;
 };
 
+export type HoldSeen = {
+  through: string | null;
+  flagReason: string | null;
+  flagAt: string | null;
+};
+
+/** Luna's pending pick for a hold (a suggestion only; never auto-applied). */
+export type LunaHoldSuggestion = {
+  id: string;
+  outcome: string;
+  confidence: number;
+  inbound_message_id: string;
+};
+
 export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Property id (one hold per property). */
   id: string;
@@ -126,11 +156,34 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   sources: HoldSource[];
   /** ISO time the oldest underlying item opened; null when unknown (never guessed from updated_at). */
   since: string | null;
+  /**
+   * When the hold began, for alert eligibility only. null = unknown (a property
+   * flagged before start times were tracked): such a hold never alerts.
+   */
+  alert_since?: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;
-  /** A pending Claude reply draft exists for this hold's run (body not shown in Phase 0). */
+  /** A pending Claude reply draft exists for this hold's run. */
   draft_held?: boolean;
+  /**
+   * The newest pending draft. `body` / `edited_body` are present only when the
+   * page asked for them (the hold actions need to show and send the text).
+   */
+  draft?: {
+    id: string;
+    inbound_message_id: string | null;
+    body?: string;
+    edited_body?: string | null;
+    /** Version of the human edit (null = never edited). Sent back with Send / Edit so a changed draft is refused. */
+    edited_at?: string | null;
+  };
+  /**
+   * What this card displayed, for the stale-click guard: Dismiss / Take over
+   * send it back and the server refuses (STALE) when anything newer exists.
+   * `through` is the newest pending decision / review / draft created_at shown.
+   */
+  seen?: HoldSeen;
   /** Inbound message ids tied to this hold (used to match dead letters). */
   message_ids?: string[];
   /** A dead-letter row exists: the reply text was saved for review (text never loaded). */
@@ -139,8 +192,12 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   dead_letter_late?: boolean;
   /** One entry per inbound/run dead-letter on this hold; `late` = provider accepted it late. */
   dead_letters?: DeadLetterInfo[];
+  /** Latest alert delivery for this hold's property (hold_alert_deliveries); absent = none recorded. */
+  alert?: { status: "pending" | "sending" | "sent" | "failed" | "skipped"; reason: string | null };
   /** The property's raw last_ai_escalation_reason (e.g. `send_timeout_then_sent`); null/absent when none. */
   flag_reason?: string | null;
+  /** Luna's pending suggestion for this hold (only when the Luna flag is on). */
+  luna?: LunaHoldSuggestion;
 };
 
 export type PipelineCoverage = { inboundMessages: number; runs: number };

@@ -323,6 +323,8 @@ export function formatLeadEventSentence(
     }
     case "ai_escalation_cleared":
       return `${actor} cleared human review`;
+    case "hold_reply_sent":
+      return `${actor} sent a held reply${payload.edited === true ? " (edited)" : ""}`;
     case "ai_responder_toggled":
       return typeof payload.to === "boolean"
         ? `${actor} turned Sandra replies ${payload.to ? "off" : "on"}`

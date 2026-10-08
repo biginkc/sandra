@@ -6,7 +6,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
-import { dispatchAiResponse, resolveOutboundPolicy, sendReservationTuning } from "./dispatch";
+import { dispatchAiResponse, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
@@ -24,6 +24,12 @@ vi.mock("@/lib/sms-classification/dispatch-bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/sms-classification/dispatch-bridge")>();
   return { ...actual, classifyForDispatch: vi.fn(actual.classifyForDispatch) };
 });
+
+const lunaSuggest = vi.hoisted(() => ({ request: vi.fn() }));
+
+vi.mock("@/lib/sms-classification/luna/suggest", () => ({
+  requestLunaSuggestion: lunaSuggest.request,
+}));
 
 vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
@@ -212,6 +218,7 @@ type MockState = {
     min_confidence: number;
     model: string;
     outbound_mode?: string;
+    reply_generation?: "llm" | "off";
     system_prompt: string;
   };
   smsClassificationRuns: Array<{ id: string }>;
@@ -2356,6 +2363,120 @@ describe("dispatchAiResponse debounce", () => {
         expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
         expect(state.property.needs_human_attention).toBe(false);
       } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+  });
+
+  describe("Luna fallback suggestion on below-threshold holds (never applied, never blocking)", () => {
+    const LUNA_ENV = { LUNA_SUGGESTIONS_ENABLED: "1", OPENAI_API_KEY: "sk-test-key" };
+
+    async function dispatchBelowThreshold(choice: string, body: string, id: string) {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: choice, min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id, body });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice, confidence: 0.5 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: body, inboundMessageId: id, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        return { result, state };
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    }
+
+    beforeEach(() => {
+      lunaSuggest.request.mockReset();
+      lunaSuggest.request.mockResolvedValue({ status: "stored", outcome: "nurture", confidence: 0.9 });
+    });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it.each([
+      { choice: "nurture", jev: "nurture" },
+      { choice: "not_interested", jev: "not_interested" },
+      { choice: "wrong_number", jev: "wrong_number" },
+    ])("asks Luna once for a below-threshold Jev $choice hold and leaves the dispatch result unchanged", async ({ choice, jev }) => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      const { result, state } = await dispatchBelowThreshold(choice, "maybe, not sure", `inbound-luna-${choice}`);
+      await vi.waitFor(() => expect(lunaSuggest.request).toHaveBeenCalledTimes(1));
+      expect(lunaSuggest.request).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ jevOutcome: jev, inboundMessageId: `inbound-luna-${choice}`, propertyId: PROPERTY_ID }),
+        expect.anything(),
+      );
+      // Still held for a human; Luna applied nothing.
+      expect(result.outcome).not.toBe("sent");
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+    });
+
+    it("does not wait for a Luna call that never finishes", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      lunaSuggest.request.mockImplementation(() => new Promise(() => undefined));
+      const { result } = await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-hang");
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
+      await vi.waitFor(() => expect(lunaSuggest.request).toHaveBeenCalledTimes(1));
+    });
+
+    it("schedules the Luna call after the response when a request scope exists, not inline", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      afterTasks.capture = true;
+      afterTasks.fns.length = 0;
+      try {
+        await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-after");
+        expect(lunaSuggest.request).not.toHaveBeenCalled();
+        expect(afterTasks.fns.length).toBeGreaterThan(0);
+        for (const task of afterTasks.fns) await task();
+        expect(lunaSuggest.request).toHaveBeenCalledTimes(1);
+      } finally {
+        afterTasks.capture = false;
+        afterTasks.fns.length = 0;
+      }
+    });
+
+    it("never asks Luna when the flag is off or the key is missing", async () => {
+      vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "");
+      vi.stubEnv("OPENAI_API_KEY", "sk-test-key");
+      await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-off");
+      vi.stubEnv("LUNA_SUGGESTIONS_ENABLED", "1");
+      vi.stubEnv("OPENAI_API_KEY", "");
+      await dispatchBelowThreshold("nurture", "maybe, not sure", "inbound-luna-nokey");
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
+    });
+
+    it.each(["opted_out", "dnc"])("never asks Luna about Jev's own below-threshold %s call", async (choice) => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      await dispatchBelowThreshold(choice, "whatever the reply is", `inbound-luna-${choice}`);
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
+    });
+
+    it("never asks Luna for a Jev decision that auto-applies", async () => {
+      for (const [k, v] of Object.entries(LUNA_ENV)) vi.stubEnv(k, v);
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-luna-auto", body: "not right now" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 } } }),
+      })));
+      try {
+        await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "not right now", inboundMessageId: "inbound-luna-auto", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(lunaSuggest.request).not.toHaveBeenCalled();
     });
   });
 
@@ -6246,6 +6367,144 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
 
 });
 
+describe("Jev-only mode (reply_generation = off): the legacy generator is never called", () => {
+  const inp = (id: string, extra: Record<string, unknown> = {}) => ({
+    contactId: CONTACT_ID,
+    conversationId: CONVERSATION_ID,
+    inboundBody: "Maybe, tell me more",
+    inboundMessageId: id,
+    propertyId: PROPERTY_ID,
+    ...extra,
+  });
+  const anthropic = { anthropic: {} as never };
+  const CARRIED = {
+    body: "Hi there",
+    confidence: 0.91,
+    sentiment: "neutral" as const,
+    orgId: "org-1",
+    kind: "send_reply" as const,
+  };
+
+  beforeEach(() => {
+    Object.assign(sendReservationTuning, { deadlineMs: 0 });
+    vi.mocked(getConsentState).mockResolvedValue({} as never);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+    vi.mocked(applyPhoneLevelOptOut).mockResolvedValue(undefined);
+    vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+    vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+    vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    Object.assign(sendReservationTuning, defaultReservationTuning);
+  });
+
+  const offState = (provider: "legacy" | "jev" = "legacy") => {
+    const state = createMockState();
+    state.config.reply_generation = "off";
+    state.config.classifier_provider = provider;
+    state.config.classifier_mode = "automatic";
+    installSendMock(state);
+    return state;
+  };
+  const expectHeld = (state: MockState, result: unknown) => {
+    expect(result).toEqual({ outcome: "escalated", reason: "needs_reply" });
+    expect(generateAiReply).not.toHaveBeenCalled();
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("needs_reply");
+  };
+  const stubJev = (choice: string, confidence: number) =>
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice, confidence } } }),
+    })));
+
+  it("first dispatch, legacy classifier: no Anthropic call, held as needs_reply", async () => {
+    const state = offState("legacy");
+    seedInboundMessage(state, { id: "inbound-off-1", body: "Maybe, tell me more" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-1"), anthropic);
+    expectHeld(state, result);
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("first dispatch, Jev use_legacy fall-through: no Anthropic call, held as needs_reply", async () => {
+    const state = offState("jev");
+    seedInboundMessage(state, { id: "inbound-off-2", body: "Maybe, tell me more" });
+    vi.mocked(classifyForDispatch).mockResolvedValueOnce({ kind: "use_legacy", classificationRunId: null } as never);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-2"), anthropic);
+    expectHeld(state, result);
+  });
+
+  it("retry (no carried reply, as the ai-reply-delay workflow re-dispatches): still no Anthropic call", async () => {
+    const state = offState("legacy");
+    seedInboundMessage(state, { id: "inbound-off-3", body: "Maybe, tell me more" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-3", { retryAttempt: 1 }), anthropic);
+    expectHeld(state, result);
+  });
+
+  it("retry carrying a reply generated BEFORE the switch: not sent, held as needs_reply", async () => {
+    const state = offState("legacy");
+    seedInboundMessage(state, { id: "inbound-off-4", body: "Maybe, tell me more" });
+    const result = await dispatchAiResponse(
+      createMockSupabase(state) as never,
+      inp("inbound-off-4", { retryAttempt: 1, retryReply: CARRIED }),
+      anthropic,
+    );
+    expectHeld(state, result);
+  });
+
+  it("STOP/suppression arriving during the retry gap with drafting off: ends quietly, no needs_reply hold", async () => {
+    const state = offState("legacy");
+    seedInboundMessage(state, { id: "inbound-off-4b", body: "Maybe, tell me more" });
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" } as never);
+    const result = await dispatchAiResponse(
+      createMockSupabase(state) as never,
+      inp("inbound-off-4b", { retryAttempt: 1, retryReply: CARRIED }),
+      anthropic,
+    );
+    expect(result).toEqual({ outcome: "skipped", reason: "disabled_per_property" });
+    expect(state.property.last_ai_escalation_reason).not.toBe("needs_reply");
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("Jev still classifies and applies its outcome (not_interested) with drafting off; no generation, no send", async () => {
+    const state = offState("jev");
+    state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.9 }];
+    seedInboundMessage(state, { id: "inbound-off-5", body: "Not interested" });
+    stubJev("not_interested", 0.97);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-5", { inboundBody: "Not interested" }), anthropic);
+    expect(result.outcome).not.toBe("escalated");
+    expect(state.property.outreach_dispo).toBe("not_interested");
+    expect(state.property.last_ai_escalation_reason).not.toBe("needs_reply");
+    expect(generateAiReply).not.toHaveBeenCalled();
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("Jev still applies opted_out with drafting off", async () => {
+    const state = offState("jev");
+    state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
+    seedInboundMessage(state, { id: "inbound-off-6", body: "STOP texting me" });
+    stubJev("opted_out", 0.99);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-off-6", { inboundBody: "STOP texting me" }), anthropic);
+    expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+    expect(generateAiReply).not.toHaveBeenCalled();
+  });
+
+  it("the default ('llm') still generates and sends", async () => {
+    const state = createMockState();
+    state.config.reply_generation = "llm";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-on-1", body: "Maybe, tell me more" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-on-1"), anthropic);
+    expect(generateAiReply).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe("sent");
+  });
+});
+
 describe("resolveOutboundPolicy", () => {
   afterEach(() => vi.unstubAllEnvs());
 
@@ -6272,5 +6531,178 @@ describe("resolveOutboundPolicy", () => {
   it("ignores an invalid env mode and falls back to the DB value", () => {
     vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "bogus");
     expect(resolveOutboundPolicy({ source: "llm", dbMode: "hold" })).toEqual({ hold: true, reason: "outbound_mode_hold" });
+  });
+
+  it("a human-approved send is never re-held by the AI outbound policy", () => {
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "hold");
+    vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
+    expect(resolveOutboundPolicy({ source: "human", dbMode: "hold" })).toEqual({ hold: false });
+  });
+});
+
+describe("sendHumanDraft (Messages v2 Phase 1 hold Send)", () => {
+  const human = (overrides: Record<string, unknown> = {}) => ({
+    orgId: "org-1",
+    propertyId: PROPERTY_ID,
+    contactId: CONTACT_ID,
+    conversationId: CONVERSATION_ID,
+    inboundMessageId: "inbound-h",
+    inboundFromPhone: "+18165550001",
+    body: "Thanks for getting back to us",
+    userId: "user-1",
+    edited: false,
+    ...overrides,
+  });
+  const pushOutbound = (state: MockState, row: Partial<MessageRow> & { id: string }) => {
+    state.messages.push({
+      body: "x", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
+      created_at: new Date().toISOString(), direction: "outbound", metadata: null, property_id: PROPERTY_ID,
+      sent_at: null, status: "sent", ...row,
+    });
+  };
+
+  beforeEach(() => {
+    Object.assign(sendReservationTuning, { deadlineMs: 0 });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z"));
+    vi.mocked(getConsentState).mockResolvedValue({} as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    Object.assign(sendReservationTuning, defaultReservationTuning);
+  });
+
+  it("sends a held draft for a property already flagged for a human, stamping who approved it", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.aiReplyDrafts = [{ id: "d1", inbound_message_id: "inbound-h", status: "pending", body: "Thanks for getting back to us" }];
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human({ edited: true }));
+    expect(result).toMatchObject({ status: "sent" });
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact).mock.calls[0]![1]).toMatchObject({ body: "Thanks for getting back to us", origin: "automated" });
+    const sent = state.messages.find((m) => m.direction === "outbound");
+    expect(sent?.metadata).toMatchObject({
+      generated_by: "ai_responder_v1",
+      inbound_message_id: "inbound-h",
+      approved_by_user_id: "user-1",
+      edited_by_human: true,
+    });
+  });
+
+  it("still sends in draft-only mode (owner outbound_mode=hold applies to the AI, not to a human click)", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("sent");
+    expect(state.aiReplyDrafts ?? []).toHaveLength(0);
+  });
+
+  it("refuses a stale draft: a newer inbound without a live handler is not answered by the old draft", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    state.messages.find((m) => m.id === "inbound-h")!.created_at = "2026-06-13T17:00:00.000Z";
+    seedInboundMessage(state, { id: "inbound-newer", body: "actually wait" });
+    state.messages.find((m) => m.id === "inbound-newer")!.created_at = "2026-06-13T17:30:00.000Z";
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "superseded_before_send" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses when someone already answered the seller after the inbound (no double text)", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    pushOutbound(state, { id: "rep-reply", sent_at: new Date().toISOString(), metadata: { sent_by: "rep" } as never });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("refused");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a suppressed / opted-out seller even when a human clicks Send", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.contact.sms_opted_out = true;
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "stop" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "contact_sms_opted_out" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a property closed by a terminal disposition", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.property.outreach_dispo = "opted_out";
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result.status).toBe("refused");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a draft a human already discarded (rule 8)", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    state.aiReplyDrafts = [{ id: "d1", inbound_message_id: "inbound-h", status: "discarded", body: "old" }];
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "already_answered" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("a busy conversation lease is a retry-by-the-user refusal, never a schedule, flag or dead letter", async () => {
+    vi.useRealTimers();
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = "draft_held";
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "send_reserved_elsewhere", retryable: true });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.deadLetters ?? []).toHaveLength(0);
+  });
+
+  it("refuses a human Send when the property carries any flag other than draft_held, showing the reason", async () => {
+    for (const reason of ["send_timeout:inbound-h", "keyword_stop", "jev_below_threshold:new_lead"]) {
+      const state = createMockState();
+      state.property.needs_human_attention = true;
+      state.property.last_ai_escalation_reason = reason;
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+      const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+      expect(result).toMatchObject({ status: "refused", reason: `already_flagged:${reason}`, retryable: false });
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses a human Send when the property is flagged with no recorded reason", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    state.property.last_ai_escalation_reason = null;
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-h", body: "ok" });
+    const result = await sendHumanDraft(createMockSupabase(state) as never, human());
+    expect(result).toMatchObject({ status: "refused", reason: "already_flagged:unknown" });
   });
 });

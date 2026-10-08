@@ -1024,6 +1024,7 @@ export type Database = {
           model: string
           org_id: string
           outbound_mode: string
+          reply_generation: string
           reply_delay_max_seconds: number
           reply_delay_min_seconds: number
           system_prompt: string
@@ -1044,6 +1045,7 @@ export type Database = {
           model?: string
           org_id: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt: string
@@ -1064,6 +1066,7 @@ export type Database = {
           model?: string
           org_id?: string
           outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt?: string
@@ -1084,11 +1087,18 @@ export type Database = {
           body: string
           conversation_id: string | null
           created_at: string
+          edited_at: string | null
+          edited_body: string | null
+          edited_by: string | null
           id: string
           inbound_message_id: string | null
           org_id: string
           property_id: string | null
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
           run_id: string | null
+          sent_message_id: string | null
           source: string
           status: string
         }
@@ -1096,11 +1106,18 @@ export type Database = {
           body: string
           conversation_id?: string | null
           created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
           id?: string
           inbound_message_id?: string | null
           org_id: string
           property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
           run_id?: string | null
+          sent_message_id?: string | null
           source: string
           status?: string
         }
@@ -1108,11 +1125,18 @@ export type Database = {
           body?: string
           conversation_id?: string | null
           created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
           id?: string
           inbound_message_id?: string | null
           org_id?: string
           property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
           run_id?: string | null
+          sent_message_id?: string | null
           source?: string
           status?: string
         }
@@ -3006,6 +3030,70 @@ export type Database = {
             columns: ["related_import_id"]
             isOneToOne: false
             referencedRelation: "csv_imports"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      luna_suggestions: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          applied_outcome: string | null
+          confidence: number
+          created_at: string
+          id: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at: string | null
+          rejected_by: string | null
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence: number
+          created_at?: string
+          id?: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence?: number
+          created_at?: string
+          id?: string
+          inbound_message_id?: string
+          model?: string
+          org_id?: string
+          outcome?: string
+          property_id?: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "luna_suggestions_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "luna_suggestions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -7808,10 +7896,35 @@ export type Database = {
         Args: {
           p_conversation_id: string
           p_holder: string
-          p_inbound_message_id?: string
+          p_inbound_message_id: string | null
           p_lease_seconds: number
         }
         Returns: boolean
+      }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      fn_luna_suggestion_stats: {
+        Args: { p_org_id: string; p_window_days: number }
+        Returns: {
+          outcome: string
+          shown: number
+          accepted: number
+          rejected: number
+          agreed_manually: number
+          open: number
+        }[]
+      }
+      fn_resolve_hold: {
+        Args: {
+          p_org_id: string
+          p_property_id: string
+          p_user_id: string
+          p_action: string
+          p_reason?: string | null
+          p_seen_through?: string | null
+          p_flag_reason?: string | null
+          p_flag_at?: string | null
+        }
+        Returns: Json
       }
       fn_renew_ai_send: {
         Args: { p_conversation_id: string; p_holder: string; p_lease_seconds: number }
