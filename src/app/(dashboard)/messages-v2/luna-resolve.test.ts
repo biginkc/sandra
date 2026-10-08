@@ -96,6 +96,23 @@ describe("applyLunaSuggestion", () => {
     expect(r).toMatchObject({ ok: false, error: { code: "LUNA_NOT_ACTIONABLE" } });
   });
 
+  it.each([
+    ["confirm", "superseded"],
+    ["correct", "superseded"],
+  ])("does not record acceptance when %s returns %s (item changed under us)", async (path, status) => {
+    const { admin, updates } =
+      path === "confirm"
+        ? fakeAdmin({ suggestion: suggestion("nurture"), decision: { id: "d-1", proposed_outcome: "nurture" } })
+        : fakeAdmin({ suggestion: suggestion("new_lead"), decision: { id: "d-1", proposed_outcome: "nurture" } });
+    const d = deps(admin, {
+      confirm: vi.fn(async () => ok({ status })),
+      correct: vi.fn(async () => ok({ status, resolvedOutcome: "new_lead" })),
+    });
+    const r = await applyLunaSuggestion(d, { suggestionId: "s-1" });
+    expect(r).toMatchObject({ ok: false, error: { code: "LUNA_NO_PENDING_ITEM" } });
+    expect(updates).toEqual([]);
+  });
+
   it("refuses when nothing is pending, and applies nothing", async () => {
     const { admin, updates } = fakeAdmin({ suggestion: suggestion("nurture") });
     const d = deps(admin);

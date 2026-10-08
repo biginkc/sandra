@@ -112,14 +112,20 @@ export async function applyLunaSuggestion(
     return fail("LUNA_NO_PENDING_ITEM", "Nothing is waiting on a decision for this message. Refresh the page.");
   }
 
+  // The item can change between the lookup and the decision (superseded, already
+  // handled): nothing was applied, so the suggestion must stay open and the card reloads.
+  const stale = () =>
+    fail("LUNA_NO_PENDING_ITEM", "Nothing is waiting on a decision for this message. Refresh the page.");
   let applied: { status: string; resolvedOutcome: string; warning?: string };
   if (item.proposed === s.outcome) {
     const confirmed = await d.confirm(item.source, item.id);
     if (!confirmed.ok) return confirmed;
+    if (confirmed.data.status !== "confirmed") return stale();
     applied = { ...confirmed.data, resolvedOutcome: s.outcome };
   } else {
     const corrected = await d.correct(item.source, item.id, s.outcome, "Applied Luna suggestion");
     if (!corrected.ok) return corrected;
+    if (corrected.data.status !== "corrected") return stale();
     applied = corrected.data;
   }
 

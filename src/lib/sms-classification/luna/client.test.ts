@@ -100,3 +100,15 @@ describe("classifyWithLuna", () => {
     expect(empty.status).toBe("error");
   });
 });
+
+describe("parseLunaJson error text", () => {
+  it("never echoes model output (field names can carry PII)", () => {
+    const bad = JSON.stringify({ outcome: "nurture", "Jane Doe 555-123-4567": 1 });
+    expect(() => parseLunaJson(bad)).toThrow("output has unexpected fields");
+    try {
+      parseLunaJson(bad);
+    } catch (e) {
+      expect(String((e as Error).message)).not.toMatch(/Jane|555/);
+    }
+  });
+});

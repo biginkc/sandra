@@ -48,7 +48,7 @@ export function parseLunaJson(text: string): { outcome: JevOutcome; confidence: 
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("output is not a JSON object");
   const o = raw as Record<string, unknown>;
   const extra = Object.keys(o).filter((k) => !["outcome", "escalation_reason", "confidence"].includes(k));
-  if (extra.length) throw new Error(`unexpected field(s): ${extra.join(", ")}`);
+  if (extra.length) throw new Error("output has unexpected fields");
   if (typeof o.outcome !== "string" || !(LUNA_OUTCOMES as string[]).includes(o.outcome)) {
     throw new Error("outcome missing or not an allowed value");
   }
