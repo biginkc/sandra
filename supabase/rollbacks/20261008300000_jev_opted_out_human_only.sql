@@ -3,6 +3,17 @@
 -- automation off stay off.)
 begin;
 
+-- Restore the exact prior reset_tenant_tables() seed line.
+do $$
+declare
+  v_def text;
+  v_new text;
+begin
+  v_def := pg_get_functiondef('public.reset_tenant_tables()'::regprocedure);
+  v_new := replace(v_def, '(v.outcome not in (''new_lead'', ''opted_out''))', '(v.outcome <> ''new_lead'')');
+  if v_new <> v_def then execute v_new; end if;
+end $$;
+
 alter table public.jev_outcome_thresholds
   drop constraint if exists jev_outcome_thresholds_opted_out_human_only;
 

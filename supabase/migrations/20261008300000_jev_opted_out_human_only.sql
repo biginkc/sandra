@@ -31,6 +31,24 @@ insert into public.jev_outcome_threshold_history (
 select id, org_id, 'opted_out', min_confidence, min_confidence, true, false, version
 from flipped;
 
+-- The test/tenant reset re-seeds thresholds with automation on for everything
+-- except new_lead; opted_out must be seeded off or the CHECK below aborts it.
+-- Patched in place (the function was last redefined/patched by earlier
+-- migrations; every other line stays identical). Idempotent.
+do $$
+declare
+  v_def text;
+  v_new text;
+begin
+  v_def := pg_get_functiondef('public.reset_tenant_tables()'::regprocedure);
+  if position('(v.outcome not in (''new_lead'', ''opted_out''))' in v_def) > 0 then
+    return;
+  end if;
+  v_new := replace(v_def, '(v.outcome <> ''new_lead'')', '(v.outcome not in (''new_lead'', ''opted_out''))');
+  if v_new = v_def then raise exception 'reset_tenant_tables opted_out seed patch not applied'; end if;
+  execute v_new;
+end $$;
+
 alter table public.jev_outcome_thresholds
   drop constraint if exists jev_outcome_thresholds_opted_out_human_only;
 alter table public.jev_outcome_thresholds

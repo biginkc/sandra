@@ -152,4 +152,25 @@ describe("20261008300000", () => {
       ),
     ).resolves.toBeDefined();
   });
+
+  it("reset_tenant_tables() runs clean after the migration and seeds opted_out with automation off", async () => {
+    await db.query(MIGRATION);
+    await db.query("select public.reset_tenant_tables()");
+    const rows = (
+      await db.query(`select outcome, automation_enabled from public.jev_outcome_thresholds order by outcome`)
+    ).rows;
+    for (const r of rows.filter((x) => x.outcome === "opted_out")) expect(r.automation_enabled).toBe(false);
+  });
+
+  it("rollback restores the exact prior seed expression, and re-applying the migration is idempotent", async () => {
+    await db.query(MIGRATION);
+    await db.query(MIGRATION);
+    const def = async () =>
+      (await db.query(`select pg_get_functiondef('public.reset_tenant_tables()'::regprocedure) d`)).rows[0].d as string;
+    expect(await def()).toContain("v.outcome not in ('new_lead', 'opted_out')");
+    await db.query(ROLLBACK);
+    const after = await def();
+    expect(after).toContain("(v.outcome <> 'new_lead')");
+    expect(after).not.toContain("'opted_out'))");
+  });
 });
