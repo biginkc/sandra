@@ -73,6 +73,24 @@ async function mergeProps(db: Client, actor: string, keeper: string, loser: stri
     await db.query("select set_config('request.jwt.claim.role','',true)");
   }
 }
+/** Merge expected to be refused: runs inside its own savepoint (rolled back) and returns the error, or null if the merge succeeded (then it stays applied). */
+async function mergeAttempt(db: Client, actor: string, keeper: string, loser: string): Promise<{ message?: string; code?: string; detail?: string } | null> {
+  await db.query("select set_config('request.jwt.claim.sub',$1,true)", [actor]);
+  await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+  await db.query("savepoint merge_try");
+  try {
+    await db.query("select public.merge_duplicate_properties($1::uuid,$2::uuid)", [keeper, loser]);
+    await db.query("release savepoint merge_try");
+    return null;
+  } catch (e) {
+    await db.query("rollback to savepoint merge_try");
+    return e as { message?: string; code?: string; detail?: string };
+  } finally {
+    await db.query("select set_config('request.jwt.claim.sub','',true)");
+    await db.query("select set_config('request.jwt.claim.role','',true)");
+  }
+}
+const MERGE_BLOCKED = "NORMA_MERGE_BLOCKED_UNRESOLVED_CALL";
 const nextSlotFor = async (db: Client, state: string, sends: string[], now: string): Promise<Row> =>
   (await svcOne(db, "select public.fn_norma_queue_next_slot_for($1::text,$2::timestamptz[],$3::timestamptz) as r", [state, sends, now])).r as Row;
 const nextSlotOf = async (db: Client, entry: string, now: string): Promise<Row> =>
@@ -2639,6 +2657,7 @@ describe("norma call queue (migration *_norma_call_queue)", () => {
         expect(await bind(db, f.requestId, "call-h8a")).toBe("bound");
         await complete(db, f.requestId, "call-h8a", "no_answer");
         expect(await attemptsOf(db, f.entry)).toHaveLength(1);
+        await setWall(db, plusSeconds(V_OPEN, 11)); // the merge is refused for 10 s after a send marker (see the refusal tests)
         await mergeProps(db, ctx.assignee, keeper.property, loser.property);
         expect(await entryRow(db, f.entry)).toMatchObject({ property_id: keeper.property, status: "queued" });
         expect(await attemptsOf(db, f.entry)).toHaveLength(1); // ledger survives the loser's request/property delete
@@ -2676,6 +2695,12 @@ describe("norma call queue (migration *_norma_call_queue)", () => {
         const keeper = await bareLead(db, ctx);
         const loser = await bareLead(db, ctx);
         const f = await inFlight(db, ctx, { l: loser });
+        // Settle the call first: the merge is refused while it is open or within 10 s of its send marker.
+        await stamp(db, f.requestId, V_OPEN);
+        await setWall(db, V_OPEN);
+        expect(await bind(db, f.requestId, "call-h8-reassign")).toBe("bound");
+        await complete(db, f.requestId, "call-h8-reassign", "no_answer");
+        await setWall(db, plusSeconds(V_OPEN, 11));
         await db.query(
           "insert into public.norma_followup_reassignments(org_id,request_id,property_id,intended_assignee,kind,payload) values ($1,$2,$3,$4,'review_task','{}'::jsonb)",
           [ctx.org, f.requestId, loser.property, ctx.rep],
@@ -2684,27 +2709,146 @@ describe("norma call queue (migration *_norma_call_queue)", () => {
         expect((await db.query("select property_id from public.norma_followup_reassignments where org_id=$1", [ctx.org])).rows).toEqual([{ property_id: keeper.property }]);
       }));
 
-    it("[N4] loser entry `calling` with an in-flight request: the request is cascade-deleted, the attempts row REMAINS (request_id is a non-FK snapshot), the loser entry is cancelled merged_into:<keeper ENTRY id>, the survivor is untouched", () =>
+    // ---- refusal while Norma has unresolved call state (Astra P1): the merge must never delete call evidence ----
+    type OpenKind = "requested" | "dispatching" | "dispatched";
+    /** An open request in the given status on `l`. */
+    async function openRequest(db: Client, ctx: Ctx, l: Lead, kind: OpenKind): Promise<Flight> {
+      const f = kind === "requested" ? await createdReq(db, ctx, { l }) : await inFlight(db, ctx, { l });
+      if (kind === "dispatched") {
+        await stamp(db, f.requestId, V_OPEN);
+        await setWall(db, V_OPEN);
+        expect(await bind(db, f.requestId, "call-open-dispatched")).toBe("bound");
+      }
+      return f;
+    }
+    const snapshotOf = async (db: Client, props: string[], entries: string[], requests: string[]) => ({
+      props: (await db.query("select id from public.properties where id = any($1::uuid[]) order by id", [props])).rows,
+      entries: (await db.query("select id, property_id, status, end_reason, lease_token, dispatch_token from public.norma_queue_entries where id = any($1::uuid[]) order by id", [entries])).rows,
+      requests: (await db.query("select id, status, attempt, send_attempted_at, bland_call_id from public.norma_call_requests where id = any($1::uuid[]) order by id", [requests])).rows,
+      attempts: (await db.query("select request_id, entry_id, resolution from public.norma_queue_attempts where entry_id = any($1::uuid[]) order by request_id", [entries])).rows,
+    });
+
+    it("[N4] loser entry `calling` with a dispatched request and a pending attempt: the merge is REFUSED, nothing is deleted or moved, the ids are in DETAIL", () =>
       run(async (db) => {
         const ctx = await newOrg(db);
         const keeper = await bareLead(db, ctx);
         const loser = await bareLead(db, ctx);
         const keeperEntry = await enqueueOne(db, ctx, keeper);
-        const keeperBefore = await entryRow(db, keeperEntry);
         const f = await inFlight(db, ctx, { l: loser });
         await stamp(db, f.requestId, V_OPEN);
         await setWall(db, V_OPEN);
         expect(await bind(db, f.requestId, "call-n4")).toBe("bound"); // writes the pending attempts row
         expect(await attemptsOf(db, f.entry)).toHaveLength(1);
         expect((await entryRow(db, f.entry)).status).toBe("calling");
-        await mergeProps(db, ctx.assignee, keeper.property, loser.property);
-        expect(await count(db, "select count(*) as n from public.norma_call_requests where id=$1", [f.requestId])).toBe(0);
-        const attempts = await attemptsOf(db, f.entry);
-        expect(attempts).toHaveLength(1);
-        expect(attempts[0]).toMatchObject({ request_id: f.requestId, resolution: "pending" });
-        expect(await entryRow(db, f.entry)).toMatchObject({ property_id: keeper.property, status: "cancelled", end_reason: `merged_into:${keeperEntry}` });
-        expect(await entryRow(db, keeperEntry)).toEqual(keeperBefore);
-        expect(await attemptsOf(db, keeperEntry)).toHaveLength(0);
+        const before = await snapshotOf(db, [keeper.property, loser.property], [keeperEntry, f.entry], [f.requestId]);
+        const err = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+        expect(err?.message).toBe(MERGE_BLOCKED);
+        expect(err?.detail).toContain(`request:${f.requestId}`);
+        expect(err?.detail).toContain(`entry:${f.entry}`);
+        expect(await snapshotOf(db, [keeper.property, loser.property], [keeperEntry, f.entry], [f.requestId])).toEqual(before);
+        expect((await attemptsOf(db, f.entry))[0]).toMatchObject({ request_id: f.requestId, resolution: "pending" });
+      }));
+
+    describe.each(["loser", "keeper"] as const)("open request on the %s", (side) => {
+      it.each(["requested", "dispatching", "dispatched"] as const)("status %s: refused, both properties, the request, its entry and attempts unchanged", (kind) =>
+        run(async (db) => {
+          const ctx = await newOrg(db);
+          const other = await bareLead(db, ctx);
+          const carrier = await bareLead(db, ctx);
+          const f = await openRequest(db, ctx, carrier, kind);
+          // Only the request may block: take the carrier's entry out of `calling`.
+          await ownerWrite(db, "update public.norma_queue_entries set status = 'queued' where id = $1", [f.entry]);
+          const keeper = side === "keeper" ? carrier : other;
+          const loser = side === "keeper" ? other : carrier;
+          const before = await snapshotOf(db, [keeper.property, loser.property], [f.entry], [f.requestId]);
+          const err = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+          expect(err?.message).toBe(MERGE_BLOCKED);
+          expect(err?.detail).toBe(`request:${f.requestId}`);
+          expect(await snapshotOf(db, [keeper.property, loser.property], [f.entry], [f.requestId])).toEqual(before);
+          expect((await requestOf(db, f.requestId)).status).toBe(kind);
+        }));
+
+      it.each(["dispatch_unknown", "needs_review"] as const)("status %s (escalated after a dispatch): refused, evidence preserved", (kind) =>
+        run(async (db) => {
+          const ctx = await newOrg(db);
+          const other = await bareLead(db, ctx);
+          const carrier = await bareLead(db, ctx);
+          const f = await inFlight(db, ctx, { l: carrier });
+          await stamp(db, f.requestId, V_OPEN);
+          await setWall(db, V_OPEN);
+          if (kind === "dispatch_unknown") await svc(db, "select public.fn_norma_mark_dispatch_unknown($1::uuid,'t',1::integer)", [f.requestId]);
+          else await escalate(db, f.requestId);
+          expect((await requestOf(db, f.requestId)).status).toBe(kind);
+          await ownerWrite(db, "update public.norma_queue_entries set status = 'queued' where id = $1", [f.entry]);
+          const keeper = side === "keeper" ? carrier : other;
+          const loser = side === "keeper" ? other : carrier;
+          const before = await snapshotOf(db, [keeper.property, loser.property], [f.entry], [f.requestId]);
+          const err = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+          expect(err?.message).toBe(MERGE_BLOCKED);
+          expect(err?.detail).toBe(`request:${f.requestId}`);
+          expect(await snapshotOf(db, [keeper.property, loser.property], [f.entry], [f.requestId])).toEqual(before);
+        }));
+    });
+
+    it.each(["loser", "keeper"] as const)("a `calling` entry on the %s with no request yet blocks the merge (lease held)", (side) =>
+      run(async (db) => {
+        const ctx = await newOrg(db);
+        const other = await bareLead(db, ctx);
+        const carrier = await bareLead(db, ctx);
+        const entry = await enqueueOne(db, ctx, carrier);
+        expect((await claimTx1(db, entry, V_OPEN)).result).toBe("claimed");
+        const keeper = side === "keeper" ? carrier : other;
+        const loser = side === "keeper" ? other : carrier;
+        const err = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+        expect(err?.message).toBe(MERGE_BLOCKED);
+        expect(err?.detail).toBe(`entry:${entry}`);
+        expect((await entryRow(db, entry)).status).toBe("calling");
+      }));
+
+    it("same phone, post-settle admission: refused within 10 s of the send marker, merges after 10 s, then the keeper's next claim is admitted normally", () =>
+      run(async (db) => {
+        const ctx = await newOrg(db);
+        const loser = await bareLead(db, ctx);
+        const keeper = await lead(db, ctx, { enrollment: false, sameContactAs: loser });
+        const keeperEntry = await enqueueOne(db, ctx, keeper);
+        const f = await inFlight(db, ctx, { l: loser });
+        await stamp(db, f.requestId, V_OPEN);
+        await setWall(db, V_OPEN);
+        expect(await bind(db, f.requestId, "call-same-phone")).toBe("bound");
+        await complete(db, f.requestId, "call-same-phone", "no_answer"); // settled: no longer open, but the send marker is the spacing evidence
+        expect((await requestOf(db, f.requestId)).status).toBe("completed");
+        await setWall(db, plusSeconds(V_OPEN, 5));
+        const early = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+        expect(early?.message).toBe(MERGE_BLOCKED);
+        expect(early?.detail).toBe(`request:${f.requestId}`);
+        expect(await count(db, "select count(*) as n from public.norma_call_requests where id=$1", [f.requestId])).toBe(1);
+        await setWall(db, plusSeconds(V_OPEN, 11));
+        expect(await mergeAttempt(db, ctx.assignee, keeper.property, loser.property)).toBeNull();
+        expect(await count(db, "select count(*) as n from public.properties where id=$1", [loser.property])).toBe(0);
+        // The keeper's next claim is admitted normally (the settled call is past the 10 s spacing, so number_busy cannot apply).
+        const now = plusSeconds(V_OPEN, 11);
+        const claim = await claimTx1(db, keeperEntry, now);
+        expect(claim.result).toBe("claimed");
+        const req = await createV2(db, keeper, ctx.rep, ctx.rep, keeperEntry, claim.lease_token);
+        expect(req.outcome).toBe("created");
+        expect(await claimV2(db, req.request_id, now)).toBe("claimed");
+      }));
+
+    it("late callback: with the merge refused, the webhook completion still lands on the request and settles the queue entry", () =>
+      run(async (db) => {
+        const ctx = await newOrg(db);
+        const keeper = await bareLead(db, ctx);
+        const loser = await bareLead(db, ctx);
+        const f = await inFlight(db, ctx, { l: loser });
+        await stamp(db, f.requestId, V_OPEN);
+        await setWall(db, V_OPEN);
+        expect(await bind(db, f.requestId, "call-late")).toBe("bound");
+        const err = await mergeAttempt(db, ctx.assignee, keeper.property, loser.property);
+        expect(err?.message).toBe(MERGE_BLOCKED);
+        await complete(db, f.requestId, "call-late", "reached_no_callback");
+        expect((await requestOf(db, f.requestId)).status).toBe("completed");
+        expect(await entryRow(db, f.entry)).toMatchObject({ property_id: loser.property, status: "done", end_reason: "outcome:reached_no_callback" });
+        expect((await attemptsOf(db, f.entry))[0]).toMatchObject({ resolution: "final", outcome: "reached_no_callback" });
       }));
 
     it.todo("[H8] 'log both' (merge writes a log record for the kept and the cancelled entry): the plan does not say where or in what shape (lead_events? entry end_reason only?); needs Astra/Jarrad before pinning");
@@ -2931,6 +3075,162 @@ describe("concurrency on a run-owned disposable database ([C7], [E2], [E6], [C1]
     expect(result).toBe("refused:window_closed");
     expect(await requestStatus(x.requestId)).toMatchObject({ status: "dispatch_rejected", send_attempted_at: null });
   }, 60_000);
+
+  // ---- merge_duplicate_properties vs the request paths: two real sessions (Astra P1) ----
+  /** Committed: org, a loser and a keeper that share one phone; optionally a dispatched request on the loser and a requested one on the keeper. */
+  async function committedMergePair(o: { loserDispatched: boolean; keeperRequest: boolean }) {
+    const fx = cf.v!;
+    await fx.resetRequests();
+    return fx.seed(async (db) => {
+      await db.query("update public.zz_test_clock set at=$1::timestamptz", [CLAIM_AT]);
+      const ctx = await newOrg(db);
+      const loser = await lead(db, ctx, { enrollment: false });
+      const keeper = await lead(db, ctx, { enrollment: false, sameContactAs: loser });
+      let loserRequest: string | null = null;
+      let keeperRequest: string | null = null;
+      if (o.loserDispatched) {
+        const f = await inFlight(db, ctx, { l: loser });
+        await stamp(db, f.requestId, CLAIM_AT);
+        expect(await bind(db, f.requestId, `call-${randomUUID()}`)).toBe("bound");
+        loserRequest = f.requestId;
+      }
+      if (o.keeperRequest) {
+        const entry = await enqueueOne(db, ctx, keeper);
+        const claim = await claimTx1(db, entry, CLAIM_AT);
+        expect(claim.result).toBe("claimed");
+        const req = await createV2(db, keeper, ctx.rep, ctx.rep, entry, claim.lease_token);
+        expect(req.outcome).toBe("created");
+        keeperRequest = req.request_id as string;
+      }
+      await setControl(db, true);
+      return { ctx, loser, keeper, loserRequest, keeperRequest };
+    });
+  }
+  /** Begin on `c` and run the merge as an authenticated member; the transaction stays open. Resolves to the error, or null. */
+  async function mergeOn(c: Client, actor: string, keeper: string, loser: string): Promise<{ message?: string; detail?: string } | null> {
+    try {
+      await c.query("begin");
+      await c.query("select set_config('request.jwt.claim.sub',$1,true)", [actor]);
+      await c.query("select set_config('request.jwt.claim.role','authenticated',true)");
+      await c.query("select public.merge_duplicate_properties($1::uuid,$2::uuid)", [keeper, loser]);
+      return null;
+    } catch (e) {
+      return e as { message?: string; detail?: string };
+    }
+  }
+  const propertyExists = async (id: string) => Number((await cf.v!.owner.query("select count(*) as n from public.properties where id=$1", [id])).rows[0].n) === 1;
+
+  it("[merge x create] merge runs first: a concurrent create_request_v2 on the loser waits on the shared lock, then fails on the deleted property (no fresh open request)", async () => {
+    const fx = cf.v!;
+    const p = await committedMergePair({ loserDispatched: false, keeperRequest: false });
+    const c1 = await fx.connect();
+    const c2 = await fx.connect();
+    expect(await mergeOn(c1, p.ctx.assignee, p.keeper.property, p.loser.property)).toBeNull(); // holds the loser's creation lock until commit
+    await beginService(c2);
+    const c2pid = await pidOf(c2); // fetched BEFORE the blocking call: a blocked session cannot answer a query
+    let settled = false;
+    const create = c2
+      .query("select * from public.fn_norma_create_request_v2($1::uuid,$2::uuid,$3::text,$4::uuid,'ctx',$5::uuid,null,null)", [p.loser.property, p.loser.contact, p.loser.phone, p.ctx.rep, p.ctx.assignee])
+      .then((r) => { settled = true; return r.rows[0] as Row; });
+    expect(await waitBlocked(fx.owner, c2pid, () => settled), "create_request_v2 must wait on the merge's per-property lock").toBe(true);
+    await c1.query("commit");
+    const out = await withTimeout(create, 10_000, "create_request_v2");
+    await c2.query("commit");
+    expect(out).toMatchObject({ outcome: "blocked", block_reason: "property_not_found" });
+    expect(await propertyExists(p.loser.property)).toBe(false);
+    expect(Number((await fx.owner.query("select count(*) as n from public.norma_call_requests where property_id=$1", [p.loser.property])).rows[0].n)).toBe(0);
+  }, 60_000);
+
+  it("[merge x create] create_request_v2 runs first: the merge waits, then is refused on the fresh open request; the request and the loser survive", async () => {
+    const fx = cf.v!;
+    const p = await committedMergePair({ loserDispatched: false, keeperRequest: false });
+    const c1 = await fx.connect();
+    const c2 = await fx.connect();
+    await beginService(c2);
+    const created = (await c2.query("select * from public.fn_norma_create_request_v2($1::uuid,$2::uuid,$3::text,$4::uuid,'ctx',$5::uuid,null,null)", [p.loser.property, p.loser.contact, p.loser.phone, p.ctx.rep, p.ctx.assignee])).rows[0] as Row;
+    expect(created.outcome).toBe("created");
+    const c1pid = await pidOf(c1);
+    let settled = false;
+    const merge = mergeOn(c1, p.ctx.assignee, p.keeper.property, p.loser.property).then((e) => { settled = true; return e; });
+    expect(await waitBlocked(fx.owner, c1pid, () => settled), "the merge must wait on create's per-property lock").toBe(true);
+    await c2.query("commit");
+    const err = await withTimeout(merge, 10_000, "merge");
+    await c1.query("rollback");
+    expect(err?.message).toBe(MERGE_BLOCKED);
+    expect(err?.detail).toBe(`request:${created.request_id}`);
+    expect(await propertyExists(p.loser.property)).toBe(true);
+    expect((await requestStatus(created.request_id as string)).status).toBe("requested");
+  }, 60_000);
+
+  it("[merge x claim] a claim on the keeper sees the loser's open request (number_busy) until the merge is refused; neither side loses the evidence", async () => {
+    const fx = cf.v!;
+    const p = await committedMergePair({ loserDispatched: true, keeperRequest: true });
+    const c1 = await fx.connect();
+    const c2 = await fx.connect();
+    await beginService(c1);
+    const claim = (await c1.query("select public.fn_norma_claim_dispatch_v2($1::uuid,1,$2::timestamptz,true,1000,100000,'America/Chicago') as r", [p.keeperRequest, CLAIM_AT])).rows[0].r as string;
+    expect(claim).toBe("number_busy"); // the loser's dispatched call is on the same phone
+    const c2pid = await pidOf(c2);
+    let settled = false;
+    const merge = mergeOn(c2, p.ctx.assignee, p.keeper.property, p.loser.property).then((e) => { settled = true; return e; });
+    expect(await waitBlocked(fx.owner, c2pid, () => settled), "the merge must wait for the claim's lock on the keeper's request").toBe(true);
+    await c1.query("commit");
+    const err = await withTimeout(merge, 10_000, "merge");
+    await c2.query("rollback");
+    expect(err?.message).toBe(MERGE_BLOCKED);
+    expect(err?.detail).toContain(`request:${p.loserRequest}`);
+    expect(err?.detail).toContain(`request:${p.keeperRequest}`);
+    expect(await propertyExists(p.loser.property)).toBe(true);
+    expect((await requestStatus(p.loserRequest!)).status).toBe("dispatched");
+    expect((await requestStatus(p.keeperRequest!)).status).toBe("requested"); // number_busy leaves it requested
+  }, 60_000);
+
+  it("[merge x completion replay] a webhook replay on the COMPLETED loser request racing the merge: no deadlock (40P01), merge completes, the replay is rejected cleanly", async () => {
+    const fx = cf.v!;
+    await fx.resetRequests();
+    const p = await fx.seed(async (db) => {
+      await db.query("update public.zz_test_clock set at=$1::timestamptz", [CLAIM_AT]);
+      const ctx = await newOrg(db);
+      const loser = await lead(db, ctx);
+      const keeper = await lead(db, ctx, { enrollment: false, sameContactAs: loser });
+      const f = await inFlight(db, ctx, { l: loser });
+      await stamp(db, f.requestId, CLAIM_AT);
+      const callId = `call-${randomUUID()}`;
+      expect(await bind(db, f.requestId, callId)).toBe("bound");
+      expect((await complete(db, f.requestId, callId, "reached_no_callback")).result).toBe("applied");
+      await stamp(db, f.requestId, "2000-01-01T00:00:00Z"); // a CLOSED request outside the merge's 10 s send-marker window, so the merge is not refused
+      await db.query("insert into public.lead_events(org_id,property_id,actor_type,event_type,payload) values ($1,$2,'system','merge_race_probe','{}'::jsonb)", [ctx.org, loser.property]);
+      await setControl(db, true);
+      return { ctx, loser, keeper, requestId: f.requestId, callId };
+    });
+    const blocker = await fx.connect(); // holds a loser lead_events row so the merge stalls AFTER its property lock
+    const cm = await fx.connect();
+    const cr = await fx.connect();
+    await blocker.query("begin");
+    await blocker.query("select id from public.lead_events where property_id=$1 for update", [p.loser.property]);
+    const mpid = await pidOf(cm);
+    let mSettled = false;
+    const merge = mergeOn(cm, p.ctx.assignee, p.keeper.property, p.loser.property).then((e) => { mSettled = true; return e; });
+    expect(await waitBlocked(fx.owner, mpid, () => mSettled), "the merge must stall on the blocker's row").toBe(true);
+    await beginService(cr);
+    const rpid = await pidOf(cr);
+    let rSettled = false;
+    const replay = cr
+      .query("select public.fn_norma_complete_call($1::uuid,$2::text,'reached_no_callback',$3::jsonb) as r", [p.requestId, p.callId, JSON.stringify({ attempt: 1 })])
+      .then((r) => { rSettled = true; return { row: (r.rows[0] as Row).r as Row, err: null as { code?: string } | null }; })
+      .catch((e) => { rSettled = true; return { row: null, err: e as { code?: string } }; });
+    expect(await waitBlocked(fx.owner, rpid, () => rSettled), "the replay must wait on the merge").toBe(true);
+    await blocker.query("rollback"); // merge resumes; on the old order it now needs the enrollment the replay holds
+    const mErr = await withTimeout(merge, 15_000, "merge");
+    await cm.query(mErr ? "rollback" : "commit"); // the replay is queued behind the merge's locks until this commit
+    const out = await withTimeout(replay, 15_000, "replay");
+    await cr.query(out.err ? "rollback" : "commit").catch(() => undefined);
+    expect(out.err?.code, "no deadlock victim").not.toBe("40P01");
+    expect(mErr?.message ?? null, "merge completes").toBeNull();
+    expect(out.err).toBeNull();
+    expect(["not_found", "replayed"]).toContain(out.row?.result);
+    expect(await propertyExists(p.loser.property)).toBe(false);
+  }, 90_000);
 
   it.todo("[B1] lock-order stress (completion vs block trigger vs claim vs resume on one property, 1,000 randomised runs): probabilistic by design, not a deterministic assertion; belongs to the stress harness (src/lib/norma/stress, its own config), not this suite");
 });

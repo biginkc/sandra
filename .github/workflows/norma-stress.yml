@@ -66,6 +66,11 @@ jobs:
       - name: Run the stress gate
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          # The runtime fails closed (queue_limits_not_configured) without queue limits, so the gate must supply them. Test
+          # values only, generous on purpose: the gate tests races, not capacity. NORMA_QUEUE_ENABLED stays unset (the queue switch is never on here).
+          NORMA_QUEUE_MAX_CONCURRENT: "1000"
+          NORMA_QUEUE_DAILY_CAP: "100000"
+          NORMA_QUEUE_CAP_TZ: America/Chicago
         run: npm run test:norma-stress
 
       - name: Stop disposable stack

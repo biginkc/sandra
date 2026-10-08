@@ -385,7 +385,7 @@ describe("button hammer", () => {
     expect(request.status).toBe("dispatched");
     // A completed call legitimately allows a new request (once the 10 s same-number spacing of claim_dispatch_v2 [C9] has passed).
     await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
-    await h.advance(11_000);
+    await h.advance(15_000); // > 10 s number spacing [C9] with margin for host↔DB clock drift on long-lived stacks
     expect(await h.requestCall(ctx, h.world.rep1)).toMatchObject({ ok: true });
   });
 

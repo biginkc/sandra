@@ -89,6 +89,11 @@ describe("sendNormaPrecallSms", () => {
     expect(await sendNormaPrecallSms(clientFor(), row, { enabled: true, send })).toEqual({ status: "refused", detail: "blocked_landline" });
   });
 
+  it("a consent-read failure is refused as consent_unavailable (no text, call still placed)", async () => {
+    const send = vi.fn(async () => ({ status: "blocked_fresh_state_unavailable", error: "read failed" }) as SendSmsOutcome);
+    expect(await sendNormaPrecallSms(clientFor(), row, { enabled: true, send })).toEqual({ status: "refused", detail: "consent_unavailable" });
+  });
+
   it("a thrown error or a slow provider is a failure, never an exception and never a long wait", async () => {
     const boom = vi.fn(async () => {
       throw new Error("provider down");

@@ -16,6 +16,7 @@ vi.mock("./registry", () => ({
 }));
 vi.mock("./consent", () => ({
   getConsentState: vi.fn(),
+  getConsentStateStrict: vi.fn(),
 }));
 vi.mock("./opt-out-phone", () => ({
   isSmsPhoneSuppressed: vi.fn(),
@@ -32,7 +33,7 @@ vi.mock("@/lib/messages/threading", () => ({
 
 import { releaseQueuedMessage, sendSmsToContact } from "./send";
 import { getMessagingProvider } from "./registry";
-import { getConsentState } from "./consent";
+import { getConsentState, getConsentStateStrict } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { checkQuietHours } from "./quiet-hours";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
@@ -120,6 +121,7 @@ const PROPERTY_ROW = {
 beforeEach(() => {
   vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
   vi.mocked(getConsentState).mockResolvedValue("can_send_marketing");
+  vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: true, state: "can_send_marketing" });
   vi.mocked(isSmsPhoneSuppressed).mockResolvedValue(false);
   vi.mocked(checkQuietHours).mockReturnValue({
     ok: true,
@@ -235,6 +237,58 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
     });
   });
 
+  it("automated send: consent read error at the early provider-path check → no provider call, blocked status", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: false, error: "consent db down" });
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome.status).toBe("blocked_fresh_state_unavailable");
+  });
+
+  it("automated send: consent read error only in the fresh re-check → held, no provider call", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.mocked(getConsentStateStrict)
+      .mockResolvedValueOnce({ ok: true, state: "can_send_marketing" })
+      .mockResolvedValueOnce({ ok: false, error: "consent db down" });
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-1" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", messageId: "msg-1" });
+    expect(String((outcome as { error: string }).error)).toContain("consent db down");
+  });
+
   it("manual send: does not run the fresh re-check at all — sends normally", async () => {
     const provider = fakeProvider();
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
@@ -259,6 +313,158 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+  });
+});
+
+describe("sendSmsToContact — beforeProviderSubmit fence", () => {
+  function scripted() {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const base = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null }, // fresh re-check
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null }, // fresh re-check
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null }, // pending insert
+        { data: { id: "msg-f" }, error: null }, // sent CAS / abort update
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const updates: Array<Record<string, unknown>> = [];
+    const realFrom = base.from;
+    base.from = (table: string) => {
+      const builder = realFrom(table);
+      const realUpdate = builder.update;
+      builder.update = (value: Record<string, unknown>) => {
+        if (table === "messages") updates.push(value);
+        return realUpdate(value);
+      };
+      return builder;
+    };
+    return { provider, supabase: base, updates };
+  }
+  const aiInput = {
+    origin: "automated" as const,
+    contactId: CONTACT_ID,
+    propertyId: PROPERTY_ID,
+    body: "hello",
+    from: "+18165551234",
+    metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-1" },
+  };
+
+  it("a refusing hook means NO provider call: the pending row is failed and only its uniqueness-bearing inbound key is retired (generated_by stays)", async () => {
+    const { provider, supabase, updates } = scripted();
+    const hook = vi.fn().mockResolvedValue(false);
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
+    expect(hook).toHaveBeenCalledTimes(1);
+    // The hook is told which pending row is this attempt's own (not a competitor).
+    expect(hook).toHaveBeenCalledWith({ messageId: "msg-f" });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
+    expect(updates[0]).toMatchObject({
+      status: "failed",
+      error_message: "aborted_before_provider",
+      metadata: expect.objectContaining({
+        generated_by: "ai_responder_v1",
+        aborted_inbound_message_id: "inbound-1",
+        abortedBeforeProvider: true,
+      }),
+    });
+    // The key idx_messages_ai_responder_inbound_unique matches on is gone.
+    expect(updates[0]!.metadata).not.toHaveProperty("inbound_message_id");
+  });
+
+  it("the retirement write is verified: a failed or zero-row update is retried (bounded) and then reported unconfirmed", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null }, // pending insert
+        { data: null, error: { message: "update boom" } }, // attempt 1: error
+        { data: null, error: null }, // attempt 2: zero rows affected
+        { data: null, error: null }, // attempt 3: zero rows affected
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: vi.fn().mockResolvedValue(false),
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: false });
+  });
+
+  it("a retirement that fails once and then lands is confirmed", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null },
+        { data: null, error: { message: "update boom" } },
+        { data: { id: "msg-f" }, error: null },
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: vi.fn().mockResolvedValue(false),
+    });
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
+  });
+
+  it("a hook that throws is a refusal", async () => {
+    const { provider, supabase } = scripted();
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: async () => {
+        throw new Error("renew boom");
+      },
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_before_provider", retired: true });
+  });
+
+  it("runs after every preflight check and immediately before the provider; true lets the send proceed", async () => {
+    const { provider, supabase } = scripted();
+    const order: string[] = [];
+    vi.mocked(isSmsPhoneSuppressed).mockImplementation(async () => {
+      order.push("suppression");
+      return false;
+    });
+    provider.sendSms.mockImplementation(async () => {
+      order.push("provider");
+      return { externalId: "ext-1", providerStatus: "queued", raw: {} };
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: async () => {
+        order.push("fence");
+        return true;
+      },
+    });
+    expect(order).toEqual(["suppression", "fence", "provider"]);
+    expect(outcome).toMatchObject({ status: "sent", messageId: "msg-f" });
   });
 });
 

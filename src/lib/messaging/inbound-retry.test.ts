@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
   dispatchOwner: vi.fn(async () => undefined),
   dispatchOwnerTriage: vi.fn(async () => undefined),
   listAdmins: vi.fn(async () => []),
-  loadDelayConfig: vi.fn(async () => null),
+  loadDelayConfig: vi.fn(async () => null as unknown),
+  computeDelay: vi.fn(() => 0),
+  preGates: vi.fn(async () => ({ ok: true }) as unknown),
   dispatchAi: vi.fn(async () => ({
     outcome: "skipped" as const,
     reason: "no_config",
@@ -22,6 +24,10 @@ const mocks = vi.hoisted(() => ({
   findTakeover: vi.fn(async () => null),
   recordTakeover: vi.fn(async () => undefined),
   persistTakeover: vi.fn(async () => undefined),
+  markAttention: vi.fn(async () => undefined),
+  recordThread: vi.fn(async () => undefined),
+  deadLetter: vi.fn(async () => true),
+  flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -33,7 +39,7 @@ vi.mock("@supabase/supabase-js", async () => {
 
 vi.mock("@/lib/messages/ai-responder-thread-state", () => ({
   clearAiResponderThreadState: mocks.clearThread,
-  recordAiResponderOutcomeForThread: vi.fn(),
+  recordAiResponderOutcomeForThread: mocks.recordThread,
 }));
 
 vi.mock("@/lib/messaging/inbound-intents", () => ({
@@ -57,16 +63,25 @@ vi.mock("@/lib/notifications/dispatch", () => ({
 
 vi.mock("@/lib/auth/admins", () => ({ listAdminUserIds: mocks.listAdmins }));
 
+vi.mock("@/lib/ai-responder/retry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-responder/retry")>()),
+  writeReplyDeadLetter: mocks.deadLetter,
+}));
+
 vi.mock("@/lib/ai-responder/delay", () => ({
-  computeReplyDelaySeconds: vi.fn(() => 0),
+  computeReplyDelaySeconds: mocks.computeDelay,
   loadAiReplyDelayConfig: mocks.loadDelayConfig,
 }));
 
 vi.mock("@/lib/ai-responder/dispatch", () => ({
   applyKeywordEscalation: vi.fn(async () => ({ escalated: false })),
-  checkAiResponderDispatchPreGates: vi.fn(async () => ({ ok: true })),
+  checkAiResponderDispatchPreGates: mocks.preGates,
+  // Mirrors the real helper: a silent exit stamps `skipped:rule_<n>`.
+  inboundStampOutcomeOf: (o: { outcome: string; reason?: string }) =>
+    o.outcome === "skipped" && o.reason === "already_answered" ? "skipped:rule_2" : o.outcome,
   dispatchAiResponse: mocks.dispatchAi,
-  markPropertyNeedsAttention: vi.fn(async () => undefined),
+  flagAndDeadLetter: mocks.flagAndDeadLetter,
+  markPropertyNeedsAttention: mocks.markAttention,
 }));
 
 vi.mock("@/lib/messaging/inbound-state", () => ({
@@ -319,5 +334,128 @@ describe("handleInboundWebhook retry boundary", () => {
     expect(mocks.markComplete).toHaveBeenCalledTimes(1);
     expect(mocks.dispatchOwner).toHaveBeenCalledTimes(1);
     expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
+  async function runWebhook() {
+    const handler = handlerClient([{ data: INSERTED, error: null }]);
+    mocks.serviceClient = handler.client;
+    process.env.TEST_SUPABASE_URL = "http://example.test";
+    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+    return handleInboundWebhook(
+      new Request("https://example.test/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: { host: "example.test" },
+        body: "{}",
+      }),
+      { includeFullUrl: true, provider: provider() as never },
+    );
+  }
+  const retryOutcome = {
+    outcome: "retry" as const,
+    reason: "send_reserved_elsewhere" as const,
+    attempt: 1,
+    delaySeconds: 20,
+    reply: {
+      body: "Hi there, still interested?",
+      confidence: 0.91,
+      sentiment: "neutral" as const,
+      orgId: "org-1",
+      kind: "send_reply" as const,
+    },
+  };
+
+  it("re-schedules the same inbound through the delay workflow and does NOT stamp a terminal outcome", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({
+      inboundMessageId: "message-1",
+      propertyId: "property-1",
+      delaySeconds: 20,
+      retryAttempt: 1,
+      // The generated reply rides in the durable workflow params so the retry
+      // re-sends it verbatim (no re-classification, no re-generation).
+      retryReply: expect.objectContaining({ body: "Hi there, still interested?", orgId: "org-1" }),
+    });
+    expect(mocks.deadLetter).not.toHaveBeenCalled();
+    // Inbound is stamped `delayed` (so a webhook redelivery does not race the
+    // retry), never with the retry outcome or a terminal state.
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "delayed", retryAttempt: 1, retryReason: "send_reserved_elsewhere" }) },
+    );
+    expect(mocks.recordThread).not.toHaveBeenCalled();
+    expect(mocks.markAttention).not.toHaveBeenCalled();
+  });
+
+  it("when the retry cannot be scheduled, the generated reply is dead-lettered, the property is flagged reply_skipped:<reason> and a terminal escalation is stamped", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    await runWebhook();
+    // Q8 rule 7: ONE helper dead-letters the carried reply and flags (and
+    // switches the flag to dead_letter_failed:<reason> when the write fails).
+    expect(mocks.flagAndDeadLetter).toHaveBeenCalledTimes(1);
+    expect((mocks.flagAndDeadLetter.mock.calls[0] as unknown[])[1]).toMatchObject({
+      orgId: "org-1",
+      propertyId: "property-1",
+      inboundMessageId: "message-1",
+      body: "Hi there, still interested?",
+      reason: "send_reserved_elsewhere",
+      flagReason: "reply_skipped:send_reserved_elsewhere",
+    });
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "escalated", reason: "send_reserved_elsewhere" }) },
+    );
+  });
+
+  it("an immediate silent exit stamps skipped:rule_<n> (not bare skipped), and a redelivery then skips dispatch", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    const stampCall = mocks.markState.mock.calls.find(
+      (c) => (c as unknown[])[2] && "aiResponder" in ((c as unknown[])[2] as object),
+    ) as unknown[] | undefined;
+    const stamp = (stampCall?.[2] as { aiResponder: { outcome: string } }).aiResponder;
+    expect(stamp.outcome).toBe("skipped:rule_2");
+
+    mocks.dispatchAi.mockClear();
+    mocks.readState.mockReturnValueOnce({ aiResponder: stamp } as never);
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+  });
+
+  it("the delayed pre-gate terminal stamp also keeps skipped:rule_<n> (never bare skipped)", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({
+      delayMinSeconds: 10,
+      delayMaxSeconds: 20,
+      propertyState: null,
+      escalationKeywords: [],
+    });
+    mocks.computeDelay.mockReturnValueOnce(15);
+    mocks.preGates.mockResolvedValueOnce({
+      ok: false,
+      outcome: { outcome: "skipped", reason: "already_answered" },
+    });
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "skipped:rule_2", reason: "already_answered" }) },
+    );
+  });
+
+  it("a webhook redelivery of an inbound already stamped delayed does not dispatch again", async () => {
+    mocks.readState.mockReturnValueOnce({ aiResponder: { outcome: "delayed", delaySeconds: 20, scheduledAt: "x" } } as never);
+    // First delivery's insert is a duplicate on redelivery; the stamp check is
+    // what keeps the retry from being short-circuited AND from being doubled.
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
   });
 });

@@ -36,6 +36,7 @@ const ADMIN_ITEMS: readonly AdminItem[] = [
   { href: "/admin/webhooks", label: "Webhooks", icon: LinkIcon },
   { href: "/settings/ai-responder", label: "AI responder", icon: Bot },
   { href: "/settings/contract-defaults", label: "Contract defaults", icon: FileSignature },
+  { href: "/settings/jev-thresholds", label: "Jev thresholds", icon: Bot },
 ];
 
 const ITEM_BASE =

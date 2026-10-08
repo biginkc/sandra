@@ -24,6 +24,10 @@ const {
   assertNotTrainingTarget: vi.fn(),
 }));
 
+const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
+  applySuppressionForConfirmedReview: vi.fn(),
+}));
+vi.mock("@/lib/ai-responder/confirm-suppression", () => ({ applySuppressionForConfirmedReview }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/leads/qualify", () => ({ qualifyProperty }));
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget }));
@@ -62,6 +66,7 @@ beforeEach(() => {
     { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: false },
   ]);
   qualifyProperty.mockResolvedValue({ status: "qualified" });
+  applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
   recordConsentEvent.mockResolvedValue({
     inserted: true,
     id: CONSENT_EVENT_ID,
@@ -81,6 +86,26 @@ describe("confirmAiDispositionReview", () => {
 
     expect(result).toEqual({ ok: true, status: "confirmed" });
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("runs suppression for a confirmed review", async () => {
+    responseQueue = [{ data: { status: "confirmed", reviewId: "review-1" } }];
+    await confirmAiDispositionReview("review-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "actor-1");
+  });
+
+  it("does not run suppression for a superseded review", async () => {
+    responseQueue = [{ data: { status: "superseded", reviewId: "review-1" } }];
+    await confirmAiDispositionReview("review-1");
+    expect(applySuppressionForConfirmedReview).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a suppression warning and keeps the review confirmed", async () => {
+    responseQueue = [{ data: { status: "confirmed", reviewId: "review-1" } }];
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: false, warning: "Confirmed, but suppression incomplete — retry." });
+    const result = await confirmAiDispositionReview("review-1");
+    expect(result).toEqual({ ok: true, status: "confirmed", warning: "Confirmed, but suppression incomplete — retry." });
   });
 
   it("reports a stale review as superseded without pretending it was confirmed", async () => {

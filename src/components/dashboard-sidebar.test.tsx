@@ -39,7 +39,7 @@ describe("DashboardMobileNav", () => {
     expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(14);
+    expect(links).toHaveLength(15); // main's 14 + the Norma queue link
     expect(screen.getByRole("link", { name: "Norma callbacks" })).toHaveAttribute("href", "/norma/callbacks");
     expect(screen.getByRole("link", { name: "Norma queue" })).toHaveAttribute("href", "/norma/queue");
     for (const link of links) {
@@ -92,5 +92,16 @@ describe("DashboardMobileNav", () => {
       "href",
       "/my-leads",
     );
+  });
+
+  it("shows Messages v2 right after Messages only when granted", () => {
+    const { rerender } = render(<DashboardSidebar />);
+    expect(screen.queryByRole("link", { name: "Messages v2" })).not.toBeInTheDocument();
+
+    rerender(<DashboardSidebar showMessagesV2 />);
+    const v2 = screen.getByRole("link", { name: "Messages v2" });
+    expect(v2).toHaveAttribute("href", "/messages-v2");
+    const links = screen.getAllByRole("link");
+    expect(links[links.indexOf(screen.getByRole("link", { name: "Messages" })) + 1]).toBe(v2);
   });
 });

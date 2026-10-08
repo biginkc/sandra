@@ -80,7 +80,7 @@ export async function applyQueueChain(db: Client, opts: QueueChainOptions = {}):
   await db.query(loadNamed(RETRY_MIGRATION)); // norma_retry_admission stays OFF (plan [H7])
   if (opts.beforeQueueMigration) await opts.beforeQueueMigration(db);
   // The queue's merge_duplicate_properties is rebuilt from the latest definition (inbound call records), so that
-  // migration must already be in place, exactly as it is on main before the queue migration (150100 > 135000).
+  // migration must already be in place, exactly as it is on main before the queue migration (20261009010100 > 20261008135000).
   await db.query(loadNamed(INBOUND_CALL_RECORDS_MIGRATION));
   const legacy = findOptionalLegacyClaimMigration();
   if (legacy) await db.query(loadNamed(legacy));

@@ -125,7 +125,7 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
   // suite then replays the Norma migrations it needs. Only when the whole chain is present, never after a test applied it itself.
   if (known.length > 0 && present.every(Boolean)) {
     await db.query('drop function if exists public.fn_norma_mark_needs_review(uuid, text, integer)');
-    // Same for the legacy dispatch claim: 20261008150000 left a (uuid, integer) overload that is always false, and the historical Norma
+    // Same for the legacy dispatch claim: 20261009010000 left a (uuid, integer) overload that is always false, and the historical Norma
     // migrations a suite replays re-create the 1-argument one, which makes every 1-argument call ambiguous. Those suites test the
     // historical function bodies; the always-false legacy claim is covered by norma_call_queue.integration.test.ts.
     await db.query('drop function if exists public.fn_norma_claim_dispatch(uuid, integer)');
@@ -143,7 +143,7 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
 /**
  * For suites that replay a HISTORICAL Norma migration (20261002120000/-0100/-0200/...) inside their rolled-back transaction on a database where the
  * whole chain is already applied. The historical migrations re-create the old 1/2-argument dispatch functions next to the evolved overloads that
- * 20261008090100 (retry admission) and 20261008150000 (legacy claim disable) left behind, so every `fn_norma_*($1,...)` call with untyped
+ * 20261008090100 (retry admission) and 20261009010000 (legacy claim disable) left behind, so every `fn_norma_*($1,...)` call with untyped
  * parameters becomes "is not unique". In production the retry migration drops the old shapes after the historical ones; this removes the evolved
  * shapes first so the replay lands on the same state a historical-only database has. `if exists`, so it is a no-op on a database without them.
  * Scoped to the caller's transaction (rolled back); the evolved functions are covered by the retry-admission and norma_call_queue suites.

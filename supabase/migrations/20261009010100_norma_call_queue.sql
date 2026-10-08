@@ -949,8 +949,12 @@ begin
   if not norma_private.fn_norma_active_member(p_requested_by, p_org_id) then
     raise exception 'requester_not_member' using errcode = '42501';
   end if;
-  foreach v_pid in array coalesce(p_property_ids, '{}'::uuid[]) loop
+  -- Advisory locks for the whole batch, ascending uuid order, before any row work (two batches with opposite
+  -- orders must not wait on each other). The same per-property lock create_request and merge take.
+  for v_pid in select distinct u from unnest(coalesce(p_property_ids, '{}'::uuid[])) u order by u loop
     perform pg_advisory_xact_lock(hashtextextended('norma_create_request:' || v_pid::text, 0));
+  end loop;
+  foreach v_pid in array coalesce(p_property_ids, '{}'::uuid[]) loop
     select p.org_id, p.state, p.homeowner_contact_id into v_prop
       from public.properties p where p.id = v_pid and p.org_id = p_org_id and p.deleted_at is null;
     if not found then
@@ -1506,6 +1510,9 @@ begin
     when p_result = 'bland_unknown' then 'unknown'
     else null end;
   if v_kind is null then return 'noop'; end if;
+  -- Global lock order: request -> enrollments -> contact -> property -> queue entry. The lead rows come BEFORE
+  -- the entry (the property/contact block triggers lock lead then entry); mark_dispatch_* below re-take them.
+  perform public.fn_norma_lock_lead(r.property_id, r.contact_id);
   select * into e from public.norma_queue_entries where id = r.queue_entry_id for update;
 
   if v_kind = 'unknown' then
@@ -2521,6 +2528,8 @@ as $$
 declare
   v_keeper_org_id uuid;
   v_loser_org_id uuid;
+  v_lock_id uuid;
+  v_blockers text;
 begin
   select property.org_id into v_keeper_org_id
   from public.properties property where property.id = keeper_id;
@@ -2536,6 +2545,25 @@ begin
       using errcode = '42501';
   end if;
 
+  -- Norma queue [merge safety]: the global lock order is request -> enrollment -> contact -> property -> entry (the order
+  -- fn_norma_complete_call / fn_norma_lock_lead take), preceded by the per-property creation advisory locks (ascending uuid), the
+  -- one fn_norma_create_request(_v2) and enqueue take, so a concurrent creation either finishes first and is seen below, or waits
+  -- and then fails on the deleted property. EVERY request on either property is locked first, open AND closed: the merge cascade-
+  -- deletes the loser's closed requests, and a webhook replay on one of them (request -> enrollment -> property) must queue behind
+  -- the merge rather than hold an enrollment the merge needs after it has taken the property. Nothing is written before the refusal.
+  for v_lock_id in select u from unnest(array[keeper_id, loser_id]) u order by u loop
+    perform pg_advisory_xact_lock(hashtextextended('norma_create_request:' || v_lock_id::text, 0));
+  end loop;
+  perform 1 from public.norma_call_requests r
+   where r.property_id in (keeper_id, loser_id)
+   order by r.id for update;
+  perform 1 from public.sequence_enrollments e
+   where e.property_id in (keeper_id, loser_id)
+   order by e.id for update;
+  perform 1 from public.contacts c
+   where c.id in (select p.homeowner_contact_id from public.properties p
+                   where p.id in (keeper_id, loser_id) and p.homeowner_contact_id is not null)
+   order by c.id for no key update;
   -- Deterministic locking makes a concurrent save either complete before the
   -- merge or fail cleanly before the loser is removed.
   perform 1
@@ -2543,6 +2571,26 @@ begin
   where property.id in (keeper_id, loser_id)
   order by property.id
   for update;
+  perform 1 from public.norma_queue_entries qe
+   where qe.property_id in (keeper_id, loser_id) order by qe.id for update;
+  -- Refusal check, after every lock above: nothing it reads can change under the merge.
+  select string_agg(b.ref, ',' order by b.ref) into v_blockers
+    from (
+      select 'request:' || r.id::text as ref
+        from public.norma_call_requests r
+       where r.property_id in (keeper_id, loser_id)
+         and (r.status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown', 'needs_review')
+              or (r.send_attempted_at is not null
+                  and abs(extract(epoch from (norma_private.fn_norma_wallclock() - r.send_attempted_at))) < 10))
+      union all
+      select 'entry:' || qe.id::text
+        from public.norma_queue_entries qe
+       where qe.property_id in (keeper_id, loser_id) and qe.status = 'calling'
+    ) b;
+  if v_blockers is not null then
+    raise exception 'NORMA_MERGE_BLOCKED_UNRESOLVED_CALL'
+      using errcode = '55000', detail = v_blockers;
+  end if;
 
   update public.norma_inbound_calls set property_id=keeper_id,updated_at=now()
     where property_id=loser_id and org_id=v_keeper_org_id;
@@ -2574,11 +2622,9 @@ begin
   -- statement can accidentally inherit calculator write authority.
   perform set_config('offer_calculations.merge_repoint', '', true);
 
-  -- Norma queue [H8]: entries are locked after the properties (property -> entry). When both properties
+  -- Norma queue [H8]: the entries were locked above, after the properties (property -> entry). When both properties
   -- hold a LIVE entry the survivor's is kept and the loser's is cancelled before the repoint (one live
   -- entry per property). The attempts ledger follows via entry_id and survives the loser's request delete.
-  perform 1 from public.norma_queue_entries qe
-   where qe.property_id in (keeper_id, loser_id) order by qe.id for update;
   update public.norma_queue_entries l
      set status = 'cancelled', end_reason = 'merged_into:' || k.id::text, pause_reason = null,
          dispatch_token = gen_random_uuid()

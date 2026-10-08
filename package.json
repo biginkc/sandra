@@ -47,7 +47,7 @@
     "stress": "tsx e2e/stress/cli.ts",
     "test:stress-unit": "vitest run --config vitest.stress.config.ts",
     "test:my-leads-close-unit": "vitest run scripts/my-leads-close e2e/support/my-leads-close-fixture.test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node --max-old-space-size=6144 ./node_modules/typescript/bin/tsc --noEmit",
     "verify": "npm run verify:sms-opening-identity && npm run verify:esign-atomic-packet && npm run verify:esign-essentials-rehearsal && npm run verify:calculators-migration && npm run typecheck && npm run test && npm run test:rtl",
     "filters:characterize:pass1": "tsx scripts/properties-filter-characterization.ts",
     "prepare": "husky",

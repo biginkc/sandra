@@ -6,14 +6,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
 
 /**
- * Grant regression guard for 20261008150100_norma_call_queue.sql.
+ * Grant regression guard for 20261009010100_norma_call_queue.sql.
  *
  * Runs against a run-owned, full-chain DISPOSABLE database (queue migrations already applied) and only ever works inside a
  * rolled-back transaction. The queue migration must not change ANY privilege that 20261008135000 (inbound call records) set:
  * its RLS policies call norma_private.can_access_callbacks as `authenticated`, which needs USAGE on schema norma_private and
  * EXECUTE on the function.
  *
- * Baseline = the ACLs of a database built WITHOUT 20261008150000/20261008150100. They are pinned below; when
+ * Baseline = the ACLs of a database built WITHOUT 20261009010000/20261009010100. They are pinned below; when
  * TEST_SUPABASE_PREQUEUE_DB_URL points at such a database, the pinned values are also checked against it live.
  */
 const url = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres");

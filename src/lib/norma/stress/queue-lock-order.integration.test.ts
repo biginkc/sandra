@@ -9,12 +9,15 @@ import { rng, sleep, type Rng } from "./trace";
 /**
  * [B1] Queue lock-order stress (docs/norma/queue-sql-contract.md, concurrency section).
  *
- * One property, one queue entry, four writers released together in a random order with random head starts:
+ * One property, one queue entry, up to five writers released together in a random order with random head starts:
  *   - completion   fn_norma_complete_call (settles the attempt, ends the entry)
  *   - block        a committed write that makes the lead ineligible (DNC lock / contact DNC / disposition) -> the
  *                  zz_norma_queue_block_* triggers
  *   - claim        fn_norma_queue_claim (SKIP LOCKED; must never wait)
  *   - pause/resume fn_norma_queue_pause then fn_norma_queue_resume (the operator path)
+ *   - presend      fn_norma_queue_apply_presend (the refusal writer: request -> lead rows -> entry). In the "presend" shape the
+ *                  request is still `dispatching`, so the refusal really rejects it and requeues the entry; in the "calling"
+ *                  shape the request is already dispatched, so it is the answer-noop path that still takes the same locks.
  * The harness delay triggers (stress.delay_*_ms, scratch database only) randomly hold a row lock open inside the
  * completion / enrollment update to widen the window between the first and the next lock.
  *
@@ -51,24 +54,25 @@ afterAll(async () => {
 const q = async (sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows as Row[];
 const one = async (sql: string, params: unknown[] = []) => (await q(sql, params))[0]!;
 
-async function seed(shape: "calling" | "queued") {
+async function seed(shape: "calling" | "queued" | "presend") {
   const l = await h.world.nextLead({ enrollments: ["active"] });
   const rep = h.world.rep1;
   const enq = await one("select * from public.fn_norma_queue_enqueue($1::uuid,$2::uuid,$3::uuid[],'b1')", [h.world.org, rep, [l.property]]);
   expect(enq.result).toBe("queued");
   const entry = enq.entry_id as string;
   await q("update public.norma_queue_entries set created_at = created_at - interval '1 day', next_attempt_at = '2029-12-01T00:00:00Z' where id=$1", [entry]);
-  if (shape === "queued") return { l, entry, requestId: null as string | null, callId: null as string | null };
+  if (shape === "queued") return { l, entry, requestId: null as string | null, callId: null as string | null, lease: null as string | null };
   const claim = await one("select * from public.fn_norma_queue_claim($1::uuid,$2::timestamptz,true)", [entry, V_OPEN]);
   expect(claim.result).toBe("claimed");
   const req = await one("select * from public.fn_norma_create_request_v2($1::uuid,$2::uuid,$3::text,$4::uuid,'b1',$4::uuid,$5::uuid,$6::uuid)", [l.property, l.contact, l.phone, rep, entry, claim.lease_token]);
   expect(req.outcome).toBe("created");
   const requestId = req.request_id as string;
   expect((await one("select public.fn_norma_claim_dispatch_v2($1::uuid,1,$2::timestamptz,true,1000,100000,'America/Chicago') as r", [requestId, V_OPEN])).r).toBe("claimed");
+  if (shape === "presend") return { l, entry, requestId, callId: null as string | null, lease: claim.lease_token as string }; // claimed, nothing sent: apply_presend can reject it
   await q("update public.norma_call_requests set send_attempted_at=$2::timestamptz where id=$1", [requestId, V_OPEN]);
   const callId = `b1-${randomUUID()}`;
   expect((await one("select public.fn_norma_bind_call_id($1::uuid,$2::text,1::integer) as b", [requestId, callId])).b).toBe("bound");
-  return { l, entry, requestId, callId };
+  return { l, entry, requestId, callId, lease: claim.lease_token as string };
 }
 
 type Outcome = { actor: string; ok: boolean; value?: unknown; code?: string; message?: string };
@@ -86,7 +90,7 @@ async function onConnection(delay: { guc: "stress.delay_request_ms" | "stress.de
 }
 
 async function oneRun(r: Rng, n: number): Promise<{ violations: string[]; shape: string; results: Outcome[] }> {
-  const shape = r.chance(0.5) ? "calling" : "queued";
+  const shape: "calling" | "queued" | "presend" = r.chance(0.35) ? "calling" : r.chance(0.5) ? "queued" : "presend";
   const s = await seed(shape);
   const rep = h.world.rep1;
   const blockKind = r.pick(["dnc_lock", "contact_dnc", "dispo_dnc"] as const);
@@ -128,6 +132,14 @@ async function oneRun(r: Rng, n: number): Promise<{ violations: string[]; shape:
         }),
     });
   }
+  if (s.requestId) {
+    const d = delayFor();
+    actors.push({
+      name: "presend",
+      run: () =>
+        onConnection(d, async (c) => (await c.query("select public.fn_norma_queue_apply_presend($1::uuid,'capacity_daily') as r", [s.requestId])).rows[0].r),
+    });
+  }
   actors.push({
     name: "claim",
     run: () => onConnection(null, async (c) => (await c.query("select * from public.fn_norma_queue_claim($1::uuid,$2::timestamptz,true)", [s.entry, V_OPEN])).rows[0]?.result),
@@ -162,7 +174,7 @@ async function oneRun(r: Rng, n: number): Promise<{ violations: string[]; shape:
   const raced = await Promise.race([settled, hang]);
   const violations: string[] = [];
   if (raced === "hang") {
-    const waiting = await q("select pid, wait_event_type, wait_event, state, left(query, 120) as query from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
+    const waiting = await q("select pid, wait_event_type, wait_event, state, pg_blocking_pids(pid) as blocked_by, now() - xact_start as xact_age, left(query, 120) as query from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and (wait_event_type = 'Lock' or state <> 'idle' or xact_start is not null)");
     violations.push(`run ${n} (${shape}): writers still running after ${HANG_MS} ms (undetected deadlock / lost wake-up); waiting sessions=${JSON.stringify(waiting)}`);
     return { violations, shape, results: [] };
   }
@@ -187,6 +199,15 @@ async function oneRun(r: Rng, n: number): Promise<{ violations: string[]; shape:
     if (attempts.length !== 1 || !attempts[0]!.outcome) violations.push(`run ${n} (calling): LOST SETTLEMENT attempts=${JSON.stringify(attempts)}`);
     if (!["done"].includes(entry.status as string)) violations.push(`run ${n} (calling): entry left ${String(entry.status)} after a terminal settlement ${JSON.stringify(entry)}`);
   }
+  if (shape === "presend") {
+    const req = await one("select status from public.norma_call_requests where id=$1", [s.requestId]);
+    const refusal = results.find((o) => o.actor === "presend");
+    if (refusal && refusal.value !== "applied") violations.push(`run ${n} (presend): refusal answered ${JSON.stringify(refusal.value)}`);
+    if (req.status !== "dispatch_rejected") violations.push(`run ${n} (presend): LOST REFUSAL request is ${String(req.status)} after an applied presend refusal`);
+    // The entry may legitimately be `calling` again only on a NEW lease (pause -> resume -> claim can all happen after the rejection);
+    // the lease of the rejected call must never survive.
+    if (entry.status === "calling" && entry.lease_token === s.lease) violations.push(`run ${n} (presend): entry still holds the rejected call's lease ${JSON.stringify(entry)}`);
+  }
   // A blocked lead must not keep a live, unflagged entry.
   if (blockNow && ["queued", "paused", "calling"].includes(entry.status as string) && !entry.blocked_reason) {
     violations.push(`run ${n} (${shape}): LOST BLOCK ${blockNow} but entry is ${JSON.stringify(entry)}`);
@@ -199,11 +220,11 @@ describe("[B1] queue lock-order stress: completion vs block trigger vs claim vs 
   it(`${RUNS} randomised runs: no deadlock, no hang, no lost settlement, no lost block`, async () => {
     const r = rng(SEED);
     const all: string[] = [];
-    const shapes = { calling: 0, queued: 0 };
+    const shapes = { calling: 0, queued: 0, presend: 0 };
     const byActor = new Map<string, number>();
     for (let n = 1; n <= RUNS; n += 1) {
       const out = await oneRun(r, n);
-      shapes[out.shape as "calling" | "queued"] += 1;
+      shapes[out.shape as "calling" | "queued" | "presend"] += 1;
       for (const o of out.results) byActor.set(`${o.actor.split(":")[0]}:${o.ok ? "ok" : "err"}`, (byActor.get(`${o.actor.split(":")[0]}:${o.ok ? "ok" : "err"}`) ?? 0) + 1);
       all.push(...out.violations);
       if (out.violations.some((v) => v.includes("undetected"))) break; // sessions are wedged: stop and report

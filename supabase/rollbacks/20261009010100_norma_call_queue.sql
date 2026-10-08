@@ -1,5 +1,5 @@
 -- ============================================================================
--- Rollback of 20261008150100_norma_call_queue (plan [G1]; run as a new forward migration).
+-- Rollback of 20261009010100_norma_call_queue (plan [G1]; run as a new forward migration).
 -- Returns the database to its pre-queue catalog:
 --   * restores, byte-for-byte from their pre-queue source migrations, the shared functions the queue
 --     migration replaced: norma_call_requests_guard, fn_norma_bind_call_id, fn_norma_complete_call,
@@ -10,8 +10,8 @@
 --   * re-asserts the norma_private grants from 20261008135000 (schema USAGE and EXECUTE on
 --     can_access_callbacks / associate_inbound_call for authenticated). The queue migration no longer
 --     strips them; the grant lines at the end only restate 135000's state.
--- It does NOT restore fn_norma_claim_dispatch: 20261008150000 (legacy claim disable) is a separate
--- migration; apply rollbacks/20261008150000_norma_legacy_claim_disable.sql AFTER this file if the
+-- It does NOT restore fn_norma_claim_dispatch: 20261009010000 (legacy claim disable) is a separate
+-- migration; apply rollbacks/20261009010000_norma_legacy_claim_disable.sql AFTER this file if the
 -- legacy runtime must dial again.
 -- DESTRUCTIVE: queue-only data this rollback deletes:
 --   * the norma_queue_* tables (entries, attempts, digests, control), including the
@@ -45,9 +45,14 @@ begin
   ) and exists (
     select 1 from public.norma_call_requests
      where queue_entry_id is not null
-       and status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown')
+       and status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown', 'needs_review')
   ) then
     raise exception 'NORMA_ROLLBACK: queue-linked requests are still in flight; let them settle first' using errcode = '55000';
+  end if;
+  -- A pending attempt is unresolved call evidence (the request may already be gone): the ledger drop would erase it.
+  if to_regclass('public.norma_queue_attempts') is not null
+     and exists (select 1 from public.norma_queue_attempts where resolution = 'pending') then
+    raise exception 'NORMA_ROLLBACK: pending queue attempts exist; let them settle first' using errcode = '55000';
   end if;
 end $$;
 

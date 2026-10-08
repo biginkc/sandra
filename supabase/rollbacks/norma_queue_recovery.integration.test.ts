@@ -1,8 +1,8 @@
 // Forward-recovery proof for the Norma queue cutover (plan [G1]). Loopback-only, needs three disposable
 // databases cloned from the same pre-queue chain (see NORMA_ROLLBACK_* below), so it is skipped unless all are set:
-//   BASELINE: chain through 20261008135100 (no 150000, no 150100)  - the reference catalog
-//   MID:      BASELINE + 20261008150000 (legacy claim disabled)    - 150100 "cannot land"
-//   FULL:     BASELINE + 150000 + 150100 (queue installed)
+//   BASELINE: chain through 20261008144200 (pre-queue high-water; no 20261009010000, no 20261009010100)  - the reference catalog
+//   MID:      BASELINE + 20261009010000 (legacy claim disabled)    - 20261009010100 "cannot land"
+//   FULL:     BASELINE + 20261009010000 + 20261009010100 (queue installed)
 // Every test runs in a transaction that is rolled back; BASELINE is only read.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -22,8 +22,8 @@ const ready = Boolean(BASELINE && MID && FULL);
 
 const sql = (file: string) =>
   readFileSync(path.join(process.cwd(), "supabase", file), "utf8").replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const RECOVERY = sql("rollbacks/20261008150000_norma_legacy_claim_disable.sql");
-const QUEUE_ROLLBACK = sql("rollbacks/20261008150100_norma_call_queue.sql");
+const RECOVERY = sql("rollbacks/20261009010000_norma_legacy_claim_disable.sql");
+const QUEUE_ROLLBACK = sql("rollbacks/20261009010100_norma_call_queue.sql");
 
 // Whole public + norma_private catalog: function bodies, owners and ACLs; relations, ACLs, columns, indexes,
 // constraints, triggers, policies and schema ACLs.
@@ -113,7 +113,7 @@ describe.skipIf(!ready)("Norma queue forward recovery (loopback disposable DBs)"
     });
   });
 
-  it("FULL: the 150100 rollback drops the queue and restores every touched catalog entry; recovery then matches baseline exactly", async () => {
+  it("FULL: the 20261009010100 rollback drops the queue and restores every touched catalog entry; recovery then matches baseline exactly", async () => {
     const reference = await baselineSnapshot();
     const installed = await inTx(FULL!, snapshot);
     expect(installed.some((x) => x.includes("norma_queue_entries"))).toBe(true);
@@ -130,10 +130,84 @@ describe.skipIf(!ready)("Norma queue forward recovery (loopback disposable DBs)"
     });
   });
 
-  it("FULL: the 150100 rollback refuses while the queue is enabled", async () => {
+  it("FULL: the 20261009010100 rollback refuses while the queue is enabled", async () => {
     await inTx(FULL!, async (db) => {
       await db.query("insert into public.norma_queue_control(singleton, enabled) values (true, true) on conflict (singleton) do update set enabled = true");
       await expect(db.query(QUEUE_ROLLBACK)).rejects.toMatchObject({ code: "55000" });
+    });
+  });
+
+  // ---- destructive-rollback guard: unresolved call evidence must survive a refused rollback (Astra residual) ----
+  /** An org, one lead, a queue entry in `calling` and a queue-linked request, through the real functions; the wall clock is pinned inside the transaction. */
+  async function seedQueueLinkedRequest(db: Client) {
+    const org = randomUUID(), rep = randomUUID(), assignee = randomUUID(), sequence = randomUUID(), contact = randomUUID(), property = randomUUID();
+    const wall = "2030-01-07T17:00:00Z"; // Mon 11:00 Chicago, dialing window open
+    await db.query(`create or replace function norma_private.fn_norma_wallclock() returns timestamptz language sql volatile as $w$ select '${wall}'::timestamptz $w$`);
+    await db.query("insert into auth.users(id) values ($1), ($2)", [rep, assignee]);
+    await db.query("insert into public.organizations(id,name) values ($1,'norma rollback guard')", [org]);
+    await db.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'owner','active'), ($3,$2,'member','active')", [assignee, org, rep]);
+    await db.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Norma drip')", [sequence, org]);
+    await db.query("insert into public.sequence_steps(sequence_id,step_index,action_type,template_body) values ($1,0,'send_sms','hi')", [sequence]);
+    await db.query("insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values ($1,$2,'Seller','+18165571299','mobile')", [contact, org]);
+    await db.query("insert into public.properties(id,org_id,address,state,status,homeowner_contact_id) values ($1,$2,'1 Guard St','MO','new_lead',$3)", [property, org, contact]);
+    const enq = await svc<{ entry_id: string; result: string }>(db, "select * from public.fn_norma_queue_enqueue($1,$2,array[$3]::uuid[],'ctx')", [org, rep, property]);
+    expect(enq.rows[0]!.result).toBe("queued");
+    const entry = enq.rows[0]!.entry_id;
+    await db.query("update public.norma_queue_entries set next_attempt_at = '2029-12-01T00:00:00Z' where id=$1", [entry]);
+    const claim = await svc<{ result: string; lease_token: string }>(db, "select * from public.fn_norma_queue_claim($1::uuid,$2::timestamptz,true)", [entry, wall]);
+    expect(claim.rows[0]!.result).toBe("claimed");
+    const req = await svc<{ outcome: string; request_id: string }>(db, "select * from public.fn_norma_create_request_v2($1,$2,$3,$4,'ctx',$5,$6,$7)", [property, contact, "+18165571299", rep, assignee, entry, claim.rows[0]!.lease_token]);
+    expect(req.rows[0]!.outcome).toBe("created");
+    return { entry, requestId: req.rows[0]!.request_id };
+  }
+  const evidence = async (db: Client, entry: string, requestId: string) => ({
+    request: (await db.query("select id, status, queue_entry_id from public.norma_call_requests where id=$1", [requestId])).rows,
+    entry: (await db.query("select id, status from public.norma_queue_entries where id=$1", [entry])).rows,
+    attempts: (await db.query("select request_id, entry_id, resolution from public.norma_queue_attempts where entry_id=$1", [entry])).rows,
+  });
+  const refusedRollback = async (db: Client) => {
+    await db.query("savepoint rb_try");
+    try {
+      await db.query(QUEUE_ROLLBACK);
+      await db.query("release savepoint rb_try");
+      return null;
+    } catch (e) {
+      await db.query("rollback to savepoint rb_try");
+      return e as { code?: string; message?: string };
+    }
+  };
+
+  it("FULL: the 20261009010100 rollback refuses with a needs_review queue-linked request and preserves that row, its entry and its attempts", async () => {
+    await inTx(FULL!, async (db) => {
+      const { entry, requestId } = await seedQueueLinkedRequest(db);
+      await db.query("insert into public.norma_queue_attempts(entry_id,request_id,local_date,slot,sent_at,resolution) values ($1,$2,'2030-01-07','A_am','2030-01-07T17:00:00Z','pending')", [entry, requestId]);
+      await db.query("set local session_replication_role = replica");
+      await db.query("update public.norma_call_requests set status='needs_review' where id=$1", [requestId]);
+      await db.query("set local session_replication_role = origin");
+      const before = await evidence(db, entry, requestId);
+      expect(before.request).toMatchObject([{ status: "needs_review" }]);
+      expect(before.attempts).toHaveLength(1);
+      const err = await refusedRollback(db);
+      expect(err).toMatchObject({ code: "55000" });
+      expect(err?.message).toContain("NORMA_ROLLBACK");
+      expect(err?.message).toContain("in flight");
+      expect(await evidence(db, entry, requestId)).toEqual(before);
+    });
+  });
+
+  it("FULL: the 20261009010100 rollback refuses on a pending queue attempt even when no request is open, and the attempt survives", async () => {
+    await inTx(FULL!, async (db) => {
+      const { entry, requestId } = await seedQueueLinkedRequest(db);
+      await db.query("insert into public.norma_queue_attempts(entry_id,request_id,local_date,slot,sent_at,resolution) values ($1,$2,'2030-01-07','A_am','2030-01-07T17:00:00Z','pending')", [entry, requestId]);
+      await db.query("set local session_replication_role = replica");
+      await db.query("update public.norma_call_requests set status='dispatch_rejected' where id=$1", [requestId]);
+      await db.query("set local session_replication_role = origin");
+      const before = await evidence(db, entry, requestId);
+      expect(before.request).toMatchObject([{ status: "dispatch_rejected" }]);
+      const err = await refusedRollback(db);
+      expect(err).toMatchObject({ code: "55000" });
+      expect(err?.message).toContain("pending queue attempts");
+      expect(await evidence(db, entry, requestId)).toEqual(before);
     });
   });
 });
