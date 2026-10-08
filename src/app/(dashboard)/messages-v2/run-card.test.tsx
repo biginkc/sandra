@@ -165,4 +165,30 @@ describe("RunCard", () => {
     render(<RunCard run={baseRun()} label={undefined} />);
     expect(screen.getByText("Unknown sender")).toBeInTheDocument();
   });
+  it("shows the auto-drip route, when the first text goes, and how to stop it", () => {
+    const run = baseRun({
+      steps: [
+        step(1, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "applied",
+          detail: { route: "maybe_later", sequenceId: "s", enrollmentId: "e", firstSendNotBefore: "2026-11-06T12:00:00Z" },
+        }),
+      ],
+    });
+    render(<RunCard run={run} label={label} />);
+    expect(screen.getByTestId("drip-enrollment")).toHaveTextContent("Maybe later, first text Nov 6");
+    expect(screen.getByRole("link", { name: "Stop it from the lead page" })).toHaveAttribute("href", "/leads/p1");
+  });
+
+  it("shows the Book appointment route for a hot lead, and nothing for a failed or absent enrolment", () => {
+    const hot = baseRun({ steps: [step(1, { kind: "action", name: "drip_enrolled", result: "applied", detail: { route: "hot_book_appointment" } })] });
+    const { unmount } = render(<RunCard run={hot} label={label} />);
+    expect(screen.getByTestId("drip-enrollment")).toHaveTextContent("Book appointment");
+    unmount();
+    const failed = baseRun({ steps: [step(1, { kind: "action", name: "drip_enrolled", result: "error", detail: { reason: "no_phone" } })] });
+    render(<RunCard run={failed} label={label} />);
+    expect(screen.queryByTestId("drip-enrollment")).toBeNull();
+    expect(screen.queryByTestId("drip-stop-hint")).toBeNull();
+  });
 });

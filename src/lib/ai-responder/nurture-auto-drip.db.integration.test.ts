@@ -12,12 +12,13 @@ vi.mock("@/lib/events", () => ({
     DISPO_SET: "dispo_set",
     SEQUENCE_ENROLLED: "sequence_enrolled",
     SEQUENCE_PAUSED: "sequence_paused",
+    SEQUENCE_RESUMED: "sequence_resumed",
   },
   recordLeadEvent: vi.fn(async () => undefined),
   recordLeadEvents: vi.fn(async () => undefined),
 }));
 
-import { enrollLead } from "@/lib/sequences/enrollment";
+import { enrollLead, pausePropertyEnrollments, promotePropertyEnrollmentPauseReason } from "@/lib/sequences/enrollment";
 import { enrollNurtureInDrip } from "./nurture-auto-drip";
 
 const db = createTestClient();
@@ -209,5 +210,66 @@ describe("enrollNurtureInDrip (real database, real enrollLead)", () => {
     const rows = await enrollments(propertyId);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.sequence_id).toBe(other);
+  });
+  it("delayDays holds the first text back: a 30-day route is due in 30 days even when the drip's own first step is immediate", async () => {
+    const sequenceId = await seedSequence({ delayMinutes: 0 });
+    const propertyId = await seedProperty("Delayed");
+    const before = Date.now();
+    const result = await enrollNurtureInDrip(db, { propertyId, sequenceId, delayDays: 30 });
+    expect(result.status).toBe("enrolled");
+    const [row] = await enrollments(propertyId);
+    expect(Math.abs(new Date(row!.next_run_at!).getTime() - (before + 30 * 86_400_000))).toBeLessThan(60_000);
+  });
+
+  it("a paused enrolment in the same drip is handed back to a person (drip_paused), not left silent", async () => {
+    const sequenceId = await seedSequence();
+    const propertyId = await seedProperty("Paused");
+    expect((await enrollNurtureInDrip(db, { propertyId, sequenceId })).status).toBe("enrolled");
+    await pausePropertyEnrollments(db, { propertyId, reason: "inbound_reply" });
+    expect(await dispo(propertyId)).toBe("needs_sequence");
+
+    const result = await enrollNurtureInDrip(db, { propertyId, sequenceId });
+
+    expect(result).toEqual({ status: "refused", reason: "drip_paused" });
+    expect(await dispo(propertyId)).toBe("nurture");
+    expect((await enrollments(propertyId))[0]).toMatchObject({ status: "paused" });
+  });
+});
+
+describe("Book appointment enrolment (hot lead) stops on its own", () => {
+  async function hotEnrol(label: string) {
+    const sequenceId = await seedSequence({ delayMinutes: 24 * 60 });
+    // A hot lead is NOT nurture (no dispo is set); enrolment is the same shared enrollLead, no offset.
+    const propertyId = await seedProperty(label, { dispo: null });
+    const outcome = await enrollLead(db, { propertyId, sequenceId, enrolledByUserId: null });
+    expect(outcome.status).toBe("enrolled");
+    return { sequenceId, propertyId };
+  }
+
+  it("follows the drip's own day-1 delay (no extra offset)", async () => {
+    const before = Date.now();
+    const { propertyId } = await hotEnrol("HotDelay");
+    const [row] = await enrollments(propertyId);
+    expect(Math.abs(new Date(row!.next_run_at!).getTime() - (before + 24 * 3600_000))).toBeLessThan(60_000);
+  });
+
+  it("pauses when the seller replies (inbound reply path)", async () => {
+    const { propertyId } = await hotEnrol("HotReply");
+    await pausePropertyEnrollments(db, { propertyId, reason: "inbound_reply" });
+    expect((await enrollments(propertyId))[0]).toMatchObject({ status: "paused" });
+  });
+
+  it("stays paused with the precise reason when a person takes over by text", async () => {
+    const { propertyId } = await hotEnrol("HotTakeover");
+    await pausePropertyEnrollments(db, { propertyId, reason: "inbound_reply" });
+    await promotePropertyEnrollmentPauseReason(db, { propertyId, fromReason: "inbound_reply", reason: "rep_sms_human_takeover" });
+    const { data } = await db.from("sequence_enrollments").select("status, pause_reason").eq("property_id", propertyId).single();
+    expect(data).toEqual({ status: "paused", pause_reason: "rep_sms_human_takeover" });
+  });
+
+  it("pauses when a person starts a call", async () => {
+    const { propertyId } = await hotEnrol("HotCall");
+    await pausePropertyEnrollments(db, { propertyId, reason: "call_in_progress" });
+    expect((await enrollments(propertyId))[0]).toMatchObject({ status: "paused" });
   });
 });

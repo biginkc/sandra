@@ -10,6 +10,24 @@ import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
 
 const ENTER = "animate-in fade-in slide-in-from-top-1 duration-300";
 
+const DRIP_ROUTE_LABELS: Record<string, string> = {
+  maybe_later: "Maybe later",
+  check_in_60: "Check in every 60 days",
+  listed_not_selling: "Listed, not selling",
+  hot_book_appointment: "Book appointment",
+};
+
+/** "Maybe later, first text Nov 6" for an applied auto-drip step, else null. */
+export function dripEnrollmentSummary(step: PipelineRunStep): string | null {
+  if (step.name !== "drip_enrolled" || step.result !== "applied") return null;
+  const route = typeof step.detail?.route === "string" ? step.detail.route : null;
+  const label = route ? (DRIP_ROUTE_LABELS[route] ?? route) : null;
+  const at = typeof step.detail?.firstSendNotBefore === "string" ? new Date(step.detail.firstSendNotBefore) : null;
+  const when = at && !Number.isNaN(at.getTime()) ? `first text ${format(at, "MMM d")}` : null;
+  const parts = [label, when].filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
 export function StepLine({ step }: { step: PipelineRunStep }) {
   const base = cn("flex items-baseline gap-2 text-sm", ENTER);
   switch (step.kind) {
@@ -54,6 +72,11 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           <span>{step.name}</span>
           {step.result !== "applied" && (
             <span className="text-muted-foreground">({step.result})</span>
+          )}
+          {dripEnrollmentSummary(step) && (
+            <span data-testid="drip-enrollment" className="text-muted-foreground">
+              {dripEnrollmentSummary(step)}
+            </span>
           )}
         </li>
       );
@@ -134,6 +157,7 @@ export function RunCard({
     (s) => !(s.kind === "gate" && s.result === "pass"),
   );
   const running = run.status === "running";
+  const autoDripped = run.steps.some((st) => dripEnrollmentSummary(st) !== null);
 
   return (
     <article
@@ -191,6 +215,20 @@ export function RunCard({
           </li>
         )}
       </ul>
+
+      {autoDripped && run.property_id && (
+        <p data-testid="drip-stop-hint" className="mt-2 text-xs text-muted-foreground">
+          Auto-enrolled in a drip.{" "}
+          <a
+            href={`/leads/${encodeURIComponent(run.property_id)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-4 hover:text-foreground"
+          >
+            Stop it from the lead page
+          </a>
+        </p>
+      )}
 
       {threadHref && (
         <a

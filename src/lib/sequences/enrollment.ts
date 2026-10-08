@@ -47,6 +47,12 @@ export async function enrollLead(
     propertyId: string;
     enrolledByUserId?: string | null;
     deferEvent?: boolean;
+    /**
+     * Earliest moment the first text may go out. The first run is the LATER of
+     * this and the first step's own delay. Omitted = unchanged behaviour
+     * (the button path).
+     */
+    firstSendNotBefore?: Date;
   },
 ): Promise<EnrollmentOutcome> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
@@ -204,7 +210,11 @@ export async function enrollLead(
   }
 
   // Calculate first fire time — delay of step 0 from enrollment moment.
-  const nextRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
+  const stepRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
+  const nextRunAt =
+    params.firstSendNotBefore && params.firstSendNotBefore.getTime() > stepRunAt.getTime()
+      ? params.firstSendNotBefore
+      : stepRunAt;
 
   // INSERT — partial unique indexes enforce both the same-sequence and
   // property-wide live enrollment rules atomically.

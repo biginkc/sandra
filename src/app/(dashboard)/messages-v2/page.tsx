@@ -69,7 +69,7 @@ async function loadNurtureAutoDrip(
     const [cfg, seqs] = await Promise.all([
       supabase
         .from("ai_responder_configs")
-        .select("id, nurture_auto_drip, nurture_auto_drip_sequence_id")
+        .select("id, nurture_auto_drip, nurture_drip_maybe_later_sequence_id, nurture_drip_check_in_60_sequence_id, nurture_drip_listed_not_selling_sequence_id, nurture_drip_hot_book_appointment_sequence_id")
         .eq("org_id", orgId)
         .maybeSingle(),
       supabase
@@ -80,12 +80,24 @@ async function loadNurtureAutoDrip(
         .is("archived_at", null)
         .order("name"),
     ]);
-    const row = cfg.data as { id: string; nurture_auto_drip: boolean; nurture_auto_drip_sequence_id: string | null } | null;
+    const row = cfg.data as {
+      id: string;
+      nurture_auto_drip: boolean;
+      nurture_drip_maybe_later_sequence_id: string | null;
+      nurture_drip_check_in_60_sequence_id: string | null;
+      nurture_drip_listed_not_selling_sequence_id: string | null;
+      nurture_drip_hot_book_appointment_sequence_id: string | null;
+    } | null;
     if (cfg.error || seqs.error || !row) return null;
     return {
       configId: row.id,
       enabled: row.nurture_auto_drip,
-      sequenceId: row.nurture_auto_drip_sequence_id,
+      drips: {
+        maybeLater: row.nurture_drip_maybe_later_sequence_id,
+        checkIn60: row.nurture_drip_check_in_60_sequence_id,
+        listedNotSelling: row.nurture_drip_listed_not_selling_sequence_id,
+        hotBookAppointment: row.nurture_drip_hot_book_appointment_sequence_id,
+      },
       sequences: (seqs.data ?? []) as Array<{ id: string; name: string }>,
     };
   } catch {

@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const assertNotTrainingTarget = vi.hoisted(() => vi.fn());
 const getConsentState = vi.hoisted(() => vi.fn());
@@ -149,4 +149,28 @@ it("the same Nurture lead becomes eligible after the explicit Needs drip outcome
   const ready = clientFor({ outreach_dispo: "needs_sequence" });
   expect((await enrollLead(ready.client as never, { sequenceId: "sequence-1", propertyId: "property-1" })).status).toBe("enrolled");
   expect(ready.insert).toHaveBeenCalledOnce();
+});
+
+describe("firstSendNotBefore", () => {
+  const nextRun = (insert: ReturnType<typeof vi.fn>) => new Date((insert.mock.calls[0] as unknown as [{ next_run_at: string }])[0].next_run_at).getTime();
+
+  it("is unchanged without it (the button path): due at the first step's own delay", async () => {
+    const { client, insert } = clientFor({});
+    const before = Date.now();
+    expect((await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" })).status).toBe("enrolled");
+    expect(nextRun(insert) - before).toBeLessThan(5_000);
+  });
+
+  it("holds the first send until the given time when that is later than the step delay", async () => {
+    const { client, insert } = clientFor({});
+    const at = new Date(Date.now() + 30 * 86_400_000);
+    await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1", firstSendNotBefore: at });
+    expect(nextRun(insert)).toBe(at.getTime());
+  });
+
+  it("never sends earlier than the step's own delay when firstSendNotBefore is sooner", async () => {
+    const { client, insert } = clientFor({});
+    await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1", firstSendNotBefore: new Date(0) });
+    expect(nextRun(insert)).toBeGreaterThan(Date.now() - 5_000);
+  });
 });

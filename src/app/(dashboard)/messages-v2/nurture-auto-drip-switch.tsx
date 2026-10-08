@@ -16,32 +16,53 @@ import {
 } from "@/components/ui/dialog";
 import { callAction } from "@/lib/errors/call-action";
 
-import { setNurtureAutoDrip } from "./threshold-actions";
+import { NURTURE_DRIP_DEFAULT_NAMES } from "@/lib/ai-responder/nurture-routes";
+
+import { setNurtureAutoDrip, type NurtureDripMap } from "./threshold-actions";
 
 export type NurtureAutoDripState = {
   configId: string;
   enabled: boolean;
-  sequenceId: string | null;
+  /** Saved route -> drip mapping. */
+  drips: NurtureDripMap;
   /** Active drips the owner can pick from. */
   sequences: Array<{ id: string; name: string }>;
 };
 
+const ROUTES: Array<{ key: keyof NurtureDripMap; label: string; defaultName: string }> = [
+  { key: "maybeLater", label: "Maybe later (1 to 12 months)", defaultName: NURTURE_DRIP_DEFAULT_NAMES.maybe_later },
+  { key: "checkIn60", label: "Check in every 60 days (over a year, no timeframe, unsure)", defaultName: NURTURE_DRIP_DEFAULT_NAMES.check_in_60 },
+  { key: "hotBookAppointment", label: "Ready within 30 days (also alerts a person)", defaultName: NURTURE_DRIP_DEFAULT_NAMES.hot_book_appointment },
+  { key: "listedNotSelling", label: "Listed, not selling", defaultName: NURTURE_DRIP_DEFAULT_NAMES.listed_not_selling },
+];
+
+/** Saved choice, else the drip whose name matches the default EXACTLY, else empty. Owner still has to save. */
+function initialDrips(state: NurtureAutoDripState): Record<keyof NurtureDripMap, string> {
+  const out = {} as Record<keyof NurtureDripMap, string>;
+  for (const r of ROUTES) {
+    out[r.key] = state.drips[r.key] ?? state.sequences.find((s) => s.name === r.defaultName)?.id ?? "";
+  }
+  return out;
+}
+
 /**
  * Owner-only switch beside the per-label rules: when on, a nurture outcome that
- * Jev applies automatically also enrols the lead in the chosen drip, but only
- * after the approved nurture reply was sent. Off by default. Never picks a
- * drip for the owner.
+ * Jev applies automatically also enrols the lead in the drip the owner mapped to
+ * its route, but only after the approved nurture reply was sent. Off by default;
+ * cannot be turned on until all three routes have a drip. Never picks a drip
+ * for the owner (name matches are only pre-selected).
  */
 export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
   const [enabled, setEnabled] = useState(state.enabled);
-  const [sequenceId, setSequenceId] = useState(state.sequenceId ?? "");
+  const [drips, setDrips] = useState(() => initialDrips(state));
 
-  const currentName = state.sequences.find((s) => s.id === state.sequenceId)?.name;
-  const changed = enabled !== state.enabled || (enabled && sequenceId !== (state.sequenceId ?? ""));
-  const canSave = changed && (!enabled || sequenceId !== "");
+  const allSet = ROUTES.every((r) => drips[r.key] !== "");
+  const dripsChanged = ROUTES.some((r) => drips[r.key] !== (state.drips[r.key] ?? ""));
+  const changed = enabled !== state.enabled || dripsChanged;
+  const canSave = changed && (!enabled || allSet);
 
   const apply = () => {
     startTransition(async () => {
@@ -49,7 +70,12 @@ export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }
         setNurtureAutoDrip({
           configId: state.configId,
           enabled,
-          sequenceId: sequenceId || null,
+          drips: {
+            maybeLater: drips.maybeLater || null,
+            checkIn60: drips.checkIn60 || null,
+            listedNotSelling: drips.listedNotSelling || null,
+            hotBookAppointment: drips.hotBookAppointment || null,
+          },
         }),
         { fallbackMessage: "Failed to save" },
       );
@@ -70,12 +96,12 @@ export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }
         className="cursor-pointer rounded-full focus-visible:ring-2 focus-visible:ring-ring"
         onClick={() => {
           setEnabled(state.enabled);
-          setSequenceId(state.sequenceId ?? "");
+          setDrips(initialDrips(state));
           setOpen(true);
         }}
       >
         <Badge variant="outline" className="gap-1">
-          nurture drip [{state.enabled ? `ON${currentName ? `: ${currentName}` : ""}` : "OFF"}]
+          nurture drip [{state.enabled ? "ON" : "OFF"}]
         </Badge>
       </button>
 
@@ -84,7 +110,7 @@ export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }
           <DialogHeader>
             <DialogTitle>Nurture auto-drip</DialogTitle>
             <DialogDescription>
-              When Jev applies nurture on its own, send the approved nurture reply first, then start this drip.
+              When Jev applies nurture on its own, send the approved nurture reply first, then start the drip for what the seller said.
               If the reply cannot go out, nothing is enrolled and a person is asked to reply and start the drip.
             </DialogDescription>
           </DialogHeader>
@@ -111,25 +137,31 @@ export function NurtureAutoDripSwitch({ state }: { state: NurtureAutoDripState }
             </label>
           </fieldset>
 
-          <label className="flex flex-col gap-1 text-sm">
-            Drip to start
-            <select
-              className="rounded border bg-background px-2 py-1"
-              value={sequenceId}
-              onChange={(e) => setSequenceId(e.target.value)}
-              data-testid="nurture-auto-drip-sequence"
-            >
-              <option value="">Choose a drip</option>
-              {state.sequences.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {enabled && sequenceId === "" && (
+          {ROUTES.map((r) => (
+            <label key={r.key} className="flex flex-col gap-1 text-sm">
+              {r.label}
+              <select
+                className="rounded border bg-background px-2 py-1"
+                value={drips[r.key]}
+                onChange={(e) => setDrips((d) => ({ ...d, [r.key]: e.target.value }))}
+                data-testid={`nurture-auto-drip-${r.key}`}
+              >
+                <option value="">Choose a drip</option>
+                {state.sequences.map((sq) => (
+                  <option key={sq.id} value={sq.id}>
+                    {sq.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+          <p className="text-xs text-muted-foreground">
+            Sellers who say they could sell within 30 days get no nurture reply: a person is alerted and the Book appointment drip starts.
+            Anyone enrolled can be stopped from the lead page.
+          </p>
+          {enabled && !allSet && (
             <p role="alert" className="text-xs text-red-700 dark:text-red-300">
-              Choose the drip before turning this on.
+              Choose all four drips before turning this on.
             </p>
           )}
 

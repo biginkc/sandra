@@ -61,11 +61,14 @@ async function asUser<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const setSwitch = (enabled: boolean, seq: string | null) => () =>
-  db.query(`select public.fn_set_nurture_auto_drip($1, $2, $3) as r`, [configId, enabled, seq]);
+const setSwitch = (enabled: boolean, seq: string | null, ...rest: Array<string | null>) => () => {
+  // One drip for every route unless the test gives all four.
+  const four = rest.length === 3 ? [seq, ...rest] : [seq, seq, seq, seq];
+  return db.query(`select public.fn_set_nurture_auto_drip($1, $2, $3, $4, $5, $6) as r`, [configId, enabled, ...four]);
+};
 
 const cfg = async () =>
-  (await db.query(`select nurture_auto_drip, nurture_auto_drip_sequence_id from public.ai_responder_configs where id = $1`, [configId]))
+  (await db.query(`select nurture_auto_drip, nurture_drip_maybe_later_sequence_id as ml, nurture_drip_check_in_60_sequence_id as c60, nurture_drip_listed_not_selling_sequence_id as ls, nurture_drip_hot_book_appointment_sequence_id as hot from public.ai_responder_configs where id = $1`, [configId]))
     .rows[0];
 
 beforeEach(async () => {
@@ -92,12 +95,12 @@ afterEach(async () => {
 
 describe("nurture auto-drip switch", () => {
   it("is OFF with no drip by default (zero behaviour change)", async () => {
-    expect(await cfg()).toEqual({ nurture_auto_drip: false, nurture_auto_drip_sequence_id: null });
+    expect(await cfg()).toEqual({ nurture_auto_drip: false, ml: null, c60: null, ls: null, hot: null });
   });
 
   it("an owner turns it on with a drip, and off again", async () => {
     await asUser(users.owner, setSwitch(true, sequenceId));
-    expect(await cfg()).toEqual({ nurture_auto_drip: true, nurture_auto_drip_sequence_id: sequenceId });
+    expect(await cfg()).toEqual({ nurture_auto_drip: true, ml: sequenceId, c60: sequenceId, ls: sequenceId, hot: sequenceId });
     await asUser(users.owner, setSwitch(false, sequenceId));
     expect((await cfg()).nurture_auto_drip).toBe(false);
   });
@@ -110,6 +113,18 @@ describe("nurture auto-drip switch", () => {
     expect((await cfg()).nurture_auto_drip).toBe(false);
   });
 
+  it("cannot be turned on unless ALL FOUR routes have a drip, and each must be this org's active drip", async () => {
+    const other = (await db.query(`insert into public.sequences (org_id, name, active) values ($1, 'Second', true) returning id`, [orgId])).rows[0].id;
+    for (let missing = 0; missing < 4; missing++) {
+      const four = [sequenceId, other, sequenceId, other];
+      four[missing] = null as unknown as string;
+      await expect(asUser(users.owner, setSwitch(true, four[0], four[1], four[2], four[3]))).rejects.toThrow(/DRIP_REQUIRED/);
+    }
+    await expect(asUser(users.owner, setSwitch(true, sequenceId, other, sequenceId, otherOrgSequenceId))).rejects.toThrow(/DRIP_UNAVAILABLE/);
+    await asUser(users.owner, setSwitch(true, sequenceId, other, sequenceId, other));
+    expect(await cfg()).toEqual({ nurture_auto_drip: true, ml: sequenceId, c60: other, ls: sequenceId, hot: other });
+  });
+
   it("only an owner may change it", async () => {
     await expect(asUser(users.member, setSwitch(true, sequenceId))).rejects.toThrow(/FORBIDDEN/);
     expect((await cfg()).nurture_auto_drip).toBe(false);
@@ -118,7 +133,7 @@ describe("nurture auto-drip switch", () => {
   it("the table itself refuses 'on' with no drip (check constraint)", async () => {
     await expect(
       db.query(`update public.ai_responder_configs set nurture_auto_drip = true where id = $1`, [configId]),
-    ).rejects.toThrow(/nurture_auto_drip_sequence_check/);
+    ).rejects.toThrow(/nurture_auto_drip_sequences_check/);
   });
 
   it("deleting the chosen drip while the switch is on is refused, so 'on' can never point at nothing", async () => {
@@ -129,7 +144,7 @@ describe("nurture auto-drip switch", () => {
   it("the rollback removes the columns, constraint and RPC", async () => {
     await db.query(ROLLBACK);
     const cols = await db.query(
-      `select column_name from information_schema.columns where table_name = 'ai_responder_configs' and column_name like 'nurture_auto_drip%'`,
+      `select column_name from information_schema.columns where table_name = 'ai_responder_configs' and (column_name like 'nurture_auto_drip%' or column_name like 'nurture_drip_%')`,
     );
     expect(cols.rows).toEqual([]);
     const fn = await db.query(`select 1 from pg_proc where proname = 'fn_set_nurture_auto_drip'`);

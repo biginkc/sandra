@@ -72,7 +72,7 @@ function phase(name, files, dir) {
 // Phase 4 (templates, 20261008240000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
-const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|ai_responder_configs_nurture_auto_drip_sequence_check";
+const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|ai_responder_configs_nurture_auto_drip_sequences_check";
 const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name
@@ -95,7 +95,7 @@ select kind || ' ' || name from (
   union all
   select 'column', table_name || '.' || column_name from information_schema.columns
    where table_schema = 'public' and ((table_name = 'sms_templates' and column_name ~ '^approved_')
-      or (table_name = 'ai_responder_configs' and column_name ~ '^nurture_auto_drip'))
+      or (table_name = 'ai_responder_configs' and column_name ~ '^nurture_(auto_drip|drip_)'))
   union all
   select 'constraint', conrelid::regclass::text || '.' || conname from pg_constraint
    where conname ~ '(${TPL})'

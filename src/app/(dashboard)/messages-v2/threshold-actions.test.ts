@@ -78,22 +78,32 @@ describe("setLabelRule", () => {
 });
 
 describe("setNurtureAutoDrip", () => {
-  it("passes the owner's choice to the owner-only RPC", async () => {
-    mocks.rpcResult = { data: { id: "c", nurtureAutoDrip: true, sequenceId: "seq-1" }, error: null };
-    const r = await setNurtureAutoDrip({ configId: "c", enabled: true, sequenceId: "seq-1" });
-    expect(r).toEqual({ ok: true, data: { enabled: true, sequenceId: "seq-1" } });
+  const drips = { maybeLater: "s1", checkIn60: "s2", listedNotSelling: "s3", hotBookAppointment: "s4" };
+  it("passes the owner's four choices to the owner-only RPC", async () => {
+    mocks.rpcResult = {
+      data: { id: "c", nurtureAutoDrip: true, maybeLaterSequenceId: "s1", checkIn60SequenceId: "s2", listedNotSellingSequenceId: "s3", hotBookAppointmentSequenceId: "s4" },
+      error: null,
+    };
+    const r = await setNurtureAutoDrip({ configId: "c", enabled: true, drips });
+    expect(r).toEqual({ ok: true, data: { enabled: true, drips } });
     expect(mocks.rpcCalls).toEqual([
-      expect.objectContaining({ name: "fn_set_nurture_auto_drip", p_config_id: "c", p_enabled: true, p_sequence_id: "seq-1" }),
+      expect.objectContaining({
+        name: "fn_set_nurture_auto_drip", p_config_id: "c", p_enabled: true,
+        p_maybe_later_sequence_id: "s1", p_check_in_60_sequence_id: "s2",
+        p_listed_not_selling_sequence_id: "s3", p_hot_book_appointment_sequence_id: "s4",
+      }),
     ]);
   });
-  it("refuses 'on' with no drip before any database call", async () => {
-    const r = await setNurtureAutoDrip({ configId: "c", enabled: true, sequenceId: null });
-    expect(r.ok).toBe(false);
+  it("refuses 'on' unless all four drips are set, before any database call", async () => {
+    for (const missing of ["maybeLater", "checkIn60", "listedNotSelling", "hotBookAppointment"] as const) {
+      const r = await setNurtureAutoDrip({ configId: "c", enabled: true, drips: { ...drips, [missing]: null } });
+      expect(r.ok).toBe(false);
+    }
     expect(mocks.rpcCalls).toEqual([]);
   });
   it("maps a non-owner to a plain message", async () => {
     mocks.rpcResult = { data: null, error: { message: "FORBIDDEN" } };
-    const r = await setNurtureAutoDrip({ configId: "c", enabled: false, sequenceId: null });
+    const r = await setNurtureAutoDrip({ configId: "c", enabled: false, drips: { maybeLater: null, checkIn60: null, listedNotSelling: null, hotBookAppointment: null } });
     expect(r).toMatchObject({ ok: false, error: { message: "Only an org owner can change this." } });
   });
 });

@@ -1023,7 +1023,10 @@ export type Database = {
           min_confidence: number
           model: string
           nurture_auto_drip: boolean
-          nurture_auto_drip_sequence_id: string | null
+          nurture_drip_check_in_60_sequence_id: string | null
+          nurture_drip_hot_book_appointment_sequence_id: string | null
+          nurture_drip_listed_not_selling_sequence_id: string | null
+          nurture_drip_maybe_later_sequence_id: string | null
           org_id: string
           outbound_mode: string
           reply_delay_max_seconds: number
@@ -1045,7 +1048,10 @@ export type Database = {
           min_confidence?: number
           model?: string
           nurture_auto_drip?: boolean
-          nurture_auto_drip_sequence_id?: string | null
+          nurture_drip_check_in_60_sequence_id?: string | null
+          nurture_drip_hot_book_appointment_sequence_id?: string | null
+          nurture_drip_listed_not_selling_sequence_id?: string | null
+          nurture_drip_maybe_later_sequence_id?: string | null
           org_id: string
           outbound_mode?: string
           reply_delay_max_seconds?: number
@@ -1067,7 +1073,10 @@ export type Database = {
           min_confidence?: number
           model?: string
           nurture_auto_drip?: boolean
-          nurture_auto_drip_sequence_id?: string | null
+          nurture_drip_check_in_60_sequence_id?: string | null
+          nurture_drip_hot_book_appointment_sequence_id?: string | null
+          nurture_drip_listed_not_selling_sequence_id?: string | null
+          nurture_drip_maybe_later_sequence_id?: string | null
           org_id?: string
           outbound_mode?: string
           reply_delay_max_seconds?: number
@@ -8049,7 +8058,14 @@ export type Database = {
         Returns: Json
       }
       fn_set_nurture_auto_drip: {
-        Args: { p_config_id: string; p_enabled: boolean; p_sequence_id: string }
+        Args: {
+          p_check_in_60_sequence_id: string
+          p_config_id: string
+          p_enabled: boolean
+          p_hot_book_appointment_sequence_id: string
+          p_listed_not_selling_sequence_id: string
+          p_maybe_later_sequence_id: string
+        }
         Returns: Json
       }
       fn_confirm_jev_lead_decision: {

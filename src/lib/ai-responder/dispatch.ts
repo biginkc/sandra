@@ -4,7 +4,12 @@ import { after } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
-import { enrollNurtureInDrip, loadNurtureAutoDripConfig } from "./nurture-auto-drip";
+import {
+  enrollNurtureInDrip,
+  loadNurtureAutoDripConfig,
+  type NurtureAutoDripConfig,
+} from "./nurture-auto-drip";
+import { routeNurture, type NurtureRoute } from "./nurture-routes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import { applyPhoneLevelOptOut, isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
@@ -17,7 +22,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
-import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
@@ -978,6 +983,54 @@ async function classifyAndHandleNonRouteOutcomes(
     // Approved-template reply first (Phase 4): nurture is a human-owned
     // disposition that suppresses automated sends, so the reply must go out
     // before the outcome is applied.
+    //
+    // Nurture auto-drip (per-org switch, default off). When on, the approved
+    // routing runs on Jev's timeframe / listing answers: "ready within 30 days"
+    // is a hot lead for a person, so it gets no nurture reply and no drip.
+    const dripCfg = await loadNurtureAutoDripConfig(supabase, property.org_id);
+    const dripRoute: NurtureRoute | null = dripCfg.enabled
+      ? routeNurture({
+          readyTimeframe: classification.readyTimeframe,
+          listingStatus: classification.listingStatus,
+        })
+      : null;
+    if (dripRoute?.kind === "person") {
+      if (input.inboundMessageId) {
+        await proposeJevLeadDecision(supabase, {
+          propertyId: input.propertyId,
+          conversationId: input.conversationId,
+          inboundMessageId: input.inboundMessageId,
+          classificationRunId: classification.classificationRunId,
+          outcome: "new_lead",
+          nativeConfidence: classification.nativeConfidence,
+          thresholdAtDecision: classification.thresholdAtDecision,
+          thresholdVersion: classification.thresholdVersion,
+          expectedRevision: classification.evaluationRevision,
+        });
+      }
+      await trace(supabase, {
+        kind: "hold",
+        name: "nurture_ready_within_30_days",
+        result: "held",
+        detail: { reason: "hot_lead", readyTimeframe: classification.readyTimeframe ?? null },
+      }, runCtx);
+      const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, "hot_lead", runCtx);
+      // Also start the Book appointment drip (no nurture reply, no dispo change,
+      // no extra delay beyond the drip's own first step). It pauses on the
+      // seller's reply and when a person takes over; a failure here never
+      // undoes the hold.
+      await enrollHotLeadInBookAppointment(supabase, {
+        propertyId: input.propertyId,
+        sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
+        runCtx,
+      });
+      await completeClaim(supabase, input.propertyId, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+        flagOk: hotFlagOk,
+      });
+      return { handled: true, outcome: { outcome: "escalated", reason: "hot_lead" } };
+    }
     let templateMessageId: string | null = null;
     // Why no nurture reply went out (drip enrolment needs one first).
     let templateNotSentReason: string | null = templateCtx ? null : "no_reply_path";
@@ -1029,7 +1082,8 @@ async function classifyAndHandleNonRouteOutcomes(
       // Strictly AFTER the nurture reply was accepted and the outcome applied.
       await runNurtureAutoDripStep(supabase, {
         propertyId: input.propertyId,
-        orgId: property.org_id,
+        cfg: dripCfg,
+        route: dripRoute,
         replySent: templateMessageId !== null,
         notSentReason: templateNotSentReason ?? "not_sent",
         runCtx,
@@ -2296,53 +2350,93 @@ async function runApprovedTemplateStep(
  * nurture and raises `drip_enroll_failed:<reason>`. With the switch off this is
  * a no-op: no read beyond the config, no step recorded.
  */
+/** Tail of the `drip_enroll_failed:` hold when enrolment threw. */
+const ENROLL_THREW = "enroll_threw";
+
+async function enrollHotLeadInBookAppointment(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; sequenceId: string | null; runCtx?: MaybeRunContext },
+): Promise<void> {
+  let detail: Record<string, unknown>;
+  let result: "applied" | "error";
+  try {
+    if (!a.sequenceId) {
+      result = "error";
+      detail = { why: "no_drip_configured", route: "hot_book_appointment" };
+    } else {
+      const outcome = await enrollLead(supabase, {
+        propertyId: a.propertyId,
+        sequenceId: a.sequenceId,
+        enrolledByUserId: null,
+      });
+      if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
+        result = "applied";
+        detail = {
+          status: outcome.status === "enrolled" ? "enrolled" : "already_enrolled",
+          route: "hot_book_appointment",
+          sequenceId: a.sequenceId,
+          ...(outcome.status === "enrolled" ? { enrollmentId: outcome.enrollmentId } : {}),
+        };
+      } else {
+        result = "error";
+        detail = { why: outcome.status === "failed" ? "enroll_failed" : outcome.status, route: "hot_book_appointment" };
+      }
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "nurture_auto_drip_hot" }, extra: { propertyId: a.propertyId } });
+    result = "error";
+    detail = { why: "enroll_failed", route: "hot_book_appointment" };
+  }
+  await trace(supabase, { kind: "action", name: "drip_enrolled", result, detail }, a.runCtx);
+}
+
 async function runNurtureAutoDripStep(
   supabase: SupabaseClient<Database>,
   a: {
     propertyId: string;
-    orgId: string;
+    cfg: NurtureAutoDripConfig;
+    route: NurtureRoute | null;
     replySent: boolean;
     notSentReason: string;
     runCtx?: MaybeRunContext;
   },
 ): Promise<void> {
-  const cfg = await loadNurtureAutoDripConfig(supabase, a.orgId);
-  if (cfg && !cfg.enabled) return;
-  if (!cfg) {
-    await trace(supabase, {
-      kind: "action",
-      name: "drip_enrolled",
-      result: "error",
-      detail: { reason: "config_unreadable" },
-    }, a.runCtx);
-    await markPropertyNeedsAttention(supabase, a.propertyId, "drip_enroll_failed:config_unreadable", a.runCtx);
-    return;
-  }
+  if (!a.cfg.enabled || !a.route || a.route.kind !== "drip") return;
+  const { drip, delayDays } = a.route;
   if (!a.replySent) {
     await trace(supabase, {
       kind: "action",
       name: "drip_enrolled",
       result: "skipped",
-      detail: { reason: "reply_not_sent", detail: a.notSentReason },
+      detail: { why: "reply_not_sent", detail: a.notSentReason, route: drip },
     }, a.runCtx);
     await markPropertyNeedsAttention(supabase, a.propertyId, `nurture_reply_not_sent:${a.notSentReason}`, a.runCtx);
     return;
   }
   let result: Awaited<ReturnType<typeof enrollNurtureInDrip>>;
   try {
-    result = await enrollNurtureInDrip(supabase, { propertyId: a.propertyId, sequenceId: cfg.sequenceId });
+    result = await enrollNurtureInDrip(supabase, {
+      propertyId: a.propertyId,
+      sequenceId: a.cfg.sequences[drip],
+      delayDays,
+    });
   } catch (error) {
     reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });
-    result = { status: "refused", reason: "enroll_failed" };
+    result = { status: "refused", reason: ENROLL_THREW };
   }
   if (result.status === "refused") {
     await trace(supabase, {
       kind: "action",
       name: "drip_enrolled",
       result: "error",
-      detail: { reason: result.reason },
+      detail: { reason: result.reason, route: drip },
     }, a.runCtx);
-    await markPropertyNeedsAttention(supabase, a.propertyId, `drip_enroll_failed:${result.reason}`, a.runCtx);
+    await markPropertyNeedsAttention(
+      supabase,
+      a.propertyId,
+      result.reason === "drip_paused" ? "drip_paused" : `drip_enroll_failed:${result.reason}`,
+      a.runCtx,
+    );
     return;
   }
   await trace(supabase, {
@@ -2351,8 +2445,11 @@ async function runNurtureAutoDripStep(
     result: "applied",
     detail: {
       status: result.status,
+      route: drip,
       sequenceId: result.sequenceId,
-      ...(result.status === "enrolled" ? { enrollmentId: result.enrollmentId } : {}),
+      ...(result.status === "enrolled"
+        ? { enrollmentId: result.enrollmentId, firstSendNotBefore: result.firstSendNotBefore }
+        : {}),
     },
   }, a.runCtx);
 }

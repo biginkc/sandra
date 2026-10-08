@@ -100,6 +100,9 @@ export type ClassificationBridgeResult =
       kind: "jev_nurture";
       classificationRunId: string;
       nativeConfidence: number | null;
+      /** Nurture routing answers (drip auto-enrol); null = not answered. */
+      readyTimeframe: SmsClassificationDecision["readyTimeframe"];
+      listingStatus: SmsClassificationDecision["listingStatus"];
       /** See `jev_route.escalationReason`. */
       escalationReason: SmsClassificationDecision["escalationReason"];
       thresholdAtDecision: number | null;
@@ -391,7 +394,7 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, readyTimeframe: decision.readyTimeframe ?? null, listingStatus: decision.listingStatus ?? null, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
@@ -552,6 +555,8 @@ async function persistRun(
       outcomeConfidence: decision.outcomeConfidence ?? null,
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
+      readyTimeframe: decision.readyTimeframe ?? null,
+      listingStatus: decision.listingStatus ?? null,
       probabilities: decision.probabilities,
       // Root direct-review finding (2026-09-20): the wrong_number/
       // not_interested/opted_out/dnc review path had no persisted
