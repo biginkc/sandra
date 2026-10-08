@@ -1895,7 +1895,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "stop texting me",
+        inboundBody: "please remove me from your list",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-persistent-opt-out",
         propertyId: PROPERTY_ID,
@@ -1928,7 +1928,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "do not contact me",
+        inboundBody: "cease all contact immediately",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-persistent-dnc",
         propertyId: PROPERTY_ID,
@@ -2008,7 +2008,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "stop texting me",
+        inboundBody: "please remove me from your list",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-drifted-opt-out",
         propertyId: PROPERTY_ID,
@@ -2050,7 +2050,7 @@ describe("dispatchAiResponse debounce", () => {
       {
         contactId: CONTACT_ID,
         conversationId: CONVERSATION_ID,
-        inboundBody: "do not contact me",
+        inboundBody: "cease all contact immediately",
         inboundFromPhone: "+18165550001",
         inboundMessageId: "inbound-drifted-dnc",
         propertyId: PROPERTY_ID,
@@ -2555,7 +2555,7 @@ describe("dispatchAiResponse debounce", () => {
     state.config.classifier_mode = "automatic";
     const supabase = createMockSupabase(state);
     installSendMock(state);
-    seedInboundMessage(state, { id: "inbound-jev-dnc", body: "I will sue you, stop contacting me" });
+    seedInboundMessage(state, { id: "inbound-jev-dnc", body: "I will sue you, cease all contact" });
 
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () => ({
@@ -2572,7 +2572,7 @@ describe("dispatchAiResponse debounce", () => {
         {
           contactId: CONTACT_ID,
           conversationId: CONVERSATION_ID,
-          inboundBody: "I will sue you, stop contacting me",
+          inboundBody: "I will sue you, cease all contact",
           inboundFromPhone: "+18165550001",
           inboundMessageId: "inbound-jev-dnc",
           propertyId: PROPERTY_ID,
@@ -2682,12 +2682,6 @@ describe("dispatchAiResponse debounce", () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
-    vi.mocked(generateAiReply).mockResolvedValueOnce({
-      action: "deescalate_close",
-      body: "model draft should be ignored",
-      confidence: 0.9,
-      sentiment: "frustrated",
-    });
 
     const outcome = await dispatchAiResponse(
       supabase as never,
@@ -2702,6 +2696,7 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+    expect(generateAiReply).not.toHaveBeenCalled(); // no LLM call for a hostile inbound
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
     expect(state.property.outreach_dispo).toBeNull(); // not closed as not_interested
     expect(state.aiDispoReviews).toEqual([]);
@@ -7159,14 +7154,32 @@ describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", (
       expect(recordLeadEvent.mock.calls.filter(([e]) => e?.eventType === "opted_out")).toHaveLength(0); // the helper (mocked) owns that event
     });
 
-    it("explicit DNC wording ('do not contact me') keeps the existing close_dnc path: one suppression, no hostile hold", async () => {
+    it("hostile wording Jev labels dnc ('do not contact me') is held: ZERO suppression calls, nothing sent", async () => {
       const state = createMockState();
       installSendMock(state);
       state.jevOutcomeThresholds = [{ outcome: "dnc", min_confidence: 0.5 }];
       const result = await run(state, "in-h-dnc", "do not contact me again", { outcome: "dnc", confidence: 0.99 });
-      expect(result.outcome).not.toBe("sent");
-      expect(suppressionCalls().length).toBeLessThanOrEqual(1);
-      expect(state.property.last_ai_escalation_reason ?? "").not.toContain("hostile");
+      expect(result).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+      expect(suppressionCalls()).toHaveLength(0);
+      expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.aiDispoReviews).toEqual([]);
+    });
+
+    it("the legacy classifier path holds a hostile inbound BEFORE any LLM call", async () => {
+      const state = createMockState(); // legacy provider
+      installSendMock(state);
+      const supabase = createMockSupabase(state);
+      seedInboundMessage(state, { id: "in-h-legacy", body: "you people are idiots" });
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundFromPhone: "+18165550001",
+        inboundBody: "you people are idiots", inboundMessageId: "in-h-legacy", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "hostile_needs_confirm" });
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(suppressionCalls()).toHaveLength(0);
     });
 
     it("an ordinary message never takes the hostile path", async () => {

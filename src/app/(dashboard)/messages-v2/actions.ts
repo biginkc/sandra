@@ -10,7 +10,7 @@ import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { recordLeadEvent } from "@/lib/events";
 import { recordStep, resumeRun } from "@/lib/pipeline-runs";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -82,6 +82,7 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
             providerId: "messages_v2",
             surface: "dnc",
             idempotencyKey: `human-hostile:${propertyId}:${contactId}`,
+            leadEvent: { propertyId, actorType: "user", actorId: userId, trigger: "human_confirmed_hostile" },
           });
           await pausePropertyEnrollments(admin, {
             propertyId,
@@ -89,14 +90,6 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
             permanent: true,
             actor: { actorType: "user", actorId: userId },
           });
-          await recordLeadEvent({
-            propertyId,
-            actorType: "user",
-            actorId: userId,
-            eventType: LEAD_EVENT_TYPES.OPTED_OUT,
-            payload: { channel: "sms", trigger: "human_confirmed_hostile" },
-            ...(inboundMessageId ? { sourceType: "hostile_confirmed", sourceId: inboundMessageId } : {}),
-          } as Parameters<typeof recordLeadEvent>[0]);
           return { ok: true, data: null };
         } catch (e) {
           reportError(e, { tags: { surface: "messages_v2_confirm_dnc_suppression" }, extra: { propertyId } });

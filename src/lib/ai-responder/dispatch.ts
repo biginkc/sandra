@@ -1251,7 +1251,11 @@ async function resolveAndApplyRoute(
     // use_legacy — jev_no_action is handled inline above (returns
     // handled: true before reaching resolveAndApplyRoute), so only
     // use_legacy falls through to the existing combined Claude
-    // classify+generate call, unchanged from today.
+    // classify+generate call, unchanged from today. A hostile inbound is held
+    // BEFORE the model is called: no LLM call, no automatic decision.
+    if (isHostileInbound(input.inboundBody)) {
+      return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
+    }
     const conversation = await loadConversation(
       supabase,
       input.propertyId,
@@ -1308,14 +1312,11 @@ async function resolveAndApplyRoute(
     }
     route = resolveResponderOutcome(generated);
   }
-  if (
-    isHostileInbound(input.inboundBody) &&
-    route.kind !== "opt_out" &&
-    route.kind !== "close_dnc"
-  ) {
+  if (isHostileInbound(input.inboundBody) && route.kind !== "opt_out") {
     // Hostile wording: hold for a person, whatever else the classifier decided
-    // (close, nurture, wrong number, a generated reply). An opt-out / dnc the
-    // classifier recognises keeps going through the existing path unchanged.
+    // (close, nurture, wrong number, dnc, a generated reply). Only an explicit
+    // opt-out the classifier recognises keeps going through the existing
+    // opt-out path unchanged. A hostile "dnc" is NEVER applied automatically.
     return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
   }
   const expectedDisposition: AiReviewDisposition | null =
