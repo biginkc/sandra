@@ -1,29 +1,21 @@
--- 20261008320000_auto_reply_templates_wrong_number_hostile.sql
--- Messages v2: approved hostile and wrong-number replies (stacked on Phase 4,
--- 20261008240000). Widens the outcome -> template mapping key:
---   * wrong_number: no longer an "unmappable" outcome. The approved
---     wrong-number text is sent for a clear wrong number and the wrong_number
---     disposition closes that property (no phone-wide suppression).
---   * hostile: a mapping key that is NOT a Jev outcome. Hostile wording is
---     detected in code (src/lib/ai-responder/hostile.ts) and held for a
---     person; the reply is sent only by the "Confirm do-not-contact" hold
---     action. The mapping gets its own key instead of abusing an outcome label.
--- new_lead, opted_out and dnc stay unmappable. No template text, mapping or
--- approval is created here (texts are seeded UNAPPROVED by
--- scripts/messages-v2/seed-reply-templates.ts; an owner approves and maps them
--- in the Templates UI).
+-- Rollback for 20261009040000_auto_reply_templates_wrong_number_hostile.
+-- Restores the Phase 4 allow-list (nurture, not_interested only). Mappings for
+-- wrong_number / hostile cannot exist under the restored constraint, so they
+-- are deleted (the feature that reads them is rolled back with the code).
 begin;
 
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
 
+delete from public.auto_reply_templates where outcome in ('wrong_number', 'hostile');
+
 alter table public.auto_reply_templates drop constraint if exists auto_reply_templates_outcome_check;
 alter table public.auto_reply_templates
   add constraint auto_reply_templates_outcome_check
-  check (outcome in ('nurture', 'not_interested', 'wrong_number', 'hostile'));
+  check (outcome in ('nurture', 'not_interested'));
 
 comment on table public.auto_reply_templates is
-  'Which approved template answers a Jev outcome (nurture, not_interested, wrong_number) or hostile wording (outcome = hostile), optionally narrowed by reply_intent. Writable only via fn_set_auto_reply_template (owner). A mapping to a template that is not approved is inert.';
+  'Which approved template answers a Jev outcome (optionally narrowed by reply_intent). Writable only via fn_set_auto_reply_template (owner). A mapping to a template that is not approved is inert.';
 
 create or replace function public.fn_set_auto_reply_template(
   p_org_id uuid,
@@ -76,7 +68,7 @@ begin
     return jsonb_build_object('ok', true, 'mappingId', v_id, 'deleted', true);
   end if;
 
-  if p_outcome is null or p_outcome not in ('nurture', 'not_interested', 'wrong_number', 'hostile') then
+  if p_outcome is null or p_outcome not in ('nurture', 'not_interested') then
     raise exception 'INVALID_OUTCOME' using errcode = '22023';
   end if;
   if p_reply_intent is not null and p_reply_intent not in ('positive', 'negative', 'neutral') then

@@ -108,7 +108,7 @@ export default defineConfig({
       "supabase/migrations/20261008250000_luna_suggestions.integration.test.ts",
       "scripts/messages-v2/replay/replay.integration.test.ts",
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
-      "supabase/migrations/20261008320000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
+      "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
