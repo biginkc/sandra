@@ -74,6 +74,10 @@ export type ClassificationBridgeResult =
        *  new_lead escalate can still be recorded in jev_lead_decisions with
        *  the real numbers, not just a generic attention flag. */
       nativeConfidence: number | null;
+      /** Jev's "what human follow-up does this message need" answer, carried
+       *  so the approved-template step can fail closed on anything but
+       *  `not_applicable` (PLAN D5: price / distress never auto-reply). */
+      escalationReason: SmsClassificationDecision["escalationReason"];
       thresholdAtDecision: number | null;
       /** The threshold SETTINGS ROW'S version actually used at decision
        *  time — null exactly when thresholdAtDecision is null (root
@@ -96,6 +100,8 @@ export type ClassificationBridgeResult =
       kind: "jev_nurture";
       classificationRunId: string;
       nativeConfidence: number | null;
+      /** See `jev_route.escalationReason`. */
+      escalationReason: SmsClassificationDecision["escalationReason"];
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
       evaluationRevision: number;
@@ -385,7 +391,7 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
@@ -423,6 +429,7 @@ export async function classifyForDispatch(
       classificationRunId,
       eligibleForAutoAccept: false,
       nativeConfidence,
+      escalationReason: decision.escalationReason,
       thresholdAtDecision,
       thresholdVersion,
       evaluationRevision,
@@ -450,6 +457,7 @@ export async function classifyForDispatch(
     assembled: resolved.assembled,
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
+    escalationReason: decision.escalationReason,
   };
 }
 

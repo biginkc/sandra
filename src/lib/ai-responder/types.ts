@@ -122,6 +122,9 @@ export type AiMessageMetadata = {
   sentiment: AiSentiment;
   /** 1-based turn number within this thread. */
   turn: number;
+  /** Set on template auto-replies (Messages v2 Phase 4): the library template that was sent. */
+  reply_source?: "approved_template";
+  template_id?: string | null;
 };
 
 export type AiReplyDelayProcessingMetadata = {

@@ -8,8 +8,13 @@ import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
+import {
+  checkFloridaCap,
+  checkRecipientQuietHours,
+} from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
-import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import { normalizePhone } from "@/lib/csv/normalize";
+import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
@@ -30,6 +35,7 @@ import {
   classifyForDispatch,
   type ClassificationBridgeResult,
 } from "@/lib/sms-classification/dispatch-bridge";
+import type { JevEscalationReason } from "@/lib/sms-classification/types";
 import { jevOutcomeForLunaHold } from "@/lib/sms-classification/luna/hold";
 import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { requestLunaSuggestion } from "@/lib/sms-classification/luna/suggest";
@@ -38,6 +44,8 @@ import {
   claimAiResponse,
   completeAiResponseClaim,
   expireAiResponseClaimLease,
+  loadClaimTemplateSent,
+  recordClaimTemplateSent,
 } from "./claims";
 import {
   GATE_EVIDENCE_STATUSES,
@@ -74,6 +82,7 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
+import { resolveApprovedTemplateReply } from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
@@ -254,6 +263,14 @@ export type AiDispatchInput = {
    * call) nor re-generates: it re-sends exactly this text. Never log it.
    */
   retryReply?: RetryReply;
+  /**
+   * Set by the webhook's inline fallback when the delay workflow could not be
+   * started: this dispatch is running without the randomized reply delay, so
+   * an approved-template reply is dropped (the outcome still applies).
+   */
+  replyDelayBypassed?: boolean;
+  /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
+  replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
 };
 
 export type AiDispatchOptions = {
@@ -776,6 +793,12 @@ async function dispatchAiResponseCore(
   // canary" was overridden. dnc's human-gate is unaffected either way —
   // DB-enforced regardless of mode (see 20260920120000_sms_classification_runs.sql).
   // --------------------------------------------------------------------------
+  const templateCtx: TemplateStepContext = {
+    model: config!.model,
+    outboundMode: config!.outbound_mode,
+    currentTurn,
+    claimStartedAt,
+  };
   const classificationResult = await classifyAndHandleNonRouteOutcomes(
     supabase,
     input,
@@ -783,6 +806,7 @@ async function dispatchAiResponseCore(
     config,
     responseClaim,
     deps.runContext,
+    templateCtx,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -804,6 +828,7 @@ async function dispatchAiResponseCore(
     { claimId: responseClaim.claimId, startedAt: claimStartedAt },
     classification,
     deps.runContext,
+    templateCtx,
   );
 }
 
@@ -939,8 +964,10 @@ async function classifyAndHandleNonRouteOutcomes(
     | undefined,
   responseClaim: { claimId: string | null },
   runCtx?: MaybeRunContext,
+  /** Present only on the reply-eligible path: absent = no template step. */
+  templateCtx?: TemplateStepContext,
 ): Promise<
-  | { handled: true; outcome: AiDispatchOutcome }
+  | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
   const classification = await classifyForDispatch(
@@ -993,6 +1020,25 @@ async function classifyAndHandleNonRouteOutcomes(
     // Root review of dbbb12e6, finding 1: effect + revision guard +
     // audit insert now happen atomically inside ONE RPC call — see
     // applyJevLeadDecisionAtomically's doc comment.
+    //
+    // Approved-template reply first (Phase 4): nurture is a human-owned
+    // disposition that suppresses automated sends, so the reply must go out
+    // before the outcome is applied.
+    let templateMessageId: string | null = null;
+    if (templateCtx) {
+      const step = await runApprovedTemplateStep(supabase, {
+        input,
+        property,
+        ctx: templateCtx,
+        claim: responseClaim,
+        outcome: "nurture",
+        nativeConfidence: classification.nativeConfidence,
+        escalationReason: classification.escalationReason,
+        runCtx,
+      });
+      if (step.kind === "stop") return { handled: true, outcome: step.outcome };
+      templateMessageId = step.outboundMessageId;
+    }
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1026,6 +1072,7 @@ async function classifyAndHandleNonRouteOutcomes(
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
+        ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
     }
@@ -1043,6 +1090,7 @@ async function classifyAndHandleNonRouteOutcomes(
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: silentSkipClaimOutcome(0),
+        ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: silentSkip("already_terminal", 0) };
     }
@@ -1051,6 +1099,7 @@ async function classifyAndHandleNonRouteOutcomes(
       claimId: responseClaim.claimId,
       outcome: "escalated",
       errorMessage: applyResult.status,
+      ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
     });
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     return { handled: true, outcome: { outcome: "escalated", reason } };
@@ -1094,6 +1143,8 @@ async function classifyAndHandleNonRouteOutcomes(
     // actions still use) is not called from this path anymore — its
     // effect is replicated inside fn_auto_apply_jev_lead_decision so it
     // can be atomic with the revision guard and the audit insert.
+    // No template step here: a new lead never auto-replies (PLAN D5). The
+    // human follow-up owns the conversation.
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1229,6 +1280,8 @@ async function resolveAndApplyRoute(
   responseClaim: { claimId: string | null; startedAt?: string },
   classification: ClassificationBridgeResult,
   runCtx?: MaybeRunContext,
+  /** Present only on the reply-eligible path: absent = no template step. */
+  templateCtx?: TemplateStepContext,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   let generated: AiStructuredOutput;
   let route: ResponderRoute;
@@ -1534,6 +1587,23 @@ async function resolveAndApplyRoute(
       });
       return wrongNumberOutcome;
     case "auto_close":
+      let autoCloseTemplateMessageId: string | null = null;
+      if (templateCtx && classification.kind === "jev_route" && classification.eligibleForAutoAccept) {
+        // Approved-template reply before the terminal not-interested
+        // disposition, which would suppress it (see runApprovedTemplateStep).
+        const step = await runApprovedTemplateStep(supabase, {
+          input,
+          property,
+          ctx: templateCtx,
+          claim: responseClaim,
+          outcome: "not_interested",
+          nativeConfidence: classification.nativeConfidence,
+          escalationReason: classification.escalationReason,
+          runCtx,
+        });
+        if (step.kind === "stop") return step.outcome;
+        autoCloseTemplateMessageId = step.outboundMessageId;
+      }
       const isJevBelowThresholdAutoClose = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const autoCloseResult = isJevBelowThresholdAutoClose
         ? await proposeDeferredJevDisposition(supabase, {
@@ -1577,6 +1647,7 @@ async function resolveAndApplyRoute(
         claimId: responseClaim.claimId,
         outcome: claimOutcomeOf(autoCloseOutcome),
         errorMessage: dispositionClaimError(autoCloseResult),
+        ...(autoCloseTemplateMessageId ? { outboundMessageId: autoCloseTemplateMessageId } : {}),
       });
       return autoCloseOutcome;
     case "send_reply":
@@ -2079,6 +2150,265 @@ async function retryBeforeGeneration(
 }
 
 /** Send a resolved, safety-checked reply and settle the claim. */
+/** What the template step needs from the dispatch that is not on the input. */
+type TemplateStepContext = {
+  model: string;
+  outboundMode?: string | null;
+  currentTurn: number;
+  claimStartedAt: string | null;
+};
+
+type TemplateStepResult =
+  /**
+   * Carry on with today's flow (apply the outcome); `outboundMessageId` when a
+   * template went out. A template that was refused or held (quiet hours, hold
+   * mode, any gate) also continues, with no message id: see the doc below.
+   */
+  | { kind: "continue"; outboundMessageId: string | null }
+  /** A contended send was parked for retry: do NOT apply the outcome yet (the re-dispatch re-runs this step). */
+  | { kind: "stop"; outcome: AiDispatchOutcome | AiRetryOutcome };
+
+/**
+ * Template step (Messages v2 Phase 4, PLAN D5 / 4.6). When Jev's outcome maps
+ * to an active, human-approved library template, Jev reports no human
+ * follow-up, and the outcome's switch is on and its confidence clears the
+ * cutoff, send that template through the same `sendResponderMessage`
+ * chokepoint (Q8 gate, reservation, fence, consent, suppression, recipient
+ * quiet hours) with `source: approved_template`. Otherwise `continue` with no
+ * message: today's behaviour is untouched.
+ *
+ * The reply goes out BEFORE the outcome is applied: nurture and a terminal
+ * not-interested disposition both suppress automated sends, so replying after
+ * the effect would always be refused. Jev Noul checks are not run: the text is
+ * a pre-approved library template, not an LLM draft.
+ *
+ * A template that is NOT sent never blocks the outcome (Q5/Q6: at or above the
+ * threshold the outcome applies). When the send cannot happen now (the owner's
+ * `outbound_mode = hold`, or the recipient's quiet hours / Florida cap) the
+ * template is DROPPED, not queued: nothing is flagged or stored, the trace
+ * records what was withheld, and the outcome is applied as it would have been
+ * without a template. Dropped rather than held because the applied outcome
+ * makes a later automated reply moot (nurture is human-owned; not_interested is
+ * terminal) and because a held draft or dead letter flags the property, which
+ * makes the disposition RPC skip the very outcome we must apply. Any refusal
+ * inside the send path itself (a Q8 gate, a fence, a timeout) keeps its own
+ * flag / dead letter as the human-visible record and the step still continues
+ * to the outcome (nurture applies; the disposition RPC's existing rule that a
+ * flagged property is left to the human still governs not_interested). Only a
+ * contended send (`retry`) stops here, because the re-dispatch re-runs this
+ * step with the outcome still unapplied.
+ *
+ * Crash safety: the sent message id is written to the dispatch claim before
+ * the outcome is applied (`recordClaimTemplateSent`); a claim that still holds
+ * it past its lease is swept and flagged (`template_sent_outcome_missing`),
+ * and a re-dispatch of the same claim never sends the template twice.
+ */
+/** Silent (unflagged) skip reason: the template was revoked / edited before the send. */
+const TEMPLATE_APPROVAL_CHANGED = "template_approval_changed";
+const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
+
+/** Trace-only drop reason (not a hold/flag reason). */
+const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
+
+async function runApprovedTemplateStep(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    property: AiDispatchPropertyGateRow;
+    ctx: TemplateStepContext;
+    claim: { claimId: string | null };
+    outcome: "nurture" | "not_interested";
+    nativeConfidence: number | null;
+    /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
+    escalationReason: JevEscalationReason | null;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<TemplateStepResult> {
+  const { input, property, ctx, claim, runCtx } = a;
+  const resolved = await resolveApprovedTemplateReply(supabase, {
+    orgId: property.org_id,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    outcome: a.outcome,
+    outcomeConfidence: a.nativeConfidence,
+    escalationReason: a.escalationReason,
+    // The responder does not ask Jev for a reply intent yet, so only
+    // any-intent mappings match until it does.
+    replyIntent: null,
+  });
+  if (resolved.kind === "none") {
+    if (
+      resolved.reason === "human_follow_up" ||
+      resolved.reason === "template_unavailable" ||
+      resolved.reason === "render_failed" ||
+      resolved.reason === "lookup_failed"
+    ) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "skipped",
+        detail: { outcome: a.outcome, reason: resolved.reason },
+      }, runCtx);
+    }
+    return { kind: "continue", outboundMessageId: null };
+  }
+
+  // The randomized reply delay was bypassed (workflow could not start): never
+  // send a template instantly. Drop it; the outcome still applies.
+  if (input.replyDelayBypassed) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE,
+        disposition: "dropped_outcome_applies",
+      },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: null };
+  }
+
+  // Cannot send right now (owner's draft-only switch, or the recipient's clock /
+  // Florida cap): DROP the template and carry on so the outcome applies (Q5/Q6).
+  // Done here, before any side effect, because a refused send flags the property
+  // and a flagged property is skipped by the disposition RPC. The outcome has
+  // made a later automated reply moot (nurture is human-owned; not_interested is
+  // terminal), so nothing is queued; the trace records what was withheld.
+  const dropReason = await templateSendBlockedNow(supabase, input, ctx);
+  if (dropReason) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "held",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: dropReason,
+        disposition: "dropped_outcome_applies",
+      },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: null };
+  }
+
+  // A crashed earlier run of this claim may already have sent the template:
+  // never send it twice. An unreadable claim fails closed (no second send).
+  const alreadySent = await loadClaimTemplateSent(supabase, claim.claimId);
+  if (alreadySent !== null) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        reason: alreadySent === "error" ? "claim_unreadable" : "already_sent",
+        templateId: resolved.templateId,
+      },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: alreadySent === "error" ? null : alreadySent };
+  }
+
+  let recorded = true;
+  let markerWrites = 0;
+  const sent = await sendResponderMessage(supabase, {
+    runContext: runCtx,
+    input,
+    body: resolved.body,
+    model: ctx.model,
+    confidence: a.nativeConfidence ?? 1,
+    sentiment: "neutral",
+    turn: ctx.currentTurn + 1,
+    source: "approved_template",
+    templateId: resolved.templateId,
+    orgId: property.org_id,
+    claimStartedAt: ctx.claimStartedAt,
+    outboundMode: ctx.outboundMode,
+    replyKind: "send_reply",
+    // Written the instant the provider accepts, ahead of every other
+    // post-send write, so the sweeper can see a crash from here on.
+    onProviderAccepted: async (messageId) => {
+      markerWrites += 1;
+      recorded = await recordClaimTemplateSent(supabase, {
+        claimId: claim.claimId,
+        outboundMessageId: messageId,
+      });
+    },
+  });
+  // Durable BEFORE anything else (even the trace) once the provider accepted:
+  // this is the only thing that lets the sweeper see a crash from here on. If
+  // the write fails the sweeper cannot see one, so tell a human now rather
+  // than risk silence.
+  if (sent.outcome === "sent" && markerWrites === 0) {
+    // The send path did not report acceptance (should not happen); record now.
+    recorded = await recordClaimTemplateSent(supabase, {
+      claimId: claim.claimId,
+      outboundMessageId: sent.messageId,
+    });
+  }
+  const detail = {
+    templateId: resolved.templateId,
+    mappingId: resolved.mappingId,
+    outcome: a.outcome,
+    sendOutcome: sent.outcome,
+    ...(sent.outcome === "sent" ? { outboundMessageId: sent.messageId } : {}),
+    ...("reason" in sent && sent.reason ? { reason: sent.reason } : {}),
+  };
+  await trace(supabase, {
+    kind: "reply",
+    name: "template_reply",
+    result:
+      sent.outcome === "sent"
+        ? "sent"
+        : sent.outcome === "skipped"
+          ? "skipped"
+          : sent.outcome === "retry"
+            ? "block"
+            : "held",
+    detail,
+  }, runCtx);
+
+  if (sent.outcome === "sent") {
+    if (!recorded) {
+      await markPropertyNeedsAttention(supabase, input.propertyId, "template_sent_outcome_missing", runCtx);
+    }
+    return { kind: "continue", outboundMessageId: sent.messageId };
+  }
+  // Nothing was sent. Held (hold mode / recipient window / any gate) or
+  // silently refused: the outcome still applies (see the doc above).
+  if (sent.outcome !== "retry") return { kind: "continue", outboundMessageId: null };
+
+  // A retry drops its carried reply so the re-dispatch classifies again and
+  // re-runs this step with the outcome still unapplied (a carried template
+  // reply would send without applying it).
+  return {
+    kind: "stop",
+    outcome: await settleClaimForSendOutcome(supabase, claim.claimId, { ...sent, reply: undefined }, {
+      orgId: property.org_id,
+      input,
+      body: resolved.body,
+      runContext: runCtx,
+    }),
+  };
+}
+
+/**
+ * Side-effect-free "will this template go out now?" for the template step.
+ * Returns why not (`outbound_mode_hold`, or the recipient-window reason) or null.
+ */
+async function templateSendBlockedNow(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  ctx: TemplateStepContext,
+): Promise<string | null> {
+  const policy = resolveOutboundPolicy({ source: "approved_template", dbMode: ctx.outboundMode });
+  if (policy.hold) return policy.reason;
+  const verdict = await evaluateRecipientWindow(supabase, input);
+  return verdict.ok ? null : `quiet_hours_recipient:${verdict.why}`;
+}
+
 async function deliverRoutedReply(
   supabase: SupabaseClient<Database>,
   a: {
@@ -2815,10 +3145,12 @@ type ResponderSendArgs = {
   confidence: number;
   sentiment: AiMessageMetadata["sentiment"];
   turn: number;
-  /** Who authored the text. `llm` for the responder; `human` for a hold click (see `sendHumanDraft`). */
+  /** Who authored the text: `llm` for generated replies, `approved_template` for the template step, `human` for a hold click (see `sendHumanDraft`). */
   source: ReplySource;
   /** Set only for a human-approved send: who clicked, and whether they edited the text. */
   approvedBy?: { userId: string; edited: boolean };
+  /** The library template behind an `approved_template` send (evidence + message metadata). */
+  templateId?: string | null;
   orgId: string;
   /** When this run took its claim; null when unknown (check skipped). */
   claimStartedAt: string | null;
@@ -2830,6 +3162,13 @@ type ResponderSendArgs = {
   replyKind: RetryReply["kind"];
   /** deescalate_close only: the route reason for the follow-up disposition. */
   closeReason?: string;
+  /**
+   * Called with the outbound message id the instant the provider has accepted
+   * the send, BEFORE any metadata update / trace / run update / lease release.
+   * Used by the template step to make the sent message durable on its claim.
+   * Must not throw.
+   */
+  onProviderAccepted?: (messageId: string) => Promise<void>;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -3467,6 +3806,9 @@ async function renewSend(
  * full lease so the bounded provider call cannot outlive it). Anything else
  * refuses, and the provider is never called.
  */
+const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
+const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
   attempt: SendAttempt,
@@ -3523,6 +3865,27 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
+  if (args.source === "approved_template") {
+    // The last word before the provider, AFTER every preflight read in
+    // sendSmsToContact: the owner may have revoked / edited / deleted the
+    // template and the recipient's window (or the Florida cap) may have
+    // closed while those reads ran. This attempt's own pending row is
+    // excluded from the cap count.
+    const window = await evaluateRecipientWindow(supabase, args.input, ctx.messageId);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    const approved = await templateStillApproved(supabase, args);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
   attempt.providerStarted = true;
   return true;
 }
@@ -3548,6 +3911,129 @@ async function resolveReservationKey(
     });
     return null;
   }
+}
+
+/**
+ * The number this send will ACTUALLY text: the same choice `sendSmsToContact`
+ * makes (the thread's number when the inbound named one, else the best saved
+ * phone via selectBestSmsPhone). Quiet hours and the Florida cap must follow
+ * this number, not whichever number the inbound happened to arrive from. null
+ * (no contact, no match, unreadable) fails closed upstream.
+ */
+async function resolveSendDestinationPhone(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("contacts")
+    .select("phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+    .eq("id", input.contactId)
+    .maybeSingle();
+  if (error || !data) {
+    reportError(new Error(error?.message ?? "contact not found for send destination"), {
+      tags: { surface: "ai_responder_send_destination" },
+      extra: { contactId: input.contactId },
+    });
+    return null;
+  }
+  const choice = input.inboundFromPhone
+    ? selectSmsPhoneByNumber(data, input.inboundFromPhone)
+    : selectBestSmsPhone(data);
+  return normalizePhone(choice?.phone ?? null);
+}
+
+/**
+ * Outbound SMS to THIS destination number in the last 24h that reached (or may
+ * have reached) the provider; null = unreadable. Counted per destination phone
+ * (a seller's second number is a different recipient).
+ */
+async function countRecentOutboundTexts(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  destinationPhone: string,
+  /** This attempt's own pending row, which must not count against its own cap. */
+  excludeMessageId?: string,
+): Promise<number | null> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let countQuery = supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true });
+  if (excludeMessageId) countQuery = countQuery.neq("id", excludeMessageId);
+  const { count, error } = await countQuery
+    .eq("contact_id", contactId)
+    .eq("to_address", destinationPhone)
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .gte("created_at", since)
+    .or("metadata->>abortedBeforeProvider.is.null,metadata->>abortedBeforeProvider.neq.true")
+    .is("metadata->>aborted_inbound_message_id", null);
+  if (error || count === null || count === undefined) {
+    reportError(new Error(error?.message ?? "missing outbound count"), {
+      tags: { surface: "ai_responder_recipient_cap_count" },
+      extra: { contactId },
+    });
+    return null;
+  }
+  return count;
+}
+
+type RecipientWindowVerdict =
+  | { ok: true; state: string; localTime: string }
+  | { ok: false; why: string; state: string | null; localTime: string | null };
+
+/**
+ * Is the RECIPIENT's local clock inside the send window, and (Florida) under
+ * the 3-per-24h cap for the number that will be texted? Side-effect free: no
+ * flag, no dead letter, no trace. Unresolvable state / destination / count
+ * fails closed.
+ */
+async function evaluateRecipientWindow(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  excludeMessageId?: string,
+): Promise<RecipientWindowVerdict> {
+  const phone = await resolveSendDestinationPhone(supabase, input);
+  const window = checkRecipientQuietHours(phone);
+  if (!window.ok) {
+    return { ok: false, why: window.reason, state: window.state, localTime: window.localTime };
+  }
+  if (window.florida) {
+    const cap = checkFloridaCap(
+      phone ? await countRecentOutboundTexts(supabase, input.contactId, phone, excludeMessageId) : null,
+    );
+    if (!cap.ok) return { ok: false, why: cap.reason, state: window.state, localTime: window.localTime };
+  }
+  return { ok: true, state: window.state, localTime: window.localTime };
+}
+
+/**
+ * Recipient-local quiet hours for a template send (PLAN 4.10). Returns the
+ * escalated outcome when the send must not go out now, else null. This is the
+ * last line of defence inside the send path (the template step normally drops
+ * the template earlier, without a flag, via `evaluateRecipientWindow`).
+ */
+async function refuseOutsideRecipientWindow(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+): Promise<ResponderSendOutcome | null> {
+  const verdict = await evaluateRecipientWindow(supabase, args.input);
+  if (verdict.ok) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "quiet_hours_recipient",
+      result: "pass",
+      detail: { state: verdict.state, localTime: verdict.localTime },
+    }, args.runContext);
+    return null;
+  }
+  await trace(supabase, {
+    kind: "gate",
+    name: "quiet_hours_recipient",
+    result: "block",
+    detail: { reason: verdict.why, state: verdict.state, localTime: verdict.localTime },
+  }, args.runContext);
+  await flagAndDeadLetterFor(supabase, args, "quiet_hours_recipient");
+  return { outcome: "escalated", reason: "quiet_hours_recipient" };
 }
 
 async function sendResponderMessage(
@@ -3664,6 +4150,14 @@ async function sendResponderMessageInner(
     const stale = await applyGateEvaluation(supabase, args, evaluation, NO_GUARD);
     if (stale) return stale;
     return holdReplyAsDraft(supabase, args, initialPolicy.reason);
+  }
+
+  // Template auto-sends are also gated on the RECIPIENT's local time (8am-9pm,
+  // Florida 8am-8pm + 3 texts per 24h): the property's state is not where the
+  // seller is. A refusal is a rule 7 exit (flag a human, text dead-lettered).
+  if (args.source === "approved_template") {
+    const refused = await refuseOutsideRecipientWindow(supabase, args);
+    if (refused) return refused;
   }
 
   // Send reservation: a per-conversation lease. Claims are per inbound
@@ -4430,6 +4924,31 @@ async function leasedSend(
   return deliverResponderMessage(supabase, args, attempt);
 }
 
+/** Is the template still approved for exactly the text about to be sent? Fails closed. */
+async function templateStillApproved(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+): Promise<boolean> {
+  if (!args.templateId) return false;
+  try {
+    const { data, error } = await supabase
+      .from("sms_templates")
+      .select("content, approved_for_auto_send, approved_content, deleted_at")
+      .eq("id", args.templateId)
+      .maybeSingle();
+    if (error || !data) return false;
+    return (
+      data.deleted_at == null &&
+      data.approved_for_auto_send === true &&
+      data.approved_content !== null &&
+      data.approved_content === data.content &&
+      data.approved_content === args.body
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function deliverResponderMessage(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
@@ -4457,6 +4976,7 @@ async function deliverResponderMessage(
     }
     assertLive(attempt);
   }
+  let hookFired = false;
   // The provider boundary is fenced inside sendSmsToContact: after every one
   // of ITS preflight awaits, `beforeProviderSubmit` re-validates the lease (and
   // the attempt deadline) and refuses the submission if either is gone.
@@ -4469,6 +4989,16 @@ async function deliverResponderMessage(
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
+    // Fired inside the send, right after the provider accepts and before its
+    // receipt persistence / reconciliation.
+    ...(args.onProviderAccepted
+      ? {
+          onProviderAccepted: async ({ messageId }: { messageId: string }) => {
+            hookFired = true;
+            await args.onProviderAccepted!(messageId);
+          },
+        }
+      : {}),
     metadata: args.input.inboundMessageId
       ? ({
           generated_by: "ai_responder_v1",
@@ -4487,6 +5017,27 @@ async function deliverResponderMessage(
       const reason = "send_blocked:abort_unconfirmed";
       await flagAndDeadLetterFor(supabase, args, reason, { guard });
       return { outcome: "escalated", reason };
+    }
+    if (
+      attempt.fenceRefusal === "revalidate" &&
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+    ) {
+      // The template must not go out now. Nothing was sent; drop it silently
+      // (the outcome still applies, same as the earlier pre-send drops).
+      guard();
+      await trace(supabase, {
+        kind: "gate",
+        name: "provider_fence_refused",
+        result: "block",
+        detail: { reason: attempt.fenceReason },
+      }, args.runContext);
+      return {
+        outcome: "skipped",
+        reason:
+          attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
+            ? TEMPLATE_APPROVAL_CHANGED
+            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+      };
     }
     if (attempt.fenceRefusal === "error") {
       return failClosed(supabase, args, "send_check_failed", undefined, guard);
@@ -4605,6 +5156,7 @@ async function deliverResponderMessage(
   // never get here, and the assertion keeps it so.
   if (!attempt.providerStarted) guard();
   const messageId = sendResult.messageId;
+  if (args.onProviderAccepted && !hookFired) await args.onProviderAccepted(messageId);
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
     ...(args.input.inboundMessageId
@@ -4614,6 +5166,9 @@ async function deliverResponderMessage(
     confidence: args.confidence,
     sentiment: args.sentiment,
     turn: args.turn,
+    ...(args.source === "approved_template"
+      ? { reply_source: "approved_template" as const, template_id: args.templateId ?? null }
+      : {}),
   };
   const { data: messageRow, error: messageLookupError } = await supabase
     .from("messages")

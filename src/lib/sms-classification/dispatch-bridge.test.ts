@@ -337,10 +337,28 @@ describe("classifyForDispatch", () => {
       kind: "jev_nurture",
       classificationRunId: "run-1",
       nativeConfidence: 0.95,
+      escalationReason: null,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
       evaluationRevision: 7,
     });
+  });
+
+  it("carries Jev's human-follow-up reason through nurture and not_interested so the template step can fail closed", async () => {
+    for (const [outcome, kind] of [["nurture", "jev_nurture"], ["not_interested", "jev_route"]] as const) {
+      for (const reason of ["not_applicable", "price_or_offer", "distress"]) {
+        const { fn } = stubFetch({
+          answers: { outcome: { choice: outcome, confidence: 0.99 }, escalation_reason: { choice: reason } },
+        });
+        const result = await classifyForDispatch(
+          stubSupabase({ thresholds: [{ outcome, min_confidence: 0.9 }] }),
+          baseInput,
+          { classifierProvider: "jev", classifierMode: "automatic" },
+          { fetch: fn, typesafeApiKey: "k" },
+        );
+        expect(result).toMatchObject({ kind, escalationReason: reason });
+      }
+    }
   });
 
   it("returns jev_needs_decision (not jev_nurture) when nurture is below its configured threshold", async () => {

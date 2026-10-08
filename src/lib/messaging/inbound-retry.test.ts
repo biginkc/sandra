@@ -459,3 +459,90 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     expect(mocks.dispatchAi).not.toHaveBeenCalled();
   });
 });
+
+describe("handleInboundWebhook reply delay vs. approved-template replies", () => {
+  async function runWebhook() {
+    const handler = handlerClient([{ data: INSERTED, error: null }]);
+    mocks.serviceClient = handler.client;
+    process.env.TEST_SUPABASE_URL = "http://example.test";
+    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+    return handleInboundWebhook(
+      new Request("https://example.test/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: { host: "example.test" },
+        body: "{}",
+      }),
+      { includeFullUrl: true, provider: provider() as never },
+    );
+  }
+  const delayConfig = (max: number) => ({
+    delayMinSeconds: 0,
+    delayMaxSeconds: max,
+    propertyState: null,
+    escalationKeywords: [],
+  });
+
+  it("never dispatches (and so never sends a template) inside the webhook when reply_delay_max_seconds > 0, even if the computed delay is 0", async () => {
+    // computeReplyDelaySeconds legitimately returns 0 (no property state,
+    // quiet-hours clamp, low random draw). The reply must still go through the
+    // delay workflow, where the dispatch step runs, never from the request.
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({ inboundMessageId: "message-1", delaySeconds: 0 });
+  });
+
+  it("a non-zero computed delay is scheduled on the workflow with that delay and no webhook dispatch", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(31);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({ delaySeconds: 31 });
+  });
+
+  it("only an org with no reply delay (max = 0) dispatches synchronously", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(0));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect(mocks.startWorkflow).not.toHaveBeenCalled();
+    expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+  });
+
+  it("when the delay workflow cannot start, the inline fallback dispatches with replyDelayBypassed so no template goes out instantly", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(20);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+
+  it("an inline dispatch for an org with no reply delay (max = 0) is marked delay_not_configured so templates are dropped", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(0));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({
+      replyDelayBypassed: true,
+      replyDelayBypassReason: "delay_not_configured",
+    });
+  });
+
+  it("a failed delay-config lookup (null) dispatches inline but marked bypassed, so no template goes out instantly", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(null);
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+});

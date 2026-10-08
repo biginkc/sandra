@@ -1217,8 +1217,26 @@ export async function handleInboundWebhook(
               })
             : 0;
 
-          if (delaySeconds === 0) {
-            await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
+          // A reply is dispatched synchronously inside the webhook ONLY when the
+          // org has no reply delay at all (max = 0, or no active config). With a
+          // non-zero max, a computed 0 (no property state, quiet-hours clamp, low
+          // random draw) still goes through the delay workflow so approved
+          // template replies are never sent from the webhook request itself.
+          const replyDelayConfigured = (delayConfig?.delayMaxSeconds ?? 0) > 0;
+          if (delaySeconds === 0 && !replyDelayConfigured) {
+            // Jarrad: replies must use the random delay. An inline dispatch has
+            // none (org max = 0, or the lookup failed and returned null), so
+            // approved-template replies are dropped here; the outcome still
+            // applies and LLM / identity replies are unchanged.
+            await dispatchAndStampAiResponder(
+              supabase,
+              {
+                ...dispatchInput,
+                replyDelayBypassed: true,
+                replyDelayBypassReason: delayConfig ? "delay_not_configured" : "delay_unavailable",
+              },
+              runCtx,
+            );
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
               supabase,
@@ -1315,7 +1333,9 @@ export async function handleInboundWebhook(
                   try {
                     await dispatchAndStampAiResponder(
                       supabase,
-                      dispatchInput,
+                      // No randomized delay on this path: template replies are
+                      // dropped (the outcome still applies).
+                      { ...dispatchInput, replyDelayBypassed: true },
                       runCtx,
                     );
                   } catch (fallbackError) {
