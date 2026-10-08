@@ -365,6 +365,19 @@ describe("MessagesV2View", () => {
     );
   });
 
+  it("shows New and Backlog counts in the header and passes the split to the rail", () => {
+    render(
+      <MessagesV2View
+        {...props([], [openHold("a")])}
+        holdsSplit={{ backlogBefore: "2026-10-08T00:00:00Z", newTotal: 1, newShown: 1, backlogTotal: 2504 }}
+        loadBacklog={async () => ({ ok: false, error: { code: "X", message: "x" } })}
+      />,
+    );
+    expect(screen.getByTestId("header-status")).toHaveTextContent("1 new · 2,504 backlog");
+    expect(screen.getByLabelText("New holds")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Backlog/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("shows 'Feed unavailable' instead of the empty-feed message when the feed query failed", async () => {
     await mount({ ...props(), feedError: "Feed unavailable — timeout" });
     expect(screen.getByTestId("feed-unavailable")).toHaveTextContent(
