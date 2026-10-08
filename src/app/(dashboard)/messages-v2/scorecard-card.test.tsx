@@ -276,3 +276,41 @@ describe("ScorecardCard", () => {
     expect(within(section("nurture")).getByText(/80 runs/)).toBeInTheDocument();
   });
 });
+
+describe("ScorecardCard luna row", () => {
+  const lunaRows = (shown: number) => [
+    { outcome: "nurture", shown, accepted: 4, rejected: 2, agreed_manually: 1, open: 3 },
+  ];
+
+  it("is absent unless lunaEnabled", () => {
+    const lunaLoad = vi.fn(async () => lunaRows(10));
+    render(<ScorecardCard orgId="o" initialRows={[]} load={vi.fn()} lunaLoad={lunaLoad} />);
+    expect(screen.queryByTestId("luna-stats")).not.toBeInTheDocument();
+    expect(lunaLoad).not.toHaveBeenCalled();
+  });
+
+  it("shows both windows side by side with accepted n/m and a per-outcome breakdown", async () => {
+    const lunaLoad = vi.fn(async (_o: string, d: number) => lunaRows(d === 7 ? 10 : 20));
+    render(<ScorecardCard orgId="o" initialRows={[]} load={vi.fn()} lunaEnabled lunaLoad={lunaLoad} />);
+    const w7 = within(await screen.findByTestId("luna-stats-7"));
+    await waitFor(() => expect(w7.getByText("Accepted").parentElement).toHaveTextContent("40%"));
+    expect(w7.getByText("Accepted").parentElement).toHaveTextContent("4/10");
+    expect(w7.getByText("Suggestions shown").parentElement).toHaveTextContent("10");
+    expect(w7.getByText("Rejected").parentElement).toHaveTextContent("2");
+    expect(w7.getByText("Agreed manually").parentElement).toHaveTextContent("1");
+    expect(w7.getByText("Still open").parentElement).toHaveTextContent("3");
+    expect(w7.getByText(/Nurture: 10 shown, 4 accepted/)).toBeInTheDocument();
+    const w30 = within(screen.getByTestId("luna-stats-30"));
+    await waitFor(() => expect(w30.getByText("Accepted").parentElement).toHaveTextContent("4/20"));
+  });
+
+  it("shows 'Luna stats unavailable' on failure, never zeros", async () => {
+    const lunaLoad = vi.fn(async () => {
+      throw new Error("x");
+    });
+    render(<ScorecardCard orgId="o" initialRows={[]} load={vi.fn()} lunaEnabled lunaLoad={lunaLoad} />);
+    const w7 = within(await screen.findByTestId("luna-stats-7"));
+    expect(await w7.findByText("Luna stats unavailable")).toBeInTheDocument();
+    expect(w7.queryByText("Suggestions shown")).not.toBeInTheDocument();
+  });
+});
