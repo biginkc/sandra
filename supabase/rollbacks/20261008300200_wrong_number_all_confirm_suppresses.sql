@@ -1,6 +1,10 @@
 -- Rollback for 20261008300200: restores the 190000 confirm RPC and sweeper feed, drops wrong_scope.
 begin;
 
+-- Block concurrent confirms/creates until this transaction ends, so no review can
+-- change state between the guard queries below and the column drop.
+lock table public.ai_disposition_reviews in access exclusive mode;
+
 -- SAFETY: this rollback drops wrong_scope and the sweeper's inclusion of
 -- wrong_number/all reviews. Refuse while that would orphan a phone-suppression
 -- duty: a human-confirmed scope=all review whose suppression is not yet proven
