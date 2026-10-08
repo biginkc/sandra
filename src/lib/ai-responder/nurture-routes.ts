@@ -30,19 +30,19 @@ export type NurtureRoute =
   | { kind: "drip"; drip: NurtureDripKey; delayDays: number };
 
 /**
- * Approved routing (Jarrad 2026-10-07). The listing check wins over the
- * timeframe; within 30 days (not listed) goes to a person; the rest by timeframe.
+ * Approved routing (Jarrad 2026-10-07). Ready within 30 days is a hot lead for
+ * a person and beats everything; otherwise listed beats every other timeframe;
+ * the rest route by timeframe.
  */
 export function routeNurture(a: {
   readyTimeframe: JevReadyTimeframe | null | undefined;
   listingStatus: JevListingStatus | null | undefined;
 }): NurtureRoute {
+  if (a.readyTimeframe === "within_30_days") return { kind: "person", drip: "hot_book_appointment" };
   if (a.listingStatus === "listed") {
     return { kind: "drip", drip: "listed_not_selling", delayDays: NURTURE_FIRST_SEND_DELAY_DAYS.listed_not_selling };
   }
   switch (a.readyTimeframe) {
-    case "within_30_days":
-      return { kind: "person", drip: "hot_book_appointment" };
     case "one_to_six_months":
       return { kind: "drip", drip: "maybe_later", delayDays: NURTURE_FIRST_SEND_DELAY_DAYS.one_to_six_months };
     case "six_to_twelve_months":

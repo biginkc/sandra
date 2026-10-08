@@ -91,8 +91,11 @@ describe("routeNurture (Jarrad-approved routing, 2026-10-07)", () => {
       expect(r(t)).toEqual({ kind: "drip", drip: "check_in_60", delayDays: 60 });
     }
   });
-  it("listed wins over every timeframe -> Listed, not selling +14d", () => {
-    for (const t of ["within_30_days", "one_to_six_months", "over_a_year", "not_stated", null] as const) {
+  it("within_30_days beats listed: still a hot lead for a person", () => {
+    expect(r("within_30_days", "listed")).toEqual({ kind: "person", drip: "hot_book_appointment" });
+  });
+  it("listed beats every other timeframe -> Listed, not selling +14d", () => {
+    for (const t of ["one_to_six_months", "over_a_year", "not_stated", null] as const) {
       expect(r(t, "listed")).toEqual({ kind: "drip", drip: "listed_not_selling", delayDays: 14 });
     }
   });

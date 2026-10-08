@@ -6614,7 +6614,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         ["not_stated", { ready_timeframe: { choice: "not_stated" } }, "seq-60", 60],
         ["uncertain", { ready_timeframe: { choice: "uncertain" } }, "seq-60", 60],
         ["no timeframe answer", {}, "seq-60", 60],
-        ["listed (wins over a timeframe)", { listing_status: { choice: "listed" }, ready_timeframe: { choice: "one_to_six_months" } }, "seq-ls", 14],
+        ["listed (beats a non-hot timeframe)", { listing_status: { choice: "listed" }, ready_timeframe: { choice: "one_to_six_months" } }, "seq-ls", 14],
       ] as Array<[string, Record<string, { choice: string }>, string, number]>) {
         it(`${name}: reply first, then enrols in ${seq} with the first text ${days} days out`, async () => {
           const state = createMockState();
@@ -6681,15 +6681,18 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(steps.find((x) => x.name === "drip_enrolled")).toMatchObject({ result: "error", detail: { why: "no_consent", route: "hot_book_appointment" } });
       });
 
-      it("a listed seller who is ready within 30 days follows the listing rule (listing wins)", async () => {
+      it("a listed seller who is ready within 30 days is still a hot lead (hot beats listed)", async () => {
         const state = createMockState();
         installSendMock(state);
         nurtureDrip.loadConfig.mockResolvedValue(ON);
+        hotEnroll.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "enr-hot", sequenceLabel: "Book appointment" });
         nurtureAnswers = { ready_timeframe: { choice: "within_30_days" }, listing_status: { choice: "listed" } };
-        vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
-        await runNurture(state, "inbound-hot-listed");
-        expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-ls", delayDays: 14 });
-        expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
+        vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(TEMPLATE);
+        const result = await runNurture(state, "inbound-hot-listed");
+        expect(result).toEqual({ outcome: "escalated", reason: "hot_lead" });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+        expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
       });
 
       it("switch OFF: within_30_days changes nothing (today's nurture behaviour)", async () => {
