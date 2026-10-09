@@ -8,8 +8,8 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { StartDripPicker } from "@/components/sequences/start-drip-picker"
-import { startDripForLeads, type DripChoice } from "@/app/(dashboard)/sequences/actions"
+import { AfterAttemptDripPicker } from "@/components/sequences/after-attempt-drip-picker"
+import { type DripChoice } from "@/app/(dashboard)/sequences/actions"
 import { Textarea } from "@/components/ui/textarea"
 import {
   DIALOG_CONTENT_CLASS,
@@ -313,13 +313,8 @@ export function AcquisitionAttemptDialog({
         />
         {savedForDrip ? <div className="space-y-4 overflow-y-auto">
           <p role="status" className="text-sm text-teal-800">Attempt saved. Add to a drip (optional).</p>
-          <StartDripPicker inline previewChoices={previewDripChoices} onChoose={async sequenceId => {
-            const result = await startDripForLeads(sequenceId, [propertyId]);
-            if (!result.ok) return {status:'failed',reason:result.error.message};
-            const item=result.data.results[0];
-            if (item?.status === 'enrolled') { onDripChanged?.(); onOpenChange(false); return {status:'enrolled',reason:item.reason}; }
-            return {status:item?.status??'failed',reason:item?.reason??'Could not start drip.'};
-          }} />
+          <AfterAttemptDripPicker key={propertyId} propertyId={propertyId} previewChoices={previewDripChoices}
+            onDripChanged={onDripChanged} onEnrolled={() => onOpenChange(false)} />
           <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
         </div> : <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">

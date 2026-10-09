@@ -7,8 +7,8 @@ import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { StartDripPicker } from "@/components/sequences/start-drip-picker"
-import { startDripForLeads, type DripChoice } from "@/app/(dashboard)/sequences/actions"
+import { AfterAttemptDripPicker } from "@/components/sequences/after-attempt-drip-picker"
+import { type DripChoice } from "@/app/(dashboard)/sequences/actions"
 import { REP_SMS_ASSISTANT, REP_SMS_COMPOSITION_POLICY_VERSION } from "@/lib/messaging/rep-sms-composition"
 import { suggestOutcome } from "@/lib/my-leads/outcome-suggestion"
 import { quickPickDueAt, type QuickPick } from "@/lib/my-leads/quick-picks"
@@ -373,13 +373,8 @@ export function PostCallPrompt({
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">Add to a drip (optional).</p>
-            <StartDripPicker inline previewChoices={previewDripChoices} onChoose={async (sequenceId) => {
-              const result = await startDripForLeads(sequenceId, [propertyId])
-              if (!result.ok) return { status: "failed", reason: result.error.message }
-              const item = result.data.results[0]
-              if (item?.status === "enrolled") { onDripChanged?.(); onOpenChange(false); return { status: "enrolled", reason: item.reason } }
-              return { status: item?.status ?? "failed", reason: item?.reason ?? "Could not start drip." }
-            }} />
+            <AfterAttemptDripPicker key={propertyId} propertyId={propertyId} previewChoices={previewDripChoices}
+            onDripChanged={onDripChanged} onEnrolled={() => onOpenChange(false)} />
             <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
           </div>
         ) : (
