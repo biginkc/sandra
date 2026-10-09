@@ -375,7 +375,7 @@ export function PostCallPrompt({
             <p className="text-sm text-muted-foreground">Add to a drip (optional).</p>
             <AfterAttemptDripPicker key={propertyId} propertyId={propertyId} previewChoices={previewDripChoices}
             onDripChanged={onDripChanged} onEnrolled={() => onOpenChange(false)} />
-            <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
+            <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without changing drip</button>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">

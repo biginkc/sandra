@@ -315,7 +315,7 @@ export function AcquisitionAttemptDialog({
           <p role="status" className="text-sm text-teal-800">Attempt saved. Add to a drip (optional).</p>
           <AfterAttemptDripPicker key={propertyId} propertyId={propertyId} previewChoices={previewDripChoices}
             onDripChanged={onDripChanged} onEnrolled={() => onOpenChange(false)} />
-          <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
+          <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without changing drip</button>
         </div> : <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <WorkflowFormError message={clientError || submitState.error} />
