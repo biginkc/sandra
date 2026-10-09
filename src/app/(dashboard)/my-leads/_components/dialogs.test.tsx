@@ -197,7 +197,7 @@ describe("My Leads workflow dialogs", () => {
     }))
   })
 
-  it("freezes a recorded no-answer attempt and leaves its obligation for the composer to resume", async () => {
+  it("freezes a saved attempt without claiming a missing follow-up can be resumed", async () => {
     const user = userEvent.setup()
     const onOpenChange = vi.fn()
     const onSubmit = vi.fn()
@@ -214,6 +214,8 @@ describe("My Leads workflow dialogs", () => {
     const saveButton = screen.getByRole("button", { name: "Save attempt" })
     await user.click(saveButton)
     expect(screen.getByText("Follow-up blocked")).toBeInTheDocument()
+    expect(screen.getByText(/No saved follow-up was confirmed/)).toBeInTheDocument()
+    expect(screen.queryByText(/resume the saved follow-up/)).not.toBeInTheDocument()
     expect(screen.getByLabelText("Editable follow-up remainder")).toHaveValue("When would be a good time for you and Jordan to connect about the property?")
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
     expect(screen.getByLabelText("External outcome")).toBeDisabled()

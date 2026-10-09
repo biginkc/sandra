@@ -564,12 +564,21 @@ async function finishCommitted(args: {
   if (command === "log-attempt" && input.outcome === "no_answer") {
     // The attempt is committed; a failure while composing or sending the follow-up is reported as a follow-up status.
     try {
-      return await finishNoAnswerFollowUp({
+      const result = await finishNoAnswerFollowUp({
         viewer,
         input,
         record,
         composition,
       });
+      // Only the committed receipt can establish durable follow-up work.
+      const obligationId = record.obligationId ?? record.obligation_id;
+      return {
+        ...result,
+        followUp: {
+          ...result.followUp,
+          obligationId: typeof obligationId === "string" && obligationId.trim() ? obligationId : null,
+        },
+      };
     } catch {
       return followUpResult(
         "unknown",
@@ -660,10 +669,17 @@ async function finishNoAnswerFollowUp(args: {
       : typeof args.record.obligation_id === "string"
         ? args.record.obligation_id
         : null;
-  if (!obligationId || !args.composition) {
+  if (!obligationId?.trim()) {
     return followUpResult(
       "blocked",
-      "Attempt recorded. Follow-up texting is not enabled for this rep.",
+      "Attempt recorded. No saved follow-up text was confirmed. This submission did not send a text because the save did not return a follow-up reference.",
+    );
+  }
+
+  if (!args.composition) {
+    return followUpResult(
+      "blocked",
+      "Attempt recorded. The follow-up text is incomplete, so this submission did not send it. Open Text lead to review and complete it without recording another attempt.",
     );
   }
 
