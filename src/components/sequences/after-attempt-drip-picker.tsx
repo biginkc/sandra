@@ -26,8 +26,6 @@ export function AfterAttemptDripPicker({ propertyId, previewChoices, onDripChang
 
   useEffect(() => {
     let current = true;
-    setLoading(true);
-    setSelectedId(null);
     void Promise.resolve().then(() => listDripProgress(createClient(), [propertyId])).then(rows => {
       if (current) { setProgress(rows[0] ?? null); setLoadError(false); }
     }).catch(() => { if (current) setLoadError(true); })
@@ -77,7 +75,7 @@ export function AfterAttemptDripPicker({ propertyId, previewChoices, onDripChang
   return <div className="space-y-2">
     {message && <p ref={messageRef} role="alert" tabIndex={-1} className="rounded-md border border-destructive p-2 text-sm text-destructive">{message}</p>}
     {loading ? <p role="status" className="text-sm">Loading current drip…</p>
-      : loadError ? <div role="alert" className="text-sm">Could not load the current drip. <button type="button" className="underline" disabled={busy} onClick={() => setRetry(value => value + 1)}>Retry current drip</button></div>
+      : loadError ? <div role="alert" className="text-sm">Could not load the current drip. <button type="button" className="underline" disabled={busy} onClick={() => { setLoading(true); setSelectedId(null); setRetry(value => value + 1); }}>Retry current drip</button></div>
       : <p className="text-sm">{live ? <>Current drip: <strong>{live.sequenceName}</strong> ({live.enrollmentStatus}). Choose a different drip, then confirm the switch.</> : "Not currently in an active or paused drip."}</p>}
     {live && !loadError && <button type="button" className="rounded-md border px-3 py-2 text-sm font-medium" disabled={busy || loading || !selectedId || selectedId === live.sequenceId} onClick={() => selectedId && void choose(selectedId, true)}>{busy ? "Switching drip…" : "Switch to selected drip"}</button>}
     <StartDripPicker inline previewChoices={previewChoices} disabled={loading || loadError || busy}
