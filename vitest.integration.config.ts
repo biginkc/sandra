@@ -29,6 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "supabase/migrations/20261009060100_dialpad_outcome_reconciliation.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       // Destructive + local-only (assertLocalOnlyEnvironment); runs via
       // vitest.filter-local.config.ts against a disposable local stack.

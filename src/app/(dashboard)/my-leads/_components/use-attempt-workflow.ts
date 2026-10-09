@@ -1,5 +1,7 @@
 "use client"
 
+import { finalizesExistingAttempt } from "@/lib/my-leads/attempt-command"
+
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 
 import type { QueueRow } from "@/lib/my-leads/queries"
@@ -139,7 +141,7 @@ function operationOf(route: string, row: QueueRow): string {
 
 /** Which server operation a command reaches; frozen with the key at the first send. */
 export function routeOf(command: string, input: Record<string, Json>): string {
-  if (command === "log-attempt") return input.source === "sandra" ? "finalize_attempt" : "log_attempt"
+  if (command === "log-attempt") return finalizesExistingAttempt(input) ? "finalize_attempt" : "log_attempt"
   if (command === "handoff") return typeof input.sequenceId === "string" && input.sequenceId ? "handoff_to_drip" : "handoff"
   return command
 }
