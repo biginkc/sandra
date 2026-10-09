@@ -316,6 +316,7 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
           recording_status: "none",
           transcript_status: "none",
           summary_status: "none",
+          provider: "sandra_softphone",
           jitter_attempt_id: "attempt-provider",
           jitter_session_id: "session-provider",
           call_recordings: [],
@@ -357,7 +358,7 @@ it.each(["", "https://jitter.example.test"])("chooses history actions per provid
     outcome: "connected_human", disposition: null, recording_status: "none", transcript_status: "none", summary_status: "none",
     jitter_attempt_id: provider, jitter_session_id: null, call_recordings: [], call_transcripts: [],
   } as CallActivityRollupRow));
-  render(<LeadActivityTimeline propertyId="property-123" initialMessages={[]} initialNotes={[]} initialEvents={[]} initialCalls={calls} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost={jitterHost} />);
+  render(<LeadActivityTimeline propertyId="property-123" contactId={null} messageError={null} noteError={null} callError={null} eventError={null} initialMessages={[]} initialNotes={[]} initialEvents={[]} initialCalls={calls} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost={jitterHost} />);
   const cards = screen.getAllByTestId("lead-activity-call");
   expect(screen.queryByTitle("Jitter host not configured")).not.toBeInTheDocument();
   expect(screen.queryAllByRole("link", { name: "Open call in Jitter" })).toHaveLength(jitterHost ? 1 : 0);
