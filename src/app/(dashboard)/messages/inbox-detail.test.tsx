@@ -1893,7 +1893,7 @@ describe("<InboxDetail />", () => {
     expect(onBackToList).toHaveBeenCalledOnce();
   });
 
-  it("Move to Lead promotes then opens the lead page", async () => {
+  it("Move to Lead promotes while keeping the current message thread open", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-move-lead",
@@ -1909,7 +1909,11 @@ describe("<InboxDetail />", () => {
     await user.click(screen.getByTestId("message-move-to-lead"));
 
     expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-move");
-    expect(pushCalls).toContain("/leads/prop-move");
+    expect(pushCalls).toHaveLength(0);
+    expect(window.open).not.toHaveBeenCalled();
+    expect(refreshCalls).toHaveLength(1);
+    expect(screen.getByTestId("message-move-to-lead")).toBeDisabled();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
   });
 
   it("header Open prospect opens a new window without promoting", async () => {
@@ -2292,7 +2296,7 @@ describe("<InboxDetail />", () => {
       renderDetail(onRevalidate);
       await user.click(screen.getByTestId("dispo-more"));
       await user.click(await screen.findByTestId("dispo-opted-out"));
-      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Consent failed"));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Consent failed", { description: makeData({ contactId: "contact-revalidate" }).propertyAddress }));
       expect(screen.getByText("SMS opted out")).toBeInTheDocument();
       expect(onRevalidate).toHaveBeenCalled();
     });

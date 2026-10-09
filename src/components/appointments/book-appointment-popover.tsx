@@ -329,6 +329,7 @@ export function BookAppointmentPopover({
         }),
         {
           successMessage: "Appointment booked",
+          contextLabel: subjectLabel ?? (propertyId ? "Address unavailable" : undefined),
           fallbackMessage: "Could not book the appointment",
         },
       );
