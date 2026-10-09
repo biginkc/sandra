@@ -84,6 +84,11 @@ const googleFontMockPath = path.resolve(
   "tests/sequence-readiness/google-fonts-mock.cjs",
 );
 const guardNodeOption = `--require=${JSON.stringify(guardPath)}`;
+// The production build's type-check phase exceeds Node's default ~4 GB old-space limit on the CI runner
+// ("JavaScript heap out of memory" after "Compiled with warnings"). The app webServer builds and starts the
+// app, so give that one process an explicit 8 GB ceiling (the ubuntu-latest runner has 16 GB; the other
+// webServers here are tiny).
+const appNodeOptions = `--max-old-space-size=8192 ${guardNodeOption}`;
 const commonLocalEnv = {
   ...safeParentEnv,
   NODE_ENV: "development",
@@ -187,7 +192,7 @@ export default defineConfig({
       reuseExistingServer: false,
       env: {
         ...productionLocalEnv,
-        NODE_OPTIONS: guardNodeOption,
+        NODE_OPTIONS: appNodeOptions,
         SEQUENCE_READINESS_PROCESS_LABEL: "sequence-readiness-app",
         PORT: "3557",
       },

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { DialpadCallContext } from "@/components/dialpad/dialpad-call-context";
 import { InboxDetail } from "./inbox-detail";
 import { outboundStatusClearsDripReply, type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import { sendSmsFromLead } from "../leads/actions";
@@ -1769,6 +1770,36 @@ describe("<InboxDetail />", () => {
     await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
   });
 
+  it("shows the suppression warning (toast + inline) and does not leave the queue when suppression is incomplete", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-ai-review";
+    const warning = "Confirmed, but suppression incomplete — retry.";
+    confirmAiDispositionReviewMock.mockResolvedValue({ ok: true, status: "confirmed", warning });
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-ai-review",
+      outreachDispo: "opted_out",
+      aiDispositionReview: {
+        id: "review-2",
+        status: "pending",
+        disposition: "opted_out",
+        reason: "Said stop",
+        sourceInboundMessageId: "message-2",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(<InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" onBackToList={onBackToList} />);
+    await user.click(screen.getByTestId("confirm-sandra-dispo"));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(warning));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sandra-dispo-warning")).toHaveTextContent(warning);
+    expect(onBackToList).not.toHaveBeenCalled();
+  });
+
   it("keeps the Sandra review control visible on permanently locked DNC history", () => {
     const data = makeData({
       contactId: "contact-locked-review",
@@ -2291,5 +2322,76 @@ describe("<InboxDetail />", () => {
       await waitFor(() => expect(onRevalidate).toHaveBeenCalledTimes(2));
       expect(onBackToList).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("InboxDetail Call routing", () => {
+  const callData = (): InboxDetailData => ({
+    ...makeData({
+      contactId: "contact-call",
+      propertyId: "prop-call",
+      threadId: "conv-call",
+      conversationId: "conv-call",
+      propertyStatus: "prospect",
+      threadCustomerPhone: "+15550000002",
+      contactPhone: "+15550000002",
+      replyToPhone: "+15550000002",
+      initialMessages: [],
+    }),
+    contactPhoneSlot: 2,
+  });
+
+  it("never offers Call with coach in Messages (the softphone cannot dial the thread number)", async () => {
+    const user = userEvent.setup();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: true, startCall: vi.fn() }}>
+        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await screen.findByTestId("inbox-detail-phone");
+    expect(screen.queryByText("Call with coach")).not.toBeInTheDocument();
+  });
+
+  it("keeps the tel: link when the thread number matches no saved slot, even with the route on", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: true, startCall }}>
+        <InboxDetail data={{ ...callData(), contactPhoneSlot: null }} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toHaveAttribute("href", "tel:+15550000002");
+    expect(startCall).not.toHaveBeenCalled();
+  });
+
+  it("keeps the phone-app link when the Dialpad route is off", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: false, startCall }}>
+        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    const link = await screen.findByTestId("inbox-detail-phone");
+    expect(link).toHaveAttribute("href", "tel:+15550000002");
+    expect(startCall).not.toHaveBeenCalled();
+  });
+
+  it("places the call through Dialpad with property, contact and number slot when the route is on", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: true, startCall }}>
+        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await user.click(await screen.findByTestId("inbox-detail-phone"));
+    expect(startCall).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "prop-call", contactId: "contact-call", phoneSlot: 2, onFallback: expect.any(Function) }),
+    );
   });
 });

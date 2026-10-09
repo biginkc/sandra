@@ -37,20 +37,25 @@ import { reasonLabel } from "./_components/call-next-reason";
 import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
 import { PostCallPrompt } from "./_components/post-call-prompt";
-import { clearExtras } from "./_components/extras-store";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { saveExtrasRequest, type ExtrasRequest } from "./_components/extras-saver";
 import type {
   AcquisitionCallReferenceOption,
-  PostCallExtras,
   PostCallExtrasState,
 } from "./_components/types";
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
-import {
-  DialpadPanel,
-  type DialpadCallRequest,
-} from "./_components/dialpad-panel";
-import type { DialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
+import { CallbackDueBanner } from "./_components/callback-due-banner";
+import { useCallStatePoll } from "./_components/use-call-state-poll";
+import type { PromptOutcome } from "./_components/post-call-prompt";
+import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
+import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
+import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
+import { useCallLockHolder } from "@/components/calls/call-lock-context";
+import { CoachCallContext } from "./_components/coach-call-context";
+import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
   MyLeadAction,
   MyLeadStage,
@@ -65,7 +70,6 @@ import {
 import type { SelectedLeadResult } from "./deep-link";
 import {
   loadMyLeadCallReferences,
-  savePostCallExtras,
   loadMyLeadRow,
   loadMyLeads,
   loadMyLeadsStage,
@@ -86,7 +90,10 @@ type Props = {
   postCallPrompt?: boolean;
   /** The Call next strip; null or omitted when it is off for this org. */
   initialStrip?: CallNextSnapshot | null;
-  dialpad?: DialpadPanelBootstrap | null;
+  /** Present only while click_to_dial is on and the connection is active; null keeps the softphone branch. */
+  dialpad?: DialpadCallingBootstrap | null;
+  /** Server-side truth (flag AND landed schema) for the auto prompt and the callback alert. */
+  callFeatures?: MyLeadsCallFeatures | null;
   initialSearch?: string;
   focus?: MyLeadsFocus | null;
   selectedLead?: import("./deep-link").SelectedLeadResult;
@@ -166,6 +173,9 @@ function focusFromSelectedLead(
 }
 
 const REFRESH_INTERVAL_MS = 30_000;
+/** Any open Base UI popup (dialog, alert dialog, popover, drawer, menu) and the hand-built softphone popover blocks the auto-prompt. */
+const OPEN_FOREIGN_POPUP_SELECTOR =
+  "[role=dialog][data-open], [role=alertdialog][data-open], [role=menu][data-open], [data-testid=softphone-popover]";
 
 type DripEntry = MyLeadDripSnapshot["active"][number];
 /** Every copy of every lead, grouped by propertyId in one pass, plus how many places hold each lead. */
@@ -304,6 +314,7 @@ export function MyLeadsClient({
   initialStrip = null,
   postCallPrompt = false,
   dialpad = null,
+  callFeatures = null,
   initialSearch = "",
   focus: providedFocus = null,
   selectedLead = { status: "none" },
@@ -351,20 +362,8 @@ export function MyLeadsClient({
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(
     null,
   );
-  type ExtrasRequest = {
-    attemptKey: string;
-    memberId: string;
-    propertyId: string;
-    extras: PostCallExtras;
-  };
   const extrasRequest = useRef<ExtrasRequest | null>(null);
   const extrasInFlight = useRef(new Set<string>());
-  const [dialpadRequest, setDialpadRequest] =
-    useState<DialpadCallRequest | null>(null);
-  const dialpadNonce = useRef(0);
-  const onCallRequestHandled = useCallback((nonce: number) => {
-    setDialpadRequest((current) => (current?.nonce === nonce ? null : current));
-  }, []);
   const [dialog, setDialog] = useState<{
     action: MyLeadAction;
     row: QueueRow;
@@ -376,7 +375,9 @@ export function MyLeadsClient({
   });
   type Opening = {
     action: MyLeadAction;
-    row: QueueRow;
+    // A completed call survives pagination and queue refreshes. Its property ID is
+    // enough to request an authoritative row; a displayed row also pins the episode.
+    row: Pick<QueueRow, "propertyId"> & Partial<Pick<QueueRow, "assignmentEpisodeId">>;
     scope: string;
     focusGeneration: number;
     callActivityId?: string | null;
@@ -624,6 +625,12 @@ export function MyLeadsClient({
     strip?.rows.find((item) => item.propertyId === id)?.row ??
     triage?.rows.find((item) => item.propertyId === id)?.row ??
     null;
+  // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
+  const callLockHolder = useCallLockHolder();
+  // The flight and its lock are owned by the persistent layout provider so navigating away cannot drop a live call.
+  const dialpadCall = useOptionalDialpadCall();
+  const dialFlight = dialpadCall?.flight ?? null;
+  const dialActive = dialpadCall?.dialActive ?? false;
   /**
    * Every workflow opening reads the lead through the single-row lookup (a database
    * statement-time read) and uses THAT row for the command's preconditions (episode,
@@ -653,7 +660,8 @@ export function MyLeadsClient({
     // Never silently move an opening into a different assignment episode.
     if (
       !fresh ||
-      fresh.assignmentEpisodeId !== opening.row.assignmentEpisodeId
+      (opening.row.assignmentEpisodeId !== undefined &&
+        fresh.assignmentEpisodeId !== opening.row.assignmentEpisodeId)
     ) {
       setOpeningStatus({
         opening,
@@ -677,35 +685,7 @@ export function MyLeadsClient({
     if (!opening || openingStatus?.busy) return;
     void finishOpening(opening);
   };
-  const action = (
-    kind: MyLeadAction,
-    id: string,
-    callActivityId?: string | null,
-  ) => {
-    const row = rawRow(id);
-    if (!row) return;
-    cancelOpening();
-    if (kind === "start-call" && dialpad) {
-      // An active Dialpad connection routes calls through the audited CTI flow; the server re-derives org and rep and revalidates at dispatch.
-      if (member !== viewer.userId) {
-        setError("Open your own queue to call with Dialpad.");
-        return;
-      }
-      setError(null);
-      setDialpadRequest({
-        nonce: ++dialpadNonce.current,
-        propertyId: row.propertyId,
-        contactId: row.contactId ?? null,
-        label: row.homeownerName ?? row.address,
-      });
-      return;
-    }
-    if (kind === "start-call") {
-      if (!softphone?.callingEnabled) {
-        setError("Calling is not enabled.");
-        return;
-      }
-      softphone.openLead({
+  const toSoftphoneLead = (row: NonNullable<ReturnType<typeof rawRow>>) => ({
         id: row.propertyId,
         contactId: row.contactId,
         firstName: row.homeownerName?.split(" ")[0] ?? "",
@@ -717,6 +697,63 @@ export function MyLeadsClient({
         contactDnc: row.contactDnc,
         callable: row.phones.some((phone) => !!phone.trim()) && !row.contactDnc,
       });
+  // "Call with coach": only with the Dialpad route on and a usable softphone; otherwise rows are unchanged.
+  const coachCall =
+    dialpad && softphone?.callingEnabled
+      ? {
+          disabled: callLockHolder === "dialpad",
+          call: (propertyId: string) => {
+            const row = rawRow(propertyId);
+            if (row && callLockHolder !== "dialpad") softphone.openLead(toSoftphoneLead(row));
+          },
+        }
+      : null;
+  const action = (
+    kind: MyLeadAction,
+    id: string,
+    callActivityId?: string | null,
+  ) => {
+    const row = rawRow(id);
+    if (!row) {
+      // The persistent call banner can outlive the row's loaded page. Resolve the
+      // lead through the same authorized lookup instead of treating pagination as denial.
+      if (kind === "log-attempt" && callActivityId) {
+        cancelOpening();
+        void finishOpening({
+          action: kind,
+          row: { propertyId: id },
+          scope: openingScope,
+          focusGeneration,
+          callActivityId,
+        });
+      }
+      return;
+    }
+    cancelOpening();
+    if (kind === "start-call" && dialpad) {
+      // An active Dialpad connection routes calls through the audited API dial; the server re-derives org and rep and revalidates at dispatch.
+      if (member !== viewer.userId) {
+        setError("Open your own queue to call with Dialpad.");
+        return;
+      }
+      setError(null);
+      if (!row.contactId) {
+        setError("This lead has no contact to call.");
+        return;
+      }
+      dialpadCall?.startCall({
+        propertyId: row.propertyId,
+        contactId: row.contactId,
+        label: row.homeownerName ?? row.address,
+      });
+      return;
+    }
+    if (kind === "start-call") {
+      if (!softphone?.callingEnabled) {
+        setError("Calling is not enabled.");
+        return;
+      }
+      softphone.openLead(toSoftphoneLead(row));
       return;
     }
     void finishOpening({
@@ -837,30 +874,18 @@ export function MyLeadsClient({
   // again for the same attempt: each extra carries its own idempotency key, so a repeat cannot
   // duplicate. The stored entry is removed only after the server confirms both extras.
   const runExtras = async (request: ExtrasRequest, showState: boolean) => {
-    const { extras } = request;
-    if (extrasInFlight.current.has(extras.submissionId)) return;
-    extrasInFlight.current.add(extras.submissionId);
-    if (showState) {
-      extrasRequest.current = request;
-      setExtrasState({ status: "saving" });
-    }
-    let result: Awaited<ReturnType<typeof savePostCallExtras>>;
-    try {
-      result = await savePostCallExtras({
-        memberId: request.memberId,
-        propertyId: request.propertyId,
-        submissionId: extras.submissionId,
-        note: extras.note,
-        nextStep: extras.nextStep,
-      });
-    } catch {
-      result = { ok: false, message: "The note and next step could not be saved." };
-    } finally {
-      extrasInFlight.current.delete(extras.submissionId);
-    }
-    if (result.ok && result.note !== "failed" && result.nextStep !== "failed" && !result.message) {
-      clearExtras(viewer.userId, request.attemptKey);
-    }
+    const result = await saveExtrasRequest(
+      request,
+      viewer.userId,
+      extrasInFlight.current,
+      () => {
+        if (showState) {
+          extrasRequest.current = request;
+          setExtrasState({ status: "saving" });
+        }
+      },
+    );
+    if (!result) return;
     // A result for a prompt that has since been replaced or closed is not shown.
     if (!showState || extrasRequest.current !== request) {
       if (result.ok) {
@@ -891,6 +916,14 @@ export function MyLeadsClient({
     viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
     onCommitted: (committed) => {
+      if (
+        autoPromptRef.current &&
+        committed.opening.callActivityId === autoPromptRef.current.callActivityId
+      ) {
+        autoPromptSaved.current = true;
+      }
+      // The attempt for this call is saved: the ended Dialpad call's panel (Log outcome) is done.
+      if (committed.opening.callActivityId) dialpadCall?.clearEndedCall?.(committed.opening.callActivityId);
       if (committed.extras) {
         void runExtras(
           {
@@ -946,6 +979,92 @@ export function MyLeadsClient({
       router.refresh();
     },
   });
+  // ---- Durable call state (P2 2.6 / 2.8): one poll, suspended while any dialog is open.
+  const ownQueue = member === viewer.userId;
+  const pollEnabled = roster.settings.enabled && ownQueue;
+  const callPoll = useCallStatePoll({
+    enabled: pollEnabled,
+    suspended: dialog !== null || openingStatus !== null,
+  });
+  const autoPromptOn = Boolean(callFeatures?.autoPrompt) && postCallPrompt && ownQueue;
+  const callbackAlertOn = Boolean(callFeatures?.callbackAlert) && ownQueue;
+  // The prompt opened by the poll, until it is acknowledged; attempts acknowledged this session
+  // are never reopened even if a stale poll still lists them.
+  const [autoPrompt, setAutoPrompt] = useState<CallPromptItem | null>(null);
+  // Mirror for callbacks that run outside render (the workflow's onCommitted).
+  const autoPromptRef = useRef<CallPromptItem | null>(null);
+  useEffect(() => {
+    autoPromptRef.current = autoPrompt;
+  });
+  const autoPromptSaved = useRef(false);
+  const ackedAttempts = useRef(new Set<string>());
+  const ackInFlight = useRef(new Set<string>());
+  const refreshCallState = callPoll.refreshNow;
+  const softphoneOnCall = softphone?.onCall === true;
+  // Handlers the persistent Dialpad panel calls back into while this page is mounted.
+  const pageHandlerRef = useRef<{ onLogOutcome: (propertyId: string, callActivityId: string) => void; onEnded: () => void }>({ onLogOutcome: () => undefined, onEnded: () => undefined });
+  useEffect(() => {
+    pageHandlerRef.current = {
+      onLogOutcome: (propertyId, callActivityId) => {
+        action("log-attempt", propertyId, callActivityId);
+      },
+      onEnded: () => {
+        void refresh(true);
+        refreshCallState();
+      },
+    };
+  });
+  const setPageHandlers = dialpadCall?.setPageHandlers;
+  useEffect(() => {
+    setPageHandlers?.({
+      onLogOutcome: (propertyId, callActivityId) => pageHandlerRef.current.onLogOutcome(propertyId, callActivityId),
+      onEnded: () => pageHandlerRef.current.onEnded(),
+    });
+    return () => setPageHandlers?.(null);
+  }, [setPageHandlers]);
+  useEffect(() => {
+    if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
+    // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
+    if (dialActive || softphoneOnCall) return;
+    // Sandra's popups are Base UI: open state is `data-open` (closing/closed popups carry `data-closed`), never Radix's `data-state=open`.
+    if (typeof document !== "undefined" && document.querySelector(OPEN_FOREIGN_POPUP_SELECTOR)) return;
+    const candidates = callPoll.prompts.filter(
+      (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
+    );
+    const next = oldestPrompt(candidates);
+    // A lead no longer in this queue (reassigned since the poll) is never opened.
+    if (!next || !rawRow(next.propertyId)) return;
+    autoPromptSaved.current = false;
+    setAutoPrompt(next);
+    action("log-attempt", next.propertyId, next.callActivityId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall]);
+  // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
+  useEffect(() => {
+    if (!autoPrompt) return;
+    const stillOpen =
+      dialog?.action === "log-attempt" && dialog.callActivityId === autoPrompt.callActivityId;
+    if (stillOpen || openingStatus !== null) return;
+    const attemptId = autoPrompt.attemptId;
+    const via = autoPromptSaved.current ? "saved" : "dismissed";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the close of the auto-opened prompt is the external event being synchronised
+    setAutoPrompt(null);
+    ackedAttempts.current.add(attemptId);
+    ackInFlight.current.add(attemptId);
+    void acknowledgeCallPromptAction(attemptId, via).finally(() => {
+      ackInFlight.current.delete(attemptId);
+      refreshCallState();
+    });
+  }, [autoPrompt, dialog, openingStatus, refreshCallState]);
+  const polledCallbacks = callPoll.callbacksDue;
+  const callbacksDue = useMemo(
+    () => (callbackAlertOn ? polledCallbacks : []),
+    [callbackAlertOn, polledCallbacks],
+  );
+  const stripPins = useMemo(
+    () => callbacksDue.map((item) => ({ propertyId: item.propertyId, reason: "Callback due now" })),
+    [callbacksDue],
+  );
   // The deep-link target lives in client state, seeded from the URL. A user-driven
   // rep/search change clears it (and the URL, without adding history). A different
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
@@ -1150,8 +1269,23 @@ export function MyLeadsClient({
       ? target.retryHref
       : canonicalRetryHref;
   return (
-    <>
-      {openingStatus && (
+    <CoachCallContext.Provider value={coachCall}>
+      {openingStatus && (openingStatus.opening.callActivityId ? (
+        <Dialog open onOpenChange={(open) => { if (!open) cancelOpening(); }}>
+          <DialogContent>
+            <DialogTitle>Log call outcome</DialogTitle>
+            <div role="status" aria-live="polite">{openingStatus.message}</div>
+            {!openingStatus.busy && (
+              <Button type="button" variant="outline" onClick={retryOpening}>
+                Retry opening
+              </Button>
+            )}
+            <Button type="button" variant="ghost" onClick={cancelOpening}>
+              Cancel opening
+            </Button>
+          </DialogContent>
+        </Dialog>
+      ) : (
         <div role="status" className="mb-4 rounded border p-3">
           {openingStatus.message}
           {!openingStatus.busy && (
@@ -1163,7 +1297,7 @@ export function MyLeadsClient({
             Cancel opening
           </Button>
         </div>
-      )}
+      ))}
       {viewer.isOwner && (
         <details className="mb-4 rounded-lg border p-4">
           <summary className="cursor-pointer font-medium">
@@ -1278,21 +1412,16 @@ export function MyLeadsClient({
           </Button>
         </div>
       )}
-      {dialpad && roster.settings.enabled && (
-        <DialpadPanel
-          bootstrap={dialpad}
-          callRequest={dialpadRequest}
-          onCallRequestHandled={onCallRequestHandled}
-          onRecordingFinalResult={() => {
-            void refresh(true);
+      {callbackAlertOn && roster.settings.enabled && (
+        <CallbackDueBanner
+          items={callbacksDue}
+          labelFor={(propertyId) => {
+            const row = rawRow(propertyId);
+            return row ? (row.homeownerName ?? row.address) : null;
           }}
-          onLogOutcome={(propertyId, callActivityId) => {
-            if (!rawRow(propertyId)) {
-              setError("This lead is no longer in your queue.");
-              return;
-            }
-            action("log-attempt", propertyId, callActivityId);
-          }}
+          onCall={(propertyId) => action("start-call", propertyId)}
+          callingPropertyId={dialActive && dialFlight?.kind === "in_flight" ? dialFlight.propertyId : null}
+          canCall={ownQueue}
         />
       )}
       {!roster.settings.enabled ? (
@@ -1324,6 +1453,7 @@ export function MyLeadsClient({
                 void stripOverride(propertyId, "not_today")
               }
               onDeadNurture={(propertyId) => action("handoff", propertyId)}
+              pinned={stripPins}
             />
           )}
           <MyLeadsQueue
@@ -1482,6 +1612,11 @@ export function MyLeadsClient({
             onDripChanged={onDripChanged}
             key={`${dialog.row.propertyId}:${dialog.callActivityId ?? ""}`}
             initialCallActivityId={dialog.callActivityId ?? null}
+            initialOutcome={
+              autoPrompt && autoPrompt.callActivityId === dialog.callActivityId
+                ? (autoPrompt.outcomeGuess as PromptOutcome | null)
+                : null
+            }
             callReferenceOptions={
               callOptions?.propertyId === dialog.row.propertyId
                 ? callOptions.options
@@ -1588,6 +1723,6 @@ export function MyLeadsClient({
           </Button>
         </div>
       )}
-    </>
+    </CoachCallContext.Provider>
   );
 }

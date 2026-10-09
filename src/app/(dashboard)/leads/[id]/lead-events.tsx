@@ -1,5 +1,7 @@
 "use client";
 
+import { NormaRecordings } from "./norma-recordings";
+
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { ActivityIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -11,6 +13,7 @@ import { validateTemplateTitle } from "@/lib/esign/template-contract";
 import { createClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { normaOutcomeLabel } from "@/lib/norma/outcome-labels";
+import { NORMA_TONE_CLASSES, normaOutcomeTone } from "@/lib/norma/tone";
 import { formatNormaCallbackTime, type NormaRequestView } from "@/lib/norma/view";
 
 type LeadEventRow = Database["public"]["Tables"]["lead_events"]["Row"];
@@ -140,14 +143,19 @@ export function LeadEventPill({
   /** Norma call requests for this lead, used for the call detail under the pill. */
   normaRequests?: readonly NormaRequestView[];
 }) {
+  // A finished Norma call is green when it reached a person, grey when nobody
+  // answered, amber when it needs a human; every other event keeps the muted pill.
+  const normaTone =
+    event.event_type === "norma_call_completed" ? normaOutcomeTone(readString(readPayload(event.payload), "outcome")) : null;
   const pill = (
     <div
-      className="border-border/80 bg-muted/80 text-muted-foreground inline-flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-full border px-3 py-1.5 text-center text-[11px] shadow-sm"
+      className={`${normaTone ? NORMA_TONE_CLASSES[normaTone] : NORMA_TONE_CLASSES.neutral} inline-flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-full border px-3 py-1.5 text-center text-[11px] shadow-sm`}
       data-testid="lead-event-row"
       data-event-type={event.event_type}
+      data-tone={normaTone ?? undefined}
     >
       <ActivityIcon className="size-3 shrink-0" aria-hidden />
-      <span className="text-foreground font-medium">
+      <span className={normaTone && normaTone !== "neutral" ? "font-medium" : "text-foreground font-medium"}>
         {formatLeadEventSentence(event, authorEmails, currentUserId)}
       </span>
       {event.event_type === 'calculation_saved' && typeof readPayload(event.payload).calculation_id === 'string' && /^[0-9a-f-]{36}$/i.test(String(readPayload(event.payload).calculation_id)) ? (
@@ -163,7 +171,10 @@ export function LeadEventPill({
     </div>
   );
   const detail = formatNormaEventDetail(event, normaRequests);
-  if (!detail) return pill;
+  const requestId = readPayload(event.payload).request_id;
+  const recordingRequestId = (event.event_type === "norma_call_completed" || event.event_type === "norma_call_reviewed") && typeof requestId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : null;
+  if (!detail && !recordingRequestId) return pill;
   return (
     <div className="flex max-w-full flex-col items-center gap-1.5">
       {pill}
@@ -171,18 +182,19 @@ export function LeadEventPill({
         className="border-border/80 bg-muted/50 text-foreground max-w-md space-y-1 rounded-lg border px-3 py-2 text-xs"
         data-testid="norma-event-detail"
       >
-        {detail.summary ? <p className="whitespace-pre-line">{detail.summary}</p> : null}
-        {detail.callbackPreference ? (
+        {detail?.summary ? <p className="whitespace-pre-line">{detail.summary}</p> : null}
+        {detail?.callbackPreference ? (
           <p>
             <span className="font-medium">Seller&apos;s stated callback preference (unconfirmed):</span>{" "}
             {detail.callbackPreference}
           </p>
         ) : null}
-        {detail.callbackTime ? (
+        {detail?.callbackTime ? (
           <p data-testid="norma-event-callback-time">
             <span className="font-medium">Converted callback time (unconfirmed):</span> {detail.callbackTime}
           </p>
         ) : null}
+        {recordingRequestId ? <NormaRecordings key={recordingRequestId} requestId={recordingRequestId} /> : null}
       </div>
     </div>
   );
@@ -224,8 +236,12 @@ export function formatLeadEventSentence(
     }
     case "norma_call_requested":
       return `${actor} asked Norma to call${payload.has_context === true ? " (with context)" : ""}`;
+    case "norma_call_attempt_no_answer":
+      return "Norma's first call was not answered";
     case "norma_call_completed":
       return `Norma call finished — ${normaOutcomeLabel(readString(payload, "outcome"))}`;
+    case "norma_call_reviewed":
+      return `${actor} marked the Norma call reviewed`;
     case "lead_created":
       return `${actor} created the lead`;
     case "qualified":
@@ -307,6 +323,8 @@ export function formatLeadEventSentence(
     }
     case "ai_escalation_cleared":
       return `${actor} cleared human review`;
+    case "hold_reply_sent":
+      return `${actor} sent a held reply${payload.edited === true ? " (edited)" : ""}`;
     case "ai_responder_toggled":
       return typeof payload.to === "boolean"
         ? `${actor} turned Sandra replies ${payload.to ? "off" : "on"}`

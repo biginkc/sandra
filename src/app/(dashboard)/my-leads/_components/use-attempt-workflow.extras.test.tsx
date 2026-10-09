@@ -78,6 +78,20 @@ describe("post-call extras on every recovery path", () => {
     expect(handlers.onExtras).toHaveBeenCalledTimes(1)
   })
 
+  it("a refused save (another prompt saved the call) clears its extras, so Refresh-and-close and a reload write nothing", async () => {
+    actions.submitMyLeadCommand.mockRejectedValueOnce(new Error("network")).mockResolvedValue({ ok: false, answered: true, certainty: "rejected", code: "ALREADY_FINALIZED", message: "This was already saved. Refresh to see it." })
+    const { hook, handlers } = setup(opening())
+    await act(async () => { await hook.result.current.submit({ outcome: "reached", postCall: extras() }).catch(() => undefined) })
+    const key = (actions.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey
+    expect(getExtras("user-1", key)).not.toBeNull()
+    await act(async () => { await hook.result.current.submit({ outcome: "reached", postCall: extras() }) })
+    expect(getExtras("user-1", key)).toBeNull()
+    await act(async () => { hook.result.current.recoveryValue?.refresh() })
+    simulateExtrasReloadForTests()
+    expect(handlers.onExtras).not.toHaveBeenCalled()
+    expect(handlers.onCommitted).not.toHaveBeenCalled()
+  })
+
   it("Refresh-and-close after a reload mid-save: the extras come back from sessionStorage and are flushed", async () => {
     actions.submitMyLeadCommand.mockRejectedValue(new Error("network"))
     const first = setup(opening(3))

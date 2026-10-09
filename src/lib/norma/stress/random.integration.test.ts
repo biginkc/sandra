@@ -31,9 +31,23 @@ describe("norma stress gate: randomised lifecycles", () => {
         // eslint-disable-next-line no-console
         console.log(`[norma-stress] seed=${seed} lifecycles=${run.lifecycles} ${JSON.stringify(stats)}`);
         if (all.length) {
+          const detailIds = [...new Set(all.flatMap((v) => [...v.matchAll(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi)].map((m) => m[0])))].slice(0, 25);
+          const diagnostics = await Promise.all(detailIds.map(async (id) => {
+            const request = (await h.scratch.pool.query("select * from public.norma_call_requests where id = $1", [id])).rows[0];
+            const audit = (await h.scratch.pool.query("select seq, txid, old_row, new_row from stress.audit where tbl = 'norma_call_requests' and row_id = $1 order by seq", [id])).rows;
+            const reviews = h.reviews.filter((r) => r.requestId === id);
+            const sends = h.bland.sendsFor(id);
+            const trace = h.trace.events.filter((e) => {
+              const args = e.detail?.args as { p_request_id?: unknown } | undefined;
+              return args?.p_request_id === id || e.detail?.requestId === id || e.detail?.request_id === id;
+            });
+            return `request ${id}\n  row=${JSON.stringify(request)}\n  reviews=${JSON.stringify(reviews)}\n  sends=${JSON.stringify(sends)}\n  audit=${JSON.stringify(audit)}\n  trace=${JSON.stringify(trace)}`;
+          }));
           const detail = [
             `FAILING SEED ${seed} (replay: NORMA_STRESS_SEED=${seed} NORMA_STRESS_LIFECYCLES=${perSeed} npm run test:norma-stress)`,
             ...[...new Set(all)].slice(0, 25),
+            "--- request diagnostics ---",
+            ...diagnostics,
             "--- trace tail ---",
             ...h.trace.tail(40),
           ].join("\n");

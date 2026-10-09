@@ -486,6 +486,11 @@ export async function submitMyLeadCommand(
           "FORBIDDEN" as const,
         ),
       );
+    // Another prompt (a second tab, or the call-screen dock) already saved this call under its own
+    // key. Nothing was written, so this prompt must not write its note or next step either: the
+    // blocked recovery (existing wording, Refresh) keeps the extras unflushed.
+    if (named(message, ["ALREADY_FINALIZED"]))
+      return ans(failure("rejected", ALREADY_SAVED, "ALREADY_FINALIZED" as const));
     if (
       named(message, ["STALE_STATE", "STALE_ASSIGNMENT"]) ||
       message.includes("STALE_")
@@ -984,15 +989,23 @@ const POST_CALL_PICKS = ["tomorrow", "three_days", "next_week", "custom"];
 
 /**
  * The post-call prompt's extras: the one note (written to lead_notes) and the quick next step
- * (a phone appointment). They are independent, each safe to retry (the note by
- * lead_notes.idempotency_key, the appointment by its booking idempotency key, both the prompt's
- * submissionId); a partial success is reported, never rolled back, and never affects the saved
- * attempt. The lead must be in the member's own queue (same single-row read every opening uses).
+ * (a phone appointment). They are independent and a partial success is reported, never rolled
+ * back, and never affects the saved attempt. They are written ONLY after the database proves
+ * (fn_post_call_extras_proof) that this rep's attempt key holds the receipt of an attempt on this
+ * lead; the note and appointment idempotency keys come from that proof (derived from the attempt),
+ * never from the client, so any number of tabs, openings or retries land on one note and one
+ * appointment per attempt. No proof means nothing is written and the caller keeps its stored
+ * extras (`pending`); another key having saved the call means they are dropped (`alreadySaved`).
+ * The lead must be in the member's own queue (same single-row read every opening uses).
  */
 export async function savePostCallExtras(input: {
   memberId: string;
   propertyId: string;
   submissionId: string;
+  /** The finalize idempotency key of the attempt these extras belong to. Required: it is the proof. */
+  attemptKey: string;
+  /** The Sandra call the attempt records (null for a manual attempt); lets the proof say `foreign`. */
+  callActivityId?: string | null;
   note: string | null;
   nextStep: {
     dueAt: string;
@@ -1005,10 +1018,12 @@ export async function savePostCallExtras(input: {
       nextStep: "created" | "skipped" | "failed";
       message?: string;
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; alreadySaved?: true; pending?: true }
 > {
   if (
     !POST_CALL_UUID.test(input.submissionId ?? "") ||
+    !POST_CALL_UUID.test(input.attemptKey ?? "") ||
+    (input.callActivityId && !POST_CALL_UUID.test(input.callActivityId)) ||
     (input.nextStep &&
       (!POST_CALL_PICKS.includes(input.nextStep.pick) ||
         !Number.isFinite(Date.parse(input.nextStep.dueAt))))
@@ -1029,6 +1044,46 @@ export async function savePostCallExtras(input: {
     return { ok: false, message: "Could not confirm this lead. Please retry." };
   }
 
+  // Positive proof gate. Missing function or any error fails closed: nothing is written, the stored
+  // extras stay for a retry.
+  const pending = (message: string) => ({ ok: false as const, pending: true as const, message });
+  let noteKey: string;
+  let nextStepKey: string;
+  try {
+    if (!(await schemaReady("post_call_extras_proof")))
+      return pending("Not saved yet: Sandra is still updating. Your note is kept.");
+    const viewer = await myLeadsViewer();
+    const { data, error } = await (
+      viewer.client as unknown as {
+        rpc(
+          name: string,
+          args: Record<string, string | null>,
+        ): Promise<{ data: unknown; error: { message?: string } | null }>;
+      }
+    ).rpc("fn_post_call_extras_proof", {
+      p_org: viewer.orgId,
+      p_property: input.propertyId,
+      p_attempt_key: input.attemptKey,
+      p_call_activity: input.callActivityId ?? null,
+    });
+    const proof = (data ?? null) as { status?: string; noteKey?: string; nextStepKey?: string } | null;
+    if (error || !proof || typeof proof !== "object")
+      return pending("Could not confirm this save. Your note is kept; retry.");
+    if (proof.status === "foreign") return { ok: false, message: ALREADY_SAVED, alreadySaved: true };
+    if (proof.status === "pending")
+      return pending("Not saved yet: this call's save isn't confirmed. Your note is kept.");
+    if (
+      proof.status !== "proven" ||
+      !POST_CALL_UUID.test(proof.noteKey ?? "") ||
+      !POST_CALL_UUID.test(proof.nextStepKey ?? "")
+    )
+      return pending("Could not confirm this save. Your note is kept; retry.");
+    noteKey = proof.noteKey as string;
+    nextStepKey = proof.nextStepKey as string;
+  } catch {
+    return pending("Could not confirm this save. Your note is kept; retry.");
+  }
+
   const messages: string[] = [];
   const noteText = input.note?.trim() ?? "";
   let note: "saved" | "skipped" | "failed" = "skipped";
@@ -1037,7 +1092,7 @@ export async function savePostCallExtras(input: {
       const saved = await createIdempotentLeadNote(
         input.propertyId,
         noteText,
-        input.submissionId,
+        noteKey,
       );
       note = saved.ok ? "saved" : "failed";
       if (!saved.ok) messages.push(`Note not saved: ${saved.error.message}`);
@@ -1060,11 +1115,14 @@ export async function savePostCallExtras(input: {
         assigneeId: input.memberId,
         dueAt: new Date(input.nextStep.dueAt).toISOString(),
         title: `Call ${row.address}`,
-        idempotencyKey: input.submissionId,
+        idempotencyKey: nextStepKey,
         origin: "app",
       });
-      nextStep = created.ok ? "created" : "failed";
-      if (!created.ok) messages.push(`Next step not set: ${created.error.message}`);
+      // The attempt's appointment already exists under this key (an earlier opening wrote it, and the
+      // text or time differed): that is success, not a failure to retry forever.
+      const alreadyThere = !created.ok && created.error.message.includes("idempotency key reuse");
+      nextStep = created.ok || alreadyThere ? "created" : "failed";
+      if (!created.ok && !alreadyThere) messages.push(`Next step not set: ${created.error.message}`);
     } else {
       messages.push("Next step not set yet: Sandra is still updating. Add it from the lead page.");
     }

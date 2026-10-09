@@ -14,6 +14,13 @@ export type Database = {
   }
   public: {
     Tables: {
+      norma_inbound_calls: {
+        Row: { id: string; org_id: string; provider_call_id: string; from_e164: string; to_e164: string; completed: boolean; reconciliation_state: "pending" | "done" | "denied" | "unavailable"; reconciliation_attempts: number; next_lookup_at: string; recording_state: "pending" | "reported_available" | "not_recorded"; review_state: "needs_review" | "associated"; property_id: string | null; reviewed_by: string | null; reviewed_at: string | null; created_at: string; updated_at: string }
+        Insert: never
+        Update: { reconciliation_state?: "pending" | "done" | "denied" | "unavailable" }
+        Relationships: []
+      }
+
       direct_call_operators: {
         Row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at: string }
         Insert: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at?: string }
@@ -45,9 +52,9 @@ export type Database = {
         Relationships: []
       }
       dialpad_org_connections: {
-        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; created_at: string; updated_at: string }
-        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; created_at?: string; updated_at?: string }
-        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; dial_endpoint: string; dial_api_key_ref: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; dial_endpoint?: string; dial_api_key_ref?: string | null; created_at?: string; updated_at?: string }
+        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; dial_endpoint?: string; dial_api_key_ref?: string | null; updated_at?: string }
         Relationships: []
       }
 
@@ -73,7 +80,7 @@ export type Database = {
       }
 
       dialpad_call_events: {
-        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null }
+        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null; redacted_at: string | null }
         Insert: { id?: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg?: string; secret_version: number; received_at?: string; disposition?: string; disposition_reason?: string | null; conflicts_with_event_id?: string | null; disposed_at?: string | null }
         Update: { disposition?: string; disposition_reason?: string | null; matched_intent_id?: string | null; disposed_at?: string | null; projected_at?: string | null; process_attempts?: number; last_process_error?: string | null }
         Relationships: []
@@ -370,6 +377,8 @@ export type Database = {
           outcome: string | null
           property_id: string
           provider_attempt_key: string | null
+          prompt_acknowledged_at: string | null
+          prompt_acknowledged_via: string | null
           recorded_at: string
           recording_url: string | null
           source: string
@@ -390,6 +399,8 @@ export type Database = {
           outcome?: string | null
           property_id: string
           provider_attempt_key?: string | null
+          prompt_acknowledged_at?: string | null
+          prompt_acknowledged_via?: string | null
           recorded_at?: string
           recording_url?: string | null
           source: string
@@ -816,9 +827,15 @@ export type Database = {
           ai_reason: string
           classification_run_id: string | null
           conversation_id: string
+          corrected_at: string | null
+          corrected_by: string | null
+          corrected_disposition: string | null
+          correction_reason: string | null
           created_at: string
           disposition: string
           dispo_applied: boolean
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
           id: string
           org_id: string
           property_id: string
@@ -827,14 +844,21 @@ export type Database = {
           source_inbound_message_id: string
           status: string
           superseded_reason: string | null
+          wrong_scope: string | null
         }
         Insert: {
           ai_reason: string
           classification_run_id?: string | null
           conversation_id: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id: string
           property_id: string
@@ -843,14 +867,21 @@ export type Database = {
           source_inbound_message_id: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Update: {
           ai_reason?: string
           classification_run_id?: string | null
           conversation_id?: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition?: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id?: string
           property_id?: string
@@ -859,6 +890,7 @@ export type Database = {
           source_inbound_message_id?: string
           status?: string
           superseded_reason?: string | null
+          wrong_scope?: string | null
         }
         Relationships: [
           {
@@ -994,6 +1026,8 @@ export type Database = {
           min_confidence: number
           model: string
           org_id: string
+          outbound_mode: string
+          reply_generation: string
           reply_delay_max_seconds: number
           reply_delay_min_seconds: number
           system_prompt: string
@@ -1013,6 +1047,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id: string
+          outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt: string
@@ -1032,6 +1068,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id?: string
+          outbound_mode?: string
+          reply_generation?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt?: string
@@ -1046,6 +1084,108 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      ai_reply_drafts: {
+        Row: {
+          body: string
+          conversation_id: string | null
+          created_at: string
+          edited_at: string | null
+          edited_body: string | null
+          edited_by: string | null
+          id: string
+          inbound_message_id: string | null
+          org_id: string
+          property_id: string | null
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
+          run_id: string | null
+          sent_message_id: string | null
+          source: string
+          status: string
+        }
+        Insert: {
+          body: string
+          conversation_id?: string | null
+          created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
+          id?: string
+          inbound_message_id?: string | null
+          org_id: string
+          property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          run_id?: string | null
+          sent_message_id?: string | null
+          source: string
+          status?: string
+        }
+        Update: {
+          body?: string
+          conversation_id?: string | null
+          created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
+          id?: string
+          inbound_message_id?: string | null
+          org_id?: string
+          property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          run_id?: string | null
+          sent_message_id?: string | null
+          source?: string
+          status?: string
+        }
+        Relationships: []
+      }
+      ai_reply_dead_letters: {
+        Row: {
+          body: string
+          conversation_id: string | null
+          created_at: string
+          id: string
+          inbound_message_id: string | null
+          org_id: string
+          property_id: string | null
+          reason: string
+          resolved_at: string | null
+          resolution_reason: string | null
+          run_id: string | null
+        }
+        Insert: {
+          body: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id: string
+          property_id?: string | null
+          reason: string
+          resolved_at?: string | null
+          resolution_reason?: string | null
+          run_id?: string | null
+        }
+        Update: {
+          body?: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id?: string
+          property_id?: string | null
+          reason?: string
+          resolved_at?: string | null
+          resolution_reason?: string | null
+          run_id?: string | null
+        }
+        Relationships: []
       }
       ai_response_claims: {
         Row: {
@@ -2500,6 +2640,257 @@ export type Database = {
           },
         ]
       }
+      // Hand-inserted for migration 20261008300100_jev_action_undo.sql.
+      jev_action_undo: {
+        Row: {
+          action: string
+          applied_dispo: string
+          classification_run_id: string | null
+          created_at: string
+          id: string
+          org_id: string
+          applied_follow_up_at: string | null
+          paused_enrollment_ids: string[]
+          prior_follow_up_at: string | null
+          prior_outreach_dispo: string | null
+          property_id: string
+          recorded_revision: number | null
+          source_inbound_message_id: string
+          undone_at: string | null
+          undone_by: string | null
+        }
+        Insert: {
+          action: string
+          applied_dispo: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id: string
+          recorded_revision?: number | null
+          source_inbound_message_id: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Update: {
+          action?: string
+          applied_dispo?: string
+          classification_run_id?: string | null
+          created_at?: string
+          id?: string
+          org_id?: string
+          applied_follow_up_at?: string | null
+          paused_enrollment_ids?: string[]
+          prior_follow_up_at?: string | null
+          prior_outreach_dispo?: string | null
+          property_id?: string
+          recorded_revision?: number | null
+          source_inbound_message_id?: string
+          undone_at?: string | null
+          undone_by?: string | null
+        }
+        Relationships: []
+      }
+      jev_lead_decisions: {
+        Row: {
+          classification_run_id: string
+          conversation_id: string
+          created_at: string
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
+          id: string
+          native_confidence: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
+          resolved_outcome: string | null
+          source_inbound_message_id: string
+          status: string
+          superseded_reason: string | null
+          threshold_at_decision: number | null
+          threshold_version: number | null
+        }
+        Insert: {
+          classification_run_id: string
+          conversation_id: string
+          created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
+          id?: string
+          native_confidence?: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+          threshold_version?: number | null
+        }
+        Update: {
+          classification_run_id?: string
+          conversation_id?: string
+          created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
+          id?: string
+          native_confidence?: number | null
+          org_id?: string
+          property_id?: string
+          proposed_outcome?: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id?: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+          threshold_version?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_lead_decisions_classification_run_id_fkey"
+            columns: ["classification_run_id"]
+            isOneToOne: false
+            referencedRelation: "sms_classification_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      jev_outcome_threshold_history: {
+        Row: {
+          new_automation_enabled: boolean
+          previous_automation_enabled: boolean | null
+          changed_at: string
+          changed_by: string | null
+          id: string
+          idempotency_key: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence: number | null
+          threshold_id: string | null
+          version: number
+        }
+        Insert: {
+          new_automation_enabled: boolean
+          previous_automation_enabled?: boolean | null
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version: number
+        }
+        Update: {
+          new_automation_enabled?: boolean
+          previous_automation_enabled?: boolean | null
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence?: number
+          org_id?: string
+          outcome?: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_threshold_history_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_outcome_threshold_history_threshold_id_fkey"
+            columns: ["threshold_id"]
+            isOneToOne: false
+            referencedRelation: "jev_outcome_thresholds"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      jev_outcome_thresholds: {
+        Row: {
+          automation_enabled: boolean
+          id: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at: string
+          updated_by: string | null
+          version: number
+        }
+        Insert: {
+          automation_enabled?: boolean
+          id?: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Update: {
+          automation_enabled?: boolean
+          id?: string
+          min_confidence?: number
+          org_id?: string
+          outcome?: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_thresholds_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       job_items: {
         Row: {
           contact_id: string | null
@@ -2697,6 +3088,70 @@ export type Database = {
             columns: ["related_import_id"]
             isOneToOne: false
             referencedRelation: "csv_imports"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      luna_suggestions: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          applied_outcome: string | null
+          confidence: number
+          created_at: string
+          id: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at: string | null
+          rejected_by: string | null
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence: number
+          created_at?: string
+          id?: string
+          inbound_message_id: string
+          model: string
+          org_id: string
+          outcome: string
+          property_id: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          applied_outcome?: string | null
+          confidence?: number
+          created_at?: string
+          id?: string
+          inbound_message_id?: string
+          model?: string
+          org_id?: string
+          outcome?: string
+          property_id?: string
+          rejected_at?: string | null
+          rejected_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "luna_suggestions_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "luna_suggestions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -3135,10 +3590,22 @@ export type Database = {
           },
         ]
       }
+      norma_recording_lookup_control: {
+        Row: { singleton: boolean; enabled: boolean; denied_at: string | null; awaiting_result: boolean; lease_id: string | null; lease_until: string | null }
+        Insert: { singleton?: boolean; enabled?: boolean; denied_at?: string | null; awaiting_result?: boolean; lease_id?: string | null; lease_until?: string | null }
+        Update: { enabled?: boolean; denied_at?: string | null; awaiting_result?: boolean; lease_id?: string | null; lease_until?: string | null }
+        Relationships: []
+      }
+      norma_attempt_recordings: {
+        Row: { request_id: string; attempt: number; provider_call_id: string; state: string; lookup_attempts: number; next_lookup_at: string; last_checked_at: string | null; updated_at: string }
+        Insert: { request_id: string; attempt: number; provider_call_id: string; state?: string; lookup_attempts?: number; next_lookup_at?: string; last_checked_at?: string | null; updated_at?: string }
+        Update: { state?: string; lookup_attempts?: number; next_lookup_at?: string; last_checked_at?: string | null; updated_at?: string }
+        Relationships: []
+      }
       norma_call_requests: {
-        Row: { id: string; org_id: string; property_id: string; contact_id: string | null; phone_e164: string; requested_by: string | null; rep_context: string | null; callback_assignee_id: string; status: string; idempotency_key: string; bland_call_id: string | null; outcome: string | null; callback_requested_for: string | null; callback_timezone: string | null; callback_raw: string | null; qualification: Json; summary: string | null; dispatch_error: string | null; dispatch_started_at: string | null; dispatched_at: string | null; completed_at: string | null; created_at: string; updated_at: string; next_check_at: string }
-        Insert: { id?: string; org_id: string; property_id: string; contact_id?: string | null; phone_e164: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
-        Update: { id?: string; org_id?: string; property_id?: string; contact_id?: string | null; phone_e164?: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id?: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
+        Row: { id: string; org_id: string; property_id: string; contact_id: string | null; phone_e164: string; requested_by: string | null; rep_context: string | null; callback_assignee_id: string; status: string; idempotency_key: string; bland_call_id: string | null; outcome: string | null; callback_requested_for: string | null; callback_timezone: string | null; callback_raw: string | null; qualification: Json; summary: string | null; dispatch_error: string | null; dispatch_started_at: string | null; dispatched_at: string | null; completed_at: string | null; created_at: string; updated_at: string; next_check_at: string; attempt: number; first_bland_call_id: string | null; first_attempt_outcome: string | null; first_attempt_at: string | null; precall_sms_status: string | null; reviewed_by: string | null; reviewed_at: string | null }
+        Insert: { id?: string; org_id: string; property_id: string; contact_id?: string | null; phone_e164: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string; attempt?: number; first_bland_call_id?: string | null; first_attempt_outcome?: string | null; first_attempt_at?: string | null; precall_sms_status?: string | null; reviewed_by?: string | null; reviewed_at?: string | null }
+        Update: { id?: string; org_id?: string; property_id?: string; contact_id?: string | null; phone_e164?: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id?: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string; attempt?: number; first_bland_call_id?: string | null; first_attempt_outcome?: string | null; first_attempt_at?: string | null; precall_sms_status?: string | null; reviewed_by?: string | null; reviewed_at?: string | null }
         Relationships: []
       }
       norma_enrollment_pauses: {
@@ -3218,6 +3685,132 @@ export type Database = {
         }
         Relationships: []
       }
+      pipeline_run_steps: {
+        Row: {
+          created_at: string
+          detail: Json
+          id: string
+          kind: string
+          name: string
+          org_id: string
+          result: string
+          run_id: string
+          seq: number
+        }
+        Insert: {
+          created_at?: string
+          detail?: Json
+          id?: string
+          kind: string
+          name: string
+          org_id: string
+          result: string
+          run_id: string
+          seq: number
+        }
+        Update: {
+          created_at?: string
+          detail?: Json
+          id?: string
+          kind?: string
+          name?: string
+          org_id?: string
+          result?: string
+          run_id?: string
+          seq?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_run_steps_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pipeline_run_steps_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "pipeline_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pipeline_runs: {
+        Row: {
+          classification_run_id: string | null
+          claim_id: string | null
+          completed_at: string | null
+          contact_id: string | null
+          conversation_id: string | null
+          created_at: string
+          final_outcome: string | null
+          id: string
+          inbound_message_id: string
+          inbound_preview: string | null
+          mode: string
+          org_id: string
+          outbound_message_id: string | null
+          property_id: string | null
+          reason: string | null
+          started_at: string
+          status: string
+        }
+        Insert: {
+          classification_run_id?: string | null
+          claim_id?: string | null
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          final_outcome?: string | null
+          id?: string
+          inbound_message_id: string
+          inbound_preview?: string | null
+          mode?: string
+          org_id: string
+          outbound_message_id?: string | null
+          property_id?: string | null
+          reason?: string | null
+          started_at?: string
+          status?: string
+        }
+        Update: {
+          classification_run_id?: string | null
+          claim_id?: string | null
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          final_outcome?: string | null
+          id?: string
+          inbound_message_id?: string
+          inbound_preview?: string | null
+          mode?: string
+          org_id?: string
+          outbound_message_id?: string | null
+          property_id?: string | null
+          reason?: string | null
+          started_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_runs_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pipeline_runs_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       properties: {
         Row: {
           search_text: string | null
@@ -3240,6 +3833,9 @@ export type Database = {
           county_id: string | null
           created_at: string
           deleted_at: string | null
+          // Hand-inserted 2026-09-21 for migration
+          // 20261008140800_jev_decision_context_revision.sql.
+          decision_context_revision: number
           distress_flags: string[]
           equity_estimate: number | null
           equity_pct: number | null
@@ -3312,6 +3908,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -3384,6 +3981,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -4141,8 +4739,94 @@ export type Database = {
         }
         Relationships: []
       }
+      // Hand-inserted 2026-10-08 for migration
+      // 20261008310000_auto_reply_templates.sql (Messages v2 Phase 4).
+      auto_reply_templates: {
+        Row: {
+          active: boolean
+          created_at: string
+          created_by: string | null
+          id: string
+          org_id: string
+          outcome: string
+          priority: number
+          reply_intent: string | null
+          template_id: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          org_id: string
+          outcome: string
+          priority?: number
+          reply_intent?: string | null
+          template_id: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          org_id?: string
+          outcome?: string
+          priority?: number
+          reply_intent?: string | null
+          template_id?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "auto_reply_templates_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "sms_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_template_approval_events: {
+        Row: {
+          action: string
+          actor: string | null
+          content: string
+          created_at: string
+          id: string
+          org_id: string
+          template_id: string | null
+        }
+        Insert: {
+          action: string
+          actor?: string | null
+          content: string
+          created_at?: string
+          id?: string
+          org_id: string
+          template_id: string | null
+        }
+        Update: {
+          action?: string
+          actor?: string | null
+          content?: string
+          created_at?: string
+          id?: string
+          org_id?: string
+          template_id?: string | null
+        }
+        Relationships: []
+      }
       sms_templates: {
         Row: {
+          approved_at: string | null
+          approved_by: string | null
+          approved_content: string | null
+          approved_for_auto_send: boolean
           category: string
           content: string
           created_at: string
@@ -4155,6 +4839,10 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          approved_content?: string | null
+          approved_for_auto_send?: boolean
           category?: string
           content: string
           created_at?: string
@@ -4167,6 +4855,10 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          approved_content?: string | null
+          approved_for_auto_send?: boolean
           category?: string
           content?: string
           created_at?: string
@@ -5967,6 +6659,44 @@ export type Database = {
         }
         Relationships: []
       }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008142100_jev_needs_decision_eligibility_view.sql (fable
+      // re-review of e5d001bb, jev-root-round17-fable2-fixes.md, finding
+      // 2). security_invoker view over sms_classification_runs — same
+      // Row shape as NEEDS_DECISION_CLASSIFIER_EVENT_SELECT's source
+      // columns.
+      jev_needs_decision_classifier_events: {
+        Row: {
+          id: string | null
+          org_id: string | null
+          property_id: string | null
+          conversation_id: string | null
+          source_inbound_message_id: string | null
+          resolved_outcome: string | null
+          fallback_reason: string | null
+          model: string | null
+          schema_version: string | null
+          policy_version: string | null
+          decision: Json | null
+          created_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_classification_runs_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "sms_classification_runs_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       leads_board: {
         Row: {
           absentee_flag: boolean | null
@@ -6055,6 +6785,19 @@ export type Database = {
       }
     }
     Functions: {
+      fn_norma_pause_inbound_lookups: { Args: Record<string, never>; Returns: undefined }
+      fn_norma_claim_inbound_recordings: { Args: Record<string, never>; Returns: { id: string; provider_call_id: string; from_e164: string; to_e164: string; reconciliation_attempts: number; lease_id: string }[] }
+      fn_norma_start_inbound_lookup: { Args: { p_lease_id: string; p_call_id: string }; Returns: boolean }
+      fn_norma_checkpoint_inbound_lookup: { Args: { p_call_id: string; p_attempts: number; p_lease_id: string; p_state: string }; Returns: boolean }
+      fn_norma_finish_inbound_lookup: { Args: { p_lease_id: string; p_denied?: boolean }; Returns: undefined }
+      fn_norma_associate_inbound_call: { Args: { p_call_id: string; p_property_id: string; p_expected_updated_at: string }; Returns: string }
+      fn_norma_ingest_inbound_call: { Args: { p_call_id: string; p_from: string; p_to: string; p_completed: boolean; p_recording_state: string }; Returns: string | null }
+      fn_norma_start_recording_lookup: { Args: { p_lease_id: string }; Returns: boolean }
+      fn_norma_claim_recordings: { Args: Record<PropertyKey, never>; Returns: { request_id: string; attempt: number; provider_call_id: string; phone_e164: string; lookup_attempts: number; lease_id: string }[] }
+      fn_norma_checkpoint_recording: { Args: { p_request_id: string; p_attempt: number; p_call_id: string; p_lookup_attempts: number; p_lease_id: string; p_state: string }; Returns: boolean }
+      fn_norma_finish_recording_lookup: { Args: { p_lease_id: string; p_denied?: boolean }; Returns: undefined }
+      fn_norma_seed_recordings: { Args: Record<PropertyKey, never>; Returns: number }
+
       direct_call_active_for_operator: { Args: { p_user: string }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
       direct_call_operator_busy: { Args: { p_user: string }; Returns: string | null }
       direct_call_begin: { Args: { p_org: string; p_operator: string; p_property: string | null; p_contact: string | null; p_destination: string; p_caller: string; p_request: string; p_time_limit_secs: number; p_preparation_property: string | null }; Returns: { outcome: string; call_id: string | null }[] }
@@ -6074,12 +6817,14 @@ export type Database = {
       fn_norma_pause_for_request: { Args: { p_request_id: string }; Returns: number }
       fn_norma_release_pauses: { Args: { p_request_id: string }; Returns: number }
       fn_norma_create_request: { Args: { p_property_id: string; p_contact_id: string; p_phone_e164: string; p_requested_by: string; p_rep_context: string | null; p_callback_assignee_id: string }; Returns: { outcome: string; request_id: string | null; idempotency_key: string | null; block_reason: string | null }[] }
-      fn_norma_claim_dispatch: { Args: { p_request_id: string }; Returns: boolean }
-      fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string }; Returns: string }
-      fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string }; Returns: string }
-      fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string }; Returns: string }
-      fn_norma_mark_needs_review: { Args: { p_request_id: string; p_reason: string }; Returns: string }
+      fn_norma_claim_dispatch: { Args: { p_request_id: string; p_expected_attempt?: number }; Returns: boolean }
+      fn_norma_presend_fence: { Args: { p_request_id: string; p_expected_attempt?: number }; Returns: boolean }
+      fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_needs_review: { Args: { p_request_id: string; p_reason: string; p_expected_attempt?: number }; Returns: string }
       fn_norma_complete_call: { Args: { p_request_id: string; p_call_id: string; p_outcome: string; p_payload?: Json }; Returns: Json }
+      fn_norma_mark_reviewed: { Args: { p_request_id: string; p_property_id: string; p_user_id: string }; Returns: Json }
       fn_norma_upgrade_pauses_for_reply: { Args: { p_property_id: string; p_reason: string }; Returns: number }
       sweep_resume_call_in_progress: { Args: { p_enrollment_ids: string[]; p_resume_at: string }; Returns: number }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
@@ -6128,6 +6873,13 @@ export type Database = {
         Returns: Json
       }
       fn_resolve_dialpad_recording_links: { Args: { p_limit?: number }; Returns: Json }
+      // P2 UI (2.6-2.10): hand-added beside the generated Dialpad block.
+      fn_list_unacknowledged_call_prompts: { Args: { p_org_id: string; p_limit?: number; p_before_ended?: string | null; p_before_id?: string | null; p_horizon?: string }; Returns: Json }
+      fn_acknowledge_call_prompt: { Args: { p_org_id: string; p_attempt_id: string; p_via: string }; Returns: Json }
+      fn_my_leads_ack_legacy_call_prompts: { Args: { p_org_id: string; p_apply?: boolean; p_fingerprint?: string | null }; Returns: Json }
+      fn_dialpad_call_slots: { Args: { p_org_id: string; p_rep_user_id: string; p_property_id: string; p_contact_id: string }; Returns: Json }
+      fn_redact_dialpad_unmatched_events: { Args: { p_older_than?: string; p_limit?: number }; Returns: number }
+      fn_my_leads_callbacks_due: { Args: { p_org_id: string; p_lookahead?: string; p_grace?: string }; Returns: Json }
       fn_open_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_get_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_close_dialpad_recording_capture: { Args: { p_org_id: string; p_capture_id: string; p_rep_user_id?: string | null; p_reason?: string | null }; Returns: Json }
@@ -7191,13 +7943,18 @@ export type Database = {
           verification_state: string
         }[]
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140900_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_apply_ai_disposition_with_review: {
         Args: {
           p_ai_reason: string
           p_conversation_id: string
           p_disposition: string
+          p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
         }
         Returns: Json
       }
@@ -7205,17 +7962,293 @@ export type Database = {
         Args: { p_review_id: string }
         Returns: Json
       }
+      // Hand-patched 2026-10-07 for migration
+      // 20261008144100_suppression_recovery_db_truth.sql (replaces the
+      // 20261008144000 signature; backed-ness is computed in the database).
+      fn_merge_suppression_incomplete_pointer: {
+        Args: {
+          p_hint_id?: string | null
+          p_ids: string[]
+          p_property_id: string
+          p_timeout_prefixes?: string[]
+        }
+        Returns: {
+          dropped_ids: string[]
+          kept_timeout: boolean
+          merged_ids: string[]
+          reason: string
+        }[]
+      }
+      // Same migration: service_role-only; clears the suppression hold only
+      // when nothing is outstanding, under the property row lock.
+      fn_clear_suppression_hold_if_resolved: {
+        Args: { p_property_id: string }
+        Returns: { cleared: boolean; outstanding_ids: string[] }[]
+      }
+      // Same migration: internal ledger-state helper (service_role-only).
+      fn_suppression_ledger_state: {
+        Args: { p_property_id: string }
+        Returns: {
+          ledger_failed: boolean
+          resolved: boolean
+          review_id: string
+        }[]
+      }
       // Hand-patched 2026-09-20, same caveat as sms_classification_runs above.
       fn_accept_ai_disposition_review: {
         Args: { p_classification_run_id: string; p_review_id: string }
         Returns: Json
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140900_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20261008142600_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
       fn_propose_ai_dnc_suppression_review: {
         Args: {
           p_ai_reason: string
+          p_classification_run_id: string
           p_conversation_id: string
+          p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
+          p_wrong_scope?: string | null
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008140400_jev_deferred_disposition_proposal.sql — extends
+      // dnc's Option-B deferred-write pattern above to
+      // wrong_number/not_interested/opted_out (root final-review P1 #1).
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140900_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20261008142600_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
+      fn_propose_deferred_ai_disposition_review: {
+        Args: {
+          p_ai_reason: string
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_disposition: string
+          p_expected_revision: number
+          p_property_id: string
+          p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20261008140000_jev_outcome_thresholds.sql — unlike the
+      // sms_classification_runs caveat above, this block IS a verbatim
+      // excerpt of a real `supabase gen types typescript --local` run
+      // against a fully-migrated disposable local Postgres (colima was
+      // resolvable this session); safe to trust as authoritative until
+      // the next full regen supersedes it.
+      fn_reserve_ai_send: {
+        Args: {
+          p_conversation_id: string
+          p_holder: string
+          p_inbound_message_id: string | null
+          p_lease_seconds: number
+        }
+        Returns: boolean
+      }
+      // Hand-added for migration 20261008250000_luna_suggestions.sql.
+      fn_luna_suggestion_stats: {
+        Args: { p_org_id: string; p_window_days: number }
+        Returns: {
+          outcome: string
+          shown: number
+          accepted: number
+          rejected: number
+          agreed_manually: number
+          open: number
+        }[]
+      }
+      fn_resolve_hold: {
+        Args: {
+          p_org_id: string
+          p_property_id: string
+          p_user_id: string
+          p_action: string
+          p_reason?: string | null
+          p_seen_through?: string | null
+          p_flag_reason?: string | null
+          p_flag_at?: string | null
+        }
+        Returns: Json
+      }
+      fn_renew_ai_send: {
+        Args: { p_conversation_id: string; p_holder: string; p_lease_seconds: number }
+        Returns: boolean
+      }
+      fn_release_ai_send: {
+        Args: { p_conversation_id: string; p_holder: string }
+        Returns: boolean
+      }
+      pipeline_runs_latest_for_properties: {
+        Args: { p_org_id: string; p_property_ids: string[] }
+        Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
+      }
+      // Hand-inserted 2026-10-08 for migration
+      // 20261008310000_auto_reply_templates.sql (Messages v2 Phase 4).
+      fn_set_template_auto_send_approval: {
+        Args: {
+          p_approved: boolean
+          p_expected_content?: string | null
+          p_template_id: string
+        }
+        Returns: Json
+      }
+      fn_set_auto_reply_template: {
+        Args: {
+          p_active?: boolean
+          p_delete?: boolean
+          p_mapping_id?: string | null
+          p_org_id: string
+          p_outcome: string
+          p_priority?: number
+          p_reply_intent: string | null
+          p_template_id: string | null
+        }
+        Returns: Json
+      }
+      fn_undo_jev_action: {
+        Args: { p_undo_id: string }
+        Returns: Json
+      }
+      fn_set_jev_outcome_threshold: {
+        Args: {
+          p_automation_enabled?: boolean
+          p_expected_version: number
+          p_idempotency_key: string
+          p_min_confidence: number
+          p_org_id: string
+          p_outcome: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20261008140100_jev_lead_decisions.sql — same verbatim-excerpt
+      // provenance as fn_set_jev_outcome_threshold above.
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140600_jev_lead_decision_threshold_version.sql — added
+      // p_threshold_version (root final-review P2).
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140900_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      fn_propose_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_expected_revision: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number | null
+          p_threshold_version: number | null
+        }
+        Returns: Json
+      }
+      // Hand-patched 2026-09-21 for migration
+      // 20261008140900_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      fn_auto_apply_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_expected_revision: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number | null
+          p_threshold_version: number | null
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008141300_jev_automatic_classification_active_access_rpc.sql
+      // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
+      fn_update_jev_automatic_classification: {
+        Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
+      fn_confirm_jev_lead_decision: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008140500_jev_classifier_event_resolution.sql (root
+      // final-review P1 #3: give classifier_event rows an actionable
+      // human-resolution path).
+      fn_promote_classifier_event_to_decision: {
+        Args: { p_classification_run_id: string }
+        Returns: Json
+      }
+      fn_correct_jev_lead_decision: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008140200_jev_ai_disposition_review_correction.sql — same
+      // verbatim-excerpt provenance as the jev_lead_decisions functions above.
+      fn_correct_ai_disposition_review: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008140300_jev_review_taxonomy_and_marking.sql — same
+      // verbatim-excerpt provenance as the functions above.
+      fn_mark_ai_disposition_review_reviewed: {
+        Args: { p_review_id: string }
+        Returns: Json
+      }
+      fn_mark_jev_lead_decision_reviewed: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20261008140700_jev_correction_atomic_apply.sql — root review of
+      // 02b0ad73 (jev-root-correction-race.md) found the prior
+      // fn_begin_*/fn_record_* split was NOT atomic (a PostgREST RPC
+      // releases its lock the instant it returns; the separate sanctioned
+      // TS op ran in its own transaction with a fresh-read CAS that
+      // couldn't see what fn_begin_* had observed). Replaced by a single
+      // atomic validate+write+audit RPC per source; fn_begin_*/
+      // fn_record_* are dropped, not left in place unused.
+      fn_apply_and_record_ai_disposition_review_correction: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      fn_apply_and_record_jev_lead_decision_correction: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
         }
         Returns: Json
       }

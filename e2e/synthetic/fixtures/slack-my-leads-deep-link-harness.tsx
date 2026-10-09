@@ -158,6 +158,7 @@ export type SyntheticMyLeadsBackend = {
   linkedRow: QueueRow
   secondaryRow: QueueRow
   rowReads: number
+  autoPrompt: boolean
   secondaryDetailPending: boolean
   queueReads: Array<{ memberId: string; search: string; period: string }>
   submitCalls: SyntheticSubmitCall[]
@@ -177,6 +178,7 @@ export function createSyntheticBackend(): SyntheticMyLeadsBackend {
     linkedRow: queueRow(LINKED_LEAD_ID, "44 Synthetic Link Lane", "Linked Synthetic Seller", "contacted"),
     secondaryRow: queueRow(SECONDARY_LEAD_ID, "99 Deferred Link Lane", "Deferred Synthetic Seller", "contacted"),
     rowReads: 0,
+    autoPrompt: new URLSearchParams(window.location.search).get("autoprompt") === "1",
     secondaryDetailPending: false,
     queueReads: [],
     submitCalls: [],
@@ -274,6 +276,7 @@ function DeepLinkAcceptanceApp() {
     return next
   })
   const [selectedLead, setSelectedLead] = useState(() => selectedLeadFromLocation())
+  const [autoPrompt] = useState(() => new URLSearchParams(window.location.search).get("autoprompt") === "1")
   useEffect(() => {
     const onPopState = () => setSelectedLead(selectedLeadFromLocation())
     window.addEventListener("popstate", onPopState)
@@ -290,10 +293,11 @@ function DeepLinkAcceptanceApp() {
       selectedLead={selectedLead}
       dialpad={{
         connectionId: "synthetic-dialpad",
-        allowedOrigins: ["https://dialpad.example.test"],
         binding: { status: "verified", dialpadUserId: "synthetic-user" },
         grants: [],
       }}
+      postCallPrompt={autoPrompt}
+      callFeatures={{ clickToDial: true, autoPrompt, callbackAlert: false }}
     />
   )
 }

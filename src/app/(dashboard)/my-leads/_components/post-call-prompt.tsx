@@ -49,7 +49,7 @@ import type {
 
 const TIME_ZONE = "America/Chicago"
 
-type PromptOutcome = Extract<AcquisitionAttemptFormPayload["outcome"], "reached" | "no_answer" | "voicemail" | "wrong_number">
+export type PromptOutcome = Extract<AcquisitionAttemptFormPayload["outcome"], "reached" | "no_answer" | "voicemail" | "wrong_number">
 const OUTCOMES: { value: PromptOutcome; label: string }[] = [
   { value: "reached", label: "Reached" },
   { value: "no_answer", label: "No answer" },
@@ -87,6 +87,8 @@ export type PostCallPromptProps = {
   propertyId: string
   propertyLabel: string
   initialCallActivityId?: string | null
+  /** Pre-selected outcome (the auto-open prompt's guess from the Dialpad call); the rep can change it. */
+  initialOutcome?: PromptOutcome | null
   callReferenceOptions?: readonly AcquisitionCallReferenceOption[]
   callReferencesLoading?: boolean
   callReferencesError?: string | null
@@ -108,6 +110,8 @@ export type PostCallPromptProps = {
   onReadyForOffer?: () => void
   /** Dead / Nurture: the existing handoff dialog (same required reason). */
   onDeadNurture?: () => void
+  /** "dock" renders inline (no dialog) for the call screen. Default "dialog". */
+  variant?: "dialog" | "dock"
 }
 
 export function PostCallPrompt({
@@ -115,6 +119,7 @@ export function PostCallPrompt({
   propertyId,
   propertyLabel,
   initialCallActivityId = null,
+  initialOutcome = null,
   callReferenceOptions = [],
   callReferencesLoading = false,
   callReferencesError = null,
@@ -130,9 +135,10 @@ export function PostCallPrompt({
   onRetryExtras,
   onReadyForOffer,
   onDeadNurture,
+  variant = "dialog",
 }: PostCallPromptProps) {
   const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
-  const [outcome, setOutcome] = useState<PromptOutcome | "">("")
+  const [outcome, setOutcome] = useState<PromptOutcome | "">(initialOutcome ?? "")
   const outcomeTouched = useRef(false)
   const [occurredAt, setOccurredAt] = useState(() => centralDateTimeFromIso(new Date().toISOString()))
   const [note, setNote] = useState("")
@@ -353,22 +359,8 @@ export function PostCallPrompt({
 
   const manualSource = source !== "sandra"
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (nextOpen) onOpenChange(true)
-        else closeDialog()
-      }}
-    >
-      <DialogContent
-        data-testid="post-call-prompt"
-        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
-      >
-        <WorkflowDialogHeader
-          title="How did the call go?"
-          description={`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}
-        />
+  const promptBody = (
+    <>
         {savedForDrip ? (
           <div className="space-y-4 overflow-y-auto">
             {receipt}
@@ -596,32 +588,75 @@ export function PostCallPrompt({
                 </div>
               )}
             </div>
-            <WorkflowDialogFooter
-              submitting={submitState.submitting}
-              submitLabel={attemptRecorded ? "Attempt recorded" : "Save"}
-              onCancel={closeDialog}
-              disabled={attemptRecorded}
-            />
+            {variant === "dock" ? (
+              <div className="flex justify-end gap-2">
+                <Button type="submit" disabled={attemptRecorded || submitState.submitting || recovery?.blocked || recovery?.busy}>
+                  {submitState.submitting ? "Saving…" : recovery?.reconciliation ? "Reconcile saved change" : attemptRecorded ? "Attempt recorded" : "Save"}
+                </Button>
+              </div>
+            ) : (
+              <WorkflowDialogFooter
+                submitting={submitState.submitting}
+                submitLabel={attemptRecorded ? "Attempt recorded" : "Save"}
+                onCancel={closeDialog}
+                disabled={attemptRecorded}
+              />
+            )}
           </form>
         )}
+    </>
+  )
+
+  if (variant === "dock") {
+    return (
+      <section data-testid="post-call-prompt" data-variant="dock" aria-label="Post-call prompt" className="flex flex-col gap-3 rounded-[16px] border border-border bg-card p-4">
+        <div>
+          <h2 className="text-base font-bold">How did the call go?</h2>
+          <p className="text-xs text-muted-foreground">{`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}</p>
+        </div>
+        {promptBody}
+      </section>
+    )
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true)
+        else closeDialog()
+      }}
+    >
+      <DialogContent
+        data-testid="post-call-prompt"
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
+        <WorkflowDialogHeader
+          title="How did the call go?"
+          description={`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}
+        />
+        {promptBody}
       </DialogContent>
     </Dialog>
   )
 }
 
-function ReceiptLines({
+export function ReceiptLines({
   extras,
   sentNextStepAt,
   note,
   onRetry,
+  attemptSaved = true,
 }: {
+  /** False for the reload banner of an earlier, unconfirmed save: never claim "Attempt saved" there. */
+  attemptSaved?: boolean
   extras: PostCallExtrasState | null
   sentNextStepAt: string | null
   /** The note the rep typed; shown with a copy button whenever it was not saved. */
   note: string | null
   onRetry?: () => void
 }) {
-  const parts = ["Attempt saved"]
+  const parts = attemptSaved ? ["Attempt saved"] : []
   let failed = false
   let detail: string | undefined
   let noteNotSaved = false

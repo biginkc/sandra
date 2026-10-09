@@ -43,7 +43,12 @@ test.beforeAll(async () => {
     ["notes-feed", `export const AddNoteComposer=()=>null;`],
     ["call-artifacts", `export const MyLeadCallArtifacts=()=>null;`],
     ["existing-detail-actions", `export const MyLeadAppointmentActions=()=>null; export const MyLeadCallbackActions=()=>null;`],
-    ["dialpad-panel", `export const DialpadPanel=({onLogOutcome})=><section aria-label="Synthetic Dialpad"><button type="button" data-testid="dialpad-log-outcome" onClick={()=>onLogOutcome?.("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","dialpad-activity-1")}>Log Dialpad outcome</button></section>;`],
+    ["dialpad-actions", `export const dialLeadAction=async()=>({ok:false,code:'not_configured',message:'synthetic'}); export const getDialpadCallStatusAction=async()=>({ok:false,code:'not_configured',message:''}); export const cancelDialpadCallAction=async()=>({ok:true}); export const ensureDialpadBindingAction=async()=>({ok:false,code:'not_configured',message:''});`],
+    ["call-state-actions", `
+      const backend=()=>window.__sandraSyntheticMyLeadsBackend;
+      export const pollMyLeadsCallStateAction=async()=>({ok:true,state:{prompts:backend()?.autoPrompt?[{propertyId:'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',callActivityId:'dialpad-activity-1',attemptId:'dialpad-attempt-1',endedAt:'2026-10-03T14:30:00.000Z',durationSeconds:120,talkDurationSeconds:90,outcomeGuess:'reached',origin:'sandra',voicemail:false}]:[],promptsCursor:null,ambiguous:[],callbacksDue:[],features:{autoPrompt:Boolean(backend()?.autoPrompt),callbackAlert:false}}});
+      export const acknowledgeCallPromptAction=async()=>({ok:true,status:'acknowledged'});
+    `],
     ["login-background", `export const LoginBackground=()=>null;`],
     ["login-actions", `export async function signIn(){return {ok:true,data:null}} export async function signInWithHugo(){return null} export async function requestPasswordReset(){return {ok:true,data:null}}`],
   ])
@@ -72,7 +77,8 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /book-appointment-popover$/ }, () => virtual("appointments"))
         build.onResolve({ filter: /softphone-provider$/ }, () => virtual("softphone"))
         build.onResolve({ filter: /sms-actions$/ }, () => virtual("sms-actions"))
-        build.onResolve({ filter: /dialpad-panel$/ }, () => virtual("dialpad-panel"))
+        build.onResolve({ filter: /dialpad-actions$/ }, () => virtual("dialpad-actions"))
+        build.onResolve({ filter: /call-state-actions$/ }, () => virtual("call-state-actions"))
         build.onResolve({ filter: /notes-feed$/ }, () => virtual("notes-feed"))
         build.onResolve({ filter: /call-artifacts$/ }, () => virtual("call-artifacts"))
         build.onResolve({ filter: /existing-detail-actions$/ }, () => virtual("existing-detail-actions"))
@@ -245,14 +251,13 @@ test("linked lead call uses the selected linked row and readiness save recovers 
   expect(offerCall?.input.expectedQueueVersion).toBe(2)
 })
 
-test("Dialpad Log outcome opens the actual attempt dialog for the linked row", async ({ page }) => {
-  await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
+test("Dialpad call prompt opens on its own for the linked row", async ({ page }) => {
+  await mount(page, "/my-leads", `?lead=${linkedLeadId}&autoprompt=1`)
 
-  await page.getByTestId("dialpad-log-outcome").click()
-  const dialog = page.getByRole("dialog", { name: "Log an attempt" })
-  await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText("44 Synthetic Link Lane")
-  await expect(dialog.getByLabel("Source")).toHaveValue("sandra")
+  const prompt = page.getByTestId("post-call-prompt")
+  await expect(prompt).toBeVisible()
+  await expect(prompt).toContainText("44 Synthetic Link Lane")
+  await expect(prompt.getByTestId("post-call-outcome-reached")).toHaveAttribute("aria-checked", "true")
 
   const backend = await page.evaluate(() => ({
     rowReads: window.__sandraSyntheticMyLeadsBackend.rowReads,

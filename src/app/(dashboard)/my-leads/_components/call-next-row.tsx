@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { CallNextRow } from "@/lib/my-leads/call-next";
+import { useCoachCall } from "./coach-call-context";
 import { reasonLabel } from "./call-next-reason";
 
 const TEMPERATURE_CLASSES = {
@@ -29,6 +30,8 @@ export type CallNextRowProps = {
   onCallToday: (propertyId: string) => void;
   onNotToday: (propertyId: string) => void;
   onDeadNurture: (propertyId: string) => void;
+  /** Replaces the ranked reason line (a client-side pin such as "Callback due now"). */
+  reasonOverride?: string | null;
 };
 
 export function CallNextRowView({
@@ -40,15 +43,17 @@ export function CallNextRowView({
   onCallToday,
   onNotToday,
   onDeadNurture,
+  reasonOverride = null,
 }: CallNextRowProps) {
   const { propertyId, row } = item;
   const temperature = row.temperature;
   const name = row.homeownerName ?? "Unnamed owner";
-  const reason = reasonLabel(item.reason, item.reasonAt, now);
+  const reason = reasonOverride ?? reasonLabel(item.reason, item.reasonAt, now);
   const disabled = !canAct || busy;
   // No point offering Call on a lead that cannot be dialed (DNC contact, or no phone number).
   const callable = !row.contactDnc && row.phones.some((phone) => phone.trim() !== "");
   const callDisabled = disabled || !callable;
+  const coachCall = useCoachCall();
   return (
     <li
       data-testid={`call-next-row-${propertyId}`}
@@ -87,6 +92,18 @@ export function CallNextRowView({
           <Phone aria-hidden="true" />
           Call
         </Button>
+        {coachCall && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={callDisabled || coachCall.disabled}
+            data-testid={`call-next-action-call-with-coach-${propertyId}`}
+            onClick={() => coachCall.call(propertyId)}
+          >
+            Call with coach
+          </Button>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger
             render={

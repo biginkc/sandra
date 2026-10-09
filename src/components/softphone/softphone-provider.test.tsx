@@ -1,5 +1,6 @@
 import type { DialerRecent, DialerSearchResult } from "@/lib/dialer/actions";
 import { act, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -113,8 +114,31 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context";
+import type { CallLock } from "@/lib/calls/call-lock";
 import { SoftphoneLeadButton } from "./softphone-lead-button";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "./softphone-provider";
+
+const lockProbe: { lock: CallLock | null } = { lock: null };
+function LockProbe() {
+  const lock = useCallLock();
+  useEffect(() => {
+    lockProbe.lock = lock;
+  });
+  return null;
+}
+const lockLead = {
+  id: "property-1",
+  contactId: "contact-1",
+  firstName: "Softphone",
+  name: "Softphone Lead",
+  address: "1 Main St",
+  state: "MO",
+  phones: ["+18165550123"],
+  dncLocked: false,
+  contactDnc: false,
+  callable: true,
+};
 
 describe("SoftphoneProvider transport gate", () => {
   beforeEach(() => {
@@ -189,6 +213,77 @@ describe("SoftphoneProvider transport gate", () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
   });
+
+  it("holds the lock while the softphone is preparing", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockImplementation(() => new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <SoftphoneProvider>
+          <SoftphoneLeadButton lead={lockLead} />
+        </SoftphoneProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("call-preparing")).toBeInTheDocument());
+    expect(lockProbe.lock?.holder()).toBe("softphone");
+  });
+
+  it("holds the lock while preparing and releases it when preparation fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValueOnce({ ok: false, error: "No number" });
+    const user = userEvent.setup();
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <SoftphoneProvider>
+          <SoftphoneLeadButton lead={lockLead} />
+        </SoftphoneProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(prepareLeadCall).toHaveBeenCalled());
+    await waitFor(() => expect(lockProbe.lock?.holder()).toBeNull());
+  });
+
+  it("is blocked from preparing a lead while Dialpad holds the lock", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    const user = userEvent.setup();
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <SoftphoneProvider>
+          <SoftphoneLeadButton lead={lockLead} />
+        </SoftphoneProvider>
+      </CallLockProvider>,
+    );
+    expect(lockProbe.lock?.acquire("dialpad", Symbol("test"))).toBe(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(prepareLeadCall).not.toHaveBeenCalled();
+    expect(lockProbe.lock?.holder()).toBe("dialpad");
+  });
+
+  it("refuses the typed keypad dial while Dialpad holds the lock", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    const user = userEvent.setup();
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.type(screen.getByTestId("dialer-input"), "3107540662");
+    expect(lockProbe.lock?.acquire("dialpad", Symbol("test"))).toBe(true);
+    await user.click(screen.getByTestId("dialer-call-manual"));
+    expect(prepareManualCall).not.toHaveBeenCalled();
+    expect(await screen.findAllByText("Finish your current call before starting another.")).not.toHaveLength(0);
+  });
+
 
   it("shows one company caller ID read-only and sends it with the call", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");

@@ -17,7 +17,16 @@ export type SchemaFeature =
   | "seller_reminders"
   | "artifact_fetch"
   | "intent_timeout"
-  | "lead_comps";
+  | "lead_comps"
+  | "api_dial"
+  | "ack_prompts"
+  | "callbacks_due"
+  | "event_redaction"
+  | "contract_defaults"
+  | "offer_projection"
+  | "call_facts"
+  | "post_call_extras_proof"
+  | "dialpad_call_audio";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -82,10 +91,99 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   lead_comps: {
     functions: [
       "public.fn_enqueue_comp_fetch(uuid,uuid,text,uuid)",
-      "public.fn_claim_comp_fetches(integer)",
+      "public.fn_claim_comp_fetches(integer,uuid)",
       "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
     ],
     columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],
+  },
+  // P2 UI 2.7: the server-side dialer needs the patched authorize release (dialpadUserId), the slot pre-check and the two connection columns.
+  api_dial: {
+    functions: ["public.fn_dialpad_call_slots(uuid,uuid,uuid,uuid)", "public.fn_authorize_dialpad_dispatch(uuid,uuid,uuid)"],
+    columns: ["dialpad_org_connections.dial_endpoint", "dialpad_org_connections.dial_api_key_ref", "my_leads_feature_flags.click_to_dial"],
+  },
+  // P2 UI 2.6: the poll reads unacknowledged prompts and the auto-open acknowledges them.
+  ack_prompts: {
+    functions: ["public.fn_list_unacknowledged_call_prompts(uuid,integer,timestamptz,uuid,interval)", "public.fn_acknowledge_call_prompt(uuid,uuid,text)"],
+    columns: ["acquisition_attempts.prompt_acknowledged_at", "my_leads_feature_flags.auto_prompt"],
+  },
+  // P2 UI 2.8: the callback-due alert.
+  callbacks_due: {
+    functions: ["public.fn_my_leads_callbacks_due(uuid,interval,interval)"],
+    columns: ["tasks.next_step_kind", "my_leads_feature_flags.callback_alert"],
+  },
+  // P2 UI 2.10: the event sweep redacts unmatched payloads through this function.
+  event_redaction: {
+    functions: ["public.fn_redact_dialpad_unmatched_events(interval,integer)"],
+    columns: ["dialpad_call_events.redacted_at"],
+  },
+  // P3c: contract defaults tables (title companies, buyer entities, settings).
+  contract_defaults: {
+    functions: [],
+    columns: ["acquisition_contract_settings.earnest_money_cents", "acquisition_contract_title_companies.closing_agent_name", "acquisition_contract_buyer_entities.name"],
+  },
+  // P3c offer projection (§3.6): the card and the sweep stay disabled until every function they call exists.
+  offer_projection: {
+    functions: [
+      "public.fn_project_acquisition_offer(uuid)",
+      "public.fn_create_offer_projection(uuid,uuid,uuid,uuid,text,text,jsonb,bigint,date,text,text,text)",
+      "public.fn_abandon_offer_projection(uuid)",
+      "public.fn_offer_projection_repair()",
+      "public.fn_offer_projection_due(integer)",
+      "public.fn_retry_offer_projection(uuid,uuid,text)",
+      "public.fn_supersede_offer_and_log(uuid,uuid,uuid)",
+      "public.fn_list_offer_conflicts(uuid,uuid,uuid)",
+    ],
+    columns: ["acquisition_offer_projections.send_payload"],
+  },
+  // P3c call facts (§3.12): the sweep, the chips and their accept/dismiss actions.
+  call_facts: {
+    functions: [
+      "public.fn_claim_call_facts(integer,integer,integer)",
+      "public.fn_call_known_names(uuid,uuid)",
+      "public.fn_complete_call_facts(uuid,uuid,jsonb,text,text)",
+      "public.fn_accept_call_fact(uuid,uuid,text,text)",
+      "public.fn_dismiss_call_facts(uuid,uuid)",
+      "public.fn_unaccept_call_fact(uuid,uuid,text)",
+    ],
+    columns: ["lead_call_facts.processing_state"],
+  },
+  // PR #823: the post-call note and appointment are written only behind this proof function.
+  post_call_extras_proof: {
+    functions: ["public.fn_post_call_extras_proof(uuid,uuid,uuid,uuid)"],
+    columns: [],
+  },
+  // Dialpad call audio: the recording worker route stays disabled until every table, flag column and function it
+  // calls exists. (The private bucket is checked separately by the route; this probe sees only the public schema.)
+  dialpad_call_audio: {
+    functions: [
+      "public.fn_dpa_worker_take(uuid)",
+      "public.fn_dpa_worker_release(uuid,timestamptz,timestamptz)",
+      "public.fn_dpa_worker_block(uuid,timestamptz)",
+      "public.fn_dpa_queue(uuid,integer)",
+      "public.fn_dpa_discovery_result(uuid,uuid,text,text,bigint,text,text)",
+      "public.fn_dpa_requeue_denied(uuid,uuid,text)",
+      "public.fn_dpa_attempt_begin(uuid,uuid)",
+      "public.fn_dpa_attempt_set(uuid,uuid,text,text,text,text,text,text)",
+      "public.fn_dpa_resolve_ambiguous(uuid,text)",
+      "public.fn_dpa_audio_fail(uuid,uuid,text,text,text,text)",
+      "public.fn_dpa_mark_uploading(uuid,uuid,text,bigint,bigint)",
+      "public.fn_dpa_register_stored(uuid,uuid,text,bigint,text,bigint)",
+      "public.fn_dialpad_audio_authorize(uuid,uuid,uuid)",
+      "public.fn_dialpad_audio_for_service(uuid,uuid,text)",
+    ],
+    columns: [
+      "dialpad_call_audio.state",
+      "dialpad_call_audio.upload_expected_sha256",
+      "dialpad_call_audio.upload_expected_size",
+      "dialpad_call_audio.warning",
+      "dialpad_share_link_attempts.reason",
+      "dialpad_share_link_attempts.state",
+      "dialpad_recording_worker.recording_blocked_until",
+      "dialpad_audio_access_log.consumer",
+      "my_leads_feature_flags.recording_download",
+      "my_leads_feature_flags.recording_download_canary_call_ids",
+      "my_leads_feature_flags.audio_consumers",
+    ],
   },
 };
 

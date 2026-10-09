@@ -73,6 +73,15 @@ const CHAIN = [
   { key: 'artifactFetches', file: '20261006100500_dialpad_artifact_fetches', present: "to_regclass('public.dialpad_call_artifact_fetches') is not null" },
   { key: 'replayLocation', file: '20261006111000_fn_create_next_step_replay_location', present: procUses('fn_create_next_step', 'v_existing.location') },
   { key: 'leadComps', file: '20261007100000_lead_comps_foundation', present: "to_regclass('public.lead_comps') is not null" },
+  // Phase 2 UI.
+  { key: 'ackPrompts', file: '20261007150000_call_prompt_acknowledgement', present: proc('fn_list_unacknowledged_call_prompts') },
+  { key: 'apiDial', file: '20261007150100_dialpad_api_dial_support', present: column('dialpad_org_connections', 'dial_endpoint') },
+  { key: 'redaction', file: '20261007150200_dialpad_unmatched_event_redaction', present: proc('fn_redact_dialpad_unmatched_events') },
+  { key: 'callbacksDue', file: '20261007150300_my_leads_callbacks_due', present: proc('fn_my_leads_callbacks_due') },
+  { key: 'contractDefaults', file: '20261007160000_acquisition_contract_defaults', present: "to_regclass('public.acquisition_contract_settings') is not null" },
+  { key: 'offerProjections', file: '20261007170000_acquisition_offer_projections', present: "to_regclass('public.acquisition_offer_projections') is not null" },
+  { key: 'callFacts', file: '20261007190000_call_facts', present: "to_regclass('public.lead_call_facts') is not null" },
+  { key: 'phoneBatched', file: '20261007200000_contact_phone_numbers_batched_backfill', present: proc('fn_contact_phone_numbers_backfill_range') },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
@@ -110,6 +119,17 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
   if (firstAbsent >= 0 && present.slice(firstAbsent).some(Boolean)) {
     throw new Error(`My Leads migrations are partly applied (${known.map((e, i) => `${e.key}=${present[i]}`).join(', ')}); reset the test database`);
   }
+  // Full-chain disposable database (every migration applied): the later 20261008 Norma migrations re-created fn_norma_mark_needs_review as a
+  // 3-argument overload that still calls fn_create_next_step. The 2-argument rollback of 20261005130500 cannot remove it, so the chain would
+  // look half-applied after the unwind. Drop that overload (inside the caller's rolled-back transaction) so the unwind is complete; each
+  // suite then replays the Norma migrations it needs. Only when the whole chain is present, never after a test applied it itself.
+  if (known.length > 0 && present.every(Boolean)) {
+    await db.query('drop function if exists public.fn_norma_mark_needs_review(uuid, text, integer)');
+    // Same for the legacy dispatch claim: 20261009010000 left a (uuid, integer) overload that is always false, and the historical Norma
+    // migrations a suite replays re-create the 1-argument one, which makes every 1-argument call ambiguous. Those suites test the
+    // historical function bodies; the always-false legacy claim is covered by norma_call_queue.integration.test.ts.
+    await db.query('drop function if exists public.fn_norma_claim_dispatch(uuid, integer)');
+  }
   for (let i = known.length - 1; i >= 0; i--) {
     if (present[i]) await db.query(stripTransaction(rollbackPath(known[i].file)));
   }
@@ -117,6 +137,26 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
   for (const step of steps) {
     if (typeof step !== 'string') await db.query(step.sql);
     else await db.query(stripTransaction(migrationPath(known.find((entry) => entry.key === step)!.file)));
+  }
+}
+
+/**
+ * For suites that replay a HISTORICAL Norma migration (20261002120000/-0100/-0200/...) inside their rolled-back transaction on a database where the
+ * whole chain is already applied. The historical migrations re-create the old 1/2-argument dispatch functions next to the evolved overloads that
+ * 20261008090100 (retry admission) and 20261009010000 (legacy claim disable) left behind, so every `fn_norma_*($1,...)` call with untyped
+ * parameters becomes "is not unique". In production the retry migration drops the old shapes after the historical ones; this removes the evolved
+ * shapes first so the replay lands on the same state a historical-only database has. `if exists`, so it is a no-op on a database without them.
+ * Scoped to the caller's transaction (rolled back); the evolved functions are covered by the retry-admission and norma_call_queue suites.
+ */
+export async function dropEvolvedNormaDispatchOverloads(db: Client): Promise<void> {
+  for (const sig of [
+    'fn_norma_claim_dispatch(uuid, integer)',
+    'fn_norma_bind_call_id(uuid, text, integer)',
+    'fn_norma_mark_dispatch_unknown(uuid, text, integer)',
+    'fn_norma_mark_dispatch_rejected(uuid, text, text, integer)',
+    'fn_norma_mark_needs_review(uuid, text, integer)',
+  ]) {
+    await db.query(`drop function if exists public.${sig}`);
   }
 }
 

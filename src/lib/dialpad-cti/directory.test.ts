@@ -4,8 +4,10 @@ import {
   assessDialpadDirectoryIdentity,
   dialpadDirectoryVerificationRef,
   fetchDialpadDirectoryUser,
+  findDialpadDirectoryUserByEmail,
   parseClaimedDialpadUserId,
   parseDialpadDirectoryUser,
+  parseDialpadDirectoryUsers,
   resolveDialpadDirectoryKey,
   type DialpadDirectoryFetch,
   type DialpadDirectoryUser,
@@ -132,5 +134,66 @@ describe('assessDialpadDirectoryIdentity', () => {
   });
   it('stores only ids as verification evidence', () => {
     expect(dialpadDirectoryVerificationRef('42', '5551234')).toBe('dialpad-directory:42:5551234');
+  });
+});
+
+describe('findDialpadDirectoryUserByEmail', () => {
+  const rec = (id: string, emails: string[], company = '42') => `{"id":${id},"company_id":${company},"state":"active","emails":${JSON.stringify(emails)}}`;
+  const find = (fetchImpl: DialpadDirectoryFetch, email = 'Rep@Example.com') => findDialpadDirectoryUserByEmail({ email, apiKey: KEY, fetchImpl });
+
+  it('returns the single match from an items envelope and from a bare array', async () => {
+    const expected = { ok: true, user: { id: '5551234', companyId: '42', state: 'active', emails: ['rep@example.com'] } };
+    expect(await find(responder(200, `{"items":[${rec('5551234', ['rep@example.com'])}]}`))).toEqual(expected);
+    expect(await find(responder(200, `[${rec('5551234', ['rep@example.com'])}]`))).toEqual(expected);
+  });
+  it('maps statuses', async () => {
+    expect(await find(responder(404, ''))).toEqual({ ok: false, reason: 'not_found' });
+    expect(await find(responder(401, ''))).toEqual({ ok: false, reason: 'rejected' });
+    expect(await find(responder(403, ''))).toEqual({ ok: false, reason: 'rejected' });
+    expect(await find(responder(500, ''))).toEqual({ ok: false, reason: 'unavailable' });
+    expect(await find(responder(503, ''))).toEqual({ ok: false, reason: 'unavailable' });
+    expect(await find(async () => { throw new Error('boom'); })).toEqual({ ok: false, reason: 'unavailable' });
+  });
+  it('treats invalid JSON and a non-list body as invalid_response', async () => {
+    expect(await find(responder(200, 'garbage'))).toEqual({ ok: false, reason: 'invalid_response' });
+    expect(await find(responder(200, '{"foo":1}'))).toEqual({ ok: false, reason: 'invalid_response' });
+    expect(await find(responder(200, ''))).toEqual({ ok: false, reason: 'invalid_response' });
+  });
+  it('refuses to guess when two users carry the email', async () => {
+    const body = `[${rec('5551234', ['rep@example.com'])},${rec('5551235', ['REP@example.com'])}]`;
+    expect(await find(responder(200, body))).toEqual({ ok: false, reason: 'invalid_response' });
+  });
+  it('is not_found when a 200 list has no record with the email', async () => {
+    expect(await find(responder(200, `[${rec('5551234', ['someone@example.com'])}]`))).toEqual({ ok: false, reason: 'not_found' });
+    expect(await find(responder(200, '[]'))).toEqual({ ok: false, reason: 'not_found' });
+  });
+  it('picks the matching record out of a mixed list', async () => {
+    const body = `[${rec('1', ['other@example.com'])},${rec('2', ['rep@example.com'])}]`;
+    expect(await find(responder(200, body))).toMatchObject({ ok: true, user: { id: '2' } });
+  });
+  it('keeps int64 ids exact', async () => {
+    const result = await find(responder(200, `[${rec('9007199254740993', ['rep@example.com'], '9007199254740995')}]`));
+    expect(result).toMatchObject({ ok: true, user: { id: '9007199254740993', companyId: '9007199254740995' } });
+  });
+  it('uses GET with the encoded email, Bearer key, no redirects and no caching', async () => {
+    let seen: { url: string; init: Parameters<DialpadDirectoryFetch>[1] } | null = null;
+    await find(async (url, init) => { seen = { url, init }; return { status: 200, text: async () => '[]' }; }, '  A+b@Example.com ');
+    expect(seen!.url).toBe('https://dialpad.com/api/v2/users?email=a%2Bb%40example.com');
+    expect(seen!.init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store' });
+    expect(seen!.init.headers.Authorization).toBe(`Bearer ${KEY}`);
+  });
+  it('rejects an unusable email without any request', async () => {
+    let called = false;
+    const fetchImpl: DialpadDirectoryFetch = async () => { called = true; return { status: 200, text: async () => '[]' }; };
+    expect(await find(fetchImpl, '')).toEqual({ ok: false, reason: 'invalid_response' });
+    expect(await find(fetchImpl, 'no-at-sign')).toEqual({ ok: false, reason: 'invalid_response' });
+    expect(called).toBe(false);
+  });
+});
+
+describe('parseDialpadDirectoryUsers', () => {
+  it('returns null when any item is malformed', () => {
+    expect(parseDialpadDirectoryUsers('[{"id":1}]')).toBeNull();
+    expect(parseDialpadDirectoryUsers('{"items":"x"}')).toBeNull();
   });
 });

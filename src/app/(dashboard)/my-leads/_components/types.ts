@@ -74,7 +74,7 @@ export type MyLeadQueueRow = {
     method: string
     sentLabel: string
     followUpLabel: string | null
-    outcome: "pending" | "accepted" | "declined"
+    outcome: "pending" | "accepted" | "declined" | "superseded"
   } | null
   archived: boolean
 }
@@ -130,6 +130,8 @@ export type MyLeadAttempt = {
   sourceLabel?: string
   recordingUrl?: string | null
   callActivityId?: string | null
+  /** A Dialpad call's activity id: Sandra's own copy of the recording plays only when it is authorized and stored. */
+  dialpadCallActivityId?: string | null
   followUpObligationId?: string | null
   followUpStatus?: "required" | "draft" | "claimed" | "sending" | "accepted" | "delivered" | "failed_not_dispatched" | "unknown" | "blocked" | "delivery_failed" | "voided" | "exception_closed" | null
   followUpMessage?: string | null
@@ -284,6 +286,11 @@ export type MyLeadsStripProps = {
   onNotToday: (propertyId: string) => void
   /** Opens the existing handoff dialog (its reason field stays required). */
   onDeadNurture: (propertyId: string) => void
+  /**
+   * Client-side pins (P2 2.8): these leads sort first, in this order, and show the given reason text
+   * ("Callback due now") instead of the ranked reason. The ranking RPC is untouched.
+   */
+  pinned?: readonly { propertyId: string; reason: string }[]
 }
 
 export type MyLeadDetailPanelProps = {
@@ -342,6 +349,8 @@ export type PostCallExtras = {
   submissionId: string
   note: string | null
   nextStep: PostCallNextStep | null
+  /** The Sandra call the attempt records; lets the server refuse extras for a call another prompt already saved. */
+  callActivityId?: string | null
 }
 export type PostCallExtrasResult =
   | {
@@ -350,7 +359,7 @@ export type PostCallExtrasResult =
       nextStep: "created" | "skipped" | "failed"
       message?: string
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; /** Another prompt already saved this call: the stored extras are dropped, never retried. */ alreadySaved?: true; /** No proof yet that this save committed: nothing was written; the stored extras stay for Retry. */ pending?: true }
 /** What the prompt shows after the attempt is saved. */
 export type PostCallExtrasState =
   | { status: "saving" }

@@ -1,0 +1,284 @@
+"use client";
+
+import { format } from "date-fns/format";
+import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
+
+import { cn } from "@/lib/utils";
+
+import { readJevScores, replyPersona } from "./step-format";
+import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
+
+const ENTER = "animate-in fade-in slide-in-from-top-1 duration-300";
+
+export function StepLine({ step }: { step: PipelineRunStep }) {
+  const base = cn("flex items-baseline gap-2 text-sm", ENTER);
+  switch (step.kind) {
+    case "jev": {
+      const scores = readJevScores(step.detail);
+      return (
+        <li data-testid="step-jev" className={base}>
+          <span aria-hidden className="text-sky-600">
+            ●
+          </span>
+          <span className="font-medium">Jev</span>
+          {scores.length === 0 ? (
+            <span className="text-muted-foreground">{step.name}</span>
+          ) : (
+            scores.map((s) => (
+              <span key={s.label} className="tabular-nums">
+                {s.label} {s.pct}%
+              </span>
+            ))
+          )}
+        </li>
+      );
+    }
+    case "threshold":
+      return (
+        <li data-testid="step-threshold" className={base}>
+          <span aria-hidden className="text-sky-600">
+            ●
+          </span>
+          <span>
+            {step.name}{" "}
+            <span className="text-muted-foreground">{step.result}</span>
+          </span>
+        </li>
+      );
+    case "action":
+      return (
+        <li data-testid="step-action" className={base}>
+          <span aria-hidden className="text-emerald-600">
+            ✔
+          </span>
+          <span>{step.name}</span>
+          {step.result !== "applied" && (
+            <span className="text-muted-foreground">({step.result})</span>
+          )}
+        </li>
+      );
+    case "reply": {
+      const persona = replyPersona(step);
+      return (
+        <li data-testid="step-reply" className={base}>
+          <span aria-hidden className="text-emerald-600">
+            ▶
+          </span>
+          <span>
+            {step.name}{" "}
+            <span className="text-muted-foreground">
+              ({step.result}
+              {persona ? `, as ${persona}` : ""})
+            </span>
+          </span>
+        </li>
+      );
+    }
+    case "gate":
+    case "hold":
+      return (
+        <li data-testid={`step-${step.kind}`} className={base}>
+          <span aria-hidden className="text-amber-600">
+            ■
+          </span>
+          <span>
+            {step.name}{" "}
+            <span className="text-muted-foreground">({step.result})</span>
+          </span>
+        </li>
+      );
+    case "shadow":
+      return (
+        <li
+          data-testid="step-shadow"
+          className={cn(base, "text-muted-foreground")}
+        >
+          <span aria-hidden>○</span>
+          <span>would → {step.name}</span>
+        </li>
+      );
+  }
+}
+
+/**
+ * Where "open thread" goes. The lead page admits both owners and
+ * Acquisitions callers; the legacy /messages inbox denies Acquisitions, so it
+ * is only offered to owners when there is no property to open.
+ */
+export function openThreadHref(
+  run: Pick<RunWithSteps, "property_id" | "conversation_id">,
+  isOwner: boolean,
+): string | null {
+  if (run.property_id) return `/leads/${encodeURIComponent(run.property_id)}`;
+  if (run.conversation_id && isOwner) {
+    return `/messages?thread=${encodeURIComponent(run.conversation_id)}`;
+  }
+  return null;
+}
+
+/** Action steps Jev applies on its own that a person can reverse. */
+const UNDOABLE_ACTION_STEPS = new Set(["wrong_number", "not_interested", "apply_nurture"]);
+
+export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean {
+  return run.steps.some(
+    (s) => s.kind === "action" && s.result === "applied" && UNDOABLE_ACTION_STEPS.has(s.name),
+  );
+}
+
+export type UndoControls = {
+  /** Returns the undo record id while the action is still undoable, else null. */
+  find: (inboundMessageId: string) => Promise<string | null>;
+  undo: (undoId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+};
+
+function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
+  const [undoId, setUndoId] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    controls
+      .find(inboundMessageId)
+      .then((id) => {
+        if (alive) setUndoId(id);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [controls, inboundMessageId]);
+
+  if (state === "done") {
+    return (
+      <p data-testid="undo-done" className="mt-2 text-xs text-muted-foreground">
+        Undone. The lead is back the way it was before Jev acted.
+      </p>
+    );
+  }
+  if (!undoId) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        data-testid="undo-jev-action"
+        disabled={state === "busy"}
+        onClick={async () => {
+          setState("busy");
+          setError(null);
+          const r = await controls.undo(undoId);
+          if (r.ok) setState("done");
+          else {
+            setState("idle");
+            setError(r.message);
+          }
+        }}
+        className="rounded-md border px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
+      >
+        {state === "busy" ? "Undoing..." : "Undo Jev's action"}
+      </button>
+      {error && (
+        <span role="alert" data-testid="undo-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+export function RunCard({
+  run,
+  label,
+  isOwner = false,
+  undoControls,
+}: {
+  run: RunWithSteps;
+  label: RunLabel | undefined;
+  isOwner?: boolean;
+  undoControls?: UndoControls;
+}) {
+  const threadHref = openThreadHref(run, isOwner);
+  const name = label?.name ?? "Unknown sender";
+  const passedGates = run.steps.filter(
+    (s) => s.kind === "gate" && s.result === "pass",
+  );
+  const visible = run.steps.filter(
+    (s) => !(s.kind === "gate" && s.result === "pass"),
+  );
+  const running = run.status === "running";
+
+  return (
+    <article
+      data-testid="run-card"
+      data-status={run.status}
+      className={cn(
+        "rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10",
+        ENTER,
+      )}
+    >
+      <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        {running && (
+          <span
+            data-testid="run-pulse"
+            aria-label="Running"
+            className="size-2 animate-pulse self-center rounded-full bg-sky-500"
+          />
+        )}
+        <time
+          suppressHydrationWarning
+          dateTime={run.started_at}
+          className="text-xs tabular-nums text-muted-foreground"
+        >
+          {format(new Date(run.started_at), "h:mm:ss a")}
+        </time>
+        <span className="font-semibold">{name}</span>
+        {label?.address && (
+          <span className="text-muted-foreground">· {label.address}</span>
+        )}
+        <span className="ml-auto rounded-full bg-secondary px-2 text-xs uppercase tracking-wide text-muted-foreground">
+          {run.mode}
+        </span>
+      </header>
+
+      {run.inbound_preview && (
+        <p className="mt-2 flex gap-2">
+          <span aria-hidden className="text-muted-foreground">
+            ◀
+          </span>
+          <span>{run.inbound_preview}</span>
+        </p>
+      )}
+
+      <ul className="mt-2 space-y-1">
+        {visible.map((step) => (
+          <StepLine key={step.id} step={step} />
+        ))}
+        {passedGates.length > 0 && (
+          <li
+            data-testid="gates-passed"
+            className="text-xs text-muted-foreground"
+          >
+            {passedGates.length} gate{passedGates.length === 1 ? "" : "s"}{" "}
+            passed
+          </li>
+        )}
+      </ul>
+
+      {undoControls && hasUndoableJevAction(run) && (
+        <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
+      )}
+
+      {threadHref && (
+        <a
+          href={threadHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          open thread <ExternalLink className="size-3" aria-hidden />
+        </a>
+      )}
+    </article>
+  );
+}

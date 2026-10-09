@@ -41,8 +41,10 @@ const arrive = (name: string, actors: string[], argKey?: string, argValue?: stri
  */
 async function crm(propertyId: string) {
   const T = "array['created_at','updated_at','next_check_at','completed_at','dispatched_at','dispatch_started_at','due_at','callback_requested_for','next_run_at','enrolled_at','released_at','next_attempt_at','snoozed_until']";
+  // send_attempted_at is a stamp (shifted by the virtual clock), so its value is excluded, but whether it is set is state: a wrong null -> set on a refused path must show.
+  const SEND = "jsonb_build_object('send_attempted_at_is_null', (to_jsonb(x) ->> 'send_attempted_at') is null)";
   const r = await q(
-    `select (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.norma_call_requests x where x.property_id = $1) as requests,
+    `select (select coalesce(jsonb_agg((to_jsonb(x) - ${T} - 'send_attempted_at') || ${SEND} order by x.id), '[]') from public.norma_call_requests x where x.property_id = $1) as requests,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.tasks x where x.related_property_id = $1) as tasks,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.lead_events x where x.property_id = $1) as events,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.sequence_enrollments x where x.property_id = $1) as enrollments,
@@ -70,8 +72,9 @@ describe("webhook before the call id is stored", () => {
     expect(res).toMatchObject({ ok: true, code: "calling" });
     const request = await requestOf(ctx.lead.property);
     expect(request.status).toBe("completed");
-    expect(request.bland_call_id).toBe(h.bland.callForNumber(ctx.lead.phone)!.callId);
-    expect(h.bland.sendsFor(request.id)).toHaveLength(1);
+    // A no-answer first call is retried once (the nested webhook of the second call completes it): the FINAL call is bound.
+    expect(request.bland_call_id).toBe(h.bland.callsForNumber(ctx.lead.phone).at(-1)!.callId);
+    expect(h.bland.sendsFor(request.id)).toHaveLength(kind === "voicemail" ? 2 : 1);
     expect(await events(request.id, "norma_call_completed")).toBe(1);
     expect(await notifications(request.id)).toBe(1);
     expect((await tasksOf(request.id)).length).toBe(NEEDS_TASK.has(kind) ? 1 : 0);
@@ -125,6 +128,15 @@ describe("webhook vs reconciliation", () => {
     const [hook] = await Promise.all([h.bland.webhook(call, "good"), h.reconcile({ actor: "reconcile-race" })]);
     remove();
     expect(hook.status).toBe(200);
+    if (kind === "voicemail") {
+      // Both reached the completion of attempt 1: exactly one scheduled (and dialled) the retry.
+      const retrying = await requestOf(ctx.lead.property);
+      expect(retrying.status).toBe("dispatched");
+      expect(await events(request.id, "norma_call_attempt_no_answer")).toBe(1);
+      expect(h.bland.sendsFor(request.id)).toHaveLength(2);
+      expect(await events(request.id, "norma_call_completed")).toBe(0);
+      await h.finish(ctx);
+    }
     const after = await requestOf(ctx.lead.property);
     expect(after.status).toBe("completed");
     expect(await events(request.id, "norma_call_completed")).toBe(1);
@@ -183,7 +195,7 @@ describe("close vs dispatch (expected-status)", () => {
     const remove = h.addHook(async (info) => {
       if (
         info.kind === "rpc" &&
-        ((info.name === "fn_norma_claim_dispatch" && info.actor === "dispatch-race") ||
+        ((info.name === "fn_norma_claim_dispatch_v2" && info.actor === "dispatch-race") ||
           (info.name === "fn_norma_mark_dispatch_rejected" && info.actor === "close-race")) &&
         (info.args as { p_request_id?: string }).p_request_id === request.id
       ) {
@@ -211,11 +223,16 @@ describe("reply during a Norma hold", () => {
 
   async function held(seed: Seed) {
     const { ctx } = await placeCall("voicemail", { enrollments: [seed] });
+    // Call twice: the first call's no-answer schedules and places the retry; the
+    // hold (and the pause) must survive it. The state under test is "second call in flight".
+    await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
     const request = await requestOf(ctx.lead.property);
     expect(request.status).toBe("dispatched");
+    expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(2);
     return { ctx, request };
   }
-  const finish = (ctx: LeadCtx) => h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+  /** The no-answer that ends the request: the SECOND call's webhook. */
+  const finish = (ctx: LeadCtx) => h.bland.webhook(h.bland.callsForNumber(ctx.lead.phone)[1]!, "good");
 
   it.each(seeds)("reply fully before the no-answer (%s): stays paused as inbound_reply", async (seed) => {
     const { ctx } = await held(seed);
@@ -299,7 +316,7 @@ describe("[I1] softphone cleanup race", () => {
     const cleanup = h.softphoneCleanup(ctx, "cleanup");
     await selected.promise;
     await h.inboundReply(ctx);
-    await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    await h.finish(ctx);
     expect((await requestOf(ctx.lead.property)).status).toBe("completed");
     gate.open();
     await cleanup;
@@ -319,7 +336,7 @@ describe("[I1] softphone cleanup race", () => {
     });
     const cleanup = h.softphoneCleanup(ctx, "cleanup2");
     await selected.promise;
-    await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    await h.finish(ctx);
     gate.open();
     await cleanup;
     remove();
@@ -330,7 +347,7 @@ describe("[I1] softphone cleanup race", () => {
     const a = await placeCall("voicemail", { enrollments: ["paused:call_in_progress"] });
     await h.softphoneCleanup(a.ctx);
     expect(await enrollment(a.ctx.lead.enrollments[0]!)).toEqual({ status: "paused", pause_reason: "call_in_progress" });
-    await h.bland.webhook(h.bland.callForNumber(a.ctx.lead.phone)!, "good");
+    await h.finish(a.ctx);
     await h.advance(40 * 60_000);
     await h.staleSweep();
     expect((await enrollment(a.ctx.lead.enrollments[0]!)).status).toBe("active");
@@ -366,8 +383,9 @@ describe("button hammer", () => {
     expect(h.bland.sendsFor(request.id)).toHaveLength(1);
     expect(h.bland.callsFor(request.id)).toHaveLength(1);
     expect(request.status).toBe("dispatched");
-    // A completed call legitimately allows a new request.
+    // A completed call legitimately allows a new request (once the 10 s same-number spacing of claim_dispatch_v2 [C9] has passed).
     await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    await h.advance(15_000); // > 10 s number spacing [C9] with margin for host↔DB clock drift on long-lived stacks
     expect(await h.requestCall(ctx, h.world.rep1)).toMatchObject({ ok: true });
   });
 
@@ -377,7 +395,7 @@ describe("button hammer", () => {
     const request = await requestOf(ctx.lead.property);
     const barrier = new Barrier(20);
     const remove = h.addHook(async (info) => {
-      if (info.kind === "rpc" && info.name === "fn_norma_claim_dispatch" && info.actor.startsWith("d20-")) await barrier.wait();
+      if (info.kind === "rpc" && info.name === "fn_norma_claim_dispatch_v2" && info.actor.startsWith("d20-")) await barrier.wait();
     });
     const out = await Promise.all(Array.from({ length: 20 }, (_, i) => h.dispatch(request.id, `d20-${i}`)));
     remove();
@@ -398,20 +416,24 @@ describe("a database failure during completion rolls everything back", () => {
   ];
   it.each(cases)("$kind, failure on $table: no partial effect, then the replay applies exactly once", async ({ kind, table }) => {
     const { ctx } = await placeCall(kind);
+    // A no-answer first call only schedules the retry; the completion (and so the
+    // outbox / task writes the fault hits) is the second call's webhook.
+    if (kind === "voicemail") await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    const target = h.bland.callsForNumber(ctx.lead.phone).at(-1)!;
     const request = await requestOf(ctx.lead.property);
     const before = await crm(ctx.lead.property);
     await q("insert into stress.fault(property_id, tbl) values ($1, $2)", [ctx.lead.property, table]);
-    const failed = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    const failed = await h.bland.webhook(target, "good");
     expect(failed.status).toBe(500);
     expect(await crm(ctx.lead.property)).toBe(before);
     expect((await requestOf(ctx.lead.property)).status).toBe("dispatched");
     await q("delete from stress.fault where property_id = $1", [ctx.lead.property]);
-    const ok = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    const ok = await h.bland.webhook(target, "good");
     expect(ok.body.status).toBe("applied");
     expect(await events(request.id, "norma_call_completed")).toBe(1);
     expect(await notifications(request.id)).toBe(1);
     expect((await tasksOf(request.id)).length).toBe(NEEDS_TASK.has(kind) ? 1 : 0);
-    const again = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+    const again = await h.bland.webhook(target, "good");
     expect(again.body.status).toBe("replayed");
     expect(await events(request.id, "norma_call_completed")).toBe(1);
   });

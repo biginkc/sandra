@@ -1,3 +1,5 @@
+import { assertRealProviderAllowed } from "@/lib/messaging/replay-stub";
+
 /** Bulk reply transport only. It never retries or modifies the existing Outbox
  * sender. Call only after the durable attempt marker has committed. */
 export type FrozenReply = { from: string; to: string; body: string };
@@ -25,6 +27,8 @@ async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   } finally { if (listener) signal.removeEventListener("abort", listener); }
 }
 export function createSendilloReplyTransport(apiKey: string, transport: typeof fetch = fetch) {
+  // Replay harness (SMS_PROVIDER_STUB=1): the real bulk-reply transport must not exist.
+  assertRealProviderAllowed("sendillo", "bulk reply transport");
   if (!apiKey || /[\r\n]/.test(apiKey)) throw Error("Reply provider configuration missing");
   return async (input: FrozenReply, cancellation: AbortSignal): Promise<ReplyProviderResult> => {
     if (!input || typeof input.body !== "string" || !input.body.trim() || input.body.length > 1600 || !PHONE.test(input.from) || !PHONE.test(input.to)) return { kind: "not_attempted", reason: "invalid_input" };

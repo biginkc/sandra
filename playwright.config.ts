@@ -123,11 +123,15 @@ const webServerEnv: Record<string, string> = {
   // my-leads-close CI lane (TECH-PLAN Phase 4, 4.3): the Dialpad webhook secret the fixture's
   // `env:DIALPAD_CTI_WEBHOOK_SECRET_E2E` connection resolves to, and a cron bearer so the spec can
   // drive the seller-reminder cron by hand. Test-only values for the disposable stack; production
-  // never reads these names. Phase 2/3 stubs (DIALPAD_DIAL_PROVIDER, COMPS_PROVIDER,
-  // DROPBOX_SIGN_API_BASE_URL, ESIGN_PROVIDER_TIMEOUT_MS) are added by their own slices.
+  // never reads these names.
   DIALPAD_CTI_WEBHOOK_SECRET_E2E:
     process.env.DIALPAD_CTI_WEBHOOK_SECRET_E2E ?? "e2e-dialpad-secret-0123456789",
   CRON_SECRET: process.env.E2E_CRON_SECRET ?? "e2e-cron-secret-0123456789",
+  // Phase 2 slice: stub dial provider (seam S1; ignored when VERCEL_ENV=production) and a dummy Dialpad
+  // key (>= 16 chars) behind `env:DIALPAD_CTI_DIAL_KEY_E2E`. COMPS_PROVIDER, DROPBOX_SIGN_API_BASE_URL and
+  // ESIGN_PROVIDER_TIMEOUT_MS are added by the Phase 3 slices.
+  DIALPAD_DIAL_PROVIDER: "stub",
+  DIALPAD_CTI_DIAL_KEY_E2E: "e2e-dummy-dialpad-key-0123456789",
   NODE_ENV: "development",
 };
 
@@ -145,12 +149,16 @@ export default defineConfig({
   testIgnore: [
     // Requires the four-principal loopback fixture, never the shared CI project.
     "**/my-leads.local.spec.ts",
+    // Runs only via playwright.jev-local.config.ts against local Supabase (127.0.0.1:54329).
+    "**/jev-decision-workflow.local.spec.ts",
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
     "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
     // Vitest unit tests that live beside the fixtures; Playwright would load them as specs and crash.
     "**/support/**/*.test.ts",
+    // Opt-in chaos-day stress harness (e2e/stress): runs only through playwright.stress.config.ts, never the default lanes.
+    "**/stress/**",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.

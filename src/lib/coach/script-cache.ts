@@ -130,3 +130,31 @@ export async function loadCachedCoachDefault(
     ? { slug, revision: ref.revision as number, digest: row.digest }
     : null;
 }
+
+/** Resolves the cached default plus its validated bundle. No fallback, never throws. */
+export async function loadCachedCoachBundle(
+  slug: string,
+  admin = createAdminClient() as unknown as CacheAdmin,
+): Promise<{ ref: Pick<ScriptRef, "slug" | "revision" | "digest">; bundle: ScriptBundle } | null> {
+  try {
+    const result = await admin.from("coach_script_defaults").select(
+      "digest, coach_script_revisions!coach_script_defaults_digest_slug_fkey(slug, revision, bundle, import_status)",
+    ).eq("slug", slug).maybeSingle();
+    if (result.error || !result.data || typeof result.data !== "object") return null;
+    const row = result.data as { digest?: unknown; coach_script_revisions?: unknown };
+    const revision = Array.isArray(row.coach_script_revisions) ? row.coach_script_revisions[0] : row.coach_script_revisions;
+    if (!revision || typeof revision !== "object") return null;
+    const script = revision as { slug?: unknown; revision?: unknown; bundle?: unknown; import_status?: unknown };
+    if (
+      script.import_status !== "reviewed" || script.slug !== slug ||
+      !Number.isInteger(script.revision) || (script.revision as number) <= 0 ||
+      typeof row.digest !== "string"
+    ) return null;
+    assertValidScriptBundle(script.bundle);
+    const bundle = script.bundle as ScriptBundle;
+    if ((await computeScriptDigest(bundle)) !== row.digest) return null;
+    return { ref: { slug, revision: script.revision as number, digest: row.digest }, bundle };
+  } catch {
+    return null;
+  }
+}

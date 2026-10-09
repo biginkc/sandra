@@ -6,9 +6,10 @@ import type { Database } from "@/lib/supabase/types";
 import type { BlandClient } from "./bland";
 import type { DispatchResult } from "./dispatch";
 import { withConvertedCallbackTime } from "./callback-wiring";
+import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
-import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
+import { applyNormaQueuePresend, completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
 
 const MIN = 60_000;
@@ -46,8 +47,11 @@ export type ReconcileSummary = {
 
 type Row = Pick<
   Database["public"]["Tables"]["norma_call_requests"]["Row"],
-  "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome"
->;
+  "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome" | "attempt"
+> & {
+  /** Set on queue requests; only the queue tick dials those. Column added by the queue migration. */
+  queue_entry_id?: string | null;
+};
 
 export type ReconcileDeps = {
   client: SupabaseClient<Database>;
@@ -70,14 +74,14 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")
-    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome")
+    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome, attempt, queue_entry_id" as never)
     .in("status", statuses)
     .lte("next_check_at", new Date(now).toISOString())
     .order("next_check_at", { ascending: true })
     .limit(BATCH);
   if (error) throw new Error(`norma reconcile scan failed: ${error.message}`);
 
-  for (const row of (data ?? []) as Row[]) {
+  for (const row of (data ?? []) as unknown as Row[]) {
     summary.scanned += 1;
     try {
       await reconcileRow(row, deps, now, summary);
@@ -108,9 +112,27 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
   const idleAge = now - Date.parse(row.updated_at);
 
   if (row.status === "requested") {
-    if (createdAge < T.requestedGrace) return void (summary.waiting += 1);
-    if (createdAge > T.requestedExpiry) {
-      const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested");
+    const attempt = row.attempt ?? 1;
+    // A call-twice retry (attempt 2) waits in `requested` from the moment the
+    // first call ended, which can be long after the request was created: its
+    // clock is the last update, not the creation.
+    const requestedAge = row.attempt === 2 ? idleAge : createdAge;
+    if (requestedAge < T.requestedGrace) return void (summary.waiting += 1);
+    if (row.queue_entry_id) {
+      // Queue rows are dialled only by the queue tick, never by this sweep. Aged ones are closed through the
+      // queue store port, which settles the entry per rule 4 in SQL; younger ones are left to the tick.
+      if (requestedAge <= T.requestedExpiry) return void (summary.waiting += 1);
+      const applied = await applyNormaQueuePresend(deps.client, row.id, "stranded_requested_expired");
+      if (applied === "applied") return void (summary.rejected += 1);
+      if (applied === "no_entry") {
+        // The entry link is gone: close the request the button way so it cannot sit open.
+        const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested", attempt);
+        return void (closed === "dispatch_rejected" ? (summary.rejected += 1) : (summary.waiting += 1));
+      }
+      return void (summary.waiting += 1);
+    }
+    if (requestedAge > T.requestedExpiry) {
+      const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested", attempt);
       // Claimed by a dispatcher in the meantime: not ours to close.
       return void (closed === "dispatch_rejected" ? (summary.rejected += 1) : (summary.waiting += 1));
     }
@@ -125,7 +147,7 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
   if (row.status === "dispatching" && !row.bland_call_id) {
     if (idleAge < T.dispatchingStale) return void (summary.waiting += 1);
     // The sender may or may not have reached Bland. Fence, never redial.
-    await markNormaDispatchUnknown(deps.client, row.id, "stranded_dispatching");
+    await markNormaDispatchUnknown(deps.client, row.id, "stranded_dispatching", row.attempt ?? 1);
     return void (summary.markedUnknown += 1);
   }
 
@@ -133,7 +155,7 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
     // dispatch_unknown / needs_review with no id: Bland cannot be queried by
     // metadata, so nothing can resolve it but a human or a late webhook.
     if (row.status === "dispatch_unknown" && idleAge >= T.unknownNoIdEscalateAfter) {
-      await markNormaNeedsReview(deps.client, row.id, "dispatch outcome unknown and no Bland call id");
+      await markNormaNeedsReview(deps.client, row.id, "dispatch outcome unknown and no Bland call id", row.attempt ?? 1);
       return void (summary.escalated += 1);
     }
     return void (summary.waiting += 1);
@@ -172,9 +194,14 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
       // A needs_review row already holding an unknown result gains nothing.
       if (!(row.status === "needs_review" && mapping.outcome === "unknown")) {
         const result = await completeNormaCall(deps.client, {
-          requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload,
+          requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload, attempt: row.attempt,
         });
-        if (result.result === "applied" || result.result === "replayed") return void (summary.completed += 1);
+        if (result.result === "applied" || result.result === "replayed") {
+          // Attempt 1 confirmed not answered: place the one retry now.
+          const retry = await dispatchScheduledRetry(result, row.id, deps.dispatch);
+          if (retry?.status === "dispatched") summary.dispatched += 1;
+          return void (summary.completed += 1);
+        }
         // Not applied (mismatch, rejected, ...): never a dead end. Report it and
         // fall through to the same escalate-after-window branch as any other
         // ambiguous lookup, so the request cannot be stuck open.
@@ -190,7 +217,7 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
   // Not found / not finished / lookup failed: ambiguous. Wait, then escalate.
   // Never redial, never resume.
   if (row.status !== "needs_review" && idleAge >= T.escalateAfter) {
-    await markNormaNeedsReview(deps.client, row.id, "Bland call unresolved after the reconciliation window");
+    await markNormaNeedsReview(deps.client, row.id, "Bland call unresolved after the reconciliation window", row.attempt ?? 1);
     return void (summary.escalated += 1);
   }
   summary.waiting += 1;

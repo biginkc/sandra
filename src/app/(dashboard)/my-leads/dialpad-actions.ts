@@ -1,23 +1,23 @@
 'use server';
-import { createAdminClient } from '@/lib/supabase/admin';
-import { myLeadsViewer } from '@/lib/my-leads/queries';
+import { createDialpadDialer, startDialpadApiCall, type DialpadApiDialOutcome } from '@/lib/dialpad-cti/api-dial';
 import {
   cancelDialpadCall,
   createSupabaseDialpadDispatchDb,
+  ensureDialpadBinding,
   getDialpadCallStatus,
-  listDialpadCallTargets,
-  listRecentDialpadCalls,
-  startDialpadCall,
-  verifyDialpadBinding,
   type DialpadActor,
   type DialpadDispatchDb,
 } from '@/lib/dialpad-cti/dispatch';
+import { getMyLeadsFlag } from '@/lib/my-leads/flags';
+import { myLeadsViewer } from '@/lib/my-leads/queries';
+import { schemaReady } from '@/lib/my-leads/schema-ready';
+import { createAdminClient } from '@/lib/supabase/admin';
 
 const SIGN_IN_MESSAGE = 'Sign in with an active organization to use Dialpad.';
 
 // Org and rep are derived here from the authenticated session; no action
 // accepts either from the browser.
-async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; email: string | null; emailConfirmed: boolean } | null> {
+async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; acquisitions: boolean; email: string | null; emailConfirmed: boolean } | null> {
   try {
     const viewer = await myLeadsViewer();
     const { data } = await viewer.client.auth.getUser();
@@ -25,6 +25,7 @@ async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; 
     return {
       actor: { orgId: viewer.orgId, userId: viewer.userId },
       db: createSupabaseDialpadDispatchDb(createAdminClient()),
+      acquisitions: viewer.acquisitions === true,
       email: data.user.email ?? null,
       emailConfirmed: typeof data.user.email_confirmed_at === 'string' && data.user.email_confirmed_at.length > 0,
     };
@@ -35,28 +36,36 @@ async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; 
 
 const unauthenticated = { ok: false as const, code: 'not_configured' as const, message: SIGN_IN_MESSAGE };
 
-export async function verifyDialpadBindingAction(claimedUserId: unknown) {
+export type DialLeadInput = { propertyId: unknown; contactId: unknown; phoneSlot?: unknown; idempotencyKey: unknown; confirmRedialOf?: unknown };
+
+/**
+ * Click-to-dial through the Dialpad API (2.7). Kill switch and readiness: the `click_to_dial`
+ * flag (a missing row or table reads OFF) and `schemaReady('api_dial')` must both hold, otherwise
+ * `not_configured` sends the client down the Sandra-softphone branch. Only the outcome crosses to
+ * the browser; the dial payload and the key never do.
+ */
+export async function dialLeadAction(input: DialLeadInput): Promise<DialpadApiDialOutcome> {
   const s = await session();
   if (!s) return unauthenticated;
-  return verifyDialpadBinding(s.db, s.actor, { email: s.email, emailConfirmed: s.emailConfirmed }, claimedUserId, { env: process.env });
+  // Same rule as the routing: Dialpad is for Acquisitions callers; anyone else is sent down the softphone branch.
+  if (!s.acquisitions) return { ok: false, code: 'not_configured', message: 'Dialpad click-to-dial is not enabled for this organization.' };
+  const [enabled, ready] = await Promise.all([getMyLeadsFlag(s.actor.orgId, 'click_to_dial'), schemaReady('api_dial')]);
+  if (!enabled || !ready) return { ok: false, code: 'not_configured', message: 'Dialpad click-to-dial is not enabled for this organization.' };
+  const outcome = await startDialpadApiCall(s.db, createDialpadDialer(process.env), s.actor, {
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    phoneSlot: input.phoneSlot ?? null,
+    idempotencyKey: input.idempotencyKey,
+    confirmRedialOf: input.confirmRedialOf,
+  }, { env: process.env });
+  return outcome;
 }
 
-export async function listDialpadCallTargetsAction(input: { propertyId: unknown; contactId: unknown }) {
+/** Binding without the iframe: verifies the rep against the Dialpad directory by their confirmed email. */
+export async function ensureDialpadBindingAction() {
   const s = await session();
   if (!s) return unauthenticated;
-  return listDialpadCallTargets(s.db, s.actor, { propertyId: input?.propertyId, contactId: input?.contactId });
-}
-
-export async function startDialpadCallAction(input: { propertyId: unknown; contactId: unknown; phoneSlot: unknown; grantId: unknown; idempotencyKey: unknown }) {
-  const s = await session();
-  if (!s) return unauthenticated;
-  return startDialpadCall(s.db, s.actor, {
-    propertyId: input?.propertyId,
-    contactId: input?.contactId,
-    phoneSlot: input?.phoneSlot,
-    grantId: input?.grantId,
-    idempotencyKey: input?.idempotencyKey,
-  });
+  return ensureDialpadBinding(s.db, s.actor, { email: s.email, emailConfirmed: s.emailConfirmed }, { env: process.env });
 }
 
 export async function getDialpadCallStatusAction(intentId: unknown) {
@@ -68,11 +77,12 @@ export async function getDialpadCallStatusAction(intentId: unknown) {
 export async function cancelDialpadCallAction(intentId: unknown) {
   const s = await session();
   if (!s) return unauthenticated;
+  // An intent whose dial was already released may have rung; cancelling it would make `cancelled` a false
+  // proof of non-dispatch for the client key rules. Only unreleased intents can be cancelled here.
+  const status = await getDialpadCallStatus(s.db, s.actor, intentId);
+  if (!status.ok) return status;
+  if (status.status.dispatchAuthorizedAt) {
+    return { ok: false as const, code: 'denied' as const, message: 'This call was already sent to Dialpad and cannot be cancelled here.' };
+  }
   return cancelDialpadCall(s.db, s.actor, intentId);
-}
-
-export async function listRecentDialpadCallsAction() {
-  const s = await session();
-  if (!s) return unauthenticated;
-  return listRecentDialpadCalls(s.db, s.actor);
 }

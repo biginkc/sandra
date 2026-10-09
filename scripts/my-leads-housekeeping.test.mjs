@@ -109,12 +109,12 @@ test("close-attempts and rollback route to their RPCs", async () => {
   const infoPreview = { kind: "rollback", run: { id: RUN }, fingerprint: "d".repeat(64) };
   const r = harness({ preview: infoPreview });
   assert.equal(await run(["rollback", "--org", ORG, "--run", RUN, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...infoPreview }))], r.io), 0);
-  assert.deepEqual(r.calls.map((x) => x.name), ["fn_my_leads_housekeeping_run_info", "fn_my_leads_housekeeping_rollback"]);
-  assert.deepEqual(r.calls[1].args, { p_run: RUN, p_org_id: ORG, p_fingerprint: infoPreview.fingerprint });
+  assert.deepEqual(r.calls.map((x) => x.name), ["fn_contact_phone_numbers_backfill_run_info", "fn_my_leads_housekeeping_run_info", "fn_my_leads_housekeeping_rollback"]);
+  assert.deepEqual(r.calls[2].args, { p_run: RUN, p_org_id: ORG, p_fingerprint: infoPreview.fingerprint });
 });
 
-test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["ack-legacy-prompts", "--org", ORG], ["nope"]]) {
+test("unknown and under-specified commands are refused without any call", async () => {
+  for (const argv of [["nope"], ["ack-legacy-prompts"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -238,18 +238,146 @@ test("link-backfill previews, refuses apply without the confirm hash, and applie
   assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint });
 });
 
-test("phone-backfill previews, is bound to the host through the confirm hash, and applies through its own function", async () => {
-  const preview = { kind: "phone_backfill", fingerprint: "e".repeat(64), count: 7 };
-  const h = harness({ preview });
+// A fake database for the paged phone backfill: `n` ranges whose ids are r1..rn.
+function phoneHarness({ ranges = 3, failApplyAt = null, runKind = null } = {}) {
+  const base = harness();
+  const calls = [];
+  const id = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+  const digest = (i) => String(i).repeat(64).slice(0, 64);
+  base.io.createClient = () => ({
+    rpc: async (name, args) => {
+      calls.push({ name, args });
+      if (name === "fn_contact_phone_numbers_backfill_range") {
+        if (!args.p_apply) {
+          const at = args.p_after ? Number(args.p_after.slice(-12)) : 0;
+          if (at >= ranges) return { data: { done: true, lastId: null }, error: null };
+          return { data: { done: false, lastId: id(at + 1), candidates: 10, toCreate: 8, toUpdate: 2, digest: digest(at + 1), sample: [id(at + 1)] }, error: null };
+        }
+        const n = Number(args.p_upto.slice(-12));
+        if (failApplyAt === n) return { data: null, error: { message: "FINGERPRINT_MISMATCH: the cohort changed" } };
+        return { data: { runId: RUN, candidates: 10, created: 8, updated: 2 }, error: null };
+      }
+      if (name === "fn_contact_phone_numbers_backfill_run_info") {
+        return { data: { kind: "rollback", run: { id: RUN, kind: runKind, status: "applied", params: { batched: true } } }, error: null };
+      }
+      if (name === "fn_contact_phone_numbers_backfill_rollback_range") {
+        if (!args.p_apply) {
+          const at = args.p_after ? Number(args.p_after.slice(-12)) : 0;
+          if (at >= ranges) return { data: { done: true }, error: null };
+          return { data: { done: false, lastId: id(at + 1), images: 10, digest: digest(at + 1) }, error: null };
+        }
+        return { data: { restored: 10, alreadyRestored: 0, notRestored: [] }, error: null };
+      }
+      if (name === "fn_contact_phone_numbers_backfill_rollback_finish") return { data: { status: "rolled_back", restored: args.p_restored }, error: null };
+      throw new Error(`unexpected ${name}`);
+    },
+  });
+  return { ...base, calls };
+}
+
+test("phone-backfill pages every range, prints one whole-set fingerprint, and applies each range under its own digest", async () => {
+  const h = phoneHarness();
   assert.equal(await run(["phone-backfill", "--org", ORG], h.io), 0);
-  assert.deepEqual(h.calls, [{ name: "fn_contact_phone_numbers_backfill", args: { p_org_id: ORG, p_apply: false } }]);
-  const none = harness({ preview });
+  const preview = JSON.parse(h.out.join(""));
+  assert.equal(preview.ranges, 3);
+  assert.equal(preview.candidates, 30);
+  assert.equal(preview.toCreate, 24);
+  assert.equal(preview.fingerprint, sha256Hex(`phone_backfill_batched|2000|${["1".repeat(64), "2".repeat(64), "3".repeat(64)].join(",")}`));
+  assert.ok(h.calls.every((c) => c.name === "fn_contact_phone_numbers_backfill_range" && c.args.p_apply === false));
+  assert.equal(h.calls.length, 4);
+
+  const none = phoneHarness();
   assert.equal(await run(["phone-backfill", "--org", ORG, "--apply"], none.io), 1);
-  assert.equal(none.calls.length, 1);
-  const otherHost = harness({ preview });
-  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ supabaseHost: "other.example.co", ...preview }))], otherHost.io), 1);
-  assert.equal(otherHost.calls.length, 1);
-  const a = harness({ preview });
-  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
-  assert.deepEqual(a.calls[1], { name: "fn_contact_phone_numbers_backfill", args: { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint } });
+  assert.ok(none.calls.every((c) => c.args.p_apply === false)); // no confirm hash, nothing written
+  const wrong = phoneHarness();
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", "0".repeat(64)], wrong.io), 1);
+  assert.ok(wrong.calls.every((c) => c.args.p_apply === false));
+
+  const hash = sha256Hex(canonicalJson({ ...HOST, ...preview }));
+  const a = phoneHarness();
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", hash], a.io), 0);
+  const applies = a.calls.filter((c) => c.args.p_apply);
+  assert.equal(applies.length, 3);
+  assert.deepEqual(applies.map((c) => c.args.p_expected_digest), ["1".repeat(64), "2".repeat(64), "3".repeat(64)]);
+  assert.deepEqual(applies.map((c) => c.args.p_run), [null, RUN, RUN]);
+  assert.ok(applies.every((c) => c.args.p_fingerprint === preview.fingerprint));
+  assert.equal(JSON.parse(a.out.join("")).created, 24);
 });
+
+test("phone-backfill stops at the first range that drifted and names the run to roll back", async () => {
+  const preview = JSON.parse((await (async () => { const h = phoneHarness(); await run(["phone-backfill", "--org", ORG], h.io); return h.out.join(""); })()));
+  const h = phoneHarness({ failApplyAt: 2 });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], h.io), 1);
+  assert.equal(h.calls.filter((c) => c.args.p_apply).length, 2); // range 3 never attempted
+  const message = h.err.join("");
+  assert.match(message, /FINGERPRINT_MISMATCH/);
+  assert.match(message, new RegExp(`rollback --run ${RUN}`));
+});
+
+test("phone-backfill never claims nothing was applied when the first range's response is lost", async () => {
+  const preview = JSON.parse((await (async () => { const h = phoneHarness(); await run(["phone-backfill", "--org", ORG], h.io); return h.out.join(""); })()));
+  const confirm = sha256Hex(canonicalJson({ ...HOST, ...preview }));
+  const h = phoneHarness();
+  const inner = h.io.createClient();
+  h.io.createClient = () => ({
+    rpc: async (name, args) => (name === "fn_contact_phone_numbers_backfill_range" && args.p_apply
+      ? { data: null, error: { message: "TypeError: fetch failed" } }
+      : inner.rpc(name, args)),
+  });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", confirm], h.io), 1);
+  const message = h.err.join("");
+  assert.doesNotMatch(message, /Nothing was applied/);
+  assert.match(message, /response was lost/);
+  assert.match(message, /rollback --run <id>/);
+
+  // lost response on a later range: the run id is known, confirmed through run info, and named
+  const later = phoneHarness();
+  const inner2 = later.io.createClient();
+  let applies = 0;
+  later.io.createClient = () => ({
+    rpc: async (name, args) => {
+      if (name === "fn_contact_phone_numbers_backfill_range" && args.p_apply && ++applies === 2) return { data: null, error: { message: "TypeError: fetch failed" } };
+      return inner2.rpc(name, args);
+    },
+  });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", confirm], later.io), 1);
+  assert.match(later.err.join(""), new RegExp(`rollback --run ${RUN}`));
+  assert.doesNotMatch(later.err.join(""), /Nothing was applied/);
+});
+
+test("phone-backfill batch size is validated and sets the range size", async () => {
+  assert.throws(() => parseArgs(["phone-backfill", "--org", ORG, "--batch-size", "0"]), /batch-size/);
+  assert.throws(() => parseArgs(["phone-backfill", "--org", ORG, "--batch-size", "9999"]), /batch-size/);
+  const h = phoneHarness();
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--batch-size", "500"], h.io), 0);
+  assert.equal(h.calls[0].args.p_limit, 500);
+});
+
+test("rollback of a batched phone run pages its before-images and finishes the run", async () => {
+  const h = phoneHarness({ runKind: "phone_backfill" });
+  assert.equal(await run(["rollback", "--org", ORG, "--run", RUN], h.io), 0);
+  const preview = JSON.parse(h.out.join(""));
+  assert.equal(preview.beforeImages, 30);
+  const a = phoneHarness({ runKind: "phone_backfill" });
+  assert.equal(await run(["rollback", "--org", ORG, "--run", RUN, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+  assert.deepEqual(a.calls.filter((c) => c.args.p_apply).map((c) => c.args.p_expected_digest), ["1".repeat(64), "2".repeat(64), "3".repeat(64)]);
+  const finish = a.calls.at(-1);
+  assert.equal(finish.name, "fn_contact_phone_numbers_backfill_rollback_finish");
+  assert.equal(finish.args.p_restored, 30);
+});
+for (const [command, rpcName, kind] of [
+  ["ack-legacy-prompts", "fn_my_leads_ack_legacy_call_prompts", "ack_legacy_prompts"],
+]) {
+  test(`${command} previews, refuses apply without the confirm hash, and applies through its own function`, async () => {
+    const preview = { kind, fingerprint: "e".repeat(64), candidates: 5 };
+    const h = harness({ preview });
+    assert.equal(await run([command, "--org", ORG], h.io), 0);
+    assert.deepEqual(h.calls, [{ name: rpcName, args: { p_org_id: ORG, p_apply: false } }]);
+    const none = harness({ preview });
+    assert.equal(await run([command, "--org", ORG, "--apply"], none.io), 1);
+    assert.equal(none.calls.length, 1);
+    const a = harness({ preview });
+    assert.equal(await run([command, "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+    assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint });
+  });
+}

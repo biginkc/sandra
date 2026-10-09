@@ -28,12 +28,21 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p1c2-dup-fix` | none | Claude Sonnet 5.5 builder | in progress (pre-enable fix: reclaim-after-reschedule duplicate text) |
 | `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
-| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
+| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a`; owner Claude Sonnet 5.5 builder, pre-enable fixes in progress (keep key after expired callback; resume polling on flag change) |
+| `claude/my-leads-p2-acceptance` | #813 | Claude Sonnet 5.5 builder | in progress; Phase 2 acceptance slice (fixture, T0/T3/T7/T8 spec, CI step), based on `claude/my-leads-p2-ui`; no migration, no `src/` change |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer: Claude Sonnet 5.5 (builder) | draft, built, NOT merged; main merged (f064f455); Opus YES at `bb86747e` pre-merge |
-| `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft, built, NOT merged; Opus YES at `a908ad1c` |
+| `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes applied (dock key, notFound, action guards, schemaReady gate dropped, lead_comps probe signature); needs Opus re-review |
+| `claude/my-leads-autoprompt-guard` | none | Claude Sonnet 5.5 builder | in progress: auto-prompt foreign-dialog guard used Radix `data-state=open`; Sandra is Base UI (`data-open`). client.tsx guard selector + RTL test only. |
 | `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
-| `p3-send-card`, `p1a-retire` | none | none | NOT built yet |
+| `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
+| `claude/my-leads-p3-offer` | #815 (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
+| `claude/my-leads-callscreen-dial` | #818 (draft, base `main`) | Claude Sonnet 5.5 builder | in progress: call screen Call button wired to the shared My Leads dial path; deletes dial-stub.ts |
+| `claude/my-leads-p3-facts` | none yet | Claude Sonnet 5.5 builder | in progress (TECH-PLAN 3.12 call facts: migration 20261007190000, claim/complete job, flag-off cron, extractor with null prompt, chips) |
+| `claude/my-leads-stress-harness` | #822 (draft, base `main`) | Claude Sonnet 5.5 builder | built, pending review: chaos-day stress-test tooling under `e2e/stress/` (replay engine, oracles, gates, self-test, browser specs, lane guards, live leg DISABLED). Gaps closed 2026-10-05: browser lane green locally, contract-card runner, live-leg UI driver (disabled, never CI), pf egress;. Runs only at the very end, executed by Codex. |
+| `claude/my-leads-phone-backfill` | draft (see PR) | Claude Sonnet 5.5 builder | in progress: batched phone-backfill preview/apply (migration 20261007200000 + script paging) so it runs within the statement timeout on prod; blocks Dialpad activation |
+| `p1a-retire` | none | none | NOT built yet |
+| `claude/my-leads-pcp-second-tab` | none yet | Claude Sonnet 5.5 builder | in progress (pre-enable fix: a second tab saving the same post-call attempt under a different key duplicates the note and appointment; migration 20261008090000 makes finalize single-shot per attempt) |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).

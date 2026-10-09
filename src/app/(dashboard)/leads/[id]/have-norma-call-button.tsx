@@ -3,20 +3,28 @@
 import { PhoneCall } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { describeRequestResult, normaBlockText } from "@/lib/norma/block-copy";
+import { markReviewedText } from "@/lib/norma/mark-reviewed";
+import { normaOutcomeLabel } from "@/lib/norma/outcome-labels";
+import { NORMA_TONE_CLASSES, normaOutcomeTone, normaRequestTone } from "@/lib/norma/tone";
+import { cn } from "@/lib/utils";
 import type { NormaCallPreview } from "@/lib/norma/preview";
 import { formatPhoneDisplay } from "@/lib/phone-format";
 
-import { previewNormaCall, requestNormaCall } from "./norma-actions";
+import { markNormaCallReviewed, previewNormaCall, requestNormaCall } from "./norma-actions";
 
 const IN_FLIGHT_REFRESH_MS = 30_000;
 const POLLED_STATUSES: ReadonlySet<string> = new Set(["requested", "dispatching", "dispatched"]);
 
-export type NormaOpenRequest = { id: string; status: string };
+export type NormaOpenRequest = { id: string; status: string; attempt?: number | null };
+
+/** The lead's newest finished Norma call, shown as a coloured badge beside the button. */
+export type NormaLastResult = { id: string; outcome: string | null };
 
 type Props = {
   propertyId: string;
@@ -24,17 +32,18 @@ type Props = {
   propertyAddress: string;
   /** The lead's open Norma request (any non-terminal status), if there is one. */
   openRequest?: NormaOpenRequest | null;
+  lastResult?: NormaLastResult | null;
 };
 
-type Notice = { tone: "success" | "warning" | "error"; text: string };
+type Notice = { tone: "success" | "warning" | "error"; text: string; code?: string };
 
 /** Plain state label and explanation for a request that is still open. */
-export function describeOpenNormaRequest(status: string): { label: string; detail: string } {
+export function describeOpenNormaRequest(status: string, attempt?: number | null): { label: string; detail: string } {
   switch (status) {
     case "needs_review":
       return {
         label: "Norma call needs review",
-        detail: "This call did not end with a clear result. A person needs to review it. No second call can be started until it is resolved.",
+        detail: "This call did not end with a clear result. A person needs to review it. No second call can be started until it is marked reviewed.",
       };
     case "dispatch_unknown":
       return {
@@ -42,6 +51,13 @@ export function describeOpenNormaRequest(status: string): { label: string; detai
         detail: "Sandra could not confirm this call went out. It is being checked automatically. No second call can be started meanwhile.",
       };
     default:
+      if (attempt === 2) {
+        return {
+          label: "Norma calling again",
+          detail:
+            "The first call was not answered, so Norma is calling once more. This is the last try. The summary will appear on this lead when the call ends.",
+        };
+      }
       return {
         label: "Norma call in progress",
         detail: "Norma has been asked to call this seller. The summary will appear on this lead when the call ends.",
@@ -49,7 +65,7 @@ export function describeOpenNormaRequest(status: string): { label: string; detai
   }
 }
 
-export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, openRequest = null }: Props) {
+export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, openRequest = null, lastResult = null }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState<NormaCallPreview | "loading" | null>(null);
@@ -57,10 +73,13 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [reviewing, startReviewing] = useTransition();
+  const [reviewedRequestId, setReviewedRequestId] = useState<string | null>(null);
   const previewSeq = useRef(0);
 
   const inFlight = openRequest;
-  const state = inFlight ? describeOpenNormaRequest(inFlight.status) : null;
+  const state = inFlight ? describeOpenNormaRequest(inFlight.status, inFlight.attempt) : null;
+  const inFlightTone = inFlight ? normaRequestTone(inFlight.status, null) : null;
 
   // While a request is open, re-read the lead now and then so the button
   // follows the call to its end without a manual reload.
@@ -104,7 +123,7 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
         return;
       }
       const described = describeRequestResult(result);
-      setNotice(described);
+      setNotice({ ...described, code: result.code });
       // An accepted request, an uncertain send and an already-open request all
       // hold the lead: never offer a second click; the refresh shows the state.
       if (result.ok || result.code === "in_flight") {
@@ -116,11 +135,54 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
     });
   }
 
+  // "Mark reviewed" only exists while this lead's request is parked for review.
+  const canMarkReviewed = inFlight?.status === "needs_review";
+  const alreadyMarked = inFlight !== null && reviewedRequestId === inFlight.id;
+
+  function markReviewed() {
+    if (!inFlight || reviewing || alreadyMarked || !canMarkReviewed) return;
+    const requestId = inFlight.id;
+    startReviewing(async () => {
+      let result;
+      try {
+        result = await markNormaCallReviewed(propertyId, requestId);
+      } catch {
+        result = { ok: false, code: "error" } as const;
+      }
+      const described = markReviewedText(result);
+      setNotice(described);
+      if (described.tone === "success") {
+        toast.success(described.text);
+        setReviewedRequestId(requestId);
+        // The hold is gone: close the panel so it does not sit on a stale view; the refresh shows the lead's new state.
+        setOpen(false);
+        setNotice(null);
+      } else {
+        toast.error(described.text);
+      }
+      // Success clears the hold; "no longer waiting" means the page was stale. Either way re-read the lead.
+      if (result.ok || result.code === "not_waiting") router.refresh();
+    });
+  }
+
   const callable = preview && preview !== "loading" && preview.callable ? preview : null;
   const blockText = preview && preview !== "loading" && !preview.callable ? normaBlockText(preview.block) : null;
   const previewPhone = preview && preview !== "loading" ? (preview.phoneE164 ?? null) : null;
 
   return (
+    <>
+    {!inFlight && lastResult ? (
+      <span
+        className={cn(
+          "inline-flex h-8 items-center rounded-full border px-2.5 text-xs font-medium",
+          NORMA_TONE_CLASSES[normaOutcomeTone(lastResult.outcome)],
+        )}
+        data-testid="norma-last-result"
+        data-tone={normaOutcomeTone(lastResult.outcome)}
+      >
+        Norma: {normaOutcomeLabel(lastResult.outcome)}
+      </span>
+    ) : null}
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger
         render={
@@ -130,6 +192,8 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
             size="sm"
             data-testid="have-norma-call-trigger"
             data-state-label={state?.label}
+            data-tone={inFlightTone ?? undefined}
+            className={inFlightTone === "amber" ? NORMA_TONE_CLASSES.amber : undefined}
           >
             <PhoneCall className="h-3.5 w-3.5" />
             {state ? state.label : "Have Norma call"}
@@ -145,9 +209,23 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
         </div>
 
         {state ? (
-          <p className="text-sm" data-testid="norma-call-state">
-            {state.detail}
-          </p>
+          <>
+            <p className="text-sm" data-testid="norma-call-state">
+              {state.detail}
+            </p>
+            {canMarkReviewed ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={markReviewed}
+                disabled={reviewing || alreadyMarked}
+                data-testid="norma-mark-reviewed"
+              >
+                {reviewing ? "Marking…" : "Mark reviewed"}
+              </Button>
+            ) : null}
+          </>
         ) : (
           <>
             {preview === "loading" || preview === null ? (
@@ -199,11 +277,13 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
             role={notice.tone === "error" ? "alert" : "status"}
             className={notice.tone === "error" ? "text-destructive text-sm" : "text-sm"}
             data-testid="norma-call-notice"
+            data-code={notice.code}
           >
             {notice.text}
           </p>
         ) : null}
       </PopoverContent>
     </Popover>
+    </>
   );
 }

@@ -87,6 +87,11 @@ jobs:
           # Keep real thread-detail loading and read receipts on a fresh
           # server; the shared run stalled these requests before mark-read.
           npm run test:e2e -- e2e/cockpit-thread-panel.spec.ts
+          # my-leads-close Phase 2 slice (TECH-PLAN Phase 4, 4.3): T0/T3/T7/T8 on their own fresh
+          # server. Synthetic non-training leads over the disposable DB's owner connection, the stub
+          # dial provider, and locally signed Dialpad webhook events; the shards below grep-invert it.
+          # Phase 2's activation gate (2.11) runs this file at the released SHA.
+          npm run test:e2e -- e2e/my-leads-close-phase2.spec.ts
           # my-leads-close (TECH-PLAN Phase 4, 4.3): the Phase 1 acceptance lane on its own fresh
           # server. It seeds a synthetic non-training lead over the disposable DB's owner connection,
           # turns the Phase 1 flags on for the test org in its own setup, and posts stubbed Dialpad
@@ -299,6 +304,30 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007100000_lead_comps_foundation.integration.test.ts
 
+      - name: "My Leads contract defaults - RLS, empty defaults, rollback (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007160000_acquisition_contract_defaults.integration.test.ts
+
+      - name: "My Leads offer projection - runner, recovery, open-contract guard (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts
+
+      - name: "My Leads call facts - claim/complete job, accept, RLS, rollback (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007190000_call_facts.integration.test.ts
+
       - name: My Leads housekeeping operator script (unit)
         run: node --test scripts/my-leads-housekeeping.test.mjs
 
@@ -360,7 +389,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts supabase/migrations/20261007200000_contact_phone_numbers_batched_backfill.integration.test.ts
 
       - name: My Leads Dialpad native matching (disposable DB)
         env:
@@ -393,6 +422,86 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100500_dialpad_artifact_fetches.integration.test.ts
+
+      - name: My Leads call prompt acknowledgement (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150000_call_prompt_acknowledgement.integration.test.ts
+
+      - name: Dialpad API dial support (eligibility patch, call slots) (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150100_dialpad_api_dial_support.integration.test.ts
+
+      - name: Dialpad unmatched event redaction (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150200_dialpad_unmatched_event_redaction.integration.test.ts
+
+      - name: Dialpad CTI custom_data OAuthApp wrapper (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008110000_dialpad_cti_custom_data_oauthapp.integration.test.ts
+
+      - name: Dialpad call audio (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008130000_dialpad_call_audio.integration.test.ts
+
+      - name: My Leads callbacks due (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts
+
+      - name: My Leads finalize single-shot per attempt (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008090000_finalize_single_shot_per_attempt.integration.test.ts
+
+      - name: Messages v2 auto-reply templates approval and outcome mapping (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts
+
+      - name: Messages v2 wrong-number and hostile reply mapping keys (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts
+
+      - name: Messages v2 template stale-claim sweeper (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/ai-responder/template-claims.integration.test.ts
 
       - name: Destroy disposable database
         if: always() && env.E2E_LOCAL_WORKDIR != ''

@@ -1,8 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, screen, waitFor } from "@testing-library/react"
+import { renderWithDialpad as render } from "@/components/dialpad/test-shell"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
 import { DailyCallClock } from "./_components/daily-call-clock"
+import { EMPTY_CALL_STATE } from "@/lib/my-leads/call-state"
 
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
@@ -11,11 +13,8 @@ const mocks = vi.hoisted(() => ({
   loadMyLeads: vi.fn(),
   loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
-  realDialpad: false,
   realQueue: false,
-  dialpadTargets: vi.fn(),
-  dialpadRecent: vi.fn(),
-  dialpadHandlers: [] as Array<((nonce: number) => void) | undefined>,
+  dialLead: vi.fn(),
   listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
@@ -49,22 +48,15 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
 }))
 
 vi.mock("./dialpad-actions", () => ({
-  verifyDialpadBindingAction: vi.fn(), listDialpadCallTargetsAction: mocks.dialpadTargets,
-  startDialpadCallAction: vi.fn(), getDialpadCallStatusAction: vi.fn(),
-  cancelDialpadCallAction: vi.fn(), listRecentDialpadCallsAction: mocks.dialpadRecent,
+  dialLeadAction: mocks.dialLead,
+  getDialpadCallStatusAction: vi.fn(async () => ({ ok: false, code: "not_configured", message: "" })),
+  cancelDialpadCallAction: vi.fn(),
+  ensureDialpadBindingAction: vi.fn(),
 }))
-vi.mock("./dialpad-recording-actions", () => ({
-  closeDialpadRecordingCaptureAction: vi.fn(), getDialpadRecordingBrowserStatusAction: vi.fn(),
-  mintDialpadRecordingNextEpochAction: vi.fn(), openDialpadRecordingCaptureAction: vi.fn(),
+vi.mock("./call-state-actions", () => ({
+  pollMyLeadsCallStateAction: vi.fn(async () => ({ ok: true, state: EMPTY_CALL_STATE })),
+  acknowledgeCallPromptAction: vi.fn(async () => ({ ok: true, status: "acknowledged" })),
 }))
-vi.mock("./_components/dialpad-panel", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./_components/dialpad-panel")>()
-  return { DialpadPanel: (props: React.ComponentProps<typeof actual.DialpadPanel>) => {
-    if (mocks.realDialpad) return React.createElement(actual.DialpadPanel, props)
-    mocks.dialpadHandlers.push(props.onCallRequestHandled)
-    return React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel")
-  }}
-})
 
 vi.mock("./rep-sms-composer", () => ({ RepSmsComposer: () => null }))
 vi.mock("./_components/queue", async (importOriginal) => {
@@ -237,11 +229,8 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeads.mockReset()
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
-    mocks.dialpadHandlers.length = 0
-    mocks.realDialpad = false
     mocks.realQueue = false
-    mocks.dialpadRecent.mockResolvedValue({ok:true,calls:[]})
-    mocks.dialpadTargets.mockResolvedValue({ok:true,contactId:'contact-1',phones:[{slot:1,masked:'••• ••• 0196'}],grants:[]})
+    mocks.dialLead.mockReset()
   })
 
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
@@ -284,100 +273,6 @@ describe("MyLeadsClient", () => {
     }
   })
 
-  it("keeps the real Dialpad chooser visible after the parent consumes a completed lookup", async () => {
-    mocks.realDialpad = true
-    const initial = snapshot("1842 Lantern Finch Lane")
-    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:initial,kpis})
-    const view = renderClient(initial,kpis,null,{
-      connectionId:"connection-1",allowedOrigins:["https://dialpad.com"],
-      binding:{status:"verified",dialpadUserId:"5551234"},grants:[],
-    })
-    const iframe = view.container.querySelector('iframe')!
-    act(() => window.dispatchEvent(new MessageEvent('message', {origin:'https://dialpad.com',source:iframe.contentWindow,
-      data:{api:'opencti_dialpad',version:'1.0',method:'user_authentication',payload:{user_authenticated:true,user_id:5551234}}})))
-    await userEvent.click(screen.getByRole('button',{name:'Start call'}))
-    await waitFor(()=>expect(mocks.dialpadTargets).toHaveBeenCalledWith({propertyId:'property-1',contactId:'contact-1'}))
-    await waitFor(()=>expect(screen.getByRole('button',{name:'Call'})).toBeEnabled())
-    expect(screen.getByRole('radio',{name:/0196/})).toBeInTheDocument()
-    view.unmount()
-  })
-
-  it("opens the real chooser after switching to the own queue and filtering an expanded lead", async () => {
-    mocks.realDialpad = true
-    const own = snapshot("1842 Lantern Finch Lane")
-    const other = snapshot("Other Lane")
-    other.stages.not_contacted!.rows[0].propertyId = 'other-property'
-    mocks.loadMyLeads.mockImplementation(async ({memberId}) => ({ok:true,snapshot:memberId==='rep-1'?own:other,kpis}))
-    const view = render(<MyLeadsClient viewer={{...viewer,isOwner:true}}
-      roster={{...roster,isOwner:true,members:[...roster.members,{...roster.members[0],id:'rep-2',label:'Other rep'}]}}
-      initialMemberId="rep-2" initialSnapshot={other} initialKpis={kpis}
-      dialpad={{connectionId:'c1',allowedOrigins:['https://dialpad.com'],binding:{status:'verified',dialpadUserId:'5551234'},grants:[]}} />)
-    const iframe=view.container.querySelector('iframe')!
-    act(()=>window.dispatchEvent(new MessageEvent('message',{origin:'https://dialpad.com',source:iframe.contentWindow,
-      data:{api:'opencti_dialpad',version:'1.0',method:'user_authentication',payload:{user_authenticated:true,user_id:5551234}}})))
-    await userEvent.selectOptions(screen.getByRole('combobox',{name:'Acquisitions member'}),'rep-1')
-    await waitFor(()=>expect(screen.getByTestId('queue-address')).toHaveTextContent('1842 Lantern Finch Lane'))
-    await userEvent.type(screen.getByRole('textbox',{name:'Search My Leads'}),'1842 Lantern Finch')
-    await waitFor(()=>expect(mocks.loadMyLeads).toHaveBeenLastCalledWith({memberId:'rep-1',search:'1842 Lantern Finch',period:'today'}))
-    await userEvent.click(screen.getByRole('button',{name:'Expand details'}))
-    await userEvent.click(screen.getByRole('button',{name:'Start call'}))
-    await waitFor(()=>expect(screen.getByRole('button',{name:'Call'})).toBeEnabled())
-    expect(mocks.dialpadTargets).toHaveBeenCalledWith({propertyId:'property-1',contactId:'contact-1'})
-    view.unmount()
-  })
-
-  it("opens the chooser through the actual queue row after member selection and filtering", async () => {
-    mocks.realDialpad = true
-    mocks.realQueue = true
-    const own = snapshot("1842 Lantern Finch Lane")
-    const other = snapshot("Other Lane")
-    other.stages.not_contacted!.rows[0].propertyId = 'other-property'
-    mocks.loadMyLeads.mockImplementation(async ({memberId}) => ({ok:true,snapshot:memberId==='rep-1'?own:other,kpis}))
-    const view = render(<MyLeadsClient viewer={{...viewer,isOwner:true}}
-      roster={{...roster,isOwner:true,members:[...roster.members,{...roster.members[0],id:'rep-2',label:'Other rep'}]}}
-      initialMemberId="rep-2" initialSnapshot={other} initialKpis={kpis}
-      dialpad={{connectionId:'c1',allowedOrigins:['https://dialpad.com'],binding:{status:'verified',dialpadUserId:'5551234'},grants:[]}} />)
-    const iframe=view.container.querySelector('iframe')!
-    act(()=>window.dispatchEvent(new MessageEvent('message',{origin:'https://dialpad.com',source:iframe.contentWindow,
-      data:{api:'opencti_dialpad',version:'1.0',method:'user_authentication',payload:{user_authenticated:true,user_id:5551234}}})))
-    await userEvent.selectOptions(screen.getByRole('combobox',{name:'Acquisitions member'}),'rep-1')
-    await screen.findByRole('button',{name:'Show details for 1842 Lantern Finch Lane'})
-    await userEvent.type(screen.getByRole('textbox',{name:'Search My Leads'}),'1842 Lantern Finch')
-    await waitFor(()=>expect(mocks.loadMyLeads).toHaveBeenLastCalledWith({memberId:'rep-1',search:'1842 Lantern Finch',period:'today'}))
-    await userEvent.click(screen.getByRole('button',{name:'Show details for 1842 Lantern Finch Lane'}))
-    await userEvent.click(screen.getByRole('button',{name:'Start call'}))
-    await waitFor(()=>expect(screen.getByRole('button',{name:'Call'})).toBeEnabled())
-    expect(mocks.dialpadTargets).toHaveBeenCalledWith({propertyId:'property-1',contactId:'contact-1'})
-    view.unmount()
-  })
-
-  it("keeps the Dialpad request handler stable across focus and 30-second queue refreshes", async () => {
-    vi.useFakeTimers()
-    const initial = snapshot("106 Fixture Lane")
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: { ...initial, snapshotAt: "2026-09-11T14:01:00.000Z" }, kpis })
-    const dialpad = {
-      connectionId: "connection-1",
-      allowedOrigins: ["https://dialpad.com"],
-      binding: { status: "verified", dialpadUserId: "5551234" },
-      grants: [],
-    } as React.ComponentProps<typeof MyLeadsClient>["dialpad"]
-    const view = renderClient(initial, kpis, null, dialpad)
-    try {
-      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Start call" })) })
-      expect(screen.getByTestId("dialpad-panel-stub")).toBeInTheDocument()
-      const firstHandler = mocks.dialpadHandlers.at(-1)
-      expect(firstHandler).toBeDefined()
-      await act(async () => { window.dispatchEvent(new Event("focus")) })
-      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
-      expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2)
-      expect(mocks.dialpadHandlers.length).toBeGreaterThan(1)
-      expect(mocks.dialpadHandlers.every((handler) => handler === firstHandler)).toBe(true)
-    } finally {
-      view.unmount()
-      vi.useRealTimers()
-    }
-  })
-
   it.each(["result", "rejection"])("marks stale counts and resumes polling after a refresh %s", async mode => {
     vi.useFakeTimers()
     const initial = snapshot("106 Fixture Lane")
@@ -407,20 +302,6 @@ describe("MyLeadsClient", () => {
     }
   })
 
-  it("shows lookup loading, then enables the actual call selector", async () => {
-    const user = userEvent.setup()
-    let resolve!: (value: unknown) => void
-    mocks.loadMyLeadCallReferences.mockReturnValue(new Promise(r => { resolve = r }))
-    renderClient(snapshot("106 Fixture Lane"))
-    await user.click(screen.getByRole("button", { name: "Log attempt" }))
-    expect(screen.getByRole("status")).toHaveTextContent("Loading Sandra calls")
-    expect(screen.getByRole("option", { name: "Sandra" })).toBeDisabled()
-    resolve({ ok: true, options: [{ id: "call-1", label: "Today at 9 AM" }] })
-    await waitFor(() => expect(screen.getByRole("option", { name: "Sandra" })).toBeEnabled())
-    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
-    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
-  })
-
   it.each(["result", "rejection"])("retries a lookup %s inside the dialog without losing the note", async mode => {
     const user = userEvent.setup()
     if (mode === "result") mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: false, message: "Failed" })
@@ -435,21 +316,23 @@ describe("MyLeadsClient", () => {
     expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledTimes(2)
   })
 
-  it("ignores a stale lookup after closing and reopening the same lead", async () => {
+  it("dials through the API once per click while in flight and shows the dial status", async () => {
     const user = userEvent.setup()
-    let resolveOld!: (value: unknown) => void
-    mocks.loadMyLeadCallReferences.mockReturnValueOnce(new Promise(r => { resolveOld = r }))
-    mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: true, options: [{ id: "new-call", label: "Current call" }] })
-    renderClient(snapshot("106 Fixture Lane"))
-    await user.click(screen.getByRole("button", { name: "Log attempt" }))
-    await user.click(await screen.findByRole("button", { name: "Cancel" }))
-    await user.click(screen.getByRole("button", { name: "Log attempt" }))
-    await screen.findByLabelText("Source")
-    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
-    expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call")
-    resolveOld({ ok: true, options: [{ id: "old-call", label: "Stale call" }] })
-    await waitFor(() => expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call"))
-    expect(screen.queryByRole("option", { name: "Stale call" })).not.toBeInTheDocument()
+    let resolve!: (value: unknown) => void
+    mocks.dialLead.mockReturnValue(new Promise(r => { resolve = r }))
+    const dialpad = { connectionId: "c1", binding: { status: "verified", dialpadUserId: "5551234" }, grants: [] } as React.ComponentProps<typeof MyLeadsClient>["dialpad"]
+    renderClient(snapshot("106 Fixture Lane"), kpis, null, dialpad)
+    await user.click(screen.getByRole("button", { name: "Start call" }))
+    await user.click(screen.getByRole("button", { name: "Start call" }))
+    expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+    expect(mocks.dialLead).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      contactId: "contact-1",
+      idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+    await act(async () => { resolve({ ok: true, intentId: "intent-1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 }) })
+    expect(await screen.findByTestId("dial-status")).toBeInTheDocument()
+    expect(mocks.dialLead).toHaveBeenCalledTimes(1)
   })
 
   it("preserves expanded queue details when router refresh supplies new initial props", async () => {
