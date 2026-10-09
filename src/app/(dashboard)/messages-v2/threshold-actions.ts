@@ -92,3 +92,77 @@ export async function setLabelRule(input: SetLabelRuleInput): Promise<Result<Set
     return errFromUnknown(e, "LABEL_RULE_UPDATE_FAILED");
   }
 }
+
+export type NurtureDripMap = {
+  maybeLater: string | null;
+  checkIn60: string | null;
+  listedNotSelling: string | null;
+  hotBookAppointment: string | null;
+};
+
+export type SetNurtureAutoDripInput = {
+  configId: string;
+  enabled: boolean;
+  /** The drip the owner mapped to each nurture route; all three required to turn on. */
+  drips: NurtureDripMap;
+};
+
+/**
+ * Owner-only switch: Jev's auto-applied `nurture` also enrols the lead in the
+ * drip the owner mapped to that lead's route. Takes exactly what the owner
+ * confirmed; the real authorization boundary is `fn_set_nurture_auto_drip`
+ * (active org owner).
+ */
+export async function setNurtureAutoDrip(
+  input: SetNurtureAutoDripInput,
+): Promise<Result<{ enabled: boolean; drips: NurtureDripMap }>> {
+  if (typeof input.enabled !== "boolean" || !input.configId || !input.drips) {
+    return { ok: false, error: { code: "VALIDATION", message: "Missing switch value." } };
+  }
+  const { maybeLater, checkIn60, listedNotSelling, hotBookAppointment } = input.drips;
+  if (input.enabled && !(maybeLater && checkIn60 && listedNotSelling && hotBookAppointment)) {
+    return { ok: false, error: { code: "VALIDATION", message: "Choose all four drips before turning this on." } };
+  }
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("fn_set_nurture_auto_drip", {
+      p_config_id: input.configId,
+      p_enabled: input.enabled,
+      p_maybe_later_sequence_id: maybeLater as string,
+      p_check_in_60_sequence_id: checkIn60 as string,
+      p_listed_not_selling_sequence_id: listedNotSelling as string,
+      p_hot_book_appointment_sequence_id: hotBookAppointment as string,
+    });
+    if (error) {
+      const message = error.message.includes("FORBIDDEN")
+        ? "Only an org owner can change this."
+        : error.message.includes("DRIP_UNAVAILABLE")
+          ? "One of those drips is not active. Choose another."
+          : error.message;
+      return { ok: false, error: { code: "NURTURE_AUTO_DRIP_UPDATE_FAILED", message } };
+    }
+    const result = data as {
+      nurtureAutoDrip: boolean;
+      maybeLaterSequenceId: string | null;
+      checkIn60SequenceId: string | null;
+      listedNotSellingSequenceId: string | null;
+      hotBookAppointmentSequenceId: string | null;
+    } | null;
+    if (!result) {
+      return { ok: false, error: { code: "NURTURE_AUTO_DRIP_UPDATE_FAILED", message: "Unexpected empty response" } };
+    }
+    revalidatePath("/messages-v2");
+    return ok({
+      enabled: result.nurtureAutoDrip,
+      drips: {
+        maybeLater: result.maybeLaterSequenceId,
+        checkIn60: result.checkIn60SequenceId,
+        listedNotSelling: result.listedNotSellingSequenceId,
+        hotBookAppointment: result.hotBookAppointmentSequenceId,
+      },
+    });
+  } catch (e) {
+    reportError(e, { tags: { surface: "set_nurture_auto_drip" } });
+    return errFromUnknown(e, "NURTURE_AUTO_DRIP_UPDATE_FAILED");
+  }
+}

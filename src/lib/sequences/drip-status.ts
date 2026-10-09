@@ -22,6 +22,7 @@ const REASONS: Record<string, string> = {
   consent_revoked: "Lead opted out of texts.",
   appointment_booked: "An appointment was booked.",
   call_in_progress: "A call is in progress.",
+  person_took_over: "A person took over this lead.",
   manual: "Drip was paused by a person.",
   dnc: "Lead is marked do not contact.",
   terminal_dispo: "Lead reached a final disposition.",

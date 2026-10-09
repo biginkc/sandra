@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Rollback-chain proof for the Jev + messages-v2 migrations
-// (20261008140000 .. 20261009040000 -- 59 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200) + 1 templates (310000) + 1 wrong-number/hostile mapping keys (320000)).
+// (20261008140000 .. 20261009050000 -- 60 migrations: 28 inherited Jev + 13 messages-v2 (143000..144200) + 4 Phase 1 holds/alerts + 1 scorecard + 1 replay harness + 1 durable suppression (212000) + 1 new-only alert watermark + 1 Jev-only mode (220000) + 1 holds New/Backlog + 1 Luna suggestions + 1 opted_out human-only (300000) + 1 Jev action undo (300100) + 1 WN-all confirm suppresses (300200) + 1 templates (310000) + 1 wrong-number/hostile mapping keys (320000) + 1 nurture auto-drip (20261009050000)).
 //
 // Against a DISPOSABLE database on the local Postgres it:
 //   1. clones schema-only auth/storage/realtime from an existing local DB,
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
-//   3. applies the 59 rollbacks in REVERSE order,
+//   3. applies the 60 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 59 migrations forward again.
+//   5. re-applies the 60 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //
@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261009040000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 59); // 55 on main (through 300200) + templates (310000) + 2 Norma queue migrations (20261009010000/010100) + wrong-number/hostile mapping keys (20261009040000)
+const LAST = process.env.CHAIN_LAST ?? "20261009050000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 60); // 55 on main (through 300200) + templates (310000) + 2 Norma queue migrations (20261009010000/010100) + wrong-number/hostile mapping keys (20261009040000) + nurture auto-drip (20261009050000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -72,7 +72,7 @@ function phase(name, files, dir) {
 // Phase 4 (templates, 20261008310000) objects: the mapping + approval-audit
 // tables, both RPCs, the approval guard trigger/function, the claims sweep
 // index, and the approval columns/constraint added to sms_templates.
-const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check";
+const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check|fn_set_nurture_auto_drip|fn_guard_nurture_mapped_sequence_delete|fn_enrollment_first_send_floor|trg_enrollment_first_send_floor|fn_hot_enrollment_resume_guard|trg_hot_enrollment_resume_guard|fn_pause_hot_drip_on_person_assignment|trg_pause_hot_drip_on_person_assignment|trg_guard_nurture_mapped_sequence_delete|ai_responder_configs_nurture_auto_drip_sequences_check";
 const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name
@@ -94,7 +94,8 @@ select kind || ' ' || name from (
    where n.nspname = 'public' and t.typname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|messages_v2_|luna_)' and t.typtype <> 'c'
   union all
   select 'column', table_name || '.' || column_name from information_schema.columns
-   where table_schema = 'public' and table_name = 'sms_templates' and column_name ~ '^approved_'
+   where table_schema = 'public' and ((table_name = 'sms_templates' and column_name ~ '^approved_')
+      or (table_name = 'ai_responder_configs' and column_name ~ '^nurture_(auto_drip|drip_)'))
   union all
   select 'constraint', conrelid::regclass::text || '.' || conname from pg_constraint
    where conname ~ '(${TPL})'

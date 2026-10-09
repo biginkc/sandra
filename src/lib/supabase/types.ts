@@ -1025,6 +1025,11 @@ export type Database = {
           max_turns: number
           min_confidence: number
           model: string
+          nurture_auto_drip: boolean
+          nurture_drip_check_in_60_sequence_id: string | null
+          nurture_drip_hot_book_appointment_sequence_id: string | null
+          nurture_drip_listed_not_selling_sequence_id: string | null
+          nurture_drip_maybe_later_sequence_id: string | null
           org_id: string
           outbound_mode: string
           reply_generation: string
@@ -1046,6 +1051,11 @@ export type Database = {
           max_turns?: number
           min_confidence?: number
           model?: string
+          nurture_auto_drip?: boolean
+          nurture_drip_check_in_60_sequence_id?: string | null
+          nurture_drip_hot_book_appointment_sequence_id?: string | null
+          nurture_drip_listed_not_selling_sequence_id?: string | null
+          nurture_drip_maybe_later_sequence_id?: string | null
           org_id: string
           outbound_mode?: string
           reply_generation?: string
@@ -1067,6 +1077,11 @@ export type Database = {
           max_turns?: number
           min_confidence?: number
           model?: string
+          nurture_auto_drip?: boolean
+          nurture_drip_check_in_60_sequence_id?: string | null
+          nurture_drip_hot_book_appointment_sequence_id?: string | null
+          nurture_drip_listed_not_selling_sequence_id?: string | null
+          nurture_drip_maybe_later_sequence_id?: string | null
           org_id?: string
           outbound_mode?: string
           reply_generation?: string
@@ -3844,6 +3859,7 @@ export type Database = {
           homeowner_contact_id: string | null
           id: string
           is_dnc_locked: boolean
+          last_person_takeover_at: string | null
           is_training: boolean
           is_residential: boolean | null
           is_seasonal: boolean | null
@@ -3917,6 +3933,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          last_person_takeover_at?: string | null
           is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
@@ -3990,6 +4007,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          last_person_takeover_at?: string | null
           is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
@@ -4449,7 +4467,10 @@ export type Database = {
           contact_id: string | null
           current_step_index: number
           enrolled_at: string
+          auto_enrolled_route: string | null
           enrolled_by_user_id: string | null
+          first_send_not_before: string | null
+          hot_fence_message_id: string | null
           id: string
           next_run_at: string | null
           org_id: string
@@ -4464,7 +4485,10 @@ export type Database = {
           contact_id?: string | null
           current_step_index?: number
           enrolled_at?: string
+          auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          first_send_not_before?: string | null
+          hot_fence_message_id?: string | null
           id?: string
           next_run_at?: string | null
           org_id: string
@@ -4479,7 +4503,10 @@ export type Database = {
           contact_id?: string | null
           current_step_index?: number
           enrolled_at?: string
+          auto_enrolled_route?: string | null
           enrolled_by_user_id?: string | null
+          first_send_not_before?: string | null
+          hot_fence_message_id?: string | null
           id?: string
           next_run_at?: string | null
           org_id?: string
@@ -8183,6 +8210,17 @@ export type Database = {
       // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
       fn_update_jev_automatic_classification: {
         Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
+      fn_set_nurture_auto_drip: {
+        Args: {
+          p_check_in_60_sequence_id: string
+          p_config_id: string
+          p_enabled: boolean
+          p_hot_book_appointment_sequence_id: string
+          p_listed_not_selling_sequence_id: string
+          p_maybe_later_sequence_id: string
+        }
         Returns: Json
       }
       fn_confirm_jev_lead_decision: {

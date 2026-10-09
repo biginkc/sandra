@@ -111,6 +111,8 @@ export default defineConfig({
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
+      "supabase/migrations/20261009050000_nurture_auto_drip.integration.test.ts",
+      "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",

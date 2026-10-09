@@ -337,6 +337,8 @@ describe("classifyForDispatch", () => {
       kind: "jev_nurture",
       classificationRunId: "run-1",
       nativeConfidence: 0.95,
+      readyTimeframe: null,
+      listingStatus: null,
       escalationReason: null,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,

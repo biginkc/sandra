@@ -1,7 +1,7 @@
 import type { JevOutcome } from "./types";
 
 /** Version the rubric as well as the response shape: old scores are not interchangeable. */
-export const JEV_SCHEMA_VERSION = "2";
+export const JEV_SCHEMA_VERSION = "3";
 export const JEV_POLICY_VERSION = "2026-09-20-new-lead-review";
 export const JEV_MODEL = "jev-1.13.0";
 
@@ -61,6 +61,29 @@ export function buildQuestions(includeReplyIntent: boolean): Record<string, Choi
         needs_review: "Other evidence requires human review.",
         not_applicable: "No human follow-up indicated.",
         uncertain: "Insufficient evidence to choose a reason.",
+      },
+    },
+    // Nurture routing questions. Texts approved verbatim by Jarrad (2026-10-07); do not edit without a human approving the exact new text.
+    ready_timeframe: {
+      type: "choice",
+      instructions:
+        "If the seller indicates when they might be ready to sell, which timeframe does the latest inbound message support?",
+      criteria: {
+        within_30_days: "Ready or open to selling within about a month.",
+        one_to_six_months: "Indicates roughly one to six months.",
+        six_to_twelve_months: "Indicates roughly six to twelve months.",
+        over_a_year: "Indicates more than a year away.",
+        not_stated: "No timeframe given.",
+        uncertain: "A timeframe is mentioned but cannot be determined.",
+      },
+    },
+    listing_status: {
+      type: "choice",
+      instructions: "Does the seller say the property is currently listed for sale or being shown?",
+      criteria: {
+        listed: "The seller says it is listed with an agent or has showings.",
+        not_listed_or_not_stated: "The seller does not say it is listed.",
+        uncertain: "Cannot tell from the message.",
       },
     },
   };

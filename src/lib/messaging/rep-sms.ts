@@ -720,6 +720,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
       client,
       {
         origin: "manual",
+        takeoverActorId: context.actorId,
         propertyId: input.propertyId,
         contactId,
         body: composition.finalBody,
