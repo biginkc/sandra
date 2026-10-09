@@ -1,4 +1,6 @@
 "use server";
+
+import { finalizesExistingAttempt } from "@/lib/my-leads/attempt-command";
 import { revalidatePath } from "next/cache";
 import { reportError } from "@/lib/errors/report";
 import type { Json } from "@/lib/supabase/types";
@@ -385,7 +387,7 @@ export async function submitMyLeadCommand(
         const key =
           typeof input.idempotencyKey === "string" ? input.idempotencyKey : "";
         const operation =
-          input.source === "sandra"
+          finalizesExistingAttempt(input)
             ? "finalize_acquisition_attempt"
             : "log_acquisition_attempt";
         let receipt: { data: unknown; error: unknown } | null = null;
@@ -434,7 +436,7 @@ export async function submitMyLeadCommand(
     }
   }
   const rpcName =
-    command === "log-attempt" && input.source === "sandra"
+    command === "log-attempt" && finalizesExistingAttempt(input)
       ? "fn_finalize_acquisition_attempt"
       : commands[command];
   let rpc: {
@@ -486,6 +488,8 @@ export async function submitMyLeadCommand(
           "FORBIDDEN" as const,
         ),
       );
+    if (named(message, ["AMBIGUOUS_CALL_REFERENCE"]))
+      return ans(failure("rejected", "This recording matches more than one call. Select the call by date and time before saving."));
     // Another prompt (a second tab, or the call-screen dock) already saved this call under its own
     // key. Nothing was written, so this prompt must not write its note or next step either: the
     // blocked recovery (existing wording, Refresh) keeps the extras unflushed.
