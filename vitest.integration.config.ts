@@ -30,6 +30,7 @@ export default defineConfig({
     // suite cannot accidentally select it.
     exclude: [
       "supabase/migrations/20261009060100_dialpad_outcome_reconciliation.integration.test.ts",
+      "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       // Destructive + local-only (assertLocalOnlyEnvironment); runs via
       // vitest.filter-local.config.ts against a disposable local stack.

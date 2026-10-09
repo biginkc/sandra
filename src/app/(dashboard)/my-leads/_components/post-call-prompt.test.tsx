@@ -1,8 +1,10 @@
+vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress: vi.fn(async (): Promise<unknown[]> => []) }))
+vi.mock("@/lib/supabase/client", () => ({ createClient: vi.fn() }))
 import { fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const dripActions = vi.hoisted(() => ({ listDripChoices: vi.fn(), startDripForLeads: vi.fn() }))
+const dripActions = vi.hoisted(() => ({ listDripChoices: vi.fn(), startDripForLeads: vi.fn(), changeDripAction: vi.fn() }))
 vi.mock("@/app/(dashboard)/sequences/actions", () => dripActions)
 
 import { quickPickDueAt } from "@/lib/my-leads/quick-picks"
@@ -318,4 +320,26 @@ describe("PostCallPrompt dock variant", () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ outcome: "reached" }))
   })
+})
+
+
+it("offers explicit replacement after saving the attempt", async () => {
+  const { listDripProgress } = await import("@/lib/sequences/drip-progress")
+  vi.mocked(listDripProgress).mockResolvedValue([{ propertyId: "property-1", enrollmentId: "existing", sequenceId: "old", sequenceName: "Talking price", enrollmentStatus: "paused" }] as Awaited<ReturnType<typeof listDripProgress>>)
+  dripActions.listDripChoices.mockResolvedValue({ok:true,data:[{id:"drip-1",name:"Seller follow-up",textCount:4,days:90,firstSend:"Today"}]})
+  dripActions.changeDripAction.mockResolvedValue({ok:true,data:{status:"enrolled",reason:"Enrolled"}})
+  const onSubmit = vi.fn(async () => ({ ok:true as const, attemptRecorded:true as const }))
+  const onOpenChange = vi.fn()
+  const user = userEvent.setup()
+  setup({ onSubmit, onOpenChange })
+  await user.click(outcome("Reached"))
+  await user.click(screen.getByRole("button", {name:"Save"}))
+  expect(await screen.findByText(/Current drip:/)).toHaveTextContent("Talking price (paused)")
+  await user.click(screen.getByRole("button", {name:/Seller follow-up/}))
+  expect(dripActions.changeDripAction).not.toHaveBeenCalled()
+  await user.click(screen.getByRole("button", {name:"Switch to selected drip"}))
+  expect(dripActions.changeDripAction).toHaveBeenCalledWith("existing", "drip-1")
+  expect(onSubmit).toHaveBeenCalledOnce()
+  expect(onOpenChange).toHaveBeenCalledWith(false)
+  vi.mocked(listDripProgress).mockResolvedValue([])
 })
