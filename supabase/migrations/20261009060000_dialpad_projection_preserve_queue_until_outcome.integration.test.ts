@@ -31,6 +31,8 @@ async function withDb(fn: (db: Client) => Promise<void>) {
     if ((await db.query("select to_regprocedure('public.dialpad_advance_queue_after_outcome(uuid)') as f")).rows[0].f)
       await db.query(strip('../rollbacks/20261009060000_dialpad_projection_preserve_queue_until_outcome.sql'));
     await db.query(strip('./20261009060000_dialpad_projection_preserve_queue_until_outcome.sql'));
+    // Match CI's internal-helper ACL even if this local stack has broader default grants.
+    await db.query('revoke execute on function public.dialpad_cti_project_intent(uuid) from service_role');
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
 }
@@ -138,7 +140,8 @@ describe('Dialpad queue waits for rep outcome', () => {
       expect(l.activity[0].ended_at).not.toBeNull();
       expect(l.attempt[0].recording_url).toBe(SHARE);
       expect((await db.query('select first_call_started_at from public.acquisition_assignment_episodes where property_id=$1', [w.property])).rows[0].first_call_started_at).not.toBeNull();
-      await service(db, () => db.query('select public.dialpad_cti_project_intent($1)', [intent.intentId]));
+      // Replay through the service entrypoint; the projection helper is internal-only.
+      for (const e of call(w, String(intent.customData))) await deliver(w, e);
       expect(await queue(w)).toEqual(before);
       const key = randomUUID();
       await finalize(w, l.activity[0].id, key);
@@ -147,7 +150,8 @@ describe('Dialpad queue waits for rep outcome', () => {
       expect((await ledger(w)).attempt).toHaveLength(1);
       expect((await ledger(w)).attempt[0].outcome).toBe('no_answer');
       await finalize(w, l.activity[0].id, key);
-      await service(db, () => db.query('select public.dialpad_cti_project_intent($1)', [intent.intentId]));
+      // Replay through the service entrypoint; the projection helper is internal-only.
+      for (const e of call(w, String(intent.customData))) await deliver(w, e);
       expect(await queue(w)).toEqual(after);
     });
   });
