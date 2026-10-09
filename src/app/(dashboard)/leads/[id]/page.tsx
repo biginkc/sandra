@@ -537,7 +537,7 @@ export default async function LeadDetailPage({
   // logical top 20. A row below rank 20 in either subgroup cannot enter the
   // combined top 20, so this remains exact without an unbounded read.
   const callSelection =
-    "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+    "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
   const [startedCallsResult, unstartedCallsResult] = await Promise.all([
     supabase
       .from("call_activities")

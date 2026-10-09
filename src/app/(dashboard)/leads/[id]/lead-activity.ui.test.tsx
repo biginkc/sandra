@@ -349,3 +349,18 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
       .querySelector("time"),
   ).toHaveAttribute("dateTime", attempt.at);
 });
+
+
+it.each(["", "https://jitter.example.test"])("chooses history actions per provider in a mixed timeline (host: %s)", (jitterHost) => {
+  const calls = ["dialpad", "jitter", "sandra_softphone"].map((provider) => ({
+    id: provider, provider, created_at: "2026-10-08T12:00:00Z", started_at: "2026-10-08T12:00:00Z",
+    outcome: "connected_human", disposition: null, recording_status: "none", transcript_status: "none", summary_status: "none",
+    jitter_attempt_id: provider, jitter_session_id: null, call_recordings: [], call_transcripts: [],
+  } as CallActivityRollupRow));
+  render(<LeadActivityTimeline propertyId="property-123" initialMessages={[]} initialNotes={[]} initialEvents={[]} initialCalls={calls} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost={jitterHost} />);
+  const cards = screen.getAllByTestId("lead-activity-call");
+  expect(screen.queryByTitle("Jitter host not configured")).not.toBeInTheDocument();
+  expect(screen.queryAllByRole("link", { name: "Open call in Jitter" })).toHaveLength(jitterHost ? 1 : 0);
+  if (jitterHost) expect(screen.getByRole("link", { name: "Open call in Jitter" })).toHaveAttribute("href", "https://jitter.example.test/history?prospect_id=property-123");
+  expect(cards).toHaveLength(3);
+});
