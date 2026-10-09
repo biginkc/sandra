@@ -213,7 +213,7 @@ it('records a no-answer attempt, claims the exact obligation, and persists provi
       body:'forged body'},
     smsBody:'forged body',
   });
-  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null}});
+  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null,obligationId:'obligation-1'}});
   expect(mocks.rpc).toHaveBeenCalledWith('fn_log_acquisition_attempt',{p_input:expect.objectContaining({orgId:'actual-org',smsBody:'Hey, this is Mel with BMH, Maria\'s assistant.\n\nMaria wasn\'t able to reach you. What time would work for her to call you back?'} )});
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(1,'fn_claim_authorize_rep_sms_obligation',expect.objectContaining({p_obligation_id:'obligation-1',p_actor_id:'actor'}));
   expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({propertyId:'lead',assignmentId:'sender-1',to:'+18165550123',obligationFence:expect.objectContaining({obligationId:'obligation-1',claimToken:'claim-1',claimGeneration:1,actorId:'actor',propertyId:'lead',assignmentId:'sender-1',toNumber:'+18165550123'})}));
@@ -256,8 +256,8 @@ it('does not dispatch a second SMS when concurrent submissions observe the exact
   expect(claims).toBe(2);
   expect(mocks.dispatch).toHaveBeenCalledTimes(1);
   expect([first,second]).toEqual(expect.arrayContaining([
-    {ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null}},
-    {ok:true,attemptRecorded:true,followUp:{status:'sending',message:'already_in_progress'}},
+    {ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null,obligationId:'obligation-1'}},
+    {ok:true,attemptRecorded:true,followUp:{status:'sending',message:'already_in_progress',obligationId:'obligation-1'}},
   ]));
 });
 
@@ -273,7 +273,7 @@ it('records a stale dispatch fence as failed_not_dispatched', async()=>{
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
-  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'failed_not_dispatched',message:'stale dispatch fence'}});
+  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'failed_not_dispatched',message:'stale dispatch fence',obligationId:'obligation-1'}});
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(2,'fn_record_rep_sms_obligation_result',expect.objectContaining({p_state:'failed_not_dispatched'}));
 });
 
@@ -289,7 +289,7 @@ it('returns an early delivery callback result truthfully instead of reporting ac
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
-  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'delivery_failed',message:'carrier rejected'}});
+  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'delivery_failed',message:'carrier rejected',obligationId:'obligation-early'}});
 });
 
 describe('savePostCallExtras',()=>{
@@ -431,4 +431,34 @@ describe('loadMyLeadCallReferences',()=>{
       {id:'b',callOutcome:null,talkSeconds:null,provider:null},
     ]});
   });
+});
+
+
+it.each([undefined, null, "", "   "])("does not invent a disabled rep or saved text when the attempt receipt lacks an obligation (%s)", async obligationId => {
+  mocks.rpc.mockResolvedValue({ data: { ok: true, attemptId: "attempt-saved", obligationId }, error: null });
+  const result = await submitMyLeadCommand("log-attempt", {
+    propertyId: "lead", outcome: "no_answer",
+    followUp: { acquisitionsManager: "Jordan", introId: "mel-maria-assistant-1", introVersion: 2,
+      templateId: "no-answer-callback-time", templateVersion: 1, remainder: "When can Jordan call?" },
+  });
+  expect(result).toMatchObject({ ok: true, attemptRecorded: true, followUp: {
+    status: "blocked", obligationId: null,
+    message: expect.stringContaining("No saved follow-up text was confirmed"),
+  } });
+  expect(JSON.stringify(result)).not.toContain("not enabled");
+  expect(mocks.adminRpc).not.toHaveBeenCalled();
+  expect(mocks.dispatch).not.toHaveBeenCalled();
+});
+
+
+it.each(["required", "draft", "blocked", "unknown"])("preserves durable follow-up evidence and the actual %s state", async status => {
+  mocks.rpc.mockResolvedValue({ data: { ok: true, attemptId: "saved", obligation_id: "saved-follow-up" }, error: null });
+  mocks.adminRpc.mockResolvedValue({ data: { ok: false, state: status, reason: "review needed" }, error: null });
+  const result = await submitMyLeadCommand("log-attempt", {
+    propertyId: "lead", outcome: "no_answer",
+    followUp: { acquisitionsManager: "Jordan", introId: "mel-maria-assistant-1", introVersion: 2,
+      templateId: "no-answer-callback-time", templateVersion: 1, remainder: "When can Jordan call?" },
+  });
+  expect(result).toEqual({ ok: true, attemptRecorded: true, followUp: { status, message: "review needed", obligationId: "saved-follow-up" } });
+  expect(mocks.dispatch).not.toHaveBeenCalled();
 });

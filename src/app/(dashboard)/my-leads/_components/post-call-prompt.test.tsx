@@ -256,8 +256,11 @@ describe("PostCallPrompt", () => {
     expect(onRetryExtras).toHaveBeenCalledOnce()
   })
 
-  it("freezes a recorded no-answer attempt (receipt) instead of allowing a second save", async () => {
-    const onSubmit = vi.fn(async () => ({ ok: true as const, attemptRecorded: true as const, followUp: { status: "required" as const, message: "Still needs sending" } }))
+  it.each([
+    [null, "No saved follow-up was confirmed"],
+    ["obligation-1", "resume the saved follow-up"],
+  ])("freezes the saved attempt and shows recovery based on durable evidence (%s)", async (obligationId, guidance) => {
+    const onSubmit = vi.fn(async () => ({ ok: true as const, attemptRecorded: true as const, followUp: { status: "required" as const, message: "Still needs sending", obligationId } }))
     const user = userEvent.setup()
     render(<PostCallPrompt {...baseProps} {...linked} callReferenceOptions={refs()} onSubmit={onSubmit} />)
     await user.click(outcome("No answer"))
@@ -266,6 +269,9 @@ describe("PostCallPrompt", () => {
     expect(await screen.findByRole("button", { name: "Attempt recorded" })).toBeDisabled()
     expect(outcome("Voicemail")).toBeDisabled()
     expect(screen.getByTestId("post-call-receipt")).toHaveTextContent("Attempt saved")
+    expect(screen.getByText(new RegExp(guidance))).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Attempt recorded" }))
+    expect(onSubmit).toHaveBeenCalledOnce()
   })
 
   it("restores a frozen reconciliation payload and locks the form", () => {

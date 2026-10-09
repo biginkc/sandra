@@ -1,5 +1,7 @@
 "use client"
 
+import { savedFollowUpGuidance } from "@/lib/my-leads/follow-up-recovery"
+
 import { useContext, useEffect, useMemo, useState, type FormEvent } from "react"
 
 import {
@@ -64,6 +66,7 @@ function smsInfo(text: string) {
 type FollowUpState = {
   status: "required" | "draft" | "sending" | "accepted" | "delivered" | "delivery_failed" | "blocked" | "failed_not_dispatched" | "unknown"
   message?: string | null
+  obligationId?: string | null
 }
 
 export type AcquisitionAttemptDialogProps = {
@@ -178,12 +181,12 @@ export function AcquisitionAttemptDialog({
     if (outcome === "no_answer") {
       const nextFollowUp: FollowUpState = result.ok && result.followUp
         ? result.followUp
-        : { status: "required", message: "Attempt recorded. Follow-up still needs to be accepted or delivered." }
+        : { status: "unknown", message: "Attempt recorded. The follow-up text status could not be confirmed." }
       setFollowUpState(nextFollowUp)
       if (nextFollowUp.status === "accepted" || nextFollowUp.status === "delivered") {
         setSavedForDrip(true)
       } else {
-        setClientError(nextFollowUp.message ?? `Attempt recorded. Follow-up is ${nextFollowUp.status.replaceAll("_", " ")}. Your draft is retained.`)
+        setClientError(nextFollowUp.message ?? `Attempt recorded. Follow-up is ${nextFollowUp.status.replaceAll("_", " ")}. Do not record another attempt.`)
       }
       return
     }
@@ -545,7 +548,7 @@ export function AcquisitionAttemptDialog({
                 )}
                 {attemptRecorded && followUpState?.status !== "accepted" && followUpState?.status !== "delivered" && (
                   <p className="text-xs text-muted-foreground">
-                    This attempt is already recorded. Close this dialog and use the lead&apos;s Text lead action to resume the saved follow-up.
+                    {savedFollowUpGuidance(followUpState)}
                   </p>
                 )}
               </section>

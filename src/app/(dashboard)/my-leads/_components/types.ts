@@ -311,6 +311,7 @@ export type AcquisitionFormSubmitResult =
       /** The attempt may be durable before its SMS obligation is resolved. */
       attemptRecorded?: boolean
       followUp?: {
+        obligationId?: string | null
         status:
           | "required"
           | "draft"
