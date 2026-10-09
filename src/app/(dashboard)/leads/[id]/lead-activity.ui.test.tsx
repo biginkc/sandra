@@ -309,6 +309,7 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
       initialCalls={[
         {
           id: "physical-call",
+          provider_recording_url: "https://dialpad.com/recording.mp3",
           created_at: "2026-08-25T18:00:00.000Z",
           started_at: "2026-08-25T18:00:00.000Z",
           outcome: "completed",
@@ -339,6 +340,8 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
   );
   expect(screen.getAllByTestId("lead-activity-call")).toHaveLength(1);
   const physicalCall = within(screen.getByTestId("lead-activity-call"));
+  expect(physicalCall.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+  expect(physicalCall.queryByText("No recording captured")).not.toBeInTheDocument();
   expect(physicalCall.getByText("Reached")).toBeInTheDocument();
   expect(
     physicalCall.getByText("Seller wants a Friday callback"),
