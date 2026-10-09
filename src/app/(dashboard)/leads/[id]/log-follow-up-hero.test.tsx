@@ -1,3 +1,5 @@
+vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress: vi.fn(async () => []) }))
+vi.mock("@/lib/supabase/client", () => ({ createClient: vi.fn() }))
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -12,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }), usePathname: () => "/leads/lead-1" }))
 vi.mock("next/link", () => ({ default: ({ href, children }: { href: string; children: React.ReactNode }) => <a href={href}>{children}</a> }))
-vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn(), changeDripAction: vi.fn() }))
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({
   loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
@@ -118,7 +120,7 @@ describe("Log follow-up survives the hero re-parenting its actions", () => {
     expect(screen.getByLabelText("Note (optional)")).toHaveValue("Original note")
     expect(screen.getByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Reconcile saved change" }))
-    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Done without changing drip" })).toBeInTheDocument()
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ note: "Original note", idempotencyKey: (mocks.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey })
