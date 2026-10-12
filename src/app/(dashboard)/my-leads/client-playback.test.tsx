@@ -125,6 +125,106 @@ it("keeps the real recording player mounted through polling and focus updates th
     expect(mocks.routerRefresh).not.toHaveBeenCalled();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hide details for Recorded lead" })); });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByText("Recorded lead")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh list" })); });
     expect(screen.queryByText("Recorded lead")).not.toBeInTheDocument();
+  } finally { view.unmount(); }
+});
+
+
+it("preserves loaded pages across background refresh without opening details", async () => {
+  vi.useFakeTimers();
+  const initial = snapshot("First page lead");
+  initial.stages.not_contacted = { ...initial.stages.not_contacted!, totalCount: 3, filteredCount: 3, hasMore: true, cursor: "page-2" };
+  const extraRow = { ...initial.stages.not_contacted.rows[0], propertyId: "extra-lead", address: "Second page lead" };
+  mocks.stage.mockResolvedValue({ ok: true, snapshot: { ...initial, stages: { not_contacted: { ...initial.stages.not_contacted, rows: [extraRow], cursor: "page-3", hasMore: true } } } });
+  mocks.load.mockResolvedValue({ ok: true, snapshot: initial, kpis: { ...kpis, attempts: 8 }, drips: { active: [], replied: [], counts: {} } });
+  const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} />);
+  try {
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    expect(screen.getByText("Second page lead")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByText("Second page lead")).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("8");
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(screen.getByText("Second page lead")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    expect(mocks.stage).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-3" }));
+  } finally { view.unmount(); }
+});
+
+it("does not discard a pending Load more when the background timer fires", async () => {
+  vi.useFakeTimers();
+  const initial = snapshot("First page lead");
+  initial.stages.not_contacted = { ...initial.stages.not_contacted!, totalCount: 2, filteredCount: 2, hasMore: true, cursor: "page-2" };
+  const extraRow = { ...initial.stages.not_contacted.rows[0], propertyId: "extra-lead", address: "Second page lead" };
+  let resolvePage!: (value: unknown) => void;
+  mocks.stage.mockImplementationOnce(() => new Promise(resolve => { resolvePage = resolve; }));
+  mocks.load.mockResolvedValue({ ok: true, snapshot: initial, kpis, drips: { active: [], replied: [], counts: {} } });
+  const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} />);
+  try {
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { resolvePage({ ok: true, snapshot: { ...initial, stages: { not_contacted: { ...initial.stages.not_contacted, rows: [extraRow], cursor: null, hasMore: false } } } }); });
+    expect(screen.getByText("Second page lead")).toBeInTheDocument();
+  } finally { view.unmount(); }
+});
+
+
+it.each(["transport", "expired cursor"])("keeps a %s failure visible through polling and allows refresh recovery", async (failure) => {
+  vi.useFakeTimers();
+  const initial = snapshot("First page lead");
+  initial.stages.not_contacted = { ...initial.stages.not_contacted!, totalCount: 2, filteredCount: 2, hasMore: true, cursor: "page-2" };
+  if (failure === "transport") mocks.stage.mockRejectedValueOnce(new Error("offline"));
+  else mocks.stage.mockResolvedValueOnce({ ok: false, message: "Refresh the queue or check the selected filters." });
+  mocks.load.mockResolvedValue({ ok: true, snapshot: initial, kpis, drips: { active: [], replied: [], counts: {} } });
+  const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} />);
+  try {
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent(failure === "transport" ? "Could not load more leads" : "Refresh the queue");
+    expect(screen.getByRole("button", { name: "Load more Not contacted" })).toBeEnabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh" })); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh list" })).not.toBeInTheDocument();
+  } finally { view.unmount(); }
+});
+
+it("ignores an old page after search changes", async () => {
+  vi.useFakeTimers();
+  const initial = snapshot("First page lead");
+  initial.stages.not_contacted = { ...initial.stages.not_contacted!, totalCount: 2, filteredCount: 2, hasMore: true, cursor: "page-2" };
+  let resolvePage!: (value: unknown) => void;
+  mocks.stage.mockImplementationOnce(() => new Promise(resolve => { resolvePage = resolve; }));
+  const searched = { ...snapshot("Search result"), search: "Search" };
+  mocks.load.mockResolvedValue({ ok: true, snapshot: searched, kpis, drips: { active: [], replied: [], counts: {} } });
+  const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} />);
+  try {
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    await act(async () => { fireEvent.change(screen.getByRole("textbox", { name: "Search My Leads" }), { target: { value: "Search" } }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    await act(async () => { resolvePage({ ok: true, snapshot: { ...initial, stages: { not_contacted: { ...initial.stages.not_contacted, rows: [{ ...initial.stages.not_contacted!.rows[0], propertyId: "old-page", address: "Stale lead" }] } } } }); });
+    expect(screen.getByText("Search result")).toBeInTheDocument();
+    expect(screen.queryByText("Stale lead")).not.toBeInTheDocument();
+  } finally { view.unmount(); }
+});
+
+
+it("an older background read cannot rewind a page that finished while it was loading", async () => {
+  vi.useFakeTimers();
+  const initial = snapshot("First page lead");
+  initial.stages.not_contacted = { ...initial.stages.not_contacted!, totalCount: 2, filteredCount: 2, hasMore: true, cursor: "page-2" };
+  const extraRow = { ...initial.stages.not_contacted.rows[0], propertyId: "extra-lead", address: "Second page lead" };
+  let resolveRefresh!: (value: unknown) => void;
+  mocks.load.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
+  mocks.stage.mockResolvedValueOnce({ ok: true, snapshot: { ...initial, stages: { not_contacted: { ...initial.stages.not_contacted, rows: [extraRow], cursor: null, hasMore: false } } } });
+  const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} />);
+  try {
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more Not contacted" })); });
+    await act(async () => { resolveRefresh({ ok: true, snapshot: initial, kpis, drips: { active: [], replied: [], counts: {} } }); });
+    expect(screen.getByText("Second page lead")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more Not contacted" })).not.toBeInTheDocument();
   } finally { view.unmount(); }
 });

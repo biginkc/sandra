@@ -278,3 +278,37 @@ test("real login page retains a safe My Leads lead continuation", async ({ page 
   await expect(page.getByLabel("Email")).toBeVisible()
   await expect(page.locator('form input[name="next"]')).toHaveValue(next)
 })
+
+test("Load more Not contacted survives background refresh and resets only on explicit refresh", async ({ page }) => {
+  await page.clock.install()
+  await mount(page, "/my-leads")
+  await page.evaluate(() => {
+    const backend = window.__sandraSyntheticMyLeadsBackend
+    const original = backend.loadMyLeads.bind(backend)
+    backend.loadMyLeads = async input => {
+      const result = await original(input) as { snapshot: { stages: Record<string, { rows: Array<Record<string, unknown>>; totalCount: number; filteredCount: number; cursor: string | null; hasMore: boolean }> } }
+      const stage = result.snapshot.stages.not_contacted
+      stage.totalCount = 2
+      stage.filteredCount = 2
+      if ("cursor" in input && input.cursor === "pagination-test-next") {
+        stage.rows = [{ ...stage.rows[0], propertyId: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb", address: "Second page pagination lead" }]
+        stage.cursor = null
+        stage.hasMore = false
+      } else {
+        stage.cursor = "pagination-test-next"
+        stage.hasMore = true
+      }
+      return result
+    }
+    window.dispatchEvent(new Event("focus"))
+  })
+  await page.getByRole("button", { name: "Load more Not contacted" }).click()
+  await expect(page.getByText("Second page pagination lead", { exact: true })).toBeVisible()
+  await page.clock.fastForward(30_000)
+  await expect(page.getByText("Second page pagination lead", { exact: true })).toBeVisible()
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  await expect(page.getByText("Second page pagination lead", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Refresh list" }).click()
+  await expect(page.getByText("Second page pagination lead", { exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Load more Not contacted" })).toBeVisible()
+})
