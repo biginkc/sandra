@@ -39,8 +39,51 @@ describe("classifyWithJev", () => {
     expect(body.questions.outcome.instructions).toContain("latest inbound");
     expect(body.questions.outcome.criteria.new_lead).toContain("An outbound invitation alone");
     expect(body.questions.outcome.criteria.nurture).toContain("new_lead, not nurture");
-    expect(result).toMatchObject({ outcome: "new_lead", outcomeConfidence: 0.76, schemaVersion: "2" });
+    expect(result).toMatchObject({ outcome: "new_lead", outcomeConfidence: 0.76, schemaVersion: "3" });
     expect(result.probabilities.outcome.new_lead).toBe(0.9);
+  });
+
+  it("pins the Jarrad-approved nurture routing questions character for character (2026-10-07)", async () => {
+    const f = stubFetch([{ status: 200, body: { answers: { outcome: { choice: "nurture" } } } }]);
+    await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" });
+    const body = JSON.parse(String(vi.mocked(f).mock.calls[0][1]?.body));
+    expect(body.questions.ready_timeframe).toEqual({
+      type: "choice",
+      instructions: "If the seller indicates when they might be ready to sell, which timeframe does the latest inbound message support?",
+      criteria: {
+        within_30_days: "Ready or open to selling within about a month.",
+        one_to_six_months: "Indicates roughly one to six months.",
+        six_to_twelve_months: "Indicates roughly six to twelve months.",
+        over_a_year: "Indicates more than a year away.",
+        not_stated: "No timeframe given.",
+        uncertain: "A timeframe is mentioned but cannot be determined.",
+      },
+    });
+    expect(body.questions.listing_status).toEqual({
+      type: "choice",
+      instructions: "Does the seller say the property is currently listed for sale or being shown?",
+      criteria: {
+        listed: "The seller says it is listed with an agent or has showings.",
+        not_listed_or_not_stated: "The seller does not say it is listed.",
+        uncertain: "Cannot tell from the message.",
+      },
+    });
+  });
+
+  it("parses ready_timeframe and listing_status, and treats invalid or missing choices as null", async () => {
+    const f = stubFetch([{ status: 200, body: { answers: {
+      outcome: { choice: "nurture" },
+      ready_timeframe: { choice: "six_to_twelve_months", probabilities: { six_to_twelve_months: 0.8 } },
+      listing_status: { choice: "bogus" },
+    } } }]);
+    const result = await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" });
+    expect(result.readyTimeframe).toBe("six_to_twelve_months");
+    expect(result.listingStatus).toBeNull();
+    expect(result.probabilities.ready_timeframe).toEqual({ six_to_twelve_months: 0.8 });
+    const g = stubFetch([{ status: 200, body: { answers: { outcome: { choice: "nurture" } } } }]);
+    const none = await classifyWithJev(baseInput(), { fetch: g, apiKey: "k" });
+    expect(none.readyTimeframe).toBeNull();
+    expect(none.listingStatus).toBeNull();
   });
 
   it.each([undefined, null, -1, 1.01, "0.99", NaN, Infinity])("does not accept invalid confidence %s", async (confidence) => {
