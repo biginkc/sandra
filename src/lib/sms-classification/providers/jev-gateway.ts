@@ -1,7 +1,9 @@
 import { buildQuestions, JEV_MODEL, JEV_SCHEMA_VERSION, OUTCOME_CRITERIA } from "../questions";
 import type {
   JevEscalationReason,
+  JevListingStatus,
   JevOutcome,
+  JevReadyTimeframe,
   JevReplyIntent,
   JevWrongScope,
   SmsClassificationDecision,
@@ -46,6 +48,19 @@ const ESCALATION_REASON_VALUES: readonly JevEscalationReason[] = [
   "third_party",
   "needs_review",
   "not_applicable",
+  "uncertain",
+];
+const READY_TIMEFRAME_VALUES: readonly JevReadyTimeframe[] = [
+  "within_30_days",
+  "one_to_six_months",
+  "six_to_twelve_months",
+  "over_a_year",
+  "not_stated",
+  "uncertain",
+];
+const LISTING_STATUS_VALUES: readonly JevListingStatus[] = [
+  "listed",
+  "not_listed_or_not_stated",
   "uncertain",
 ];
 const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
@@ -213,6 +228,8 @@ function parseJevResponse(
     "escalation_reason",
     ESCALATION_REASON_VALUES,
   );
+  const readyTimeframe = readChoice(json.answers, "ready_timeframe", READY_TIMEFRAME_VALUES);
+  const listingStatus = readChoice(json.answers, "listing_status", LISTING_STATUS_VALUES);
   const replyIntent = includeReplyIntent
     ? readChoice(json.answers, "reply_intent", REPLY_INTENT_VALUES)
     : { value: null, probabilities: {} };
@@ -224,6 +241,10 @@ function parseJevResponse(
     probabilities.wrong_scope = wrongScope.probabilities;
   if (Object.keys(escalationReason.probabilities).length)
     probabilities.escalation_reason = escalationReason.probabilities;
+  if (Object.keys(readyTimeframe.probabilities).length)
+    probabilities.ready_timeframe = readyTimeframe.probabilities;
+  if (Object.keys(listingStatus.probabilities).length)
+    probabilities.listing_status = listingStatus.probabilities;
   if (includeReplyIntent && Object.keys(replyIntent.probabilities).length)
     probabilities.reply_intent = replyIntent.probabilities;
 
@@ -233,6 +254,8 @@ function parseJevResponse(
     wrongScope: wrongScope.value,
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
+    readyTimeframe: readyTimeframe.value,
+    listingStatus: listingStatus.value,
     replyIntentAvailable: includeReplyIntent,
     probabilities,
     provider: "jev",

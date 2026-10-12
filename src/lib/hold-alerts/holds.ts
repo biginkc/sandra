@@ -96,6 +96,9 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "no_property",
   "no_contact",
   "ai_responder_exception",
+  // Nurture auto-drip: the same drip already holds the lead but is paused.
+  // (`nurture_reply_not_sent:` / `drip_enroll_failed:` are prefix families below.)
+  "drip_paused",
 ];
 
 /** Families with a variable tail: `keyword:<tier>`, `safety:<reason>`, `dead_letter_failed:<reason>` ... */
@@ -111,6 +114,8 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "hostile_needs_confirm:",
   "optout_phrase_needs_confirm:",
   "jev_below_threshold:",
+  "nurture_reply_not_sent:",
+  "drip_enroll_failed:",
   "jev_automatic_failed:",
   "model:",
   "already_flagged:",
