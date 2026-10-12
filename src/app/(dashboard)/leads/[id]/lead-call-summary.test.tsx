@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } =
+const { callbacks, channelOn, eq, maybeSingle, removeChannel, select, setAuth } =
   vi.hoisted(() => ({
     callbacks: {} as Record<string, (payload: { new: unknown }) => void>,
     channelOn: vi.fn(),
@@ -16,12 +16,13 @@ const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } =
     maybeSingle: vi.fn(),
     removeChannel: vi.fn(),
     setAuth: vi.fn(),
+    select: vi.fn(),
   }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => {
     const query = {
-      select: vi.fn(() => query),
+      select: select.mockImplementation(() => query),
       eq: eq.mockImplementation(() => query),
       maybeSingle,
     };
@@ -53,6 +54,7 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 import {
+  CallEventCard,
   LeadCallSummary,
   type CallActivityRollupRow,
 } from "./lead-call-summary";
@@ -98,6 +100,7 @@ function row(
 ): CallActivityRollupRow {
   return {
     id: overrides.id,
+    provider: overrides.provider ?? "jitter",
     created_at: overrides.created_at ?? timestamp,
     started_at: overrides.started_at ?? timestamp,
     outcome: overrides.outcome ?? "connected_human",
@@ -421,6 +424,7 @@ describe("<LeadCallSummary />", () => {
       recording_status: refreshed.recording_status,
       transcript_status: refreshed.transcript_status,
       summary_status: refreshed.summary_status,
+      provider: refreshed.provider,
       jitter_attempt_id: refreshed.jitter_attempt_id,
       jitter_session_id: refreshed.jitter_session_id,
     };
@@ -613,5 +617,50 @@ describe("<LeadCallSummary />", () => {
     await waitFor(() => expect(setAuth).toHaveBeenCalledWith("test-token"));
     view.unmount();
     expect(removeChannel).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("call history provider actions", () => {
+  it.each(["dialpad", "sandra_softphone", "unknown", ""])(
+    "does not show a Jitter action for %s calls, even with a configured destination",
+    (provider) => {
+      render(<CallEventCard row={row({ id: "provider-call", provider })} jitterHref="https://jitter.example.test/history?prospect_id=p" />);
+      expect(screen.queryByText("Open in Jitter")).not.toBeInTheDocument();
+      expect(screen.getByText("Connected")).toBeInTheDocument();
+    },
+  );
+
+  it.each([null, undefined, "", "   "])("omits navigation without a destination (%s)", (jitterHref) => {
+    render(<CallEventCard row={row({ id: "jitter-call", provider: "jitter" })} jitterHref={jitterHref} />);
+    expect(screen.queryByText("Open in Jitter")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Jitter host not configured")).not.toBeInTheDocument();
+  });
+
+  it("retains DialPad provider after a realtime artifact refresh", async () => {
+    const initial = row({ id: "dialpad-live", provider: "dialpad" });
+    const refreshed = row({ ...initial, transcript_status: "available", call_transcripts: [transcript()] });
+    maybeSingle.mockResolvedValue({ data: refreshed, error: null });
+    renderWidget({ initialRows: [initial], jitterHost: "https://jitter.example.test" });
+    await waitFor(() => expect(callbacks.UPDATE).toBeTypeOf("function"));
+    act(() => callbacks.UPDATE({ new: refreshed }));
+    await waitFor(() => expect(screen.getByText("The homeowner wants an offer next week.")).toBeInTheDocument());
+    expect(select.mock.calls.at(-1)?.[0].split(", ")).toContain("provider");
+    expect(screen.queryByText("Open in Jitter")).not.toBeInTheDocument();
+  });
+
+  it("preserves a configured Jitter call destination", () => {
+    render(<CallEventCard row={row({ id: "jitter-call", provider: "jitter" })} jitterHref="https://jitter.example.test/history?prospect_id=p" />);
+    expect(screen.getByRole("link", { name: "Open call in Jitter" })).toHaveAttribute("href", "https://jitter.example.test/history?prospect_id=p");
+  });
+
+  it.each(["", "https://jitter.example.test"])("omits the summary Jitter action for DialPad-only history (host: %s)", (jitterHost) => {
+    renderWidget({ initialRows: [row({ id: "dialpad-call", provider: "dialpad" })], jitterHost });
+    expect(screen.queryByText("Open in Jitter")).not.toBeInTheDocument();
+  });
+
+  it("omits the summary Jitter action when its destination is missing", () => {
+    renderWidget({ initialRows: [row({ id: "jitter-call", provider: "jitter" })] });
+    expect(screen.queryByText("Open in Jitter")).not.toBeInTheDocument();
   });
 });

@@ -29,6 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       // Destructive + local-only (assertLocalOnlyEnvironment); runs via
       // vitest.filter-local.config.ts against a disposable local stack.
@@ -133,7 +134,7 @@ export default defineConfig({
       "scripts/messages-v2/replay/replay.integration.test.ts",
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
-      "supabase/migrations/20261009050000_nurture_auto_drip.integration.test.ts",
+      "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",

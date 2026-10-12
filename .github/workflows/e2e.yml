@@ -471,6 +471,11 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts
 
+      - name: Dialpad queue waits for outcome (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts
+
       - name: My Leads finalize single-shot per attempt (disposable DB)
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
@@ -501,7 +506,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261009050000_nurture_auto_drip.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts
 
       - name: Messages v2 nurture auto-drip enrolment idempotency (disposable DB)
         env:

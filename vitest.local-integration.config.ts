@@ -10,6 +10,7 @@ const dbUrl = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? def
 export default defineConfig({
   test: {
     include: [
+      "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
@@ -110,7 +111,7 @@ export default defineConfig({
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
-      "supabase/migrations/20261009050000_nurture_auto_drip.integration.test.ts",
+      "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
