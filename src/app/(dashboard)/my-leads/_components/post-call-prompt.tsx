@@ -168,7 +168,7 @@ export function PostCallPrompt({
   const [openedAt] = useState(() => Date.now())
   const hasNextStep = nextStepAt !== null && Date.parse(nextStepAt) > openedAt
 
-  const preservedCallId = reconciliationLocked && source === "sandra" && callActivityId && !callReferenceOptions.some((call) => call.id === callActivityId)
+  const preservedCallId = reconciliationLocked && source !== "manual" && callActivityId && !callReferenceOptions.some((call) => call.id === callActivityId)
     ? callActivityId
     : null
   const availableCalls: AcquisitionCallReferenceOption[] = initialCallActivityId && !callReferenceOptions.some((call) => call.id === initialCallActivityId)
@@ -323,7 +323,7 @@ export function PostCallPrompt({
       // The note is written to lead_notes with the extras, not to the attempt.
       note: null,
       recordingUrl: source === "dialpad" ? recordingUrl.trim() || null : null,
-      callActivityId: source === "sandra" ? callActivityId.trim() : null,
+      callActivityId: source !== "manual" ? callActivityId.trim() || null : null,
       ...(composed
         ? {
             smsBody: composed.finalBody,
@@ -504,6 +504,7 @@ export function PostCallPrompt({
                     const next = event.target.value as AcquisitionAttemptSource
                     if (next === "sandra" && !sandraAvailable) return
                     setSource(next)
+                    if (next === "manual") setCallActivityId("")
                     if (next === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
                     clearClientErrors()
                   }}
@@ -523,24 +524,24 @@ export function PostCallPrompt({
                 ) : null}
               </div>
 
-              {source === "sandra" && (
+              {(source === "sandra" || (source === "dialpad" && sandraAvailable)) && (
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center">
-                    <Label htmlFor="post-call-call-reference">Sandra call</Label>
-                    <RequiredHint />
+                    <Label htmlFor="post-call-call-reference">{source === "sandra" ? "Sandra call" : "Call to resolve (optional)"}</Label>
+                    {source === "sandra" && <RequiredHint />}
                   </div>
                   {sandraAvailable ? (
                     <select
                       id="post-call-call-reference"
-                      aria-label="Sandra call"
+                      aria-label={source === "sandra" ? "Sandra call" : "Call to resolve"}
                       value={callActivityId}
                       disabled={locked}
                       onChange={(event) => setCallActivityId(event.target.value)}
                       aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
-                      aria-required="true"
+                      aria-required={source === "sandra"}
                       className={SELECT_FIELD_CLASS}
                     >
-                      <option value="">Choose a call</option>
+                      <option value="">{source === "sandra" ? "Choose a call" : "Match by recording link, or log a separate call"}</option>
                       {availableCalls.map((reference) => (
                         <option key={reference.id} value={reference.id}>{reference.label}</option>
                       ))}
@@ -567,7 +568,7 @@ export function PostCallPrompt({
 
               {source === "dialpad" && (
                 <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="post-call-recording">Recording link (required)</Label>
+                  <Label htmlFor="post-call-recording">Recording link {callActivityId ? "(optional)" : "(required)"}</Label>
                   <Input
                     id="post-call-recording"
                     type="url"
