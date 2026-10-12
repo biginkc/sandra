@@ -351,6 +351,11 @@ export function MyLeadsClient({
   const [loadingStages, setLoadingStages] = useState<Set<MyLeadStage>>(
     new Set(),
   );
+  // Background reads must not rewind a cursor chain or cancel a page request.
+  const paginationEpoch = useRef(0);
+  const pagingStages = useRef(new Set<MyLeadStage>());
+  const preservingPages = useRef(false);
+  const [paginated, setPaginated] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [callOptions, setCallOptions] = useState<{
     propertyId: string;
@@ -471,6 +476,11 @@ export function MyLeadsClient({
     async (background = false) => {
       if (!roster.settings.enabled) return null;
       const id = ++request.current;
+      if (!background) {
+        ++paginationEpoch.current;
+        pagingStages.current.clear();
+        setLoadingStages(new Set());
+      }
       try {
         const pinId = pinWanted.current;
         const [loaded, pinResult] = await Promise.all([
@@ -520,7 +530,7 @@ export function MyLeadsClient({
         )
           applyPin(pinResult);
         if (result.ok) {
-          const applied = !background || !reviewingDetails.current;
+          const applied = !background || (!reviewingDetails.current && !preservingPages.current);
           if (pinWanted.current === pinId && pin !== undefined)
             actionPin.current = pin;
           if (pinResult && pinWanted.current === pinId) {
@@ -532,14 +542,20 @@ export function MyLeadsClient({
           }
           // Replacing a paginated/reordered queue can unmount its recording player.
           // Background checks may update KPIs, but must leave open lead details alone.
-          if (!background || !reviewingDetails.current)
+          if (applied) {
+            ++paginationEpoch.current;
+            pagingStages.current.clear();
+            setLoadingStages(new Set());
             setSnapshot(result.snapshot);
+            preservingPages.current = false;
+            setPaginated(false);
+          }
           setKpis(result.kpis);
           setDrips(result.drips);
           // undefined = the strip read failed: keep the last good strip. null = strip is off.
           if (result.strip !== undefined) setStrip(result.strip);
           setLastCheckedAt(result.snapshot.snapshotAt);
-          setError(null);
+          if (!background) setError(null);
           setRefreshError(null);
         } else {
           setRefreshError(result.message);
@@ -565,6 +581,11 @@ export function MyLeadsClient({
     const scopeChanged = previousServerScope.current !== serverScopeKey;
     previousServerScope.current = serverScopeKey;
     ++request.current;
+    ++paginationEpoch.current;
+    pagingStages.current.clear();
+    setLoadingStages(new Set());
+    preservingPages.current = false;
+    setPaginated(false);
     if (scopeChanged) {
       setSnapshot(null);
       setKpis(null);
@@ -1494,8 +1515,12 @@ export function MyLeadsClient({
             }}
             onLoadMore={async (stage) => {
               const cursor = snapshot?.stages[stage]?.cursor;
-              if (!cursor || loadingStages.has(stage)) return;
-              const id = request.current;
+              if (!cursor || pagingStages.current.has(stage)) return;
+              const id = paginationEpoch.current;
+              pagingStages.current.add(stage);
+              preservingPages.current = true;
+              setPaginated(true);
+              setError(null);
               setLoadingStages((previous) => new Set(previous).add(stage));
               try {
                 const result = await loadMyLeadsStage({
@@ -1504,7 +1529,7 @@ export function MyLeadsClient({
                   stage,
                   cursor,
                 });
-                if (id !== request.current) return;
+                if (id !== paginationEpoch.current) return;
                 if (!result.ok) {
                   setError(result.message);
                   return;
@@ -1529,12 +1554,18 @@ export function MyLeadsClient({
                       },
                     };
                   });
+              } catch {
+                if (id === paginationEpoch.current)
+                  setError("Could not load more leads. Try again, or refresh the list.");
               } finally {
-                setLoadingStages((previous) => {
-                  const next = new Set(previous);
-                  next.delete(stage);
-                  return next;
-                });
+                if (id === paginationEpoch.current) {
+                  pagingStages.current.delete(stage);
+                  setLoadingStages((previous) => {
+                    const next = new Set(previous);
+                    next.delete(stage);
+                    return next;
+                  });
+                }
               }
             }}
             onLoadDetail={async (propertyId) => {
@@ -1579,15 +1610,16 @@ export function MyLeadsClient({
 
           {lastCheckedAt && (
             <p className="mb-2 text-sm text-muted-foreground">
-              Counts update every 30 seconds while this page is visible. Last
+              Activity updates every 30 seconds while this page is visible. Last
               successful check:{" "}
               <time dateTime={lastCheckedAt}>
                 {refreshTime.format(new Date(lastCheckedAt))}
               </time>
               .
-              {reviewing
-                ? " The lead list stays in place while details are open."
-                : ""}
+              {paginated
+                ? " Loaded leads stay in place while you browse."
+                : reviewing ? " The lead list stays in place while details are open." : ""}
+              {paginated && <Button variant="outline" className="ml-2" onClick={() => void refresh()}>Refresh list</Button>}
             </p>
           )}
           {search && (
