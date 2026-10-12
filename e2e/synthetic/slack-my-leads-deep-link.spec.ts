@@ -38,7 +38,9 @@ test.beforeAll(async () => {
       export const savePostCallExtras=async()=>({ok:true,note:'skipped',nextStep:'skipped'});
     `],
     ["strip-actions", `export const loadCallNext=async()=>({ok:true,data:null}); export const loadTriage=async()=>({ok:true,data:{rows:[],nextCursor:null}}); export const setStripOverride=async()=>({ok:true,data:null});`],
-    ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}});`],
+    ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}}); export const changeDripAction=startDripForLeads;`],
+    ["drip-progress", `export const listDripProgress=async()=>[];`],
+    ["supabase-client", `export const createClient=()=>({});`],
     ["sms-actions", `export const loadRepSmsAssignments=async()=>({ok:true,data:[]}); export const loadRepSmsSenderInventory=async()=>({ok:true,data:{eligible:[],ineligible:[]}}); export const saveRepSmsSender=async()=>({ok:true});`],
     ["notes-feed", `export const AddNoteComposer=()=>null;`],
     ["call-artifacts", `export const MyLeadCallArtifacts=()=>null;`],
@@ -83,6 +85,8 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /call-artifacts$/ }, () => virtual("call-artifacts"))
         build.onResolve({ filter: /existing-detail-actions$/ }, () => virtual("existing-detail-actions"))
         build.onResolve({ filter: /\(dashboard\)[\\/]sequences[\\/]actions$/ }, () => virtual("sequences-actions"))
+        build.onResolve({ filter: /sequences[\/]drip-progress$/ }, () => virtual("drip-progress"))
+        build.onResolve({ filter: /supabase[\/]client$/ }, () => virtual("supabase-client"))
         build.onResolve({ filter: /login-background$/ }, () => virtual("login-background"))
         build.onResolve({ filter: /^\.\/strip-actions$/ }, () => virtual("strip-actions"))
         build.onResolve({ filter: /^\.\/actions$/ }, (args) => {

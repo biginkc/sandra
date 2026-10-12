@@ -60,6 +60,8 @@ export function StartDripPicker({
   const popupRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const messageRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (message) messageRef.current?.focus(); }, [message]);
   const chromeRef = useRef(130);
   const needle = query.trim().toLowerCase();
   const visibleChoices = needle ? choices.filter((choice) => choice.name.toLowerCase().includes(needle)) : choices;
@@ -143,12 +145,14 @@ export function StartDripPicker({
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
+      {message && !inline && !open && <p ref={messageRef} tabIndex={-1} role="status" className="my-2 rounded-md border p-2 text-xs">{message}</p>}
       {(inline || open) && <div ref={popupRef} className={inline ? "space-y-2" : `absolute left-0 z-50 w-80 rounded-md border bg-white p-3 shadow-lg ${place?.up ? "bottom-full mb-1" : "top-full mt-1"}`} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
+        {message && <p ref={messageRef} tabIndex={-1} role="status" className="my-2 rounded-md border p-2 text-xs">{message}</p>}
         {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
           placeholder="Search drips" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); } }} aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
         {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
-        <div ref={listRef} className={inline ? undefined : "overflow-y-auto pr-1"} style={inline ? undefined : { maxHeight: place?.listMax ?? 320 }} data-testid="drip-choice-list">
+        <div ref={listRef} className="overflow-y-auto pr-1" style={{ maxHeight: inline ? 240 : place?.listMax ?? 320 }} data-testid="drip-choice-list">
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy || disabled} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
@@ -162,7 +166,6 @@ export function StartDripPicker({
         </div>
         {onLeave && <button type="button" disabled={busy || disabled} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
       </div>}
-      {message && <p role="status" className="mt-1 text-xs">{message}</p>}
     </div>
   );
 }

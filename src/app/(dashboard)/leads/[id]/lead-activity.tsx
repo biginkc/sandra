@@ -87,7 +87,7 @@ type Props = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
 
 export function LeadActivityTimeline(props: Props) {
   const {

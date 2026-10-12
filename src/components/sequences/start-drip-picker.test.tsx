@@ -147,3 +147,15 @@ it("disables an already-open popup when the parent disables the picker", async (
   expect(onChoose).not.toHaveBeenCalled();
   expect(onLeave).not.toHaveBeenCalled();
 });
+
+it("focuses failure feedback before the bounded inline choices", async () => {
+  const user = userEvent.setup();
+  render(<StartDripPicker inline previewChoices={oneDrip} onChoose={async () => ({ status: "failed", reason: "Already in another drip" })} />);
+  await user.click(screen.getByRole("button", { name: /Confirmed owner/ }));
+  const message = await screen.findByRole("status");
+  expect(message).toHaveFocus();
+  const list = screen.getByTestId("drip-choice-list");
+  expect(message.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(list).toHaveStyle({ maxHeight: "240px", });
+  expect(list).toHaveClass("overflow-y-auto");
+});
