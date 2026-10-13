@@ -874,11 +874,11 @@ async function dispatchAiResponseCore(
       });
       // The reply asks "want me to take you off the list?": a person must see the answer.
       if (sent.outcome === "sent") {
-        await markPropertyNeedsAttention(supabase, input.propertyId, NUMBER_SOURCE_AWAITING_ANSWER_REASON, deps.runContext);
+        await holdWithRetry(supabase, input.propertyId, NUMBER_SOURCE_AWAITING_ANSWER_REASON, deps.runContext);
       } else if (sent.outcome !== "retry") {
         // Refused at the final fence (approval changed, recipient window) or held by the send
         // path: nobody answered the question, so a person is told (first flag wins).
-        await markPropertyNeedsAttention(
+        await holdWithRetry(
           supabase,
           input.propertyId,
           `${NUMBER_SOURCE_NOT_SENT_PREFIX}send_${sent.outcome}`,
@@ -930,7 +930,7 @@ async function dispatchAiResponseCore(
     // The seller also asked how we got the number but that reply did not go
     // out: the identity copy does not answer it, so a person looks.
     if (identityNotSentReason) {
-      await markPropertyNeedsAttention(
+      await holdWithRetry(
         supabase,
         input.propertyId,
         `${NUMBER_SOURCE_NOT_SENT_PREFIX}${identityNotSentReason}`,
@@ -1287,9 +1287,11 @@ async function classifyAndHandleNonRouteOutcomes(
       // Asked, but this dispatch cannot send replies at all.
       numberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}reply_ineligible`;
     }
-    const holdForNumberSource = async () => {
-      if (numberSourceHold) await markPropertyNeedsAttention(supabase, input.propertyId, numberSourceHold, runCtx);
-    };
+    // True when there is nothing to hold or the hold is persisted. A hold that could not be
+    // written completes the claim as error `flag_failed` (not handled) so it is recoverable:
+    // the claim keeps the sent template's id, so a re-dispatch never sends it twice.
+    const holdForNumberSource = async (): Promise<boolean> =>
+      numberSourceHold ? holdWithRetry(supabase, input.propertyId, numberSourceHold, runCtx) : true;
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1321,7 +1323,7 @@ async function classifyAndHandleNonRouteOutcomes(
         });
       }
       // Applied first, then held: a flagged property would make the outcome write skip.
-      await holdForNumberSource();
+      const holdOk = await holdForNumberSource();
       // Strictly AFTER the nurture reply was accepted and the outcome applied. Only the
       // nurture reply itself starts a drip: when the number-source reply replaced it
       // (or was asked for and could not go out) the seller is waiting on a person, so
@@ -1338,7 +1340,8 @@ async function classifyAndHandleNonRouteOutcomes(
       }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: holdOk ? "auto_closed" : "escalated",
+        ...(holdOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
@@ -1354,10 +1357,11 @@ async function classifyAndHandleNonRouteOutcomes(
       // already set (possibly by a human while Jev was classifying) —
       // nurture must never downgrade it. Skip silently, same treatment
       // as the legacy path's "already_terminal" RPC status.
-      await holdForNumberSource();
+      const terminalHoldOk = await holdForNumberSource();
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: silentSkipClaimOutcome(0),
+        outcome: terminalHoldOk ? silentSkipClaimOutcome(0) : "escalated",
+        ...(terminalHoldOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: silentSkip("already_terminal", 0) };
@@ -1449,19 +1453,15 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
-      if (classification.askedHowNumberObtained) {
+      const newLeadHoldOk = classification.askedHowNumberObtained
         // A new lead never auto-replies (PLAN D5), so the number-source reply
         // is not sent either; the lead's owner sees the question.
-        await markPropertyNeedsAttention(
-          supabase,
-          input.propertyId,
-          `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_new_lead`,
-          runCtx,
-        );
-      }
+        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_new_lead`, runCtx)
+        : true;
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: newLeadHoldOk ? "auto_closed" : "escalated",
+        ...(newLeadHoldOk ? {} : { flagOk: false }),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
@@ -1910,18 +1910,15 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      if (wrongNumberNumberSourceAsked) {
-        await markPropertyNeedsAttention(
-          supabase,
-          input.propertyId,
-          `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`,
-          runCtx,
-        );
-      }
+      const wrongNumberHoldOk = wrongNumberNumberSourceAsked
+        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`, runCtx)
+        : true;
+      const wrongNumberClaimError = dispositionClaimError(wrongNumberResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(wrongNumberOutcome),
-        errorMessage: dispositionClaimError(wrongNumberResult),
+        outcome: wrongNumberHoldOk || wrongNumberClaimError ? claimOutcomeOf(wrongNumberOutcome) : "escalated",
+        ...(wrongNumberHoldOk ? {} : { flagOk: false }),
+        errorMessage: wrongNumberClaimError,
         ...(wrongNumberTemplateMessageId ? { outboundMessageId: wrongNumberTemplateMessageId } : {}),
       });
       return wrongNumberOutcome;
@@ -2024,13 +2021,15 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      if (autoCloseNumberSourceHold) {
-        await markPropertyNeedsAttention(supabase, input.propertyId, autoCloseNumberSourceHold, runCtx);
-      }
+      const autoCloseHoldOk = autoCloseNumberSourceHold
+        ? await holdWithRetry(supabase, input.propertyId, autoCloseNumberSourceHold, runCtx)
+        : true;
+      const autoCloseClaimError = dispositionClaimError(autoCloseResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(autoCloseOutcome),
-        errorMessage: dispositionClaimError(autoCloseResult),
+        outcome: autoCloseHoldOk || autoCloseClaimError ? claimOutcomeOf(autoCloseOutcome) : "escalated",
+        ...(autoCloseHoldOk ? {} : { flagOk: false }),
+        errorMessage: autoCloseClaimError,
         ...(autoCloseTemplateMessageId ? { outboundMessageId: autoCloseTemplateMessageId } : {}),
       });
       return autoCloseOutcome;
@@ -6743,6 +6742,24 @@ export async function flagConfirmDncHold(
   return Array.isArray(updated) ? updated.length > 0 : Boolean(updated);
 }
 
+
+/**
+ * The number-source hold carries an obligation (a person must answer or look), and
+ * on the identity path the message is already out so the dispatch cannot be re-run.
+ * Tries the flag write up to three times; a persistent failure is reported by
+ * `markPropertyNeedsAttention` and returned as false.
+ */
+async function holdWithRetry(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+  runContext?: MaybeRunContext,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await markPropertyNeedsAttention(supabase, propertyId, reason, runContext)) return true;
+  }
+  return false;
+}
 
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,

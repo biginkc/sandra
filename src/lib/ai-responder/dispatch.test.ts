@@ -8001,6 +8001,49 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
     expect(state.property.last_ai_escalation_reason).toBe("hot_lead");
   });
 
+  describe("a number-source hold that cannot be written is never recorded as handled", () => {
+    const failHolds = (state: MockState) => {
+      state.flagWriteErrorReason = /^number_source_/;
+    };
+    const claimOf = (state: MockState) => state.aiClaims[state.aiClaims.length - 1];
+
+    it("nurture: reply sent and nurture applied, but the awaiting-answer hold fails -> claim error flag_failed, template id kept (no resend on recovery)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      bothMapped("nurture");
+      failHolds(state);
+      await run(state, "inbound-ns-flagfail", "how did you get my number?", answers("nurture", "yes"));
+      expect(sentBodies()).toEqual([NUMBER_BODY]);
+      expect(state.property.outreach_dispo).toBe("nurture");
+      expect(claimOf(state)).toMatchObject({ status: "error", error_message: "flag_failed" });
+    });
+
+    it("not_interested: same", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      bothMapped("not_interested");
+      failHolds(state);
+      await run(state, "inbound-ns-flagfail-ni", "not interested, how did you get my number?", answers("not_interested", "yes", 0.97));
+      expect(claimOf(state)).toMatchObject({ status: "error", error_message: "flag_failed" });
+    });
+
+    it("identity path: the hold write is retried (3 attempts) before giving up", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      failHolds(state);
+      reportErrorMock.mockClear();
+      await run(state, "inbound-id-flagfail", "Who is this? How did you get my number?", answers("nurture", "yes"));
+      expect(sentBodies()).toEqual([NUMBER_BODY]);
+      const failedWrites = reportErrorMock.mock.calls.filter(
+        (c) => (c[1] as { tags?: { surface?: string } })?.tags?.surface === "ai_responder_mark_attention",
+      );
+      expect(failedWrites).toHaveLength(3);
+      expect(state.property.needs_human_attention).toBe(false);
+    });
+  });
+
   describe("nurture auto-drip never enrols off the number-source reply", () => {
     const DRIP_ON = {
       enabled: true,
