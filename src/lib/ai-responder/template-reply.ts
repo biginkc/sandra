@@ -142,6 +142,8 @@ export type TemplateReplyResolution =
       templateId: string;
       mappingId: string;
       body: string;
+      /** The library text the body was rendered from: the send-time approval re-check compares THIS (not the rendered body) to `approved_content`. */
+      source?: string;
       outcome: TemplateOutcomeKey;
       /** The mapping key that supplied the template (the outcome itself unless a mapping key was passed). */
       key?: TemplateReplyKey;
@@ -263,6 +265,7 @@ export async function resolveApprovedTemplateReply(
       templateId: candidate.templateId,
       mappingId: candidate.mappingId,
       body,
+      source: candidate.template.content,
       outcome: args.outcome,
       key: args.mappingKey ?? args.outcome,
     };

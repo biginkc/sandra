@@ -67,7 +67,7 @@ const mappings = async () =>
     (r) => r.outcome as string,
   );
 
-/** What PR #851's 20261008270000 does to the same constraint + RPC allow-list. */
+/** What PR #851's 20261009040000 does to the same constraint + RPC allow-list. */
 async function widenLikeWrongNumberHostile() {
   await db.query(`alter table public.auto_reply_templates drop constraint auto_reply_templates_outcome_check`);
   await db.query(

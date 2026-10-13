@@ -836,6 +836,7 @@ async function dispatchAiResponseCore(
         turn: currentTurn + 1,
         source: "approved_template",
         templateId: numberSource.templateId,
+        templateSource: numberSource.source,
         replyKey: NUMBER_SOURCE_REPLY_KEY,
         orgId: property.org_id,
         claimStartedAt,
@@ -862,7 +863,10 @@ async function dispatchAiResponseCore(
           sendOutcome: sent.outcome,
         },
       }, deps.runContext);
-      const settledNumberSource = await settleClaimForSendOutcome(supabase, responseClaim.claimId, sent, {
+      // A contended send drops its carried reply so the re-dispatch classifies again and
+      // re-runs the template path (a carried reply would go out as a plain LLM reply,
+      // without the approval re-check, reply_key or the awaiting-answer hold).
+      const settledNumberSource = await settleClaimForSendOutcome(supabase, responseClaim.claimId, sent.outcome === "retry" ? { ...sent, reply: undefined } : sent, {
         orgId: property.org_id,
         input,
         body: numberSource.body,
@@ -1220,12 +1224,23 @@ async function classifyAndHandleNonRouteOutcomes(
       // no extra delay beyond the drip's own first step). It pauses on the
       // seller's reply and when a person takes over; a failure here never
       // undoes the hold.
-      await enrollHotLeadInBookAppointment(supabase, {
-        propertyId: input.propertyId,
-        sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        runCtx,
-      });
+      if (classification.askedHowNumberObtained) {
+        // The seller also asked how we got their number and no reply goes out: a person
+        // answers, so nothing is enrolled in a drip.
+        await trace(supabase, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "skipped",
+          detail: { why: "number_source_asked", route: "hot_book_appointment" },
+        }, runCtx);
+      } else {
+        await enrollHotLeadInBookAppointment(supabase, {
+          propertyId: input.propertyId,
+          sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
+          inboundMessageId: input.inboundMessageId ?? null,
+          runCtx,
+        });
+      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
@@ -2716,6 +2731,7 @@ export async function runApprovedTemplateStep(
     turn: ctx.currentTurn + 1,
     source: "approved_template",
     templateId: resolved.templateId,
+    templateSource: resolved.source,
     replyKey,
     orgId: property.org_id,
     claimStartedAt: ctx.claimStartedAt,
@@ -3769,6 +3785,8 @@ type ResponderSendArgs = {
   approvedBy?: { userId: string; edited: boolean };
   /** The library template behind an `approved_template` send (evidence + message metadata). */
   templateId?: string | null;
+  /** The unrendered library text `body` was rendered from; the send-time approval re-check compares it (not the rendered body) to the approved text. Defaults to `body`. */
+  templateSource?: string | null;
   /** Mapping key of that template (`number_source` etc.), stored as `reply_key` so a later inbound can tell it is answering that reply. */
   replyKey?: string | null;
   orgId: string;
@@ -5562,7 +5580,7 @@ async function templateStillApproved(
       data.approved_for_auto_send === true &&
       data.approved_content !== null &&
       data.approved_content === data.content &&
-      data.approved_content === args.body
+      data.approved_content === (args.templateSource ?? args.body)
     );
   } catch {
     return false;

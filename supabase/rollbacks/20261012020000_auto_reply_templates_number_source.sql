@@ -1,7 +1,7 @@
 -- Rollback for 20261012020000_auto_reply_templates_number_source.
 -- Removes number_source from the check constraint and the RPC allow-list,
 -- leaving every other key (including any wrong_number / hostile widening from
--- 20261008270000) exactly as it was. number_source mappings cannot exist under
+-- 20261009040000) exactly as it was. number_source mappings cannot exist under
 -- the restored constraint, so they are deleted (the code that reads them is
 -- rolled back with it).
 begin;

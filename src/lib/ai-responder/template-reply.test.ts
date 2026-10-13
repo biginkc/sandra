@@ -151,6 +151,8 @@ describe("resolveApprovedTemplateReply", () => {
       templateId: "t1",
       mappingId: "m1",
       body: "Hi Dana, this is Mel. Thanks for letting us know.",
+      // The unrendered library text: the send-time approval re-check compares this one.
+      source: TEXT,
       outcome: "nurture",
       key: "nurture",
     });
@@ -443,6 +445,7 @@ describe("wrong_number and hostile mapping keys", () => {
       templateId: "t1",
       mappingId: "m1",
       body: APPROVED_REPLY_TEXTS.hostile,
+      source: expect.any(String),
       outcome: "hostile",
       key: "hostile",
     });

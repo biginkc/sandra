@@ -7954,6 +7954,53 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
     expect(state.property.last_ai_escalation_reason).toBe("number_source_reply_not_sent:delay_unavailable");
   });
 
+  it("the real library template has a {{placeholder}}: the send-time approval re-check compares the UNRENDERED text, so it still goes out; an edit after approval blocks it", async () => {
+    const RAW = "Hi {{first_name}}, this is Mel. We found {{property_address}} in public records.";
+    const RENDERED = "Hi Sam, this is Mel. We found 12 Main St in public records.";
+    const mapRaw = () =>
+      vi.mocked(resolveApprovedTemplateReply).mockImplementation((async (_s: unknown, a: { mappingKey?: string }) =>
+        a.mappingKey === "number_source"
+          ? { ...tpl(RENDERED, "number_source", "nurture"), source: RAW }
+          : tpl(OUTCOME_BODY, "nurture", "nurture")) as never);
+    const ok = createMockState();
+    installSendMock(ok);
+    mapRaw();
+    ok.smsTemplateRow = { content: RAW, approved_for_auto_send: true, approved_content: RAW, deleted_at: null };
+    await run(ok, "inbound-ns-raw-ok", "how did you get my number?", answers("nurture", "yes"));
+    expect(sentBodies()).toEqual([RENDERED]);
+    expect(ok.property.last_ai_escalation_reason).toBe("number_source_awaiting_answer");
+
+    vi.mocked(sendSmsToContact).mockClear();
+    const edited = createMockState();
+    installSendMock(edited);
+    mapRaw();
+    edited.smsTemplateRow = { content: `${RAW} Edited.`, approved_for_auto_send: true, approved_content: RAW, deleted_at: null };
+    await run(edited, "inbound-ns-raw-edit", "how did you get my number?", answers("nurture", "yes"));
+    // The send-time fence refuses (nothing is stored as sent) and a person is told.
+    expect(edited.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+    expect(edited.property.last_ai_escalation_reason).toBe("number_source_reply_not_sent:send_skipped");
+  });
+
+  it("hot lead (ready within 30 days) that also asks: held for a person, the Book appointment drip is NOT enrolled", async () => {
+    nurtureDrip.loadConfig.mockResolvedValue({
+      enabled: true,
+      sequences: { maybe_later: "seq-ml", check_in_60: "seq-60", listed_not_selling: "seq-ls", hot_book_appointment: "seq-hot" },
+    });
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("nurture");
+    const { result } = await run(state, "inbound-ns-hot-yes", "ready to sell soon, how did you get my number?", {
+      ...answers("nurture", "yes"),
+      ready_timeframe: { choice: "within_30_days" },
+      listing_status: { choice: "not_listed_or_not_stated" },
+    });
+    expect(result).toEqual({ outcome: "escalated", reason: "hot_lead" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
+    expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+    expect(state.property.last_ai_escalation_reason).toBe("hot_lead");
+  });
+
   describe("nurture auto-drip never enrols off the number-source reply", () => {
     const DRIP_ON = {
       enabled: true,
@@ -8263,6 +8310,36 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       } finally { vi.stubGlobal("fetch", originalFetch); }
       expect(sentBodies()).not.toContain(NUMBER_BODY);
       expect(state.property.last_ai_escalation_reason).toBe("number_source_reply_not_sent:delay_unavailable");
+    });
+
+    it("a contended send is retried through the template path: no carried reply, then the number-source template goes out with its hold", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      Object.assign(sendReservationTuning, { deadlineMs: 0 });
+      state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+      const first = await run(state, "inbound-id-retry", WHO_AND_NUMBER, answers("nurture", "yes"));
+      expect(first.result).toMatchObject({ outcome: "retry", reason: "send_reserved_elsewhere" });
+      expect((first.result as { reply?: unknown }).reply).toBeUndefined();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+
+      state.sendReservations.clear();
+      const supabase = createMockSupabase(state);
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ answers: answers("nurture", "yes") }) })));
+      let second;
+      try {
+        second = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: WHO_AND_NUMBER, inboundMessageId: "inbound-id-retry", propertyId: PROPERTY_ID,
+          retryAttempt: 1,
+        }, { anthropic: {} as never });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(second).toMatchObject({ outcome: "sent" });
+      expect(sentBodies()).toEqual([NUMBER_BODY]);
+      expect(state.messages.find((m) => m.direction === "outbound")?.metadata).toMatchObject({ reply_source: "approved_template", template_id: "tpl-number_source" });
+      expect(state.property.last_ai_escalation_reason).toBe("number_source_awaiting_answer");
     });
 
     it("who-is-this only (Jev says no): the identity reply, once, no hold", async () => {
