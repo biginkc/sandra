@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   readContext: vi.fn(),
   dispatch: vi.fn(),
   adminRpc: vi.fn(),
+  senderRpc: vi.fn(),
   memberships: vi.fn(),
   provider: {
     providerId: "sendillo",
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   },
 }))
 
-vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }))
+vi.mock("@/lib/supabase/server", () => ({ createClient: () => ({ rpc: mocks.senderRpc }) }))
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ rpc: mocks.adminRpc }) }))
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }))
 vi.mock("@/lib/auth/access-state", () => ({ hasActiveSandraAccess: vi.fn(() => true) }))
@@ -62,6 +63,31 @@ afterEach(() => {
 })
 
 describe("rep SMS sender inventory diagnostics", () => {
+  it.each(["18164876899", "+18164876899"])("normalizes catalog and assignment number %s before the owner RPC", async (number) => {
+    mocks.provider.listPurchasedNumbers.mockResolvedValue([{
+      phoneE164: number,
+      providerAccountId: "account-9",
+      providerNumberId: "number-9",
+      status: "active",
+      messagingStatus: "active",
+      raw: {},
+    }])
+    mocks.senderRpc.mockResolvedValue({ data: "assignment-1", error: null })
+    const inventory = await loadRepSmsNumbers("org-1")
+    expect(inventory).toEqual({ ok: true, data: [{
+      number: "+18164876899", ownerName: "Sendillo", ownerType: "sendillo", status: "active",
+    }] })
+    const result = await saveRepSmsSender({
+      orgId: "org-1", userId: "rep-1", number, label: "Sendillo", isDefault: true, active: true,
+    })
+    expect(result).toEqual({ ok: true, data: "assignment-1" })
+    expect(mocks.senderRpc).toHaveBeenCalledWith("fn_set_rep_sms_sender", {
+      p_org_id: "org-1", p_user_id: "rep-1", p_provider: "sendillo", p_phone: "+18164876899",
+      p_provider_account_id: "account-9", p_provider_sender_id: "number-9", p_label: "Sendillo",
+      p_default: true, p_active: true,
+    })
+  })
+
   it("returns eligible options plus precise nonsecret reasons for every ineligible Sendillo number", async () => {
     mocks.provider.listPurchasedNumbers.mockResolvedValue([
       {

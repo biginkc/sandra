@@ -290,7 +290,7 @@ function toFromOption(entry: {
   status: string | null;
 }): DialpadFromOption {
   return {
-    number: entry.phoneE164,
+    number: normalizePhone(entry.phoneE164) ?? entry.phoneE164,
     ownerName: "Sendillo",
     ownerType: "sendillo",
     status: entry.status ?? "active",
@@ -505,7 +505,9 @@ export async function saveRepSmsSender(input: SaveRepSmsSenderInput) {
       p_org_id: input.orgId,
       p_user_id: input.userId,
       p_provider: providerId,
-      p_phone: input.number,
+      // Sendillo may return NANP numbers without the leading +. Normalize at
+      // the RPC boundary as well as in the catalog for already-open forms.
+      p_phone: normalizePhone(input.number) ?? input.number,
       p_provider_account_id: providerAccountId,
       p_provider_sender_id: providerSenderId,
       p_label: input.label,
