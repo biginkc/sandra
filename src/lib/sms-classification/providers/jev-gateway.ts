@@ -7,7 +7,9 @@ import {
 } from "../questions";
 import type {
   JevEscalationReason,
+  JevListingStatus,
   JevOutcome,
+  JevReadyTimeframe,
   JevReplyIntent,
   JevWrongScope,
   SmsClassificationDecision,
@@ -55,6 +57,19 @@ const ESCALATION_REASON_VALUES: readonly JevEscalationReason[] = [
   "uncertain",
 ];
 const YES_NO_VALUES: readonly ("yes" | "no")[] = ["yes", "no"];
+const READY_TIMEFRAME_VALUES: readonly JevReadyTimeframe[] = [
+  "within_30_days",
+  "one_to_six_months",
+  "six_to_twelve_months",
+  "over_a_year",
+  "not_stated",
+  "uncertain",
+];
+const LISTING_STATUS_VALUES: readonly JevListingStatus[] = [
+  "listed",
+  "not_listed_or_not_stated",
+  "uncertain",
+];
 const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
   "positive",
   "negative",
@@ -221,6 +236,8 @@ function parseJevResponse(
     ESCALATION_REASON_VALUES,
   );
   const numberSource = readChoice(json.answers, NUMBER_SOURCE_QUESTION_ID, YES_NO_VALUES);
+  const readyTimeframe = readChoice(json.answers, "ready_timeframe", READY_TIMEFRAME_VALUES);
+  const listingStatus = readChoice(json.answers, "listing_status", LISTING_STATUS_VALUES);
   const replyIntent = includeReplyIntent
     ? readChoice(json.answers, "reply_intent", REPLY_INTENT_VALUES)
     : { value: null, probabilities: {} };
@@ -234,6 +251,10 @@ function parseJevResponse(
     probabilities.escalation_reason = escalationReason.probabilities;
   if (Object.keys(numberSource.probabilities).length)
     probabilities[NUMBER_SOURCE_QUESTION_ID] = numberSource.probabilities;
+  if (Object.keys(readyTimeframe.probabilities).length)
+    probabilities.ready_timeframe = readyTimeframe.probabilities;
+  if (Object.keys(listingStatus.probabilities).length)
+    probabilities.listing_status = listingStatus.probabilities;
   if (includeReplyIntent && Object.keys(replyIntent.probabilities).length)
     probabilities.reply_intent = replyIntent.probabilities;
 
@@ -244,6 +265,8 @@ function parseJevResponse(
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
     askedHowNumberObtained: numberSource.value === null ? null : numberSource.value === "yes",
+    readyTimeframe: readyTimeframe.value,
+    listingStatus: listingStatus.value,
     replyIntentAvailable: includeReplyIntent,
     probabilities,
     provider: "jev",

@@ -159,3 +159,60 @@ for (const mode of ["immediate", "queued"] as const) {
     });
   });
 }
+
+describe("onProviderAccepted hook (real send path)", () => {
+  function run(
+    responses: Array<Result | Error>,
+    onProviderAccepted: (ctx: { messageId: string; externalId: string }) => Promise<void>,
+  ) {
+    let accepted = false;
+    const provider = {
+      providerId: "receipt-test",
+      sendSms: vi.fn().mockImplementation(async () => { accepted = true; return RECEIPT; }),
+      verifyWebhookSignature: () => true,
+      parseInboundWebhook: () => [],
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const db = database(responses, () => accepted);
+    const outcome = sendSmsToContact(db.client, {
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID,
+      body: "hello", from: "+18165551234", metadata: { audit: "preserve" },
+      onProviderAccepted,
+    });
+    return { provider, db, outcome };
+  }
+
+  it("fires once, after the provider accepted and BEFORE receipt persistence and reconciliation", async () => {
+    const seen: Array<{ providerCalls: number; receiptAttempts: number; reconciled: number; messageId: string; externalId: string }> = [];
+    let ref: ReturnType<typeof run>;
+    ref = run([success], async (ctx) => {
+      seen.push({
+        providerCalls: ref.provider.sendSms.mock.calls.length,
+        receiptAttempts: ref.db.receiptCount(),
+        reconciled: vi.mocked(reconcileStoredStatusEvents).mock.calls.length,
+        ...ctx,
+      });
+    });
+    expect((await ref.outcome).status).toBe("sent");
+    expect(seen).toEqual([
+      { providerCalls: 1, receiptAttempts: 0, reconciled: 0, messageId: MESSAGE_ID, externalId: RECEIPT.externalId },
+    ]);
+  });
+
+  it("a failure in later persistence still leaves the hook's write done", async () => {
+    let marker: string | null = null;
+    const { outcome, db } = run([new Error("network connection reset")], async (ctx) => {
+      marker = ctx.messageId;
+    });
+    expect((await outcome).status).toBe("db_error");
+    expect(db.receiptCount()).toBe(1);
+    expect(marker).toBe(MESSAGE_ID);
+  });
+
+  it("a throwing hook never fails the send", async () => {
+    const { outcome } = run([success], async () => {
+      throw new Error("hook exploded");
+    });
+    expect((await outcome).status).toBe("sent");
+  });
+});

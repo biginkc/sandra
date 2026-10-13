@@ -9,7 +9,7 @@ import { withConvertedCallbackTime } from "./callback-wiring";
 import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
-import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
+import { applyNormaQueuePresend, completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
 
 const MIN = 60_000;
@@ -48,7 +48,10 @@ export type ReconcileSummary = {
 type Row = Pick<
   Database["public"]["Tables"]["norma_call_requests"]["Row"],
   "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome" | "attempt"
->;
+> & {
+  /** Set on queue requests; only the queue tick dials those. Column added by the queue migration. */
+  queue_entry_id?: string | null;
+};
 
 export type ReconcileDeps = {
   client: SupabaseClient<Database>;
@@ -71,14 +74,14 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")
-    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome, attempt")
+    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome, attempt, queue_entry_id" as never)
     .in("status", statuses)
     .lte("next_check_at", new Date(now).toISOString())
     .order("next_check_at", { ascending: true })
     .limit(BATCH);
   if (error) throw new Error(`norma reconcile scan failed: ${error.message}`);
 
-  for (const row of (data ?? []) as Row[]) {
+  for (const row of (data ?? []) as unknown as Row[]) {
     summary.scanned += 1;
     try {
       await reconcileRow(row, deps, now, summary);
@@ -115,6 +118,19 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
     // clock is the last update, not the creation.
     const requestedAge = row.attempt === 2 ? idleAge : createdAge;
     if (requestedAge < T.requestedGrace) return void (summary.waiting += 1);
+    if (row.queue_entry_id) {
+      // Queue rows are dialled only by the queue tick, never by this sweep. Aged ones are closed through the
+      // queue store port, which settles the entry per rule 4 in SQL; younger ones are left to the tick.
+      if (requestedAge <= T.requestedExpiry) return void (summary.waiting += 1);
+      const applied = await applyNormaQueuePresend(deps.client, row.id, "stranded_requested_expired");
+      if (applied === "applied") return void (summary.rejected += 1);
+      if (applied === "no_entry") {
+        // The entry link is gone: close the request the button way so it cannot sit open.
+        const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested", attempt);
+        return void (closed === "dispatch_rejected" ? (summary.rejected += 1) : (summary.waiting += 1));
+      }
+      return void (summary.waiting += 1);
+    }
     if (requestedAge > T.requestedExpiry) {
       const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested", attempt);
       // Claimed by a dispatcher in the meantime: not ours to close.

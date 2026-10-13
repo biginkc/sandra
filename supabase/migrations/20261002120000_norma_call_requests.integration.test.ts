@@ -5,6 +5,7 @@ import { Client } from "pg";
 import { describe, expect, it } from "vitest";
 
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
+import { dropEvolvedNormaDispatchOverloads } from "@tests/integration/my-leads-housekeeping-fixture";
 
 // Local-only: every test runs inside one transaction that is rolled back, so
 // the loopback database is left as it was found. The migration itself is
@@ -27,6 +28,7 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>) {
   await db.connect();
   try {
     await db.query("begin");
+    await dropEvolvedNormaDispatchOverloads(db);
     await db.query(migration);
     const ctx: Ctx = { org: randomUUID(), rep: randomUUID(), assignee: randomUUID(), sequence: randomUUID() };
     await db.query("insert into auth.users(id) values ($1), ($2)", [ctx.rep, ctx.assignee]);

@@ -253,6 +253,79 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(mocks.dialLead).not.toHaveBeenCalled()
   })
 
+  describe("ended-call outcome popup", () => {
+    async function endedCallWithEvictedRow() {
+      mocks.dialLead.mockResolvedValue(dialOk)
+      const ended = callStatus("intent-1", "ended")
+      mocks.status.mockResolvedValue({ ...ended, status: { ...ended.status, callActivityId: "activity-ended" } })
+      mocks.loadMyLeads.mockResolvedValue({
+        ok: true,
+        snapshot: { ...snapshot(), stages: { not_contacted: { rows: [rows[1]], totalCount: 1, filteredCount: 1, cursor: null, hasMore: false } } },
+        kpis, drips: { active: [], replied: [], repliedCount: 0, counts: {} }, strip: null,
+      })
+      renderClient({ dialpad, postCallPrompt: true })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      expect(screen.queryByRole("button", { name: "Start call property-1" })).not.toBeInTheDocument()
+      return screen.getByRole("button", { name: "Log outcome" })
+    }
+
+    it("opens the called lead after the ended-call refresh removes it from the loaded list", async () => {
+      const button = await endedCallWithEvictedRow()
+      await click(button)
+      expect(mocks.loadMyLeadRow).toHaveBeenCalledWith({ memberId: "rep-1", propertyId: "property-1" })
+      expect(screen.getByTestId("post-call-prompt")).toBeVisible()
+      expect(screen.getByTestId("post-call-prompt")).toHaveTextContent("1 First Lane")
+      expect(screen.getByLabelText("Sandra call")).toHaveValue("activity-ended")
+      expect(mocks.submitMyLeadCommand).not.toHaveBeenCalled()
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+    })
+
+    it("still refuses an assignment change when the called row is loaded", async () => {
+      mocks.dialLead.mockResolvedValue(dialOk)
+      const ended = callStatus("intent-1", "ended")
+      mocks.status.mockResolvedValue({ ...ended, status: { ...ended.status, callActivityId: "activity-ended" } })
+      renderClient({ dialpad, postCallPrompt: true })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: {
+        status: "found", row: { ...rows[0], assignmentEpisodeId: "replacement-episode" }, snapshotAt: SNAPSHOT_AT,
+      } })
+      await click(screen.getByRole("button", { name: "Log outcome" }))
+      expect(screen.getByRole("dialog", { name: "Log call outcome" })).toHaveTextContent("This lead is unavailable or its assignment changed")
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+    })
+
+    it("shows lookup failures in a popup and retries the same call", async () => {
+      const button = await endedCallWithEvictedRow()
+      mocks.loadMyLeadRow.mockResolvedValueOnce({ ok: false, code: "ERROR" })
+      await click(button)
+      expect(screen.getByRole("dialog", { name: "Log call outcome" })).toHaveTextContent("Could not load current lead details")
+      await click(screen.getByRole("button", { name: "Retry opening" }))
+      expect(screen.getByTestId("post-call-prompt")).toBeVisible()
+    })
+
+    it("shows an unavailable lead without opening an editable outcome form", async () => {
+      const button = await endedCallWithEvictedRow()
+      mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: { status: "unavailable", reason: "not_found" } })
+      await click(button)
+      expect(screen.getByRole("dialog", { name: "Log call outcome" })).toHaveTextContent("This lead is unavailable or its assignment changed")
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+      expect(mocks.submitMyLeadCommand).not.toHaveBeenCalled()
+    })
+
+    it("opens loading feedback immediately and ignores a lookup completed after cancel", async () => {
+      const button = await endedCallWithEvictedRow()
+      let resolve!: (value: unknown) => void
+      mocks.loadMyLeadRow.mockReturnValue(new Promise((done) => { resolve = done }))
+      await click(button)
+      expect(screen.getByRole("dialog", { name: "Log call outcome" })).toHaveTextContent("Loading current lead")
+      await click(screen.getByRole("button", { name: "Cancel opening" }))
+      await act(async () => resolve({ ok: true, lookup: { status: "found", row: rows[0], snapshotAt: SNAPSHOT_AT } }))
+      await flush()
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+    })
+  })
+
   describe("API dial outcomes", () => {
     it("shows the dial status after an accepted dial", async () => {
       mocks.dialLead.mockResolvedValue(dialOk)

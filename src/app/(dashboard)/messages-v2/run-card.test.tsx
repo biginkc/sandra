@@ -1,5 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { RunCard } from "./run-card";
 import type { PipelineRunStep, RunWithSteps } from "./types";
@@ -164,5 +164,71 @@ describe("RunCard", () => {
   it("falls back gracefully when no label has loaded", () => {
     render(<RunCard run={baseRun()} label={undefined} />);
     expect(screen.getByText("Unknown sender")).toBeInTheDocument();
+  });
+  it("shows the auto-drip route, when the first text goes, and how to stop it", () => {
+    const run = baseRun({
+      steps: [
+        step(1, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "applied",
+          detail: { route: "maybe_later", sequenceId: "s", enrollmentId: "e", firstSendNotBefore: "2026-11-06T12:00:00Z" },
+        }),
+      ],
+    });
+    render(<RunCard run={run} label={label} />);
+    expect(screen.getByTestId("drip-enrollment")).toHaveTextContent("Maybe later, first text Nov 6");
+    expect(screen.getByRole("link", { name: "Stop it from the lead page" })).toHaveAttribute("href", "/leads/p1");
+  });
+
+  it("shows the Book appointment route for a hot lead, and nothing for a failed or absent enrolment", () => {
+    const hot = baseRun({ steps: [step(1, { kind: "action", name: "drip_enrolled", result: "applied", detail: { route: "hot_book_appointment" } })] });
+    const { unmount } = render(<RunCard run={hot} label={label} />);
+    expect(screen.getByTestId("drip-enrollment")).toHaveTextContent("Book appointment");
+    unmount();
+    const failed = baseRun({ steps: [step(1, { kind: "action", name: "drip_enrolled", result: "error", detail: { reason: "no_phone" } })] });
+    render(<RunCard run={failed} label={label} />);
+    expect(screen.queryByTestId("drip-enrollment")).toBeNull();
+    expect(screen.queryByTestId("drip-stop-hint")).toBeNull();
+  });
+});
+
+describe("RunCard undo", () => {
+  const applied = (name: string) => [step(1, { kind: "action", name, result: "applied" })];
+
+  it("offers Undo for a Jev-applied action and calls undo with the record id", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const controls = {
+      find: vi.fn(async () => "undo-1"),
+      undo: vi.fn(async () => ({ ok: true as const })),
+    };
+    render(<RunCard run={baseRun({ steps: applied("wrong_number") })} label={label} undoControls={controls} />);
+    const btn = await screen.findByTestId("undo-jev-action");
+    await userEvent.click(btn);
+    expect(controls.find).toHaveBeenCalledWith("m1");
+    expect(controls.undo).toHaveBeenCalledWith("undo-1");
+    expect(await screen.findByTestId("undo-done")).toBeInTheDocument();
+  });
+
+  it("shows the refusal when the lead changed since", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const controls = {
+      find: vi.fn(async () => "undo-1"),
+      undo: vi.fn(async () => ({ ok: false as const, message: "Someone changed this lead after Jev did" })),
+    };
+    render(<RunCard run={baseRun({ steps: applied("apply_nurture") })} label={label} undoControls={controls} />);
+    await userEvent.click(await screen.findByTestId("undo-jev-action"));
+    expect(await screen.findByTestId("undo-error")).toHaveTextContent(/changed this lead/);
+  });
+
+  it("shows no Undo when nothing is recorded, for held actions, or without controls", async () => {
+    const none = { find: vi.fn(async () => null), undo: vi.fn() };
+    render(<RunCard run={baseRun({ steps: applied("wrong_number") })} label={label} undoControls={none} />);
+    await vi.waitFor(() => expect(none.find).toHaveBeenCalled());
+    expect(screen.queryByTestId("undo-jev-action")).toBeNull();
+
+    const held = { find: vi.fn(async () => "undo-1"), undo: vi.fn() };
+    render(<RunCard run={baseRun({ steps: [step(1, { kind: "action", name: "opted_out", result: "held" })] })} label={label} undoControls={held} />);
+    expect(held.find).not.toHaveBeenCalled();
   });
 });

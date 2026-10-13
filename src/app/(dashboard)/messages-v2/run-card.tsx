@@ -2,6 +2,7 @@
 
 import { format } from "date-fns/format";
 import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -9,6 +10,24 @@ import { readJevScores, replyPersona } from "./step-format";
 import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
 
 const ENTER = "animate-in fade-in slide-in-from-top-1 duration-300";
+
+const DRIP_ROUTE_LABELS: Record<string, string> = {
+  maybe_later: "Maybe later",
+  check_in_60: "Check in every 60 days",
+  listed_not_selling: "Listed, not selling",
+  hot_book_appointment: "Book appointment",
+};
+
+/** "Maybe later, first text Nov 6" for an applied auto-drip step, else null. */
+export function dripEnrollmentSummary(step: PipelineRunStep): string | null {
+  if (step.name !== "drip_enrolled" || step.result !== "applied") return null;
+  const route = typeof step.detail?.route === "string" ? step.detail.route : null;
+  const label = route ? (DRIP_ROUTE_LABELS[route] ?? route) : null;
+  const at = typeof step.detail?.firstSendNotBefore === "string" ? new Date(step.detail.firstSendNotBefore) : null;
+  const when = at && !Number.isNaN(at.getTime()) ? `first text ${format(at, "MMM d")}` : null;
+  const parts = [label, when].filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
 
 export function StepLine({ step }: { step: PipelineRunStep }) {
   const base = cn("flex items-baseline gap-2 text-sm", ENTER);
@@ -54,6 +73,11 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           <span>{step.name}</span>
           {step.result !== "applied" && (
             <span className="text-muted-foreground">({step.result})</span>
+          )}
+          {dripEnrollmentSummary(step) && (
+            <span data-testid="drip-enrollment" className="text-muted-foreground">
+              {dripEnrollmentSummary(step)}
+            </span>
           )}
         </li>
       );
@@ -116,14 +140,86 @@ export function openThreadHref(
   return null;
 }
 
+/** Action steps Jev applies on its own that a person can reverse. */
+const UNDOABLE_ACTION_STEPS = new Set(["wrong_number", "not_interested", "apply_nurture"]);
+
+export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean {
+  return run.steps.some(
+    (s) => s.kind === "action" && s.result === "applied" && UNDOABLE_ACTION_STEPS.has(s.name),
+  );
+}
+
+export type UndoControls = {
+  /** Returns the undo record id while the action is still undoable, else null. */
+  find: (inboundMessageId: string) => Promise<string | null>;
+  undo: (undoId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+};
+
+function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
+  const [undoId, setUndoId] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    controls
+      .find(inboundMessageId)
+      .then((id) => {
+        if (alive) setUndoId(id);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [controls, inboundMessageId]);
+
+  if (state === "done") {
+    return (
+      <p data-testid="undo-done" className="mt-2 text-xs text-muted-foreground">
+        Undone. The lead is back the way it was before Jev acted.
+      </p>
+    );
+  }
+  if (!undoId) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        data-testid="undo-jev-action"
+        disabled={state === "busy"}
+        onClick={async () => {
+          setState("busy");
+          setError(null);
+          const r = await controls.undo(undoId);
+          if (r.ok) setState("done");
+          else {
+            setState("idle");
+            setError(r.message);
+          }
+        }}
+        className="rounded-md border px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
+      >
+        {state === "busy" ? "Undoing..." : "Undo Jev's action"}
+      </button>
+      {error && (
+        <span role="alert" data-testid="undo-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function RunCard({
   run,
   label,
   isOwner = false,
+  undoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   isOwner?: boolean;
+  undoControls?: UndoControls;
 }) {
   const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
@@ -134,6 +230,7 @@ export function RunCard({
     (s) => !(s.kind === "gate" && s.result === "pass"),
   );
   const running = run.status === "running";
+  const autoDripped = run.steps.some((st) => dripEnrollmentSummary(st) !== null);
 
   return (
     <article
@@ -191,6 +288,24 @@ export function RunCard({
           </li>
         )}
       </ul>
+
+      {autoDripped && run.property_id && (
+        <p data-testid="drip-stop-hint" className="mt-2 text-xs text-muted-foreground">
+          Auto-enrolled in a drip.{" "}
+          <a
+            href={`/leads/${encodeURIComponent(run.property_id)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-4 hover:text-foreground"
+          >
+            Stop it from the lead page
+          </a>
+        </p>
+      )}
+
+      {undoControls && hasUndoableJevAction(run) && (
+        <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
+      )}
 
       {threadHref && (
         <a

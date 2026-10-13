@@ -37,6 +37,7 @@ export type NormaBlockCode =
   | "gate_off"
   | "callback_assignee_not_configured"
   | "dispatch_rejected"
+  | "busy_try_again"
   | "error";
 
 export type NormaBlockInfo = { code: NormaBlockCode; reason?: string };
@@ -63,6 +64,9 @@ export function normaBlockText(info: NormaBlockInfo): string {
       return "Norma is not fully set up yet: nobody is assigned to receive callback tasks.";
     case "dispatch_rejected":
       return "The call was not placed. Nothing was sent to the seller.";
+    // Capacity / number-spacing refusal. Wording approved by Jarrad 2026-10-07 ("Yes busy notice text is fine").
+    case "busy_try_again":
+      return "Norma is busy. Try again shortly. No call was placed.";
     default:
       return "Something went wrong. Nothing was sent to the seller. Try again in a moment.";
   }

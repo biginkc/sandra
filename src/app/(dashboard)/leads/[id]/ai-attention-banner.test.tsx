@@ -41,6 +41,26 @@ describe("<AiAttentionBanner />", () => {
     expect(screen.queryByTestId("ai-attention-banner")).toBeNull();
   });
 
+  it("renders the suppression warning when the attention flag is off but suppression is outstanding", async () => {
+    listOutstandingSuppressionFailures.mockResolvedValue({ ok: true, data: { reviewIds: ["r1"] } });
+    render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible={false} reason={null} nowMs={NOW_MS} />,
+    );
+    expect(await screen.findByTestId("ai-attention-suppression-warning")).toHaveTextContent(
+      "1 confirmed opt-out still needs suppression",
+    );
+    expect(screen.getByTestId("ai-attention-retry-suppression")).toBeInTheDocument();
+    expect(listOutstandingSuppressionFailures).toHaveBeenCalledWith("prop-1");
+  });
+
+  it("stays hidden when the flag is off and nothing is outstanding", async () => {
+    render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible={false} reason={null} nowMs={NOW_MS} />,
+    );
+    await waitFor(() => expect(listOutstandingSuppressionFailures).toHaveBeenCalled());
+    expect(screen.queryByTestId("ai-attention-banner")).toBeNull();
+  });
+
   it("shows a truthful failure and retries the same clear action", async () => {
     const user = userEvent.setup();
     clearNeedsHumanAttention

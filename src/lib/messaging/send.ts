@@ -486,6 +486,8 @@ export type SendSmsInput = {
   queueOnly?: boolean;
   scheduledFor?: Date | null;
   metadata?: Json | null;
+  /** The person behind a manual send, for the audit trail when a takeover pauses a drip. Defaults to the system actor. */
+  takeoverActorId?: string | null;
   campaignId?: string | null;
   /**
    * Bulk campaigns opt into a final destination check immediately before the
@@ -510,6 +512,13 @@ export type SendSmsInput = {
    */
   beforeProviderSubmit?: (ctx?: { messageId: string }) => Promise<boolean>;
   /**
+   * Called once, immediately after the provider accepted the send and BEFORE
+   * receipt persistence, the status update and event reconciliation, so a
+   * caller can make "this message went out" durable ahead of any other
+   * post-send write. Errors are caught and reported; they never fail the send.
+   */
+  onProviderAccepted?: (ctx: { messageId: string; externalId: string }) => Promise<void>;
+  /**
    * Sequence first-touches can have no prior inbound and no campaign snapshot.
    * When true, the provider default may be used, but inventory-aware providers
    * still validate it against the approved sender catalog before any send.
@@ -533,6 +542,38 @@ export type SendSmsInput = {
 };
 
 export async function sendSmsToContact(
+  supabase: SupabaseClient<Database>,
+  input: SendSmsInput,
+  manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
+): Promise<SendSmsOutcome> {
+  const outcome = await sendSmsToContactInner(supabase, input, manualDispatch);
+  const meta = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? input.metadata : null;
+  if (
+    input.origin === "manual" &&
+    outcome.status === "sent" &&
+    input.propertyId &&
+    // A scheduled seller reminder is sent on a person's behalf by the system, not a takeover.
+    meta?.kind !== "seller_appointment_reminder"
+  ) {
+    // A person texting the seller is a person taking over: stop an auto-enrolled
+    // Book appointment drip. Best-effort (the helper never throws); imported
+    // lazily so the send path keeps its module graph.
+    try {
+      const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+      await pauseHotBookAppointmentOnTakeover({
+        propertyIds: [input.propertyId],
+        actor: input.takeoverActorId
+          ? { actorType: "user", actorId: input.takeoverActorId }
+          : { actorType: "system" },
+      });
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function sendSmsToContactInner(
   supabase: SupabaseClient<Database>,
   input: SendSmsInput,
   manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
@@ -1047,6 +1088,16 @@ export async function sendSmsToContact(
     });
     providerAccepted = true;
     acceptedExternalId = result.externalId;
+    if (input.onProviderAccepted) {
+      try {
+        await input.onProviderAccepted({ messageId: pending.id, externalId: result.externalId });
+      } catch (hookError) {
+        reportError(hookError, {
+          tags: { surface: "send_on_provider_accepted" },
+          extra: { messageId: pending.id },
+        });
+      }
+    }
     // Bind the provider receipt before updating the user-visible history row.
     // If that row update loses a race, the service ledger still records that
     // the provider accepted the request and a retry cannot issue a duplicate.
@@ -1536,6 +1587,32 @@ async function queueForLater(
  * controller's tick loop.
  */
 export async function releaseQueuedMessage(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+): Promise<SendSmsOutcome> {
+  const outcome = await releaseQueuedMessageInner(supabase, messageId);
+  if (outcome.status === "sent") {
+    // A person's queued text finally going out is a takeover too (same rule as an
+    // immediate manual send); automated queue rows and seller reminders are not.
+    try {
+      const { data: row } = await supabase
+        .from("messages")
+        .select("property_id, metadata")
+        .eq("id", messageId)
+        .maybeSingle();
+      const meta = readMetadataRecord(row?.metadata ?? null);
+      if (row?.property_id && resolveQueuedSendOrigin(row.metadata ?? null) === "manual" && meta?.kind !== "seller_appointment_reminder") {
+        const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+        await pauseHotBookAppointmentOnTakeover({ propertyIds: [row.property_id], actor: { actorType: "system" } });
+      }
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function releaseQueuedMessageInner(
   supabase: SupabaseClient<Database>,
   messageId: string,
 ): Promise<SendSmsOutcome> {

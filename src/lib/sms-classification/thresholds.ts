@@ -25,6 +25,24 @@ export const THRESHOLDABLE_OUTCOMES: ReadonlySet<ThresholdableOutcome> = new Set
   "opted_out",
 ]);
 
+/**
+ * HARD RULE (Jarrad, 2026-10-07, verbatim: "I don't want you making any DNC
+ * decisions. I don't want Jev making any DNC decisions."): a model judgment
+ * never suppresses a phone or sets an opt-out/DNC disposition on its own.
+ * `opted_out` stays a thresholdable outcome (scorecard, history) but is
+ * ALWAYS human-gated here, whatever its confidence and whatever
+ * `automation_enabled` says. `dnc` is already never thresholdable. The
+ * `fn_set_jev_outcome_threshold` RPC refuses to switch automation on for
+ * these outcomes too (20261008300000). The only automatic suppression left
+ * in the system is the deterministic carrier STOP keyword path in
+ * `messaging/inbound.ts`.
+ */
+export const HUMAN_ONLY_OUTCOMES: ReadonlySet<string> = new Set(["opted_out", "dnc"]);
+
+export function isHumanOnlyOutcome(outcome: string): boolean {
+  return HUMAN_ONLY_OUTCOMES.has(outcome);
+}
+
 export function isThresholdableOutcome(
   outcome: JevOutcome,
 ): outcome is ThresholdableOutcome {
@@ -76,7 +94,8 @@ export type ThresholdDecision =
         | "missing_confidence"
         | "invalid_confidence"
         | "no_threshold_configured"
-        | "automation_disabled";
+        | "automation_disabled"
+        | "human_only_outcome";
       outcome: JevOutcome;
     };
 
@@ -106,6 +125,12 @@ export function resolveThresholdDecision(
       reason: "not_applicable",
       outcome: decision.outcome,
     };
+  }
+
+  if (decision.outcome === "opted_out") {
+    // Hard rule (see HUMAN_ONLY_OUTCOMES): checked before confidence or the
+    // automation switch so no config value can ever auto-apply it.
+    return { status: "human_gated", reason: "human_only_outcome", outcome: decision.outcome };
   }
 
   const outcome = decision.outcome; // narrowed to ThresholdableOutcome below

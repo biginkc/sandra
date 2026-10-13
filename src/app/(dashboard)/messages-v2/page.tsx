@@ -14,7 +14,13 @@ import {
   takeOverHoldAction,
   confirmDoNotContactAction,
   retrySuppressionHoldAction,
+  setReplyGenerationAction,
+  undoJevAppliedAction,
+  findJevUndoAction,
 } from "./actions";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
+
+import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Split, type LooseSupabase } from "./queries";
@@ -27,6 +33,7 @@ import {
   type ScorecardRow,
 } from "./scorecard";
 import { loadReplayBatchId } from "./replay-batch";
+import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -60,6 +67,84 @@ async function loadCoverage(
   }
 }
 
+/** Owner-only: the org's nurture auto-drip switch and the drips it can pick. Null hides the control. */
+async function loadNurtureAutoDrip(
+  supabase: LooseSupabase,
+  orgId: string,
+): Promise<NurtureAutoDripState | null> {
+  try {
+    const [cfg, seqs] = await Promise.all([
+      supabase
+        .from("ai_responder_configs")
+        .select("id, nurture_auto_drip, nurture_drip_maybe_later_sequence_id, nurture_drip_check_in_60_sequence_id, nurture_drip_listed_not_selling_sequence_id, nurture_drip_hot_book_appointment_sequence_id")
+        .eq("org_id", orgId)
+        .maybeSingle(),
+      supabase
+        .from("sequences")
+        .select("id, name")
+        .eq("org_id", orgId)
+        .eq("active", true)
+        .is("archived_at", null)
+        .order("name"),
+    ]);
+    const row = cfg.data as {
+      id: string;
+      nurture_auto_drip: boolean;
+      nurture_drip_maybe_later_sequence_id: string | null;
+      nurture_drip_check_in_60_sequence_id: string | null;
+      nurture_drip_listed_not_selling_sequence_id: string | null;
+      nurture_drip_hot_book_appointment_sequence_id: string | null;
+    } | null;
+    if (cfg.error || seqs.error || !row) return null;
+    return {
+      configId: row.id,
+      enabled: row.nurture_auto_drip,
+      drips: {
+        maybeLater: row.nurture_drip_maybe_later_sequence_id,
+        checkIn60: row.nurture_drip_check_in_60_sequence_id,
+        listedNotSelling: row.nurture_drip_listed_not_selling_sequence_id,
+        hotBookAppointment: row.nurture_drip_hot_book_appointment_sequence_id,
+      },
+      sequences: (seqs.data ?? []) as Array<{ id: string; name: string }>,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The org's active responder config and its "AI drafts" setting (null on any failure: the toggle hides). */
+async function loadReplyGeneration(
+  supabase: LooseSupabase,
+  orgId: string,
+): Promise<{ configId: string; replyGeneration: "llm" | "off" } | null> {
+  try {
+    const { data, error } = await (supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          eq: (c: string, v: unknown) => {
+            eq: (c: string, v: unknown) => {
+              maybeSingle: () => PromiseLike<{
+                data: { id: string; reply_generation: string } | null;
+                error: unknown;
+              }>;
+            };
+          };
+        };
+      };
+    })
+      .from("ai_responder_configs")
+      .select("id, reply_generation")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error || !data) return null;
+    if (data.reply_generation !== "llm" && data.reply_generation !== "off") return null;
+    return { configId: data.id, replyGeneration: data.reply_generation };
+  } catch {
+    return null;
+  }
+}
+
 /** 7-day scorecard for first paint; null lets the client card load/retry itself. */
 async function loadScorecard(
   supabase: LooseSupabase,
@@ -83,15 +168,18 @@ export default async function MessagesV2Page() {
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
+  const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
-  const [loaded, coverage, scorecardRows, replayBatchId] = await Promise.all([
-    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
+  const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip] = await Promise.all([
+    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
+    loadReplyGeneration(supabase, orgId),
+    isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -115,7 +203,12 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replyGeneration={replySetting}
+        setReplyGeneration={setReplyGenerationAction}
+        undoJevAction={undoJevAppliedAction}
+        findJevUndo={findJevUndoAction}
         replayBatchId={replayBatchId}
+        nurtureAutoDrip={nurtureAutoDrip}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
@@ -130,6 +223,7 @@ export default async function MessagesV2Page() {
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
+        lunaEnabled={lunaEnabled}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,
@@ -139,6 +233,12 @@ export default async function MessagesV2Page() {
           retrySuppression: retrySuppressionHoldAction,
           confirmDoNotContact: confirmDoNotContactAction,
           listAssignees: listHoldAssigneesAction,
+          ...(lunaEnabled
+            ? {
+                lunaApply: applyLunaSuggestionAction,
+                lunaReject: rejectLunaSuggestionAction,
+              }
+            : {}),
         }}
       />
     </div>

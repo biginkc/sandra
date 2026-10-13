@@ -172,7 +172,7 @@ export async function retrySuppressionForProperty(
       .select("id")
       .eq("property_id", propertyId)
       .eq("status", "confirmed")
-      .in("disposition", ["opted_out", "dnc"])
+      .or("disposition.in.(opted_out,dnc),and(disposition.eq.wrong_number,wrong_scope.eq.all)")
       .in("id", ids);
     if (reviewError) return fail(reviewError.message);
     const valid = new Set(

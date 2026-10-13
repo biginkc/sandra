@@ -1,5 +1,6 @@
 import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages-v2/types";
 
+import { holdReasonLabel } from "./messages";
 import type { HoldInfo } from "./types";
 
 /**
@@ -33,6 +34,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "number_source_answer_received",
   "draft_persist_failed",
   "reply_pending",
+  "needs_reply",
   "send_timeout",
   "send_timeout_then_sent",
   "send_timeout_unparseable",
@@ -47,6 +49,19 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "jev_unexpected_send_route",
   "jev_new_lead_promotion_failed",
   "jev_unclear_no_action",
+  // Model judgments about opt-out / DNC / phone-wide wrong number never act
+  // on their own (Jarrad 2026-10-07); a human confirms each one.
+  "jev_dnc_needs_confirm",
+  "jev_opted_out_needs_confirm",
+  "jev_wrong_number_all_needs_confirm",
+  "model_opt_out_needs_confirm",
+  "model_dnc_needs_confirm",
+  // Hostile / opt-out PHRASE wording (Jarrad 2026-10-08): held for a person.
+  "hostile_needs_confirm",
+  "optout_phrase_needs_confirm",
+  "sold_needs_human",
+  "wrong_number_suppression_failed",
+  "hostile_suppression_failed",
   "ai_disposition_replay_lookup_failed",
   "ai_disposition_missing_thread_identity",
   // Run outcomes / reasons.
@@ -83,6 +98,9 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "no_property",
   "no_contact",
   "ai_responder_exception",
+  // Nurture auto-drip: the same drip already holds the lead but is paused.
+  // (`nurture_reply_not_sent:` / `drip_enroll_failed:` are prefix families below.)
+  "drip_paused",
 ];
 
 /** Families with a variable tail: `keyword:<tier>`, `safety:<reason>`, `dead_letter_failed:<reason>` ... */
@@ -95,8 +113,12 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "send_timeout:",
   "dead_letter_failed:",
   "suppression_incomplete:",
+  "hostile_needs_confirm:",
+  "optout_phrase_needs_confirm:",
   "jev_below_threshold:",
   "number_source_reply_not_sent:",
+  "nurture_reply_not_sent:",
+  "drip_enroll_failed:",
   "jev_automatic_failed:",
   "model:",
   "already_flagged:",
@@ -197,6 +219,7 @@ export function toAlertHolds(
       since: hold.since,
       startedAt: hold.alert_since ?? null,
       name: label?.name ?? "Unknown sender",
+      reasonLabel: holdReasonLabel(holdReasonKey(hold)),
       hot: isHotHold(hold, hotReasons),
     });
   }

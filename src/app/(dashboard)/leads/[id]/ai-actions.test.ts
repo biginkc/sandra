@@ -206,6 +206,7 @@ describe("retrySuppressionForProperty", () => {
           if (table === "lead_events") return Promise.resolve({ data: state.events, error: null });
           return c;
         };
+        c.or = () => c;
         c.update = (v: Record<string, unknown>) => {
           pending = v;
           return c;

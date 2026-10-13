@@ -18,6 +18,8 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 import {
   applySuppressionForConfirmedReview,
   applyConfirmedSuppression,
+  dischargeSuppressionObligation,
+  retryOutstandingSuppressionObligations,
   listOutstandingSuppressionReviews,
   recordSuppressionRetriedOk,
   suppressionIncompleteReason,
@@ -39,6 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   applyPhoneLevelOptOut.mockResolvedValue(undefined);
   recordLeadEvent.mockResolvedValue(undefined);
+  createAdminClient.mockReturnValue({ admin: true } as never);
 });
 
 describe("applyConfirmedSuppression", () => {
@@ -173,6 +176,67 @@ describe("applySuppressionForConfirmedReview", () => {
   it("confirmed dnc review suppresses on the dnc surface", async () => {
     await applySuppressionForConfirmedReview(lookupClient("dnc"), "review-1", "user-1");
     expect(applyPhoneLevelOptOut).toHaveBeenCalledWith({ admin: true }, expect.objectContaining({ surface: "dnc" }));
+  });
+
+  it("confirmed wrong_number scoped to all suppresses the phone on the dnc surface and discharges the obligation", async () => {
+    const a = {
+      inserts: [] as Array<Record<string, unknown>>,
+      rpcs: [] as string[],
+    };
+    const chain = (table: string) => {
+      const c: Record<string, unknown> = {};
+      c.select = () => c;
+      c.eq = () => c;
+      c.maybeSingle = async () => ({ data: table === "lead_events" ? { id: "ev-1" } : { org_id: "org-1" }, error: null });
+      c.insert = async (values: Record<string, unknown>) => {
+        a.inserts.push(values);
+        return { error: null };
+      };
+      return c;
+    };
+    createAdminClient.mockReturnValue({
+      from: chain,
+      rpc: async (name: string) => {
+        a.rpcs.push(name);
+        return { error: null };
+      },
+    } as never);
+    const result = await applySuppressionForConfirmedReview(
+      lookupClient("wrong_number", {
+        ai_disposition_reviews: {
+          property_id: "property-1", org_id: "org-1", disposition: "wrong_number",
+          ai_reason: "wrong number", source_inbound_message_id: "msg-1", wrong_scope: "all",
+        },
+      }),
+      "review-1",
+      "user-1",
+      { discharge: true },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+    expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ surface: "dnc", source: "ai_responder_wrong_number" }),
+    );
+    expect(a.inserts[0]).toMatchObject({ event_type: "suppression_retried_ok", source_id: "review-1" });
+    expect(a.rpcs).toEqual(["fn_clear_suppression_hold_if_resolved"]);
+  });
+
+  it("confirmed wrong_number scoped to this_property (or unscoped) never suppresses the phone", async () => {
+    for (const scope of ["this_property", null]) {
+      await applySuppressionForConfirmedReview(
+        lookupClient("wrong_number", {
+          ai_disposition_reviews: {
+            property_id: "property-1", org_id: "org-1", disposition: "wrong_number",
+            ai_reason: "wrong number", source_inbound_message_id: "msg-1", wrong_scope: scope,
+          },
+        }),
+        "review-1",
+        "user-1",
+        { discharge: true },
+      );
+    }
+    expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
   });
 
   it("confirmed not_interested review does not suppress", async () => {
@@ -675,5 +739,189 @@ describe("atomic pointer merge (r24+)", () => {
     const { admin } = statefulAdmin("suppression_incomplete:A,B,C");
     const out = await listOutstandingSuppressionReviews(admin as never, "property-1");
     expect(out.reviewIds.sort()).toEqual(["A", "B", "C"]);
+  });
+});
+
+describe("durable obligation discharge (round 14)", () => {
+  function dischargeAdmin(opts: { ledgerRow: boolean; insertCode?: string; clearError?: boolean }) {
+    const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
+    const rpcs: Array<{ name: string; args: unknown }> = [];
+    const chain = (table: string) => {
+      const c: Record<string, unknown> = {};
+      c.select = () => c;
+      c.eq = () => c;
+      c.maybeSingle = async () => ({
+        data: table === "lead_events" ? (opts.ledgerRow ? { id: "ev-1" } : null) : { org_id: "org-1" },
+        error: null,
+      });
+      c.insert = async (values: Record<string, unknown>) => {
+        inserts.push({ table, values });
+        return { error: opts.insertCode ? { code: opts.insertCode, message: "dup" } : null };
+      };
+      return c;
+    };
+    return {
+      inserts,
+      rpcs,
+      client: {
+        from: chain,
+        rpc: async (name: string, args: unknown) => {
+          rpcs.push({ name, args });
+          return { error: opts.clearError ? { message: "boom" } : null };
+        },
+      },
+    };
+  }
+
+  it("with a ledger row: writes retried_ok then asks the database to clear", async () => {
+    const a = dischargeAdmin({ ledgerRow: true });
+    createAdminClient.mockReturnValue(a.client as never);
+    await dischargeSuppressionObligation({ propertyId: "property-1", reviewId: "review-1", actorId: "user-1" });
+    expect(a.inserts).toHaveLength(1);
+    expect(a.inserts[0].values).toMatchObject({
+      event_type: "suppression_retried_ok",
+      source_id: "review-1",
+      actor_type: "user",
+    });
+    expect(a.rpcs).toEqual([{ name: "fn_clear_suppression_hold_if_resolved", args: { p_property_id: "property-1" } }]);
+  });
+
+  it("without a ledger row writes nothing (a confirm that never needed phone suppression)", async () => {
+    const a = dischargeAdmin({ ledgerRow: false });
+    createAdminClient.mockReturnValue(a.client as never);
+    await dischargeSuppressionObligation({ propertyId: "property-1", reviewId: "review-1", actorId: "user-1" });
+    expect(a.inserts).toHaveLength(0);
+    expect(a.rpcs).toHaveLength(0);
+  });
+
+  it("a duplicate retried_ok (concurrent retry) is not an error and the clear still runs", async () => {
+    const a = dischargeAdmin({ ledgerRow: true, insertCode: "23505" });
+    createAdminClient.mockReturnValue(a.client as never);
+    await dischargeSuppressionObligation({ propertyId: "property-1", reviewId: "review-1", actorId: null });
+    expect(reportError).not.toHaveBeenCalled();
+    expect(a.rpcs).toHaveLength(1);
+  });
+
+  it("a failing clear is reported, never thrown", async () => {
+    const a = dischargeAdmin({ ledgerRow: true, clearError: true });
+    createAdminClient.mockReturnValue(a.client as never);
+    await expect(
+      dischargeSuppressionObligation({ propertyId: "property-1", reviewId: "review-1", actorId: "u" }),
+    ).resolves.toBeUndefined();
+    expect(reportError).toHaveBeenCalled();
+  });
+
+  it("applySuppressionForConfirmedReview discharges only on success and only when asked", async () => {
+    const a = dischargeAdmin({ ledgerRow: true });
+    createAdminClient.mockReturnValue(a.client as never);
+    await applySuppressionForConfirmedReview(lookupClient("opted_out"), "review-1", "user-1");
+    expect(a.inserts).toHaveLength(0);
+    await applySuppressionForConfirmedReview(lookupClient("opted_out"), "review-1", "user-1", { discharge: true });
+    expect(a.inserts).toHaveLength(1);
+
+    const b = dischargeAdmin({ ledgerRow: true });
+    createAdminClient.mockReturnValue(b.client as never);
+    applyPhoneLevelOptOut.mockRejectedValueOnce(new Error("down"));
+    const r = await applySuppressionForConfirmedReview(lookupClient("opted_out"), "review-1", "user-1", {
+      discharge: true,
+    });
+    expect(r.ok).toBe(false);
+    expect(b.inserts.filter((i) => (i.values as { event_type?: string }).event_type === "suppression_retried_ok")).toHaveLength(0);
+    createAdminClient.mockReturnValue({ admin: true } as never);
+  });
+
+  function sweepFixture(attemptReply: { attempt_count: number; should_report: boolean }) {
+    const a = dischargeAdmin({ ledgerRow: true });
+    createAdminClient.mockReturnValue(a.client as never);
+    const lookup = lookupClient("opted_out");
+    const rpcs: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const sweepClient = {
+      from: lookup.from,
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        rpcs.push({ name, args });
+        if (name === "fn_list_outstanding_suppression_obligations")
+          return {
+            data: [
+              { review_id: "review-1", property_id: "property-1", org_id: "org-1", reviewed_by: "u1" },
+              { review_id: "review-2", property_id: "property-1", org_id: "org-1", reviewed_by: "u2" },
+            ],
+            error: null,
+          };
+        if (name === "fn_record_suppression_attempt_failure") return { data: [attemptReply], error: null };
+        if (name === "fn_list_resolvable_suppression_holds") return { data: [{ property_id: "property-9" }], error: null };
+        if (name === "fn_clear_suppression_hold_if_resolved") return { data: [{ cleared: true, outstanding_ids: [] }], error: null };
+        return lookup.rpc(name, args);
+      },
+    };
+    return { a, sweepClient, rpcs };
+  }
+
+  it("sweep step: retries each as the system actor; a failure is counted in the DB and left outstanding", async () => {
+    const { a, sweepClient, rpcs } = sweepFixture({ attempt_count: 1, should_report: false });
+    applyPhoneLevelOptOut.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("down"));
+    const out = await retryOutstandingSuppressionObligations(sweepClient as never, { limit: 5 });
+    expect(out).toEqual({ attempted: 2, succeeded: 1, failed: 1, holdsCleared: 1 });
+    // Never the original reviewer: system actor on retried_ok, OPTED_OUT lead event and audit detail.
+    expect(a.inserts.some((i) => i.values.event_type === "suppression_retried_ok" && i.values.actor_type === "system")).toBe(true);
+    expect(a.inserts.some((i) => i.values.actor_id === "u1")).toBe(false);
+    for (const call of recordLeadEvent.mock.calls) {
+      expect(call[0].actorType).toBe("system");
+      expect(call[0].actorId).toBeUndefined();
+    }
+    expect(applyPhoneLevelOptOut.mock.calls[0][1].sourceDetail).toMatchObject({ confirmedBy: null });
+    // Attempt recorded once, for the failed row only; resolved holds re-cleared.
+    expect(rpcs.filter((r) => r.name === "fn_record_suppression_attempt_failure")).toEqual([
+      { name: "fn_record_suppression_attempt_failure", args: { p_review_id: "review-2", p_property_id: "property-1", p_org_id: "org-1" } },
+    ]);
+    expect(rpcs.find((r) => r.name === "fn_clear_suppression_hold_if_resolved")?.args).toEqual({ p_property_id: "property-9" });
+    // Throttled: below the report threshold nothing is reported for the failure.
+    expect(reportError).not.toHaveBeenCalled();
+    createAdminClient.mockReturnValue({ admin: true } as never);
+  });
+
+  it("sweep step reports a permanently failing row only when the DB says so (3rd attempt on, once per day)", async () => {
+    const { sweepClient } = sweepFixture({ attempt_count: 3, should_report: true });
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("down"));
+    await retryOutstandingSuppressionObligations(sweepClient as never, { limit: 5 });
+    const permanent = reportError.mock.calls.filter((c) => c[1]?.tags?.surface === "suppression_obligation_permanent_failure");
+    expect(permanent).toHaveLength(2);
+    expect(permanent[0][1].extra).toMatchObject({ attempts: 3 });
+    reportError.mockClear();
+    const quiet = sweepFixture({ attempt_count: 4, should_report: false });
+    await retryOutstandingSuppressionObligations(quiet.sweepClient as never, { limit: 5 });
+    expect(reportError).not.toHaveBeenCalled();
+    createAdminClient.mockReturnValue({ admin: true } as never);
+  });
+
+  it("sweep step never throws when listing fails", async () => {
+    const out = await retryOutstandingSuppressionObligations({
+      from: () => ({}),
+      rpc: async () => ({ data: null, error: { message: "nope" } }),
+    } as never);
+    expect(out).toEqual({ attempted: 0, succeeded: 0, failed: 0, holdsCleared: 0 });
+    expect(reportError).toHaveBeenCalled();
+  });
+
+  it("hold-clear failures for many properties produce one aggregated report", async () => {
+    const supabase = {
+      from: () => ({}),
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        if (name === "fn_list_outstanding_suppression_obligations") return { data: [], error: null };
+        if (name === "fn_list_resolvable_suppression_holds")
+          return { data: [{ property_id: "p1" }, { property_id: "p2" }, { property_id: "p3" }], error: null };
+        if (name === "fn_clear_suppression_hold_if_resolved")
+          return args.p_property_id === "p3"
+            ? { data: [{ cleared: true, outstanding_ids: [] }], error: null }
+            : { data: null, error: { message: `boom ${args.p_property_id}` } };
+        return { data: null, error: null };
+      },
+    };
+    reportError.mockClear();
+    const out = await retryOutstandingSuppressionObligations(supabase as never, { limit: 5 });
+    expect(out.holdsCleared).toBe(1);
+    const calls = reportError.mock.calls.filter((c) => c[1]?.tags?.surface === "suppression_hold_resolved_clear");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0].message).toBe("boom p1");
+    expect(calls[0][1].extra).toEqual({ failedCount: 2, firstPropertyId: "p1" });
   });
 });

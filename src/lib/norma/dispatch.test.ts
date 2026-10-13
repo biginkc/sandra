@@ -14,13 +14,14 @@ const blandConfig: NormaBlandConfig = {
   fromNumber: "+12135550100", webhookUrl: "https://sandra.test/h", timeoutMs: 1000, waitForGreeting: true, backgroundTrack: "office",
 };
 const openGate = { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] };
+const queueConfig = { enabled: true, maxConcurrent: 5, dailyCap: 200, capTz: "America/Chicago", problems: [] };
 
 function setup(opts: { precallSms?: import("./precall-sms").PrecallDeps; eligibleSequence?: boolean[]; property?: Record<string, unknown>; notes?: Array<Record<string, unknown>>; send?: BlandSendResult; gate?: typeof openGate; row?: Record<string, unknown>; claim?: boolean; eligible?: boolean; bind?: string; blandConfig?: NormaBlandConfig | null } = {}) {
   const sendCall = vi.fn().mockResolvedValue(opts.send ?? { kind: "accepted", callId: "call-1" });
   const bland: BlandClient = { sendCall, getCall: vi.fn() };
   const rpcs = {
-    fn_norma_claim_dispatch: vi.fn().mockReturnValue(opts.claim ?? true),
-    fn_norma_presend_fence: vi.fn().mockReturnValue(true),
+    fn_norma_claim_dispatch_v2: vi.fn().mockReturnValue(opts.claim === false ? "not_claimed" : "claimed"),
+    fn_norma_mark_sending: vi.fn().mockReturnValue("sending"),
     fn_norma_eligibility: vi.fn().mockImplementation(() => {
       const next = opts.eligibleSequence && opts.eligibleSequence.length > 1 ? opts.eligibleSequence.shift() : opts.eligibleSequence?.[0];
       const ok = next === undefined ? opts.eligible !== false : next;
@@ -45,6 +46,7 @@ function setup(opts: { precallSms?: import("./precall-sms").PrecallDeps; eligibl
       blandConfig: opts.blandConfig === undefined ? blandConfig : opts.blandConfig,
       gate: opts.gate ?? openGate,
       precallSms: opts.precallSms,
+      queueConfig,
     });
   return { run, sendCall, rpcs, calls, client };
 }
@@ -54,7 +56,7 @@ describe("dispatchNormaCall", () => {
     const t = setup({ gate: { dispatchEnabled: false, sellerRelease: true, allowedNumbers: [PHONE] } });
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "dispatch_disabled" });
     expect(t.sendCall).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested", p_expected_attempt: 1 });
   });
 
@@ -69,7 +71,7 @@ describe("dispatchNormaCall", () => {
     const t = setup({ gate: { dispatchEnabled: true, sellerRelease: false, allowedNumbers: ["+18165550000"] } });
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "number_not_allowed" });
     expect(t.sendCall).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).not.toHaveBeenCalled();
   });
 
   it("seller release dials a non-allowlisted number", async () => {
@@ -93,7 +95,7 @@ describe("dispatchNormaCall", () => {
     const t = setup({ blandConfig: unset });
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "bland_not_configured" });
     expect(t.sendCall).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "bland_not_configured", p_expected_status: "requested", p_expected_attempt: 1 });
   });
 
@@ -105,38 +107,43 @@ describe("dispatchNormaCall", () => {
       variables: { seller_first_name: "Sam", property_address: "1 Main, KC, MO, 64111", rep_context: "ctx", asking_price: "", latest_notes: "" },
     });
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_call_id: "call-1", p_expected_attempt: 1 });
-    expect(t.rpcs.fn_norma_presend_fence).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: 1 });
+    expect(t.rpcs.fn_norma_mark_sending).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: 1 });
+    // the legacy claim and fence are gone: nothing may reach them any more
+    expect(t.calls.map((c) => c.name)).not.toContain("fn_norma_claim_dispatch");
+    expect(t.calls.map((c) => c.name)).not.toContain("fn_norma_presend_fence");
   });
 
-  it.each([1, 2])("passes the exact attempt to the final send fence (attempt %s)", async (rowAttempt) => {
+  it.each([1, 2])("passes the exact attempt to the final send admission (attempt %s)", async (rowAttempt) => {
     const t = setup({ row: { attempt: rowAttempt } });
     await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
-    expect(t.rpcs.fn_norma_presend_fence).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: rowAttempt });
+    expect(t.rpcs.fn_norma_mark_sending).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: rowAttempt });
     expect(t.sendCall).toHaveBeenCalledTimes(1);
   });
 
   it.each([
-    ["false", (): boolean | undefined => false],
-    ["unknown", (): boolean | undefined => undefined],
-  ] as const)("fails closed when the final send fence returns %s", async (_label, fenceResult) => {
+    ["refused:stale_claim", (): string | undefined => "refused:stale_claim"],
+    ["refused:not_dispatching", (): string | undefined => "refused:not_dispatching"],
+    ["an unrecognised answer", (): string | undefined => "maybe"],
+    ["no answer", (): string | undefined => undefined],
+  ] as const)("fails closed when the final send admission returns %s", async (_label, fenceResult) => {
     const t = setup();
-    t.rpcs.fn_norma_presend_fence.mockImplementationOnce(fenceResult);
+    t.rpcs.fn_norma_mark_sending.mockImplementationOnce(fenceResult);
     await expect(t.run()).resolves.toEqual({ status: "not_claimed" });
     expect(t.sendCall).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_rejected).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_unknown).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the final send fence errors, without mutating dispatch state", async () => {
+  it("fails closed when the final send admission errors, without mutating dispatch state", async () => {
     const t = setup();
-    t.rpcs.fn_norma_presend_fence.mockImplementationOnce(() => { throw new Error("fence unavailable"); });
+    t.rpcs.fn_norma_mark_sending.mockImplementationOnce(() => { throw new Error("fence unavailable"); });
     await expect(t.run()).resolves.toEqual({ status: "not_claimed" });
     expect(t.sendCall).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_rejected).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_unknown).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the final send fence response exceeds the local freshness budget", async () => {
+  it("fails closed when the final send admission response exceeds the local freshness budget", async () => {
     const t = setup();
     const now = vi.spyOn(performance, "now").mockReturnValueOnce(1_000).mockReturnValueOnce(6_001);
     try {
@@ -166,6 +173,7 @@ describe("dispatchNormaCall", () => {
       blandConfig: config,
       gate: openGate,
       precallSms: { enabled: false },
+      queueConfig,
     })).resolves.toEqual({ status: "dispatched", callId: `attempt-${attempt}` });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, options] = fetchImpl.mock.calls[0];
@@ -191,9 +199,9 @@ describe("dispatchNormaCall", () => {
     expect(body.record).toBe(true);
     expect(body.max_duration).toBe(10);
     expect(body).not.toHaveProperty("retry");
-    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).toHaveBeenCalledWith(expect.objectContaining({
       p_request_id: REQUEST_ID, p_expected_attempt: attempt,
-    });
+    }));
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({
       p_request_id: REQUEST_ID, p_call_id: `attempt-${attempt}`, p_expected_attempt: attempt,
     });
@@ -292,7 +300,7 @@ describe("dispatchNormaCall", () => {
   it("a request that is not 'requested' is left alone", async () => {
     const t = setup({ row: { status: "dispatched" } });
     await expect(t.run()).resolves.toEqual({ status: "not_claimed" });
-    expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).not.toHaveBeenCalled();
   });
 
   it("dial-time ineligibility rejects without dialling", async () => {
@@ -358,7 +366,7 @@ describe("dispatchNormaCall", () => {
   it("the claim is fenced on the attempt read, and that same attempt goes into the Bland metadata", async () => {
     const t = setup({ row: { attempt: 2 } });
     await t.run();
-    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: 2 });
+    expect(t.rpcs.fn_norma_claim_dispatch_v2).toHaveBeenCalledWith(expect.objectContaining({ p_request_id: REQUEST_ID, p_expected_attempt: 2 }));
     expect(t.sendCall.mock.calls[0][0].attempt).toBe(2);
     const stale = setup({ claim: false });
     await expect(stale.run()).resolves.toEqual({ status: "not_claimed" });

@@ -4,8 +4,14 @@ import { after } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import {
+  enrollNurtureInDrip,
+  loadNurtureAutoDripConfig,
+  type NurtureAutoDripConfig,
+} from "./nurture-auto-drip";
+import { routeNurture, type NurtureRoute } from "./nurture-routes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
-import { applyPhoneLevelOptOut, isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
+import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import {
@@ -16,7 +22,8 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
-import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
@@ -35,6 +42,9 @@ import {
   type ClassificationBridgeResult,
 } from "@/lib/sms-classification/dispatch-bridge";
 import type { JevEscalationReason } from "@/lib/sms-classification/types";
+import { jevOutcomeForLunaHold } from "@/lib/sms-classification/luna/hold";
+import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
+import { requestLunaSuggestion } from "@/lib/sms-classification/luna/suggest";
 
 import {
   claimAiResponse,
@@ -66,6 +76,7 @@ import {
   type RetryReason,
   type RetryReply,
 } from "./retry";
+import { retryOutstandingSuppressionObligations } from "./confirm-suppression";
 import { classifyAiSkip } from "./classify";
 import {
   classifyProviderFailure,
@@ -270,6 +281,14 @@ export type AiDispatchInput = {
    * call) nor re-generates: it re-sends exactly this text. Never log it.
    */
   retryReply?: RetryReply;
+  /**
+   * Set by the webhook's inline fallback when the delay workflow could not be
+   * started: this dispatch is running without the randomized reply delay, so
+   * an approved-template reply is dropped (the outcome still applies).
+   */
+  replyDelayBypassed?: boolean;
+  /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
+  replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
 };
 
 export type AiDispatchOptions = {
@@ -541,7 +560,7 @@ async function dispatchAiResponseCore(
   const { data: config } = await supabase
     .from("ai_responder_configs")
     .select(
-      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode, outbound_mode",
+      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode, outbound_mode, reply_generation",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -799,7 +818,13 @@ async function dispatchAiResponseCore(
       config: config!,
       runCtx: deps.runContext,
     });
-    const numberSource = identityLookup.template;
+    // The randomized reply delay was bypassed: an approved template is never sent
+    // instantly, so the number-source reply is dropped and a person is told.
+    const identityDelayDrop = identityLookup.template && input.replyDelayBypassed
+      ? (input.replyDelayBypassReason ?? "delay_unavailable")
+      : null;
+    const numberSource = identityDelayDrop ? null : identityLookup.template;
+    const identityNotSentReason = identityDelayDrop ?? identityLookup.askedNotSentReason;
     if (numberSource) {
       const sent = await sendResponderMessage(supabase, {
         runContext: deps.runContext,
@@ -891,11 +916,11 @@ async function dispatchAiResponseCore(
     });
     // The seller also asked how we got the number but that reply did not go
     // out: the identity copy does not answer it, so a person looks.
-    if (identityLookup.askedNotSentReason) {
+    if (identityNotSentReason) {
       await markPropertyNeedsAttention(
         supabase,
         input.propertyId,
-        `${NUMBER_SOURCE_NOT_SENT_PREFIX}${identityLookup.askedNotSentReason}`,
+        `${NUMBER_SOURCE_NOT_SENT_PREFIX}${identityNotSentReason}`,
         deps.runContext,
       );
     }
@@ -953,6 +978,7 @@ async function dispatchAiResponseCore(
       system_prompt: config!.system_prompt,
       min_confidence: config!.min_confidence,
       outbound_mode: config!.outbound_mode,
+      reply_generation: config!.reply_generation,
     },
     deps,
     currentTurn,
@@ -997,6 +1023,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     model: string;
     system_prompt: string;
     min_confidence: number;
+    reply_generation?: string | null;
   },
   currentTurn: number,
   runCtx?: MaybeRunContext,
@@ -1084,7 +1111,14 @@ async function classifyAndHandleNonRouteOutcomes(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   property: AiDispatchPropertyGateRow,
-  config: { classifier_provider?: string | null; classifier_mode?: string | null } | null | undefined,
+  config:
+    | {
+        classifier_provider?: string | null;
+        classifier_mode?: string | null;
+        escalation_keywords?: ReadonlyArray<string> | null;
+      }
+    | null
+    | undefined,
   responseClaim: { claimId: string | null },
   runCtx?: MaybeRunContext,
   /** Present only on the reply-eligible path: absent = no template step. */
@@ -1114,6 +1148,31 @@ async function classifyAndHandleNonRouteOutcomes(
     },
   );
 
+  // Luna fallback SUGGESTION for a below-threshold hold. Fire-and-forget after
+  // the response: it never delays or blocks this pipeline, never applies
+  // anything, and is a no-op unless LUNA_SUGGESTIONS_ENABLED=1 with a key.
+  const lunaJevOutcome = jevOutcomeForLunaHold(classification);
+  if (lunaJevOutcome && input.inboundMessageId && lunaSuggestionsEnabled()) {
+    const inboundMessageId = input.inboundMessageId;
+    runAfterResponse(async () => {
+      await requestLunaSuggestion(
+        supabase,
+        {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId,
+          inboundBody: input.inboundBody,
+          jevOutcome: lunaJevOutcome,
+          escalationKeywords: config?.escalation_keywords ?? null,
+          runContext: runCtx,
+        },
+        { fetch },
+      );
+    });
+  }
+
   if (classification.kind === "jev_nurture") {
     if (isHostileInbound(input.inboundBody)) {
       return { handled: true, outcome: await holdHostileForConfirm(supabase, input, responseClaim, runCtx) };
@@ -1125,8 +1184,64 @@ async function classifyAndHandleNonRouteOutcomes(
     // Approved-template reply first (Phase 4): nurture is a human-owned
     // disposition that suppresses automated sends, so the reply must go out
     // before the outcome is applied.
+    //
+    // Nurture auto-drip (per-org switch, default off). When on, the approved
+    // routing runs on Jev's timeframe / listing answers: "ready within 30 days"
+    // is a hot lead for a person, so it gets no nurture reply and no drip.
+    const dripCfg = await loadNurtureAutoDripConfig(supabase, property.org_id);
+    const dripRoute: NurtureRoute | null = dripCfg.enabled
+      ? routeNurture({
+          readyTimeframe: classification.readyTimeframe,
+          listingStatus: classification.listingStatus,
+        })
+      : null;
+    if (dripRoute?.kind === "person") {
+      if (input.inboundMessageId) {
+        await proposeJevLeadDecision(supabase, {
+          propertyId: input.propertyId,
+          conversationId: input.conversationId,
+          inboundMessageId: input.inboundMessageId,
+          classificationRunId: classification.classificationRunId,
+          outcome: "new_lead",
+          nativeConfidence: classification.nativeConfidence,
+          thresholdAtDecision: classification.thresholdAtDecision,
+          thresholdVersion: classification.thresholdVersion,
+          expectedRevision: classification.evaluationRevision,
+        });
+      }
+      await trace(supabase, {
+        kind: "hold",
+        name: "nurture_ready_within_30_days",
+        result: "held",
+        detail: { reason: "hot_lead", readyTimeframe: classification.readyTimeframe ?? null },
+      }, runCtx);
+      const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, "hot_lead", runCtx);
+      // Also start the Book appointment drip (no nurture reply, no dispo change,
+      // no extra delay beyond the drip's own first step). It pauses on the
+      // seller's reply and when a person takes over; a failure here never
+      // undoes the hold.
+      await enrollHotLeadInBookAppointment(supabase, {
+        propertyId: input.propertyId,
+        sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
+        inboundMessageId: input.inboundMessageId ?? null,
+        runCtx,
+      });
+      await completeClaim(supabase, input.propertyId, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+        flagOk: hotFlagOk,
+      });
+      return { handled: true, outcome: { outcome: "escalated", reason: "hot_lead" } };
+    }
     let templateMessageId: string | null = null;
     let numberSourceHold: string | null = null;
+    let templateReplyKey: TemplateReplyKey | null = null;
+    // Why no nurture reply went out (drip enrolment needs the nurture reply first).
+    let templateNotSentReason: string | null = !templateCtx
+      ? "no_reply_path"
+      : templateCtx.hostile
+        ? "hostile"
+        : null;
     if (templateCtx && !templateCtx.hostile) {
       const step = await runApprovedTemplateStep(supabase, {
         input,
@@ -1142,6 +1257,8 @@ async function classifyAndHandleNonRouteOutcomes(
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
       templateMessageId = step.outboundMessageId;
       numberSourceHold = step.hold;
+      templateReplyKey = step.replyKey;
+      templateNotSentReason = step.outboundMessageId ? null : (step.notSentReason ?? "not_sent");
     } else if (classification.askedHowNumberObtained) {
       // Asked, but this dispatch cannot send replies at all.
       numberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}reply_ineligible`;
@@ -1181,6 +1298,20 @@ async function classifyAndHandleNonRouteOutcomes(
       }
       // Applied first, then held: a flagged property would make the outcome write skip.
       await holdForNumberSource();
+      // Strictly AFTER the nurture reply was accepted and the outcome applied. Only the
+      // nurture reply itself starts a drip: when the number-source reply replaced it
+      // (or was asked for and could not go out) the seller is waiting on a person, so
+      // nothing is enrolled and no "nurture reply not sent" flag is raised.
+      if (!classification.askedHowNumberObtained) {
+        await runNurtureAutoDripStep(supabase, {
+          propertyId: input.propertyId,
+          cfg: dripCfg,
+          route: dripRoute,
+          replySent: templateMessageId !== null && templateReplyKey === "nurture",
+          notSentReason: templateNotSentReason ?? "not_sent",
+          runCtx,
+        });
+      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
@@ -1370,6 +1501,32 @@ async function classifyAndHandleNonRouteOutcomes(
   return { handled: false, classification };
 }
 
+/**
+ * Jev-only mode (`ai_responder_configs.reply_generation = 'off'`): no LLM reply
+ * is generated or sent. The conversation is held for a human with the reason
+ * `needs_reply` so the seller is never silently unanswered.
+ */
+async function holdForNeedsReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  claimId: string | null,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "gate",
+    name: "reply_generation_off",
+    result: "block",
+    detail: { reason: "needs_reply" },
+  }, runCtx);
+  const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, "needs_reply", runCtx);
+  await completeClaim(supabase, input.propertyId, {
+    claimId,
+    outcome: "escalated",
+    flagOk,
+  });
+  return { outcome: "escalated", reason: "needs_reply" };
+}
+
 async function resolveAndApplyRoute(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -1379,6 +1536,7 @@ async function resolveAndApplyRoute(
     system_prompt: string;
     min_confidence: number;
     outbound_mode?: string | null;
+    reply_generation?: string | null;
   },
   deps: { anthropic: AnthropicLike },
   currentTurn: number,
@@ -1404,6 +1562,12 @@ async function resolveAndApplyRoute(
       jevAutoAccept = { classificationRunId: classification.classificationRunId };
     }
   } else {
+    // Jev-only mode: the owner turned LLM drafting off. This is the ONLY
+    // place the legacy generator is called, so refusing here guarantees no
+    // Anthropic call on any path. A human answers instead.
+    if (config.reply_generation === "off") {
+      return holdForNeedsReply(supabase, input, responseClaim.claimId, runCtx);
+    }
     // use_legacy — jev_no_action is handled inline above (returns
     // handled: true before reaching resolveAndApplyRoute), so only
     // use_legacy falls through to the existing combined Claude
@@ -1468,11 +1632,11 @@ async function resolveAndApplyRoute(
     }
     route = resolveResponderOutcome(generated);
   }
-  if (isHostileInbound(input.inboundBody) && route.kind !== "opt_out") {
+  if (isHostileInbound(input.inboundBody)) {
     // Hostile wording: hold for a person, whatever else the classifier decided
-    // (close, nurture, wrong number, dnc, a generated reply). Only an explicit
-    // opt-out the classifier recognises keeps going through the existing
-    // opt-out path unchanged. A hostile "dnc" is NEVER applied automatically.
+    // (close, nurture, wrong number, opt-out, dnc, a generated reply). Jarrad
+    // (2026-10-08): no auto DNC decisions; only a bare carrier STOP keyword
+    // (handled in the webhook before dispatch) suppresses automatically.
     return holdHostileForConfirm(supabase, input, responseClaim, runCtx);
   }
   const expectedDisposition: AiReviewDisposition | null =
@@ -1563,39 +1727,37 @@ async function resolveAndApplyRoute(
         flagOk: flagOk7,
       });
       return { outcome: "escalated", reason: route.reason };
-    case "opt_out":
-      const isJevBelowThresholdOptOut = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
-      const optOutResult = isJevBelowThresholdOptOut
-        ? // Q6 (Jarrad, 2026-10-08): below threshold goes to human review
-          // everywhere. Defer only; the phone is NOT suppressed until a
-          // human confirms (keyword STOP still suppresses upstream).
-          await proposeDeferredJevDisposition(supabase, {
-            runContext: runCtx,
-            propertyId: input.propertyId,
-            conversationId: input.conversationId ?? null,
-            inboundMessageId: input.inboundMessageId ?? null,
-            classificationRunId: classification.classificationRunId,
-            dispo: "opted_out",
-            reason: route.reason,
-            expectedRevision: jevRevision!,
-          })
-        : await applyResponderOptOut(supabase, {
-            propertyId: input.propertyId,
-            contactId: input.contactId,
-            conversationId: input.conversationId ?? null,
-            inboundMessageId: input.inboundMessageId ?? null,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
-            reason: route.reason,
-            expectedRevision: jevRevision,
-          });
-      await traceDisposition(
-        supabase,
-        "opted_out",
-        optOutResult,
-        isJevBelowThresholdOptOut,
-        runCtx,
-      );
+    case "opt_out": {
+      // HARD RULE (Jarrad, 2026-10-07: "I don't want you making any DNC
+      // decisions. I don't want Jev making any DNC decisions."): a model
+      // judgment never suppresses a phone. Jev's opted_out is ALWAYS deferred
+      // to human review whatever its confidence or the automation switch
+      // (thresholds.ts also refuses to auto-apply it); the legacy classifier's
+      // opt_out only holds the lead. Suppression happens when a human
+      // confirms (confirm-suppression.ts). The deterministic carrier STOP
+      // keyword path in messaging/inbound.ts is the only automatic one.
+      const isJevOptOut = classification.kind === "jev_route";
+      if (!isJevOptOut) {
+        return holdModelOptOutForHuman(supabase, {
+          runCtx,
+          propertyId: input.propertyId,
+          claimId: responseClaim.claimId,
+          reason: HOLD_MODEL_OPT_OUT_NEEDS_CONFIRM,
+          routeReason: route.reason,
+        });
+      }
+      const optOutResult = await proposeDeferredJevDisposition(supabase, {
+        runContext: runCtx,
+        propertyId: input.propertyId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+        classificationRunId: classification.classificationRunId,
+        dispo: "opted_out",
+        reason: route.reason,
+        expectedRevision: jevRevision!,
+        holdReason: HOLD_JEV_OPTED_OUT_NEEDS_CONFIRM,
+      });
+      await traceDisposition(supabase, "opted_out", optOutResult, true, runCtx);
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
         await completeClaim(supabase, input.propertyId, {
@@ -1605,48 +1767,37 @@ async function resolveAndApplyRoute(
         });
         return outcome;
       }
-      if (jevAutoAccept && input.inboundMessageId) {
-        await maybeAutoAcceptJevReview(
-          supabase,
-          input.inboundMessageId,
-          jevAutoAccept.classificationRunId,
-        );
-      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "opted_out",
       });
       return { outcome: "opted_out", reason: route.reason };
+    }
     case "close_dnc": {
-      // Jev-driven dnc: phone suppressed immediately, review + hold written,
-      // outreach_dispo deferred to a human. PLAN §8 Q4 OPEN — prod
-      // behaviour preserved until Jarrad decides. Legacy dnc is
-      // completely unchanged — applyResponderDnc still applies
-      // everything immediately, exactly as it does today.
-      const isJevDnc = classification.kind === "jev_route";
-      const dncResult = isJevDnc
-        ? await proposeJevDncSuppression(supabase, {
-          runContext: runCtx,
-            propertyId: input.propertyId,
-            contactId: input.contactId,
-            conversationId: input.conversationId ?? null,
-            inboundMessageId: input.inboundMessageId ?? null,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
-            classificationRunId: classification.classificationRunId,
-            reason: route.reason,
-            expectedRevision: jevRevision!,
-          })
-        : await applyResponderDnc(supabase, {
-            propertyId: input.propertyId,
-            contactId: input.contactId,
-            conversationId: input.conversationId ?? null,
-            inboundMessageId: input.inboundMessageId ?? null,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
-            reason: route.reason,
-          });
-      await traceDisposition(supabase, "dnc", dncResult, isJevDnc, runCtx);
+      // HARD RULE (Jarrad, 2026-10-07): no automated DNC decision. Jev's dnc
+      // opens a pending review + holds the lead (`jev_dnc_needs_confirm`)
+      // with NO phone suppression; the legacy classifier's dnc only holds
+      // (`model_dnc_needs_confirm`). A human confirming the review is what
+      // suppresses the phone (confirm-suppression.ts).
+      if (classification.kind !== "jev_route") {
+        return holdModelOptOutForHuman(supabase, {
+          runCtx,
+          propertyId: input.propertyId,
+          claimId: responseClaim.claimId,
+          reason: HOLD_MODEL_DNC_NEEDS_CONFIRM,
+          routeReason: route.reason,
+        });
+      }
+      const dncResult = await proposeJevDncForReview(supabase, {
+        runContext: runCtx,
+        propertyId: input.propertyId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+        classificationRunId: classification.classificationRunId,
+        reason: route.reason,
+        expectedRevision: jevRevision!,
+      });
+      await traceDisposition(supabase, "dnc", dncResult, true, runCtx);
       const dncOutcome = closeOutcome(dncResult, route.reason);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
@@ -1699,18 +1850,19 @@ async function resolveAndApplyRoute(
             dispo: "wrong_number",
             reason: route.reason,
             expectedRevision: jevRevision!,
+            wrongScope: route.scope,
           })
         : await applyWrongNumber(supabase, {
           runContext: runCtx,
             propertyId: input.propertyId,
-            contactId: input.contactId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
             scope: route.scope,
             reason: route.reason,
             expectedRevision: jevRevision,
+            undo: jevAutoAccept
+              ? { orgId: property.org_id, classificationRunId: jevAutoAccept.classificationRunId }
+              : undefined,
           });
       await traceDisposition(
         supabase,
@@ -1720,7 +1872,14 @@ async function resolveAndApplyRoute(
         runCtx,
       );
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
-      if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
+      // scope = all keeps its review pending: phone-wide suppression is a
+      // human decision, so never auto-accept it.
+      if (
+        jevAutoAccept &&
+        wrongNumberResult.updated &&
+        input.inboundMessageId &&
+        route.scope !== "all"
+      ) {
         await maybeAutoAcceptJevReview(
           supabase,
           input.inboundMessageId,
@@ -1822,6 +1981,9 @@ async function resolveAndApplyRoute(
             dispo: route.dispo,
             reason: route.reason,
             expectedRevision: jevRevision,
+            undo: jevAutoAccept
+              ? { orgId: property.org_id, classificationRunId: jevAutoAccept.classificationRunId }
+              : undefined,
           });
       await traceDisposition(
         supabase,
@@ -2154,6 +2316,7 @@ async function retryWithCarriedReply(
         max_turns: number;
         model: string;
         outbound_mode?: string | null;
+        reply_generation?: string | null;
       }
     | null
     | undefined,
@@ -2285,6 +2448,13 @@ async function retryWithCarriedReply(
     return silentSkip(skip.reason, 0);
   }
 
+  // Jev-only mode: a reply generated before drafting was turned off is not
+  // sent either; a human answers. Checked only after the skip gate so
+  // opt-out / suppression / takeover / disabled still end quietly.
+  if (config?.reply_generation === "off") {
+    return holdForNeedsReply(supabase, input, claim.claimId, runCtx);
+  }
+
   await trace(supabase, {
     kind: "action",
     name: "retry_reply_reused",
@@ -2365,7 +2535,7 @@ export type TemplateStepResult =
    * awaiting-answer hold when the number-source reply went out, or
    * `number_source_reply_not_sent:<reason>` when the seller asked but it did not.
    */
-  | { kind: "continue"; outboundMessageId: string | null; replyKey: TemplateReplyKey | null; hold: string | null }
+  | { kind: "continue"; outboundMessageId: string | null; replyKey: TemplateReplyKey | null; hold: string | null; notSentReason?: string }
   /** A contended send was parked for retry: do NOT apply the outcome yet (the re-dispatch re-runs this step). */
   | { kind: "stop"; outcome: AiDispatchOutcome | AiRetryOutcome };
 
@@ -2404,6 +2574,13 @@ export type TemplateStepResult =
  * it past its lease is swept and flagged (`template_sent_outcome_missing`),
  * and a re-dispatch of the same claim never sends the template twice.
  */
+/** Silent (unflagged) skip reason: the template was revoked / edited before the send. */
+const TEMPLATE_APPROVAL_CHANGED = "template_approval_changed";
+const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
+
+/** Trace-only drop reason (not a hold/flag reason). */
+const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
+
 export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
@@ -2461,7 +2638,26 @@ export async function runApprovedTemplateStep(
         detail: { outcome: a.outcome, reason: resolved.reason, ...(asked ? { replyKey: NUMBER_SOURCE_REPLY_KEY } : {}) },
       }, runCtx);
     }
-    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(resolved.reason) };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(resolved.reason), notSentReason: resolved.reason };
+  }
+
+  // The randomized reply delay was bypassed (workflow could not start): never
+  // send a template instantly. Drop it; the outcome still applies.
+  if (input.replyDelayBypassed) {
+    const bypassReason = input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE;
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: bypassReason,
+        disposition: "dropped_outcome_applies",
+      },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(bypassReason), notSentReason: bypassReason };
   }
   const replyKey: TemplateReplyKey = resolved.key ?? resolved.outcome;
   const sentHold = replyKey === NUMBER_SOURCE_REPLY_KEY ? NUMBER_SOURCE_AWAITING_ANSWER_REASON : null;
@@ -2486,7 +2682,7 @@ export async function runApprovedTemplateStep(
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(dropReason) };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(dropReason), notSentReason: dropReason };
   }
 
   // A crashed earlier run of this claim may already have sent the template:
@@ -2504,10 +2700,12 @@ export async function runApprovedTemplateStep(
       },
     }, runCtx);
     return alreadySent === "error"
-      ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable") }
+      ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable"), notSentReason: "claim_unreadable" }
       : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
   }
 
+  let recorded = true;
+  let markerWrites = 0;
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
@@ -2523,7 +2721,27 @@ export async function runApprovedTemplateStep(
     claimStartedAt: ctx.claimStartedAt,
     outboundMode: ctx.outboundMode,
     replyKind: "send_reply",
+    // Written the instant the provider accepts, ahead of every other
+    // post-send write, so the sweeper can see a crash from here on.
+    onProviderAccepted: async (messageId) => {
+      markerWrites += 1;
+      recorded = await recordClaimTemplateSent(supabase, {
+        claimId: claim.claimId,
+        outboundMessageId: messageId,
+      });
+    },
   });
+  // Durable BEFORE anything else (even the trace) once the provider accepted:
+  // this is the only thing that lets the sweeper see a crash from here on. If
+  // the write fails the sweeper cannot see one, so tell a human now rather
+  // than risk silence.
+  if (sent.outcome === "sent" && markerWrites === 0) {
+    // The send path did not report acceptance (should not happen); record now.
+    recorded = await recordClaimTemplateSent(supabase, {
+      claimId: claim.claimId,
+      outboundMessageId: sent.messageId,
+    });
+  }
   const detail = {
     templateId: resolved.templateId,
     mappingId: resolved.mappingId,
@@ -2548,12 +2766,6 @@ export async function runApprovedTemplateStep(
   }, runCtx);
 
   if (sent.outcome === "sent") {
-    // Durable BEFORE the outcome is applied. If this write fails the sweeper
-    // cannot see a crash, so tell a human now rather than risk silence.
-    const recorded = await recordClaimTemplateSent(supabase, {
-      claimId: claim.claimId,
-      outboundMessageId: sent.messageId,
-    });
     if (!recorded) {
       await markPropertyNeedsAttention(supabase, input.propertyId, "template_sent_outcome_missing", runCtx);
     }
@@ -2562,7 +2774,8 @@ export async function runApprovedTemplateStep(
   // Nothing was sent. Held (hold mode / recipient window / any gate) or
   // silently refused: the outcome still applies (see the doc above).
   if (sent.outcome !== "retry") {
-    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(`send_${sent.outcome}`) };
+    const why = ("reason" in sent && sent.reason ? `${sent.outcome}:${sent.reason}` : sent.outcome).replace(/\s+/g, "_");
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(`send_${sent.outcome}`), notSentReason: why };
   }
 
   // A retry drops its carried reply so the re-dispatch classifies again and
@@ -2662,6 +2875,134 @@ async function resolveNumberSourceForIdentity(
   return resolved.kind === "template"
     ? { template: { ...resolved, nativeConfidence }, askedNotSentReason: null }
     : { template: null, askedNotSentReason: resolved.reason };
+}
+
+/**
+ * Nurture auto-drip step (per-org switch `nurture_auto_drip`, default off).
+ * Order is strict: the approved nurture reply must have been accepted by the
+ * provider, THEN the lead is enrolled. When the reply did not go out (quiet
+ * hours, gate refusal, outbound hold, no approved/mapped template) nothing is
+ * enrolled and a person is asked to reply and start the drip
+ * (`nurture_reply_not_sent:<reason>`). A refused enrolment leaves the lead as
+ * nurture and raises `drip_enroll_failed:<reason>`. With the switch off this is
+ * a no-op: no read beyond the config, no step recorded.
+ */
+/** Tail of the `drip_enroll_failed:` hold when enrolment threw. */
+const ENROLL_THREW = "enroll_threw";
+
+async function enrollHotLeadInBookAppointment(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; sequenceId: string | null; inboundMessageId: string | null; runCtx?: MaybeRunContext },
+): Promise<void> {
+  let detail: Record<string, unknown>;
+  let result: "applied" | "error";
+  try {
+    if (!a.sequenceId) {
+      result = "error";
+      detail = { why: "no_drip_configured", route: "hot_book_appointment" };
+    } else {
+      // Fence = the triggering inbound (its time is read in SQL at full precision): a person
+      // taking over or the seller replying again since makes the enrolment be born paused.
+      const outcome = await enrollLead(supabase, {
+        propertyId: a.propertyId,
+        sequenceId: a.sequenceId,
+        enrolledByUserId: null,
+        autoRoute: "hot_book_appointment",
+        ...(a.inboundMessageId ? { hotFenceMessageId: a.inboundMessageId } : {}),
+      });
+      if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
+        result = "applied";
+        detail = {
+          status: outcome.status === "enrolled" ? "enrolled" : "already_enrolled",
+          route: "hot_book_appointment",
+          sequenceId: a.sequenceId,
+          ...(outcome.status === "enrolled" ? { enrollmentId: outcome.enrollmentId } : {}),
+        };
+        if (outcome.status === "enrolled") {
+          // The fence may have created it paused (a takeover / newer seller reply happened first).
+          const { data: row } = await supabase
+            .from("sequence_enrollments")
+            .select("status, pause_reason")
+            .eq("id", outcome.enrollmentId)
+            .maybeSingle();
+          if (row && row.status !== "active") detail = { ...detail, status: "enrolled_paused", pausedBecause: row.pause_reason };
+        }
+      } else {
+        result = "error";
+        detail = { why: outcome.status === "failed" ? "enroll_failed" : outcome.status, route: "hot_book_appointment" };
+      }
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "nurture_auto_drip_hot" }, extra: { propertyId: a.propertyId } });
+    result = "error";
+    detail = { why: "enroll_failed", route: "hot_book_appointment" };
+  }
+  await trace(supabase, { kind: "action", name: "drip_enrolled", result, detail }, a.runCtx);
+}
+
+async function runNurtureAutoDripStep(
+  supabase: SupabaseClient<Database>,
+  a: {
+    propertyId: string;
+    cfg: NurtureAutoDripConfig;
+    route: NurtureRoute | null;
+    replySent: boolean;
+    notSentReason: string;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<void> {
+  if (!a.cfg.enabled || !a.route || a.route.kind !== "drip") return;
+  const { drip, delayDays } = a.route;
+  if (!a.replySent) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "reply_not_sent", detail: a.notSentReason, route: drip },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(supabase, a.propertyId, `nurture_reply_not_sent:${a.notSentReason}`, a.runCtx);
+    return;
+  }
+  let result: Awaited<ReturnType<typeof enrollNurtureInDrip>>;
+  try {
+    result = await enrollNurtureInDrip(supabase, {
+      propertyId: a.propertyId,
+      sequenceId: a.cfg.sequences[drip],
+      delayDays,
+      route: drip,
+    });
+  } catch (error) {
+    reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });
+    result = { status: "refused", reason: ENROLL_THREW };
+  }
+  if (result.status === "refused") {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: result.reason, route: drip },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(
+      supabase,
+      a.propertyId,
+      result.reason === "drip_paused" ? "drip_paused" : `drip_enroll_failed:${result.reason}`,
+      a.runCtx,
+    );
+    return;
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "drip_enrolled",
+    result: "applied",
+    detail: {
+      status: result.status,
+      route: drip,
+      sequenceId: result.sequenceId,
+      ...(result.status === "enrolled"
+        ? { enrollmentId: result.enrollmentId, firstSendNotBefore: result.firstSendNotBefore }
+        : {}),
+    },
+  }, a.runCtx);
 }
 
 /**
@@ -3050,12 +3391,19 @@ async function loadSilentExit(
   if (humanActor) {
     // Engineering policy: a human Send is exempt
     // from the "already flagged" check ONLY when the flag is exactly
-    // `draft_held` (the flag that put the draft on the rail). Any other flag
+    // `draft_held` (the flag that put the draft on the rail) or a hostile
+    // hold being confirmed (`hostile_needs_confirm[:<id>]`). Any other flag
     // reason still refuses, with the reason shown.
     if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })) {
       return { ok: true, reason: "already_terminal" };
     }
-    if (property.needs_human_attention && property.last_ai_escalation_reason !== HUMAN_SEND_EXEMPT_FLAG_REASON) {
+    const humanExempt =
+      property.last_ai_escalation_reason === HUMAN_SEND_EXEMPT_FLAG_REASON ||
+      // "Confirm do-not-contact" on a hostile hold: the click is the human
+      // decision, validated by the hold action (reason + inbound id + org).
+      // Every other gate (Q8, consent, quiet hours, fence) still applies.
+      (property.last_ai_escalation_reason ?? "").startsWith(HOSTILE_NEEDS_CONFIRM_REASON);
+    if (property.needs_human_attention && !humanExempt) {
       return {
         ok: true,
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
@@ -3434,6 +3782,13 @@ type ResponderSendArgs = {
   replyKind: RetryReply["kind"];
   /** deescalate_close only: the route reason for the follow-up disposition. */
   closeReason?: string;
+  /**
+   * Called with the outbound message id the instant the provider has accepted
+   * the send, BEFORE any metadata update / trace / run update / lease release.
+   * Used by the template step to make the sent message durable on its claim.
+   * Must not throw.
+   */
+  onProviderAccepted?: (messageId: string) => Promise<void>;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -4071,6 +4426,9 @@ async function renewSend(
  * full lease so the bounded provider call cannot outlive it). Anything else
  * refuses, and the provider is never called.
  */
+const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
+const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
   attempt: SendAttempt,
@@ -4127,6 +4485,27 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
+  if (args.source === "approved_template") {
+    // The last word before the provider, AFTER every preflight read in
+    // sendSmsToContact: the owner may have revoked / edited / deleted the
+    // template and the recipient's window (or the Florida cap) may have
+    // closed while those reads ran. This attempt's own pending row is
+    // excluded from the cap count.
+    const window = await evaluateRecipientWindow(supabase, args.input, ctx.messageId);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    const approved = await templateStillApproved(supabase, args);
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
   attempt.providerStarted = true;
   return true;
 }
@@ -4192,11 +4571,15 @@ async function countRecentOutboundTexts(
   supabase: SupabaseClient<Database>,
   contactId: string,
   destinationPhone: string,
+  /** This attempt's own pending row, which must not count against its own cap. */
+  excludeMessageId?: string,
 ): Promise<number | null> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count, error } = await supabase
+  let countQuery = supabase
     .from("messages")
-    .select("*", { count: "exact", head: true })
+    .select("*", { count: "exact", head: true });
+  if (excludeMessageId) countQuery = countQuery.neq("id", excludeMessageId);
+  const { count, error } = await countQuery
     .eq("contact_id", contactId)
     .eq("to_address", destinationPhone)
     .eq("channel", "sms")
@@ -4227,6 +4610,7 @@ type RecipientWindowVerdict =
 async function evaluateRecipientWindow(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
+  excludeMessageId?: string,
 ): Promise<RecipientWindowVerdict> {
   const phone = await resolveSendDestinationPhone(supabase, input);
   const window = checkRecipientQuietHours(phone);
@@ -4235,7 +4619,7 @@ async function evaluateRecipientWindow(
   }
   if (window.florida) {
     const cap = checkFloridaCap(
-      phone ? await countRecentOutboundTexts(supabase, input.contactId, phone) : null,
+      phone ? await countRecentOutboundTexts(supabase, input.contactId, phone, excludeMessageId) : null,
     );
     if (!cap.ok) return { ok: false, why: cap.reason, state: window.state, localTime: window.localTime };
   }
@@ -4963,6 +5347,7 @@ export async function sweepLateSends(
   nextCursor: LateSendSweepCursor | null;
   orphanMalformed: number;
   orphanBackingFailed: number;
+  suppressionRetried: { attempted: number; succeeded: number; failed: number; holdsCleared: number };
 }> {
   const windowStartMs = Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000);
   const pageSize = options.pageSize ?? 100;
@@ -4973,11 +5358,13 @@ export async function sweepLateSends(
   let exhaustedA = false;
   let orphanMalformed = 0;
   let orphanBackingFailed = 0;
+  let suppressionRetried = { attempted: 0, succeeded: 0, failed: 0, holdsCleared: 0 };
   const done = () => ({
     scanned,
     reconciled,
     orphanMalformed,
     orphanBackingFailed,
+    suppressionRetried,
     nextCursor: exhaustedA ? null : { a: cursorA },
   });
   const resolveUnreconcilable = async (id: string, reason: string): Promise<boolean> => {
@@ -5013,6 +5400,14 @@ export async function sweepLateSends(
       extra: { orphanMalformed },
     });
   }
+
+  // Durable phone-suppression obligations recorded by the confirm RPC (or a
+  // failed first attempt): retry the ones older than 2 minutes. Bounded, and
+  // idempotent with a concurrent human Retry. Never throws.
+  suppressionRetried = await retryOutstandingSuppressionObligations(supabase as never, {
+    olderThanSeconds: 120,
+    limit: 25,
+  });
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase
@@ -5149,6 +5544,31 @@ async function leasedSend(
   return deliverResponderMessage(supabase, args, attempt);
 }
 
+/** Is the template still approved for exactly the text about to be sent? Fails closed. */
+async function templateStillApproved(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+): Promise<boolean> {
+  if (!args.templateId) return false;
+  try {
+    const { data, error } = await supabase
+      .from("sms_templates")
+      .select("content, approved_for_auto_send, approved_content, deleted_at")
+      .eq("id", args.templateId)
+      .maybeSingle();
+    if (error || !data) return false;
+    return (
+      data.deleted_at == null &&
+      data.approved_for_auto_send === true &&
+      data.approved_content !== null &&
+      data.approved_content === data.content &&
+      data.approved_content === args.body
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function deliverResponderMessage(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
@@ -5176,6 +5596,7 @@ async function deliverResponderMessage(
     }
     assertLive(attempt);
   }
+  let hookFired = false;
   // The provider boundary is fenced inside sendSmsToContact: after every one
   // of ITS preflight awaits, `beforeProviderSubmit` re-validates the lease (and
   // the attempt deadline) and refuses the submission if either is gone.
@@ -5188,6 +5609,16 @@ async function deliverResponderMessage(
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
+    // Fired inside the send, right after the provider accepts and before its
+    // receipt persistence / reconciliation.
+    ...(args.onProviderAccepted
+      ? {
+          onProviderAccepted: async ({ messageId }: { messageId: string }) => {
+            hookFired = true;
+            await args.onProviderAccepted!(messageId);
+          },
+        }
+      : {}),
     metadata: args.input.inboundMessageId
       ? ({
           generated_by: "ai_responder_v1",
@@ -5206,6 +5637,27 @@ async function deliverResponderMessage(
       const reason = "send_blocked:abort_unconfirmed";
       await flagAndDeadLetterFor(supabase, args, reason, { guard });
       return { outcome: "escalated", reason };
+    }
+    if (
+      attempt.fenceRefusal === "revalidate" &&
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+    ) {
+      // The template must not go out now. Nothing was sent; drop it silently
+      // (the outcome still applies, same as the earlier pre-send drops).
+      guard();
+      await trace(supabase, {
+        kind: "gate",
+        name: "provider_fence_refused",
+        result: "block",
+        detail: { reason: attempt.fenceReason },
+      }, args.runContext);
+      return {
+        outcome: "skipped",
+        reason:
+          attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
+            ? TEMPLATE_APPROVAL_CHANGED
+            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+      };
     }
     if (attempt.fenceRefusal === "error") {
       return failClosed(supabase, args, "send_check_failed", undefined, guard);
@@ -5324,6 +5776,7 @@ async function deliverResponderMessage(
   // never get here, and the assertion keeps it so.
   if (!attempt.providerStarted) guard();
   const messageId = sendResult.messageId;
+  if (args.onProviderAccepted && !hookFired) await args.onProviderAccepted(messageId);
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
     ...(args.input.inboundMessageId
@@ -5416,6 +5869,13 @@ function replySendArgs(a: {
   };
 }
 
+/** Hold reasons for model judgments that wait for a human (registered in hold-alerts/holds.ts). */
+export const HOLD_JEV_DNC_NEEDS_CONFIRM = "jev_dnc_needs_confirm";
+export const HOLD_JEV_OPTED_OUT_NEEDS_CONFIRM = "jev_opted_out_needs_confirm";
+export const HOLD_JEV_WRONG_NUMBER_ALL_NEEDS_CONFIRM = "jev_wrong_number_all_needs_confirm";
+export const HOLD_MODEL_OPT_OUT_NEEDS_CONFIRM = "model_opt_out_needs_confirm";
+export const HOLD_MODEL_DNC_NEEDS_CONFIRM = "model_dnc_needs_confirm";
+
 async function setResponderDispo(
   supabase: SupabaseClient<Database>,
   args: {
@@ -5429,8 +5889,25 @@ async function setResponderDispo(
     // jev-root-revision-review.md, 2026-09-20): revision read before the
     // Jev HTTP call started. Legacy callers omit this.
     expectedRevision?: number;
+    /** Jev auto-applies only: record prior state so a person can undo it. */
+    undo?: { orgId: string; classificationRunId: string };
+    /** wrong_number: written by the same RPC that creates the review. */
+    wrongScope?: AiWrongScope;
   },
 ): Promise<ResponderDispoResult> {
+  // HARD RULE (Jarrad 2026-10-07): fn_apply_ai_disposition_with_review flips
+  // contacts.sms_opted_out immediately for opted_out/dnc, which is an
+  // automated DNC decision. Model judgments reach those dispositions only via
+  // the deferred review RPCs; refuse here so no caller can bypass that.
+  if (args.dispo === "opted_out" || args.dispo === "dnc") {
+    const reason = `ai_disposition_${args.dispo}_requires_human`;
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason, args.runContext);
+    reportError(new Error(reason), {
+      tags: { surface: "ai_responder_set_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo },
+    });
+    return { updated: false, reason: "db_error" };
+  }
   if (!args.conversationId || !args.inboundMessageId) {
     const reason = "ai_disposition_missing_thread_identity";
     await markPropertyNeedsAttention(supabase, args.propertyId, reason, args.runContext);
@@ -5452,6 +5929,12 @@ async function setResponderDispo(
         p_disposition: args.dispo,
         p_ai_reason: args.reason,
         p_expected_revision: args.expectedRevision ?? null,
+        ...(args.dispo === "wrong_number" && args.wrongScope
+          ? { p_wrong_scope: args.wrongScope }
+          : {}),
+        // The undo record (prior state + what Jev applied) is written by the
+        // RPC itself, in its transaction, under the property row lock.
+        ...(args.undo ? { p_undo_classification_run_id: args.undo.classificationRunId } : {}),
       },
     );
     if (error) {
@@ -5484,12 +5967,20 @@ async function setResponderDispo(
       continue;
     }
 
+    let pausedEnrollmentIds: string[] = [];
     if (args.dispo === "wrong_number") {
-      await pausePropertyEnrollments(supabase, {
+      const pauseResult = await pausePropertyEnrollments(supabase, {
         propertyId: args.propertyId,
         reason: "inbound_reply",
         permanent: false,
         actor: { actorType: "ai" },
+      });
+      pausedEnrollmentIds = pauseResult?.enrollmentIds ?? [];
+    }
+    if (args.undo && status === "applied" && pausedEnrollmentIds.length > 0) {
+      await recordPausedEnrollmentsForUndo(supabase, {
+        inboundMessageId: args.inboundMessageId,
+        pausedEnrollmentIds,
       });
     }
     return { updated: true };
@@ -5732,106 +6223,19 @@ async function findExistingAiDispositionReview(
  * dispositions, applied here for the fifth (nurture has no RPC of its
  * own since it needs no auth.uid() gate).
  */
-async function applyResponderOptOut(
-  supabase: SupabaseClient<Database>,
-  args: {
-    propertyId: string;
-    contactId: string;
-    conversationId: string | null;
-    inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-    orgId: string;
-    reason: string;
-    expectedRevision?: number;
-  },
-): Promise<ResponderDispoResult> {
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder",
-    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "stop",
-    idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
-  const result = await setResponderDispo(supabase, {
-    propertyId: args.propertyId,
-    conversationId: args.conversationId,
-    inboundMessageId: args.inboundMessageId,
-    dispo: "opted_out",
-    reason: args.reason,
-    expectedRevision: args.expectedRevision,
-  });
-  return result;
-}
-
-async function applyResponderDnc(
-  supabase: SupabaseClient<Database>,
-  args: {
-    propertyId: string;
-    contactId: string;
-    conversationId: string | null;
-    inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-    orgId: string;
-    reason: string;
-    expectedRevision?: number;
-  },
-): Promise<ResponderDispoResult> {
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder_threat",
-    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "dnc",
-    idempotencyKey: `ai-responder-dnc:${args.propertyId}:${args.contactId}:${args.reason}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
-  const result = await setResponderDispo(supabase, {
-    propertyId: args.propertyId,
-    conversationId: args.conversationId,
-    inboundMessageId: args.inboundMessageId,
-    dispo: "dnc",
-    reason: args.reason,
-    expectedRevision: args.expectedRevision,
-  });
-  return result;
-}
-
 /**
- * Jev-driven dnc: suppress the phone IMMEDIATELY (same applyPhoneLevelOptOut
- * call and `ai-responder-dnc-proposed:` key as origin/main), while the
- * pending review row + hold are still written and outreach_dispo stays
- * unwritten until a human confirms via `fn_confirm_ai_disposition_review`.
- * PLAN §8 Q4 OPEN — prod behaviour preserved until Jarrad decides.
- * (Q6 still holds opted_out below threshold; only dnc is restored here.)
+ * Jev-driven dnc: open the pending human review (outreach_dispo untouched) and
+ * hold the lead with `jev_dnc_needs_confirm`. NO phone suppression, no consent
+ * event: per Jarrad's 2026-10-07 directive ("I don't want Jev making any DNC
+ * decisions") only a human confirming the review suppresses the phone.
  */
-async function proposeJevDncSuppression(
+async function proposeJevDncForReview(
   supabase: SupabaseClient<Database>,
   args: {
     runContext?: MaybeRunContext;
     propertyId: string;
-    contactId: string;
     conversationId: string | null;
     inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-    orgId: string;
     classificationRunId: string;
     reason: string;
     expectedRevision: number;
@@ -5846,24 +6250,6 @@ async function proposeJevDncSuppression(
     });
     return { updated: false, reason: "db_error" };
   }
-
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder_threat",
-    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "dnc",
-    idempotencyKey: `ai-responder-dnc-proposed:${args.propertyId}:${args.contactId}:${args.reason}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
 
   const { data, error } = await supabase.rpc(
     "fn_propose_ai_dnc_suppression_review",
@@ -5891,9 +6277,75 @@ async function proposeJevDncSuppression(
 
   const status = readAiDispositionRpcStatus(data);
   if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
-  // "proposed" and "replayed" both mean a pending review + hold now exist
-  // and the phone is already suppressed; outreach_dispo waits for a human.
+  // "proposed" and "replayed" both mean a pending review + hold now exist;
+  // the phone is NOT suppressed and outreach_dispo waits for a human.
+  await stampHoldReason(supabase, args.propertyId, HOLD_JEV_DNC_NEEDS_CONFIRM, args.runContext);
   return { updated: true };
+}
+
+/**
+ * Legacy-classifier opt_out / dnc (no Jev run, so no review RPC input): hold
+ * the lead for a human and do nothing else. No disposition, no consent event,
+ * no phone suppression.
+ */
+async function holdModelOptOutForHuman(
+  supabase: SupabaseClient<Database>,
+  args: {
+    runCtx: MaybeRunContext | undefined;
+    propertyId: string;
+    claimId: string | null;
+    reason: string;
+    routeReason: string;
+  },
+): Promise<AiDispatchOutcome> {
+  const flagOk = await markPropertyNeedsAttention(supabase, args.propertyId, args.reason, args.runCtx);
+  if (flagOk) {
+    await stampHoldReason(supabase, args.propertyId, args.reason, args.runCtx);
+  }
+  await completeClaim(supabase, args.propertyId, {
+    claimId: args.claimId,
+    outcome: "escalated",
+    flagOk,
+  });
+  return { outcome: "escalated", reason: args.reason };
+}
+
+/**
+ * The review RPCs flip `needs_human_attention` themselves, so
+ * `markPropertyNeedsAttention` (which only writes when the flag is still
+ * false) would never record WHY. This sets the reason on an already-held
+ * property. Best effort: the pending review row is the durable record.
+ */
+async function stampHoldReason(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+  runContext?: MaybeRunContext,
+): Promise<void> {
+  await trace(
+    supabase,
+    { kind: "hold", name: "needs_confirm", result: "held", detail: { reason } },
+    runContext,
+  );
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("properties")
+    .update({
+      last_ai_escalation_reason: reason,
+      last_ai_escalation_at: now,
+      updated_at: now,
+    })
+    .eq("id", propertyId)
+    .eq("needs_human_attention", true)
+    // Never overwrite a suppression_incomplete pointer: it names reviews whose
+    // phone suppression is still owed and drives the sweeper/clear logic.
+    .or("last_ai_escalation_reason.is.null,last_ai_escalation_reason.not.like.suppression_incomplete%");
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_stamp_hold_reason" },
+      extra: { propertyId, reason },
+    });
+  }
 }
 
 /**
@@ -5921,6 +6373,10 @@ async function proposeDeferredJevDisposition(
     dispo: "wrong_number" | "not_interested" | "opted_out";
     reason: string;
     expectedRevision: number;
+    /** Recorded as the hold reason once the pending review exists. */
+    holdReason?: string;
+    /** wrong_number only: scope "all" makes a human confirm suppress the phone. */
+    wrongScope?: AiWrongScope;
   },
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
@@ -5943,6 +6399,7 @@ async function proposeDeferredJevDisposition(
       p_disposition: args.dispo,
       p_ai_reason: args.reason,
       p_expected_revision: args.expectedRevision,
+      ...(args.dispo === "wrong_number" && args.wrongScope ? { p_wrong_scope: args.wrongScope } : {}),
     },
   );
   if (error) {
@@ -5961,8 +6418,13 @@ async function proposeDeferredJevDisposition(
   const status = readAiDispositionRpcStatus(data);
   if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
   // "proposed" and "replayed" both mean a pending review now exists —
-  // same convention as proposeJevDncSuppression's `updated: true`. The
+  // same convention as proposeJevDncForReview's `updated: true`. The
   // outreach_dispo write itself is intentionally still pending.
+  if (args.dispo === "wrong_number" && args.wrongScope === "all") {
+    await stampHoldReason(supabase, args.propertyId, HOLD_JEV_WRONG_NUMBER_ALL_NEEDS_CONFIRM, args.runContext);
+  } else if (args.holdReason) {
+    await stampHoldReason(supabase, args.propertyId, args.holdReason, args.runContext);
+  }
   return { updated: true };
 }
 
@@ -5971,16 +6433,19 @@ async function applyWrongNumber(
   args: {
     runContext?: MaybeRunContext;
     propertyId: string;
-    contactId: string;
     conversationId: string | null;
     inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-    orgId: string;
     scope: AiWrongScope;
     reason: string;
     expectedRevision?: number;
+    undo?: { orgId: string; classificationRunId: string };
   },
 ): Promise<ResponderDispoResult> {
+  // The wrong_number disposition applies to THIS property only. A model's
+  // "wrong number for everything" judgment (scope = all) never suppresses the
+  // phone by itself (Jarrad 2026-10-07: no automated DNC decisions): it keeps
+  // the review pending and holds the lead so a human decides phone-wide
+  // suppression.
   const result = await setResponderDispo(supabase, {
     runContext: args.runContext,
     propertyId: args.propertyId,
@@ -5989,31 +6454,25 @@ async function applyWrongNumber(
     dispo: "wrong_number",
     reason: args.reason,
     expectedRevision: args.expectedRevision,
+    undo: args.undo,
+    wrongScope: args.scope,
   });
-  if (args.scope !== "all") return result;
-  if (!result.updated) return result;
-
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder_wrong_number",
-    sourceDetail: {
-      propertyId: args.propertyId,
-      reason: args.reason,
-      wrong_scope: args.scope,
-    } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "dnc",
-    idempotencyKey: `ai-responder-wrong-number:${args.propertyId}:${args.contactId}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
+  if (args.scope === "all" && result.updated) {
+    const flagged = await markPropertyNeedsAttention(
+      supabase,
+      args.propertyId,
+      HOLD_JEV_WRONG_NUMBER_ALL_NEEDS_CONFIRM,
+      args.runContext,
+    );
+    if (flagged) {
+      await stampHoldReason(
+        supabase,
+        args.propertyId,
+        HOLD_JEV_WRONG_NUMBER_ALL_NEEDS_CONFIRM,
+        args.runContext,
+      );
+    }
+  }
   return result;
 }
 
@@ -6034,10 +6493,14 @@ async function holdHostileForConfirm(
     result: "block",
     detail: { reason: HOSTILE_NEEDS_CONFIRM_REASON },
   }, runCtx);
+  // The originating inbound id rides in the hold reason so "Confirm
+  // do-not-contact" acts on exactly this message's contact and number.
   const flagOk = await markPropertyNeedsAttention(
     supabase,
     input.propertyId,
-    HOSTILE_NEEDS_CONFIRM_REASON,
+    input.inboundMessageId
+      ? `${HOSTILE_NEEDS_CONFIRM_REASON}:${input.inboundMessageId}`
+      : HOSTILE_NEEDS_CONFIRM_REASON,
     runCtx,
   );
   await completeClaim(supabase, input.propertyId, {
@@ -6208,6 +6671,44 @@ async function loadInboundBusinessNumber(
 function assertNeverRoute(value: never): never {
   throw new Error(`Unhandled responder route: ${JSON.stringify(value)}`);
 }
+
+/**
+ * markPropertyNeedsAttention never overwrites an existing flag, so a property
+ * already held for something else (a draft, a price escalation) would lose the
+ * actionable, message-specific confirm-DNC reason. Upgrade the reason to this
+ * message's confirm hold, guarded on the value just read. A suppression
+ * recovery pointer is preserved (it carries its own retry action).
+ */
+export async function flagConfirmDncHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+): Promise<boolean> {
+  const flagged = await markPropertyNeedsAttention(supabase, propertyId, reason);
+  if (!flagged) return false;
+  const { data, error } = await supabase
+    .from("properties")
+    .select("needs_human_attention, last_ai_escalation_reason")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (error || !data) return false;
+  const current = data.last_ai_escalation_reason ?? null;
+  if (data.needs_human_attention !== true) return false;
+  if (current === reason) return true;
+  if (current && (current === "suppression_incomplete" || current.startsWith("suppression_incomplete:"))) return true;
+  const base = supabase
+    .from("properties")
+    .update({ last_ai_escalation_reason: reason, last_ai_escalation_at: new Date().toISOString() })
+    .eq("id", propertyId)
+    .eq("needs_human_attention", true);
+  const { data: updated, error: updateError } = await (current === null
+    ? base.is("last_ai_escalation_reason", null)
+    : base.eq("last_ai_escalation_reason", current)
+  ).select("id");
+  if (updateError) return false;
+  return Array.isArray(updated) ? updated.length > 0 : Boolean(updated);
+}
+
 
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,

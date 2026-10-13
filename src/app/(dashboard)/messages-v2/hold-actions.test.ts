@@ -506,10 +506,10 @@ describe("review round 1: Dismiss / Take over from a stale view", () => {
 });
 
 describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
-  const HOSTILE_SEEN = { through: null as string | null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-07T11:59:00+00:00" };
+  const HOSTILE_SEEN = { through: null as string | null, flagReason: "hostile_needs_confirm:msg-1", flagAt: "2026-10-07T11:59:00+00:00" };
   const HOSTILE_ROW = {
     needs_human_attention: true,
-    last_ai_escalation_reason: "hostile_needs_confirm",
+    last_ai_escalation_reason: "hostile_needs_confirm:msg-1",
     last_ai_escalation_at: "2026-10-07T11:59:00+00:00",
   };
   function hostileReply(propertyRow: Record<string, unknown> = HOSTILE_ROW) {
@@ -567,23 +567,25 @@ describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
     expect(audited).not.toContain("+1816");
   });
 
-  it("uses the held conversation's own inbound (its contact and number), not the property's latest inbound from anyone", async () => {
-    // Contact B texted most recently on the property, but the hold was raised by contact A's message msg-A.
+  it("acts on EXACTLY the inbound named in the hold, even when another contact texted later or runs overlap", async () => {
+    // Contact B texted after contact A's hostile message msg-A raised the hold.
     const A = { id: "msg-A", contact_id: "contact-A", conversation_id: "conv-A", from_address: "+18165550001" };
-    const base = hostileReply();
+    const base = hostileReply({ ...HOSTILE_ROW, last_ai_escalation_reason: "hostile_needs_confirm:msg-A" });
     const seenQueries: Array<{ table: string; calls: Call[] }> = [];
     const { d } = deps({ resolveHostileReply: vi.fn().mockResolvedValue("TEXT") }, (table, calls) => {
       seenQueries.push({ table, calls });
-      if (table === "pipeline_runs") return { data: { id: "run-A", inbound_message_id: "msg-A" } };
+      if (table === "pipeline_runs") return { data: { id: "run-B", inbound_message_id: "msg-B" } }; // overlapping run from B
       if (table === "messages") {
-        // Only a lookup pinned to the held message may return A; anything else would be B.
         return has(calls, "eq", "id", "msg-A")
           ? { data: A }
           : { data: { id: "msg-B", contact_id: "contact-B", conversation_id: "conv-B", from_address: "+18165559999" } };
       }
       return base(table, calls);
     });
-    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN });
+    const result = await confirmDoNotContact(d, {
+      propertyId: "prop-1",
+      seen: { ...HOSTILE_SEEN, flagReason: "hostile_needs_confirm:msg-A" },
+    });
     expect(result).toMatchObject({ ok: true });
     expect(d.suppressNumber).toHaveBeenCalledWith({
       propertyId: "prop-1",
@@ -595,14 +597,28 @@ describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
       d.admin,
       expect.objectContaining({ contactId: "contact-A", inboundFromPhone: "+18165550001", inboundMessageId: "msg-A" }),
     );
-    const run = seenQueries.find((q) => q.table === "pipeline_runs")!;
-    expect(has(run.calls, "lte", "started_at", HOSTILE_ROW.last_ai_escalation_at)).toBe(true);
+    // The run table is only used for the audit step, never to pick the contact.
+    expect(seenQueries.every((q) => q.table !== "messages" || has(q.calls, "eq", "id", "msg-A"))).toBe(true);
+  });
+
+  it("a plain opt-out-phrase hold suppresses the number and sends NO hostile reply", async () => {
+    const reason = "optout_phrase_needs_confirm:msg-1";
+    const { d } = deps(
+      { resolveHostileReply: vi.fn().mockResolvedValue("HOSTILE TEXT") },
+      hostileReply({ ...HOSTILE_ROW, last_ai_escalation_reason: reason }),
+    );
+    const result = await confirmDoNotContact(d, { propertyId: "prop-1", seen: { ...HOSTILE_SEEN, flagReason: reason } });
+    expect(result).toMatchObject({ ok: true, data: { replySent: false, replyNote: null } });
+    expect(d.resolveHostileReply).not.toHaveBeenCalled();
+    expect(d.sendHumanDraft).not.toHaveBeenCalled();
+    expect(d.suppressNumber).toHaveBeenCalledTimes(1);
   });
 
   it("refuses when the held message cannot be found", async () => {
     const base = hostileReply();
-    const { d } = deps({}, (t, c) => (t === "pipeline_runs" ? { data: null } : base(t, c)));
-    expect(await confirmDoNotContact(d, { propertyId: "prop-1", seen: HOSTILE_SEEN })).toMatchObject({
+    const noId = "hostile_needs_confirm";
+    const { d } = deps({}, hostileReply({ ...HOSTILE_ROW, last_ai_escalation_reason: noId }));
+    expect(await confirmDoNotContact(d, { propertyId: "prop-1", seen: { ...HOSTILE_SEEN, flagReason: noId } })).toMatchObject({
       ok: false,
       error: { code: "INBOUND_NOT_FOUND" },
     });

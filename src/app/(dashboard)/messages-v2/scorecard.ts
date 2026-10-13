@@ -275,3 +275,81 @@ export async function fetchScorecardRows(
   if (error) throw new Error(error.message);
   return parseScorecardRows(data);
 }
+
+/** One row of fn_luna_suggestion_stats, numbers coerced. */
+export type LunaStatRow = {
+  outcome: string;
+  shown: number;
+  accepted: number;
+  rejected: number;
+  agreed_manually: number;
+  open: number;
+};
+
+export type LunaOutcomeStats = {
+  outcome: string;
+  shown: number;
+  accepted: number;
+  acceptedRate: number | null;
+};
+
+export type LunaStats = {
+  shown: number;
+  accepted: number;
+  rejected: number;
+  agreedManually: number;
+  open: number;
+  /** accepted / shown; null when nothing was shown. */
+  acceptedRate: number | null;
+  byOutcome: LunaOutcomeStats[];
+};
+
+/** Coerces the RPC payload (bigint strings) defensively. */
+export function parseLunaStatRows(data: unknown): LunaStatRow[] {
+  if (!Array.isArray(data)) return [];
+  return data
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
+    .map((r) => ({
+      outcome: String(r.outcome ?? ""),
+      shown: num(r.shown),
+      accepted: num(r.accepted),
+      rejected: num(r.rejected),
+      agreed_manually: num(r.agreed_manually),
+      open: num(r.open),
+    }));
+}
+
+export function buildLunaStats(rows: readonly LunaStatRow[]): LunaStats {
+  const sum = (k: keyof Omit<LunaStatRow, "outcome">) =>
+    rows.reduce((m, r) => m + r[k], 0);
+  const shown = sum("shown");
+  const accepted = sum("accepted");
+  return {
+    shown,
+    accepted,
+    rejected: sum("rejected"),
+    agreedManually: sum("agreed_manually"),
+    open: sum("open"),
+    acceptedRate: rate(accepted, shown),
+    byOutcome: rows.map((r) => ({
+      outcome: r.outcome,
+      shown: r.shown,
+      accepted: r.accepted,
+      acceptedRate: rate(r.accepted, r.shown),
+    })),
+  };
+}
+
+/** Loads and parses Luna stats; throws on an RPC error. */
+export async function fetchLunaStatRows(
+  supabase: RpcClient,
+  orgId: string,
+  windowDays: ScorecardWindow,
+): Promise<LunaStatRow[]> {
+  const { data, error } = await supabase.rpc("fn_luna_suggestion_stats", {
+    p_org_id: orgId,
+    p_window_days: windowDays,
+  });
+  if (error) throw new Error(error.message);
+  return parseLunaStatRows(data);
+}

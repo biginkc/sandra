@@ -17,7 +17,7 @@ describe("first stage Slack DMs", () => {
     expect(slack.map((s) => s.userId).sort()).toEqual(["acq-1", "owner-1"]);
     expect(slack[0].text).toContain("Dana");
     expect(slack[0].text).not.toContain("Oak St");
-    expect(slack[0].text).toContain("https://app.example.com/messages-v2");
+    expect(slack[0].text).toContain("https://app.example.com/leads/prop-1");
     expect(t.store.rows.filter((r) => r.channel === "slack").every((r) => r.status === "sent" && r.stage === "first")).toBe(true);
     expect(summary).toMatchObject({ holds: 1, sent: 2, failed: 0 });
   });
@@ -89,7 +89,7 @@ describe("hot-hold SMS", () => {
     const sms = hot.sent.filter((s) => s.channel === "sms");
     expect(sms).toHaveLength(1);
     expect(sms[0].userId).toBe("owner-1");
-    expect(sms[0].text).toContain("https://app.example.com/messages-v2");
+    expect(sms[0].text).toContain("https://app.example.com/leads/prop-1");
 
     const cold = makeDeps({ holds: [hold({ hot: false })] });
     await runHoldAlertsForOrg(cold.deps, ORG);
@@ -274,7 +274,7 @@ describe("email digest", () => {
     expect(mail).toHaveLength(2);
     expect(mail[0].text).toContain("Dana");
     expect(mail[0].text).not.toContain("Oak St");
-    expect(mail[0].text).toContain("https://app.example.com/messages-v2");
+    expect(mail[0].text).toContain("https://app.example.com/leads/prop-1");
     const keys = t.store.rows.filter((r) => r.channel === "email").map((r) => r.holdKey);
     expect(new Set(keys)).toEqual(new Set([`digest:${ORG}:2026-10-08T10`]));
     expect(t.store.rows.find((r) => r.channel === "email")!.propertyId).toBeNull();
@@ -535,5 +535,21 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
     const cleared = makeDeps({ store: t.store, holds: [] });
     expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(2);
     expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(0);
+  });
+});
+
+describe("lead links and reason labels", () => {
+  it("every format links only the lead page, labels the reason, and carries no message text or Messages v2 link", async () => {
+    const t = makeDeps({ emailEnabled: true, holds: [hold({ hot: true, propertyId: "prop-9", holdKey: "prop-9:price_or_offer", reasonLabel: "price talk" })] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const texts = t.sent.map((s) => s.text);
+    expect(new Set(t.sent.map((s) => s.channel))).toEqual(new Set(["slack", "sms", "email"]));
+    for (const text of texts) {
+      expect(text).toContain("https://app.example.com/leads/prop-9");
+      expect(text).toContain("price talk");
+      expect(text).not.toContain("messages-v2");
+      expect(text.match(/https?:\/\//g)).toHaveLength(1);
+      expect(text).not.toContain("Oak St");
+    }
   });
 });

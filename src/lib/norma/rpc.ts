@@ -25,7 +25,7 @@ type Client = SupabaseClient<Database>;
 /** Thrown when an RPC is missing because the migration has not been applied. */
 export class NormaMissingFunctionError extends Error {}
 
-function fail(name: string, error: { message: string; code?: string }): never {
+export function fail(name: string, error: { message: string; code?: string }): never {
   if (error.code === "PGRST202" || error.code === "42883") {
     throw new NormaMissingFunctionError(`${name}: ${error.message}`);
   }
@@ -114,6 +114,79 @@ export async function presendNormaFence(client: Client, requestId: string, expec
   });
   if (error) fail("fn_norma_presend_fence", error);
   return data === true;
+}
+
+/**
+ * The queue migration's functions are not in the generated Database types until
+ * they are regenerated, so the queue wrappers call `rpc` through this loose shape.
+ */
+export type LooseRpcClient = {
+  rpc: (name: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string; code?: string } | null }>;
+};
+
+export function looseRpc(client: unknown): LooseRpcClient {
+  return client as LooseRpcClient;
+}
+
+export type NormaClaimV2Limits = {
+  /** The attempt the caller read; omitted from the call when undefined. */
+  expectedAttempt?: number;
+  /** ISO instant: every time check in claim_dispatch_v2 uses this one value. */
+  now: string;
+  queueEnabled: boolean;
+  maxConcurrent: number;
+  dailyCap: number;
+  capTz: string;
+};
+
+/**
+ * requested -> dispatching under the shared capacity gate (queue contract s.4).
+ * Returns the database answer verbatim: `claimed` | `queue_refused:<r>` | `capacity_concurrency` | `capacity_daily` |
+ * `number_busy` | `ineligible:<r>` | `not_claimed`. Anything that is not a string throws (fail closed).
+ */
+export async function claimNormaDispatchV2(client: Client, requestId: string, limits: NormaClaimV2Limits): Promise<string> {
+  const { data, error } = await looseRpc(client).rpc("fn_norma_claim_dispatch_v2", {
+    p_request_id: requestId,
+    ...(limits.expectedAttempt !== undefined ? { p_expected_attempt: limits.expectedAttempt } : {}),
+    p_now: limits.now,
+    p_queue_enabled: limits.queueEnabled,
+    p_max_concurrent: limits.maxConcurrent,
+    p_daily_cap: limits.dailyCap,
+    p_cap_tz: limits.capTz,
+  });
+  if (error) fail("fn_norma_claim_dispatch_v2", error);
+  if (typeof data !== "string") throw new Error("fn_norma_claim_dispatch_v2: unexpected result");
+  return data;
+}
+
+/**
+ * Final freshness / admission gate immediately before the provider send; stamps `send_attempted_at`.
+ * Returns `sending` or `refused:<reason>` verbatim. Anything that is not a string throws (fail closed).
+ */
+export async function markNormaSending(
+  client: Client,
+  requestId: string,
+  params: { dispatchToken?: string; expectedAttempt?: number } = {},
+): Promise<string> {
+  const { data, error } = await looseRpc(client).rpc("fn_norma_mark_sending", {
+    p_request_id: requestId,
+    ...(params.dispatchToken !== undefined ? { p_dispatch_token: params.dispatchToken } : {}),
+    ...(params.expectedAttempt !== undefined ? { p_expected_attempt: params.expectedAttempt } : {}),
+  });
+  if (error) fail("fn_norma_mark_sending", error);
+  if (typeof data !== "string") throw new Error("fn_norma_mark_sending: unexpected result");
+  return data;
+}
+
+/**
+ * Settle a queue request's entry after a dispatch result (plan rule 4). SQL owns every transition.
+ * Returns `applied` | `noop` | `no_entry`.
+ */
+export async function applyNormaQueuePresend(client: Client, requestId: string, result: string): Promise<string> {
+  const { data, error } = await looseRpc(client).rpc("fn_norma_queue_apply_presend", { p_request_id: requestId, p_result: result });
+  if (error) fail("fn_norma_queue_apply_presend", error);
+  if (typeof data !== "string") throw new Error("fn_norma_queue_apply_presend: unexpected result");
+  return data;
 }
 
 /** Record the Bland call id; never overwrites a completed request or another id. */

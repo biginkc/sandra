@@ -35,7 +35,7 @@ type Props = {
   lastResult?: NormaLastResult | null;
 };
 
-type Notice = { tone: "success" | "warning" | "error"; text: string };
+type Notice = { tone: "success" | "warning" | "error"; text: string; code?: string };
 
 /** Plain state label and explanation for a request that is still open. */
 export function describeOpenNormaRequest(status: string, attempt?: number | null): { label: string; detail: string } {
@@ -123,7 +123,7 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
         return;
       }
       const described = describeRequestResult(result);
-      setNotice(described);
+      setNotice({ ...described, code: result.code });
       // An accepted request, an uncertain send and an already-open request all
       // hold the lead: never offer a second click; the refresh shows the state.
       if (result.ok || result.code === "in_flight") {
@@ -277,6 +277,7 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
             role={notice.tone === "error" ? "alert" : "status"}
             className={notice.tone === "error" ? "text-destructive text-sm" : "text-sm"}
             data-testid="norma-call-notice"
+            data-code={notice.code}
           >
             {notice.text}
           </p>

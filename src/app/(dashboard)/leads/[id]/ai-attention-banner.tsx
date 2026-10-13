@@ -46,7 +46,6 @@ export function AiAttentionBanner({
   const [dismissed, setDismissed] = useState(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const visible = initialVisible && !dismissed;
   const reasonIsSuppression =
     reason === "suppression_incomplete" ||
     !!reason?.startsWith("suppression_incomplete:");
@@ -54,7 +53,8 @@ export function AiAttentionBanner({
   // the outstanding list is loaded whenever the banner is showing.
   const [outstanding, setOutstanding] = useState<number | null>(null);
   useEffect(() => {
-    if (!initialVisible) return;
+    // Always load: an outstanding suppression obligation must surface even when
+    // the attention flag is off (e.g. the process died right after a confirm).
     let live = true;
     listOutstandingSuppressionFailures(propertyId)
       .then((r) => {
@@ -71,6 +71,9 @@ export function AiAttentionBanner({
   const outstandingCount =
     outstanding ?? suppressionReviewIdsFromReason(reason).length;
   const suppressionIncomplete = reasonIsSuppression || outstandingCount > 0;
+  // Visible on the attention flag OR any outstanding suppression, independent of
+  // the flag.
+  const visible = (initialVisible || suppressionIncomplete) && !dismissed;
 
   if (!visible) return null;
 
@@ -127,9 +130,15 @@ export function AiAttentionBanner({
       <div className="text-destructive flex min-w-0 flex-1 gap-3">
         <AlertTriangleIcon className="mt-0.5 size-5 shrink-0" aria-hidden />
         <div>
-          <strong>Human reply needed.</strong> Sandra paused on this
-          conversation. Review the latest inbound message and take over
-          directly.
+          {initialVisible ? (
+            <>
+              <strong>Human reply needed.</strong> Sandra paused on this
+              conversation. Review the latest inbound message and take over
+              directly.
+            </>
+          ) : (
+            <strong>Opt-out suppression is incomplete.</strong>
+          )}
           {(friendly || when) && (
             <div className="text-destructive/80 mt-1 text-xs">
               {friendly ? (

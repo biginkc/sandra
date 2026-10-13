@@ -63,6 +63,7 @@ export async function confirmAiDispositionReview(
       supabase as never,
       reviewId,
       user.id,
+      { discharge: true },
     );
     if (!suppression.ok) warning = suppression.warning;
   }

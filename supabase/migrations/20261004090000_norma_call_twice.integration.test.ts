@@ -5,7 +5,7 @@ import { Client } from "pg";
 import { describe, expect, it } from "vitest";
 
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
-import { applyMyLeadsChain } from "@tests/integration/my-leads-housekeeping-fixture";
+import { applyMyLeadsChain, dropEvolvedNormaDispatchOverloads } from "@tests/integration/my-leads-housekeeping-fixture";
 
 // Local-only: every test runs inside one transaction that is rolled back, so
 // the loopback database is left as it was found. The migration itself is
@@ -40,6 +40,7 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade
   try {
     await db.query("begin");
     await applyMyLeadsChain(db, []);
+    await dropEvolvedNormaDispatchOverloads(db);
     await db.query(migration);
     await applyMyLeadsChain(db, ["schema", "createFn"]);
     const ctx: Ctx = { org: randomUUID(), rep: randomUUID(), assignee: randomUUID(), sequence: randomUUID() };
@@ -191,7 +192,9 @@ describe("norma call twice (migration 20261004090000)", () => {
         await db.query("update public.sequence_enrollments set pause_reason=$2 where id=$1", [l.enrollment, pauseReason]);
         open.push({ id, property: l.property, callId, enrollment: l.enrollment!, pauseReason });
       }
-      before = (await db.query("select to_jsonb(r) as row from public.norma_call_requests r order by id")).rows;
+      // On a full-chain database these columns already exist before the replayed upgrade (the historical schema lacks them); strip them from the
+      // snapshot exactly as the post-upgrade read does, so it compares only what the historical schema had.
+      before = (await db.query("select to_jsonb(r) - array['attempt','first_bland_call_id','first_attempt_outcome','first_attempt_at','precall_sms_status','reviewed_by','reviewed_at'] as row from public.norma_call_requests r order by id")).rows;
       pausesBefore = (await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows;
     });
   });

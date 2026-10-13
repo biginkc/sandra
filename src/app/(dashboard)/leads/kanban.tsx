@@ -64,6 +64,8 @@ import type {
 } from "./inbound-filters";
 import { loadLeadBoardAction, setLeadNextActionAction } from "./board-actions";
 import { BulkStartDripDialog } from "./bulk-start-drip-dialog";
+import { NormaQueueDialog } from "./norma-queue-dialog";
+import { NORMA_QUEUE_COPY } from "@/lib/norma/queue/copy";
 import type {
   CustomTag,
   LeadBoardCursor,
@@ -191,6 +193,8 @@ export function Kanban({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDripOpen, setBulkDripOpen] = useState(false);
   const [bulkDripLeads, setBulkDripLeads] = useState<{ id: string; address: string }[]>([]);
+  const [normaQueueOpen, setNormaQueueOpen] = useState(false);
+  const [normaQueueLeads, setNormaQueueLeads] = useState<{ id: string; address: string }[]>([]);
   const [totals, setTotals] = useState(initialTotals);
   const [baselineTotals, setBaselineTotals] = useState(initialBaselineTotals);
   const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
@@ -931,12 +935,18 @@ export function Kanban({
         {selectedLeads.length > 0 ? <>
           <span>{selectedLeads.length} selected</span>
           <Button size="sm" onClick={() => { setBulkDripLeads(selectedLeads.map((lead) => ({ id: lead.id, address: lead.address }))); setBulkDripOpen(true); }}>Start drip</Button>
+          <Button size="sm" variant="outline" onClick={() => { setNormaQueueLeads(selectedLeads.map((lead) => ({ id: lead.id, address: lead.address }))); setNormaQueueOpen(true); }}>{NORMA_QUEUE_COPY.dialog.button}</Button>
           <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>Clear selection</Button>
         </> : null}
       </div>
       {bulkDripOpen ? <BulkStartDripDialog open leads={bulkDripLeads} onClose={() => setBulkDripOpen(false)} onComplete={() => {
         setSelectedIds(new Set());
         void refreshBoard();
+        router.refresh();
+      }} /> : null}
+
+      {normaQueueOpen ? <NormaQueueDialog open leads={normaQueueLeads} onClose={() => setNormaQueueOpen(false)} onComplete={() => {
+        setSelectedIds(new Set());
         router.refresh();
       }} /> : null}
 

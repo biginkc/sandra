@@ -137,6 +137,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
     since: "2026-10-08T10:00:00.000Z",
     startedAt: "2026-10-08T10:00:00.000Z",
     name: "Dana",
+    reasonLabel: "price talk",
     hot: false,
     ...over,
   };

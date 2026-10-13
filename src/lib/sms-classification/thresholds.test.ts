@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isHumanOnlyOutcome,
   isThresholdableOutcome,
   loadOrgThresholdMap,
   resolveThresholdDecision,
@@ -102,6 +103,17 @@ describe("resolveThresholdDecision", () => {
     expect(result).toEqual({ status: "human_gated", reason: "dnc", outcome: "dnc" });
   });
 
+  it("never auto-applies opted_out, even at confidence 1.0 with automation enabled (Jarrad 2026-10-07 hard rule)", () => {
+    for (const confidence of [0.95, 0.999, 1]) {
+      expect(
+        resolveThresholdDecision({ outcome: "opted_out", outcomeConfidence: confidence }, THRESHOLDS),
+      ).toEqual({ status: "human_gated", reason: "human_only_outcome", outcome: "opted_out" });
+    }
+    expect(isHumanOnlyOutcome("opted_out")).toBe(true);
+    expect(isHumanOnlyOutcome("dnc")).toBe(true);
+    expect(isHumanOnlyOutcome("wrong_number")).toBe(false);
+  });
+
   it("never auto-applies unclear regardless of confidence", () => {
     const result = resolveThresholdDecision(
       { outcome: "unclear", outcomeConfidence: 1 },
@@ -128,13 +140,13 @@ describe("resolveThresholdDecision", () => {
 
   it("is human-gated (not defaulted to 0 or 1) when no threshold is configured for the outcome", () => {
     const result = resolveThresholdDecision(
-      { outcome: "opted_out", outcomeConfidence: 0.999 },
+      { outcome: "wrong_number", outcomeConfidence: 0.999 },
       {},
     );
     expect(result).toEqual({
       status: "human_gated",
       reason: "no_threshold_configured",
-      outcome: "opted_out",
+      outcome: "wrong_number",
     });
   });
 
@@ -179,7 +191,7 @@ describe("automation_enabled switch", () => {
   });
 
   it("still auto-applies the production-preserving outcomes at 1.0", () => {
-    for (const outcome of ["not_interested", "wrong_number", "nurture", "opted_out"] as const) {
+    for (const outcome of ["not_interested", "wrong_number", "nurture"] as const) {
       expect(
         resolveThresholdDecision({ outcome, outcomeConfidence: 1 }, THRESHOLDS).status,
       ).toBe("auto_apply");

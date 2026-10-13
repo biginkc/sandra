@@ -102,7 +102,10 @@ export async function create(db: Client, ctx: Ctx, l: Lead) {
 }
 
 export async function dispatched(db: Client, requestId: string, callId = `call-${randomUUID()}`) {
-  expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [requestId])).rows[0]!.c).toBe(true);
+  // After the queue migration the legacy claim is always false (G1); the admitted dispatch is claim_dispatch_v2. Use whichever the schema has.
+  const v2 = (await db.query("select to_regprocedure('public.fn_norma_claim_dispatch_v2(uuid,integer,timestamptz,boolean,integer,integer,text)') is not null as v")).rows[0].v === true;
+  if (v2) expect((await svc<{ c: string }>(db, "select public.fn_norma_claim_dispatch_v2($1,1,now(),false,1000,100000,'America/Chicago') as c", [requestId])).rows[0]!.c).toBe("claimed");
+  else expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [requestId])).rows[0]!.c).toBe(true);
   expect((await svc<{ b: string }>(db, "select public.fn_norma_bind_call_id($1,$2) as b", [requestId, callId])).rows[0]!.b).toBe("bound");
   return callId;
 }

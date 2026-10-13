@@ -26,6 +26,26 @@ describe("asked_how_number_obtained question", () => {
   });
 
   it("bumps the schema version so old scores are not read as having this answer", () => {
-    expect(JEV_SCHEMA_VERSION).toBe("3");
+    expect(JEV_SCHEMA_VERSION).toBe("4");
+  });
+
+  it("pins the full question list (nurture routing + number source), in order", () => {
+    expect(Object.keys(buildQuestions(false))).toEqual([
+      "outcome",
+      "wrong_scope",
+      "escalation_reason",
+      "asked_how_number_obtained",
+      "ready_timeframe",
+      "listing_status",
+    ]);
+    expect(Object.keys(buildQuestions(true))).toEqual([
+      "outcome",
+      "wrong_scope",
+      "escalation_reason",
+      "asked_how_number_obtained",
+      "ready_timeframe",
+      "listing_status",
+      "reply_intent",
+    ]);
   });
 });

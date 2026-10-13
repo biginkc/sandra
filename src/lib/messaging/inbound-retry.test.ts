@@ -24,10 +24,16 @@ const mocks = vi.hoisted(() => ({
   findTakeover: vi.fn(async () => null),
   recordTakeover: vi.fn(async () => undefined),
   persistTakeover: vi.fn(async () => undefined),
-  markAttention: vi.fn(async () => undefined),
+  markAttention: vi.fn(async () => true),
   recordThread: vi.fn(async () => undefined),
   deadLetter: vi.fn(async () => true),
   flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
+  optOut: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/messaging/opt-out-phone")>()),
+  applyPhoneLevelOptOut: mocks.optOut,
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -82,6 +88,7 @@ vi.mock("@/lib/ai-responder/dispatch", () => ({
   dispatchAiResponse: mocks.dispatchAi,
   flagAndDeadLetter: mocks.flagAndDeadLetter,
   markPropertyNeedsAttention: mocks.markAttention,
+  flagConfirmDncHold: mocks.markAttention,
 }));
 
 vi.mock("@/lib/messaging/inbound-state", () => ({
@@ -457,5 +464,183 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     // what keeps the retry from being short-circuited AND from being doubled.
     await runWebhook();
     expect(mocks.dispatchAi).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleInboundWebhook reply delay vs. approved-template replies", () => {
+  async function runWebhook() {
+    const handler = handlerClient([{ data: INSERTED, error: null }]);
+    mocks.serviceClient = handler.client;
+    process.env.TEST_SUPABASE_URL = "http://example.test";
+    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+    return handleInboundWebhook(
+      new Request("https://example.test/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: { host: "example.test" },
+        body: "{}",
+      }),
+      { includeFullUrl: true, provider: provider() as never },
+    );
+  }
+  const delayConfig = (max: number) => ({
+    delayMinSeconds: 0,
+    delayMaxSeconds: max,
+    propertyState: null,
+    escalationKeywords: [],
+  });
+
+  it("never dispatches (and so never sends a template) inside the webhook when reply_delay_max_seconds > 0, even if the computed delay is 0", async () => {
+    // computeReplyDelaySeconds legitimately returns 0 (no property state,
+    // quiet-hours clamp, low random draw). The reply must still go through the
+    // delay workflow, where the dispatch step runs, never from the request.
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({ inboundMessageId: "message-1", delaySeconds: 0 });
+  });
+
+  it("a non-zero computed delay is scheduled on the workflow with that delay and no webhook dispatch", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(31);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({ delaySeconds: 31 });
+  });
+
+  it("only an org with no reply delay (max = 0) dispatches synchronously", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(0));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect(mocks.startWorkflow).not.toHaveBeenCalled();
+    expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+  });
+
+  it("when the delay workflow cannot start, the inline fallback dispatches with replyDelayBypassed so no template goes out instantly", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
+    mocks.computeDelay.mockReturnValueOnce(20);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+
+  it("an inline dispatch for an org with no reply delay (max = 0) is marked delay_not_configured so templates are dropped", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(0));
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({
+      replyDelayBypassed: true,
+      replyDelayBypassReason: "delay_not_configured",
+    });
+  });
+
+  it("a failed delay-config lookup (null) dispatches inline but marked bypassed, so no template goes out instantly", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce(null);
+    mocks.computeDelay.mockReturnValueOnce(0);
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
+    await runWebhook();
+    expect((mocks.dispatchAi.mock.calls[0] as unknown[])[1]).toMatchObject({ replyDelayBypassed: true });
+  });
+
+  describe("hostile precedence and durable holds at the webhook", () => {
+    const run = async (body: string) => {
+      const original = INPUT.body;
+      (INPUT as { body: string }).body = body;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      mocks.serviceClient = handlerClient([{ data: INSERTED, error: null }]).client;
+      try {
+        return await handleInboundWebhook(
+          new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+          { includeFullUrl: true, provider: provider() as never },
+        );
+      } finally {
+        (INPUT as { body: string }).body = original;
+      }
+    };
+    const reasonOf = () => (mocks.markAttention.mock.calls[0] as unknown[])[2] as string;
+
+    it.each(["I am not the owner, you idiot", "Wrong number you idiot"])(
+      "hostile + wrong-number wording %j is held as hostile_needs_confirm (no wrong_number disposition, no suppression)",
+      async (body) => {
+        await run(body);
+        expect(reasonOf()).toBe("hostile_needs_confirm:message-1");
+        expect(mocks.optOut).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["Your $50k offer is a scam", "you idiot", "this is spam, go to hell"])(
+      "any hostile text %j is held at the webhook before generic exits: exact hold reason, no dispatch, no suppression",
+      async (body) => {
+        await run(body);
+        expect(reasonOf()).toBe("hostile_needs_confirm:message-1");
+        expect(mocks.dispatchAi).not.toHaveBeenCalled();
+        expect(mocks.optOut).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a plain 'wrong person' (scope all) is held with the non-hostile reason", async () => {
+      await run("you have the wrong person");
+      expect(reasonOf()).toBe("optout_phrase_needs_confirm:message-1");
+      expect(mocks.optOut).not.toHaveBeenCalled();
+    });
+
+    it("a hold that cannot be saved fails the webhook (retryable) instead of acknowledging the opt-out", async () => {
+      mocks.markAttention.mockResolvedValueOnce(false as never);
+      const response = await run("do not contact me");
+      expect(response.status).toBe(500);
+      expect(mocks.optOut).not.toHaveBeenCalled();
+      // A redelivery that can save the hold succeeds.
+      mocks.markAttention.mockResolvedValueOnce(true as never);
+      const retried = await run("do not contact me");
+      expect(retried.status).toBe(200);
+    });
+  });
+
+  describe("opt-out wording: only a bare carrier STOP suppresses automatically (Jarrad 2026-10-08)", () => {
+    const withBody = async (body: string) => {
+      const original = INPUT.body;
+      (INPUT as { body: string }).body = body;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      mocks.serviceClient = handlerClient([{ data: INSERTED, error: null }]).client;
+      try {
+        await handleInboundWebhook(
+          new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+          { includeFullUrl: true, provider: provider() as never },
+        );
+      } finally {
+        (INPUT as { body: string }).body = original;
+      }
+    };
+
+    it.each(["STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit"])("bare %j suppresses the number", async (body) => {
+      await withBody(body);
+      expect(mocks.optOut).toHaveBeenCalledTimes(1);
+      expect(mocks.optOut).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ surface: "stop" }));
+    });
+
+    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot"])(
+      "phrase %j does NOT suppress: it is held for a person, nothing dispatched",
+      async (body) => {
+        await withBody(body);
+        expect(mocks.optOut).not.toHaveBeenCalled();
+        expect(mocks.dispatchAi).not.toHaveBeenCalled();
+        expect(mocks.markAttention).toHaveBeenCalledTimes(1);
+        const reason = (mocks.markAttention.mock.calls[0] as unknown[])[2] as string;
+        expect(reason).toMatch(/^(hostile_needs_confirm|optout_phrase_needs_confirm):message-1$/);
+      },
+    );
   });
 });

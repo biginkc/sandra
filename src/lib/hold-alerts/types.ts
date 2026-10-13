@@ -17,6 +17,8 @@ export type HoldInfo = {
   startedAt: string | null;
   /** First name (or "Unknown ···1234"), from the page's label loader. */
   name: string;
+  /** Short human reason for the hold ("price talk"); never message text. */
+  reasonLabel: string;
   /** One of the hold's reasons is in the configured hot list (HOLD_ALERT_HOT_REASONS, exact match). */
   hot: boolean;
 };

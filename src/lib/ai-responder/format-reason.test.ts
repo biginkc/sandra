@@ -131,6 +131,13 @@ describe("parseEscalationReason — unknown gate falls back gracefully", () => {
 });
 
 describe("provider failure reasons", () => {
+  it("needs_reply reads as a human-reply request, not generic review", () => {
+    const parsed = parseEscalationReason("needs_reply");
+    expect(parsed?.shortLabel).toBe("Needs reply");
+    expect(parsed?.longLabel).toBe("Seller replied — needs a human reply");
+    expect(parsed?.color).toBe("amber");
+  });
+
   it("provider_billing parses loud: rose color, credits label", () => {
     const parsed = parseEscalationReason("provider_billing");
     expect(parsed).not.toBeNull();
@@ -192,6 +199,20 @@ describe("send timeout reasons", () => {
     const parsed = parseEscalationReason("send_timeout_then_sent");
     expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");
   });
+  it("labels every needs-confirm hold with a specific (non-default) label", () => {
+    for (const r of [
+      "jev_dnc_needs_confirm",
+      "jev_opted_out_needs_confirm",
+      "jev_wrong_number_all_needs_confirm",
+      "model_opt_out_needs_confirm",
+      "model_dnc_needs_confirm",
+    ]) {
+      const parsed = parseEscalationReason(r)!;
+      expect(parsed.shortLabel, r).not.toBe("Needs review");
+      expect(parsed.longLabel, r).not.toBe(r);
+    }
+  });
+
   it("suppression_incomplete labels the same with or without a review id, never showing the uuid", () => {
     const bare = parseEscalationReason("suppression_incomplete");
     const withId = parseEscalationReason("suppression_incomplete:3f1c2d9e-0000-4000-8000-123456789abc");

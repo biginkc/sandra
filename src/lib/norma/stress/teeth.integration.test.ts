@@ -40,8 +40,9 @@ async function prepareBoundAttemptTwo(h: Harness) {
   h.skipRetryDispatchOnce = true;
   await h.bland.webhook(first, "good");
   const id = (await h.scratch.pool.query<{ id: string }>("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0]!.id;
-  const { claimNormaDispatch } = await import("../rpc");
-  await claimNormaDispatch(h.client("claim"), id, 2);
+  const { claimNormaDispatchV2 } = await import("../rpc");
+  const claimed = await claimNormaDispatchV2(h.client("claim"), id, { expectedAttempt: 2, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+  if (claimed !== "claimed") throw new Error(`attempt-2 claim answered ${claimed}`);
   await h.scratch.pool.query("update public.norma_call_requests set status = 'dispatched', bland_call_id = 'call-2' where id = $1", [id]);
   return { ctx, id };
 }
@@ -106,17 +107,6 @@ const MUTANTS: Mutant[] = [
       ),
   },
   {
-    name: "marking a call reviewed also resumes the lead's drip",
-    invariant: "9",
-    apply: (q) =>
-      mutateFunction(
-        q,
-        "public.fn_norma_mark_reviewed(uuid, uuid, uuid)",
-        "select count(*)::integer into v_kept",
-        "update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = r.property_id and status = 'paused' and pause_reason = 'norma_call';\n  select count(*)::integer into v_kept",
-      ),
-  },
-  {
     name: "marking a call reviewed does not check that the caller belongs to the org",
     invariant: "9",
     apply: (q) =>
@@ -131,11 +121,11 @@ const MUTANTS: Mutant[] = [
   {
     name: "eligibility never blocks (DNC / not_interested leads get dialled)",
     invariant: "2",
+    // Every dial-time gate (claim_dispatch_v2, mark_sending, the public wrapper) reads eligibility through eligibility_core.
     apply: async (q) => {
-      await q("alter function public.fn_norma_eligibility(uuid, uuid, text) rename to fn_norma_eligibility_orig");
-      await q(`create function public.fn_norma_eligibility(p_property_id uuid, p_contact_id uuid, p_phone_e164 text)
+      await q("alter function norma_private.fn_norma_eligibility_core(uuid, uuid, text) rename to fn_norma_eligibility_core_orig");
+      await q(`create function norma_private.fn_norma_eligibility_core(p_property_id uuid, p_contact_id uuid, p_phone_e164 text)
                returns table (eligible boolean, block_reason text) language sql security definer set search_path = public as $$ select true, null::text $$`);
-      await q("grant execute on function public.fn_norma_eligibility(uuid, uuid, text) to service_role");
     },
   },
 ];
@@ -150,7 +140,7 @@ type SceneMutant = { name: string; apply: Mutant["apply"]; scene: (h: Harness) =
 const SCENE_MUTANTS: SceneMutant[] = [
   {
     name: "the final pre-send fence is removed (reviewed dispatch still dials)",
-    apply: (q) => mutateFunction(q, "public.fn_norma_presend_fence(uuid, integer)", "return v_n = 1;", "return true;"),
+    apply: (q) => mutateFunction(q, "public.fn_norma_mark_sending(uuid, uuid, integer)", "if r.id is null or r.status <> 'dispatching'\n     or not ((p_expected_attempt is null and r.attempt = 1) or r.attempt = p_expected_attempt) then", "if r.id is null then"),
     scene: async (h) => {
       const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback" });
       await h.requestCall(ctx, h.world.rep1, { crashBeforeDispatch: true });
@@ -158,7 +148,7 @@ const SCENE_MUTANTS: SceneMutant[] = [
       const gate = new Latch();
       const reached = new Latch();
       const remove = h.holdOnce(
-        (info) => info.kind === "rpc" && info.name === "fn_norma_presend_fence" && info.actor === "fence-mutant",
+        (info) => info.kind === "rpc" && info.name === "fn_norma_mark_sending" && info.actor === "fence-mutant",
         gate.promise,
         () => reached.open(),
       );
@@ -176,6 +166,33 @@ const SCENE_MUTANTS: SceneMutant[] = [
         gate.open();
       }
       return h.bland.sendsFor(id).length === 0 ? [] : ["removed pre-send fence still allowed a provider send after review committed"];
+    },
+  },
+  {
+    name: "marking a call reviewed also resumes the lead's drip",
+    apply: (q) =>
+      mutateFunction(
+        q,
+        "public.fn_norma_mark_reviewed(uuid, uuid, uuid)",
+        "select count(*)::integer into v_kept",
+        "update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = r.property_id and status = 'paused' and pause_reason = 'norma_call';\n  select count(*)::integer into v_kept",
+      ),
+    // Deterministic: a lead whose drip is paused by Norma (paused:norma_call), with a needs_review request, then reviewed.
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback" });
+      await h.requestCall(ctx, h.world.rep1, { crashBeforeDispatch: true });
+      const id = (await h.scratch.pool.query<{ id: string }>("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0]!.id;
+      const enrollment = async () => (await h.scratch.pool.query("select status, pause_reason from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
+      const before = await enrollment();
+      if (before?.status !== "paused" || before?.pause_reason !== "norma_call") return [`scene setup: drip was ${before?.status}/${before?.pause_reason}, expected paused/norma_call`];
+      const claimed = await (await import("../rpc")).claimNormaDispatchV2(h.client("review-scene"), id, { expectedAttempt: 1, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+      if (claimed !== "claimed") return [`scene setup: claim answered ${claimed}`];
+      const parked = (await h.scratch.pool.query("select public.fn_norma_mark_needs_review($1, $2, $3) as result", [id, "review-scene", 1])).rows[0]?.result;
+      if (parked !== "needs_review") return [`scene setup: mark_needs_review returned ${parked}`];
+      const reviewed = await h.markReviewed(ctx, h.world.rep1);
+      if (!reviewed?.ok) return [`review failed in scene: ${JSON.stringify(reviewed)}`];
+      const after = await enrollment();
+      return after?.status === "paused" && after?.pause_reason === "norma_call" ? [] : [`reviewing resumed the drip: ${after?.status}/${after?.pause_reason}`];
     },
   },
   {
@@ -282,8 +299,9 @@ const SCENE_MUTANTS: SceneMutant[] = [
       h.skipRetryDispatchOnce = true;
       await h.bland.webhook(first, "good");
       const id = (await h.scratch.pool.query("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0].id;
-      const { claimNormaDispatch } = await import("../rpc");
-      await claimNormaDispatch(h.client("claim"), id, 2);
+      const { claimNormaDispatchV2 } = await import("../rpc");
+      const claimed = await claimNormaDispatchV2(h.client("claim"), id, { expectedAttempt: 2, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+      if (claimed !== "claimed") return [`scene setup: attempt-2 claim answered ${claimed}`];
       await h.bland.webhook(first, "mismatch_call_id");
       const row = (await h.scratch.pool.query("select status from public.norma_call_requests where id = $1", [id])).rows[0];
       return row?.status === "dispatching" ? [] : [`a forged attempt-1 call id moved the request to ${row?.status}`];

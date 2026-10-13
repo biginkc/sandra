@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { digestMessage, holdsLink, slackFirstText, slackNudgeText, smsText } from "./messages";
+import { digestMessage, slackFirstText, slackNudgeText, smsText } from "./messages";
 import {
   MAX_ATTEMPTS,
   ROUTE_MAX_DURATION_MS,
@@ -101,7 +101,7 @@ export async function runHoldAlertsForOrg(
   if (holds.length === 0) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
-  const link = holdsLink(deps.baseUrl);
+  const link = deps.baseUrl;
   const nowMs = startMs;
   const base = { orgId };
   const tasks: Task[] = [];

@@ -68,6 +68,7 @@ const ITEMS: readonly Item[] = [
   { href: "/jev", label: "Jev", icon: Sparkles, matchAlso: ["/jev/needs-decision", "/jev/review"] },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
   { href: "/norma/callbacks", label: "Norma callbacks", icon: Headphones },
+  { href: "/norma/queue", label: "Norma queue", icon: Headphones },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/calculators", label: "Calculators", icon: Calculator },
   { href: "/jobs", label: "Jobs", icon: Briefcase },

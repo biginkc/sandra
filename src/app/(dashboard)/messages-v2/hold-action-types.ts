@@ -24,6 +24,10 @@ export type HoldActionsApi = {
   }): Promise<Result<{ replySent: boolean; replyNote: string | null }>>;
   /** Optional: re-run suppression for a `suppression_incomplete` hold (the lead banner's action). */
   retrySuppression?(input: { propertyId: string }): Promise<Result<{ cleared: boolean; remaining: number }>>;
+  /** Optional: apply Luna's pending suggestion (never offered for opt-out outcomes). */
+  lunaApply?(input: { suggestionId: string }): Promise<Result<{ status: string; resolvedOutcome: string; warning?: string }>>;
+  /** Optional: dismiss Luna's pending suggestion. */
+  lunaReject?(input: { suggestionId: string }): Promise<Result<null>>;
   listAssignees(input: { propertyId: string }): Promise<Result<TeamMember[]>>;
 };
 

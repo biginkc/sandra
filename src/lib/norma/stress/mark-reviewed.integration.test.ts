@@ -100,6 +100,7 @@ describe("mark reviewed (stress scenes)", () => {
     // The provider behaves this time.
     ctx.plan.send = "accept";
     ctx.plan.kind = "callback";
+    await h.advance(15_000); // (margin for host↔DB clock drift) claim_dispatch_v2 spaces dials on one number by 10 s [C9]; the first send was just now
 
     expect(await h.requestCall(ctx, h.world.rep2)).toMatchObject({ ok: true, code: "calling" });
     const rows = await requests(ctx.lead.property);

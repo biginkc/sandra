@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { HOSTILE_NEEDS_CONFIRM_REASON } from "@/lib/ai-responder/hostile";
+import { HOSTILE_NEEDS_CONFIRM_REASON, confirmDncInboundId, isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import type { HumanDraftSendInput, HumanDraftSendResult } from "@/lib/ai-responder/dispatch";
 import { err, ok, type Result } from "@/lib/errors/result";
 import type { LeadEventType, RecordLeadEventInput } from "@/lib/events";
@@ -570,7 +570,7 @@ export async function confirmDoNotContact(
       | null;
     if (rowError || !current) return fail("HOLD_LOOKUP_FAILED", "Could not load that hold. Nothing was changed.");
     const reason = current.last_ai_escalation_reason ?? "";
-    if (!current.needs_human_attention || !reason.startsWith(HOSTILE_NEEDS_CONFIRM_REASON)) {
+    if (!current.needs_human_attention || !isConfirmDncReason(reason)) {
       return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
     }
     if (
@@ -580,19 +580,9 @@ export async function confirmDoNotContact(
       return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
     }
 
-    // The held conversation's own inbound, not "the property's latest inbound
-    // from anyone": the run that raised this hold (the latest run that started
-    // at or before the flag) names the inbound message, and that message names
-    // the contact and the number that texted.
-    const { data: run } = await d.admin
-      .from("pipeline_runs")
-      .select("inbound_message_id")
-      .eq("property_id", input.propertyId)
-      .lte("started_at", current.last_ai_escalation_at ?? new Date().toISOString())
-      .order("started_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const heldInboundId = (run as { inbound_message_id: string | null } | null)?.inbound_message_id ?? null;
+    // Exactly the message that raised the hold: its id rides in the hold
+    // reason. A hold without one is refused (fail closed), never guessed.
+    const heldInboundId = confirmDncInboundId(reason);
     if (!heldInboundId) return fail("INBOUND_NOT_FOUND", "Could not find the seller text or number. Nothing was changed.");
     const { data: inbound, error: inboundError } = await d.admin
       .from("messages")
@@ -611,9 +601,14 @@ export async function confirmDoNotContact(
     const ctx = await latestRunContext(d, input.propertyId);
     let replySent = false;
     let replyNote: string | null = null;
-    const body = await d.resolveHostileReply({ propertyId: input.propertyId, contactId: msg.contact_id });
+    // The approved hostile reply is only for hostile wording; a plain opt-out
+    // phrase is just suppressed.
+    const hostileHold = reason.startsWith(HOSTILE_NEEDS_CONFIRM_REASON);
+    const body = hostileHold
+      ? await d.resolveHostileReply({ propertyId: input.propertyId, contactId: msg.contact_id })
+      : null;
     if (body === null) {
-      replyNote = "no approved hostile reply is mapped";
+      replyNote = hostileHold ? "no approved hostile reply is mapped" : null;
     } else {
       const sent = await d.sendHumanDraft(d.admin, {
         orgId: d.orgId,
@@ -654,7 +649,7 @@ export async function confirmDoNotContact(
         .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: now })
         .eq("id", input.propertyId)
         .eq("needs_human_attention", true)
-        .like("last_ai_escalation_reason", `${HOSTILE_NEEDS_CONFIRM_REASON}%`)
+        .eq("last_ai_escalation_reason", reason)
         .select("id");
       if (error) throw new Error(error.message);
       if (Array.isArray(cleared) && cleared.length > 0) {

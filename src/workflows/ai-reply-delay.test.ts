@@ -106,6 +106,16 @@ describe("aiReplyDelayWorkflow", () => {
 
     expect(sleep).not.toHaveBeenCalled();
     expect(dispatchAiResponse).toHaveBeenCalledTimes(1);
+    // No delay was applied (e.g. quiet-hours clamp), so templates must drop.
+    expect(dispatchAiResponse.mock.calls[0]![1]).toMatchObject({
+      replyDelayBypassed: true,
+      replyDelayBypassReason: "delay_not_applied",
+    });
+  });
+
+  it("a real positive delay is never marked bypassed", async () => {
+    await aiReplyDelayWorkflow(params);
+    expect(dispatchAiResponse.mock.calls[0]![1]).not.toHaveProperty("replyDelayBypassed");
   });
 
   describe("retry of a contended / failed reply", () => {
