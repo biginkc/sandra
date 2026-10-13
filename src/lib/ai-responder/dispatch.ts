@@ -875,6 +875,15 @@ async function dispatchAiResponseCore(
       // The reply asks "want me to take you off the list?": a person must see the answer.
       if (sent.outcome === "sent") {
         await markPropertyNeedsAttention(supabase, input.propertyId, NUMBER_SOURCE_AWAITING_ANSWER_REASON, deps.runContext);
+      } else if (sent.outcome !== "retry") {
+        // Refused at the final fence (approval changed, recipient window) or held by the send
+        // path: nobody answered the question, so a person is told (first flag wins).
+        await markPropertyNeedsAttention(
+          supabase,
+          input.propertyId,
+          `${NUMBER_SOURCE_NOT_SENT_PREFIX}send_${sent.outcome}`,
+          deps.runContext,
+        );
       }
       return settledNumberSource;
     }
@@ -2876,6 +2885,13 @@ async function resolveNumberSourceForIdentity(
     classification.askedHowNumberObtained
   ) {
     return { template: null, askedNotSentReason: "outcome_not_templatable" };
+  } else if (
+    (classification.kind === "jev_needs_decision" || classification.kind === "jev_no_action") &&
+    classification.askedHowNumberObtained
+  ) {
+    // Jev heard the question but the outcome is below its cutoff / has no action:
+    // the identity reply goes out as today and a person answers the number question.
+    return { template: null, askedNotSentReason: classification.kind === "jev_needs_decision" ? "below_threshold" : "no_action" };
   }
   if (!outcome || !asked) return none;
   const resolved = await resolveApprovedTemplateReply(supabase, {

@@ -8342,6 +8342,42 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       expect(state.property.last_ai_escalation_reason).toBe("number_source_awaiting_answer");
     });
 
+    it("final fence refuses the number-source template (approval edited after the lookup): nothing sent as the template and a person is told", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      state.smsTemplateRow = { content: `${NUMBER_BODY} edited`, approved_for_auto_send: true, approved_content: NUMBER_BODY, deleted_at: null };
+      await run(state, "inbound-id-fence", WHO_AND_NUMBER, answers("nurture", "yes"));
+      expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(0);
+      expect(state.property.last_ai_escalation_reason).toBe("number_source_reply_not_sent:send_skipped");
+    });
+
+    it("recipient window closes before the send (quiet hours): the template is refused and a person is told", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      vi.setSystemTime(new Date("2026-06-14T05:00:00.000Z"));
+      await run(state, "inbound-id-quiet", WHO_AND_NUMBER, answers("nurture", "yes"));
+      expect(state.messages.filter((m) => m.direction === "outbound" && (m.body ?? "") === NUMBER_BODY)).toHaveLength(0);
+      expect(state.property.needs_human_attention).toBe(true);
+    });
+
+    it.each([
+      ["below the cutoff", answers("nurture", "yes", 0.5), "inbound-id-below"],
+      ["no action (unclear outcome)", answers("unclear", "yes", 0.99), "inbound-id-noaction"],
+    ] as const)("Jev heard the question but the result is %s: identity reply as today and a person is told", async (_name, jevAnswers, id) => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
+      bothMapped("nurture");
+      await run(state, id, WHO_AND_NUMBER, jevAnswers);
+      expect(sentBodies()).not.toContain(NUMBER_BODY);
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toMatch(/^number_source_reply_not_sent:(below_threshold|no_action)/);
+    });
+
     it("who-is-this only (Jev says no): the identity reply, once, no hold", async () => {
       const state = createMockState();
       installSendMock(state);

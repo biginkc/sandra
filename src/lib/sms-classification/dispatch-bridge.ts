@@ -117,7 +117,12 @@ export type ClassificationBridgeResult =
       thresholdVersion: number | null;
       evaluationRevision: number;
     }
-  | { kind: "jev_no_action"; classificationRunId: string }
+  | {
+      kind: "jev_no_action";
+      classificationRunId: string;
+      /** Present (true) only when Jev said the seller asked how we got their number. */
+      askedHowNumberObtained?: true;
+    }
   /**
    * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
    * automatic-mode-only. Jev's HTTP call failed, no decision-time
@@ -144,6 +149,8 @@ export type ClassificationBridgeResult =
   | {
       kind: "jev_needs_decision";
       classificationRunId: string;
+      /** Present (true) only when Jev said the seller asked how we got their number. */
+      askedHowNumberObtained?: true;
       outcome: SmsClassificationDecision["outcome"];
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
@@ -393,7 +400,11 @@ export async function classifyForDispatch(
   const resolved = await resolvePolicyOutcome(decision);
 
   if (resolved.kind === "no_action") {
-    return { kind: "jev_no_action", classificationRunId };
+    return {
+      kind: "jev_no_action",
+      classificationRunId,
+      ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
+    };
   }
 
   if (resolved.kind === "nurture") {
@@ -408,6 +419,7 @@ export async function classifyForDispatch(
       : {
           kind: "jev_needs_decision",
           classificationRunId,
+          ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
           outcome: decision.outcome,
           nativeConfidence,
           thresholdAtDecision,
