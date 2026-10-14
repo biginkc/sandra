@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
+import { createHugoSessionProof, hugoSessionProofConfigured, setHugoSessionProof } from "@/lib/auth/hugo-session-proof";
 import { applyAuthNoCache } from "@/lib/auth/response";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
@@ -203,6 +204,12 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (!hugoSessionProofConfigured()) {
+    return new NextResponse("Authentication temporarily unavailable", {
+      status: 503, headers: { "Cache-Control": "no-store" },
+    });
+  }
+
   const writtenCookieNames = new Set<string>();
   let supabase: Awaited<ReturnType<typeof createClient>>;
   try {
@@ -296,11 +303,16 @@ export async function GET(request: NextRequest) {
     }
 
     const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");
-    return authRedirect(request, target, {
+    const proof = await createHugoSessionProof(
+      claimsData!.claims, data.session.user.id, request.nextUrl.origin,
+    );
+    const response = authRedirect(request, target, {
       consumeFlow: true,
       expirePkce: true,
       writtenCookieNames,
     });
+    setHugoSessionProof(request, response, proof);
+    return response;
   } catch {
     return rejectExchangedSession(
       request,
