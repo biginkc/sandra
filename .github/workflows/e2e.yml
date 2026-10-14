@@ -82,6 +82,9 @@ jobs:
           });
           NODE
 
+      - name: Verify Hugo browser session isolation
+        run: npx vitest run --config vitest.hugo-browser.config.ts
+
       - name: Run Playwright E2E suite
         run: |
           # Keep real thread-detail loading and read receipts on a fresh

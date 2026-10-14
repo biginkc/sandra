@@ -13,7 +13,9 @@ const CLOCK_SKEW_SECONDS = 60;
 
 /**
  * Prove that Hugo, rather than merely some OAuth provider, authenticated the
- * current session. A linked Hugo identity alone is not enough: users can have
+ * callback exchange. This check must NEVER run on subsequent requests: identity
+ * timestamps are shared by every session and advance on another login.
+ * A linked Hugo identity alone is not enough: users can have
  * multiple identities, while AMR only says "oauth". Hosted custom providers
  * currently advance either last_sign_in_at or
  * updated_at on the exact provider identity. Require that timestamp to match
