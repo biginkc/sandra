@@ -111,6 +111,7 @@ export default defineConfig({
       "scripts/messages-v2/replay/replay.integration.test.ts",
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
+      "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",

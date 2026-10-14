@@ -42,6 +42,11 @@ export type SmsClassificationDecision = {
   wrongScope: JevWrongScope | null;
   escalationReason: JevEscalationReason | null;
   replyIntent: JevReplyIntent | null;
+  /**
+   * Jev's `asked_how_number_obtained` answer: true = yes, false = no, null/absent
+   * = not answered or unreadable (treated as "no": fail closed).
+   */
+  askedHowNumberObtained?: boolean | null;
   /** Nurture routing answers; null when the provider did not return a valid choice. */
   readyTimeframe?: JevReadyTimeframe | null;
   listingStatus?: JevListingStatus | null;

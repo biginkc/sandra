@@ -86,11 +86,21 @@ import {
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
+import {
+  NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
+  NUMBER_SOURCE_AWAITING_ANSWER_REASON,
+  NUMBER_SOURCE_NOT_SENT_PREFIX,
+} from "./number-source";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { SOLD_NEEDS_HUMAN_REASON, isSoldInbound } from "./sold";
-import { resolveApprovedTemplateReply, type TemplateReplyKey } from "./template-reply";
+import {
+  hasSendableNumberSourceTemplate,
+  NUMBER_SOURCE_REPLY_KEY,
+  resolveApprovedTemplateReply,
+  type TemplateReplyKey,
+} from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
@@ -325,6 +335,7 @@ type AiDispatchPropertyGateRow = Pick<
   | "ai_responder_disabled"
   | "homeowner_contact_id"
   | "id"
+  | "last_ai_escalation_reason"
   | "needs_human_attention"
   | "org_id"
   | "outreach_dispo"
@@ -393,7 +404,7 @@ export async function checkAiResponderDispatchPreGates(
   const { data: property } = await supabase
     .from("properties")
     .select(
-      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id",
+      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id, last_ai_escalation_reason",
     )
     .eq("id", input.propertyId)
     .maybeSingle();
@@ -403,6 +414,32 @@ export async function checkAiResponderDispatchPreGates(
       ok: false,
       outcome: { outcome: "skipped", reason: "property_not_found" },
     };
+  }
+  if (property.needs_human_attention && (await isAnswerToNumberSourceReply(supabase, input))) {
+    // The seller is answering "want me to take you off the list?". The property
+    // is already held, but the answer must not vanish into a silent
+    // already-terminal exit: refresh the hold so a person sees there is a new
+    // message. When the hold is our own awaiting marker its reason becomes
+    // `number_source_answer_received`; when the property was already held for
+    // another reason that reason is kept (a person still needs it) and only the
+    // hold's timestamp moves. Nothing is sent and nothing is suppressed.
+    const now = new Date().toISOString();
+    const own = property.last_ai_escalation_reason === NUMBER_SOURCE_AWAITING_ANSWER_REASON;
+    let q = supabase
+      .from("properties")
+      .update({
+        ...(own ? { last_ai_escalation_reason: NUMBER_SOURCE_ANSWER_RECEIVED_REASON } : {}),
+        last_ai_escalation_at: now,
+        updated_at: now,
+      })
+      .eq("id", input.propertyId)
+      .eq("needs_human_attention", true);
+    if (own) q = q.eq("last_ai_escalation_reason", NUMBER_SOURCE_AWAITING_ANSWER_REASON);
+    const { data: refreshed } = await q.select("id").maybeSingle();
+    await blocked(NUMBER_SOURCE_ANSWER_RECEIVED_REASON);
+    if (refreshed) {
+      return { ok: false, outcome: flaggedSkip(NUMBER_SOURCE_ANSWER_RECEIVED_REASON) };
+    }
   }
   if (isTerminalAiResponderProperty(property)) {
     await blocked("already_terminal");
@@ -457,6 +494,31 @@ export async function checkAiResponderDispatchPreGates(
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
   return { ok: true, property };
+}
+
+/**
+ * True when this inbound is a seller's answer to our number-source reply: the
+ * latest outbound message is that reply (`reply_key`, so this works whatever
+ * reason the property is held for) and it was not sent in answer to THIS inbound
+ * (a replay of the original question is not an answer). Fails closed (false).
+ */
+async function isAnswerToNumberSourceReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "outbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return false;
+  const meta = (data.metadata ?? {}) as { reply_key?: unknown; inbound_message_id?: unknown };
+  if (meta.reply_key !== NUMBER_SOURCE_REPLY_KEY) return false;
+  if (input.inboundMessageId && meta.inbound_message_id === input.inboundMessageId) return false;
+  return true;
 }
 
 export async function dispatchAiResponse(
@@ -745,6 +807,86 @@ async function dispatchAiResponseCore(
   const hostileInbound = isHostileInbound(input.inboundBody);
 
   if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
+    // "Who is this?" that is ALSO "how did you get my number?": send only the
+    // approved number-source template (it identifies the context) and skip the
+    // identity reply, so the seller gets ONE message. Needs the classifier, so
+    // it is attempted only when an approved template is mapped; every other
+    // case (and any failure) falls through to the identity reply below.
+    const identityLookup = await resolveNumberSourceForIdentity(supabase, {
+      input,
+      orgId: property.org_id,
+      config: config!,
+      runCtx: deps.runContext,
+    });
+    // The randomized reply delay was bypassed: an approved template is never sent
+    // instantly, so the number-source reply is dropped and a person is told.
+    const identityDelayDrop = identityLookup.template && input.replyDelayBypassed
+      ? (input.replyDelayBypassReason ?? "delay_unavailable")
+      : null;
+    const numberSource = identityDelayDrop ? null : identityLookup.template;
+    const identityNotSentReason = identityDelayDrop ?? identityLookup.askedNotSentReason;
+    if (numberSource) {
+      const sent = await sendResponderMessage(supabase, {
+        runContext: deps.runContext,
+        input,
+        body: numberSource.body,
+        model: config!.model,
+        confidence: numberSource.nativeConfidence ?? 1,
+        sentiment: "neutral",
+        turn: currentTurn + 1,
+        source: "approved_template",
+        templateId: numberSource.templateId,
+        templateSource: numberSource.source,
+        replyKey: NUMBER_SOURCE_REPLY_KEY,
+        orgId: property.org_id,
+        claimStartedAt,
+        outboundMode: config!.outbound_mode,
+        replyKind: "send_reply",
+      });
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result:
+          sent.outcome === "sent"
+            ? "sent"
+            : sent.outcome === "skipped"
+              ? "skipped"
+              : sent.outcome === "retry"
+                ? "block"
+                : "held",
+        detail: {
+          templateId: numberSource.templateId,
+          mappingId: numberSource.mappingId,
+          outcome: numberSource.outcome,
+          replyKey: numberSource.key,
+          via: "identity_interceptor",
+          sendOutcome: sent.outcome,
+        },
+      }, deps.runContext);
+      // A contended send drops its carried reply so the re-dispatch classifies again and
+      // re-runs the template path (a carried reply would go out as a plain LLM reply,
+      // without the approval re-check, reply_key or the awaiting-answer hold).
+      const settledNumberSource = await settleClaimForSendOutcome(supabase, responseClaim.claimId, sent.outcome === "retry" ? { ...sent, reply: undefined } : sent, {
+        orgId: property.org_id,
+        input,
+        body: numberSource.body,
+        runContext: deps.runContext,
+      });
+      // The reply asks "want me to take you off the list?": a person must see the answer.
+      if (sent.outcome === "sent") {
+        await holdWithRetry(supabase, input.propertyId, NUMBER_SOURCE_AWAITING_ANSWER_REASON, deps.runContext);
+      } else if (sent.outcome !== "retry") {
+        // Refused at the final fence (approval changed, recipient window) or held by the send
+        // path: nobody answered the question, so a person is told (first flag wins).
+        await holdWithRetry(
+          supabase,
+          input.propertyId,
+          `${NUMBER_SOURCE_NOT_SENT_PREFIX}send_${sent.outcome}`,
+          deps.runContext,
+        );
+      }
+      return settledNumberSource;
+    }
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
@@ -779,12 +921,23 @@ async function dispatchAiResponseCore(
       outboundMode: config!.outbound_mode,
       replyKind: "identity",
     });
-    return settleClaimForSendOutcome(supabase, responseClaim.claimId, outcome, {
+    const settledIdentity = await settleClaimForSendOutcome(supabase, responseClaim.claimId, outcome, {
       orgId: property.org_id,
       input,
       body: IDENTITY_REPLY_BODY,
       runContext: deps.runContext,
     });
+    // The seller also asked how we got the number but that reply did not go
+    // out: the identity copy does not answer it, so a person looks.
+    if (identityNotSentReason) {
+      await holdWithRetry(
+        supabase,
+        input.propertyId,
+        `${NUMBER_SOURCE_NOT_SENT_PREFIX}${identityNotSentReason}`,
+        deps.runContext,
+      );
+    }
+    return settledIdentity;
   }
 
   // A retry with no carried reply (it waited at the gate before generating)
@@ -1080,12 +1233,23 @@ async function classifyAndHandleNonRouteOutcomes(
       // no extra delay beyond the drip's own first step). It pauses on the
       // seller's reply and when a person takes over; a failure here never
       // undoes the hold.
-      await enrollHotLeadInBookAppointment(supabase, {
-        propertyId: input.propertyId,
-        sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        runCtx,
-      });
+      if (classification.askedHowNumberObtained) {
+        // The seller also asked how we got their number and no reply goes out: a person
+        // answers, so nothing is enrolled in a drip.
+        await trace(supabase, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "skipped",
+          detail: { why: "number_source_asked", route: "hot_book_appointment" },
+        }, runCtx);
+      } else {
+        await enrollHotLeadInBookAppointment(supabase, {
+          propertyId: input.propertyId,
+          sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
+          inboundMessageId: input.inboundMessageId ?? null,
+          runCtx,
+        });
+      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
@@ -1094,6 +1258,8 @@ async function classifyAndHandleNonRouteOutcomes(
       return { handled: true, outcome: { outcome: "escalated", reason: "hot_lead" } };
     }
     let templateMessageId: string | null = null;
+    let numberSourceHold: string | null = null;
+    let templateReplyKey: TemplateReplyKey | null = null;
     // Why no nurture reply went out (drip enrolment needs the nurture reply first).
     let templateNotSentReason: string | null = !templateCtx
       ? "no_reply_path"
@@ -1109,12 +1275,23 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
         escalationReason: classification.escalationReason,
+        askedHowNumberObtained: classification.askedHowNumberObtained,
         runCtx,
       });
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
       templateMessageId = step.outboundMessageId;
+      numberSourceHold = step.hold;
+      templateReplyKey = step.replyKey;
       templateNotSentReason = step.outboundMessageId ? null : (step.notSentReason ?? "not_sent");
+    } else if (classification.askedHowNumberObtained) {
+      // Asked, but this dispatch cannot send replies at all.
+      numberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}reply_ineligible`;
     }
+    // True when there is nothing to hold or the hold is persisted. A hold that could not be
+    // written completes the claim as error `flag_failed` (not handled) so it is recoverable:
+    // the claim keeps the sent template's id, so a re-dispatch never sends it twice.
+    const holdForNumberSource = async (): Promise<boolean> =>
+      numberSourceHold ? holdWithRetry(supabase, input.propertyId, numberSourceHold, runCtx) : true;
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1145,18 +1322,26 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: null, to: "nurture", reason: "model:nurture" },
         });
       }
-      // Strictly AFTER the nurture reply was accepted and the outcome applied.
-      await runNurtureAutoDripStep(supabase, {
-        propertyId: input.propertyId,
-        cfg: dripCfg,
-        route: dripRoute,
-        replySent: templateMessageId !== null,
-        notSentReason: templateNotSentReason ?? "not_sent",
-        runCtx,
-      });
+      // Applied first, then held: a flagged property would make the outcome write skip.
+      const holdOk = await holdForNumberSource();
+      // Strictly AFTER the nurture reply was accepted and the outcome applied. Only the
+      // nurture reply itself starts a drip: when the number-source reply replaced it
+      // (or was asked for and could not go out) the seller is waiting on a person, so
+      // nothing is enrolled and no "nurture reply not sent" flag is raised.
+      if (!classification.askedHowNumberObtained) {
+        await runNurtureAutoDripStep(supabase, {
+          propertyId: input.propertyId,
+          cfg: dripCfg,
+          route: dripRoute,
+          replySent: templateMessageId !== null && templateReplyKey === "nurture",
+          notSentReason: templateNotSentReason ?? "not_sent",
+          runCtx,
+        });
+      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: holdOk ? "auto_closed" : "escalated",
+        ...(holdOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
@@ -1172,9 +1357,11 @@ async function classifyAndHandleNonRouteOutcomes(
       // already set (possibly by a human while Jev was classifying) —
       // nurture must never downgrade it. Skip silently, same treatment
       // as the legacy path's "already_terminal" RPC status.
+      const terminalHoldOk = await holdForNumberSource();
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: silentSkipClaimOutcome(0),
+        outcome: terminalHoldOk ? silentSkipClaimOutcome(0) : "escalated",
+        ...(terminalHoldOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: silentSkip("already_terminal", 0) };
@@ -1266,9 +1453,15 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
+      const newLeadHoldOk = classification.askedHowNumberObtained
+        // A new lead never auto-replies (PLAN D5), so the number-source reply
+        // is not sent either; the lead's owner sees the question.
+        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_new_lead`, runCtx)
+        : true;
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: newLeadHoldOk ? "auto_closed" : "escalated",
+        ...(newLeadHoldOk ? {} : { flagOk: false }),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
@@ -1639,9 +1832,15 @@ async function resolveAndApplyRoute(
     }
     case "auto_close_wrong_number":
       let wrongNumberTemplateMessageId: string | null = null;
+      // The seller asked how we got the number AND is the wrong contact: the
+      // wrong-number reply is not sent (it would not answer the question, and
+      // the number-source reply is never sent to a wrong contact); a person looks.
+      const wrongNumberNumberSourceAsked =
+        classification.kind === "jev_route" && classification.askedHowNumberObtained;
       if (
         templateCtx &&
         !templateCtx.hostile &&
+        !wrongNumberNumberSourceAsked &&
         classification.kind === "jev_route" &&
         classification.eligibleForAutoAccept &&
         classification.wrongScope === "this_property"
@@ -1711,15 +1910,21 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
+      const wrongNumberHoldOk = wrongNumberNumberSourceAsked
+        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`, runCtx)
+        : true;
+      const wrongNumberClaimError = dispositionClaimError(wrongNumberResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(wrongNumberOutcome),
-        errorMessage: dispositionClaimError(wrongNumberResult),
+        outcome: wrongNumberHoldOk || wrongNumberClaimError ? claimOutcomeOf(wrongNumberOutcome) : "escalated",
+        ...(wrongNumberHoldOk ? {} : { flagOk: false }),
+        errorMessage: wrongNumberClaimError,
         ...(wrongNumberTemplateMessageId ? { outboundMessageId: wrongNumberTemplateMessageId } : {}),
       });
       return wrongNumberOutcome;
     case "auto_close":
       let autoCloseTemplateMessageId: string | null = null;
+      let autoCloseNumberSourceHold: string | null = null;
       if (
         classification.kind === "jev_route" &&
         classification.eligibleForAutoAccept &&
@@ -1764,10 +1969,18 @@ async function resolveAndApplyRoute(
           outcome: "not_interested",
           nativeConfidence: classification.nativeConfidence,
           escalationReason: classification.escalationReason,
+          askedHowNumberObtained: classification.askedHowNumberObtained,
           runCtx,
         });
         if (step.kind === "stop") return step.outcome;
         autoCloseTemplateMessageId = step.outboundMessageId;
+        autoCloseNumberSourceHold = step.hold;
+      } else if (classification.kind === "jev_route" && classification.askedHowNumberObtained) {
+        // Asked, but no reply goes out here: below its cutoff, a hostile
+        // inbound, or a dispatch that cannot send replies.
+        autoCloseNumberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}${
+          templateCtx?.hostile ? "hostile" : !templateCtx ? "reply_ineligible" : "below_cutoff"
+        }`;
       }
       const isJevBelowThresholdAutoClose = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const autoCloseResult = isJevBelowThresholdAutoClose
@@ -1808,10 +2021,15 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
+      const autoCloseHoldOk = autoCloseNumberSourceHold
+        ? await holdWithRetry(supabase, input.propertyId, autoCloseNumberSourceHold, runCtx)
+        : true;
+      const autoCloseClaimError = dispositionClaimError(autoCloseResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(autoCloseOutcome),
-        errorMessage: dispositionClaimError(autoCloseResult),
+        outcome: autoCloseHoldOk || autoCloseClaimError ? claimOutcomeOf(autoCloseOutcome) : "escalated",
+        ...(autoCloseHoldOk ? {} : { flagOk: false }),
+        errorMessage: autoCloseClaimError,
         ...(autoCloseTemplateMessageId ? { outboundMessageId: autoCloseTemplateMessageId } : {}),
       });
       return autoCloseOutcome;
@@ -2328,13 +2546,19 @@ type TemplateStepContext = {
   hostile?: boolean;
 };
 
-type TemplateStepResult =
+export type TemplateStepResult =
   /**
    * Carry on with today's flow (apply the outcome); `outboundMessageId` when a
    * template went out. A template that was refused or held (quiet hours, hold
    * mode, any gate) also continues, with no message id: see the doc below.
+   * `replyKey` is the mapping key of the template that went out (`number_source`
+   * when it replaced the outcome's own reply), else null: anything that
+   * enrols a drip off this reply (nurture) must check `replyKey === "nurture"`.
+   * `hold` is a flag reason the caller sets AFTER the outcome is applied: the
+   * awaiting-answer hold when the number-source reply went out, or
+   * `number_source_reply_not_sent:<reason>` when the seller asked but it did not.
    */
-  | { kind: "continue"; outboundMessageId: string | null; notSentReason?: string }
+  | { kind: "continue"; outboundMessageId: string | null; replyKey: TemplateReplyKey | null; hold: string | null; notSentReason?: string }
   /** A contended send was parked for retry: do NOT apply the outcome yet (the re-dispatch re-runs this step). */
   | { kind: "stop"; outcome: AiDispatchOutcome | AiRetryOutcome };
 
@@ -2380,7 +2604,7 @@ const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
-async function runApprovedTemplateStep(
+export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
     input: AiDispatchInput;
@@ -2391,23 +2615,40 @@ async function runApprovedTemplateStep(
     nativeConfidence: number | null;
     /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
     escalationReason: JevEscalationReason | null;
+    /**
+     * Jev said the seller asked how we got their number. When true and an
+     * approved `number_source` template is mapped, THAT template is sent
+     * instead of the outcome's own (one reply, never two). Otherwise nothing
+     * changes.
+     */
+    askedHowNumberObtained?: boolean;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
   const { input, property, ctx, claim, runCtx } = a;
-  const resolved = await resolveApprovedTemplateReply(supabase, {
-    orgId: property.org_id,
-    propertyId: input.propertyId,
-    contactId: input.contactId,
-    outcome: a.outcome,
-    outcomeConfidence: a.nativeConfidence,
-    escalationReason: a.escalationReason,
-    // The responder does not ask Jev for a reply intent yet, so only
-    // any-intent mappings match until it does.
-    replyIntent: null,
-  });
+  const resolveFor = (mappingKey?: typeof NUMBER_SOURCE_REPLY_KEY) =>
+    resolveApprovedTemplateReply(supabase, {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      outcome: a.outcome,
+      ...(mappingKey ? { mappingKey } : {}),
+      outcomeConfidence: a.nativeConfidence,
+      escalationReason: a.escalationReason,
+      // The responder does not ask Jev for a reply intent yet, so only
+      // any-intent mappings match until it does.
+      replyIntent: null,
+    });
+  const asked = a.askedHowNumberObtained === true;
+  const notSent = (reason: string) => (asked ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}${reason}` : null);
+  // When the seller asked how we got the number, the approved number-source
+  // reply is the ONLY template that may answer: if it cannot go out, the
+  // outcome's own template is NOT sent in its place (it would not answer the
+  // question); the caller holds the conversation for a person instead.
+  const resolved = asked ? await resolveFor(NUMBER_SOURCE_REPLY_KEY) : await resolveFor();
   if (resolved.kind === "none") {
     if (
+      asked ||
       resolved.reason === "human_follow_up" ||
       resolved.reason === "template_unavailable" ||
       resolved.reason === "render_failed" ||
@@ -2417,15 +2658,16 @@ async function runApprovedTemplateStep(
         kind: "reply",
         name: "template_reply",
         result: "skipped",
-        detail: { outcome: a.outcome, reason: resolved.reason },
+        detail: { outcome: a.outcome, reason: resolved.reason, ...(asked ? { replyKey: NUMBER_SOURCE_REPLY_KEY } : {}) },
       }, runCtx);
     }
-    return { kind: "continue", outboundMessageId: null, notSentReason: resolved.reason };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(resolved.reason), notSentReason: resolved.reason };
   }
 
   // The randomized reply delay was bypassed (workflow could not start): never
   // send a template instantly. Drop it; the outcome still applies.
   if (input.replyDelayBypassed) {
+    const bypassReason = input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE;
     await trace(supabase, {
       kind: "reply",
       name: "template_reply",
@@ -2434,12 +2676,14 @@ async function runApprovedTemplateStep(
         outcome: a.outcome,
         templateId: resolved.templateId,
         mappingId: resolved.mappingId,
-        reason: input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE,
+        reason: bypassReason,
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(bypassReason), notSentReason: bypassReason };
   }
+  const replyKey: TemplateReplyKey = resolved.key ?? resolved.outcome;
+  const sentHold = replyKey === NUMBER_SOURCE_REPLY_KEY ? NUMBER_SOURCE_AWAITING_ANSWER_REASON : null;
 
   // Cannot send right now (owner's draft-only switch, or the recipient's clock /
   // Florida cap): DROP the template and carry on so the outcome applies (Q5/Q6).
@@ -2461,7 +2705,7 @@ async function runApprovedTemplateStep(
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null, notSentReason: dropReason };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(dropReason), notSentReason: dropReason };
   }
 
   // A crashed earlier run of this claim may already have sent the template:
@@ -2478,11 +2722,9 @@ async function runApprovedTemplateStep(
         templateId: resolved.templateId,
       },
     }, runCtx);
-    return {
-      kind: "continue",
-      outboundMessageId: alreadySent === "error" ? null : alreadySent,
-      ...(alreadySent === "error" ? { notSentReason: "claim_unreadable" } : {}),
-    };
+    return alreadySent === "error"
+      ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable"), notSentReason: "claim_unreadable" }
+      : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
   }
 
   let recorded = true;
@@ -2497,6 +2739,8 @@ async function runApprovedTemplateStep(
     turn: ctx.currentTurn + 1,
     source: "approved_template",
     templateId: resolved.templateId,
+    templateSource: resolved.source,
+    replyKey,
     orgId: property.org_id,
     claimStartedAt: ctx.claimStartedAt,
     outboundMode: ctx.outboundMode,
@@ -2526,6 +2770,7 @@ async function runApprovedTemplateStep(
     templateId: resolved.templateId,
     mappingId: resolved.mappingId,
     outcome: a.outcome,
+    ...(resolved.key === NUMBER_SOURCE_REPLY_KEY ? { replyKey: resolved.key } : {}),
     sendOutcome: sent.outcome,
     ...(sent.outcome === "sent" ? { outboundMessageId: sent.messageId } : {}),
     ...("reason" in sent && sent.reason ? { reason: sent.reason } : {}),
@@ -2548,13 +2793,13 @@ async function runApprovedTemplateStep(
     if (!recorded) {
       await markPropertyNeedsAttention(supabase, input.propertyId, "template_sent_outcome_missing", runCtx);
     }
-    return { kind: "continue", outboundMessageId: sent.messageId };
+    return { kind: "continue", outboundMessageId: sent.messageId, replyKey, hold: sentHold };
   }
   // Nothing was sent. Held (hold mode / recipient window / any gate) or
   // silently refused: the outcome still applies (see the doc above).
   if (sent.outcome !== "retry") {
-    const why = "reason" in sent && sent.reason ? `${sent.outcome}:${sent.reason}` : sent.outcome;
-    return { kind: "continue", outboundMessageId: null, notSentReason: why.replace(/\s+/g, "_") };
+    const why = ("reason" in sent && sent.reason ? `${sent.outcome}:${sent.reason}` : sent.outcome).replace(/\s+/g, "_");
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(`send_${sent.outcome}`), notSentReason: why };
   }
 
   // A retry drops its carried reply so the re-dispatch classifies again and
@@ -2569,6 +2814,98 @@ async function runApprovedTemplateStep(
       runContext: runCtx,
     }),
   };
+}
+
+/**
+ * Identity-interceptor helper: when this inbound both asks who we are and asks
+ * how we got the number, returns the rendered number-source template, under the
+ * same gates the classified path applies (a nurture / not-interested outcome at
+ * its cutoff, no human follow-up, label switch on, an approved + mapped
+ * template). The classification goes through `classifyForDispatch`, so the Jev
+ * decision is saved like any other (`sms_classification_runs`) and the same
+ * timeout and retries apply; no outcome is applied (the identity path never
+ * applied one). `askedNotSentReason` is set when Jev said yes but no
+ * number-source template could go out, so the caller holds for a person.
+ * Hostile inbounds never reach this (the identity shortcut is skipped).
+ */
+async function resolveNumberSourceForIdentity(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    orgId: string;
+    config: { classifier_provider?: string | null; classifier_mode?: string | null };
+    runCtx?: MaybeRunContext;
+  },
+): Promise<{
+  template:
+    | (Extract<Awaited<ReturnType<typeof resolveApprovedTemplateReply>>, { kind: "template" }> & {
+        nativeConfidence: number | null;
+      })
+    | null;
+  askedNotSentReason: string | null;
+}> {
+  const { input } = a;
+  const none = { template: null, askedNotSentReason: null };
+  if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return none;
+  if (!(await hasSendableNumberSourceTemplate(supabase, a.orgId))) return none;
+  const classification = await classifyForDispatch(
+    supabase,
+    {
+      orgId: a.orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { classifierProvider: "jev", classifierMode: "automatic" },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
+  );
+  let outcome: "nurture" | "not_interested" | null = null;
+  let asked = false;
+  let nativeConfidence: number | null = null;
+  let escalationReason: JevEscalationReason | null = null;
+  if (classification.kind === "jev_nurture") {
+    outcome = "nurture";
+    asked = classification.askedHowNumberObtained;
+    nativeConfidence = classification.nativeConfidence;
+    escalationReason = classification.escalationReason;
+  } else if (
+    classification.kind === "jev_route" &&
+    classification.route.kind === "auto_close" &&
+    classification.eligibleForAutoAccept
+  ) {
+    outcome = "not_interested";
+    asked = classification.askedHowNumberObtained;
+    nativeConfidence = classification.nativeConfidence;
+    escalationReason = classification.escalationReason;
+  } else if (
+    (classification.kind === "jev_route" || classification.kind === "jev_promote_new_lead") &&
+    classification.askedHowNumberObtained
+  ) {
+    return { template: null, askedNotSentReason: "outcome_not_templatable" };
+  } else if (
+    (classification.kind === "jev_needs_decision" || classification.kind === "jev_no_action") &&
+    classification.askedHowNumberObtained
+  ) {
+    // Jev heard the question but the outcome is below its cutoff / has no action:
+    // the identity reply goes out as today and a person answers the number question.
+    return { template: null, askedNotSentReason: classification.kind === "jev_needs_decision" ? "below_threshold" : "no_action" };
+  }
+  if (!outcome || !asked) return none;
+  const resolved = await resolveApprovedTemplateReply(supabase, {
+    orgId: a.orgId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    outcome,
+    mappingKey: NUMBER_SOURCE_REPLY_KEY,
+    outcomeConfidence: nativeConfidence,
+    escalationReason,
+    replyIntent: null,
+  });
+  return resolved.kind === "template"
+    ? { template: { ...resolved, nativeConfidence }, askedNotSentReason: null }
+    : { template: null, askedNotSentReason: resolved.reason };
 }
 
 /**
@@ -3463,6 +3800,10 @@ type ResponderSendArgs = {
   approvedBy?: { userId: string; edited: boolean };
   /** The library template behind an `approved_template` send (evidence + message metadata). */
   templateId?: string | null;
+  /** The unrendered library text `body` was rendered from; the send-time approval re-check compares it (not the rendered body) to the approved text. Defaults to `body`. */
+  templateSource?: string | null;
+  /** Mapping key of that template (`number_source` etc.), stored as `reply_key` so a later inbound can tell it is answering that reply. */
+  replyKey?: string | null;
   orgId: string;
   /** When this run took its claim; null when unknown (check skipped). */
   claimStartedAt: string | null;
@@ -5254,7 +5595,7 @@ async function templateStillApproved(
       data.approved_for_auto_send === true &&
       data.approved_content !== null &&
       data.approved_content === data.content &&
-      data.approved_content === args.body
+      data.approved_content === (args.templateSource ?? args.body)
     );
   } catch {
     return false;
@@ -5479,7 +5820,11 @@ async function deliverResponderMessage(
     sentiment: args.sentiment,
     turn: args.turn,
     ...(args.source === "approved_template"
-      ? { reply_source: "approved_template" as const, template_id: args.templateId ?? null }
+      ? {
+          reply_source: "approved_template" as const,
+          template_id: args.templateId ?? null,
+          ...(args.replyKey ? { reply_key: args.replyKey } : {}),
+        }
       : {}),
   };
   const { data: messageRow, error: messageLookupError } = await supabase
@@ -6397,6 +6742,24 @@ export async function flagConfirmDncHold(
   return Array.isArray(updated) ? updated.length > 0 : Boolean(updated);
 }
 
+
+/**
+ * The number-source hold carries an obligation (a person must answer or look), and
+ * on the identity path the message is already out so the dispatch cannot be re-run.
+ * Tries the flag write up to three times; a persistent failure is reported by
+ * `markPropertyNeedsAttention` and returned as false.
+ */
+async function holdWithRetry(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+  runContext?: MaybeRunContext,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await markPropertyNeedsAttention(supabase, propertyId, reason, runContext)) return true;
+  }
+  return false;
+}
 
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
