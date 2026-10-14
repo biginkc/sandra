@@ -31,6 +31,8 @@ type Props = {
   footerAction?: React.ReactNode;
   onSent?: (messageId: string) => void;
   onPendingChange?: (pending: boolean) => void;
+  /** Inbox thread contact; lets the server send when no homeowner is set. */
+  threadContactId?: string | null;
   sendAction?: (body: string, to: string | null) => ReturnType<typeof sendSmsFromLead>;
 };
 
@@ -53,6 +55,7 @@ export function InlineReply({
   footerAction,
   onSent,
   sendAction,
+  threadContactId,
   onPendingChange,
 }: Props) {
   const router = useRouter();
@@ -103,6 +106,7 @@ export function InlineReply({
           fromNumber,
           false,
           effectiveToPhone,
+          threadContactId ?? null,
         ),
         {
           fallbackMessage: "Send not confirmed",
