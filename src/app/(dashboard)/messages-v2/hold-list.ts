@@ -372,7 +372,17 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
  * ordering columns with no history, so the past cannot be reconstructed.)
  */
 /** `th` = the newest pending decision / review / draft the order was built from (the hold's "seen through"). */
-export type SnapshotEntry = { id: string; at: string | null; r: number; run: string | null; fa: string | null; th: string | null };
+/** `d` / `ds` = the draft the card showed at snapshot time and whether it was sendable from the card. */
+export type SnapshotEntry = {
+  id: string;
+  at: string | null;
+  r: number;
+  run: string | null;
+  fa: string | null;
+  th: string | null;
+  d?: string | null;
+  ds?: boolean;
+};
 export type WaitingSnapshot = { reasons: string[]; entries: SnapshotEntry[] };
 
 export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): WaitingSnapshot {
@@ -388,7 +398,16 @@ export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): Waitin
         index.set(reason, r);
       }
     }
-    return { id: h.id, at: holdActivityAt(h), r, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null, th: h.seen?.through ?? null };
+    return {
+      id: h.id,
+      at: holdActivityAt(h),
+      r,
+      run: h.run?.id ?? null,
+      fa: h.seen?.flagAt ?? null,
+      th: h.seen?.through ?? null,
+      // Omitted when there is no draft, to keep the list small.
+      ...(h.draft ? { d: h.draft.id, ds: h.draft.sendable === true } : {}),
+    };
   });
   return { reasons, entries };
 }

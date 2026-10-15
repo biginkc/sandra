@@ -247,7 +247,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
       .then(({ threads: fetched, failedRunIds }) => {
-        const current = new Map([...runsRef.current, ...earlierRef.current].map((r) => [r.id, threadKey(r)]));
+        const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
         const fresh = [...fetched].filter(([id]) => current.get(id) === versionAtRequest.get(id));
         setThreads((curr) => new Map([...curr, ...fresh]));
         retryLater(failedRunIds);
@@ -387,9 +387,13 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setDayFlagReasons((curr) => [...curr, ...(res.data.flagReasons ?? [])]);
-        setThreads((curr) => new Map([...curr, ...res.data.threads]));
+        // Same versioned commit as the browser fetch: a delayed day response never overwrites a newer reply.
+        const dayVersion = new Map(got.map((r) => [r.id, threadKey(r)]));
+        const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
+        const freshDay = res.data.threads.filter(([id]) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id));
+        setThreads((curr) => new Map([...curr, ...freshDay]));
         const failedIds = res.data.failedRunIds ?? [];
-        for (const r of got) if (!failedIds.includes(r.id)) requestedThreads.current.add(threadKey(r));
+        for (const r of got) if (!failedIds.includes(r.id) && freshDay.some(([id]) => id === r.id)) requestedThreads.current.add(threadKey(r));
         // A full page means this day was cut off: continue the same day from the oldest run returned.
         // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
         const last = got[got.length - 1];

@@ -503,6 +503,93 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("the displayed draft moves while through/activity stay equal: card Updated and Send/Edit disabled", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1), draft: { id: "d1", inbound_message_id: "m1", body: "hi", sendable: true }, draft_held: true };
+      const snapshot = buildSnapshot([a]);
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, through: null, draftId: "d2", draftProperty: "aaaa", draftSendable: true })),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
+      expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.getByTestId("hold-updated")).toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a re-check removes a card while an older request is in flight: the card stays removed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+      const snapshot = buildSnapshot(all);
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => (release = r));
+      const server = byIdsServer(() => all);
+      const loadOlderHolds = vi.fn(async (input: { ids: string[] }) => {
+        await gate;
+        return server(input);
+      });
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) => {
+          const e = snapshot.entries.find((x) => x.id === id)!;
+          return id === "h1"
+            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, through: null, draftId: null, draftProperty: null, draftSendable: false }
+            : { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+        }),
+      }));
+      await mount({ ...props([], all.slice(0, 3)), holdsSnapshot: snapshot, loadOlderHolds, revalidateHolds });
+      await act(async () => {
+        screen.getByTestId("show-older").click();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(2));
+      await act(async () => {
+        release();
+        await gate;
+      });
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
+      expect(screen.queryByText(/h1/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a delayed earlier-day response carrying an older version of a run never overwrites the newer reply", async () => {
+    const newer = run("v", { conversation_id: "c1", outbound_message_id: "o1", status: "replied" });
+    const older = run("v", { conversation_id: "c1", outbound_message_id: null, status: "running" });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const loadTapeDay = vi.fn(async () => {
+      await gate;
+      return {
+        ok: true as const,
+        data: { runs: [older], labels: [] as Array<[string, { name: string; address: null }]>, threads: [["v", { lastOutbound: null, reply: "STALE reply" }]] as Array<[string, { lastOutbound: string | null; reply: string | null }]>, failedRunIds: [], flagReasons: [] },
+      };
+    });
+    await mount({ ...props([newer]), threads: [["v", { lastOutbound: null, reply: "Thanks, take care." }]], loadTapeDay });
+    await act(async () => {
+      screen.getByTestId("show-earlier").click();
+    });
+    await act(async () => {
+      release();
+      await gate;
+    });
+    await waitFor(() => expect(loadTapeDay).toHaveBeenCalled());
+    expect(screen.queryByText("STALE reply")).toBeNull();
+    expect(screen.getAllByTestId("tape-reply")[0]).toHaveTextContent("Thanks, take care.");
+  });
+
   it("a flagged hold with a reason but no flag time: Dismiss sends the snapshot reason (and a null time), not null", async () => {
     const h = { ...openHold("p5"), ...at(3), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: null } };
     const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));

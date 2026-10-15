@@ -207,7 +207,18 @@ export function WaitingColumn({
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
-  const entries = snapshot?.entries ?? holds.map((h) => ({ id: h.id, at: holdActivityAt(h), r: -1, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null, th: h.seen?.through ?? null }));
+  const entries =
+    snapshot?.entries ??
+    holds.map((h) => ({
+      id: h.id,
+      at: holdActivityAt(h),
+      r: -1,
+      run: h.run?.id ?? null,
+      fa: h.seen?.flagAt ?? null,
+      th: h.seen?.through ?? null,
+      d: h.draft?.id ?? null,
+      ds: h.draft?.sendable === true,
+    }));
   const reasonOf = (r: number) => (snapshot && r >= 0 ? snapshot.reasons[r] : null);
   const fresh = (): OlderState => ({
     forKey: refreshKey,
@@ -243,24 +254,33 @@ export function WaitingColumn({
     const ids = entries.slice(older.nextPos, older.nextPos + OLDER_PAGE).map((e) => e.id);
     setBusy(true);
     try {
+      const requestedFrom = older.nextPos;
       const res = await loadOlder({ ids });
       if (res.ok) {
-        setOlder({
-          forKey: refreshKey,
-          cards: new Map([...older.cards, ...res.data.holds.map((h) => [h.id, h] as const)]),
-          labels: new Map([...older.labels, ...res.data.labels]),
-          missing: new Set([...older.missing, ...res.data.missing]),
-          nextPos: older.nextPos + ids.length,
-          unverified: res.data.unverified,
-          error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
+        // Functional and monotonic: merge into the LATEST state (a re-check may have removed cards meanwhile);
+        // `missing` only grows within a snapshot, so a removed card is never brought back by a later slice.
+        setOlder((prev) => {
+          const cur = prev.forKey === refreshKey ? prev : fresh();
+          if (cur.forKey !== refreshKey) return cur;
+          const missing = new Set([...cur.missing, ...res.data.missing]);
+          return {
+            ...cur,
+            cards: new Map([...cur.cards, ...res.data.holds.filter((h) => !missing.has(h.id)).map((h) => [h.id, h] as const)]),
+            labels: new Map([...cur.labels, ...res.data.labels]),
+            missing,
+            nextPos: Math.max(cur.nextPos, requestedFrom + ids.length),
+            unverified: res.data.unverified,
+            error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
+          };
         });
         setVisible((v) => v + PAGE);
       } else {
         // Position kept: the same ids are asked for again on retry.
-        setOlder({ ...older, error: res.error.message });
+        const message = res.error.message;
+        setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: message }));
       }
     } catch {
-      setOlder({ ...older, error: "Older texts could not be loaded." });
+      setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: "Older texts could not be loaded." }));
     } finally {
       setBusy(false);
     }
@@ -273,6 +293,7 @@ export function WaitingColumn({
   const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
   // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
   const [checkFailed, setCheckFailed] = useState(false);
+  const checkSeq = useRef(0);
   const shownIdsRef = useRef<string[]>([]);
   const entriesRef = useRef(entries);
   const olderRef = useRef(older);
@@ -287,6 +308,7 @@ export function WaitingColumn({
     if (!revalidate || !snapshot) return;
     let alive = true;
     const check = async () => {
+      const seq = ++checkSeq.current;
       const ids = shownIdsRef.current;
       if (!ids.length) return;
       const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
@@ -297,12 +319,12 @@ export function WaitingColumn({
         try {
           res = await revalidate({ ids: ids.slice(i, i + 100) });
         } catch {
-          if (alive) setCheckFailed(true);
+          if (alive && seq === checkSeq.current) setCheckFailed(true);
           return;
         }
         if (!alive) return;
         if (!res.ok) {
-          setCheckFailed(true);
+          if (seq === checkSeq.current) setCheckFailed(true);
           return;
         }
         for (const st of res.data) {
@@ -310,18 +332,23 @@ export function WaitingColumn({
           if (!e) continue;
           if (!st.eligible) gone.push(st.id);
           else {
-            const shownDraft = liveRef.current.get(st.id)?.draft?.id ?? null;
-            const shownSendable = liveRef.current.get(st.id)?.draft?.sendable === true;
-            const draftMoved =
-              st.draftId !== shownDraft || (shownDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== shownSendable));
+            // Compared against the SNAPSHOT's draft (id, property, sendable), never the already-updated card.
+            const snapDraft = e.d ?? null;
+            const draftMoved = st.draftId !== snapDraft || (snapDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== (e.ds === true)));
             if (draftMoved || st.through !== (e.th ?? null) || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
           }
         }
       }
       if (!alive) return;
       setCheckFailed(false);
-      if (gone.length) setOlder({ ...olderRef.current, forKey: refreshKey, missing: new Set([...olderRef.current.missing, ...gone]) });
-      setStale({ forKey: refreshKey, ids: new Set(changedIds) });
+      if (seq !== checkSeq.current) return; // a newer check started: only the latest one commits
+      if (gone.length)
+        setOlder((prev) => {
+          const cur = prev.forKey === refreshKey ? prev : fresh();
+          return { ...cur, missing: new Set([...cur.missing, ...gone]) };
+        });
+      // Updated is monotonic within a snapshot too.
+      setStale((prev) => ({ forKey: refreshKey, ids: new Set([...(prev.forKey === refreshKey ? prev.ids : []), ...changedIds]) }));
     };
     const id = window.setInterval(check, 60_000);
     const onFocus = () => void check();
@@ -342,6 +369,8 @@ export function WaitingColumn({
     const reason = reasonOf(e.r);
     // Updated = ANY snapshot field differs from live: reason, flag time, activity time or the shown run.
     const changed =
+      (h.draft?.id ?? null) !== (e.d ?? null) ||
+      (h.draft ? h.draft.sendable === true : false) !== (e.d ? e.ds === true : false) ||
       (h.flag_reason ?? null) !== reason ||
       (h.seen?.through ?? null) !== (e.th ?? null) ||
       (h.seen?.flagAt ?? null) !== e.fa ||
