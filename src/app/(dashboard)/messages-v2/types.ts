@@ -217,6 +217,8 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   dead_letter_late?: boolean;
   /** The server's final check found this hold changed while the page was built: the card renders Updated. */
   recheck_changed?: boolean;
+  /** Snapshot cards: the frozen DISPLAY reason (tag and sentence). Action controls never read it: they use flag_reason. */
+  display_reason?: string | null;
   /** One entry per inbound/run dead-letter on this hold; `late` = provider accepted it late. */
   dead_letters?: DeadLetterInfo[];
   /** Latest alert delivery for this hold's property (hold_alert_deliveries); absent = none recorded. */

@@ -55,7 +55,8 @@ export function commitIfCurrent<S>(
 // ---------------------------------------------------------------------------------------------------------------
 // Per-card records
 
-export type CardStatus = "paused" | "ok" | "updated" | "missing";
+/** "checking" = revealed and waiting for its own first check (actions off, no failure note). */
+export type CardStatus = "paused" | "checking" | "ok" | "updated" | "missing";
 
 /** What the snapshot pinned for a card, plus the outcome of its checks. */
 export type CardRecord = {
@@ -86,7 +87,7 @@ export function loadedCard(snapshotKey: unknown, pinned: Pinned, versionCheckOk:
 }
 
 /** One card's result from a check: ok / failed (pause) / updated (changed since snapshot) / gone (no longer eligible). */
-export type CheckResult = "ok" | "failed" | "updated" | "gone";
+export type CheckResult = "ok" | "failed" | "updated" | "gone" | "checking";
 
 /**
  * Applies results stamped `stamp` to the table. Stale snapshot → no change. "gone" and "updated" are facts and
@@ -125,7 +126,7 @@ export function applyResults(
       cards.set(id, { ...rec, lastCheckSeq: seq });
       continue;
     }
-    cards.set(id, { ...rec, status: result === "ok" ? "ok" : "paused", lastCheckSeq: seq });
+    cards.set(id, { ...rec, status: result === "ok" ? "ok" : result === "checking" ? "checking" : "paused", lastCheckSeq: seq });
   }
   return { snapshotKey: table.snapshotKey, cards };
 }
@@ -174,7 +175,7 @@ export function actionsEnabled(rec: CardRecord | undefined, live: LiveView | und
 /** Why a card is not actionable, for its label. */
 export function cardFlags(rec: CardRecord | undefined, live: LiveView | undefined, extraUpdated = false) {
   const updated = rec?.status === "updated" || extraUpdated || (!!rec && !!live && liveDiffers(rec, live));
-  return { updated, paused: !rec || rec.status === "paused", missing: rec?.status === "missing" };
+  return { updated, paused: !rec || rec.status === "paused" || rec.status === "checking", missing: rec?.status === "missing" };
 }
 
 // ---------------------------------------------------------------------------------------------------------------

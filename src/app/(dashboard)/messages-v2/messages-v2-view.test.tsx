@@ -690,13 +690,20 @@ describe("MessagesV2View", () => {
       try {
         const all = Array.from({ length: 40 }, (_, i) => ({ ...openHold(`h${i}`), ...at(i + 1) }));
         const snapshot = buildSnapshot(all);
-        const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
-          ok: true as const,
-          data: input.ids.map((id) => {
-            const e = snapshot.entries.find((x) => x.id === id)!;
-            return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
-          }),
-        }));
+        let releaseReveal: () => void = () => {};
+        const revealGate = new Promise<void>((r) => (releaseReveal = r));
+        let calls = 0;
+        const revalidateHolds = vi.fn(async (input: { ids: string[] }) => {
+          calls += 1;
+          if (calls === 2) await revealGate; // the immediate check of the revealed cards
+          return {
+            ok: true as const,
+            data: input.ids.map((id) => {
+              const e = snapshot.entries.find((x) => x.id === id)!;
+              return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+            }),
+          };
+        });
         const holdsMeta = { total: 40, shown: 40, truncated: false, totalState: "exact" as const, failed: [], contextErrors: ["version check"], deadLetterUnavailable: false };
         const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
         await mount({ ...props([], all), holdsMeta, holdsSnapshot: snapshot, revalidateHolds, actions });
@@ -714,6 +721,13 @@ describe("MessagesV2View", () => {
         expect(buttons.length).toBeGreaterThan(shownCount);
         expect(buttons.slice(0, shownCount).every((b) => !b.disabled)).toBe(true);
         expect(buttons.slice(shownCount).every((b) => b.disabled)).toBe(true);
+        // Revealed cards are re-checked immediately, by exactly their ids, and enable only when that check succeeds.
+        expect(revalidateHolds.mock.calls[1][0].ids).toEqual(all.slice(shownCount, buttons.length).map((h) => h.id));
+        await act(async () => {
+          releaseReveal();
+          await revealGate;
+        });
+        await waitFor(() => expect((screen.getAllByRole("button", { name: "Dismiss" }) as HTMLButtonElement[]).every((b) => !b.disabled)).toBe(true));
       } finally {
         vi.useRealTimers();
       }
@@ -913,6 +927,47 @@ describe("MessagesV2View", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("R-A reveal: a loaded, hidden card locked meanwhile is paused when revealed, then removed by its immediate check", async () => {
+    const all = Array.from({ length: 25 }, (_, i) => ({ ...openHold(`h${i}`), ...at(i + 1) }));
+    const snapshot = buildSnapshot(all);
+    const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+      ok: true as const,
+      data: input.ids.map((id) => {
+        if (id === "h22") return { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, through: null, draftId: null, draftProperty: null, draftSendable: false };
+        const e = snapshot.entries.find((x) => x.id === id)!;
+        return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+      }),
+    }));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], all), holdsSnapshot: snapshot, revalidateHolds, actions });
+    const before = screen.getAllByTestId("waiting-card").length;
+    await userEvent.click(screen.getByTestId("show-older"));
+    expect(revalidateHolds).toHaveBeenCalledTimes(1);
+    expect(revalidateHolds.mock.calls[0][0].ids).toContain("h22");
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(all.length - 1));
+    expect(before).toBeLessThan(all.length);
+    expect(screen.getByTestId("holds-missing")).toBeInTheDocument();
+  });
+
+  it("flag reason null, run reason hostile_needs_confirm: shows Hostile but offers no confirm-DNC control (actions read the flag reason)", async () => {
+    const r = run("rh", { property_id: "ph", status: "held", reason: "hostile_needs_confirm:abc" });
+    const hold = { ...openHold("ph", r), ...at(5), flag_reason: null };
+    const snapshot = buildSnapshot([hold]);
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn(), confirmDoNotContact: vi.fn() };
+    await mount({ ...props([r], [hold]), holdsSnapshot: snapshot, flagReasons: snapshotFlagReasons(snapshot), actions });
+    expect(screen.getByTestId("waiting-reason")).toHaveTextContent("Hostile text. Nothing sent.");
+    expect(screen.queryByTestId("hostile-confirm")).toBeNull();
+  });
+
+  it("control check: the same hold FLAGGED hostile_needs_confirm does offer the confirm-DNC control", async () => {
+    const r = run("rh2", { property_id: "ph2", status: "held", reason: null });
+    const hold = { ...openHold("ph2", r), ...at(5), flag_reason: "hostile_needs_confirm:abc" };
+    const snapshot = buildSnapshot([hold]);
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn(), confirmDoNotContact: vi.fn() };
+    await mount({ ...props([r], [hold]), holdsSnapshot: snapshot, flagReasons: snapshotFlagReasons(snapshot), actions });
+    expect(screen.getByTestId("hostile-confirm")).toBeInTheDocument();
   });
 
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {

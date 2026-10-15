@@ -80,7 +80,8 @@ function WaitingCard({
   const who = sellerWho(label);
   // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
   // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
-  const effectiveRun = run ? (pinned ? { ...run, reason: hold.flag_reason ?? null } : withEffectiveReason(run, hold.flag_reason)) : null;
+  const shownReason = pinned ? (hold.display_reason !== undefined ? hold.display_reason : (hold.flag_reason ?? null)) : (hold.flag_reason ?? null);
+  const effectiveRun = run ? (pinned ? { ...run, reason: shownReason } : withEffectiveReason(run, hold.flag_reason)) : null;
   const cardRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (selected) cardRef.current?.scrollIntoView?.({ block: "center" });
@@ -121,7 +122,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
+        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, shownReason, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">
@@ -352,7 +353,13 @@ export function WaitingColumn({
 
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
+      // R-A on reveal: cards going hidden -> shown start "checking" (actions off) and are re-checked right now;
+      // they become actionable only when THAT check succeeds for them in this snapshot.
+      const revealed = loadedEntries.slice(visible, visible + PAGE).map((e) => e.id);
+      const stamp: Stamp = { snapshotKey: refreshKey, seq: ++cardCheckSeq.current };
+      commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, revealed.map((id) => [id, "checking"] as const)));
       setVisible((v) => v + PAGE);
+      checkNowRef.current?.(revealed);
       return;
     }
     if (!loadOlder || busy || !canLoadMore) return;
@@ -412,6 +419,8 @@ export function WaitingColumn({
   // 60 seconds and on tab focus the rendered ids are checked against the CURRENT list. No longer eligible ->
   // missing (removed); any snapshot field differs -> Updated (actions locked).
   const shownIdsRef = useRef<string[]>([]);
+  /** Runs an immediate re-check of exactly these ids (set by the re-check effect). */
+  const checkNowRef = useRef<((ids: readonly string[]) => void) | null>(null);
   const tableRef = useRef<CardTable>({ snapshotKey: refreshKey, cards: new Map() });
   const olderRef = useRef(older);
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
@@ -426,10 +435,10 @@ export function WaitingColumn({
   useEffect(() => {
     if (!revalidate || !snapshot) return;
     let alive = true;
-    const check = async () => {
+    const check = async (only?: readonly string[]) => {
       const key = refreshKeyRef.current;
       const stamp: Stamp = { snapshotKey: key, seq: ++cardCheckSeq.current };
-      const ids = shownIdsRef.current;
+      const ids = only ? [...only] : shownIdsRef.current;
       if (!ids.length) return;
       const results: Array<readonly [string, CheckResult]> = [];
       const fail = () => {
@@ -479,6 +488,7 @@ export function WaitingColumn({
     const id = window.setInterval(check, 60_000);
     const onFocus = () => void check();
     window.addEventListener("focus", onFocus);
+    checkNowRef.current = (ids) => void check(ids);
     return () => {
       alive = false;
       window.clearInterval(id);
@@ -489,15 +499,16 @@ export function WaitingColumn({
   }, [revalidate, snapshot, refreshKey]);
 
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
-  /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
   const asSnapshot = (e: (typeof entries)[number], h: OpenHold<RunWithSteps> = live.get(e.id)!): OpenHold<RunWithSteps> => {
     const pe = pinEntry(e.id);
     if (!pe) return h;
     const reason = pe.reason;
     return {
       ...h,
-      // The card shows the frozen display reason (flag reason, else the run reason at snapshot time).
-      flag_reason: pe.display,
+      // Two fields, never mixed: flag_reason = the pinned FLAG reason (action controls and stale checks);
+      // display_reason = the frozen display reason (flag reason, else the run reason at snapshot time) for the sentence.
+      flag_reason: reason,
+      display_reason: pe.display,
       // Always the SNAPSHOT versions (reason, flag time, pending-row version), never the live ones: the server
       // compares them and refuses a changed hold.
       seen: { through: e.th ?? null, flagReason: reason, flagAt: e.fa },

@@ -50,12 +50,16 @@ const table = (key: unknown, loadOk: boolean): CardTable => ({ snapshotKey: key,
 const WRITERS: Record<string, CheckResult[]> = {
   slice: ["ok", "failed", "gone"],
   revalidate: ["ok", "failed", "updated", "gone"],
+  reveal: ["checking"],
 };
 const pairs: Array<[string, string]> = [
   ["slice", "revalidate"],
   ["revalidate", "slice"],
   ["revalidate", "revalidate"],
   ["slice", "slice"],
+  ["reveal", "revalidate"],
+  ["revalidate", "reveal"],
+  ["slice", "reveal"],
 ];
 
 describe("card writers: every pair, every outcome, every finish order", () => {
