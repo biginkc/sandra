@@ -52,7 +52,8 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 - [ ] Decide the open gap: "gave a time to call" (e.g. "Anytime", "noon is best"). Today it rides on the hot-lead path; Jarrad decides whether it needs its own question. If a new question is added, its text needs verbatim approval.
 - [ ] Actions per question (per Jarrad 2026-10-14): 1 and 9 → Jarrad (PR 2 path). 2, 3, 4, 5, 8 → approved reply + matching drip. 6, 7 → waiting for a person. Unclear → waiting for a person.
 - [ ] Drip wiring: Maybe later → "Maybe later"; Asked who → "Asked who is texting"; Not interested → "Not interested"; Confirmed owner → "Confirmed owner". Wrong person → close, no drip. "Talking price", "Book appointment", "Curious" are never auto-started.
-- [ ] Approved replies: not_interested, nurture (maybe later), wrong_number, hostile exist. Missing for "Asked who is texting" and "Confirmed owner": Jarrad approves two new texts verbatim before this PR ships, or those two wait for a person until he does.
+- [ ] Approved replies: not_interested, nurture (maybe later), wrong_number, hostile exist. "Asked who is texting" uses the approved identity reply (`IDENTITY_REPLY_BODY`, PR #316); the "Asked who is texting" drip skips its day-1 text when that reply already went out. "Confirmed owner" sends no reply: enroll straight into the "Confirmed owner" drip, first line kept as is ("Hey, we tried to give you a call…") per Jarrad 2026-10-14.
+- [ ] "Gave a time to call" stays under "wants an offer" (Jarrad 2026-10-14). No new question.
 - [ ] Cutoff 0.6 replaces 0.90/0.95; rules panel shows it as "60% sure or more".
 - [ ] Shadow run first: 30-day replay harness (`scripts/messages-v2/replay`) comparing nine-question decisions to the human dispositions; report agreement per question to Jarrad before switching on.
 - [ ] Depends on: PR 2.
@@ -73,6 +74,4 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 
 ## Decisions still open for Jarrad
 
-1. The "gave a time to call" question (PR 3).
-2. Two missing reply texts: "Asked who is texting" and "Confirmed owner" (PR 3).
-3. Approve the group order above (PR 3).
+1. Approve the tie-breaker order above (PR 3): stop > wrong person > price > wants offer > maybe later > not interested > asked who > confirmed owner.
