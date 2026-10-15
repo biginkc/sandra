@@ -1462,7 +1462,7 @@ async function classifyAndHandleNonRouteOutcomes(
       // Hot seller (PR 2): the lead goes on My Leads under Jarrad. A failed
       // hand-off fails CLOSED: the property is held (a hot hold, so the alert
       // cron still texts Jarrad) and the run is escalated, never auto_closed.
-      const handoff = await assignHotLeadToOwner(supabase, input.propertyId);
+      const handoff = await assignHotLeadToOwner(supabase, input.propertyId, { inboundMessageId: input.inboundMessageId });
       await trace(supabase, {
         kind: "action",
         name: "assign_hot_lead",

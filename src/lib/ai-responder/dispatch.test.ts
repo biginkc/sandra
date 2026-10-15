@@ -2321,7 +2321,7 @@ describe("dispatchAiResponse debounce", () => {
       }, { anthropic: {} as never });
       expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
       expect(hotAssign.assign).toHaveBeenCalledTimes(1);
-      expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID);
+      expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID, { inboundMessageId: "inbound-hot-handoff" });
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });

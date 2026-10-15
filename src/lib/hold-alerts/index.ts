@@ -9,7 +9,7 @@ import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
 import { runHoldAlertsForOrg } from "./core";
-import { parseHotHoldReasons, toAlertHolds } from "./holds";
+import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
 import type {
   HoldAlertDeps,
@@ -18,12 +18,10 @@ import type {
   OrgAlertSummary,
   Recipient,
 } from "./types";
-import {
-  HOT_HANDOFF_SOURCE_TYPE,
-  resolveHotOwner,
-} from "@/lib/hot-sellers/assign";
+import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
+import { hotPromotionKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { MAX_ATTEMPTS } from "./types";
 
-export { HOT_HOLD_REASONS, parseHotHoldReasons } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
 
 type MembershipRow = {
@@ -64,7 +62,6 @@ export function resolveAppBaseUrl(
 async function loadAlertHolds(
   db: LooseSupabase,
   orgId: string,
-  hotReasons: readonly string[],
   alertsSince: string,
   nowMs: number,
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
@@ -79,62 +76,86 @@ async function loadAlertHolds(
     })),
   );
   const complete = data.holdsMeta.failed.length === 0;
-  return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
+  return { holds: toAlertHolds(data.holds, labels), complete };
 }
 
 const HOT_PROMOTION_PAGE = 200;
-const HOT_PROMOTION_MAX = 5_000;
+
+/** Hot alerts older than this are stale; the pass never looks further back. */
+export const HOT_ALERT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 /**
- * Hot promotions since the watermark: the checked lead_events 'assigned' row the
- * hand-off writes (source hot_seller_handoff). First name from the homeowner
- * contact; never message text or address.
+ * Hot sellers to alert: Sandra's hand-off ('assigned', source hot_seller_handoff)
+ * and hot texts on a lead Jarrad already owned ('ai_escalated', source
+ * hot_seller_text), since max(watermark, now - 48h), NEWEST first, keyset-paged
+ * to exhaustion, minus keys whose deliveries are already finished (one bulk
+ * query). So history never grows a pass and the newest seller is never starved.
+ * First name from the homeowner contact; never message text or address.
  */
 export async function loadHotPromotions(
   db: LooseSupabase,
   orgId: string,
   alertsSince: string,
+  nowMs: number = Date.now(),
 ): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
-  // Keyset-paged to exhaustion (created_at, id), so a pass never re-reads only
-  // the oldest page: every promotion since the watermark is seen. Delivery rows
-  // keep it idempotent; HOT_PROMOTION_MAX bounds one pass (complete=false past it).
   type Row = {
     id: string;
     property_id: string;
+    source_type: string;
+    source_id: string;
     payload: { to?: unknown } | null;
     created_at: string;
   };
+  const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
+  const since = new Date(Number.isFinite(sinceMs) ? sinceMs : nowMs - HOT_ALERT_LOOKBACK_MS).toISOString();
   const rows: Row[] = [];
   let complete = true;
-  let after: { at: string; id: string } | null = null;
+  let before: { at: string; id: string } | null = null;
   for (;;) {
     let q = db
       .from("lead_events")
-      .select("id, property_id, payload, created_at")
+      .select("id, property_id, source_type, source_id, payload, created_at")
       .eq("org_id", orgId)
-      .eq("event_type", "assigned")
-      .eq("source_type", HOT_HANDOFF_SOURCE_TYPE)
-      .gte("created_at", alertsSince);
-    if (after)
-      q = q.or(
-        `created_at.gt.${after.at},and(created_at.eq.${after.at},id.gt.${after.id})`,
-      );
+      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE])
+      .gte("created_at", since);
+    if (before) q = q.or(`created_at.lt.${before.at},and(created_at.eq.${before.at},id.lt.${before.id})`);
     const { data, error } = await q
-      .order("created_at", { ascending: true })
-      .order("id", { ascending: true })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(HOT_PROMOTION_PAGE);
     if (error) return { promotions: [], complete: false };
     const page = (data ?? []) as Row[];
     rows.push(...page);
     if (page.length < HOT_PROMOTION_PAGE) break;
-    if (rows.length >= HOT_PROMOTION_MAX) {
-      complete = false;
-      break;
-    }
     const last = page[page.length - 1]!;
-    after = { at: last.created_at, id: last.id };
+    before = { at: last.created_at, id: last.id };
   }
-  const ids = rows.map((r) => r.property_id);
+  const keyOf = (r: Row) => (r.source_type === HOT_TEXT_SOURCE_TYPE ? hotTextKey(r.source_id) : hotPromotionKey(r.property_id));
+  // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
+  const done = new Set<string>();
+  const keys = [...new Set(rows.map(keyOf))];
+  for (let i = 0; i < keys.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("hold_key, channel, status, attempts")
+      .eq("org_id", orgId)
+      .in("hold_key", keys.slice(i, i + HOT_PROMOTION_PAGE));
+    if (error) {
+      complete = false;
+      continue;
+    }
+    const finished = new Map<string, Set<string>>();
+    for (const d of (data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number }>) {
+      const isDone = d.status === "sent" || d.status === "skipped" || (d.status === "failed" && d.attempts >= MAX_ATTEMPTS);
+      if (!isDone) continue;
+      const set = finished.get(d.hold_key) ?? new Set<string>();
+      set.add(d.channel);
+      finished.set(d.hold_key, set);
+    }
+    for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
+  }
+  const todo = rows.filter((r) => !done.has(keyOf(r)));
+  const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
@@ -142,16 +163,13 @@ export async function loadHotPromotions(
       .select("id, contacts:homeowner_contact_id(first_name)")
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
-    for (const p of (props ?? []) as Array<{
-      id: string;
-      contacts: { first_name: string | null } | null;
-    }>) {
+    for (const p of (props ?? []) as Array<{ id: string; contacts: { first_name: string | null } | null }>) {
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
     }
   }
   const promotions: HotPromotion[] = [];
-  for (const r of rows) {
+  for (const r of todo) {
     const to = typeof r.payload?.to === "string" ? r.payload.to : null;
     if (!to) continue;
     promotions.push({
@@ -159,6 +177,8 @@ export async function loadHotPromotions(
       assigneeUserId: to,
       name: names.get(r.property_id) ?? "Unknown sender",
       assignedAt: r.created_at,
+      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : "handoff",
+      key: keyOf(r),
     });
   }
   return { promotions, complete };
@@ -170,7 +190,6 @@ export function createHoldAlertDeps(
 ): HoldAlertDeps {
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
-  const hotReasons = parseHotHoldReasons(env);
   const now = () => new Date();
   return {
     now,
@@ -178,11 +197,21 @@ export function createHoldAlertDeps(
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
     loadHolds: (orgId, alertsSince) =>
-      loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
+      loadAlertHolds(db, orgId, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     loadHotPromotions: (orgId, alertsSince) =>
       loadHotPromotions(db, orgId, alertsSince),
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
+    async isPropertyAssignedTo(orgId, propertyId, userId) {
+      const { data, error } = await db
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("org_id", orgId)
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (error) throw new Error(`assignment re-check failed: ${error.message}`);
+      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id === userId;
+    },
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")

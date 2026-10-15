@@ -52,3 +52,6 @@ export function isHotSeller(input: {
  * seller can never both ping).
  */
 export const hotPromotionKey = (propertyId: string): string => `hot_promotion:${propertyId}`;
+
+/** Alert key for a hot text on a lead Jarrad already owned: once per inbound message. */
+export const hotTextKey = (inboundMessageId: string): string => `hot_text:${inboundMessageId}`;
