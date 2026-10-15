@@ -1,6 +1,6 @@
 import { createRng, type Rng } from "../prng";
 import { DAY, HOUR, MIN, SEC, emptyLead, type Appointment, type Enrollment, type Lead, type Msg, type OutboundSource, type SendOutcome, type Stage } from "./model";
-import { addBusinessDays, minusChicagoDays } from "./oracle";
+import { addBusinessDays, chicagoLocal, minusChicagoDays } from "./oracle";
 
 /**
  * The 31 scenario families of the stress design (section 1). Each builds leads for ONE variant of a world:
@@ -371,13 +371,12 @@ export const FAMILIES: readonly FamilyDef[] = [
 ];
 
 function addBusinessDaysBack(now: number, n: number): number {
-  // a send time n business days before `now` (wall-clock Chicago); walk back day by day skipping weekends
+  // a send time n business days before `now` on the Chicago wall clock (as everywhere else), skipping weekends
   let t = now;
   let done = 0;
   while (done < n) {
-    t -= DAY;
-    const dow = new Date(t - 5 * HOUR).getUTCDay(); // 0 Sun .. 6 Sat in Chicago-ish time
-    if (dow !== 0 && dow !== 6) done += 1;
+    t = minusChicagoDays(t, 1);
+    if (chicagoLocal(t).dow < 6) done += 1;
   }
   return t;
 }

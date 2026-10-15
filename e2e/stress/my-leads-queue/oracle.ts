@@ -2,7 +2,7 @@ import { DAY, HOUR, MIN, type Appointment, type Lead, type LeadEvent, type Msg, 
 
 /**
  * Independent oracle for the My Leads unified work queue. Pure TypeScript, derived ONLY from the design text
- * (UNIFIED-QUEUE-DESIGN-2026-10, v8): 1.1 placement table, 2/2.1 reasons and Broken inventory, 3.1 healthy
+ * (UNIFIED-QUEUE-DESIGN-2026-10, v9 incl. section 17): 1.1 placement table, 2/2.1 reasons and Broken inventory, 3.1 healthy
  * automation, 5 handled-reply rule, 16 amendments. It must not import, read or mirror the SQL; where the design
  * text and the SQL disagree the oracle follows the text and the lead is tagged with a SPEC_QUESTION so the
  * report separates "SQL is wrong" from "the spec needs a decision".
@@ -31,6 +31,7 @@ export type Placement = {
 /** Places where the design text and the A1 SQL disagree. Registered so the report can group mismatches. */
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
   SQ5: "v9 17: a contact-only inbound counts only when its contact is homeowner on exactly one queue lead; otherwise never New reply (label check texts). The A1 SQL counts it on every lead sharing the contact. Confirmed SQL bug; fix in A1.2 (classifier performance PR). Still gating.",
+  SQ6: "Row 13/14 'last seller-facing outbound' is read as the last ACCEPTED outbound (later failed/queued/pending texts are ignored), by both the oracle and the SQL. The text could also be read as 'the last outbound must itself be accepted'. Not seeded; recorded for a decision.",
   SQ2: "v9 17: ledger/obligation 'unknown' younger than 15 min is in flight, not Broken (oracle follows this). The A1 SQL still marks it Broken; fix routed to PR #876 migration 20261015020200.",
 };
 
@@ -119,6 +120,8 @@ function latestInbound(lead: Lead): Inbound | null {
   return items[0]!;
 }
 
+// The one acknowledged non-text input: the my_leads_workflow operation allowlist is the existing SQL allowlist (design 5 "the existing
+// allowlist", migration 20260930035000) minus log_acquisition_attempt per v9 17 (SQ4). Everything else here comes from the design text.
 const handlesEvent = (e: LeadEvent) =>
   e.actor === "user" && (
     e.type === "dispo_set"

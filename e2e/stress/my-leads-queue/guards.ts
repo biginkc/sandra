@@ -9,7 +9,8 @@ import { requireLoopbackPostgresUrl } from "../../../src/lib/testing/loopback-po
  *  - No hosted Supabase project reference may appear anywhere in the environment variables this harness reads.
  *  - Lanes that COMMIT rows (races) additionally require the explicit acknowledgement MYLEADS_STRESS_DISPOSABLE_DB=1 and refuse
  *    a database that already holds non-harness leads. Read-only/rolled-back lanes never commit anything.
- *  - Providers are never called: the only sender in this harness is the in-process fake in fake-provider.ts.
+ *  - Providers are never called: the only sender is the in-process fake (races.ts sqlSendDriver, and the mocked provider and
+ *    sendSmsToContact in race.dispatch.integration.test.ts).
  */
 export const DEFAULT_LOCAL_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
 export const HARNESS_ADDRESS_PREFIX = "S1RACE ";

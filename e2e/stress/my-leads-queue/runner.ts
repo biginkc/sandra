@@ -2,7 +2,7 @@ import { Client } from "pg";
 
 import { FAMILIES, VARIANTS, buildFamilyWorld, type FamilyDef, type Variant } from "./families";
 import { materializeWorld, setupOrg, type Materialized, type OrgCtx } from "./materialize";
-import { loadClassifierMigration } from "./migration";
+import { loadClassifierMigration, sq2FixLanded } from "./migration";
 import type { Lead, World } from "./model";
 import { EXPECTED_UNTIL, NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place, tabOf, type Placement } from "./oracle";
 
@@ -104,7 +104,8 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     mismatches.push({ kind, family: c.family, repeat: c.repeat, lead: lead?.key ?? "-", tags: lead?.tags ?? [], question: lead?.question, expected, actual, ...(expectedUntil ? { expectedUntil } : {}) });
   // The known SQ2 disagreement (fix routed to #876): the SQL's pre-v9 reading, computed precisely. A mismatch is excused only when the
   // SQL output equals this reading exactly and differs from v9 only because of it.
-  const sq2 = EXPECTED_UNTIL.SQ2;
+  // Self-retiring: once the fix migration is in the checkout, SQ2 mismatches are never excused again.
+  const sq2 = sq2FixLanded() ? undefined : EXPECTED_UNTIL.SQ2;
   const legacy = new Map<string, Placement>(world.leads.map((l) => [l.key, place(l, world.now, { preV9Unknown: true })]));
   const rowMatches = (row: Json, p: Placement) => row.place === p.place && row.reason === p.reason && row.rowNo === p.row
     && sameSet(brokenActionsOf(row), p.brokenActions) && Object.entries(p.headline).every(([k, v]) => String(row.headline?.[k]) === String(v));

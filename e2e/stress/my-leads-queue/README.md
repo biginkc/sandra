@@ -50,7 +50,7 @@ families ran, the scale lane did not run at both sizes, or no race lane ran.
 
 ## Files
 
-- `model.ts` abstract per-lead facts. `oracle.ts` the oracle: pure TypeScript from design v8 (1.1, 2/2.1, 3.1, 5, 16); it does not import or read SQL. `oracle.test.ts` its unit tests.
+- `model.ts` abstract per-lead facts. `oracle.ts` the oracle: pure TypeScript from design v9 (1.1, 2/2.1, 3.1, 5, 16, 17); it does not import or read SQL. `oracle.test.ts` its unit tests.
 - `families.ts` the 31 families and their variants (deterministic from `--seed`). `prod-shape.ts` the prod-shaped generator (aggregate counts only, no contact data).
 - `materialize.ts` the one place that turns facts into rows. `runner.ts` compares SQL with the oracle. `races.ts`, `scale.ts`, `report.ts`, `run.ts`, `cli.ts`.
 - `guards.ts` loopback-only database, no `.env` reads, no hosted references, commit-lane acknowledgement.
@@ -58,8 +58,14 @@ families ran, the scale lane did not run at both sizes, or no race lane ran.
 
 ## Spec questions
 
-Where the design text and the SQL disagree, the oracle follows the text and tags the lead (`SQ1`..`SQ3` in `oracle.ts`). They show up in the
-report under "Spec questions" and keep the exit code non-zero until the text or the SQL is changed. Never resolve them in the oracle.
+Registered in `oracle.ts` (`SPEC_QUESTIONS`). After design v9 section 17, two still produce mismatches:
+- **SQ2** (unknown ledger/obligation under 15 min): excused (`expected_until: #876`) only when the SQL output equals the pre-v9 reading
+  exactly. The excusal retires itself: once migration `20261015020200*` is in the checkout, SQ2 mismatches fail the run.
+- **SQ5** (ambiguous contact-only reply): a confirmed SQL bug, labelled `expected_until: A1.2`, and still failing the run.
+SQ6 is recorded for a decision and not seeded. Never resolve a question in the oracle without a design decision.
+
+The rolled-back lanes apply every classifier migration from `20261015010000` onward (each file that defines a classifier function), in
+order, so a later fix is never overwritten by the first migration.
 
 Note: a loopback address is not proof of a local database (an SSH tunnel to a remote host also answers on 127.0.0.1). Check what listens
 on the port before running the committed lanes.

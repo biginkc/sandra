@@ -129,6 +129,7 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
   run("concurrent inbound Y 50-500 ms after a stamped dispatchRepSms for X begins: Y stays unhandled", async () => {
     const lane: LaneResult = { id: "race:dispatch_stamped_send_vs_inbound", title: "dispatchRepSms stamped for X vs inbound Y 50-500 ms later (fake provider)", runs: 0, failures: 0, samples: [], notes: ["driver dispatchRepSms"] };
     const rng = createRng(11);
+    let yBefore = 0, yAfter = 0;
     const admin = new Client({ connectionString: url });
     await admin.connect();
     try {
@@ -151,8 +152,12 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
           await a.end();
         }
         const row = (await admin.query("select * from public.my_leads_work_classified($1,$2,$3)", [w.ctx.org, w.ctx.rep, new Date(Date.now() + 5 * SEC).toISOString()])).rows.find((r) => r.property_id === w.property);
-        const meta = (await admin.query("select metadata from public.messages where property_id=$1 and direction='outbound'", [w.property])).rows[0]?.metadata;
+        const out = (await admin.query("select metadata, sent_at, (select created_at from public.messages where id=$2) as y_at from public.messages where property_id=$1 and direction='outbound'", [w.property, y])).rows;
+        const meta = out[0]?.metadata;
         lane.runs += 1;
+        // ordering from what the database recorded, like the SQL twin
+        if (out.length !== 1 || !out[0].sent_at) { lane.failures += 1; lane.samples.push({ rep: n, why: `expected one accepted outbound, found ${out.length} (sent_at ${out[0]?.sent_at ?? "null"})` }); continue; }
+        if (out[0].y_at < out[0].sent_at) yBefore += 1; else yAfter += 1;
         const latest = row.facts.latestInbound;
         if (!(row.row_no === "5" && latest?.messageId === y && latest?.handled === false && meta?.inbound_message_id === w.x)) {
           lane.failures += 1;
@@ -162,6 +167,9 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
     } finally {
       await admin.end();
     }
+    lane.notes!.push(`by database timestamps, Y was created before the text's sent_at in ${yBefore} runs and after it in ${yAfter}`);
+    // The stamp only matters when Y lands before the send time (same minimum as the SQL twin).
+    if (REPS >= 10 && yBefore < Math.ceil(REPS / 4)) { lane.failures += 1; lane.samples.push({ why: `only ${yBefore} of ${REPS} runs had Y before sent_at` }); }
     lanes.push(lane);
     expect(lane.failures).toBe(0);
   }, 600_000);

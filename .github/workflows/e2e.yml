@@ -278,7 +278,7 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts e2e/stress/my-leads-queue/smoke.integration.test.ts
 
-      - name: My Leads queue stress: dispatchRepSms race lanes, fake provider (disposable DB)
+      - name: "My Leads queue stress: dispatchRepSms race lanes, fake provider (disposable DB)"
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
           MYLEADS_STRESS_DISPOSABLE_DB: "1"
