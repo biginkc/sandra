@@ -19,6 +19,8 @@ it('binds the reply stamp first-writer-wins, org-scoped, service_role only, and 
   await db.connect();
   const bind = async (kind: string, id: string, org: string, inbound: string | null) =>
     (await db.query('select public.fn_bind_rep_sms_inbound_stamp($1,$2,$3,$4) as v', [kind, id, org, inbound])).rows[0].v as string | null;
+  const read = async (kind: string, id: string, org: string) =>
+    (await db.query('select public.fn_get_rep_sms_inbound_stamp($1,$2,$3) as v', [kind, id, org])).rows[0].v as string | null;
   try {
     await db.query('begin');
     await db.query(MIGRATION);
@@ -45,11 +47,14 @@ it('binds the reply stamp first-writer-wins, org-scoped, service_role only, and 
 
     const x = randomUUID(), y = randomUUID();
     for (const [kind, id] of [['obligation', obligation], ['draft', ledger]] as const) {
+      expect(await read(kind, id, org)).toBeNull();            // nothing stored yet
       expect(await bind(kind, id, org, null)).toBeNull();      // nothing stored yet, null does not bind
       expect(await bind(kind, id, org, x)).toBe(x);            // first writer wins
       expect(await bind(kind, id, org, y)).toBe(x);            // later capture never replaces it
       expect(await bind(kind, id, org, null)).toBe(x);         // read-back with no supplied value
+      expect(await read(kind, id, org)).toBe(x);               // read-only path sees it
       expect(await bind(kind, id, otherOrg, y)).toBeNull();    // cross-org sees and changes nothing
+      expect(await read(kind, id, otherOrg)).toBeNull();
     }
     // A SQL exception aborts the transaction; recover with a savepoint so the
     // permission and rollback checks below still execute.
@@ -62,12 +67,16 @@ it('binds the reply stamp first-writer-wins, org-scoped, service_role only, and 
     await db.query('set local role authenticated');
     await expect(bind('draft', ledger, org, y)).rejects.toThrow(/permission denied/);
     await db.query('rollback to savepoint denied');
+    await db.query('savepoint denied_read');
+    await db.query('set local role authenticated');
+    await expect(read('draft', ledger, org)).rejects.toThrow(/permission denied/);
+    await db.query('rollback to savepoint denied_read');
     await db.query('reset role');
 
     // Rollback removes exactly what was added.
     await db.query(ROLLBACK);
     const left = await db.query(
-      "select (select count(*) from information_schema.columns where column_name='inbound_message_id' and table_name in ('rep_sms_obligations','rep_sms_delivery_ledger'))::int cols, (select count(*) from pg_proc where proname='fn_bind_rep_sms_inbound_stamp')::int fns");
+      "select (select count(*) from information_schema.columns where column_name='inbound_message_id' and table_name in ('rep_sms_obligations','rep_sms_delivery_ledger'))::int cols, (select count(*) from pg_proc where proname in ('fn_bind_rep_sms_inbound_stamp','fn_get_rep_sms_inbound_stamp'))::int fns");
     expect(left.rows[0]).toEqual({ cols: 0, fns: 0 });
   } finally {
     await db.query('rollback').catch(() => undefined);

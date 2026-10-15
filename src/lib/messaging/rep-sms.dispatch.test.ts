@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   adminRpc: vi.fn(),
   stampRow: vi.fn(),
   bindRpc: vi.fn(),
+  readRpc: vi.fn(),
   createClient: vi.fn(),
   provider: vi.fn(),
   sendSmsToContact: vi.fn(),
@@ -12,7 +13,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({
     rpc: (name: string, args: Record<string, unknown>) =>
-      name === "fn_bind_rep_sms_inbound_stamp" ? mocks.bindRpc(args) : mocks.adminRpc(name, args),
+      name === "fn_bind_rep_sms_inbound_stamp"
+        ? mocks.bindRpc(args)
+        : name === "fn_get_rep_sms_inbound_stamp"
+          ? mocks.readRpc(args)
+          : mocks.adminRpc(name, args),
     from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => mocks.stampRow() }) }) }),
   }),
 }));
@@ -86,6 +91,7 @@ beforeEach(() => {
   vi.stubEnv("SENDILLO_ORG_ID", "org-1");
   setupClient();
   mocks.bindRpc.mockImplementation(async (args: { p_inbound_message_id: string | null }) => ({ data: args.p_inbound_message_id, error: null }));
+  mocks.readRpc.mockResolvedValue({ data: null, error: null });
   mocks.provider.mockReturnValue({ providerId: "sendillo" });
   mocks.sendSmsToContact.mockResolvedValue({
     status: "sent",
@@ -332,11 +338,9 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
       .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
       .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
     // The ledger already holds ORIGINAL; the browser now (after reload) supplies NEWER.
-    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    mocks.readRpc.mockResolvedValue({ data: ORIGINAL, error: null });
     await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111", inboundMessageId: NEWER });
-    expect(mocks.bindRpc).toHaveBeenCalledWith({
-      p_kind: "draft", p_id: "receipt-1", p_org_id: "org-1", p_inbound_message_id: NEWER,
-    });
+    expect(mocks.readRpc).toHaveBeenCalledWith({ p_kind: "draft", p_id: "receipt-1", p_org_id: "org-1" });
     expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
   });
 
@@ -345,9 +349,9 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
     mocks.adminRpc
       .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
       .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
-    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    mocks.readRpc.mockResolvedValue({ data: ORIGINAL, error: null });
     await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111" });
-    expect(mocks.bindRpc).toHaveBeenCalledWith(expect.objectContaining({ p_kind: "draft", p_inbound_message_id: null }));
+    expect(mocks.readRpc).toHaveBeenCalledWith(expect.objectContaining({ p_kind: "draft" }));
     expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
   });
 
@@ -376,39 +380,41 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
   };
 
   it("binds an obligation resume to the obligation id and stamps the stored ORIGINAL", async () => {
-    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    mocks.readRpc.mockResolvedValue({ data: ORIGINAL, error: null });
     const outcome = await resumeWithObligation(NEWER);
     expect(outcome.status).toBe("sent");
-    expect(mocks.bindRpc).toHaveBeenCalledWith({
-      p_kind: "obligation", p_id: "obligation-1", p_org_id: "org-1", p_inbound_message_id: NEWER,
-    });
+    expect(mocks.readRpc).toHaveBeenCalledWith({ p_kind: "obligation", p_id: "obligation-1", p_org_id: "org-1" });
     expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
   });
 
-  it("never substitutes the newer browser id when the bind fails (stored original may exist)", async () => {
+  it("stored X, browser Y, bind RPC fails -> stamped X", async () => {
+    mocks.readRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "connection reset" } });
+    const outcome = await resumeWithObligation(NEWER);
+    expect(outcome.status).toBe("sent");
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
+  });
+
+  it("read fails but bind returns the stored original -> stamped X", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "connection reset", code: "08006" } });
+    mocks.readRpc.mockResolvedValue({ data: null, error: { message: "timeout" } });
+    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    await resumeWithObligation(NEWER);
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
+  });
+
+  it("nothing stored and the bind fails -> unstamped, never the browser id", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.readRpc.mockResolvedValue({ data: null, error: null });
+    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "connection reset" } });
     const outcome = await resumeWithObligation(NEWER);
     expect(outcome.status).toBe("sent");
     expect(mocks.bindRpc).toHaveBeenCalledTimes(2); // one retry
     expect(mocks.sendSmsToContact.mock.calls[0][1].metadata).not.toHaveProperty("inbound_message_id");
   });
 
-  it("recovers from one transient bind failure and still stamps the stored original", async () => {
-    mocks.bindRpc
-      .mockResolvedValueOnce({ data: null, error: { message: "timeout", code: "57014" } })
-      .mockResolvedValueOnce({ data: ORIGINAL, error: null });
+  it("nothing stored and the bind succeeds -> the browser id is stamped", async () => {
     await resumeWithObligation(NEWER);
-    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
-  });
-
-  it("falls back to the validated supplied id if the bind function is unavailable", async () => {
-    valid();
-    mocks.adminRpc
-      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
-      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
-    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "function does not exist", code: "42883" } });
-    await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111", inboundMessageId: NEWER });
     expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(NEWER);
   });
 });

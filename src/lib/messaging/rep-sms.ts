@@ -595,9 +595,9 @@ async function recordRepSmsLedgerResult(
  * Reply-to stamp for a human rep text. A browser-supplied id is validated, bound
  * once (first writer wins) to the durable obligation or ledger row, and read back
  * so a resume, retry or recovered draft reuses the ORIGINAL stamp instead of one
- * captured after reload. A failed bind sends unstamped (never the browser's
- * newer id) unless the function does not exist yet; a stamp problem never
- * blocks a send.
+ * captured after reload. The persisted stamp is read first; the browser's id is
+ * used only when the bind succeeds and nothing was stored. If the bind fails the
+ * send goes out unstamped; a stamp problem never blocks a send.
  */
 async function resolveRepSmsInboundStamp(args: {
   orgId: string;
@@ -611,39 +611,37 @@ async function resolveRepSmsInboundStamp(args: {
   const admin = createAdminClient();
   const supplied = args.supplied ? await resolveInboundStamp(admin, args.supplied, scope) : null;
   if (!args.target) return supplied;
-  const bind = admin as unknown as {
-    rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string; code?: string } | null }>;
+  const rpc = admin as unknown as {
+    rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
   };
-  let lastError: { message?: string; code?: string } | null = null;
-  // One retry for a transient failure. A stored stamp must never be replaced by
-  // a newer browser capture just because the read failed.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const result = await bind.rpc("fn_bind_rep_sms_inbound_stamp", {
-        p_kind: args.target.kind,
-        p_id: args.target.id,
-        p_org_id: args.orgId,
-        p_inbound_message_id: supplied,
-      });
-      if (!result.error) {
-        if (typeof result.data !== "string") return supplied;
-        // Stored wins, re-validated; an invalid stored value is dropped, never
-        // replaced by a newer capture.
-        return resolveInboundStamp(admin, result.data, scope);
+  const call = async (name: string, rpcArgs: Record<string, unknown>) => {
+    // One retry for a transient failure.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await rpc.rpc(name, rpcArgs);
+        if (!result.error) return { ok: true as const, data: result.data };
+        console.warn(`[inbound-stamp] ${name} failed for ${args.target?.kind} ${args.target?.id}: ${result.error.message ?? "unknown"}`);
+      } catch (error) {
+        console.warn(`[inbound-stamp] ${name} threw: ${error instanceof Error ? error.message : String(error)}`);
       }
-      lastError = result.error;
-    } catch (error) {
-      lastError = { message: error instanceof Error ? error.message : String(error) };
     }
+    return { ok: false as const };
+  };
+  const key = { p_kind: args.target.kind, p_id: args.target.id, p_org_id: args.orgId };
+  // 1. The persisted stamp wins. It is read through a read-only function so a
+  //    failing bind cannot cost the original.
+  const stored = await call("fn_get_rep_sms_inbound_stamp", key);
+  if (stored.ok && typeof stored.data === "string") {
+    // Re-validated; an invalid stored value is dropped, never replaced by a
+    // newer browser capture.
+    return resolveInboundStamp(admin, stored.data, scope);
   }
-  console.warn(`[inbound-stamp] bind failed for ${args.target.kind} ${args.target.id}: ${lastError?.message ?? "unknown"}`);
-  // Only a function that does not exist (migration not applied yet) means nothing
-  // can be stored, so the validated supplied id is safe to use. Any other
-  // failure may hide a stored original: send unstamped instead of claiming a
-  // newer reply was handled.
-  const missing = lastError?.code === "42883" || lastError?.code === "PGRST202" ||
-    /could not find the function|function .* does not exist/i.test(lastError?.message ?? "");
-  return missing ? supplied : null;
+  // 2. Nothing readable is stored: bind the browser's validated id (first writer
+  //    wins, so a concurrent bind is returned instead). If the bind fails, send
+  //    unstamped: unstamped only over-flags, it never hides a reply.
+  const bound = await call("fn_bind_rep_sms_inbound_stamp", { ...key, p_inbound_message_id: supplied });
+  if (!bound.ok || typeof bound.data !== "string") return bound.ok ? supplied : null;
+  return resolveInboundStamp(admin, bound.data, scope);
 }
 
 export type DispatchRepSmsInput = {
