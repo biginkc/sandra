@@ -184,3 +184,17 @@ describe("maskAddresses", () => {
     expect(maskAddresses("I want 150000 for it, 3 beds")).toBe("I want 150000 for it, 3 beds");
   });
 });
+
+import { buildKnownAddressMasker } from "./mask";
+describe("address fallbacks", () => {
+  it("masks odd suffixes and suffix-less fragments but not amounts", () => {
+    expect(maskAddresses("at 55 Pine Trce now")).toBe("at [address] now");
+    expect(maskAddresses("13075 Woodridge is mine")).toBe("[address] mine");
+    expect(maskAddresses("I'd take 250 for it and 1500 dollars")).toBe("I'd take 250 for it and 1500 dollars");
+  });
+  it("masks known addresses and street names", () => {
+    const m = buildKnownAddressMasker([{ address: "742 Evergreen Terrace, Springfield", city: "Springfield" }]);
+    expect(m("it is 742 evergreen terrace in springfield")).toBe("it is [address] in [city]");
+    expect(m("down evergreen")).toBe("down [street]");
+  });
+});
