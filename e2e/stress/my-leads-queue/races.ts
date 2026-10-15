@@ -234,6 +234,8 @@ export async function laneRefresh(url: string, repeats: number, seed: number, fa
 // ---------------- committed lanes (disposable database only) ----------------
 
 async function commitWorld(db: Client, lead: Lead, now: number) {
+  // A no-expiry pin drops a check constraint (rolled back elsewhere); never let that commit.
+  if (lead.pin) throw new Error("committed lanes may not seed pins");
   await db.query("begin");
   try {
     const ctx = await setupOrg(db);
@@ -301,7 +303,9 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
       } finally {
         await b.end(); await a.end();
       }
-      if (yDelay < latencyMs) yBeforeSend += 1; else yAfterAccept += 1;
+      // classify from what the database recorded, not from the intended delays
+      const t = (await admin.query("select (select created_at from public.messages where id=$1) as y, created_at, sent_at from public.messages where property_id=$2 and direction='outbound'", [y, property])).rows[0];
+      if (t && t.y < t.sent_at) yBeforeSend += 1; else yAfterAccept += 1;
       const row = (await classify(admin, ctx, new Date(Date.now() + 5 * SEC))).get(property)!;
       lane.runs += 1;
       const latest = row.facts.latestInbound;
@@ -313,7 +317,9 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
   } finally {
     await admin.end();
   }
-  lane.notes!.push(`Y arrived before the text was accepted in ${yBeforeSend} runs and after in ${yAfterAccept}`);
+  lane.notes!.push(`by database timestamps, Y was created before the text's sent_at in ${yBeforeSend} runs and after it in ${yAfterAccept}`);
+  // The stamp only matters when Y lands before the send time; a lane that never produced that ordering proved nothing.
+  if (reps >= 10 && yBeforeSend < Math.ceil(reps / 4)) { lane.failures += 1; lane.samples.push({ why: `only ${yBeforeSend} of ${reps} runs had Y before sent_at; the lane did not exercise the stamp` }); }
   return lane;
 }
 

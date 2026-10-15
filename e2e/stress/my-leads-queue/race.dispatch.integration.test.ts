@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -43,6 +44,10 @@ const OUT = process.env.MYLEADS_STRESS_OUT_DIR ?? path.resolve("test-results/my-
 const JWT_SECRET = process.env.LOCAL_SUPABASE_JWT_SECRET ?? "super-secret-jwt-token-with-at-least-32-characters-long";
 const API = process.env.LOCAL_SUPABASE_URL ?? "http://127.0.0.1:54331";
 const ANON = process.env.LOCAL_SUPABASE_ANON_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
+
+function isLoopbackHttp(raw: string): boolean {
+  try { const u = new URL(raw); return (u.protocol === "http:" || u.protocol === "https:") && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname); } catch { return false; }
+}
 
 const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
 function jwtFor(sub: string): string {
@@ -112,7 +117,12 @@ const lanes: LaneResult[] = [];
 describe("dispatchRepSms race lanes (fake provider, disposable database)", async () => {
   assertEnvLooksLocal(env);
   const url = resolveDbUrl(env);
+  for (const [name, value] of [["LOCAL_SUPABASE_URL", API], ["TEST_SUPABASE_URL", process.env.TEST_SUPABASE_URL ?? API]] as const) {
+    if (!isLoopbackHttp(value)) throw new Error(`${name} must be a loopback http(s) URL; refusing ${value}`);
+  }
   const skip = await preflightCommitLanes(url).catch((error: Error) => error.message);
+  // Acknowledged disposable database but the lanes cannot run: that is a failure, not a green skip.
+  if (skip && process.env.MYLEADS_STRESS_DISPOSABLE_DB === "1") throw new Error(`dispatchRepSms race lanes cannot run: ${skip}`);
   const run = skip ? it.skip : it;
   if (skip) console.warn(`dispatchRepSms race lanes skipped: ${skip}`);
 
@@ -200,7 +210,8 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
     const payload = skip
       ? [{ id: "race:dispatch_stamped_send_vs_inbound", title: "dispatchRepSms race", runs: 0, failures: 0, skipped: skip, samples: [] }]
       : lanes;
-    writeFileSync(path.join(OUT, "dispatch-lanes.json"), JSON.stringify(payload, null, 2));
+    const sha = (() => { try { return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim(); } catch { return "unknown"; } })();
+    writeFileSync(path.join(OUT, "dispatch-lanes.json"), JSON.stringify({ sha, reps: REPS, lanes: payload }, null, 2));
     expect(true).toBe(true);
   });
 });

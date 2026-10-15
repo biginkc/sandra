@@ -37,6 +37,7 @@ describe("my-leads queue stress harness smoke", () => {
 
   it("the race lane has teeth: with the reply-to stamp removed, a late-accepted text wrongly handles the newer inbound", async () => {
     const skip = await preflightCommitLanes(url).catch((error: Error) => error.message);
+    if (skip && process.env.MYLEADS_STRESS_DISPOSABLE_DB === "1") throw new Error(`race-lane mutation check cannot run: ${skip}`);
     if (skip) { console.warn(`race-lane mutation check skipped: ${skip}`); return; }
     // Y always lands before the fake provider accepts, so without the stamp the text's send time is newer than Y.
     const lane = await laneStampedSendVsInbound(url, 4, 3, unstampedSendDriver, { latencyMs: [700, 900], yDelayMs: [50, 100] });

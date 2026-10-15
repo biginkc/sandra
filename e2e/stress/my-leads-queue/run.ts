@@ -67,7 +67,15 @@ export async function runStress(opts: StressOptions, env: Record<string, string 
   const dispatchFile = opts.dispatchLanesFile ?? (opts.outDir ? path.join(opts.outDir, "dispatch-lanes.json") : null);
   if (opts.lanes.includes("races") && dispatchFile && existsSync(dispatchFile)) {
     log(`dispatchRepSms lanes: ${dispatchFile}`);
-    lanes.push(...(JSON.parse(readFileSync(dispatchFile, "utf8")) as LaneResult[]));
+    const file = JSON.parse(readFileSync(dispatchFile, "utf8")) as { sha?: string; reps?: number; lanes?: LaneResult[] };
+    const head = git("rev-parse", "--short", "HEAD");
+    const ids = new Set((file.lanes ?? []).map((l) => l.id));
+    const problems: string[] = [];
+    if (file.sha !== head) problems.push(`written at ${file.sha ?? "unknown"}, not ${head}`);
+    if (opts.mode === "full" && (file.reps ?? 0) < opts.raceReps) problems.push(`${file.reps ?? 0} reps, fewer than --race-reps ${opts.raceReps}`);
+    for (const id of ["race:dispatch_stamped_send_vs_inbound", "race:dispatch_bind_failure"]) if (!ids.has(id)) problems.push(`missing ${id}`);
+    if (problems.length) lanes.push({ id: "race:dispatch_file", title: "dispatchRepSms lane results file", runs: 0, failures: 1, samples: problems });
+    lanes.push(...(file.lanes ?? []));
   }
   if (opts.lanes.includes("scale")) {
     log(`scale lane: ${opts.scaleSizes.join(", ")} leads`);

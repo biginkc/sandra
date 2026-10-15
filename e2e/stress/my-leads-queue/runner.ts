@@ -179,7 +179,7 @@ export async function compareOwnerView(db: Client, ctx: OrgCtx, world: World, c:
     try { await new Reader(db, ctx, ctx.rep, at, sub).page("all", null, 1, 25); } catch (error) { code = (error as { code?: string }).code ?? "error"; }
     await db.query("rollback to savepoint s1_scope");
     await db.query("reset role").catch(() => {});
-    if (code !== "42501" && code !== "P0002" && code !== "22023") out.push({ kind: "scope", family: c.family, repeat: c.repeat, lead: "-", tags: [], expected: `${who} refused (42501)`, actual: code ?? "allowed" });
+    if (code !== "42501" && code !== "P0002") out.push({ kind: "scope", family: c.family, repeat: c.repeat, lead: "-", tags: [], expected: `${who} refused (42501)`, actual: code ?? "allowed" });
   }
   return out;
 }

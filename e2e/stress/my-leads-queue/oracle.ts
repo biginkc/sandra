@@ -29,6 +29,8 @@ export type Placement = {
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
   SQ1: "1.1 row 1 reads 'no active appointment with effective time <= now + 15 min' (so an under-contract lead with only a FUTURE callback is Neither); the SQL treats any active appointment as 'something due' and places that lead in Waiting · Callback booked.",
   SQ2: "2.1 lists ledger 'unknown, reserved, sending older than 15 min' as Check status; read literally an 'unknown' receipt younger than 15 min is not Broken yet. The SQL treats every 'unknown' ledger receipt as Broken immediately.",
+  SQ4: "5 says user my_leads_workflow events with operation 'in the existing allowlist' clear New reply; the existing allowlist (migration 20260930035000) includes log_acquisition_attempt, but v7 says a no-answer call must not clear it. Both the oracle and the SQL drop log_acquisition_attempt. Needs a decision; not seeded as a mismatch.",
+  SQ5: "1.1 row 15 puts 'contact-only or ambiguous inbound attribution' in Nothing planned (label check texts), while 5 attributes inbounds by homeowner contact when property_id is null. Both the oracle and the SQL follow 5 (New reply). Needs a decision; not seeded as a mismatch.",
   SQ3: "2.1 lists a pending AI reply draft as Broken · 'AI reply needs your OK' (and 1.1 row 6 sends any unresolved Broken condition to Broken once no unhandled inbound exists). The SQL treats a pending draft as a label only, never Broken.",
 };
 
