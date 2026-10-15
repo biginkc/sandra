@@ -279,7 +279,10 @@ export function WaitingColumn({
     setBusy(true);
     try {
       const requestedFrom = older.nextPos;
+      const requestKey = refreshKey;
       const res = await loadOlder({ ids });
+      // Tagged with the snapshot it was asked for: a response landing after a new snapshot loaded is discarded.
+      if (refreshKeyRef.current !== requestKey) return;
       if (res.ok) {
         // Functional and monotonic: merge into the LATEST state (a re-check may have removed cards meanwhile);
         // `missing` only grows within a snapshot, so a removed card is never brought back by a later slice.
@@ -304,6 +307,7 @@ export function WaitingColumn({
         setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: message }));
       }
     } catch {
+      if (refreshKeyRef.current !== refreshKey) return;
       setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: "Older texts could not be loaded." }));
     } finally {
       setBusy(false);
@@ -318,6 +322,7 @@ export function WaitingColumn({
   // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
   const [checkFailed, setCheckFailed] = useState(false);
   const checkSeq = useRef(0);
+  const refreshKeyRef = useRef<unknown>(refreshKey);
   const shownIdsRef = useRef<string[]>([]);
   const entriesRef = useRef(entries);
   const olderRef = useRef(older);
@@ -327,6 +332,7 @@ export function WaitingColumn({
     shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned && entries.some((e) => e.id === focusPinned.id) ? [focusPinned.id] : [])];
     entriesRef.current = entries;
     olderRef.current = older;
+    refreshKeyRef.current = refreshKey;
   });
   useEffect(() => {
     if (!revalidate || !snapshot) return;
@@ -395,6 +401,8 @@ export function WaitingColumn({
       (h.draft?.id ?? null) !== (e.d ?? null) ||
       (h.draft ? h.draft.sendable === true : false) !== (e.d ? e.ds === true : false) ||
       (h.flag_reason ?? null) !== reason ||
+      // A flag re-stamped during enrichment arrives in the fresh `seen`: compared at render, not only on the next poll.
+      (h.seen !== undefined && e.fa !== null && (h.seen.flagReason ?? null) !== reason) ||
       (h.seen?.through ?? null) !== (e.th ?? null) ||
       (h.seen?.flagAt ?? null) !== e.fa ||
       holdActivityAt(h) !== e.at ||

@@ -557,6 +557,15 @@ export async function recheckOpen(
   ]);
   if (failed) return null;
   for (const id of draftOk) open.add(id);
+  // Not confirmed open by the direct reads: before declaring it missing, re-run the FULL eligibility path
+  // (every draft link: own property, run, inbound message, conversation; org-verified, unlocked).
+  const unconfirmed = ids.filter((id) => !open.has(id) && !locked.has(id));
+  if (unconfirmed.length) {
+    const list = await loadEligibleHolds(supabase, orgId);
+    if (!list.ok) return null;
+    const eligible = new Set(list.holds.map((h) => h.id));
+    for (const id of unconfirmed) if (eligible.has(id)) open.add(id);
+  }
   // A displayed draft that no longer belongs to this hold's property (moved, locked, gone) is dropped from the card,
   // so Send/Edit cannot act on it; if nothing else keeps the hold open it is missing.
   const badDraft = new Set(holds.filter((h) => h.draft && !validDraftIds.has(`${h.draft.id}|${h.id}`)).map((h) => h.id));

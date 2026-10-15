@@ -536,6 +536,30 @@ describe("final check re-resolves drafts", () => {
   });
 });
 
+describe("final check keeps holds another current source still holds open", () => {
+  it("the displayed draft resolves and a new run-linked draft arrives: card stays (draft dropped), count unchanged", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [plainProp(3)],
+      ai_reply_drafts: [draft(1, { property_id: u(3) })],
+      pipeline_runs: [runRow(2, { property_id: u(3) })],
+    };
+    const client = db(tables).client;
+    let moved = false;
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !moved) {
+        moved = true; // during enrichment: the shown draft is sent, a new draft linked ONLY by run arrives
+        tables.ai_reply_drafts = [{ ...tables.ai_reply_drafts[0], status: "sent" }, draft(5, { run_id: u(2, 5), created_at: t(20) })];
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    const page = await loadMessagesV2Page(client, "org");
+    expect(decodeSnapshot(page.snapshot).entries.map((e) => e.id)).toEqual([u(3)]);
+    expect(page.missing).toEqual([]);
+    expect(page.holds.map((h) => h.id)).toEqual([u(3)]);
+    expect(page.holds[0].draft).toBeUndefined(); // Send/Edit have nothing to act on; the column marks it Updated
+  });
+});
+
 describe("Codex round: drafts must still belong to the hold, and to the org", () => {
   it("a displayed draft moved to another property mid-enrichment is removed from the card (Send disabled), original flag keeps the hold", async () => {
     const tables: Record<string, Row[]> = {

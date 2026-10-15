@@ -532,6 +532,41 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent("This item was handled or is no longer available.");
   });
 
+  it("a flag reason changed during enrichment (fresh seen) disables actions immediately", async () => {
+    const snapHold = { ...openHold("p9"), ...at(5), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+    const enriched = { ...snapHold, seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-01T00:00:00.000000Z" } };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [enriched]), holdsSnapshot: buildSnapshot([snapHold]), actions });
+    expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+  });
+
+  it("a 'Show older' response that lands after a new snapshot loaded is ignored", async () => {
+    const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const server = byIdsServer(() => all);
+    const loadOlderHolds = vi.fn(async (input: { ids: string[] }) => {
+      await gate;
+      return server(input);
+    });
+    const p1 = { ...props([], all.slice(0, 3)), holdsSnapshot: buildSnapshot(all), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p1} />);
+    await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+    await act(async () => {
+      screen.getByTestId("show-older").click();
+    });
+    // Refresh: a new snapshot with only h1 and h2.
+    const fresh = all.slice(0, 2);
+    rerender(<MessagesV2View {...p1} holds={[...fresh]} holdsSnapshot={buildSnapshot(fresh)} />);
+    await act(async () => {
+      release();
+      await gate;
+    });
+    expect(screen.getAllByTestId("waiting-card")).toHaveLength(2);
+    expect(screen.queryByTestId("older-error")).toBeNull();
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
