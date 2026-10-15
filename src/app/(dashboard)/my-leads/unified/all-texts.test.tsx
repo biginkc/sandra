@@ -1,0 +1,61 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const composer = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
+vi.mock("../rep-sms-composer", () => ({
+  RepSmsComposer: (props: Record<string, unknown>) => {
+    composer.props = props;
+    return <button type="button" onClick={() => (props.onSent as (id?: string) => void)("msg-9")}>Text lead</button>;
+  },
+}));
+
+import { AllTexts } from "./all-texts";
+
+const detailState = {
+  status: "ready" as const,
+  detail: {
+    messages: { rows: [], hasMore: false, nextCursor: null },
+    notes: { rows: [], hasMore: false, nextCursor: null },
+    attempts: { rows: [], hasMore: false, nextCursor: null },
+    appointments: { rows: [], hasMore: false, nextCursor: null },
+    offers: { rows: [], hasMore: false, nextCursor: null },
+    history: { rows: [], hasMore: false, nextCursor: null },
+  },
+};
+
+beforeEach(() => { composer.props = null; });
+
+describe("<AllTexts />", () => {
+  it("shows the text history strip and the action-placement composer with the reply-to stamp", () => {
+    render(
+      <AllTexts
+        facts={{ propertyId: "lead-1", latestInbound: { at: "2026-10-14T14:00:00Z", kind: "text", messageId: "inb-7", handled: false, contactOnly: false } }}
+        state={detailState}
+        onRetry={() => {}}
+      />,
+    );
+    expect(screen.getByRole("region", { name: "Text history" })).toBeInTheDocument();
+    expect(composer.props).toMatchObject({ propertyId: "lead-1", placement: "action", inboundMessageId: "inb-7" });
+  });
+  it("passes a null stamp when there is no inbound", () => {
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);
+    expect(composer.props?.inboundMessageId).toBeNull();
+  });
+  it("a missed-call inbound carries no message id, so no stamp", () => {
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: { at: "2026-10-14T14:00:00Z", kind: "call", messageId: null, handled: false, contactOnly: false } }} state={detailState} onRetry={() => {}} />);
+    expect(composer.props?.inboundMessageId).toBeNull();
+  });
+  it("a send reloads the thread and tells the container", async () => {
+    const onRetry = vi.fn();
+    const onSent = vi.fn();
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={onRetry} onSent={onSent} />);
+    await userEvent.click(screen.getByRole("button", { name: "Text lead" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onSent).toHaveBeenCalledExactlyOnceWith("msg-9");
+  });
+  it("shows the strip's loading state while detail loads", () => {
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={{ status: "loading" }} onRetry={() => {}} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Loading texts");
+  });
+});

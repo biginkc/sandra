@@ -5,6 +5,7 @@ import { getCallerMemberships } from '@/lib/auth/memberships';
 import { isAcquisitionsCaller } from '@/lib/auth/surface-access';
 import type { Json } from '@/lib/supabase/types';
 import type { QueueStage } from './types';
+import { unifiedQueueEnabled } from './unified-queue';
 import { acquisitionDateRange, acquisitionPeriodBounds, type AcquisitionPeriod } from './period';
 
 export type QueueRow = {
@@ -102,9 +103,16 @@ export async function getAcquisitionKpis(input: {memberId:string;period:Acquisit
     p_org_id:viewer.orgId,p_member_id:input.memberId,p_start:bounds.start.toISOString(),p_end:bounds.end.toISOString(),
   });
 }
+/** Unified-queue badge: distinct leads in Due / New reply / Broken across the caller's own queues. */
+export async function readBadgeV2(client: unknown): Promise<number> {
+  const count=await readRpc<unknown>(client,'fn_my_leads_badge_v2',{});
+  if(typeof count!=='number'||!Number.isInteger(count)||count<0) throw new MyLeadsReadError('READ_FAILED','My Leads returned an unexpected response.');
+  return count;
+}
 export async function getAcquisitionBadge(): Promise<number> {
   const viewer=await myLeadsViewer();
-  try { return await readRpc<number>(viewer.client,'fn_get_acquisition_badge',{p_org_id:viewer.orgId}); }
+  const unified=await unifiedQueueEnabled(viewer.orgId);
+  try { return unified?await readBadgeV2(viewer.client):await readRpc<number>(viewer.client,'fn_get_acquisition_badge',{p_org_id:viewer.orgId}); }
   catch(error) { if(error instanceof MyLeadsReadError&&error.code==='FEATURE_DISABLED') return 0; throw error; }
 }
 

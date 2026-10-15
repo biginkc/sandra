@@ -13,7 +13,12 @@ function Metric({ id, label, children, detail }: { id: string; label: string; ch
   </div>
 }
 
-export function MyLeadsMetrics({ kpis, repliedToDrip = 0 }: { kpis: MyLeadsKpis; repliedToDrip?: number }) {
+export function MyLeadsMetrics({ kpis, repliedToDrip = 0, hideAttention = false }: {
+  kpis: MyLeadsKpis
+  repliedToDrip?: number
+  /** Unified queue: the tab and chip counts replace the four attention tiles. */
+  hideAttention?: boolean
+}) {
   // During a rolling deployment the RPC can still return its legacy shape.
   const count = (value: number | undefined) => Number.isFinite(value) ? value : "—"
   const hasSnapshot = typeof kpis.asOf === "string" && Number.isFinite(Date.parse(kpis.asOf))
@@ -26,7 +31,7 @@ export function MyLeadsMetrics({ kpis, repliedToDrip = 0 }: { kpis: MyLeadsKpis;
   return <div className="space-y-4">
     <p className="text-sm text-muted-foreground">All leads for this rep · Unaffected by search or filters</p>
     {!hasSnapshot && <p role="status" className="text-sm text-muted-foreground">Some metrics are temporarily unavailable.</p>}
-    <section aria-labelledby="my-leads-attention-heading" className="space-y-2">
+    {!hideAttention && <section aria-labelledby="my-leads-attention-heading" className="space-y-2">
       <h2 id="my-leads-attention-heading" className="text-sm font-semibold">Needs attention <span className="font-normal text-muted-foreground">· Includes previous days</span></h2>
       <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-4">
         <Metric id="contact-without-follow-up" label="Contact: no follow-up appointment">{count(kpis.contactWithoutFollowUp)}</Metric>
@@ -34,7 +39,7 @@ export function MyLeadsMetrics({ kpis, repliedToDrip = 0 }: { kpis: MyLeadsKpis;
         <Metric id="appointments-overdue" label="Overdue appointments">{count(kpis.appointmentsOverdue)}</Metric>
         <Metric id="replied-to-drip" label="Replied to drip">{repliedToDrip}</Metric>
       </dl>
-    </section>
+    </section>}
     <section aria-labelledby="my-leads-activity-heading" className="space-y-2">
       <h2 id="my-leads-activity-heading" className="text-sm font-semibold">Today’s activity <span className="font-normal text-muted-foreground">· Central time</span></h2>
       <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-3">

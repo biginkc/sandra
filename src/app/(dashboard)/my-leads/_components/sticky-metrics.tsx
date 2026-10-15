@@ -5,11 +5,13 @@ import { DailyCallClock, formatDuration } from "./daily-call-clock"
 import type { MyLeadsKpis } from "./types"
 
 /** Mirrors the expanded cards only after they scroll behind the dashboard navigation. */
-export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel, repliedToDrip = 0 }: {
+export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel, repliedToDrip = 0, hideAttention = false }: {
   kpis: MyLeadsKpis
   expandedRef: RefObject<HTMLDivElement | null>
   repLabel?: string | null
   repliedToDrip?: number
+  /** Unified queue: the four attention entries are replaced by the tab and chip counts. */
+  hideAttention?: boolean
 }) {
   const [visible, setVisible] = useState(false)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -37,11 +39,13 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel, repliedToDri
     return () => { observer.disconnect(); window.removeEventListener("resize", onResize) }
   }, [expandedRef])
   const count = (value: number | undefined) => Number.isFinite(value) ? value : "—"
-  const metrics = [
+  const attention = [
     ["No follow-up", count(kpis.contactWithoutFollowUp), "Active Contact leads without a future follow-up appointment"],
     ["Needs offer", count(kpis.needsOffers), "Active leads needing offers"],
     ["Overdue", count(kpis.appointmentsOverdue), "Outstanding overdue appointments, including previous days"],
     ["Replied to drip", repliedToDrip, "Leads that replied to a drip and still need a rep response"],
+  ]
+  const activity = [
     ["Last attempt", <DailyCallClock key="daily-clock" kpis={kpis} />, "Today’s calls · Mon–Fri, 9am–5pm Central"],
     ["Reaches / attempts", `${count(kpis.reached)} / ${count(kpis.attempts)}`, "Today’s reaches / attempts · Central time"],
     ["Offers sent", count(kpis.offersSent), "Today’s offers sent · Central time"],
@@ -49,6 +53,7 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel, repliedToDri
     ["Avg. talk", kpis.averageTalkSeconds == null ? "—" : formatDuration(kpis.averageTalkSeconds), `${count(kpis.talkTimeSamples)} reached calls with duration · ${count(kpis.talkTimeUnknown)} without duration excluded`],
     ["Over 5 min", count(kpis.conversationsOverFiveMinutes), "Today’s reached calls strictly over five minutes with known talk time"],
   ]
+  const metrics = hideAttention ? activity : [...attention, ...activity]
   return <div ref={stripRef} className="sticky top-[116px] z-20 -my-3 h-0 min-w-0 md:top-16">
     {visible && <div role="region" aria-label={`Sticky metrics for ${repLabel || "selected rep"}`} tabIndex={0}
       className="overflow-x-auto overscroll-x-contain rounded-xl border border-border bg-card shadow-md outline-none focus-visible:ring-2 focus-visible:ring-ring"

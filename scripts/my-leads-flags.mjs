@@ -28,6 +28,7 @@ export const FLAGS = [
   "facts_job",
   "offer_projection",
   "comp_queue",
+  "unified_queue",
 ];
 
 export function parseArgs(argv) {

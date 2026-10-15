@@ -105,3 +105,25 @@ export type SlotIcon = "new_reply" | "broken" | "new_lead" | "in_drip" | "no_dri
 export type UnifiedActionFailure = { ok: false; code?: string; message: string };
 export type LoadWorkPageResult = ({ ok: true } & { page: WorkPage }) | UnifiedActionFailure;
 export type LoadWorkFactsResult = ({ ok: true } & { facts: WorkFactsResult }) | UnifiedActionFailure;
+
+/**
+ * Server actions in src/app/(dashboard)/my-leads/unified-actions.ts (all "use server"; the member must be
+ * the viewer or the viewer must be the owner, enforced by the RPCs; pin/dismiss are member-only):
+ *   loadWorkPage({ memberId, query })                 -> LoadWorkPageResult
+ *   loadWorkFacts({ memberId, ids })                  -> LoadWorkFactsResult   (<= 50 ids)
+ *   pinLead({ memberId, propertyId, action })         -> { ok: true; pinnedAt: string | null } | UnifiedActionFailure   ('pin' | 'clear')
+ *   dismissBroken({ memberId, propertyId, sourceId }) -> { ok: true } | UnifiedActionFailure
+ *   loadUnifiedKpis({ memberId })                     -> { ok: true; kpis: AcquisitionKpis } | UnifiedActionFailure
+ */
+import type { AcquisitionKpis } from "@/lib/my-leads/queries";
+
+/** Everything the server renders into the first paint of the unified page. */
+export type UnifiedInitial = {
+  query: WorkQuery;
+  /** null when the first read failed; the client shows the error banner and retries. */
+  page: WorkPage | null;
+  error: string | null;
+  kpis: AcquisitionKpis | null;
+  /** Facts for a deep-linked lead (?lead=), whatever tab it belongs to; pinned at the top of that tab. */
+  pinned: WorkFacts | null;
+};

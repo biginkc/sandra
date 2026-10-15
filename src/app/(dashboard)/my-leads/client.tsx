@@ -97,6 +97,8 @@ type Props = {
   initialSearch?: string;
   focus?: MyLeadsFocus | null;
   selectedLead?: import("./deep-link").SelectedLeadResult;
+  /** The unified work queue's first paint; null or omitted renders today's page. */
+  unified?: import("./unified/contract").UnifiedInitial | null;
 };
 /** A lead opened from a deep link (lead page or Messages). */
 export type MyLeadsFocus = {
