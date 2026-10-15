@@ -5,7 +5,7 @@ import { Client } from "pg";
 import { createRng, type Rng } from "../prng";
 import { assertCommitLaneAllowed, assertOnlyHarnessLeads, HARNESS_ADDRESS_PREFIX } from "./guards";
 import { fromChicagoLocal } from "./oracle";
-import { materializeWorld, setupOrg, type OrgCtx } from "./materialize";
+import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { loadClassifierMigration } from "./migration";
 import { DAY, HOUR, MIN, SEC, emptyLead, type Lead, type Msg, type World } from "./model";
 import { place, addBusinessDays, minusChicagoDays, type Placement } from "./oracle";
@@ -233,12 +233,19 @@ export async function laneRefresh(url: string, repeats: number, seed: number, fa
 
 // ---------------- committed lanes (disposable database only) ----------------
 
+/** Every org context a committed lane created; purged in the lane's finally so later steps on a shared database see nothing. */
+const createdCtx: OrgCtx[] = [];
+async function purgeCreated(db: Client) {
+  while (createdCtx.length) await purgeOrg(db, createdCtx.pop()!);
+}
+
 async function commitWorld(db: Client, lead: Lead, now: number) {
   // A no-expiry pin drops a check constraint (rolled back elsewhere); never let that commit.
   if (lead.pin) throw new Error("committed lanes may not seed pins");
   await db.query("begin");
   try {
     const ctx = await setupOrg(db);
+    createdCtx.push(ctx);
     const mat = await materializeWorld(db, ctx, { now, leads: [lead] });
     await db.query("update public.properties set address = $2 || address where id=$1", [mat.ids.get(lead.key)!, HARNESS_ADDRESS_PREFIX]);
     await db.query("commit");
@@ -318,6 +325,7 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
       }
     }
   } finally {
+    await purgeCreated(admin).catch((error: Error) => { lane.failures += 1; lane.samples.push({ why: `cleanup failed: ${error.message}` }); });
     await admin.end();
   }
   lane.notes!.push(`by database timestamps, Y was created before the text's sent_at in ${yBeforeSend} runs and after it in ${yAfterAccept}`);
@@ -378,6 +386,7 @@ export async function laneLateDeliveryFailure(url: string, reps: number, seed: n
       }
     }
   } finally {
+    await purgeCreated(admin).catch((error: Error) => { lane.failures += 1; lane.samples.push({ why: `cleanup failed: ${error.message}` }); });
     await admin.end();
   }
   return lane;
@@ -391,7 +400,15 @@ export async function runCommittedLanes(url: string, reps: number, seed: number,
       { id: "race:late_delivery_failed", title: "late delivery_failed after acceptance", runs: 0, failures: 0, skipped: skip, samples: [] },
     ];
   }
-  return [await laneStampedSendVsInbound(url, reps, seed, driver), await laneLateDeliveryFailure(url, Math.max(20, Math.floor(reps / 4)), seed + 1)];
+  const c = new Client({ connectionString: url });
+  await c.connect();
+  const before = await footprint(c);
+  const lanes = [await laneStampedSendVsInbound(url, reps, seed, driver), await laneLateDeliveryFailure(url, Math.max(20, Math.floor(reps / 4)), seed + 1)];
+  const after = await footprint(c);
+  await c.end();
+  const changed = Object.keys(before).filter((k) => before[k] !== after[k]);
+  lanes.push({ id: "race:cleanup", title: "committed lanes leave every row count as they found it", runs: 1, failures: changed.length ? 1 : 0, samples: changed.map((k) => ({ table: k, before: before[k], after: after[k] })) });
+  return lanes;
 }
 
 void fromChicagoLocal; void DAY;

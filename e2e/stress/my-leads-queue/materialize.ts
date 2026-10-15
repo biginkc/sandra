@@ -255,3 +255,43 @@ async function insertLedger(db: Client, ctx: OrgCtx, member: string, property: s
     [lid, ctx.org, member, randomUUID(), property, contact, randomUUID(), state, randomUUID(), messageId, iso(updatedAt)]);
   return lid;
 }
+
+/** Row counts the committed lanes must leave exactly as they found them. */
+export async function footprint(db: Client): Promise<Record<string, number>> {
+  const tables = ["auth.users", "public.organizations", "public.memberships", "public.properties", "public.contacts", "public.messages",
+    "public.rep_sms_delivery_ledger", "public.rep_sms_sender_assignments", "public.rep_sms_rollout_enrollments", "public.tasks", "public.lead_events"];
+  const out: Record<string, number> = {};
+  for (const t of tables) out[t] = Number((await db.query(`select count(*)::int as n from ${t}`)).rows[0].n);
+  return out;
+}
+
+/**
+ * Delete everything a committed lane created for one org context: the two orgs (and everything that hangs off them) and the four users.
+ * Rows whose foreign keys do not cascade are deleted explicitly first. Designated reps are un-designated through the same guarded path
+ * setupOrg used, so the my-leads designation trigger accepts it. Runs in its own transaction.
+ */
+export async function purgeOrg(db: Client, ctx: OrgCtx): Promise<void> {
+  const orgs = [ctx.org, ctx.org2];
+  const users = [ctx.owner, ctx.rep, ctx.otherRep, ctx.outsider];
+  await db.query("begin");
+  try {
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)", [ctx.owner]);
+    for (const u of [ctx.owner, ctx.rep, ctx.otherRep]) {
+      await db.query("select set_config('my_leads.designation_update',$1,true)", [`${ctx.owner}:${ctx.org}:${u}`]);
+      await db.query("update public.memberships set acquisitions_enabled=false where user_id=$1 and org_id=$2 and acquisitions_enabled", [u, ctx.org]);
+    }
+    await db.query("select set_config('my_leads.designation_update','',true)");
+    // Everything keyed by these orgs, children before parents, with triggers off so guard/audit triggers do not block a test teardown.
+    await db.query("set local session_replication_role='replica'");
+    const tables = (await db.query(
+      `select c.table_schema, c.table_name from information_schema.columns c join information_schema.tables t using (table_schema, table_name)
+       where c.column_name='org_id' and c.table_schema='public' and t.table_type='BASE TABLE'`)).rows as Array<{ table_schema: string; table_name: string }>;
+    for (const t of tables) await db.query(`delete from ${t.table_schema}.${t.table_name} where org_id = any($1::uuid[])`, [orgs]);
+    await db.query("delete from public.organizations where id = any($1::uuid[])", [orgs]);
+    await db.query("delete from auth.users where id = any($1::uuid[])", [users]);
+    await db.query("commit");
+  } catch (error) {
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+}

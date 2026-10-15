@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { assertEnvLooksLocal, resolveDbUrl } from "./guards";
 import { HARNESS_ADDRESS_PREFIX } from "./guards";
-import { materializeWorld, setupOrg, type OrgCtx } from "./materialize";
+import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { HOUR, emptyLead, SEC } from "./model";
 import { preflightCommitLanes } from "./races";
 import type { LaneResult } from "./report";
@@ -68,11 +68,13 @@ async function replica(url: string) {
   return c;
 }
 
+const createdCtx: OrgCtx[] = [];
 async function committedLead(admin: Client, n: number) {
   const now = Date.now();
   await admin.query("begin");
   try {
     const ctx = await setupOrg(admin);
+    createdCtx.push(ctx);
     const lead = emptyLead(`d${n}`, now, { messages: [{ ref: "x", dir: "inbound", at: now - HOUR, body: "call me" }] });
     const mat = await materializeWorld(admin, ctx, { now, leads: [lead] });
     const property = mat.ids.get(lead.key)!;
@@ -125,6 +127,8 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
   if (skip && process.env.MYLEADS_STRESS_DISPOSABLE_DB === "1") throw new Error(`dispatchRepSms race lanes cannot run: ${skip}`);
   const run = skip ? it.skip : it;
   if (skip) console.warn(`dispatchRepSms race lanes skipped: ${skip}`);
+
+  const startFootprint = skip ? null : await (async () => { const c = new Client({ connectionString: url }); await c.connect(); try { return await footprint(c); } finally { await c.end(); } })();
 
   run("concurrent inbound Y 50-500 ms after a stamped dispatchRepSms for X begins: Y stays unhandled", async () => {
     const lane: LaneResult = { id: "race:dispatch_stamped_send_vs_inbound", title: "dispatchRepSms stamped for X vs inbound Y 50-500 ms later (fake provider)", runs: 0, failures: 0, samples: [], notes: ["driver dispatchRepSms"] };
@@ -212,6 +216,17 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
     lanes.push(lane);
     expect(lane.failures).toBe(0);
   }, 600_000);
+
+  run("leaves the database exactly as it found it (every created org, user and row is deleted)", async () => {
+    const c = new Client({ connectionString: url });
+    await c.connect();
+    try {
+      while (createdCtx.length) await purgeOrg(c, createdCtx.pop()!);
+      expect(await footprint(c)).toEqual(startFootprint);
+    } finally {
+      await c.end();
+    }
+  }, 120_000);
 
   it("writes dispatch-lanes.json for the main report", () => {
     mkdirSync(OUT, { recursive: true });
