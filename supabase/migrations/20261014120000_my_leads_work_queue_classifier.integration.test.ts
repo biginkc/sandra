@@ -621,6 +621,12 @@ fixture('S Ledger blocked is Broken · Review', async (w) => {
 fixture('S Ledger unknown 20 min is Broken · status unknown (Check status, never Resend)', async (w) => {
   const id = await w.lead('s'); await w.ledger(id, 'unknown', w.at(-20 * MIN)); return id;
 }, { place: NA, reason: 'broken', row: '6', headline: { kind: 'text_status_unknown', action: 'check_status' } });
+fixture('S Ledger unknown dismissed (Check status can terminate it)', async (w) => {
+  const id = await w.lead('s'); const l = await w.ledger(id, 'unknown', w.at(-20 * MIN)); await w.event(id, 'rep_sms_failure_dismissed', w.at(-MIN), { sourceId: l }); return id;
+}, { place: NA, reason: 'nothing_planned', row: '15' });
+fixture('S Obligation unknown dismissed', async (w) => {
+  const id = await w.lead('s'); const o = await w.obligation(id, 'unknown', w.at(-20 * MIN)); await w.event(id, 'rep_sms_failure_dismissed', w.at(-MIN), { sourceId: o }); return id;
+}, { place: NA, reason: 'nothing_planned', row: '15' });
 fixture('S Ledger sending 5 min is not Broken yet', async (w) => {
   const id = await w.lead('s'); await w.ledger(id, 'sending', w.at(-5 * MIN)); return id;
 }, { place: NA, reason: 'nothing_planned', row: '15' });
@@ -739,7 +745,8 @@ it('chip counts sum to the tab total, tab counts partition the queue, and every 
     const ids = await mixedWorld(w);
     const all = await w.page(w.sam, { tab: 'all', size: 50 });
     expect(all.total).toBe(Object.keys(ids).length);
-    expect(all.tabCounts.needs_attention + all.tabCounts.waiting + all.tabCounts.all - all.tabCounts.all).toBe(all.tabCounts.needs_attention + all.tabCounts.waiting);
+    const neither = (all.rows as Json[]).filter((r) => r.place === 'neither').length;
+    expect(all.tabCounts.needs_attention + all.tabCounts.waiting + neither).toBe(all.tabCounts.all);
     for (const tab of ['needs_attention', 'waiting', 'all']) {
       const r = await w.page(w.sam, { tab, size: 50 });
       const sum = Object.values(r.chipCounts as Record<string, number>).reduce((a, b) => a + Number(b), 0);
@@ -885,6 +892,18 @@ it('next_change_at includes the instant a Call today pin lapses', async () => {
     expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(3 * HOUR));
     const lapsed = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
     expect(lapsed.rows[0].reason).toBe('nothing_planned');
+  });
+});
+
+it('a fresh unknown step claim (not yet 15 minutes old) schedules the stuck boundary', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('s'); const d = await w.drip(id, { next: w.at(HOUR) }); await w.staleClaim(d.enr, d.steps[0], w.at(-5 * MIN));
+    const r = await w.page(w.sam, { tab: 'waiting' });
+    expect(r.ids).toEqual([id]);
+    expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(10 * MIN));
+    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
+    expect(later.rows[0]).toMatchObject({ reason: 'broken' });
   });
 });
 

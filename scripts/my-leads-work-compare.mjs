@@ -22,6 +22,9 @@
 //   COMPARE_DB_URL='postgresql://postgres:postgres@127.0.0.1:54329/postgres' \
 //     node scripts/my-leads-work-compare.mjs --org <org> --member <rep>
 //
+// Note: the classifier takes the pending offer from the LATEST offer by sent_at (as my_leads_queue_rows does); Call next
+// takes the latest PENDING offer. They only differ for a lead whose newest offer is no longer pending.
+//
 // Exit codes: 0 ok, 2 bad arguments or a refused connection string, 1 database error.
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';

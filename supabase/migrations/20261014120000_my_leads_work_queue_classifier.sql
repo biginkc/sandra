@@ -73,6 +73,10 @@ language sql stable security definer set search_path = '' as $$
     from base b
     join public.messages m on m.org_id = p_org and m.channel = 'sms' and m.property_id is null
       and m.contact_id = b.contact_id and b.contact_id is not null and m.created_at <= p_at),
+  -- The org's ledger receipts for queue leads, read once (matched to messages by message_id below).
+  lg as materialized (
+    select l.message_id, l.state, l.updated_at from public.rep_sms_delivery_ledger l
+    where l.org_id = p_org and l.message_id is not null and l.property_id in (select property_id from base)),
   mf as materialized (
     select x.*,
       case when x.stamp ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then x.stamp::uuid end as stamp_id,
@@ -94,8 +98,7 @@ language sql stable security definer set search_path = '' as $$
         mx.metadata ->> 'reply_source' as reply_source,
         (mx.metadata ->> 'approved_by_user_id') is not null as approved,
         mx.direction = 'outbound' and exists (select 1 from public.sequence_step_runs r where r.message_id = mx.id) as is_drip,
-        case when mx.direction = 'outbound' then (select l.state from public.rep_sms_delivery_ledger l where l.org_id = p_org and l.message_id = mx.id
-         order by l.updated_at desc limit 1) end as ledger_state
+        case when mx.direction = 'outbound' then (select l.state from lg l where l.message_id = mx.id order by l.updated_at desc limit 1) end as ledger_state
       from mx) x),
   -- User events used by the handled-reply rule and by failure supersession. An attempt logged
   -- through the workflow (log_acquisition_attempt) is deliberately NOT here: attempts count only
@@ -158,7 +161,7 @@ language sql stable security definer set search_path = '' as $$
       e.updated_at as enr_updated_at, e.current_step_index, e.first_send_not_before, seq.name as seq_name,
       (select count(*)::integer from public.sequence_steps st where st.sequence_id = e.sequence_id) as steps_total,
       (select min(r.attempt_started_at) from public.sequence_step_runs r
-       where r.enrollment_id = e.id and r.claim_active and r.attempt_outcome = 'unknown' and r.attempt_started_at < p_at - interval '15 minutes') as stale_claim_at,
+       where r.enrollment_id = e.id and r.claim_active and r.attempt_outcome = 'unknown') as claim_at,
       (select max(coalesce(r.run_at, r.created_at)) from public.sequence_step_runs r where r.enrollment_id = e.id and r.message_id is not null) as last_sent_at
     from base b
     left join lateral (
@@ -214,9 +217,9 @@ language sql stable security definer set search_path = '' as $$
     where e.enr_status = 'paused' and e.pause_reason in ('provider_failed', 'reconciliation_required', 'template_missing', 'step_misconfigured',
       'no_phone', 'no_approved_sender', 'no approved sender for first-touch sequence send', 'consent_unavailable')
     union all
-    select e.lead_id, 'drip_stuck', 'fix_drip', coalesce(e.stale_claim_at, e.next_run_at, e.enr_updated_at), e.enr_id, false
+    select e.lead_id, 'drip_stuck', 'fix_drip', coalesce(e.claim_at, e.next_run_at, e.enr_updated_at), e.enr_id, false
     from en e
-    where (e.enr_status = 'active' and (e.stale_claim_at is not null or e.next_run_at < p_at - interval '60 minutes'))
+    where (e.enr_status = 'active' and (e.claim_at < p_at - interval '15 minutes' or e.next_run_at < p_at - interval '60 minutes'))
        or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at < p_at - interval '30 minutes')
     union all
     select b.property_id, case o.state
@@ -263,12 +266,12 @@ language sql stable security definer set search_path = '' as $$
     order by d.property_id, d.created_at desc, d.id),
   bko as (
     select b0.* from bk0 b0
-    where not b0.failure or not (
-      exists (select 1 from mf r where r.lead_id = b0.lead_id and r.direction = 'outbound' and r.cls = 'human' and r.acc and r.created_at > b0.at)
-      or exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.handles and ev.created_at > b0.at)
-      or exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.event_type = 'rep_sms_failure_dismissed' and ev.source_id = b0.ref_id)
-      or exists (select 1 from public.sequence_enrollments se
-                 where se.org_id = p_org and se.property_id = b0.lead_id and se.enrolled_by_user_id is not null and se.enrolled_at > b0.at))),
+    where not exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.event_type = 'rep_sms_failure_dismissed' and ev.source_id = b0.ref_id)
+      and (not b0.failure or not (
+        exists (select 1 from mf r where r.lead_id = b0.lead_id and r.direction = 'outbound' and r.cls = 'human' and r.acc and r.created_at > b0.at)
+        or exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.handles and ev.created_at > b0.at)
+        or exists (select 1 from public.sequence_enrollments se
+                   where se.org_id = p_org and se.property_id = b0.lead_id and se.enrolled_by_user_id is not null and se.enrolled_at > b0.at)))),
   bka as (
     select lead_id, count(*)::integer as n,
       (array_agg(kind order by at, kind))[1] as first_kind, (array_agg(action order by at, kind))[1] as first_action,
@@ -288,7 +291,7 @@ language sql stable security definer set search_path = '' as $$
                                         where lo.cls in ('human', 'ai', 'campaign')) d
       union all select lead_id, next_run_at + interval '60 minutes' from en where enr_status = 'active'
       union all select lead_id, enr_updated_at + interval '30 minutes' from en where enr_status = 'paused' and pause_reason = 'call_in_progress'
-      union all select lead_id, stale_claim_at + interval '15 minutes' from en
+      union all select lead_id, claim_at + interval '15 minutes' from en
       union all select lead_id, healthy_at + interval '30 minutes' from camp
       union all select m.lead_id, m.created_at + interval '15 minutes' from mf m where m.status = 'pending' and m.cls = 'human'
       union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status = 'failed' and m.cls = 'human'
@@ -309,7 +312,7 @@ language sql stable security definer set search_path = '' as $$
       public.my_leads_add_business_days(lo.ts, 3) as lo_deadline,
       e.enr_id, e.enr_status, e.pause_reason, e.next_run_at, e.enr_completed_at, e.current_step_index, e.seq_name, e.steps_total,
       e.last_sent_at, e.first_send_not_before, e.enr_updated_at,
-      (e.enr_status = 'active' and e.next_run_at is not null and e.next_run_at >= p_at - interval '60 minutes' and e.stale_claim_at is null)
+      (e.enr_status = 'active' and e.next_run_at is not null and e.next_run_at >= p_at - interval '60 minutes' and not coalesce(e.claim_at < p_at - interval '15 minutes', false))
         or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at >= p_at - interval '30 minutes') as drip_healthy,
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
@@ -472,7 +475,7 @@ create or replace function public.fn_my_leads_work_page(
   p_org_id uuid, p_member_id uuid, p_tab text, p_chip text, p_stage text, p_search text,
   p_page integer, p_size integer, p_at timestamptz default null)
 returns jsonb
-language plpgsql security definer set search_path = '' set statement_timeout = '10s' as $$
+language plpgsql security definer set search_path = '' as $$
 declare
   v_at timestamptz := coalesce(p_at, statement_timestamp());
   v_q text;
@@ -545,7 +548,7 @@ grant execute on function public.fn_my_leads_work_page(uuid, uuid, text, text, t
 -- An id that is no longer in the member's queue comes back in "missing".
 create or replace function public.fn_my_leads_work_facts(p_org_id uuid, p_member_id uuid, p_ids uuid[], p_at timestamptz default null)
 returns jsonb
-language plpgsql security definer set search_path = '' set statement_timeout = '10s' as $$
+language plpgsql security definer set search_path = '' as $$
 declare
   v_at timestamptz := coalesce(p_at, statement_timestamp());
   v_result jsonb;
@@ -572,7 +575,7 @@ grant execute on function public.fn_my_leads_work_facts(uuid, uuid, uuid[], time
 -- placement is Due, New reply or Broken. A lead counts once.
 create or replace function public.fn_my_leads_badge_v2(p_at timestamptz default null)
 returns integer
-language plpgsql security definer set search_path = '' set statement_timeout = '10s' as $$
+language plpgsql security definer set search_path = '' as $$
 declare
   v_at timestamptz := coalesce(p_at, statement_timestamp());
   v_uid uuid := auth.uid();
