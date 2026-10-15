@@ -17,7 +17,6 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "nine_needs_person",
   "reply_text_not_approved",
   "classifier_engine_unreadable",
-  "drip_switch_off", // tape step only (nurture auto-drip switch off); never a hold
   "hot_lead",
   "price_or_offer",
   "distress",
@@ -123,7 +122,6 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   // Nine-question engine (Messages v2 PR 3).
   "nine_reply_not_sent:",
   "nine_automation_disabled:",
-  "nine_questions:",
   "model:",
   "already_flagged:",
 ];

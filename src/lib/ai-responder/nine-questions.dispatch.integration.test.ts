@@ -13,6 +13,7 @@ import {
   type NineQuestionId,
 } from "@/lib/sms-classification/nine-questions";
 
+import { startRun } from "@/lib/pipeline-runs";
 import { dispatchAiResponse } from "./dispatch";
 import { enrollNineDrip } from "./nine-questions-engine";
 import type { AnthropicLike } from "./generate";
@@ -694,6 +695,28 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     );
     expect(jevCalls.every((c) => !("our_last_text_to_homeowner" in c.state))).toBe(true);
     expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).not.toBe("classifier_engine_unreadable");
+  });
+
+  it("shadow tape order: the first jev/classify step is the eight-answer one; the nine run is shadow/nine_classify", async () => {
+    await seedOrg({ mode: "shadow" });
+    const lead = await seedLead();
+    jevProbabilities = { maybe_later: 0.9 };
+    const inbound = await seedThread(lead, "maybe later");
+    const ctx = await startRun(supabase, { orgId, inboundMessageId: inbound.id, propertyId: lead.propertyId, contactId: lead.contactId } as never);
+    expect(ctx).not.toBeNull();
+    await dispatchAiResponse(
+      supabase,
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "maybe later", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY, runId: ctx!.runId },
+      { anthropic: NO_ANTHROPIC },
+    );
+    const { data: steps } = await supabase.from("pipeline_run_steps").select("seq, kind, name, detail").eq("run_id", ctx!.runId).order("seq");
+    const classify = (steps ?? []).filter((x) => x.kind === "jev" && x.name === "classify");
+    expect(classify.length).toBeGreaterThan(0);
+    for (const c of classify) expect(c.detail).not.toHaveProperty("shadow_engine");
+    const nine = (steps ?? []).filter((x) => x.name === "nine_classify");
+    expect(nine).toHaveLength(1);
+    expect(nine[0]).toMatchObject({ kind: "shadow" });
+    expect(nine[0]!.detail).toMatchObject({ shadow_engine: "nine_questions", answer: "maybe_later" });
   });
 
   it("nine engine in shadow mode: decision recorded, today's path still acts", async () => {

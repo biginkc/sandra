@@ -139,8 +139,9 @@ export async function runNineClassification(
       }
     }
     await recordStep(supabase, deps.runContext, {
-      kind: "jev",
-      name: "classify",
+      // Shadow must not look like the eight-answer classify step (the tape reads the first jev/classify).
+      kind: shadow ? "shadow" : "jev",
+      name: shadow ? "nine_classify" : "classify",
       result: "error",
       detail: { [shadow ? "shadow_engine" : "engine"]: "nine_questions", reason },
     });
@@ -230,8 +231,8 @@ export async function runNineClassification(
   if (!classificationRunId) return failed("audit_persist_failed");
 
   await recordStep(supabase, deps.runContext, {
-    kind: "jev",
-    name: "classify",
+    kind: shadow ? "shadow" : "jev",
+    name: shadow ? "nine_classify" : "classify",
     result: "pass",
     detail: {
       ...nineDecisionRecord(result, shadow),
