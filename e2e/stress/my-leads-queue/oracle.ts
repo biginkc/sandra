@@ -23,6 +23,8 @@ export type Placement = {
   headline: Record<string, string | number | boolean>;
   /** Distinct Broken fix actions that are unresolved on the lead (design 2.1), sorted. */
   brokenActions: BrokenAction[];
+  /** Rule 2 badge fact: on a lead whose latest inbound is a contact-only text, how many leads have that person as homeowner. */
+  homeownerPropertyCount?: number;
   /** Within-chip order key from design 2 / 3 (ascending), where the design names one: pins newest first, due by time, replies newest
    * first, Waiting by next event. Undefined where the design's key needs facts this model does not hold (last touch, failure time). */
   sortAt?: number;
@@ -30,13 +32,13 @@ export type Placement = {
 
 /** Places where the design text and the A1 SQL disagree. Registered so the report can group mismatches. */
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
-  SQ5: "v9 17: a contact-only inbound counts only when its contact is homeowner on exactly one queue lead; otherwise never New reply (label check texts). The A1 SQL counts it on every lead sharing the contact. Confirmed SQL bug; fix in A1.2 (classifier performance PR). Still gating.",
+  SQ5: "Resolved 2026-10-15 by Jarrad's approved rule (oracle follows it; gating): \"A text Sandra can tie to one lead goes to that lead. A text Sandra cannot tie to one lead shows on every lead where that person is the homeowner, each with a note that they own more than one house. Answering it on any of those leads counts as answered on all of them.\"",
   SQ2: "v9 17: ledger/obligation 'unknown' younger than 15 min is in flight, not Broken (oracle follows this). The A1 SQL still marks it Broken; fix routed to PR #876 migration 20261015020200.",
 };
 
 /** Spec questions whose SQL fix is in flight elsewhere: their mismatches are reported but do not fail the run until that PR lands. */
 /** Confirmed SQL bugs whose fix is in flight. Labelled in the report but NOT excused: they keep failing the run until fixed. */
-export const FIX_PENDING: Readonly<Record<string, string>> = { SQ5: "A1.2" };
+export const FIX_PENDING: Readonly<Record<string, string>> = {};
 
 export const EXPECTED_UNTIL: Readonly<Record<string, string>> = { SQ2: "#876" };
 
@@ -106,12 +108,15 @@ function activeAppt(a: Appointment) { return a.status === "open" || a.status ===
 /** Design 1.1 commitment predicate: effective time = greatest(due, snoozed_until). */
 const effTime = (a: Appointment) => Math.max(a.due, a.snoozedUntil ?? a.due);
 
-type Inbound = { at: number; ref: string | null; kind: "text" | "call" };
+type Inbound = { at: number; ref: string | null; kind: "text" | "call"; contactOnly?: boolean };
 
-function latestInbound(lead: Lead): Inbound | null {
+/** Approved 2026-10-15 (Jarrad, verbatim): "A text Sandra can tie to one lead goes to that lead. A text Sandra cannot tie to one
+ * lead shows on every lead where that person is the homeowner, each with a note that they own more than one house. Answering it on
+ * any of those leads counts as answered on all of them." `group` = the other leads whose homeowner is the same person. */
+function latestInbound(lead: Lead, group: readonly Lead[] = []): Inbound | null {
   const items: Inbound[] = [];
-  // v9 17 (SQ5): a contact-only inbound counts only when its contact is homeowner on exactly one queue property
-  for (const m of lead.messages) if (m.dir === "inbound" && !(m.contactOnly && lead.contactShared)) items.push({ at: m.at, ref: m.ref, kind: "text" });
+  for (const m of lead.messages) if (m.dir === "inbound") items.push({ at: m.at, ref: m.ref, kind: "text", contactOnly: !!m.contactOnly });
+  for (const g of group) for (const m of g.messages) if (m.dir === "inbound" && m.contactOnly) items.push({ at: m.at, ref: m.ref, kind: "text", contactOnly: true });
   for (const c of lead.missedCalls) items.push({ at: c, ref: null, kind: "call" });
   if (items.length === 0) return null;
   // newest by time; a text beats a call at the same instant (ties never occur in generated worlds)
@@ -127,8 +132,13 @@ const handlesEvent = (e: LeadEvent) =>
     || (e.type === "my_leads_workflow" && ["ready_acquisition_offer", "log_acquisition_offer", "record_acquisition_contract", "decline_acquisition_offer", "handoff_acquisition_lead"].includes(e.operation ?? ""))
     || e.type === "appointment_booked" || e.type === "task_created");
 
-/** Design section 5. */
-export function isHandled(lead: Lead, inbound: Inbound): boolean {
+/** Design section 5. A contact-only text is answered when any lead of its homeowner answers it (approved rule above). */
+export function isHandled(lead: Lead, inbound: Inbound, group: readonly Lead[] = []): boolean {
+  if (inbound.kind === "text" && inbound.contactOnly) return [lead, ...group].some((l) => handledOn(l, inbound, [lead, ...group]));
+  return handledOn(lead, inbound, []);
+}
+
+function handledOn(lead: Lead, inbound: Inbound, family: readonly Lead[]): boolean {
   const refOrder = (ref: string | null) => ref ?? "";
   for (const m of lead.messages) {
     if (!isReplyText(m) || !accepted(m)) continue;
@@ -136,7 +146,11 @@ export function isHandled(lead: Lead, inbound: Inbound): boolean {
     if (!(t > inbound.at || (t === inbound.at && m.ref > refOrder(inbound.ref)))) continue;
     if (m.stamp?.kind === "unresolved") continue; // 16.2: handles nothing
     if (inbound.kind === "text" && m.stamp?.kind === "inbound") {
-      const s = lead.messages.find((x) => x.ref === (m.stamp as { ref: string }).ref && x.dir === "inbound");
+      const st = m.stamp as { ref: string; lead?: string };
+      // a stamp naming another lead's message resolves only to a contact-only text of the same homeowner
+      const s = st.lead === undefined || st.lead === lead.key
+        ? lead.messages.find((x) => x.ref === st.ref && x.dir === "inbound")
+        : family.find((l) => l.key === st.lead)?.messages.find((x) => x.ref === st.ref && x.dir === "inbound" && x.contactOnly);
       // a text stamped with an inbound older than this one does not answer it (5, reply-to stamp)
       if (s && (s.at < inbound.at || (s.at === inbound.at && s.ref < refOrder(inbound.ref)))) continue;
     }
@@ -164,7 +178,7 @@ function dripHealthy(lead: Lead, now: number): boolean {
 
 /** `preV9Unknown`: the A1 SQL's reading before PR #876 (an 'unknown' ledger/obligation is Broken at once). Used ONLY to recognise the
  * known SQ2 disagreement precisely; the expected answer always comes from the v9 rule. */
-export type OracleOptions = { preV9Unknown?: boolean };
+export type OracleOptions = { preV9Unknown?: boolean; group?: readonly Lead[] };
 
 function brokenItems(lead: Lead, now: number, opts: OracleOptions = {}): BrokenItem[] {
   const out: BrokenItem[] = [];
@@ -241,12 +255,15 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   const futureSet = normal.filter((a) => effTime(a) > now + SOON);
   const min = (xs: Appointment[]) => (xs.length ? Math.min(...xs.map(effTime)) : null);
   const dueAt = min(dueSet), missedAt = min(missedSet), futureAt = min(futureSet);
-  // Rows 8/12 name the open chain task's due_at: an offer-chain task's follow-up time ignores snoozed_until (Fable, v9 17);
-  // the effective time (greatest(due, snoozed_until)) applies only to non-chain callbacks/appointments.
-  const chainEff = chainTasks.length ? Math.min(...chainTasks.map((a) => a.due)) : null;
+  // Approved 2026-10-15 (Jarrad, verbatim): "An offer follow-up that the rep snoozed is due at its snooze time, not its original
+  // time. Until the snooze time passes, the lead stays in Waiting on them · Offer out." So the chain task's time is its effective
+  // time greatest(due, snoozed_until), as for every other commitment.
+  const chainEff = chainTasks.length ? Math.min(...chainTasks.map(effTime)) : null;
 
-  const inbound = latestInbound(lead);
-  const unhandled = inbound ? !isHandled(lead, inbound) : false;
+  const group = opts.group ?? [];
+  const inbound = latestInbound(lead, group);
+  const unhandled = inbound ? !isHandled(lead, inbound, group) : false;
+  const homeownerPropertyCount = inbound?.kind === "text" && inbound.contactOnly ? 1 + group.length : undefined;
   const broken = unresolvedBroken(lead, now, opts);
   const brokenActions = [...new Set(broken.map((b) => b.action))].sort() as BrokenAction[];
   const manualQueued = lead.messages.some((m) => isOutbound(m) && m.outcome === "queued" && m.scheduledFor === undefined && m.source !== "campaign" && m.source !== "drip");
@@ -269,7 +286,7 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   const loFinal = !!lo && lo.source === "drip" && !!lo.dripFinal && lead.enrollment?.status === "completed" && !inboundAfterLo;
 
   const mk = (row: string, placeOf: Place, reason: Reason, headline: Placement["headline"] = {}, sortAt?: number): Placement =>
-    ({ row, place: placeOf, reason, inBadge: ["4", "9", "5", "6"].includes(row), headline, brokenActions, sortAt });
+    ({ row, place: placeOf, reason, inBadge: ["4", "9", "5", "6"].includes(row), headline, brokenActions, sortAt, ...(homeownerPropertyCount === undefined ? {} : { homeownerPropertyCount }) });
   const onlyDrip = dripHealthy(lead, now) && !campHealthy && lead.enrollment?.status === "active" ? lead.enrollment.nextRunAt ?? undefined : undefined;
 
   // v9 17 (SQ1): Neither only with no active appointment at all; any active one flows through Due / Callback booked.
@@ -294,6 +311,12 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   if (textedOk && loDeadline !== null && now < loDeadline) return mk("13", "their_move", "texted_last", { by: lo!.source === "campaign" ? "campaign" : AI_CLASS.has(lo!.source!) ? "ai" : "human" }, loDeadline);
   if ((textedOk && loDeadline !== null && now >= loDeadline) || loFinal) return mk("14", "your_move", "gone_quiet", { kind: textedOk ? "texted_silent" : "drip_finished" });
   return mk("15", "your_move", "nothing_planned");
+}
+
+/** Places every lead of a world, giving each lead the other leads whose homeowner is the same person (`contactGroup`). */
+export function placeWorld(leads: readonly Lead[], now: number, opts: OracleOptions = {}): Map<string, Placement> {
+  const groupOf = (l: Lead) => (l.contactGroup ? leads.filter((x) => x !== l && x.contactGroup === l.contactGroup) : []);
+  return new Map(leads.map((l) => [l.key, place(l, now, { ...opts, group: groupOf(l) })]));
 }
 
 export const NEEDS_ATTENTION_CHIPS: readonly Reason[] = ["new_lead", "call_today", "due", "new_reply", "broken", "offer", "gone_quiet", "nothing_planned"];

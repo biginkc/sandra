@@ -159,7 +159,7 @@ async function insertLead(db: Client, ctx: OrgCtx, member: string, now: number, 
   for (const m of lead.messages) {
     const mid = idOf(m.ref);
     const meta = m.dir === "outbound" ? OUTBOUND_META(m, member) : {};
-    if (m.stamp?.kind === "inbound") meta.inbound_message_id = idOf(m.stamp.ref);
+    if (m.stamp?.kind === "inbound") meta.inbound_message_id = m.stamp.lead === undefined || m.stamp.lead === lead.key ? idOf(m.stamp.ref) : messageIds.get(m.stamp.lead)!.get(m.stamp.ref)!;
     if (m.stamp?.kind === "foreign") meta.inbound_message_id = randomUUID();
     const out = m.dir === "outbound";
     const outcome = m.outcome ?? "sent";
