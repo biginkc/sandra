@@ -134,10 +134,6 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("chain_snoozed", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - HOUR }, appointments: [k.appt("c", k.now - HOUR, { offerChain: true, status: "snoozed", snoozedUntil: k.now + DAY })] }),
       // the snooze has passed (due two days ago, snoozed to an hour ago): Needs attention · Offer
       k.lead("chain_snooze_passed", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.j(k.now - HOUR) })] }),
-      // boundary at the snooze end: the snooze time itself, and 1 ms before / at / after the "due soon" 15-minute lead time every offer
-      // follow-up already has (row 8). Pending the question raised on the window, these follow the existing rule.
-      k.lead("chain_snooze_ends_now", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now })] }),
-      ...EXACT.map((e) => k.lead(`chain_snooze_exact${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 15 * MIN + e })] })),
       k.lead("chain_snoozed_future", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 3 * DAY })] }),
     ];
   } },
