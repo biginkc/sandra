@@ -42,7 +42,7 @@ export function isMissingEngineColumnError(error: { code?: string | null; messag
 /**
  * The org's engine. Read on its own (not in the big config select) so that code
  * reaching a database without the column yet keeps today's eight-answer path.
- * Any OTHER read error is `unreadable`: the caller must hold the message for a
+ * Any OTHER read error, or no active row, is `unreadable`: the caller must hold the message for a
  * person and run neither engine (the switch state is unknown).
  */
 export async function readClassifierEngine(
@@ -56,7 +56,8 @@ export async function readClassifierEngine(
     .eq("active", true)
     .maybeSingle();
   if (error) return isMissingEngineColumnError(error) ? "outcome_v1" : "unreadable";
-  if (!data) return "outcome_v1";
+  // Callers only ask after finding an active config, so no row means the switch state is unknown.
+  if (!data) return "unreadable";
   return data.classifier_engine === "nine_questions" ? "nine_questions" : "outcome_v1";
 }
 

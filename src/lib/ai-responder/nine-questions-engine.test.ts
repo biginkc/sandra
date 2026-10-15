@@ -18,6 +18,8 @@ describe("readClassifierEngine", () => {
   it("reads the stored values", async () => {
     expect(await readClassifierEngine(client({ data: { classifier_engine: "nine_questions" }, error: null }), "o")).toBe("nine_questions");
     expect(await readClassifierEngine(client({ data: { classifier_engine: "outcome_v1" }, error: null }), "o")).toBe("outcome_v1");
-    expect(await readClassifierEngine(client({ data: null, error: null }), "o")).toBe("outcome_v1");
+  });
+  it("an empty result is unreadable, never outcome_v1 (the caller already found an active config)", async () => {
+    expect(await readClassifierEngine(client({ data: null, error: null }), "o")).toBe("unreadable");
   });
 });
