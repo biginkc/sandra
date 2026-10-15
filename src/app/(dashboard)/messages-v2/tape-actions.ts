@@ -7,7 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { messagesV2OrgId } from "./access";
 import { loadRunLabels } from "./labels";
 import type { LooseSupabase } from "./queries";
-import { loadRunsWindow, loadRunThreads, previousDayWindow, type RunThread } from "./tape-data";
+import { chicagoDayWindow, loadRunsWindow, loadRunThreads, type RunThread } from "./tape-data";
 import type { RunLabel, RunWithSteps } from "./types";
 
 export type TapeDayPage = {
@@ -17,11 +17,11 @@ export type TapeDayPage = {
 };
 
 /**
- * "Show yesterday's tape": the 24 hours before the oldest run the page already
- * shows. Caller and org are resolved on the server (same gate as the page);
+ * "Show yesterday's tape": one America/Chicago calendar day (optionally only the part
+ * older than a cursor, for a day with more runs than a page). Caller and org are resolved on the server (same gate as the page);
  * only the boundary instant comes from the client.
  */
-export async function loadTapeDayAction(input: { before: string }): Promise<Result<TapeDayPage>> {
+export async function loadTapeDayAction(input: { day: string; before?: string | null }): Promise<Result<TapeDayPage>> {
   let orgId: string | null = null;
   try {
     const supabase = await createClient();
@@ -36,8 +36,8 @@ export async function loadTapeDayAction(input: { before: string }): Promise<Resu
     orgId = null;
   }
   if (!orgId) return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
-  const window = previousDayWindow(String(input?.before ?? ""));
-  if (!window) return err({ code: "VALIDATION", message: "Missing time." });
+  const window = chicagoDayWindow(String(input?.day ?? ""), input?.before ? String(input.before) : null);
+  if (!window) return err({ code: "VALIDATION", message: "Missing day." });
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const { runs, error } = await loadRunsWindow(supabase, orgId, window.from, window.to);

@@ -5,15 +5,15 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
-import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
+import { HOLD_SORT_CAP, holdActivityMs, sortNewestFirst } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
-import { NEW_HOLD_CAP } from "./queries";
 import { sellerWho } from "./tape-card";
 import { holdReasonSentence } from "./tape";
-import type { HoldSource, HoldsMeta, HoldsSplit, OpenHold, RunLabel, RunWithSteps } from "./types";
+import type { HoldSource, HoldsMeta, OpenHold, RunLabel, RunWithSteps } from "./types";
 
 const PAGE = 20;
-const BACKLOG_PAGE = 50;
+const OLDER_PAGE = 50;
 
 const SOURCE_NAME: Record<HoldSource, string> = {
   needs_attention: "needs-attention",
@@ -22,31 +22,7 @@ const SOURCE_NAME: Record<HoldSource, string> = {
   pending_draft: "reply draft",
 };
 
-/**
- * When anything last happened on this hold: the newest of its start, its latest
- * run (the seller's latest text), that run's latest step, and the newest pending
- * item it shows. `since` alone is the OLDEST source timestamp, so a fresh seller
- * text on an old hold would otherwise be buried.
- */
-export function holdActivityMs(hold: OpenHold<RunWithSteps>): number | null {
-  const stamps = [
-    hold.since,
-    hold.run?.started_at,
-    hold.run?.completed_at,
-    ...(hold.run?.steps ?? []).map((st) => st.created_at),
-    hold.seen?.through,
-    hold.seen?.flagAt,
-  ]
-    .map((v) => (v ? Date.parse(v) : Number.NaN))
-    .filter((n) => Number.isFinite(n));
-  return stamps.length ? Math.max(...stamps) : null;
-}
-
-/** Newest activity first. A hold with no known time sorts last, never first by accident. */
-export function sortNewestFirst(holds: readonly OpenHold<RunWithSteps>[]): OpenHold<RunWithSteps>[] {
-  const t = (h: OpenHold<RunWithSteps>) => holdActivityMs(h) ?? Number.NEGATIVE_INFINITY;
-  return [...holds].sort((a, b) => (t(a) === t(b) ? a.id.localeCompare(b.id) : t(b) - t(a)));
-}
+export { holdActivityMs, sortNewestFirst };
 
 /** One short plain line when the text alert for this hold did not go out. */
 function alertLine(alert: OpenHold["alert"]): string | null {
@@ -144,93 +120,77 @@ function WaitingCard({
 }
 
 type OlderState = {
-  /** The server data these pages were loaded against; a newer one starts them over. */
+  /** The server data these slices were loaded against; a newer one starts them over. */
   forKey: unknown;
   holds: OpenHold<RunWithSteps>[];
   labels: Map<string, RunLabel>;
-  newOffset: number;
-  newHasMore: boolean;
-  backlogOffset: number;
-  backlogHasMore: boolean;
+  total: number;
   error: string | null;
 };
 
-/** How many New holds the page itself loaded; anything past that is paged in by "Show older". */
-const NEW_LOADED = NEW_HOLD_CAP;
-
-function freshOlder(split: HoldsSplit | undefined, forKey: unknown): OlderState {
-  return {
-    forKey,
-    holds: [],
-    labels: new Map(),
-    newOffset: NEW_LOADED,
-    newHasMore: (split?.newTotal ?? 0) > NEW_LOADED,
-    backlogOffset: 0,
-    backlogHasMore: (split?.backlogTotal ?? 0) > 0,
-    error: null,
-  };
-}
-
 /**
- * "Waiting for a person": one list, newest activity first. DNC-locked
- * properties are filtered out on the server. "Show older" first reveals what is
- * already loaded, then pages in the remaining New holds the page did not load,
- * then the pre-cutover backlog (same server action as before), until every
- * actionable hold is reachable.
+ * "Waiting for a person": ONE list in latest-activity order. The server sorts
+ * every open hold (DNC-locked excluded) and sends the newest slice; "Show older"
+ * first reveals what is already loaded, then asks the server for the next slice
+ * of that same order, so page 1 really is the newest activity.
  */
 export function WaitingColumn({
   holds,
   labels,
   meta,
-  split,
-  loadBacklog,
-  backlogRefreshKey,
+  total,
+  capped,
+  error,
+  loadOlder,
+  refreshKey,
   actions,
   onReload,
 }: {
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   meta?: HoldsMeta;
-  split?: HoldsSplit;
-  loadBacklog?: LoadBacklog;
-  /** Changes when the server data refreshes (drops stale older pages). */
-  backlogRefreshKey?: unknown;
+  /** All waiting holds on the server. */
+  total: number;
+  capped?: boolean;
+  error?: string | null;
+  loadOlder?: LoadOlderHolds;
+  /** Changes when the server data refreshes (drops stale older slices). */
+  refreshKey?: unknown;
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
   const [visible, setVisible] = useState(PAGE);
-  const [stored, setOlder] = useState<OlderState>(() => freshOlder(split, backlogRefreshKey));
+  const [stored, setOlder] = useState<OlderState>({ forKey: refreshKey, holds: [], labels: new Map(), total, error: null });
   const [busy, setBusy] = useState(false);
 
-  const older = stored.forKey === backlogRefreshKey ? stored : freshOlder(split, backlogRefreshKey);
+  const older: OlderState =
+    stored.forKey === refreshKey ? stored : { forKey: refreshKey, holds: [], labels: new Map(), total, error: null };
 
+  // Page 1 is the top of the server order (re-sorting it is a no-op unless a live step moved it); later slices
+  // continue that order and are never re-sorted across the seam.
   const seen = new Set(holds.map((h) => h.id));
-  const all = sortNewestFirst([...holds, ...older.holds.filter((h) => !seen.has(h.id))]);
-  const shown = all.slice(0, visible);
-  const hiddenLoaded = all.length - shown.length;
-  const canLoadMore = !!loadBacklog && (older.newHasMore || older.backlogHasMore);
-  const notLoadedYet =
-    Math.max(0, (split?.newTotal ?? 0) - older.newOffset) * (older.newHasMore ? 1 : 0) +
-    (older.backlogHasMore ? Math.max(0, (split?.backlogTotal ?? 0) - older.backlogOffset) : 0);
+  const loaded = [...sortNewestFirst(holds), ...older.holds.filter((h) => !seen.has(h.id))];
+  const shown = loaded.slice(0, visible);
+  const hiddenLoaded = loaded.length - shown.length;
+  const serverTotal = Math.max(older.total, total);
+  const notLoadedYet = Math.max(0, serverTotal - loaded.length);
+  const canLoadMore = !!loadOlder && notLoadedYet > 0;
 
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
       setVisible((v) => v + PAGE);
       return;
     }
-    if (!loadBacklog || busy || !canLoadMore) return;
-    const bucket = older.newHasMore ? "new" : "backlog";
+    if (!loadOlder || busy || !canLoadMore) return;
     setBusy(true);
     try {
-      const res = await loadBacklog({ offset: bucket === "new" ? older.newOffset : older.backlogOffset, limit: BACKLOG_PAGE, bucket });
+      const res = await loadOlder({ offset: loaded.length, limit: OLDER_PAGE });
       if (res.ok) {
         setOlder({
-          ...older,
+          forKey: refreshKey,
           holds: [...older.holds, ...res.data.holds],
           labels: new Map([...older.labels, ...res.data.labels]),
-          ...(bucket === "new"
-            ? { newOffset: res.data.nextOffset, newHasMore: res.data.hasMore }
-            : { backlogOffset: res.data.nextOffset, backlogHasMore: res.data.hasMore }),
+          total: res.data.total,
           error: null,
         });
         setVisible((v) => v + PAGE);
@@ -251,14 +211,18 @@ export function WaitingColumn({
       <div className="flex items-baseline gap-3">
         <h2 className="text-base font-semibold">Waiting for a person</h2>
         <span data-testid="waiting-count" className="rounded-full bg-secondary px-2 py-px text-xs font-medium text-muted-foreground">
-          {all.length}
-          {canLoadMore ? "+" : ""}
+          {serverTotal}
         </span>
       </div>
       <p className="text-[13px] text-muted-foreground">Not urgent. Check once a day.</p>
-      {split?.error && (
+      {error && (
         <p role="alert" data-testid="holds-split-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-          Waiting texts unavailable — {split.error}
+          Waiting texts unavailable — {error}
+        </p>
+      )}
+      {capped && (
+        <p data-testid="holds-capped" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          So many texts are waiting that only the first {HOLD_SORT_CAP.toLocaleString("en-US")} could be sorted.
         </p>
       )}
       {failures.length > 0 && (
@@ -282,7 +246,7 @@ export function WaitingColumn({
         </p>
       )}
       {shown.length === 0 ? (
-        failures.length > 0 || split?.error ? null : (
+        failures.length > 0 || error ? null : (
           <p className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">Nothing is waiting for you.</p>
         )
       ) : (

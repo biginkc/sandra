@@ -18,12 +18,12 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
-import { visibleBacklogTotal, withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
-import { loadMessagesV2Split, type LooseSupabase } from "./queries";
+import { loadMessagesV2Page } from "./holds-by-activity";
+import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
-import { loadBacklogHoldsAction } from "./backlog-actions";
+import { loadOlderHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
 import {
   fetchScorecardRows,
@@ -37,6 +37,9 @@ import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
+
+/** Waiting holds rendered on first paint; the rest load through "Show older". */
+const FIRST_PAGE = 40;
 
 export const metadata = {
   title: "Messages v2 · Sandra CRM",
@@ -173,21 +176,19 @@ export default async function MessagesV2Page() {
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
   const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip] = await Promise.all([
-    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
+    loadMessagesV2Page(supabase, orgId),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
   ]);
-  // The hold queries are windowed; the version each card sends back is read
-  // fresh per displayed property so a hold past the window can still be dismissed.
-  // Permanently do-not-contact locked properties are never shown as waiting: nobody can act on them.
-  const backlogVisible = await visibleBacklogTotal(supabase, orgId, loaded.split.backlogTotal);
+  // `loaded.holds` is every open hold in ONE order (latest activity first, DNC-locked
+  // already excluded). The first slice renders now; "Show older" continues the same order.
+  // The version each card sends back is read fresh per displayed property.
   const data = {
     ...loaded,
-    split: { ...loaded.split, backlogTotal: backlogVisible },
-    holds: await withoutDncLocked(supabase, orgId, await withFreshSeen(supabase, orgId, loaded.holds)),
+    holds: await withFreshSeen(supabase, orgId, loaded.holds.slice(0, FIRST_PAGE)),
   };
 
   // Hold cards are labelled by property id; synthesize label inputs from the
@@ -217,8 +218,10 @@ export default async function MessagesV2Page() {
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
-        holdsSplit={data.split}
-        loadBacklog={loadBacklogHoldsAction}
+        holdsTotal={loaded.holds.length}
+        holdsCapped={loaded.capped}
+        holdsError={loaded.error}
+        loadOlderHolds={loadOlderHoldsAction}
         runs={data.runs}
         holds={data.holds}
         feedError={data.feedError}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { holdActivityMs, sortNewestFirst } from "./waiting-column";
+import { holdActivityMs, sortNewestFirst } from "./hold-activity";
 import type { OpenHold, PipelineRunStep, RunWithSteps } from "./types";
 
 const iso = (n: number) => new Date(n).toISOString();
@@ -16,8 +16,7 @@ const runAt = (startedAt: string, stepAt?: string): RunWithSteps => ({
 
 describe("holdActivityMs / sortNewestFirst", () => {
   it("uses the latest activity, not the oldest source timestamp", () => {
-    const oldHoldFreshText = base("old-hold", iso(1_000), { run: runAt(iso(9_000)) });
-    expect(holdActivityMs(oldHoldFreshText)).toBe(9_000);
+    expect(holdActivityMs(base("old-hold", iso(1_000), { run: runAt(iso(9_000)) }))).toBe(9_000);
   });
 
   it("a fresh seller text on an older hold outranks a newer flag with no new activity", () => {
@@ -26,11 +25,18 @@ describe("holdActivityMs / sortNewestFirst", () => {
     expect(sortNewestFirst([newerFlag, olderHoldFreshText]).map((h) => h.id)).toEqual(["older-hold", "newer-flag"]);
   });
 
+  it("a hold far down the server's start-time order, with newer activity, sorts to the top of ALL holds", () => {
+    // 400 holds that started recently with no later activity, plus one that started long ago but was texted just now.
+    const many = Array.from({ length: 400 }, (_, i) => base(`h${String(i).padStart(3, "0")}`, iso(100_000 - i)));
+    const buried = base("buried", iso(1), { run: runAt(iso(500_000)) });
+    const sorted = sortNewestFirst([...many, buried]);
+    expect(sorted[0].id).toBe("buried");
+    expect(sorted.slice(0, 301).some((h) => h.id === "buried")).toBe(true); // lands on page 1, not behind "Show older"
+  });
+
   it("falls back to since, and sorts a hold with no time at all last", () => {
-    const a = base("a", iso(3_000));
-    const b = base("b", iso(4_000));
     const unknown = base("unknown", null);
-    expect(sortNewestFirst([unknown, a, b]).map((h) => h.id)).toEqual(["b", "a", "unknown"]);
+    expect(sortNewestFirst([unknown, base("a", iso(3_000)), base("b", iso(4_000))]).map((h) => h.id)).toEqual(["b", "a", "unknown"]);
     expect(holdActivityMs(unknown)).toBeNull();
   });
 

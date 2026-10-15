@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
-import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
 import { describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
@@ -21,12 +21,11 @@ import { RulesPanel } from "./rules-panel";
 import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
 import { TapeCard } from "./tape-card";
-import { loadRunThreads, type RunThread } from "./tape-data";
+import { chicagoDayKey, loadRunThreads, previousDayKey, type RunThread } from "./tape-data";
 import type { TapeDayPage } from "./tape-actions";
 import { WaitingColumn } from "./waiting-column";
 import type {
   HoldsMeta,
-  HoldsSplit,
   ModeBadge,
   OpenHold,
   PipelineCoverage,
@@ -58,10 +57,14 @@ export type MessagesV2ViewProps = {
   /** The coverage query failed: show a degraded indicator, not nothing. */
   coverageUnavailable?: boolean;
   holdsMeta?: HoldsMeta;
-  /** New / Backlog split: `holds` are the New ones; Backlog loads on demand. */
-  holdsSplit?: HoldsSplit;
-  /** Server action that loads Backlog pages (the section stays collapsed without it). */
-  loadBacklog?: LoadBacklog;
+  /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
+  holdsTotal?: number;
+  /** More holds than could be sorted together: the list says so. */
+  holdsCapped?: boolean;
+  /** The hold lookup failed (reason): say so, never "nothing is waiting". */
+  holdsError?: string | null;
+  /** "Show older": the next slice of the same latest-activity order. */
+  loadOlderHolds?: LoadOlderHolds;
   /** Feed window query failed (reason text, already prefixed "Feed unavailable"). */
   feedError?: string | null;
   /** Step lookup failed: cards may lack steps. */
@@ -76,13 +79,11 @@ export type MessagesV2ViewProps = {
   /** Server-resolved thread text (our last text, Sandra's reply), as [runId, thread] pairs. */
   threads?: Array<[string, RunThread]>;
   /** "Show yesterday's tape": loads the 24 hours before the given instant. */
-  loadTapeDay?: (input: { before: string }) => Promise<Result<TapeDayPage>>;
+  loadTapeDay?: (input: { day: string; before?: string | null }) => Promise<Result<TapeDayPage>>;
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
 };
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
 export function weekSummary(rows: ScorecardRow[] | null | undefined): { texts: number; rightPct: number | null } | null {
@@ -98,15 +99,14 @@ function sandraIsOn(badges: ModeBadge[]): boolean {
   return badges.length === 0 || badges.some((b) => b.mode === "AUTO" || b.mode === "HELD");
 }
 
-// Fixed zone so the server render and the browser agree on which day a card belongs to.
-const TAPE_TZ = "America/Chicago";
-const dayKey = (ms: number) => new Date(ms).toLocaleDateString("en-CA", { timeZone: TAPE_TZ });
+// Fixed zone (America/Chicago) so the server render and the browser agree on which day a card belongs to.
+const dayKey = chicagoDayKey;
 
 function dayLabel(ms: number, nowMs: number): string {
   const key = dayKey(ms);
   if (key === dayKey(nowMs)) return "Today";
-  if (key === dayKey(nowMs - DAY_MS)) return "Yesterday";
-  return new Date(ms).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: TAPE_TZ });
+  if (key === previousDayKey(dayKey(nowMs))) return "Yesterday";
+  return new Date(ms).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: "America/Chicago" });
 }
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
@@ -127,7 +127,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [threads, setThreads] = useState(() => new Map(props.threads ?? []));
   // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
   const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
-  const [loadedBefore, setLoadedBefore] = useState<number | null>(null);
+  const [cursor, setCursor] = useState<{ day: string; before: string | null } | null>(null);
   const [earlierBusy, setEarlierBusy] = useState(false);
   const [earlierNote, setEarlierNote] = useState<string | null>(null);
   const { undoJevAction, findJevUndo } = props;
@@ -319,24 +319,37 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
 
   const showEarlier = async () => {
     if (!props.loadTapeDay || earlierBusy) return;
+    // Start at the Chicago day of the oldest run on screen, only the part older than that run; step back a whole
+    // calendar day at a time, skipping empty days (up to a week) so one click always shows something or says why not.
     const oldest = allRuns.length ? Date.parse(allRuns[allRuns.length - 1].started_at) : nowMs;
-    const before = loadedBefore ?? oldest;
+    let next = cursor ?? { day: chicagoDayKey(oldest), before: new Date(oldest).toISOString() as string | null };
     setEarlierBusy(true);
     setEarlierNote(null);
     try {
-      const res = await props.loadTapeDay({ before: new Date(before).toISOString() });
-      if (res.ok) {
-        setEarlier((curr) => [...curr, ...res.data.runs]);
+      for (let attempt = 0; attempt < 7; attempt += 1) {
+        const res = await props.loadTapeDay(next);
+        if (!res.ok) {
+          setEarlierNote(res.error.message);
+          setCursor(next);
+          return;
+        }
+        const got = res.data.runs;
+        setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setThreads((curr) => new Map([...curr, ...res.data.threads]));
-        for (const r of res.data.runs) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
-        // A full page means the day was cut off: step back from the oldest run returned, not a whole day.
-        const returned = res.data.runs.map((r) => Date.parse(r.started_at));
-        setLoadedBefore(res.data.runs.length >= MAX_RUNS ? Math.min(...returned) : before - DAY_MS);
-        if (res.data.runs.length === 0) setEarlierNote("No texts came in that day.");
-      } else {
-        setEarlierNote(res.error.message);
+        for (const r of got) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
+        // A full page means this day was cut off: continue the same day from the oldest run returned.
+        next =
+          got.length >= MAX_RUNS
+            ? { day: next.day, before: new Date(Math.min(...got.map((r) => Date.parse(r.started_at)))).toISOString() }
+            : { day: previousDayKey(next.day), before: null };
+        if (got.length > 0) {
+          setCursor(next);
+          return;
+        }
       }
+      setCursor(next);
+      setEarlierNote("No texts came in during the week before that.");
     } catch {
       setEarlierNote("The earlier tape could not be loaded.");
     } finally {
@@ -470,7 +483,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           {props.loadTapeDay && (
             <div className="flex justify-center">
               <Button type="button" variant="ghost" size="sm" data-testid="show-earlier" disabled={earlierBusy} onClick={showEarlier}>
-                {earlierBusy ? "Loading…" : loadedBefore === null ? "Show yesterday's tape" : "Show the day before"}
+                {earlierBusy ? "Loading…" : cursor === null ? "Show yesterday's tape" : "Show the day before"}
               </Button>
             </div>
           )}
@@ -481,9 +494,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             holds={holds}
             labels={labels}
             meta={meta}
-            split={props.holdsSplit}
-            loadBacklog={props.loadBacklog}
-            backlogRefreshKey={props.holds}
+            total={props.holdsTotal ?? holds.length}
+            capped={props.holdsCapped}
+            error={props.holdsError}
+            loadOlder={props.loadOlderHolds}
+            refreshKey={props.holds}
             actions={props.actions}
             onReload={() => router.refresh()}
           />

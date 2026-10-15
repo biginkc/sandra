@@ -2,7 +2,6 @@ import { groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const CHUNK = 50;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function chunk<T>(items: readonly T[]): T[][] {
   const out: T[][] = [];
@@ -99,9 +98,67 @@ export async function loadRunsWindow(
   return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), error: null };
 }
 
-/** The 24 hours before `beforeIso` (the oldest run already on screen), so days load without gaps or overlap. */
-export function previousDayWindow(beforeIso: string): { from: string; to: string } | null {
-  const to = Date.parse(beforeIso);
-  if (!Number.isFinite(to)) return null;
-  return { from: new Date(to - DAY_MS).toISOString(), to: new Date(to).toISOString() };
+export const TAPE_TZ = "America/Chicago";
+
+/** "2026-10-14": the America/Chicago calendar day an instant falls on. */
+export const chicagoDayKey = (ms: number): string => new Date(ms).toLocaleDateString("en-CA", { timeZone: TAPE_TZ });
+
+/** The day before `key` ("2026-10-14" -> "2026-10-13"). */
+export function previousDayKey(key: string): string {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+
+const nextDayKey = (key: string): string => {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+};
+
+/** Milliseconds the zone is ahead of UTC at an instant (negative for Chicago). Handles DST. */
+function zoneOffsetMs(ms: number): number {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: TAPE_TZ,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+      .formatToParts(ms)
+      .map((part) => [part.type, part.value]),
+  );
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+  return asUtc - Math.floor(ms / 1000) * 1000;
+}
+
+/** The instant Chicago local midnight begins on a calendar day ("2026-10-14"). */
+export function chicagoDayStartMs(key: string): number {
+  const [y, m, d] = key.split("-").map(Number);
+  const localMidnightAsUtc = Date.UTC(y, m - 1, d);
+  // Two passes settle the offset even when the day contains a DST change.
+  let guess = localMidnightAsUtc - zoneOffsetMs(localMidnightAsUtc);
+  guess = localMidnightAsUtc - zoneOffsetMs(guess);
+  return guess;
+}
+
+/**
+ * One America/Chicago calendar day as an instant range. `before` narrows it to
+ * the part of the day older than a cursor, for a day with more runs than one
+ * page holds. Null on a malformed day.
+ */
+export function chicagoDayWindow(day: string, before?: string | null): { from: string; to: string } | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const start = chicagoDayStartMs(day);
+  const end = chicagoDayStartMs(nextDayKey(day));
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  let to = end;
+  if (before) {
+    const cursor = Date.parse(before);
+    if (!Number.isFinite(cursor)) return null;
+    to = Math.min(end, Math.max(start, cursor));
+  }
+  return { from: new Date(start).toISOString(), to: new Date(to).toISOString() };
 }

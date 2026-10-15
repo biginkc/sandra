@@ -41,6 +41,17 @@ export type BacklogPage = {
   nextOffset: number;
 };
 
+/** One slice of the waiting list in latest-activity order (DNC-locked already excluded). */
+export type OlderHoldsPage = {
+  holds: OpenHold<RunWithSteps>[];
+  labels: Array<[string, RunLabel]>;
+  /** All waiting holds, so the column can say how many are still to load. */
+  total: number;
+};
+
+/** Server action behind "Show older": the next slice after `offset` already-loaded holds. */
+export type LoadOlderHolds = (input: { offset: number; limit?: number }) => Promise<Result<OlderHoldsPage>>;
+
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
 export type LoadBacklog = (input: {
   offset: number;

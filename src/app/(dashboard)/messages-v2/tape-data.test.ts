@@ -1,14 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import type { LooseSupabase } from "./queries";
-import { loadRunThreads, previousDayWindow } from "./tape-data";
+import { chicagoDayKey, chicagoDayWindow, loadRunThreads, previousDayKey } from "./tape-data";
 
-describe("previousDayWindow", () => {
-  it("is the 24 hours before the boundary, with no gap or overlap", () => {
-    expect(previousDayWindow("2026-10-14T12:00:00.000Z")).toEqual({ from: "2026-10-13T12:00:00.000Z", to: "2026-10-14T12:00:00.000Z" });
+describe("chicagoDayWindow", () => {
+  it("is one America/Chicago calendar day (CDT midnight to CDT midnight)", () => {
+    expect(chicagoDayWindow("2026-10-14")).toEqual({ from: "2026-10-14T05:00:00.000Z", to: "2026-10-15T05:00:00.000Z" });
   });
-  it("rejects a bad boundary", () => {
-    expect(previousDayWindow("nope")).toBeNull();
+  it("is 25 hours on the day DST ends and 23 on the day it starts", () => {
+    expect(chicagoDayWindow("2026-11-01")).toEqual({ from: "2026-11-01T05:00:00.000Z", to: "2026-11-02T06:00:00.000Z" });
+    expect(chicagoDayWindow("2027-03-14")).toEqual({ from: "2027-03-14T06:00:00.000Z", to: "2027-03-15T05:00:00.000Z" });
+  });
+  it("narrows to the part older than a cursor inside the day, never past the day", () => {
+    expect(chicagoDayWindow("2026-10-14", "2026-10-14T20:00:00.000Z")).toEqual({ from: "2026-10-14T05:00:00.000Z", to: "2026-10-14T20:00:00.000Z" });
+    expect(chicagoDayWindow("2026-10-14", "2026-10-20T00:00:00.000Z")?.to).toBe("2026-10-15T05:00:00.000Z");
+  });
+  it("rejects a malformed day or cursor", () => {
+    expect(chicagoDayWindow("yesterday")).toBeNull();
+    expect(chicagoDayWindow("2026-10-14", "nope")).toBeNull();
+  });
+  it("keys instants by Chicago day (late evening Chicago is still the same day in UTC+1)", () => {
+    expect(chicagoDayKey(Date.parse("2026-10-15T03:30:00Z"))).toBe("2026-10-14");
+    expect(previousDayKey("2026-03-01")).toBe("2026-02-28");
   });
 });
 

@@ -9,7 +9,8 @@ import { withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { BACKLOG_PAGE, loadBacklogHolds, type LooseSupabase } from "./queries";
-import type { BacklogPage } from "./hold-action-types";
+import { loadHoldsSlice } from "./holds-by-activity";
+import type { BacklogPage, OlderHoldsPage } from "./hold-action-types";
 
 const MAX_PAGE = 500;
 
@@ -78,4 +79,48 @@ export async function loadBacklogHoldsAction(input: {
       nextOffset: page.nextOffset,
     },
   };
+}
+
+/**
+ * "Show older" for the waiting column: the next slice of ONE ordering (latest
+ * activity first, DNC-locked excluded) across every open hold, New and Backlog.
+ */
+export async function loadOlderHoldsAction(input: {
+  offset: number;
+  limit?: number;
+}): Promise<Result<OlderHoldsPage>> {
+  let orgId: string | null = null;
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user?.id) {
+      const memberships = (await getCallerMembershipsOrThrow()).filter((m) => m.user_id === user.id);
+      orgId = messagesV2OrgId(memberships);
+    }
+  } catch {
+    orgId = null;
+  }
+  if (!orgId) {
+    return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
+  }
+  const offset = clampInt(input?.offset, 0, 1_000_000);
+  const limit = Math.max(1, clampInt(input?.limit, 50, MAX_PAGE));
+  const supabase = (await createClient()) as unknown as LooseSupabase;
+  const slice = await loadHoldsSlice(supabase, orgId, offset, limit);
+  if (!slice || slice.failed) {
+    return err({ code: "OLDER_UNAVAILABLE", message: "Older waiting texts could not be loaded." });
+  }
+  const holds = await withFreshSeen(supabase, orgId, slice.holds);
+  const labels = await loadRunLabels(
+    supabase,
+    holds.map((h) => ({
+      id: h.id,
+      contact_id: h.run?.contact_id ?? null,
+      property_id: h.property_id,
+      inbound_message_id: h.run?.inbound_message_id ?? "",
+    })),
+  );
+  return { ok: true, data: { holds, labels: [...labels.entries()], total: slice.total } };
 }

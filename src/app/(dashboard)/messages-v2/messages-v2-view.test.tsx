@@ -255,28 +255,35 @@ describe("MessagesV2View", () => {
     expect(text).not.toContain("Sandra is on");
   });
 
-  it("'Show older' pages the New holds the page did not load before the backlog, and says how many remain", async () => {
+  it("'Show older' asks the server for the next slice of the same order and says how many remain", async () => {
     const holds = Array.from({ length: 3 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
-    const page = (id: string, hasMore: boolean, nextOffset: number) => ({
+    const loadOlderHolds = vi.fn(async (input: { offset: number; limit?: number }) => ({
       ok: true as const,
-      data: { holds: [{ ...openHold(id), since: new Date(NOW - 50 * 86_400_000).toISOString() }], labels: [], backlogTotal: 0, hasMore, nextOffset },
-    });
-    const loadBacklog = vi.fn(async (input: { offset: number; limit?: number; bucket?: "new" | "backlog" }) =>
-      input.bucket === "new" ? page("new-extra", false, 301) : page("backlog-one", false, 1),
-    );
-    await mount({
-      ...props([], holds),
-      holdsSplit: { backlogBefore: "2026-10-08T00:00:00Z", newTotal: 301, newShown: 300, backlogTotal: 1 },
-      loadBacklog,
-    });
+      data: { holds: [{ ...openHold(`older${input.offset}`), since: new Date(NOW - 50 * 86_400_000).toISOString() }], labels: [], total: 5 },
+    }));
+    await mount({ ...props([], holds), holdsTotal: 5, loadOlderHolds });
+    expect(screen.getByTestId("waiting-count")).toHaveTextContent("5");
     expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
-    expect(loadBacklog).toHaveBeenLastCalledWith({ offset: 300, limit: 50, bucket: "new" });
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ offset: 3, limit: 50 });
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
-    expect(loadBacklog).toHaveBeenLastCalledWith({ offset: 0, limit: 50, bucket: "backlog" });
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ offset: 4, limit: 50 });
     expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("keeps the server's order across the page seam: a later slice never jumps above page one", async () => {
+    const page1 = [{ ...openHold("newest"), since: new Date(NOW - 1000).toISOString() }];
+    const loadOlderHolds = vi.fn(async () => ({
+      ok: true as const,
+      data: { holds: [{ ...openHold("later-slice"), since: new Date(NOW - 5000).toISOString() }], labels: [], total: 2 },
+    }));
+    await mount({ ...props([], page1), holdsTotal: 2, loadOlderHolds });
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(2));
+    const texts = screen.getAllByTestId("waiting-card").map((c) => c.textContent);
+    expect(texts).toHaveLength(2);
   });
 
   it("shows a failed alert and load warnings as short plain lines", async () => {
@@ -305,7 +312,7 @@ describe("MessagesV2View", () => {
     expect(screen.getByRole("button", { name: "Take over (Sandra stops)" })).toBeInTheDocument();
   });
 
-  it("steps back from the oldest run returned when a day comes back full", async () => {
+  it("continues the same Chicago day from the oldest run returned when a day comes back full", async () => {
     const runs = Array.from({ length: 200 }, (_, i) => run(`y${i}`, { started_at: new Date(NOW - 3600_000 * 2 - i * 60_000).toISOString(), status: "closed" }));
     const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [] } }));
     await mount({ ...props([run("today", { started_at: new Date(NOW).toISOString() })]), loadTapeDay });
@@ -313,8 +320,22 @@ describe("MessagesV2View", () => {
     await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
     await userEvent.click(screen.getByTestId("show-earlier"));
     await waitFor(() => expect(loadTapeDay).toHaveBeenCalledTimes(2));
-    const second = (loadTapeDay.mock.calls as unknown as Array<[{ before: string }]>)[1][0].before;
-    expect(Date.parse(second)).toBe(NOW - 3600_000 * 2 - 199 * 60_000);
+    const calls = loadTapeDay.mock.calls as unknown as Array<[{ day: string; before: string | null }]>;
+    expect(calls[1][0].day).toBe(calls[0][0].day);
+    expect(Date.parse(calls[1][0].before!)).toBe(NOW - 3600_000 * 2 - 199 * 60_000);
+  });
+
+  it("skips empty days on its own so one click shows the next day with texts", async () => {
+    const loadTapeDay = vi.fn(async (_input: { day: string }) => ({
+      ok: true as const,
+      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [] },
+    }));
+    await mount({ ...props([run("today")]), loadTapeDay });
+    await userEvent.click(screen.getByTestId("show-earlier"));
+    await waitFor(() => expect(screen.getAllByTestId("tape-card")).toHaveLength(2));
+    expect(loadTapeDay).toHaveBeenCalledTimes(3);
+    const days = (loadTapeDay.mock.calls as unknown as Array<[{ day: string }]>).map((c) => c[0].day);
+    expect(new Set(days).size).toBe(3);
   });
 
   it("says Sandra is watching, not on, when every rule is watch-only", async () => {
@@ -503,25 +524,20 @@ describe("MessagesV2View", () => {
     expect(screen.queryByText(/nothing is waiting for you/i)).toBeNull();
   });
 
-  it("'Show older' reveals the loaded holds beyond the first 20, then pages in the backlog", async () => {
+  it("'Show older' reveals the loaded holds beyond the first 20 before asking the server", async () => {
     const holds = Array.from({ length: 22 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
-    const loadBacklog = vi.fn(async () => ({
+    const loadOlderHolds = vi.fn(async () => ({
       ok: true as const,
-      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], backlogTotal: 1, hasMore: false, nextOffset: 1 },
+      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], total: 23 },
     }));
-    await mount({
-      ...props([], holds),
-      holdsSplit: { backlogBefore: "2026-10-08T00:00:00Z", newTotal: 22, newShown: 22, backlogTotal: 1 },
-      loadBacklog,
-    });
+    await mount({ ...props([], holds), holdsTotal: 23, loadOlderHolds });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
     await userEvent.click(screen.getByTestId("show-older"));
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(22);
-    expect(loadBacklog).not.toHaveBeenCalled();
+    expect(loadOlderHolds).not.toHaveBeenCalled();
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(23));
-    expect(loadBacklog).toHaveBeenCalledWith({ offset: 0, limit: 50, bucket: "backlog" });
-    expect(screen.queryByText(/backlog/i)).toBeNull();
+    expect(loadOlderHolds).toHaveBeenCalledWith({ offset: 22, limit: 50 });
   });
 
   it("'Show yesterday's tape' loads the earlier day and shows it under its own day heading", async () => {
