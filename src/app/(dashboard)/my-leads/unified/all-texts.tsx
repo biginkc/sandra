@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { Button } from "@/components/ui/button";
 
 import { MyLeadSmsStrip } from "../_components/sms-strip";
 import type { MyLeadDetailPanelProps } from "../_components/types";
@@ -9,8 +11,8 @@ import type { WorkFacts } from "./contract";
 
 /**
  * "Show all texts": the full text history (the existing strip, history only) with the existing composer
- * beneath it. The composer carries the reply-to stamp: the newest inbound the classifier knows about
- * (facts.latestInbound.messageId), captured by the composer when the rep opens it. This is a composition of
+ * beneath it. The composer carries the reply-to stamp: the newest inbound shown in the loaded thread, captured by the
+ * composer when the rep opens it (facts.latestInbound only detects that a newer reply needs a refresh first). This is a composition of
  * existing components, not a new surface; the container supplies the detail state it already loads.
  */
 export type AllTextsProps = {
@@ -57,20 +59,58 @@ function useFocusComposerTextarea(container: React.RefObject<HTMLElement | null>
   }, [container]);
 }
 
+/** The newest inbound text in the loaded thread (the one the rep can actually see), or null. */
+function newestDisplayedInbound(state: AllTextsProps["state"]): { id: string; createdAt: string } | null {
+  if (state.status !== "ready") return null;
+  let newest: { id: string; createdAt: string } | null = null;
+  for (const message of state.detail.messages.rows) {
+    if (message.direction !== "inbound") continue;
+    if (!newest || Date.parse(message.createdAt) > Date.parse(newest.createdAt)) newest = { id: message.id, createdAt: message.createdAt };
+  }
+  return newest;
+}
+
 export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent, defaultOpen = false, canCompose = true }: AllTextsProps) {
   const container = useRef<HTMLDivElement>(null);
   useFocusComposerTextarea(container);
+  // The reply-to stamp is the newest inbound DISPLAYED in the loaded thread, never the classifier's latest: a reply that
+  // arrived after the thread loaded must not be marked answered by a send the rep wrote without seeing it.
+  const displayed = useMemo(() => newestDisplayedInbound(state), [state]);
+  const ready = state.status === "ready";
+  const loadedIds = useMemo(() => new Set(ready ? state.detail.messages.rows.map((m) => m.id) : []), [ready, state]);
+  const newerId = facts.latestInbound?.messageId ?? null;
+  const stale = ready && newerId !== null && !loadedIds.has(newerId);
+  // Refresh the cached thread once per newer reply; the notice below has a manual Refresh too.
+  const refreshedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!stale || !newerId || refreshedFor.current === newerId) return;
+    refreshedFor.current = newerId;
+    onRetry();
+  }, [stale, newerId, onRetry]);
+  // A composer that is already on screen keeps its own captured stamp (it never re-stamps mid-draft); a composer that
+  // has not opened yet waits for a thread that is loaded and current.
+  const [composerShown, setComposerShown] = useState(false);
+  const showComposer = canCompose && (state.status === "error" || (ready && !stale) || composerShown);
+  if (showComposer && !composerShown) setComposerShown(true);
   return (
     <div ref={container} data-testid={`all-texts-${facts.propertyId}`} className="min-w-0 space-y-3">
       <MyLeadSmsStrip state={state} onRetry={onRetry} onLoadDetailPage={onLoadDetailPage} />
-      {canCompose && (
+      {canCompose && stale && (
+        <div role="status" data-testid={`all-texts-stale-${facts.propertyId}`} className="flex flex-wrap items-center gap-2 rounded border border-amber-300 p-2 text-[12.5px]">
+          <span>New reply arrived</span>
+          <Button type="button" variant="outline" size="xs" onClick={onRetry}>
+            Refresh
+          </Button>
+        </div>
+      )}
+      {showComposer && (
       <div className="flex flex-wrap items-start gap-2">
         <RepSmsComposer
           defaultOpen={defaultOpen}
           propertyId={facts.propertyId}
           placement="action"
           replyToPhone={replyToPhone}
-          inboundMessageId={facts.latestInbound?.messageId ?? null}
+          inboundMessageId={displayed?.id ?? null}
           onSent={(messageId) => {
             onRetry();
             onSent?.(messageId);

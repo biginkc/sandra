@@ -120,8 +120,9 @@ function conversationState(state: MyLeadDetailState | undefined): ConversationBo
   };
 }
 
-function openLeadWindow(propertyId: string) {
-  window.open(`/leads/${propertyId}`, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
+function openLeadWindow(propertyId: string, review?: { kind: string; refId: string | null }) {
+  const params = review ? new URLSearchParams({ broken: review.kind, ...(review.refId ? { ref: review.refId } : {}) }).toString() : "";
+  window.open(`/leads/${propertyId}${params ? `?${params}` : ""}`, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
 }
 
 export function UnifiedQueue({
@@ -456,13 +457,20 @@ export function UnifiedQueue({
         setActionError("The change could not be saved. Please retry.");
       }
     });
+  // Each fix routes to an existing workflow and carries the item's refId. The composer resumes the lead's saved
+  // follow-up (required/draft/failed obligation, or a durable ledger draft) and offers its own reconcile / resume
+  // actions, so Send text, Resend and Check status open it; blocked texts show their reason there too. AI dead
+  // letters and Norma review have no in-page surface, so they open the lead page on that item.
   const brokenAction = (item: BrokenItem, propertyId: string) => {
     switch (item.action) {
       case "send_text":
       case "resend":
       case "check_status":
+        openTexts(propertyId, true);
+        break;
       case "review":
-        openTexts(propertyId);
+        if (item.kind === "ai_reply_failed" || item.kind === "norma_needs_review") openLeadWindow(propertyId, { kind: item.kind, refId: item.refId });
+        else openTexts(propertyId, true);
         break;
       case "fix_drip":
       case "open_campaign":

@@ -29,6 +29,11 @@ const detailState = {
   },
 };
 
+const withInbound = (id: string, createdAt: string) => ({
+  ...detailState,
+  detail: { ...detailState.detail, messages: { rows: [{ id, body: "hi", direction: "inbound" as const, createdAt, createdLabel: "", deliveryStatus: "received", attachmentCount: 0 }], hasMore: false, nextCursor: null } },
+});
+
 beforeEach(() => { composer.props = null; composer.showTextarea = false; });
 
 describe("<AllTexts />", () => {
@@ -36,12 +41,25 @@ describe("<AllTexts />", () => {
     render(
       <AllTexts
         facts={{ propertyId: "lead-1", latestInbound: { at: "2026-10-14T14:00:00Z", kind: "text", messageId: "inb-7", handled: false, contactOnly: false } }}
-        state={detailState}
+        state={withInbound("inb-7", "2026-10-14T14:00:00Z")}
         onRetry={() => {}}
       />,
     );
     expect(screen.getByRole("region", { name: "Text history" })).toBeInTheDocument();
     expect(composer.props).toMatchObject({ propertyId: "lead-1", placement: "action", inboundMessageId: "inb-7" });
+  });
+  it("stamps the newest inbound DISPLAYED, and a newer classifier reply blocks the composer until the thread refreshes", () => {
+    const onRetry = vi.fn();
+    render(
+      <AllTexts
+        facts={{ propertyId: "lead-1", latestInbound: { at: "2026-10-14T15:00:00Z", kind: "text", messageId: "inb-Y", handled: false, contactOnly: false } }}
+        state={withInbound("inb-X", "2026-10-14T14:00:00Z")}
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByTestId("all-texts-stale-lead-1")).toHaveTextContent("New reply arrived");
+    expect(screen.queryByRole("button", { name: "Text lead" })).not.toBeInTheDocument();
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
   it("passes a null stamp when there is no inbound", () => {
     render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);

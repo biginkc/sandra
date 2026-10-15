@@ -20,7 +20,10 @@
  *  syncQuery (adopt a URL query on Back/Forward; no onQueryChange),
  *  refresh() (swap in the new page, clears listUpdated), retryNow(), afterAction(propertyId), dismissNotice().
  *
- * Concurrency: every page load carries a sequence number; "navigation" loads (query change, Refresh, member change)
+ * Concurrency: ONE read clock stamps every read when it STARTS (navigation, background refresh, retained-row facts,
+ * after-action facts and counts). A response writes a property's facts only if its stamp is newer than that
+ * property's latest accepted stamp, and a background response writes list/counts only if newer than the view's latest
+ * accepted stamp. Navigation additionally carries a sequence number; "navigation" loads (query change, Refresh, member change)
  * drop older responses, and background reads (timer, visibility, after-action counts) are dropped when a navigation
  * load or a row mutation started after them, or when a newer background read exists.
  */
@@ -31,6 +34,7 @@ import type {
   UnifiedActionFailure,
   UnifiedInitial,
   WorkFacts,
+  WorkPage,
   WorkChip,
   WorkQuery,
   WorkStage,
@@ -109,9 +113,13 @@ const MIN_BOUNDARY_MS = 1000;
 const READ_FAILED = "My Leads could not refresh.";
 const ACTION_READ_FAILED = READ_FAILED;
 
-const fail = (message: string): UnifiedActionFailure => ({ ok: false, message });
+const fail = (message: string): UnifiedActionFailure => ({
+  ok: false,
+  message,
+});
 
-type FactsRead = { ok: true; rows: WorkFacts[]; missing: string[] } | UnifiedActionFailure;
+type FactsRead =
+  { ok: true; rows: WorkFacts[]; missing: string[] } | UnifiedActionFailure;
 
 export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
   const { initial, memberId, paused } = options;
@@ -125,8 +133,10 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
   const mutEpoch = useRef(0);
   const navInFlight = useRef(false);
   const missedWhilePaused = useRef(false);
-  // Per-property facts sequence: a facts response only lands for a property if no newer facts read for it has started.
-  const factsSeq = useRef(new Map<string, number>());
+  // One monotonic read clock. Every read is stamped when it starts; accepted stamps are tracked per property and per view.
+  const clock = useRef(0);
+  const propAccepted = useRef(new Map<string, number>());
+  const viewAccepted = useRef(0);
 
   // Refs mirror props for the stable callbacks below. Effects run in order, so this one comes first.
   useEffect(() => {
@@ -140,40 +150,89 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     setState(value);
   }, []);
 
-  const loadPageSafe = useCallback(async (member: string, query: WorkQuery): Promise<LoadWorkPageResult> => {
-    try {
-      return await optsRef.current.loadPage(member, query);
-    } catch {
-      return fail(READ_FAILED);
-    }
-  }, []);
-
-  const loadFactsAll = useCallback(async (member: string, ids: string[]): Promise<FactsRead> => {
-    try {
-      const results = await Promise.all(chunk(ids).map((c) => optsRef.current.loadFacts(member, c)));
-      const rows: WorkFacts[] = [];
-      const missing: string[] = [];
-      for (const r of results) {
-        if (!r.ok) return r;
-        rows.push(...r.facts.rows);
-        missing.push(...r.facts.missing);
+  const loadPageSafe = useCallback(
+    async (member: string, query: WorkQuery): Promise<LoadWorkPageResult> => {
+      try {
+        return await optsRef.current.loadPage(member, query);
+      } catch {
+        return fail(READ_FAILED);
       }
-      return { ok: true, rows, missing };
-    } catch {
-      return fail(ACTION_READ_FAILED);
-    }
-  }, []);
+    },
+    [],
+  );
 
-  const claimFacts = useCallback((ids: string[]) => {
-    const claim = new Map<string, number>();
-    for (const id of ids) {
-      const n = (factsSeq.current.get(id) ?? 0) + 1;
-      factsSeq.current.set(id, n);
-      claim.set(id, n);
-    }
-    return claim;
-  }, []);
-  const stillCurrent = (claim: Map<string, number>, id: string) => factsSeq.current.get(id) === claim.get(id);
+  const loadFactsAll = useCallback(
+    async (member: string, ids: string[]): Promise<FactsRead> => {
+      try {
+        const results = await Promise.all(
+          chunk(ids).map((c) => optsRef.current.loadFacts(member, c)),
+        );
+        const rows: WorkFacts[] = [];
+        const missing: string[] = [];
+        for (const r of results) {
+          if (!r.ok) return r;
+          rows.push(...r.facts.rows);
+          missing.push(...r.facts.missing);
+        }
+        return { ok: true, rows, missing };
+      } catch {
+        return fail(ACTION_READ_FAILED);
+      }
+    },
+    [],
+  );
+
+  const fresh = useCallback(
+    (id: string, stamp: number) => stamp > (propAccepted.current.get(id) ?? 0),
+    [],
+  );
+  const record = useCallback(
+    (ids: Iterable<string>, stamp: number) => {
+      for (const id of ids)
+        if (fresh(id, stamp)) propAccepted.current.set(id, stamp);
+    },
+    [fresh],
+  );
+  /**
+   * A page read may carry rows older than facts another read already landed for the same property. Those rows keep the
+   * facts on screen (or are dropped if the property has since left the list).
+   */
+  const reconcilePage = useCallback(
+    (page: WorkPage, stamp: number, s: WorkState): WorkPage => {
+      const held = new Set(
+        page.rows
+          .filter((r) => !fresh(r.propertyId, stamp))
+          .map((r) => r.propertyId),
+      );
+      if (!held.size) return page;
+      const current = (id: string) =>
+        s.facts[id] ?? (s.pinned?.propertyId === id ? s.pinned : undefined);
+      const rows = page.rows.flatMap((r) =>
+        !held.has(r.propertyId)
+          ? [r]
+          : current(r.propertyId)
+            ? [current(r.propertyId)!]
+            : [],
+      );
+      return {
+        ...page,
+        rows,
+        ids: page.ids.filter((id) => !held.has(id) || current(id)),
+      };
+    },
+    [fresh],
+  );
+  /** Mark a page's rows as written at `stamp` (call with the reconciled page, after committing). */
+  const recordPage = useCallback(
+    (page: WorkPage, stamp: number) => {
+      record(
+        page.rows.map((r) => r.propertyId),
+        stamp,
+      );
+      if (stamp > viewAccepted.current) viewAccepted.current = stamp;
+    },
+    [record],
+  );
 
   const notify = useCallback((query: WorkQuery, replace = false) => {
     if (replace) optsRef.current.onQueryChange?.(query, { replace: true });
@@ -186,17 +245,26 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
       const seq = ++navSeq.current;
       navInFlight.current = true;
       commit((s) => ({ ...s, loading: true }));
+      const stamp = ++clock.current;
       const res = await loadPageSafe(memberRef.current, query);
       if (seq !== navSeq.current) return;
       navInFlight.current = false;
       if (!res.ok) {
-        commit((s) => ({ ...s, loading: false, stale: s.order.length > 0 || s.pinned !== null, error: res.message }));
+        commit((s) => ({
+          ...s,
+          loading: false,
+          stale: s.order.length > 0 || s.pinned !== null,
+          error: res.message,
+        }));
         return;
       }
-      commit((s) => swapIn(s, res.page, query));
-      if (res.page.page !== query.page) notify({ ...query, page: res.page.page }, true);
+      const page = reconcilePage(res.page, stamp, stateRef.current);
+      commit((s) => swapIn(s, page, query));
+      recordPage(page, stamp);
+      if (res.page.page !== query.page)
+        notify({ ...query, page: res.page.page }, true);
     },
-    [commit, loadPageSafe, notify],
+    [commit, loadPageSafe, notify, reconcilePage, recordPage],
   );
 
   /** Background read: re-run the page read with the current query and fold it into the displayed list. */
@@ -207,44 +275,75 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     const my = ++bgSeq.current;
     const member = memberRef.current;
     const query = stateRef.current.query;
-    const stale = () => nav0 !== navSeq.current || mut0 !== mutEpoch.current || my !== bgSeq.current;
+    const stamp = ++clock.current;
+    const stale = () =>
+      nav0 !== navSeq.current ||
+      mut0 !== mutEpoch.current ||
+      my !== bgSeq.current ||
+      stamp < viewAccepted.current;
     const res = await loadPageSafe(member, query);
     if (stale()) return;
     if (!res.ok) {
       commit((s) => ({ ...s, error: res.message }));
       return;
     }
-    const page = res.page;
     const s = stateRef.current;
+    const page = reconcilePage(res.page, stamp, s);
     const clamped = page.page !== query.page;
     if (s.displayedKey !== queryKey(query) || s.revision === null) {
       // Nothing (or a different query) is on screen: this read IS the list.
       commit((cur) => swapIn(cur, page, query));
+      recordPage(page, stamp);
       if (clamped) notify({ ...query, page: page.page }, true);
       return;
     }
+    // Facts for retained rows and the off-page pinned lead are re-read under the same clock.
+    const refreshFacts = async (ids: string[]) => {
+      if (!ids.length) return;
+      const factsStamp = ++clock.current;
+      const facts = await loadFactsAll(member, ids);
+      if (stale()) return;
+      commit((cur) =>
+        facts.ok
+          ? applyFacts(
+              cur,
+              facts.rows.filter((r) => fresh(r.propertyId, factsStamp)),
+              facts.missing.filter((id) => fresh(id, factsStamp)),
+            )
+          : { ...cur, error: facts.message },
+      );
+      if (facts.ok) {
+        record(
+          facts.rows.map((r) => r.propertyId),
+          factsStamp,
+        );
+        record(facts.missing, factsStamp);
+      }
+    };
     if (!clamped && page.revision === s.revision) {
       commit((cur) => replaceInPlace(cur, page));
+      recordPage(page, stamp);
+      if (s.pinned && !s.order.includes(s.pinned.propertyId))
+        await refreshFacts([s.pinned.propertyId]);
       return;
     }
     // Revision changed: keep what is on screen, take the counts, refresh the retained rows' facts.
     commit((cur) => markChanged(cur, page));
+    if (stamp > viewAccepted.current) viewAccepted.current = stamp;
     const ids = [...s.order];
-    if (s.pinned && !ids.includes(s.pinned.propertyId)) ids.push(s.pinned.propertyId);
-    if (!ids.length) return;
-    const claim = claimFacts(ids);
-    const facts = await loadFactsAll(member, ids);
-    if (stale()) return;
-    commit((cur) =>
-      facts.ok
-        ? applyFacts(
-            cur,
-            facts.rows.filter((r) => stillCurrent(claim, r.propertyId)),
-            facts.missing.filter((id) => stillCurrent(claim, id)),
-          )
-        : { ...cur, error: facts.message },
-    );
-  }, [claimFacts, commit, loadFactsAll, loadPageSafe, notify]);
+    if (s.pinned && !ids.includes(s.pinned.propertyId))
+      ids.push(s.pinned.propertyId);
+    await refreshFacts(ids);
+  }, [
+    commit,
+    fresh,
+    loadFactsAll,
+    loadPageSafe,
+    notify,
+    reconcilePage,
+    record,
+    recordPage,
+  ]);
 
   /** Timer / visibility entry point: respects hidden tab and paused composers. */
   const tick = useCallback(() => {
@@ -291,7 +390,10 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
   useEffect(() => {
     if (!nextChangeAt) return;
     const now = optsRef.current.now ?? Date.now;
-    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_BOUNDARY_MS, Date.parse(nextChangeAt) - now()));
+    const delay = Math.min(
+      MAX_TIMEOUT_MS,
+      Math.max(MIN_BOUNDARY_MS, Date.parse(nextChangeAt) - now()),
+    );
     const id = setTimeout(tick, delay);
     return () => clearTimeout(id);
   }, [nextChangeAt, readCount, tick]);
@@ -328,20 +430,23 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
       const member = memberRef.current;
       mutEpoch.current++;
       try {
-        const claim = claimFacts([propertyId]);
+        const factsStamp = ++clock.current;
         const facts = await loadFactsAll(member, [propertyId]);
         if (nav0 !== navSeq.current) return;
-        // A newer facts read for this lead started while this one was in flight: it owns the row.
-        if (!stillCurrent(claim, propertyId)) return;
+        // A read that started later already landed facts for this lead: it owns the row.
+        if (!fresh(propertyId, factsStamp)) return;
         if (!facts.ok) {
           commit((s) => ({ ...s, error: ACTION_READ_FAILED }));
           return;
         }
         const row = facts.rows.find((r) => r.propertyId === propertyId);
+        propAccepted.current.set(propertyId, factsStamp);
         commit((s) => {
-          const shown = s.order.includes(propertyId) || s.pinned?.propertyId === propertyId;
+          const shown =
+            s.order.includes(propertyId) || s.pinned?.propertyId === propertyId;
           if (!shown) return s;
-          if (!row) return removeRows(s, [propertyId], "No longer in your queue");
+          if (!row)
+            return removeRows(s, [propertyId], "No longer in your queue");
           const decision = afterActionDecision(row, s.query);
           return decision.keep
             ? updateOne(s, row)
@@ -350,22 +455,41 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
         // Counts only: the displayed list is never reordered by this read.
         const query = stateRef.current.query;
         const my = ++bgSeq.current;
+        const stamp = ++clock.current;
         const res = await loadPageSafe(member, query);
-        if (nav0 !== navSeq.current || my !== bgSeq.current) return;
-        if (res.ok) commit((s) => applyCountsOnly(s, res.page));
-        else commit((s) => ({ ...s, error: res.message }));
+        if (
+          nav0 !== navSeq.current ||
+          my !== bgSeq.current ||
+          stamp < viewAccepted.current
+        )
+          return;
+        if (res.ok) {
+          const page = reconcilePage(res.page, stamp, stateRef.current);
+          const cur = stateRef.current;
+          const same =
+            page.page === cur.query.page &&
+            page.ids.length === cur.order.length &&
+            page.ids.every((id, i) => id === cur.order[i]);
+          commit((s) => applyCountsOnly(s, page));
+          if (same) recordPage(page, stamp);
+          else if (stamp > viewAccepted.current) viewAccepted.current = stamp;
+        } else commit((s) => ({ ...s, error: res.message }));
       } finally {
         mutEpoch.current++;
       }
     },
-    [claimFacts, commit, loadFactsAll, loadPageSafe],
+    [commit, fresh, loadFactsAll, loadPageSafe, reconcilePage, recordPage],
   );
 
-  const refresh = useCallback(() => void runNav(stateRef.current.query), [runNav]);
+  const refresh = useCallback(
+    () => void runNav(stateRef.current.query),
+    [runNav],
+  );
 
   const retryNow = useCallback(() => {
     const s = stateRef.current;
-    if (s.displayedKey !== queryKey(s.query) || s.revision === null) void runNav(s.query);
+    if (s.displayedKey !== queryKey(s.query) || s.revision === null)
+      void runNav(s.query);
     else void runRead();
   }, [runNav, runRead]);
 
@@ -385,15 +509,33 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     listUpdated: state.listUpdated,
     notice: state.notice,
     snapshotAt: state.snapshotAt,
-    setTab: useCallback((tab: WorkTab) => changeQuery({ tab, chip: "all" }), [changeQuery]),
-    setChip: useCallback((chip: WorkChip) => changeQuery({ chip }), [changeQuery]),
-    setStage: useCallback((stage: WorkStage | null) => changeQuery({ stage }), [changeQuery]),
-    setSearch: useCallback((search: string) => changeQuery({ search }), [changeQuery]),
-    setPage: useCallback((page: number) => changeQuery({ page }), [changeQuery]),
+    setTab: useCallback(
+      (tab: WorkTab) => changeQuery({ tab, chip: "all" }),
+      [changeQuery],
+    ),
+    setChip: useCallback(
+      (chip: WorkChip) => changeQuery({ chip }),
+      [changeQuery],
+    ),
+    setStage: useCallback(
+      (stage: WorkStage | null) => changeQuery({ stage }),
+      [changeQuery],
+    ),
+    setSearch: useCallback(
+      (search: string) => changeQuery({ search }),
+      [changeQuery],
+    ),
+    setPage: useCallback(
+      (page: number) => changeQuery({ page }),
+      [changeQuery],
+    ),
     syncQuery,
     refresh,
     retryNow,
     afterAction,
-    dismissNotice: useCallback(() => commit((s) => ({ ...s, notice: null })), [commit]),
+    dismissNotice: useCallback(
+      () => commit((s) => ({ ...s, notice: null })),
+      [commit],
+    ),
   };
 }

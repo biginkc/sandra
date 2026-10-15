@@ -343,6 +343,25 @@ it('lastTouch: kind follows the source of the greatest-timestamp touch; null whe
   });
 });
 
+it('lastTouch: an outbound text is timed by when it was sent, not created (campaign created Monday, sent Thursday beats a Wednesday note)', async () => {
+  await withDb(async (db, applyNew) => {
+    const w = await world(db);
+    const t = (ms: number) => w.at(ms);
+    const straddle = await w.lead('straddle');
+    await w.text(straddle, 'outbound', t(-4 * DAY), { campaign: true, sentAt: t(-DAY) });   // created Monday, sent Thursday
+    await w.note(straddle, t(-2 * DAY));                                                    // Wednesday
+    const earlySend = await w.lead('earlysend');
+    await w.text(earlySend, 'outbound', t(-4 * DAY), { campaign: true, sentAt: t(-3 * DAY) });
+    await w.note(earlySend, t(-2 * DAY));                                                   // the note is later than the send
+    await applyNew();
+    const r = await rows(w, db);
+    expect(r[straddle].facts.lastTouch.kind).toBe('campaign_text');
+    expect(r[earlySend].facts.lastTouch.kind).toBe('note');
+    // lastTouch.at is still last_touch_at (created_at based, unchanged), so for the straddle lead the kind and the time can disagree.
+    expect(new Date(r[straddle].facts.lastTouch.at).getTime()).toBe(new Date(r[straddle].facts.lastTouchAt).getTime());
+  });
+});
+
 it('taskKind/snoozed: rows 4, 9 and 11 (callback_booked) carry the kind and snooze state of the earliest task behind the headline time', async () => {
   await withDb(async (db, applyNew) => {
     const w = await world(db);

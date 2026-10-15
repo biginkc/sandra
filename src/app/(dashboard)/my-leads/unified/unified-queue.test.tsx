@@ -29,7 +29,7 @@ const lead = (id: string, reason: WorkFacts["reason"], over: Partial<WorkFacts> 
 
 function seed(): Server {
   const server = makeServer(25);
-  server.add("a1", lead("a1", "new_reply", { latestInbound: { at: "2026-10-14T17:00:00Z", kind: "text", messageId: "m-a1", handled: false, contactOnly: false } }, { at: "2026-10-14T17:00:00Z", kind: "text" }));
+  server.add("a1", lead("a1", "new_reply", { latestInbound: { at: "2026-10-14T17:00:00Z", kind: "text", messageId: "t2", handled: false, contactOnly: false } }, { at: "2026-10-14T17:00:00Z", kind: "text" }));
   server.add("a2", lead("a2", "new_lead", { stage: "not_contacted" }, { assignedAt: "2026-10-14T15:00:00Z", firstCallOverdue: false }));
   server.add("a3", lead("a3", "due", {}, { at: "2026-10-14T14:00:00Z", soon: false }));
   server.add("a4", lead("a4", "call_today", {}, { pinnedAt: "2026-10-14T12:00:00Z" }));
