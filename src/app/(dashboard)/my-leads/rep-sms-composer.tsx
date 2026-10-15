@@ -40,6 +40,8 @@ type RepSmsComposerProps = {
   onSent?: (id?: string) => void
   /** The exact saved phone used by an open Messages thread, when available. */
   replyToPhone?: string | null
+  /** Newest inbound message visible when the composer opened; stamped on the outbound text. */
+  inboundMessageId?: string | null
   /** Optional curated catalog override for tests or a future rollout variant. */
   templates?: readonly RepSmsTemplate[]
   /**
@@ -70,6 +72,8 @@ type StoredRepSmsSubmission = {
   assignmentId: string
   from: string
   to: string
+  /** Reply stamp captured when the composer opened; survives reload and retries. */
+  inboundMessageId?: string | null
 }
 
 const REP_SMS_SUBMISSION_TTL_MS = 24 * 60 * 60 * 1000
@@ -128,6 +132,7 @@ function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: 
       assignmentId: value.assignmentId as string,
       from: value.from as string,
       to: value.to as string,
+      inboundMessageId: typeof value.inboundMessageId === "string" ? value.inboundMessageId : null,
     }
   } catch {
     try { window.localStorage.removeItem(key) } catch { /* best effort */ }
@@ -262,6 +267,7 @@ export function RepSmsComposer({
   propertyId,
   onSent,
   replyToPhone = null,
+  inboundMessageId = null,
   templates: providedTemplates,
   placement = "inline",
 }: RepSmsComposerProps) {
@@ -282,6 +288,17 @@ export function RepSmsComposer({
   const submission = useRef<StoredRepSmsSubmission | null>(null)
   const templateRequest = useRef(0)
   const previousPropertyId = useRef(propertyId)
+  const openedInbound = useRef<string | null>(inboundMessageId)
+  // After a successful send the next draft answers whatever is shown by then, so
+  // it takes a fresh capture when it starts. Composition and retries keep theirs.
+  const latestInbound = useRef<string | null>(inboundMessageId)
+  latestInbound.current = inboundMessageId
+  const recaptureNextDraft = useRef(false)
+  const startDraft = () => {
+    if (!recaptureNextDraft.current) return
+    recaptureNextDraft.current = false
+    openedInbound.current = latestInbound.current
+  }
 
   // A retained component can be reused for a different queue row. Never let
   // the previous lead's draft or selected sender bleed into that new lead.
@@ -297,7 +314,8 @@ export function RepSmsComposer({
     setSendState(INITIAL_SEND_STATE)
     setRestoredSubmissionBlocked(false)
     submission.current = null
-  }, [propertyId, providedTemplates])
+    openedInbound.current = inboundMessageId
+  }, [propertyId, providedTemplates]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!activated) return
@@ -347,6 +365,10 @@ export function RepSmsComposer({
             setSendState({ status: "unknown", message: "The saved send cannot be safely restored because its exact texting number is no longer assigned. Ask an owner to restore that assignment, then retry." })
             return
           }
+          // The server draft does not carry the reply stamp; reuse the one saved
+          // with the browser copy of the same submission, if any.
+          const storedForDraft = readStoredRepSmsSubmission(result.data.orgId, result.data.actorId, propertyId, result.data.contactId)
+          durable.inboundMessageId = storedForDraft?.key === durable.key ? storedForDraft.inboundMessageId ?? null : null
           submission.current = durable
           setSenderId(savedSender.id)
           setIntroId(durable.composition.introId)
@@ -438,6 +460,7 @@ export function RepSmsComposer({
     if (!id) return
     const template = templates.find((candidate) => candidate.id === id)
     if (!template) return
+    startDraft()
     const requestId = ++templateRequest.current
     // Curated follow-up copy contains a plain editable remainder. Keep the
     // request token so a rapid selection remains deterministic if a future
@@ -467,6 +490,7 @@ export function RepSmsComposer({
           assignmentId: sender.id,
           from: sender.number,
           to: recipient,
+          inboundMessageId: openedInbound.current,
         }
         writeStoredRepSmsSubmission(context?.orgId ?? "", context?.actorId ?? "", propertyId, submission.current)
       }
@@ -480,6 +504,9 @@ export function RepSmsComposer({
       to: recipient,
       obligationId: resumableObligationId,
       idempotencyKey,
+      // A recovered or retried submission keeps the stamp it was created with,
+      // even if that is none; never re-stamp it with replies seen after reload.
+      inboundMessageId: submission.current ? (submission.current.inboundMessageId ?? null) : openedInbound.current,
       composition: {
         acquisitionsManager: submittedComposition.acquisitionsManager,
         introId: submittedComposition.introId,
@@ -524,6 +551,7 @@ export function RepSmsComposer({
           }
           setRemainder((current) => current === remainder ? "" : current)
           setSelectedTemplateId("")
+          recaptureNextDraft.current = true
           if (onSent) {
             onSent(messageId)
           }
@@ -571,7 +599,13 @@ export function RepSmsComposer({
       type="button"
       variant="outline"
       size={actionPlacement ? "sm" : "default"}
-      onClick={() => { setActivated(true); setOpen((value) => !value) }}
+      onClick={() => {
+        // Capture the newest inbound shown right now, not at send time.
+        // Re-showing a composer that already holds a draft keeps its stamp.
+        if (!open && !submission.current && !remainder.trim()) openedInbound.current = inboundMessageId
+        setActivated(true)
+        setOpen((value) => !value)
+      }}
       aria-expanded={open}
     >
       {open ? "Hide text" : "Text lead"}
@@ -642,7 +676,7 @@ export function RepSmsComposer({
             id={`rep-sms-remainder-${propertyId}`}
             aria-label="Editable message remainder"
             value={remainder}
-            onChange={(event) => setRemainder(event.target.value)}
+            onChange={(event) => { startDraft(); setRemainder(event.target.value) }}
             disabled={pending || submissionLocked}
             maxLength={2000}
             rows={4}

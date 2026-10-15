@@ -88,6 +88,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
 // they pull in next/server's `after` and the Supabase server client.
+vi.mock("../leads/send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("../leads/actions", () => ({
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),

@@ -11,6 +11,7 @@ vi.mock("../actions", () => ({
   loadLeadVars: vi.fn(),
   sendSmsFromLead: vi.fn(),
 }));
+vi.mock("../send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
@@ -19,7 +20,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
-import { sendSmsFromLead } from "../actions";
+import { sendSmsFromLeadStamped as sendSmsFromLead } from "../send-sms-stamped";
 import { InlineReply } from "./inline-reply";
 
 describe("<InlineReply /> disabled explanations", () => {
@@ -136,6 +137,7 @@ describe("<InlineReply /> disabled explanations", () => {
         null,
         false,
         "+18165550123",
+        null,
       );
     });
     expect(composer).toHaveValue("");
@@ -307,6 +309,7 @@ describe("<InlineReply /> disabled explanations", () => {
       null,
       false,
       "+18165550123",
+      null,
     );
     expect(composer).toBeDisabled();
     expect(sendButton).toBeDisabled();
@@ -330,5 +333,20 @@ describe("<InlineReply /> disabled explanations", () => {
 
     await waitFor(() => expect(composer).toHaveValue(""));
     expect(routerRefreshMock).toHaveBeenCalledOnce();
+  });
+  it("stamps the inbound shown when the draft started, not one that arrives mid-draft", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    const props = { propertyId: "property-1", homeownerContactId: "contact-1", homeownerPhone: "+18165550123" };
+    const view = render(<InlineReply {...props} inboundMessageId="inbound-X" />);
+    await user.type(screen.getByLabelText("Reply to this lead"), "Working on it");
+    view.rerender(<InlineReply {...props} inboundMessageId="inbound-Y" />);
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith("property-1", "Working on it", null, false, "+18165550123", "inbound-X");
+    });
   });
 });

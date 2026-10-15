@@ -12,6 +12,7 @@ import { getMessagingProvider } from "./registry";
 import { sendSmsToContact, type RepSmsDeliveryReceiptAuthority, type SendSmsOutcome } from "./send";
 import { sendilloFromEnvWithOptions } from "./providers/sendillo";
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
+import { resolveInboundStamp } from "./inbound-stamp";
 import type { DialpadFromOption, MessagingProvider, ProviderSenderNumber } from "./types";
 import {
   composeRepSms,
@@ -590,6 +591,65 @@ async function recordRepSmsLedgerResult(
   }
 }
 
+/**
+ * Reply-to stamp for a human rep text. The persisted stamp (on the obligation or
+ * ledger row) wins and is read through a read-only function; otherwise the
+ * browser's validated id is bound once (first writer wins). When the
+ * authoritative value cannot be established the text still sends, but carries
+ * `inbound_stamp_unresolved` instead of an id: a plain unstamped text would be
+ * credited by time ordering with replies that arrived while it was being
+ * written, the marker makes it handle none.
+ */
+type RepSmsInboundStamp = { stamp: string | null; unresolved: boolean };
+
+async function resolveRepSmsInboundStamp(args: {
+  orgId: string;
+  propertyId: string;
+  supplied: string | null | undefined;
+  target: { kind: "obligation" | "draft"; id: string } | null;
+}): Promise<RepSmsInboundStamp> {
+  const scope = { orgId: args.orgId, propertyId: args.propertyId };
+  const captured = Boolean(args.supplied);
+  if (!captured && !args.target) return { stamp: null, unresolved: false };
+  const admin = createAdminClient();
+  const supplied = captured ? await resolveInboundStamp(admin, args.supplied, scope) : null;
+  // A capture that does not validate (or could not be checked) is unresolved.
+  if (!args.target) return { stamp: supplied, unresolved: captured && !supplied };
+  const rpc = admin as unknown as {
+    rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
+  };
+  const call = async (name: string, rpcArgs: Record<string, unknown>) => {
+    // One retry for a transient failure.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await rpc.rpc(name, rpcArgs);
+        if (!result.error) return { ok: true as const, data: result.data };
+        console.warn(`[inbound-stamp] ${name} failed for ${args.target?.kind} ${args.target?.id}: ${result.error.message ?? "unknown"}`);
+      } catch (error) {
+        console.warn(`[inbound-stamp] ${name} threw: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { ok: false as const };
+  };
+  const key = { p_kind: args.target.kind, p_id: args.target.id, p_org_id: args.orgId };
+  // 1. The persisted stamp wins. A stored value that no longer validates is
+  //    dropped and never replaced by a newer browser capture.
+  const stored = await call("fn_get_rep_sms_inbound_stamp", key);
+  if (stored.ok && typeof stored.data === "string") {
+    const valid = await resolveInboundStamp(admin, stored.data, scope);
+    return { stamp: valid, unresolved: !valid };
+  }
+  // 2. Nothing readable is stored. With nothing captured there is nothing to
+  //    bind; an unreadable store with no capture is unresolved.
+  if (!supplied) return { stamp: null, unresolved: captured || !stored.ok };
+  // 3. Bind the browser's validated id (a concurrent bind is returned instead).
+  const bound = await call("fn_bind_rep_sms_inbound_stamp", { ...key, p_inbound_message_id: supplied });
+  if (!bound.ok) return { stamp: null, unresolved: true };
+  if (typeof bound.data !== "string") return { stamp: null, unresolved: true };
+  const valid = await resolveInboundStamp(admin, bound.data, scope);
+  return { stamp: valid, unresolved: !valid };
+}
+
 export type DispatchRepSmsInput = {
   propertyId: string;
   assignmentId: string;
@@ -606,6 +666,12 @@ export type DispatchRepSmsInput = {
   initialRemainder?: string | null;
   remainder?: string | null;
   initialBody?: string | null;
+  /**
+   * Newest inbound message the composer showed when it opened. Validated
+   * server-side and stamped as `metadata.inbound_message_id`; dropped if it
+   * does not belong to this org and property.
+   */
+  inboundMessageId?: string | null;
   /** Present only when resuming a claimed durable obligation. */
   obligationFence?: RepSmsObligationFence;
 };
@@ -673,7 +739,21 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
       deliveryAuthority = claim.authority;
     }
   }
+  const inboundStamp = await resolveRepSmsInboundStamp({
+    orgId: context.orgId,
+    propertyId: input.propertyId,
+    supplied: input.inboundMessageId,
+    // The durable record that survives a reload owns the stamp: the obligation
+    // for a resume, the delivery-ledger row for a generic send/recovered draft.
+    target: fence
+      ? { kind: "obligation", id: fence.obligationId }
+      : deliveryAuthority
+        ? { kind: "draft", id: deliveryAuthority.receiptId }
+        : null,
+  });
   const metadata = {
+    ...(inboundStamp.stamp ? { inbound_message_id: inboundStamp.stamp } : {}),
+    ...(inboundStamp.unresolved ? { inbound_stamp_unresolved: true } : {}),
     repSms: {
       workflow: composition.acquisitionsManager === REP_SMS_ASSISTANT ? "maria-through-mel" : "manager-through-mel",
       policyVersion: composition.policyVersion,

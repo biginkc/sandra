@@ -9,7 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
-import { sendSmsFromLead } from "../leads/actions";
+import { sendSmsFromLeadStamped as sendSmsFromLead } from "../leads/send-sms-stamped";
 import type { InboxFilterCounts } from "./inbox-filters";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import type { Thread } from "@/lib/messages/list-threads";
@@ -57,6 +57,7 @@ vi.mock("./actions", () => ({
   getQueueStats: getQueueStatsMock,
 }));
 
+vi.mock("../leads/send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("../leads/actions", () => ({
   markMessagesReadForThread: vi.fn(async () => ({ ok: true })),
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),

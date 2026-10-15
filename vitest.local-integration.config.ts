@@ -125,6 +125,7 @@ export default defineConfig({
       "supabase/migrations/20261007210100_slack_canary_execution_fence.integration.test.ts",
       "tests/search-oracle/oracle-comparison.integration.test.ts",
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
+      "supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
