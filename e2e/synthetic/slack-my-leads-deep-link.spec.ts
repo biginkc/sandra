@@ -39,6 +39,8 @@ test.beforeAll(async () => {
     `],
     ["strip-actions", `export const loadCallNext=async()=>({ok:true,data:null}); export const loadTriage=async()=>({ok:true,data:{rows:[],nextCursor:null}}); export const setStripOverride=async()=>({ok:true,data:null});`],
     ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}}); export const changeDripAction=startDripForLeads;`],
+    // The unified queue's server actions (flag-on path); this spec renders the flag-off page, so they must never run.
+    ["unified-actions", `const off=async()=>({ok:false,code:'FEATURE_DISABLED',message:'synthetic'}); export const loadWorkPage=off; export const loadWorkFacts=off; export const pinLead=off; export const dismissBroken=off; export const loadUnifiedKpis=off;`],
     ["drip-progress", `export const listDripProgress=async()=>[];`],
     ["supabase-client", `export const createClient=()=>({});`],
     ["sms-actions", `export const loadRepSmsAssignments=async()=>({ok:true,data:[]}); export const loadRepSmsSenderInventory=async()=>({ok:true,data:{eligible:[],ineligible:[]}}); export const saveRepSmsSender=async()=>({ok:true});`],
@@ -89,6 +91,7 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /supabase[\/]client$/ }, () => virtual("supabase-client"))
         build.onResolve({ filter: /login-background$/ }, () => virtual("login-background"))
         build.onResolve({ filter: /^\.\/strip-actions$/ }, () => virtual("strip-actions"))
+        build.onResolve({ filter: /^\.\/unified-actions$/ }, () => virtual("unified-actions"))
         build.onResolve({ filter: /^\.\/actions$/ }, (args) => {
           return args.importer.includes(`${path.sep}(auth)${path.sep}login${path.sep}`)
             ? virtual("login-actions")

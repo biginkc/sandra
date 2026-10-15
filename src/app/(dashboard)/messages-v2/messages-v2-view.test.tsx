@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -501,6 +501,19 @@ describe("MessagesV2View", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("?deadLetter= focus selects that lead's waiting card, or says it is not shown", async () => {
+    const a = { ...openHold("p1"), ...at(1) };
+    const b = { ...openHold("p2"), ...at(2) };
+    await mount({ ...props([], [a, b]), holdsSnapshot: buildSnapshot([a, b]), focusDeadLetter: { deadLetterId: "dl-1", propertyId: "p2" } });
+    const cards = screen.getAllByTestId("waiting-card");
+    expect(cards[1]).toHaveAttribute("data-selected", "true");
+    expect(cards[0]).not.toHaveAttribute("data-selected");
+    expect(screen.queryByTestId("dead-letter-focus-missing")).toBeNull();
+    cleanup();
+    await mount({ ...props([], [a]), holdsSnapshot: buildSnapshot([a]), focusDeadLetter: { deadLetterId: "dl-1", propertyId: null } });
+    expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent(/could not be found/);
   });
 
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {

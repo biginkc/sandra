@@ -21,6 +21,8 @@ import {
 } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { getCallNext } from "@/lib/my-leads/call-next";
+import { unifiedQueueEnabled } from "@/lib/my-leads/unified-queue";
+import { getNeedsAttentionTopTen } from "@/lib/my-leads/work-queue";
 import { enqueueStripComps } from "@/lib/comps/queue";
 import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { CALL_FEATURES_OFF, getMyLeadsCallFeatures } from "@/lib/my-leads/call-features";
@@ -35,6 +37,8 @@ import {
 
 import { decideDialpadCallRoute } from "@/lib/dialpad-cti/call-route";
 import { MyLeadsClient, type MyLeadsFocus } from "./client";
+import type { UnifiedInitial } from "./unified/contract";
+import { loadUnifiedInitial } from "./unified/initial";
 import {
   parseSelectedLeadParam,
   selectedLeadUnavailableMessage,
@@ -129,12 +133,40 @@ function focusForSelectedLead(
   };
 }
 
+function reportCompsFailure(error: unknown) {
+  reportError(error instanceof Error ? error : new Error("unified comps enqueue failed"), {
+    errorClass: "database",
+    tags: { surface: "database", operation: "my_leads_unified_comps" },
+  });
+}
+
+/** First ten Needs attention ids: reuse the first paint when it already is that page, else one small read. */
+async function topTenForComps(userId: string, unified: UnifiedInitial): Promise<string[]> {
+  const { query, page } = unified;
+  if (
+    page &&
+    query.tab === "needs_attention" &&
+    query.chip === "all" &&
+    query.stage === null &&
+    query.search === "" &&
+    query.page === 1
+  )
+    return page.ids.slice(0, 10);
+  try {
+    return await getNeedsAttentionTopTen(userId);
+  } catch (error) {
+    reportCompsFailure(error);
+    return [];
+  }
+}
+
 export default async function MyLeadsPage({
   searchParams,
 }: {
   searchParams: Promise<MyLeadsSearchParams>;
 }) {
-  const selectedLeadLink = parseSelectedLeadParam(await searchParams);
+  const resolvedSearchParams = await searchParams;
+  const selectedLeadLink = parseSelectedLeadParam(resolvedSearchParams);
   const retryHref = selectedLeadRetryHref(selectedLeadLink);
 
   let memberships: Membership[];
@@ -168,13 +200,17 @@ export default async function MyLeadsPage({
     notFound();
   }
 
+  // Unified work queue (design v8): flag AND schema, else the page below is exactly today's.
+  const unifiedOn = roster.settings.enabled && (await unifiedQueueEnabled(viewer.orgId));
+  let unified: UnifiedInitial | null = null;
+
   let snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null = null;
   let kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null = null;
   let drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null = null;
   // The Call next strip is additive: null when it is off (flag or schema not ready) and also
   // null when its read fails, so it can never blank or fail the existing page.
   const stripRead: Promise<Awaited<ReturnType<typeof getCallNext>>> =
-    roster.settings.enabled
+    roster.settings.enabled && !unifiedOn
       ? getCallNext({ memberId: viewer.userId }).catch((error) => {
           reportError(
             error instanceof Error ? error : new Error("call next read failed"),
@@ -187,7 +223,7 @@ export default async function MyLeadsPage({
         })
       : Promise.resolve(null);
   try {
-    if (roster.settings.enabled) {
+    if (roster.settings.enabled && !unifiedOn) {
       [snapshot, kpis, drips] = await Promise.all([
         getAcquisitionQueue({ memberId: viewer.userId }),
         getAcquisitionKpis({ memberId: viewer.userId, period: "today" }),
@@ -221,7 +257,19 @@ export default async function MyLeadsPage({
 
   // The URL is only a lookup key. Always read the signed-in user's queue, even
   // for owners; a URL cannot grant access or silently switch their queue.
-  if (selectedLeadLink.status === "requested" && roster.settings.enabled) {
+  if (unifiedOn) {
+    // The unified queue reads its first page, the KPIs and the linked lead's facts in one helper.
+    ({ unified, selectedLead, focus } = await loadUnifiedInitial({
+      userId: viewer.userId,
+      searchParams: resolvedSearchParams,
+      selectedLeadLink,
+      retryHref,
+    }));
+    // Comp the top ten of Needs attention after the response is sent, whatever page or filter is showing.
+    // The ids are read during render: after() cannot call cookies(), which every queue read needs.
+    const compIds = await topTenForComps(viewer.userId, unified);
+    if (compIds.length > 0) after(() => enqueueStripComps(viewer.orgId, compIds).catch(reportCompsFailure));
+  } else if (selectedLeadLink.status === "requested" && roster.settings.enabled) {
     try {
       const lookup = await getMyLeadsQueueRow({
         memberId: viewer.userId,
@@ -380,6 +428,7 @@ export default async function MyLeadsPage({
         callFeatures={callFeatures}
         selectedLead={selectedLead}
         focus={focus}
+        unified={unified}
       />
     </Page>
   );

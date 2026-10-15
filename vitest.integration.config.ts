@@ -81,6 +81,10 @@ export default defineConfig({
       "supabase/migrations/20261005122000_my_leads_housekeeping_reassign_sources.integration.test.ts",
       "supabase/migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts",
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
+      "supabase/migrations/20261015010000_my_leads_work_queue_classifier.integration.test.ts",
+      "supabase/migrations/20261015020100_my_leads_pin_no_expiry.integration.test.ts",
+      "supabase/migrations/20261015020300_rep_sms_delivery_target_read.integration.test.ts",
+      "supabase/migrations/20261015020200_my_leads_work_facts_zip_signed_touch.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
       "supabase/migrations/20261005180000_dialpad_hangup_link_capture.integration.test.ts",
@@ -150,6 +154,7 @@ export default defineConfig({
       "src/lib/prospects/search-eval-budget.integration.test.ts",
       // Local-only: designation setup + failure injection need loopback Postgres.
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
+      "supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts",
       // Slack rehearsal and fixtures must never run against the hosted project.
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",

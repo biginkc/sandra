@@ -57,15 +57,22 @@ export function HoldCard({
   nowMs,
   actions,
   onReload,
+  selected = false,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   nowMs: number;
+  /** Opened from a link (My Leads Broken) for this hold's failed reply: ring it and scroll it into view. */
+  selected?: boolean;
   /** Re-fetch page data (a card the server found out of date). */
   onReload?: () => void;
   /** Server actions for the five hold actions; absent = shown disabled. */
   actions?: HoldActionsApi;
 }) {
+  const cardRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (selected) cardRef.current?.scrollIntoView?.({ block: "center" });
+  }, [selected]);
   const run = hold.run;
   const age = hold.since ? Math.max(0, nowMs - Date.parse(hold.since)) : null;
   const tone = age === null ? "neutral" : ageTone(age);
@@ -83,11 +90,14 @@ export function HoldCard({
     !hasOpenDead;
   return (
     <article
+      ref={cardRef}
       data-testid="hold-card"
       {...(informational ? { "data-informational": "true" } : {})}
+      {...(selected ? { "data-selected": "true" } : {})}
       className={cn(
         "rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10",
         informational && "opacity-70",
+        selected && "ring-2 ring-sky-500",
       )}
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -407,7 +417,10 @@ export function HoldsRail({
   backlogRefreshKey,
   actions,
   onReload,
+  focus,
 }: {
+  /** The failed AI reply a link asked for (dead-letter id and its lead); its hold card is selected. */
+  focus?: { deadLetterId: string; propertyId: string | null } | null;
   meta?: HoldsMeta;
   /** New / Backlog split; absent = the single flat list (no sections). */
   split?: HoldsSplit;
@@ -442,8 +455,10 @@ export function HoldsRail({
       nowMs={nowMs}
       actions={actions}
       onReload={onReload}
+      selected={Boolean(focus?.propertyId && hold.property_id === focus.propertyId)}
     />
   ));
+  const focusMissing = Boolean(focus && !holds.some((hold) => focus.propertyId && hold.property_id === focus.propertyId));
   return (
     <aside
       aria-label="Holds"
@@ -470,6 +485,17 @@ export function HoldsRail({
         >
           Holds unavailable —{" "}
           {holdFailures.map((f) => SOURCE_NAME[f]).join(", ")} query failed
+        </p>
+      )}
+      {focus && focusMissing && (
+        <p
+          role="status"
+          data-testid="dead-letter-focus-missing"
+          className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          {focus.propertyId
+            ? "The failed reply you opened is not among the New holds shown. Check Backlog, or it may already be resolved."
+            : "The failed reply you opened could not be found. It may already be resolved."}
         </p>
       )}
       {meta?.deadLetterUnavailable && (

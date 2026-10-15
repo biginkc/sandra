@@ -597,3 +597,25 @@ describe("HoldsRail New / Backlog split", () => {
     expect(screen.getAllByTestId("hold-card")).toHaveLength(1);
   });
 });
+
+describe("HoldsRail opened on a failed AI reply (?deadLetter=)", () => {
+  const labels = new Map();
+  it("selects the hold card for that dead letter's lead", () => {
+    render(<HoldsRail holds={[hold("p1", 5), hold("p2", 10)]} labels={labels} nowMs={NOW} focus={{ deadLetterId: "dl-1", propertyId: "p2" }} />);
+    const cards = screen.getAllByTestId("hold-card");
+    expect(cards.filter((c) => c.getAttribute("data-selected") === "true")).toHaveLength(1);
+    expect(cards[1]).toHaveAttribute("data-selected", "true");
+    expect(screen.queryByTestId("dead-letter-focus-missing")).toBeNull();
+  });
+  it("says so when that lead has no New hold card (or the id did not resolve)", () => {
+    const { rerender } = render(<HoldsRail holds={[hold("p1", 5)]} labels={labels} nowMs={NOW} focus={{ deadLetterId: "dl-1", propertyId: "p9" }} />);
+    expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent(/Backlog/);
+    rerender(<HoldsRail holds={[hold("p1", 5)]} labels={labels} nowMs={NOW} focus={{ deadLetterId: "dl-1", propertyId: null }} />);
+    expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent(/could not be found/);
+  });
+  it("no focus = unchanged", () => {
+    render(<HoldsRail holds={[hold("p1", 5)]} labels={labels} nowMs={NOW} />);
+    expect(screen.getByTestId("hold-card")).not.toHaveAttribute("data-selected");
+    expect(screen.queryByTestId("dead-letter-focus-missing")).toBeNull();
+  });
+});

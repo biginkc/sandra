@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { cn } from "@/lib/utils";
+
 import { Button } from "@/components/ui/button";
 
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
@@ -41,6 +43,7 @@ function WaitingCard({
   at,
   pinned,
   paused,
+  selected = false,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
@@ -50,6 +53,8 @@ function WaitingCard({
   updated?: boolean;
   /** The last live re-check failed: actions are paused until a check succeeds. */
   paused?: boolean;
+  /** Opened from a link for this hold's failed reply: ring it and scroll it into view. */
+  selected?: boolean;
   /** flag_reason is the snapshot's reason: it wins over the run's own reason and outcome (as on the tape). */
   pinned?: boolean;
   actions?: HoldActionsApi;
@@ -59,6 +64,10 @@ function WaitingCard({
   const who = sellerWho(label);
   // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
   const effectiveRun = run ? (pinned ? { ...run, reason: hold.flag_reason ?? null } : withEffectiveReason(run, hold.flag_reason)) : null;
+  const cardRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (selected) cardRef.current?.scrollIntoView?.({ block: "center" });
+  }, [selected]);
   const draft = effectiveDraftBody(hold);
   const activity = at !== undefined ? at : holdActivityAt(hold);
   const alertText = alertLine(hold.alert);
@@ -69,9 +78,11 @@ function WaitingCard({
     hold.flag_reason === "send_timeout_then_sent" && hold.sources.every((s) => s === "needs_attention") && !hasOpenDead;
   return (
     <article
+      ref={cardRef}
       data-testid="waiting-card"
       {...(informational ? { "data-informational": "true" } : {})}
-      className="flex flex-col gap-2.5 rounded-2xl border bg-card p-4 text-sm"
+      {...(selected ? { "data-selected": "true" } : {})}
+      className={cn("flex flex-col gap-2.5 rounded-2xl border bg-card p-4 text-sm", selected && "ring-2 ring-sky-500")}
     >
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
         <span className="font-semibold text-foreground">{label?.name ?? "Unknown sender"}</span>
@@ -186,7 +197,10 @@ export function WaitingColumn({
   revalidate,
   actions,
   onReload,
+  focus,
 }: {
+  /** Opened with ?deadLetter=<id>: that failed reply's lead; its card is selected. */
+  focus?: { deadLetterId: string; propertyId: string | null } | null;
   holds: readonly OpenHold<RunWithSteps>[];
   /** First-page snapshot ids the server dropped in its final check. */
   initialMissing?: readonly string[];
@@ -420,6 +434,13 @@ export function WaitingColumn({
           Couldn&apos;t re-check this list. Actions are paused until it can be checked.
         </p>
       )}
+      {focus && !shown.some((e) => e.id === focus.propertyId) && (
+        <p role="status" data-testid="dead-letter-focus-missing" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          {focus.propertyId
+            ? "The failed reply you opened is not among the texts shown. Try Show older, or it may already be resolved."
+            : "The failed reply you opened could not be found. It may already be resolved."}
+        </p>
+      )}
       {older.missing.size > 0 && (
         <p data-testid="holds-missing" className="rounded-xl border bg-secondary p-3 text-xs text-muted-foreground">
           {older.missing.size.toLocaleString("en-US")} {older.missing.size === 1 ? "was" : "were"} handled or {older.missing.size === 1 ? "is" : "are"} no longer available since this list loaded.
@@ -463,6 +484,7 @@ export function WaitingColumn({
               updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
               pinned={!!snapshot}
               paused={checkFailed}
+              selected={!!focus && focus.propertyId === e.id}
             />
           );
         })

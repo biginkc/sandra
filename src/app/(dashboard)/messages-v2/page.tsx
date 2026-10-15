@@ -160,12 +160,46 @@ async function loadScorecard(
  * actions (Send, Edit, Take over, Assign, Dismiss). Visible to org owners and
  * the Acquisitions group.
  */
-export default async function MessagesV2Page() {
+/** ?deadLetter=<id>: resolve the failed reply's lead (org-scoped read) so its hold card can be selected. */
+async function resolveFocusDeadLetter(
+  supabase: LooseSupabase,
+  orgId: string,
+  raw: string | string[] | undefined,
+): Promise<{ deadLetterId: string; propertyId: string | null } | null> {
+  const id = typeof raw === "string" ? raw.trim() : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+  try {
+    const { data, error } = await (supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          eq: (c: string, v: string) => {
+            eq: (c: string, v: string) => { maybeSingle: () => PromiseLike<{ data: { property_id: string | null } | null; error: unknown }> };
+          };
+        };
+      };
+    })
+      .from("ai_reply_dead_letters")
+      .select("property_id")
+      .eq("id", id)
+      .eq("org_id", orgId)
+      .maybeSingle();
+    return { deadLetterId: id, propertyId: error || !data ? null : data.property_id };
+  } catch {
+    return { deadLetterId: id, propertyId: null };
+  }
+}
+
+export default async function MessagesV2Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ deadLetter?: string | string[] }>;
+}) {
   const access = messagesV2Context(await getCallerMembershipsOrThrow());
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
+  const focusDeadLetter = await resolveFocusDeadLetter(supabase, orgId, (await searchParams)?.deadLetter);
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
@@ -225,6 +259,7 @@ export default async function MessagesV2Page() {
         threadFailedRunIds={thread.failedRunIds}
         loadTapeDay={loadTapeDayAction}
         nowMs={data.nowMs}
+        focusDeadLetter={focusDeadLetter}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,

@@ -93,6 +93,8 @@ export type MessagesV2ViewProps = {
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
+  /** Opened with ?deadLetter=<id>: that failed reply's lead (null when the id did not resolve). */
+  focusDeadLetter?: { deadLetterId: string; propertyId: string | null } | null;
 };
 
 /** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
@@ -583,6 +585,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             updatedIds={updatedHoldIds}
             actions={props.actions}
             onReload={() => router.refresh()}
+            focus={props.focusDeadLetter ?? null}
           />
         </div>
       </div>

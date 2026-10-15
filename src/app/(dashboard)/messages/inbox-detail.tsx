@@ -31,6 +31,7 @@ import {
 } from "@/lib/messages/sms-parties";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
+import { latestInboundMessageId } from "@/lib/messaging/inbound-stamp";
 import { deriveLeadSmsPresentation } from "../leads/[id]/lead-detail-state";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
@@ -818,6 +819,7 @@ export function InboxDetail({
                   homeownerPhone={data.replyToPhone}
                   replyToPhone={data.replyToPhone}
                   preferredFromNumber={data.threadBusinessPhone}
+                  inboundMessageId={latestInboundMessageId(data.initialMessages)}
                   phoneUnavailableMessage={replyPhoneUnavailableMessage}
                   routeRefreshPending={replyRefreshPending}
                   suspended={isSmsRestricted}
