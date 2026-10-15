@@ -102,9 +102,16 @@ export function LeadAppointmentsSection({
     return true;
   });
 
+  // Until a page has been appended, page from the server's first page so a
+  // refresh after Held / Cancel / Done never pages from a stale cursor.
+  const paging =
+    extra.rows.length === 0
+      ? { hasMore: history.hasMore, cursor: history.cursor }
+      : { hasMore: extra.hasMore, cursor: extra.cursor };
+
   function loadMore() {
-    if (!extra.cursor) return;
-    const cursor = extra.cursor;
+    if (!paging.cursor) return;
+    const cursor = paging.cursor;
     startTransition(async () => {
       let result: LeadAppointmentHistoryResult;
       try {
@@ -211,9 +218,9 @@ export function LeadAppointmentsSection({
                 renderRow(row, group.key === "past-due"),
               )}
             </ul>
-            {group.key === "history" && (extra.hasMore || error) && (
+            {group.key === "history" && (paging.hasMore || error) && (
               <div className="space-y-1.5 px-3 py-2">
-                {extra.hasMore && (
+                {paging.hasMore && (
                   <Button
                     type="button"
                     variant="outline"

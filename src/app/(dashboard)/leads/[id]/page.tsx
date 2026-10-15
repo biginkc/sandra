@@ -316,8 +316,8 @@ export default async function LeadDetailPage({
     .order("due_at", { ascending: true });
   const appointmentHistoryPromise = loadLeadAppointmentHistory(lead.id);
   // Assignment episodes are only reachable through the My Leads detail RPC,
-  // which rejects unassigned leads, non-owner viewers of other reps' leads and
-  // orgs without My Leads. Any failure just hides the list.
+  // which rejects unassigned leads, non-owner viewers of other reps' leads,
+  // DNC-locked leads and orgs without My Leads. Any failure just hides the list.
   const assignmentEpisodesPromise = lead.assigned_user_id
     ? getAcquisitionDetail({
         memberId: lead.assigned_user_id,

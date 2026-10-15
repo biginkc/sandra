@@ -159,7 +159,7 @@ describe("<LeadAppointmentsSection />", () => {
     expect(screen.queryByTestId("stub-task-actions-cb")).not.toBeInTheDocument();
   });
 
-  it("lists follow-up tasks labelled Follow-up, with no lifecycle controls (parity with the panel)", () => {
+  it("lists follow-up tasks labelled Follow-up, with no lifecycle controls (per design-owner decision)", () => {
     renderSection({
       appointments: [makeRow({ id: "fu", type: "follow_up", title: "Check back" })],
     });
@@ -210,6 +210,19 @@ describe("<LeadAppointmentsSection />", () => {
     expect(loadHistory).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", cursor);
     expect(screen.getAllByTestId("lead-appointment-h1")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Load more history" })).not.toBeInTheDocument();
+  });
+
+  it("pages from the refreshed server cursor when nothing has been appended yet", async () => {
+    loadHistory.mockResolvedValue({ ok: true, rows: [], hasMore: false, cursor: null });
+    const first = { rows: [makeRow({ id: "h1", status: "completed" })], hasMore: true, cursor: { dueAt: iso(-50), id: "h1" } };
+    const { rerender } = renderSection({ history: first });
+    const fresh = { rows: [makeRow({ id: "h0", status: "completed" })], hasMore: true, cursor: { dueAt: iso(-40), id: "h0" } };
+    rerender(
+      <LeadAppointmentsSection propertyId="11111111-1111-4111-8111-111111111111" appointments={[]} history={fresh}
+        viewerId="rep-1" viewerIsOwner={false} timezone={TZ} nowMs={NOW_MS} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
+    await waitFor(() => expect(loadHistory).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", fresh.cursor));
   });
 
   it("keeps loaded history and shows an error when paging fails", async () => {
