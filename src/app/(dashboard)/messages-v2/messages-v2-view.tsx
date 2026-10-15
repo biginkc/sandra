@@ -245,30 +245,37 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     const missing = pool.filter((r) => !requestedThreads.current.has(threadKey(r)));
     if (missing.length === 0) return;
     for (const r of missing) requestedThreads.current.add(threadKey(r));
-    const retryLater = (ids: readonly string[], loaded: readonly string[] = []) => {
-      for (const r of missing) if (ids.includes(r.id)) requestedThreads.current.delete(threadKey(r));
+    // Versioned (R-B): every result -- thread text AND the failure / retry bookkeeping -- is committed only for runs
+    // still at the version they were fetched for, so a late result for an older version touches nothing.
+    const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
+    const stillCurrent = () => {
+      const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
+      return (id: string) => current.get(id) === versionAtRequest.get(id);
+    };
+    const retryLater = (failedIds: readonly string[], loaded: readonly string[]) => {
+      const isCurrent = stillCurrent();
+      const failed = failedIds.filter(isCurrent);
+      const ok = loaded.filter(isCurrent);
+      for (const r of missing) if (failed.includes(r.id)) requestedThreads.current.delete(threadKey(r));
       setThreadFailed((prev) => {
         const next = new Set(prev);
-        for (const id of loaded) next.delete(id);
-        for (const id of ids) next.add(id);
+        for (const id of ok) next.delete(id);
+        for (const id of failed) next.add(id);
         return next;
       });
-      if (ids.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
+      if (failed.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
     };
-    // Versioned: each result is committed only if the run is still at the version it was fetched for (an older fetch
-    // resolving late can never overwrite a newer sent reply).
-    const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
       .then(({ threads: fetched, failedRunIds }) => {
-        const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
-        const fresh = [...fetched].filter(([id]) => current.get(id) === versionAtRequest.get(id));
+        const isCurrent = stillCurrent();
+        const fresh = [...fetched].filter(([id]) => isCurrent(id));
         setThreads((curr) => new Map([...curr, ...fresh]));
         retryLater(
           failedRunIds,
           missing.filter((r) => !failedRunIds.includes(r.id)).map((r) => r.id),
         );
       })
-      .catch(() => retryLater(missing.map((r) => r.id)));
+      .catch(() => retryLater(missing.map((r) => r.id), []));
     // threadRetry re-runs this after a failure.
   }, [runs, earlier, threadRetry]);
 
@@ -409,10 +416,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         const freshDay = res.data.threads.filter(([id]) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id));
         setThreads((curr) => new Map([...curr, ...freshDay]));
         const failedIds = res.data.failedRunIds ?? [];
+        // R-B: failure bookkeeping only for runs still at the version this day response carried.
+        const dayCurrent = (id: string) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id);
         setThreadFailed((prev) => {
           const next = new Set(prev);
-          for (const r of got) if (!failedIds.includes(r.id)) next.delete(r.id);
-          for (const id of failedIds) next.add(id);
+          for (const r of got) if (!failedIds.includes(r.id) && dayCurrent(r.id)) next.delete(r.id);
+          for (const id of failedIds) if (dayCurrent(id)) next.add(id);
           return next;
         });
         for (const r of got) if (!failedIds.includes(r.id) && freshDay.some(([id]) => id === r.id)) requestedThreads.current.add(threadKey(r));

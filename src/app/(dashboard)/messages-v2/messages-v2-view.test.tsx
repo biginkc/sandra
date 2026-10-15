@@ -662,6 +662,100 @@ describe("MessagesV2View", () => {
     }
   });
 
+  describe("R-A: actions are enabled per card from that card's own successful check", () => {
+    it("first-page version check failed; a later check of only the shown cards enables those, the hidden ones stay paused when revealed", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const all = Array.from({ length: 40 }, (_, i) => ({ ...openHold(`h${i}`), ...at(i + 1) }));
+        const snapshot = buildSnapshot(all);
+        const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+          ok: true as const,
+          data: input.ids.map((id) => {
+            const e = snapshot.entries.find((x) => x.id === id)!;
+            return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+          }),
+        }));
+        const holdsMeta = { total: 40, shown: 40, truncated: false, totalState: "exact" as const, failed: [], contextErrors: ["version check"], deadLetterUnavailable: false };
+        const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+        await mount({ ...props([], all), holdsMeta, holdsSnapshot: snapshot, revalidateHolds, actions });
+        expect(screen.getAllByRole("button", { name: "Dismiss" }).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+        await act(async () => {
+          vi.advanceTimersByTime(60_000);
+        });
+        const shownCount = screen.getAllByTestId("waiting-card").length;
+        await waitFor(() => expect((screen.getAllByRole("button", { name: "Dismiss" })[0] as HTMLButtonElement).disabled).toBe(false));
+        expect(revalidateHolds.mock.calls[0][0].ids).toHaveLength(shownCount);
+        await act(async () => {
+          screen.getByTestId("show-older").click();
+        });
+        const buttons = screen.getAllByRole("button", { name: "Dismiss" }) as HTMLButtonElement[];
+        expect(buttons.length).toBeGreaterThan(shownCount);
+        expect(buttons.slice(0, shownCount).every((b) => !b.disabled)).toBe(true);
+        expect(buttons.slice(shownCount).every((b) => b.disabled)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a pinned My Leads hold outside the snapshot is re-checked; locked after load -> removed within one poll", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const all = Array.from({ length: 3 }, (_, i) => ({ ...openHold(`h${i}`), ...at(i + 1) }));
+        const snapshot = buildSnapshot(all);
+        const pinnedHold = { ...openHold("px"), ...at(9) };
+        const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+          ok: true as const,
+          data: input.ids.map((id) => {
+            if (id === "px") return { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, through: null, draftId: null, draftProperty: null, draftSendable: false };
+            const e = snapshot.entries.find((x) => x.id === id)!;
+            return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+          }),
+        }));
+        await mount({ ...props([], all), holdsSnapshot: snapshot, revalidateHolds, focusDeadLetter: { deadLetterId: "dl-1", propertyId: "px" }, focusHold: pinnedHold });
+        expect(screen.getByTestId("focus-pinned")).toBeInTheDocument();
+        await act(async () => {
+          vi.advanceTimersByTime(60_000);
+        });
+        await waitFor(() => expect(screen.queryByTestId("focus-pinned")).toBeNull());
+        expect(revalidateHolds.mock.calls[0][0].ids).toContain("px");
+        expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent("This item was handled or is no longer available.");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("R-B: a late success for an older run version never clears the newer version's failure", async () => {
+    const realFrom = mocks.client.from.getMockImplementation()!;
+    let releaseOld: () => void = () => {};
+    const oldGate = new Promise<void>((r) => (releaseOld = r));
+    let phase: "old" | "new" = "old";
+    mocks.client.from.mockImplementation(((table: string) => {
+      const q = (realFrom as (t: string) => Record<string, unknown>)(table);
+      const tag = phase;
+      q.then = (resolve: (v: unknown) => unknown) => {
+        const finish = () => resolve({ data: [], error: null });
+        return tag === "old" ? oldGate.then(finish) : finish();
+      };
+      return q;
+    }) as never);
+    try {
+      const r = run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: null, status: "running" });
+      await mount({ ...props([r]), threads: [] });
+      phase = "new";
+      // Newer version references an outbound text that cannot be read -> that fetch fails.
+      await fire("UPDATE", "pipeline_runs", run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o-missing", status: "replied", completed_at: new Date().toISOString() }));
+      await waitFor(() => expect(screen.getByTestId("threads-retrying")).toBeInTheDocument());
+      await act(async () => {
+        releaseOld();
+        await oldGate;
+      });
+      expect(screen.getByTestId("threads-retrying")).toBeInTheDocument();
+    } finally {
+      mocks.client.from.mockImplementation(realFrom as never);
+    }
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

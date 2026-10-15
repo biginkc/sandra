@@ -305,7 +305,11 @@ export function WaitingColumn({
             error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
           };
         });
-        if (res.data.contextErrors.includes(SEEN_CHECK_FAILED)) setCheckFailed(true);
+        recordChecks(
+          requestKey,
+          res.data.holds.map((h) => h.id),
+          res.data.contextErrors.includes(SEEN_CHECK_FAILED) ? "failed" : "ok",
+        );
         setVisible((v) => v + PAGE);
       } else {
         // Position kept: the same ids are asked for again on retry.
@@ -325,14 +329,28 @@ export function WaitingColumn({
   // missing (removed); any snapshot field differs -> Updated (actions locked).
   const [stale, setStale] = useState<{ forKey: unknown; ids: Set<string> }>({ forKey: refreshKey, ids: new Set() });
   const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
-  // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
-  // Paused from the start when the server could not run the fresh version check for the first page.
-  // Paused when the server could not run the fresh version check for THIS snapshot's cards (first page or the
-  // pinned My Leads card); keyed by snapshot, so a refresh is judged by its own result. A successful re-check clears it.
-  const seededFail = !!meta?.contextErrors.includes(SEEN_CHECK_FAILED) || !!focusHoldErrors?.includes(SEEN_CHECK_FAILED);
-  const [checkState, setCheckState] = useState<{ forKey: unknown; failed: boolean }>(() => ({ forKey: refreshKey, failed: seededFail }));
-  const checkFailed = checkState.forKey === refreshKey ? checkState.failed : seededFail;
-  const setCheckFailed = (failed: boolean) => setCheckState({ forKey: refreshKeyRef.current, failed });
+  // R-A: actions are enabled PER CARD, only from that card's own last successful check in the current snapshot.
+  // "ok" = its load ran the fresh version check, or a later live re-check of THAT card succeeded; "failed" = its
+  // load's version check or its last re-check failed. A card with no status (never checked) is paused.
+  const initialChecks = (): Map<string, "ok" | "failed"> => {
+    const m = new Map<string, "ok" | "failed">();
+    const firstFailed = !!meta?.contextErrors.includes(SEEN_CHECK_FAILED);
+    for (const h of holds) m.set(h.id, firstFailed ? "failed" : "ok");
+    if (focusHold) m.set(focusHold.id, focusHoldErrors?.includes(SEEN_CHECK_FAILED) ? "failed" : "ok");
+    return m;
+  };
+  const [checkStore, setCheckStore] = useState<{ forKey: unknown; status: Map<string, "ok" | "failed"> }>(() => ({ forKey: refreshKey, status: initialChecks() }));
+  const checkStatus = checkStore.forKey === refreshKey ? checkStore.status : initialChecks();
+  const pausedCard = (id: string) => checkStatus.get(id) !== "ok";
+  /** Records check outcomes for exactly these card ids, only while `key` is still the current snapshot (R-B). */
+  const recordChecks = (key: unknown, ids: readonly string[], outcome: "ok" | "failed") =>
+    setCheckStore((prev) => {
+      if (refreshKeyRef.current !== key) return prev;
+      const base = prev.forKey === key ? prev.status : initialChecks();
+      const status = new Map(base);
+      for (const id of ids) status.set(id, outcome);
+      return { forKey: key, status };
+    });
   const checkSeq = useRef(0);
   const refreshKeyRef = useRef<unknown>(refreshKey);
   const shownIdsRef = useRef<string[]>([]);
@@ -341,7 +359,8 @@ export function WaitingColumn({
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
     liveRef.current = live;
-    shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned && entries.some((e) => e.id === focusPinned.id) ? [focusPinned.id] : [])];
+    // The pinned My Leads card is always re-checked too, whether or not it is in the snapshot.
+    shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])];
     entriesRef.current = entries;
     olderRef.current = older;
     refreshKeyRef.current = refreshKey;
@@ -351,6 +370,7 @@ export function WaitingColumn({
     let alive = true;
     const check = async () => {
       const seq = ++checkSeq.current;
+      const key = refreshKeyRef.current;
       const ids = shownIdsRef.current;
       if (!ids.length) return;
       const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
@@ -361,19 +381,22 @@ export function WaitingColumn({
         try {
           res = await revalidate({ ids: ids.slice(i, i + 100) });
         } catch {
-          if (alive && seq === checkSeq.current) setCheckFailed(true);
+          if (alive && seq === checkSeq.current) recordChecks(key, ids, "failed");
           return;
         }
         // Stale responses are discarded entirely: only the newest check may touch any state.
         if (!alive || seq !== checkSeq.current) return;
         if (!res.ok) {
-          setCheckFailed(true);
+          recordChecks(key, ids, "failed");
           return;
         }
         for (const st of res.data) {
+          if (!st.eligible) {
+            gone.push(st.id);
+            continue;
+          }
           const e = byId.get(st.id);
-          if (!e) continue;
-          if (!st.eligible) gone.push(st.id);
+          if (!e) continue; // a pinned card outside the snapshot: eligibility only
           else {
             // Compared against the SNAPSHOT's draft (id, property, sendable), never the already-updated card.
             const snapDraft = e.d ?? null;
@@ -382,8 +405,8 @@ export function WaitingColumn({
           }
         }
       }
-      if (!alive || seq !== checkSeq.current) return; // a newer check started: only the latest one commits
-      setCheckFailed(false);
+      if (!alive || seq !== checkSeq.current || refreshKeyRef.current !== key) return; // only the latest check of this snapshot commits
+      recordChecks(key, ids, "ok");
       if (gone.length)
         setOlder((prev) => {
           const cur = prev.forKey === refreshKey ? prev : fresh();
@@ -458,7 +481,7 @@ export function WaitingColumn({
           {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
-      {checkFailed && (
+      {[...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])].some((id) => checkStatus.get(id) === "failed") && (
         <p role="alert" data-testid="holds-recheck-failed" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
           Couldn&apos;t re-check this list. Actions are paused until it can be checked.
         </p>
@@ -478,7 +501,7 @@ export function WaitingColumn({
                 onReload={onReload}
                 updated={changed || updatedIds?.has(focusPinned.id) || staleIds.has(focusPinned.id)}
                 pinned={!!snapshot && !!e}
-                paused={checkFailed}
+                paused={pausedCard(focusPinned.id)}
                 selected
               />
             );
@@ -538,7 +561,7 @@ export function WaitingColumn({
               onReload={onReload}
               updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
               pinned={!!snapshot}
-              paused={checkFailed}
+              paused={pausedCard(e.id)}
               selected={!!focus?.propertyId && live.get(e.id)?.property_id === focus.propertyId}
             />
           );
