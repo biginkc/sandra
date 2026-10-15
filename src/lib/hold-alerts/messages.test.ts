@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { hotPromotionSlackText, hotPromotionSmsText, hotTextHeadline } from "./messages";
 import type { HotPromotion } from "./types";
 
-const base: HotPromotion = { propertyId: "p1", assigneeUserId: "u1", name: "Pat", assignedAt: "2026-10-15T00:00:00Z", kind: "hot_text" };
+const base: HotPromotion = { propertyId: "p1", assigneeUserId: "u1", name: "Pat", assignedAt: "2026-10-15T00:00:00Z", kind: "hot_text", key: "hot_text:in-1" };
 const URL_ = "https://app.example.com";
 
 describe("hot_text alert copy", () => {

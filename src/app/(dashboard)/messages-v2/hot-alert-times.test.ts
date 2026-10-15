@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hotPromotionKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { attachHotAlertTimes, hotAlertKeyForRun } from "./hot-alert-times";
 import type { LooseSupabase } from "./queries";
@@ -25,17 +25,17 @@ function fakeDb(rows: Array<{ hold_key: string; channel: string; sent_at: string
 }
 
 describe("hot alert keys and times", () => {
-  it("keys: every hot run is keyed by its own inbound text, rep-owned -> none, no inbound -> property key", () => {
-    expect(hotAlertKeyForRun(run("a", "m1"))).toBe(hotTextKey("m1"));
-    expect(hotAlertKeyForRun({ ...run("d", "m4"), inbound_message_id: null } as never)).toBe(hotPromotionKey("prop-1"));
+  it("keys: a hand-off run is keyed hot_handoff:<inbound>, an already_owned run hot_text:<inbound>, rep-owned or no inbound -> none", () => {
+    expect(hotAlertKeyForRun(run("a", "m1"))).toBe(hotHandoffKey("m1"));
+    expect(hotAlertKeyForRun({ ...run("d", "m4"), inbound_message_id: null } as never)).toBeNull();
     expect(hotAlertKeyForRun(run("b", "m2", "already_owned"))).toBe(hotTextKey("m2"));
     expect(hotAlertKeyForRun(run("c", "m3", "owned_by_someone_else"))).toBeNull();
   });
 
   it("a later already_owned run never shows the original hand-off time", async () => {
     const db = fakeDb([
-      { hold_key: hotTextKey("m1"), channel: "slack", sent_at: "2026-10-15T10:00:00Z" },
-      { hold_key: hotTextKey("m1"), channel: "sms", sent_at: "2026-10-15T10:00:05Z" },
+      { hold_key: hotHandoffKey("m1"), channel: "slack", sent_at: "2026-10-15T10:00:00Z" },
+      { hold_key: hotHandoffKey("m1"), channel: "sms", sent_at: "2026-10-15T10:00:05Z" },
     ]);
     const out = await attachHotAlertTimes(db, "o", [run("first", "m1"), run("later", "m2", "already_owned")]);
     expect(out[0]!.hotAlertSentAt).toBe("2026-10-15T10:00:05Z");

@@ -11,7 +11,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 const NOW = "2026-10-15T12:00:00.000Z";
 const MARK = "2026-10-15T00:00:00.000Z";
 const HOUR = 60 * 60 * 1000;
-const promotion: HotPromotion = { propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T11:30:00.000Z", kind: "handoff", key: "hot_promotion:prop-9" };
+const promotion: HotPromotion = { propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T11:30:00.000Z", kind: "handoff", key: "hot_handoff:in-9" };
 const isOwnerUnknownReport = (c: unknown[]) => String((c[0] as Error)?.message ?? "").includes("couldn't tell who to alert");
 
 function setup(over: Parameters<typeof makeDeps>[0] = {}) {
@@ -301,15 +301,15 @@ describe("owner-unknown report", () => {
   });
 });
 
-describe("one alert per new hot inbound text", () => {
-  const hotHold = (hotKey: string | null, over: Record<string, unknown> = {}) => hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z", hotKey, ...over } as never);
+describe("one alert per hot event", () => {
+  const hotHold = (flagAt: string | null, over: Record<string, unknown> = {}) => hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z", flagAt, ...over } as never);
 
-  it("a hand-off and a hold from the same text share a key: one Slack + one SMS in total", async () => {
-    const t = setup({ promotions: [{ ...promotion, key: "hot_text:in-1" }], holds: [hotHold("hot_text:in-1")] });
+  it("a hand-off and a hold are separate events with their own keys: each one Slack + one SMS", async () => {
+    const t = setup({ promotions: [{ ...promotion, key: "hot_handoff:in-1" }], holds: [hotHold("2026-10-15T11:00:00.000Z")] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
-    expect([...new Set(t.store.rows.map((r) => r.holdKey))]).toEqual(["hot_text:in-1"]);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(2);
+    expect([...new Set(t.store.rows.map((r) => r.holdKey))].sort()).toEqual(["hot_flag:prop-1:2026-10-15T11:00:00.000Z", "hot_handoff:in-1"]);
   });
 
   it("two different hot texts on one property alert twice", async () => {
@@ -319,38 +319,31 @@ describe("one alert per new hot inbound text", () => {
     expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(2);
   });
 
-  it("an unassigned property: the promotion fails retryably (never finalized) but a hold with the same key still alerts in the same pass", async () => {
-    let assignee: string | null = null;
-    const t = setup({
-      promotions: [{ ...promotion, key: "hot_text:in-1" }],
-      holds: [hotHold("hot_text:in-1")],
-      loadPropertyAssignee: async (_o: string, p: string) => (p === promotion.propertyId ? assignee : null),
-    });
-    const hp = t.deps; // hold targets its own property id; make the hold's property unassigned too
-    const first = await runHoldAlertsForOrg(hp, ORG);
-    expect(first.sent).toBeGreaterThanOrEqual(2);
+  it("a hot hold is keyed by its own flag time: a re-flag (new flagAt) alerts again, the same flag never twice", async () => {
+    const t = setup({ holds: [hotHold("2026-10-15T11:00:00.000Z")] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    assignee = OWNER.userId;
-    await runHoldAlertsForOrg(hp, ORG);
-    // Same key already delivered by the hold: never a second alert.
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+    t.deps.loadHolds = async () => ({ holds: [hotHold("2026-10-15T11:30:00.000Z")], complete: true });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(2);
   });
 
-  it("a promotion with a null assignee alone: failed not_assigned_yet, retryable, sent once it is assigned", async () => {
+  it("a promotion whose lead was unassigned since: skipped not_assigned (final), nothing sent, never retried", async () => {
     let assignee: string | null = null;
     const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => assignee });
     const first = await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toEqual([]);
-    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["failed", "not_assigned_yet"], ["failed", "not_assigned_yet"]]);
-    expect(first.failed).toBe(2);
+    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["skipped", "not_assigned"], ["skipped", "not_assigned"]]);
+    expect(first.failed).toBe(0);
     assignee = OWNER.userId;
     t.setNow("2026-10-15T12:05:00.000Z");
-    expect((await runHoldAlertsForOrg(t.deps, ORG)).sent).toBe(2);
+    expect((await runHoldAlertsForOrg(t.deps, ORG)).sent).toBe(0);
   });
 
   it("a hot HOLD on a rep-owned property is skipped owned_by_someone_else: nothing sent", async () => {
-    const t = setup({ holds: [hotHold("hot_text:in-9")], loadPropertyAssignee: async () => "rep-1" });
+    const t = setup({ holds: [hotHold("2026-10-15T11:00:00.000Z")], loadPropertyAssignee: async () => "rep-1" });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toEqual([]);
     expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["skipped", "owned_by_someone_else"], ["skipped", "owned_by_someone_else"]]);

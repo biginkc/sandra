@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { hotPromotionKey } from "@/lib/hot-sellers/hot";
+import { hotFlagKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -155,7 +155,10 @@ export async function runHoldAlertsForOrg(
   );
   summary.holds = holds.length;
   const hotStartMs = Date.parse(HOT_ALERTS_START_ISO);
-  const hotHolds = holds.filter((h) => h.hot && isNewHold(h, hotStartMs));
+  // A hot hold's own moment is its flag time (falls back to its start): the
+  // cutoff and the alert key use it, never later activity on the lead.
+  const flagMoment = (h: HoldInfo) => h.flagAt ?? h.startedAt;
+  const hotHolds = holds.filter((h) => h.hot && flagMoment(h) !== null && isNewHold({ startedAt: flagMoment(h) }, hotStartMs));
   if (hotHolds.length === 0 && promotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
@@ -184,10 +187,9 @@ export async function runHoldAlertsForOrg(
     });
   }
   const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
-  // ONE rule: one alert per NEW hot inbound text, whatever the hot kind and
-  // however Jarrad got the lead. Key = hot_text:<inbound> (hotKeyFor), shared by
-  // a promotion and any hold from the same text, property_id null so
-  // archive-on-clear never re-fires it.
+  // One alert per hot EVENT (see "Alert and hand-off model" in PR #882):
+  // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
+  // property_id null so archive-on-clear never re-fires a key.
   for (const p of promotions) {
     // Same fail-closed rule as holds: only to the resolved hot owner, who must be
     // the promotion's assignee AND still own the property when the send happens.
@@ -196,7 +198,7 @@ export async function runHoldAlertsForOrg(
     const owner = hotOwner;
     for (const channel of ["slack", "sms"] as const) {
       tasks.push({
-        input: { ...base, propertyId: null, holdKey: p.key ?? hotPromotionKey(p.propertyId), recipientUserId: owner, channel, stage: "first" },
+        input: { ...base, propertyId: null, holdKey: p.key, recipientUserId: owner, channel, stage: "first" },
         send: async () => {
           // Before any provider call, so a failed check is cleanly retryable.
           const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
@@ -209,9 +211,8 @@ export async function runHoldAlertsForOrg(
           }
           // A rep has it now: final, no alert to Jarrad.
           if (assignee !== null && assignee !== owner) return { status: "skipped", reason: "owned_by_someone_else" };
-          // Not (yet) assigned: never finalize the key. Retryable, and a hold
-          // for the same text (same key) can still alert in this pass.
-          if (assignee === null) return { status: "failed", error: "not_assigned_yet" };
+          // Unassigned since: nothing to tell him (final).
+          if (assignee === null) return { status: "skipped", reason: "not_assigned" };
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
@@ -224,7 +225,7 @@ export async function runHoldAlertsForOrg(
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
         tasks.push({
-          input: { ...base, propertyId: null, holdKey: hold.hotKey ?? hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
+          input: { ...base, propertyId: null, holdKey: hotFlagKey(hold.propertyId, flagMoment(hold) as string), recipientUserId: r.userId, channel, stage: "first" },
           send: async () => {
             const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
             if (ownerCheck) return ownerCheck;

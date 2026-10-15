@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fakePostgrest } from "@/app/(dashboard)/messages-v2/fake-postgrest.test-util";
 import { loadMessagesV2Data as pageLoader } from "@/app/(dashboard)/messages-v2/queries";
@@ -127,6 +127,40 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     expect(await decisions("page")).toEqual(PR2_PAGE_LOADER_DECISIONS);
     // The old behaviour is kept below as a record, and PR 2 deliberately differs from it.
     expect(await decisions("cron")).not.toEqual(FROZEN_PARENT_DECISIONS);
+  });
+
+  /**
+   * The frozen loader only looks back 7 days from "now" whatever the watermark says (ALERT_LOOKBACK_MS). A hot hold
+   * flagged AFTER the 2026-10-15 cutoff but more than 7 days ago is therefore never loaded and never alerts: a
+   * documented limit of leaving alert-loader.ts untouched, pinned here so nobody mistakes it for a bug.
+   */
+  describe("frozen loader 7-day window", () => {
+    afterEach(() => vi.useRealTimers());
+    const FLAG = "2026-10-17T12:00:00.000Z";
+    const hotHoldTables = (): Record<string, Row[]> => ({
+      properties: [
+        { id: u(1), org_id: "org", needs_human_attention: true, is_dnc_locked: false, last_ai_escalation_at: FLAG, last_ai_escalation_reason: "model:hot_lead", updated_at: FLAG, needs_human_attention_since: FLAG },
+      ],
+      pipeline_runs: [
+        { id: u(1, 5), org_id: "org", inbound_message_id: "in-1", property_id: u(1), contact_id: null, conversation_id: u(1, 2), status: "held", mode: "automatic", final_outcome: null, reason: "model:hot_lead", classification_run_id: null, claim_id: null, outbound_message_id: null, inbound_preview: "x", started_at: FLAG, completed_at: null },
+      ],
+      pipeline_run_steps: [], ai_reply_drafts: [], jev_lead_decisions: [], ai_disposition_reviews: [], messages: [],
+    });
+    const load = async (nowIso: string) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(nowIso));
+      return createHoldAlertDeps(db(hotHoldTables()) as never, {}).loadHolds("org", "2026-10-15T00:00:00.000Z");
+    };
+
+    it("a post-cutoff hot hold flagged 8 days ago is NOT loaded, so it is not alerted", async () => {
+      const res = await load("2026-10-25T12:00:00.000Z");
+      expect(res.holds).toEqual([]);
+    });
+
+    it("the same hold flagged 5 days ago IS loaded, hot, with its flag time", async () => {
+      const res = await load("2026-10-22T12:00:00.000Z");
+      expect(res.holds.map((h) => [h.propertyId, h.hot, h.flagAt])).toEqual([[u(1), true, FLAG]]);
+    });
   });
 });
 

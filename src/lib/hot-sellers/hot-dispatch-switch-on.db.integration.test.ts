@@ -357,7 +357,7 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     for (const d of deliveries) {
       expect(d.status).toBe("sent");
       expect(d.recipient_user_id).toBe(s.owner);
-      expect(d.hold_key).toBe(`hot_text:${s.inboundMessageId}`);
+      expect(d.hold_key).toBe(`hot_handoff:${s.inboundMessageId}`);
     }
     expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
     expect(sent.every((x) => x.userId === s.owner)).toBe(true);
@@ -429,8 +429,8 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       [s.orgId],
     );
     expect(deliveries.map((d) => [d.channel, d.status, d.hold_key])).toEqual([
-      ["slack", "sent", `hot_text:${s.inboundMessageId}`],
-      ["sms", "sent", `hot_text:${s.inboundMessageId}`],
+      ["slack", "sent", `hot_handoff:${s.inboundMessageId}`],
+      ["sms", "sent", `hot_handoff:${s.inboundMessageId}`],
     ]);
 
     sent.length = 0;
@@ -596,13 +596,13 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       { anthropic: forbiddenAnthropic },
     );
 
-  it("intent written but the assignment update fails: dispatch holds hot_lead_assign_failed, ONE alert pass sends exactly one Slack + one SMS (via the hold); a later successful retry on a NEW text alerts once more; the same text never twice", async () => {
+  it("the assignment update fails: dispatch holds hot_lead_assign_failed, ONE alert pass sends exactly one Slack + one SMS (via the hold); a later hand-off on a NEW text while the hold is open is covered (no second ping)", async () => {
     resetMockState();
     installFakeJev();
     const s = await seedScenario();
     const { sent, deps } = recorders();
 
-    // Block assignment writes to this one property (the intent insert goes to lead_events, so it still lands).
+    // Block assignment writes to this one property.
     const fn = `hot_sw_block_${s.propertyId.replace(/-/g, "")}`;
     await pg.query(`create function public.${fn}() returns trigger language plpgsql as $$ begin
       if new.assigned_user_id is distinct from old.assigned_user_id then raise exception 'blocked for test'; end if; return new; end $$`);
@@ -617,7 +617,6 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     try {
       const first = await dispatchWith(s, s.inboundMessageId, s.body);
       expect(first).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
-      expect(await count("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = 'hot_seller_handoff_intent' and source_id = $2", [s.propertyId, s.inboundMessageId])).toBe(1);
       expect(await count("select count(*)::int as n from public.lead_events where property_id = $1 and event_type = 'assigned' and source_type = $2", [s.propertyId, HOT_HANDOFF_SOURCE_TYPE])).toBe(0);
       expect((await admin.from("properties").select("assigned_user_id").eq("id", s.propertyId).single()).data?.assigned_user_id).toBeNull();
 
@@ -625,28 +624,23 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
       expect(sent.every((x) => x.userId === s.owner)).toBe(true);
       const { rows: d1 } = await pg.query("select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel", [s.orgId]);
-      // Direct dispatch writes no pipeline run, so the hold has no inbound to key by: it uses the property fallback key.
-      expect(d1.map((d) => [d.channel, d.status, d.hold_key])).toEqual([
-        ["slack", "sent", `hot_promotion:${s.propertyId}`],
-        ["sms", "sent", `hot_promotion:${s.propertyId}`],
-      ]);
+      // The hold is keyed by its own flag time (hot_flag:<property>:<flagAt>), property id null.
+      expect(d1.map((d) => [d.channel, d.status])).toEqual([["slack", "sent"], ["sms", "sent"]]);
+      expect(d1.every((d) => new RegExp(`^hot_flag:${s.propertyId}:`).test(d.hold_key))).toBe(true);
       // Same text, further passes: nothing.
       expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
     } finally {
       await unblock();
     }
 
-    // Retry on a NEW hot text, block gone: hand-off succeeds, alerts once more.
+    // A NEW hot text, block gone: the hand-off succeeds, but the hold is still open so it is covered (no second ping).
     const body2 = "ok seriously, what is your best number?";
     const second = await insertInboundFor(s, body2);
-    // The earlier hold keeps the property out of the auto-responder, so the retry is the hand-off call itself.
     expect(await assignHotLeadToOwner(admin, s.propertyId, { inboundMessageId: second })).toEqual({ status: "assigned", assigneeUserId: s.owner });
     expect((await admin.from("properties").select("assigned_user_id").eq("id", s.propertyId).single()).data?.assigned_user_id).toBe(s.owner);
-    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(2);
-    expect(sent).toHaveLength(4);
     expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
-    const { rows: keys } = await pg.query("select distinct hold_key from public.hold_alert_deliveries where org_id = $1 order by hold_key", [s.orgId]);
-    expect(keys.map((k) => k.hold_key).sort()).toEqual([`hot_promotion:${s.propertyId}`, `hot_text:${second}`].sort());
+    expect(sent).toHaveLength(2);
+    expect(await count("select count(*)::int as n from public.lead_events where property_id = $1 and event_type = 'assigned' and source_type = $2", [s.propertyId, HOT_HANDOFF_SOURCE_TYPE])).toBe(1);
     expect(await count("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [s.propertyId])).toBe(0);
   }, 120_000);
 

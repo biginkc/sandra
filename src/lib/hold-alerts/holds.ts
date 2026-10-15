@@ -1,6 +1,6 @@
 import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages-v2/types";
 
-import { hotTextKey, isHotReason } from "@/lib/hot-sellers/hot";
+import { isHotReason } from "@/lib/hot-sellers/hot";
 
 import { holdReasonLabel } from "./messages";
 import type { HoldInfo } from "./types";
@@ -183,7 +183,6 @@ export function toAlertHolds(
       name: label?.name ?? "Unknown sender",
       reasonLabel: holdReasonLabel(holdReasonKey(hold)),
       hot: isHotHold(hold),
-      hotKey: hold.run?.inbound_message_id ? hotTextKey(hold.run.inbound_message_id) : null,
     });
   }
   return out;

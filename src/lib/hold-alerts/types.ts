@@ -21,8 +21,8 @@ export type HoldInfo = {
   reasonLabel: string;
   /** Hot seller (lib/hot-sellers/hot.ts), nothing else. Only hot holds ping. */
   hot: boolean;
-  /** Hot holds: hot_text:<inbound of the hold's run> (one alert per hot text); null when the run is unknown. */
-  hotKey?: string | null;
+  /** When the hold's flag was set (properties.last_ai_escalation_at): the hot hold's alert key and cutoff time. */
+  flagAt?: string | null;
 };
 
 export type Recipient = { userId: string; role: "owner" | "member" };
@@ -39,8 +39,8 @@ export type HotPromotion = {
   kind?: "handoff" | "hot_text";
   /** Property address (record data, never seller text); used by the hot_text alert. */
   address?: string | null;
-  /** Delivery key; defaults to hotPromotionKey(propertyId). */
-  key?: string;
+  /** Delivery key: hot_handoff:<inbound> or hot_text:<inbound>. */
+  key: string;
 };
 
 export type DeliveryRow = {

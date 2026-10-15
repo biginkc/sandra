@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hotPromotionKey, isHotReason, isHotSeller } from "./hot";
+import { hotFlagKey, hotHandoffKey, hotTextKey, isHotReason, isHotSeller } from "./hot";
 
 describe("isHotReason", () => {
   it.each([
@@ -39,8 +39,10 @@ describe("isHotSeller", () => {
   });
 });
 
-describe("hotPromotionKey", () => {
-  it("is once per property", () => {
-    expect(hotPromotionKey("p1")).toBe("hot_promotion:p1");
+describe("alert keys (one per hot event)", () => {
+  it("are keyed by inbound text or by the flag's own time", () => {
+    expect(hotHandoffKey("m1")).toBe("hot_handoff:m1");
+    expect(hotTextKey("m1")).toBe("hot_text:m1");
+    expect(hotFlagKey("p1", "2026-10-15T10:00:00.000Z")).toBe("hot_flag:p1:2026-10-15T10:00:00.000Z");
   });
 });

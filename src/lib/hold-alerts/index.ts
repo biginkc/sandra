@@ -19,7 +19,7 @@ import type {
   Recipient,
 } from "./types";
 import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotPromotionKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
 
 export { runHoldAlertsForOrg } from "./core";
@@ -75,8 +75,25 @@ async function loadAlertHolds(
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  const complete = data.holdsMeta.failed.length === 0;
-  return { holds: toAlertHolds(data.holds, labels), complete };
+  let complete = data.holdsMeta.failed.length === 0;
+  const holds = toAlertHolds(data.holds, labels);
+  // The hot hold's own moment (flag time) for its alert key and cutoff, read
+  // here so the frozen loader stays untouched.
+  const hotIds = [...new Set(holds.filter((h) => h.hot).map((h) => h.propertyId))];
+  const flagAt = new Map<string, string | null>();
+  for (let i = 0; i < hotIds.length; i += 200) {
+    const res = await db
+      .from("properties")
+      .select("id, last_ai_escalation_at")
+      .eq("org_id", orgId)
+      .in("id", hotIds.slice(i, i + 200));
+    if (res.error) {
+      complete = false;
+      continue;
+    }
+    for (const p of (res.data ?? []) as Array<{ id: string; last_ai_escalation_at: string | null }>) flagAt.set(p.id, p.last_ai_escalation_at);
+  }
+  return { holds: holds.map((h) => (h.hot ? { ...h, flagAt: flagAt.get(h.propertyId) ?? null } : h)), complete };
 }
 
 const HOT_PROMOTION_PAGE = 200;
@@ -103,7 +120,7 @@ export async function loadHotPromotions(
     property_id: string;
     source_type: string;
     source_id: string;
-    payload: { to?: unknown; inbound?: unknown } | null;
+    payload: { to?: unknown; inbound?: unknown; covered_by_hold?: unknown } | null;
     created_at: string;
   };
   const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
@@ -130,13 +147,7 @@ export async function loadHotPromotions(
     const last = page[page.length - 1]!;
     before = { at: last.created_at, id: last.id };
   }
-  // One alert per hot inbound text: a hand-off is keyed by the inbound it
-  // carries (payload.inbound), a hot text by its own inbound (source_id).
-  const keyOf = (r: Row) => {
-    if (r.source_type === HOT_TEXT_SOURCE_TYPE) return hotTextKey(r.source_id);
-    const inbound = typeof r.payload?.inbound === "string" ? r.payload.inbound : null;
-    return inbound ? hotTextKey(inbound) : hotPromotionKey(r.property_id);
-  };
+  const keyOf = (r: Row) => (r.source_type === HOT_TEXT_SOURCE_TYPE ? hotTextKey(r.source_id) : hotHandoffKey(r.source_id));
   // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
   const done = new Set<string>();
   const keys = [...new Set(rows.map(keyOf))];
@@ -183,6 +194,8 @@ export async function loadHotPromotions(
   for (const r of todo) {
     const to = typeof r.payload?.to === "string" ? r.payload.to : null;
     if (!to) continue;
+    // An open hot hold already pinged Jarrad about this lead.
+    if (r.payload?.covered_by_hold === true) continue;
     // A hand-off counts only while the lead really is assigned to that person.
     if (r.source_type !== HOT_TEXT_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
     promotions.push({

@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
-import { hotPromotionKey } from "@/lib/hot-sellers/hot";
+import { hotHandoffKey } from "@/lib/hot-sellers/hot";
+
 
 import {
   deleteCanaryConsentBySource,
@@ -44,7 +45,7 @@ test("production canary: a hot seller text is handed to the owner with Slack + S
   const contactLastName = `PROD-CANARY HOT ${token}`;
   let contactId: string | null = null;
   let createdContact = false;
-  let propertyId: string | null = null;
+  const alertKeys: string[] = [];
   testInfo.annotations.push({ type: "runId", description: env.runId });
 
   await deleteCanaryPropertiesByAddress(supabase, address);
@@ -59,7 +60,6 @@ test("production canary: a hot seller text is handed to the owner with Slack + S
       runId: env.runId,
       fields: { homeowner_contact_id: contact.id, state: "MO", status: "prospect" },
     });
-    propertyId = lead.id;
 
     const { data: owners, error: ownerError } = await supabase.from("memberships").select("user_id").eq("role", "owner");
     expect(ownerError).toBeNull();
@@ -98,18 +98,20 @@ test("production canary: a hot seller text is handed to the owner with Slack + S
     );
     const { data: events } = await supabase
       .from("lead_events")
-      .select("id")
+      .select("id, source_id")
       .eq("property_id", lead.id)
       .eq("event_type", "assigned")
       .eq("source_type", "hot_seller_handoff");
     expect(events).toHaveLength(1);
+    const alertKey = hotHandoffKey(events![0].source_id as string);
+    alertKeys.push(alertKey);
 
     // The alert cron runs on its own schedule; wait for both deliveries.
     const rows = await pollUntil(
       async () => {
         const { data: raw } = await deliveries()
           .select("channel, status, recipient_user_id")
-          .eq("hold_key", hotPromotionKey(lead.id));
+          .eq("hold_key", alertKey);
         const data = (raw ?? []) as unknown as DeliveryRow[];
         const sent = data.filter((r) => r.status === "sent" && r.recipient_user_id === ownerId);
         return sent.some((r) => r.channel === "slack") && sent.some((r) => r.channel === "sms") ? data : null;
@@ -127,7 +129,7 @@ test("production canary: a hot seller text is handed to the owner with Slack + S
       .neq("provider", "internal");
     expect(outbound ?? []).toHaveLength(0);
   } finally {
-    if (propertyId) await deliveries().delete().eq("hold_key", hotPromotionKey(propertyId));
+    for (const key of alertKeys) await deliveries().delete().eq("hold_key", key);
     await deleteCanaryPropertiesByAddress(supabase, address);
     if (contactId) await deleteCanaryConsentBySource(supabase, { contactId, source: env.label });
     if (createdContact) await deleteCanaryContactsByLastName(supabase, contactLastName);

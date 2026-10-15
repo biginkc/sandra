@@ -68,7 +68,7 @@ describe("first stage alerts (hot hold, owner only)", () => {
     const t = makeDeps({
       hotOwner: null,
       holds: [],
-      promotions: [{ propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T09:30:00.000Z" }],
+      promotions: [{ propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T09:30:00.000Z", key: "hot_handoff:in-9" }],
     });
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toEqual([]);
@@ -76,17 +76,16 @@ describe("first stage alerts (hot hold, owner only)", () => {
     expect(summary.hotOwnerUnknown).toBe(true);
   });
 
-  it("a hot hold and a promotion for the same property in one pass send exactly one Slack and one SMS", async () => {
+  it("a hot hold and a hand-off are separate hot events with their own keys (the loader drops a hand-off covered by an open hold)", async () => {
     const t = makeDeps({
       holds: [hold({ hot: true })],
-      promotions: [{ propertyId: "prop-1", assigneeUserId: OWNER.userId, name: "Dana", assignedAt: "2026-10-15T09:30:00.000Z" }],
+      promotions: [{ propertyId: "prop-1", assigneeUserId: OWNER.userId, name: "Dana", assignedAt: "2026-10-15T09:30:00.000Z", key: "hot_handoff:in-1" }],
     });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
-    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_promotion:prop-1"]));
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_handoff:in-1", "hot_flag:prop-1:2026-10-15T10:00:00.000Z"]));
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(2);
+    expect(t.sent).toHaveLength(4);
   });
 
   it("records no_token and pref_disabled as visible skipped rows, not silence", async () => {
@@ -154,7 +153,7 @@ describe("caps", () => {
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(0);
     expect(summary.deferred).toBe(1);
     // Over the cap is "not yet", not "never": the row stays pending with no attempt spent.
-    const row = t.store.rows.find((r) => r.holdKey === "hot_promotion:prop-1" && r.channel === "slack")!;
+    const row = t.store.rows.find((r) => r.holdKey === "hot_flag:prop-1:2026-10-15T10:00:00.000Z" && r.channel === "slack")!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 
@@ -186,7 +185,7 @@ describe("caps", () => {
     t.setNow("2026-10-15T10:55:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.store.rows.find((r) => r.holdKey === "hot_promotion:prop-1" && r.stage === "first")!.status).toBe("sent");
+    expect(t.store.rows.find((r) => r.holdKey === "hot_flag:prop-1:2026-10-15T10:00:00.000Z" && r.stage === "first")!.status).toBe("sent");
   });
 
   it("counts only the last hour toward the DM cap", async () => {
@@ -231,7 +230,7 @@ describe("caps", () => {
     }
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.some((s) => s.channel === "sms")).toBe(false);
-    const row = t.store.rows.find((r) => r.channel === "sms" && r.holdKey === "hot_promotion:prop-1")!;
+    const row = t.store.rows.find((r) => r.channel === "sms" && r.holdKey === "hot_flag:prop-1:2026-10-15T10:00:00.000Z")!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 });
@@ -497,13 +496,13 @@ describe("archive-on-clear (property-tied rows close when the hold clears)", () 
   it("hot-seller rows have no property id and are never archived: a cleared hold does not re-arm the alert", async () => {
     const t = makeDeps();
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_promotion:prop-1")).toBe(true);
+    expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_flag:prop-1:2026-10-15T10:00:00.000Z")).toBe(true);
     const cleared = makeDeps({ store: t.store, holds: [] });
     expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(0);
     expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
   });
 
-  it("a hot hold that clears and re-opens does NOT alert again (one Slack + one SMS per seller, ever)", async () => {
+  it("a hot hold that clears and re-opens with the same flag time keeps its key: no second alert", async () => {
     const t = makeDeps({ nowIso: "2026-10-15T10:02:00.000Z" });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(2);
