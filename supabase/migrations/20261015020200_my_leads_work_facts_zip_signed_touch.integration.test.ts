@@ -404,6 +404,30 @@ it('the page and facts RPCs surface the new keys, and the migration leaves them 
   });
 });
 
+it('unknown ledger/obligation states are in flight for 15 minutes, then Broken (design 2.1 v9)', async () => {
+  await withDb(async (db, applyNew) => {
+    const w = await world(db);
+    const l10 = await w.lead('l10'), l16 = await w.lead('l16'), o10 = await w.lead('o10'), o16 = await w.lead('o16');
+    await w.ledger(l10, 'unknown', w.at(-10 * MIN));
+    await w.ledger(l16, 'unknown', w.at(-16 * MIN));
+    await w.obligation(o10, 'unknown', w.at(-10 * MIN));
+    await w.obligation(o16, 'unknown', w.at(-16 * MIN));
+    await applyNew();
+    const kinds = (r: Record<string, Json>, id: string) => (r[id].facts.broken as Json[]).map((b) => b.kind);
+    const now = await rows(w, db);
+    expect(kinds(now, l10)).toEqual([]);
+    expect(kinds(now, o10)).toEqual([]);
+    expect(kinds(now, l16)).toEqual(['text_status_unknown']);
+    expect(kinds(now, o16)).toEqual(['followup_text_status_unknown']);
+    // The clock alone turns the 10-minute ones Broken: next_change_at lands 1 ms past the 15-minute threshold.
+    const boundary = new Date(w.pAt.getTime() + 5 * MIN + 1);
+    for (const id of [l10, o10]) expect(new Date(now[id].next_change_at).getTime()).toBeLessThanOrEqual(boundary.getTime());
+    const later = await rows(w, db, boundary);
+    expect(kinds(later, l10)).toEqual(['text_status_unknown']);
+    expect(kinds(later, o10)).toEqual(['followup_text_status_unknown']);
+  });
+});
+
 it('up, down, up applies cleanly in a rolled-back transaction', async () => {
   await withDb(async (db, applyNew) => {
     const w = await world(db);

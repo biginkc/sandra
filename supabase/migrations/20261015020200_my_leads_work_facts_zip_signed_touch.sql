@@ -249,7 +249,9 @@ language sql stable security definer set search_path = '' as $$
       o.updated_at, o.id, o.state in ('failed_not_dispatched', 'delivery_failed', 'blocked')
     from base b
     join public.rep_sms_obligations o on o.org_id = p_org and o.property_id = b.property_id
-    where o.state in ('required', 'draft', 'failed_not_dispatched', 'delivery_failed', 'blocked', 'unknown')
+    where o.state in ('required', 'draft', 'failed_not_dispatched', 'delivery_failed', 'blocked')
+       -- unknown is in flight for its first 15 minutes, like reserved/sending (design 2.1 v9)
+       or (o.state = 'unknown' and o.updated_at < p_at - interval '15 minutes')
        or (o.state in ('claimed', 'sending') and o.lease_expires_at < p_at)
     union all
     select b.property_id, case when l.state in ('failed_not_dispatched', 'delivery_failed') then 'text_not_delivered'
@@ -258,8 +260,8 @@ language sql stable security definer set search_path = '' as $$
       l.updated_at, l.id, l.state in ('failed_not_dispatched', 'delivery_failed', 'blocked')
     from base b
     join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id
-    where l.state in ('failed_not_dispatched', 'delivery_failed', 'blocked', 'unknown')
-       or (l.state in ('reserved', 'sending') and l.updated_at < p_at - interval '15 minutes')
+    where l.state in ('failed_not_dispatched', 'delivery_failed', 'blocked')
+       or (l.state in ('reserved', 'sending', 'unknown') and l.updated_at < p_at - interval '15 minutes')
     union all
     select m.lead_id,
       case when m.status = 'failed' and m.metadata ->> 'providerOutcome' is distinct from 'provider_unknown' then 'text_not_sent' else 'text_status_unknown' end,
@@ -315,9 +317,11 @@ language sql stable security definer set search_path = '' as $$
       union all select m.lead_id, m.created_at + interval '15 minutes 1 millisecond' from mf m where m.status = 'pending' and m.cls = 'human'
       union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status in ('failed', 'pending') and m.cls = 'human'
       union all select b.property_id, l.updated_at + interval '15 minutes 1 millisecond' from base b
-        join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id and l.state in ('reserved', 'sending')
+        join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id and l.state in ('reserved', 'sending', 'unknown')
       union all select b.property_id, o.lease_expires_at + interval '1 millisecond' from base b
         join public.rep_sms_obligations o on o.org_id = p_org and o.property_id = b.property_id and o.state in ('claimed', 'sending')
+      union all select b.property_id, o.updated_at + interval '15 minutes 1 millisecond' from base b
+        join public.rep_sms_obligations o on o.org_id = p_org and o.property_id = b.property_id and o.state = 'unknown'
     ) x where t > p_at),
   tmn as (select lead_id, min(t) as next_at from tm group by lead_id),
   fl as (
