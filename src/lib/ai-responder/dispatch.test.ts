@@ -7656,6 +7656,30 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
         });
 
+        it.each(["nurture", "callback_requested", "booked_appointment"])(
+          "held lead with human-owned outreach_dispo %s: still classified and recorded (alert-only, not suppression)",
+          async (dispo) => {
+            const state = createMockState();
+            state.property.outreach_dispo = dispo;
+            const r = await heldRun(state, `inbound-gate-dispo-${dispo}`);
+            expect(r.classifierCalls).toBe(1);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          },
+        );
+
+        it.each(["wrong_number", "bad_number", "dnc", "opted_out"])(
+          "held lead with suppressing outreach_dispo %s: classifier not called, nothing recorded",
+          async (dispo) => {
+            const state = createMockState();
+            state.property.outreach_dispo = dispo;
+            const r = await heldRun(state, `inbound-gate-supp-${dispo}`);
+            expect(r.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          },
+        );
+
         it("no conversation id: classifier not called, nothing recorded", async () => {
           const state = createMockState();
           const r = await heldRun(state, "inbound-gate-noconv", { noConversation: true });

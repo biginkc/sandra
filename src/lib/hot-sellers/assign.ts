@@ -118,7 +118,7 @@ export async function assignHotLeadToOwner(
     // while it is open are recorded but do not ping again.
     // This same text's failed hand-off already pinged him: never twice for one text.
     const failedBefore = await findBySource(db, HOT_FAILED_SOURCE_TYPE, inbound);
-    const coveredByHold = failedBefore === true || (await isCoveredByHotHold(db, property));
+    const coveredByHold = failedBefore === true || (await isCoveredByHotHold(db, property, owner));
 
 
     const previous = property.assigned_user_id;
@@ -221,7 +221,7 @@ export async function recordHotFailure(
   if (!inboundMessageId) return false;
   const { data: property } = await db
     .from("properties")
-    .select("id, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
+    .select("id, org_id, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("id", propertyId)
     .maybeSingle();
   // Called AFTER the flag write. If the open flag is this failure, the event
@@ -230,7 +230,8 @@ export async function recordHotFailure(
   // alerted covers it.
   const flagIsOurs = property?.needs_human_attention === true && property.last_ai_escalation_reason === reason;
   const flagAt = flagIsOurs ? property?.last_ai_escalation_at ?? null : null;
-  const coveredByHold = property && !flagIsOurs ? await isCoveredByHotHold(db, property) : false;
+  const owner = property && !flagIsOurs ? await resolveHotOwner(db, property.org_id).catch(() => null) : null;
+  const coveredByHold = property && !flagIsOurs ? await isCoveredByHotHold(db, property, owner) : false;
   return recordOnce(db, {
     propertyId,
     eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
@@ -248,7 +249,10 @@ export async function recordHotFailure(
 async function isCoveredByHotHold(
   db: SupabaseClient<Database>,
   p: { id: string; needs_human_attention: boolean | null; last_ai_escalation_reason: string | null; last_ai_escalation_at: string | null },
+  /** The CURRENT hot owner; null (unresolved) never counts as covered. */
+  owner: string | null,
 ): Promise<boolean> {
+  if (!owner) return false;
   if (!p.needs_human_attention || !isHotReason(p.last_ai_escalation_reason) || !p.last_ai_escalation_at) return false;
   if (Date.parse(p.last_ai_escalation_at) < Date.parse(HOT_ALERTS_START_ISO)) return false;
   // Every hot flag hold (failed hand-offs included) alerts under
@@ -256,12 +260,18 @@ async function isCoveredByHotHold(
   const key = hotFlagKey(p.id, p.last_ai_escalation_at);
   const { data, error } = await (db as unknown as { from: (t: string) => ReturnType<SupabaseClient<Database>["from"]> })
     .from("hold_alert_deliveries")
-    .select("id, status")
+    .select("id, status, recipient_user_id")
     .eq("hold_key" as never, key as never);
   if (error) return false;
-  // Covered only by an alert that is CONFIRMED sent (at least one channel).
-  // Pending (capped), sending, failed or skipped never silence a later hot text.
-  return ((data ?? []) as unknown as Array<{ status: string }>).some((d) => d.status === "sent");
+  // For the CURRENT owner: covered when the hold's alert was CONFIRMED sent
+  // to them (at least one channel), or when the hold has no delivery for them
+  // yet (it will alert them itself on the next pass, e.g. after an owner
+  // change), so one seller never pings twice. A pending (capped), sending,
+  // failed or skipped delivery to them never covers.
+  const mine = ((data ?? []) as unknown as Array<{ status: string; recipient_user_id: string }>).filter(
+    (d) => d.recipient_user_id === owner,
+  );
+  return mine.length === 0 || mine.some((d) => d.status === "sent");
 }
 
 /**
@@ -287,7 +297,7 @@ export async function recordHotTextOnHeldLead(
   const owner = await resolveHotOwner(db, property.org_id, env).catch(() => null);
   if (!owner) return false;
   if (property.assigned_user_id && property.assigned_user_id !== owner) return false;
-  const coveredByHold = await isCoveredByHotHold(db, property);
+  const coveredByHold = await isCoveredByHotHold(db, property, owner);
   return recordOnce(db, {
     propertyId,
     eventType: LEAD_EVENT_TYPES.AI_ESCALATED,

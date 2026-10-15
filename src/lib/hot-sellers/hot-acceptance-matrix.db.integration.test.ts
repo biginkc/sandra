@@ -451,8 +451,11 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
     );
   };
 
+  /** Rows that change the hot owner set the new recipient here (the final "only the owner is pinged" check uses it). */
+  const extra = { recipient: null as string | null };
+
   return {
-    orgId, owner, rep, propertyId, sent, baseDeps, newInbound, dispatch, alertPass, handoffEvents, assignee, tape, runOf, expectOneAlertTotal,
+    extra, orgId, owner, rep, propertyId, sent, baseDeps, newInbound, dispatch, alertPass, handoffEvents, assignee, tape, runOf, expectOneAlertTotal,
     blockAssignment, repWinsRace, flag, preCutoffReviewHold, blockLeadEvents, noopFlagWrites, flagKey, handoffPayload, useUpCaps, deliveryRows, hotTextPayload, hotTextEvents, seedSentHoldAlert,
     slack: () => sent.filter((s) => s.channel === "slack").length,
     sms: () => sent.filter((s) => s.channel === "sms").length,
@@ -799,7 +802,7 @@ const ROWS: Row[] = [
       const pass = await h.alertPass();
       expect(pass.holds).toBe(1);
       expect(pass.sent).toBe(2);
-      expect(h.sent.every((x) => x.userId === h.owner)).toBe(true);
+      expect(h.sent.every((x) => x.userId === (h.extra.recipient ?? h.owner))).toBe(true);
       expect(await h.assignee()).toBeNull();
       expect((await h.alertPass()).sent).toBe(0);
     },
@@ -1230,10 +1233,68 @@ const ROWS: Row[] = [
       await h.flag("draft_held", new Date().toISOString());
       const a = await h.newInbound("stop texting me, but what would you pay");
       await h.dispatch(a, outcome, HOT_ESC);
+      expect(jevCalls).toBe(1);
       expect(await h.hotTextEvents()).toBe(0);
       expect((await h.alertPass()).sent).toBe(0);
     },
   })),
+  {
+    id: "40",
+    name: "hot hold alerted owner A (sent), then A loses the owner role and B becomes the single owner, then a new hot text through real dispatch: B has no rows yet, so the hold alerts B itself and the text is covered - exactly one Slack + SMS, to B",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("model:price_or_offer", new Date().toISOString());
+      await h.seedSentHoldAlert(await h.flagKey()); // sent to A (the original owner)
+      const b = await createMember(h.orgId, "owner");
+      await pg.query("update public.memberships set role = 'member' where org_id = $1 and user_id = $2", [h.orgId, h.owner]);
+      h.extra.recipient = b;
+      const a = await h.newInbound("ok so what is your best number?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: true, to: b });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect(h.sent.map((x) => [x.channel, x.userId])).toEqual(expect.arrayContaining([["slack", b], ["sms", b]]));
+      expect(h.slack()).toBe(1);
+      expect(h.sms()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.assignee()).toBeNull();
+    },
+  },
+  {
+    id: "41",
+    name: "held lead with outreach_dispo='nurture' + a hot text through real dispatch: classified, one held-lead hot_text, exactly one Slack + SMS, nothing sent to the seller",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      await pg.query("update public.properties set outreach_dispo = 'nurture' where id = $1", [h.propertyId]);
+      const a = await h.newInbound("yes, what would you pay?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.assignee()).toBeNull();
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "42",
+    name: "held lead with outreach_dispo='callback_requested' owned by a rep + a hot text through real dispatch: classified, but a rep's lead stays silent - no hot_text event, 0 Slack, 0 SMS",
+    setup: { assigned: "rep" },
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      await pg.query("update public.properties set outreach_dispo = 'callback_requested' where id = $1", [h.propertyId]);
+      const a = await h.newInbound("yes, what would you pay?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+      expect(await h.assignee()).toBe(h.rep);
+    },
+  },
 ];
 
 /** The classification kind the hot-wins step recorded for this inbound's run. */
@@ -1286,6 +1347,6 @@ describe("hot seller acceptance matrix (real database, real dispatch + alert pas
     expect({ slack: h.slack(), sms: h.sms(), assigned: await h.handoffEvents() }).toEqual(row.expect);
     // Nothing is ever texted to the seller, and nobody but the owner is ever pinged.
     expect(await count("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [h.propertyId])).toBe(0);
-    expect(h.sent.every((x) => x.userId === h.owner)).toBe(true);
+    expect(h.sent.every((x) => x.userId === (h.extra.recipient ?? h.owner))).toBe(true);
   }, 180_000);
 });

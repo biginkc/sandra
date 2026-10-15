@@ -21,7 +21,7 @@ import {
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
-import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
+import { isSuppressed, shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -2937,7 +2937,12 @@ async function classifyOnlyForHotText(
     // The same rule-0 gates as any send (org off, consent / opt-out, DNC,
     // phone suppression, responder disabled = human takeover), evaluated as
     // if the lead were not held. Any failed lookup or any gate → nothing.
-    const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false });
+    // Alert-only (nothing is sent), so only TRUE suppression blocks it
+    // (wrong_number / bad_number / dnc / opted_out dispositions); human-owned
+    // dispositions (nurture, callback, booked) do not. The alert's send-time
+    // owner check keeps a rep's lead silent.
+    if (isSuppressed({ outreachDispo: property.outreach_dispo })) return;
+    const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false, outreach_dispo: null });
     if (!silent.ok || silent.reason) return;
     // Already handled: a response claim or a classification run for this
     // inbound means it went through before. Never classify a replay; a failed
