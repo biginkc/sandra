@@ -321,7 +321,7 @@ export async function runFamilies(url: string, opts: RunOptions): Promise<Family
     // One outer transaction PER FAMILY: the migration is applied inside it, every world is a savepoint, nothing commits.
     // Not one per run: Postgres keeps the SQL-function caches built while calling the classifier until the top-level
     // transaction ends (rolling back a savepoint does not free them), so a whole-run transaction grew the backend by
-    // ~30 MB/s until the 8 GB VM killed it (test-results/my-leads-queue-stress/oom-diagnosis.md).
+    // ~30 MB/s until the 8 GB VM killed it (diagnosis in PR #879).
     for (const family of opts.families) {
       await db.query("begin");
       await db.query(migrationSql);

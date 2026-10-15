@@ -5,8 +5,13 @@ Hard gate before the `unified_queue` flag is turned on (stress design v1). It ch
 oracle, under volume, concurrency and clock boundaries.
 
 **Disposable local database only.** No provider is ever called and no message is ever sent (the only "sender" is an in-process fake).
-The oracle lane, refresh lane, bind-failure lane and scale lane run inside one transaction that is rolled back; the committed race lanes
-need an otherwise empty database and an explicit acknowledgement.
+The oracle lane runs one rolled-back transaction per family; the refresh lane, bind-failure lane and scale lane (per size) each run inside
+one transaction that is rolled back; the committed race lanes need an otherwise empty database and an explicit acknowledgement.
+
+**Memory.** Postgres frees the per-call function caches built while calling the classifier only when the top-level transaction ends (a
+savepoint rollback does not). With one transaction for the whole oracle lane, the backend grew until the 8 GB VM killed it at ~4.6 GB; with
+one per family it peaks at ~0.7 GB on the same workload (PR #879). The refresh and bind-failure lanes still hold one transaction each across
+their repeats, so raising `--repeats` far above 20 may need the same treatment.
 
 ## Run it (Codex)
 
