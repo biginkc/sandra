@@ -228,7 +228,7 @@ language sql stable security definer set search_path = '' as $$
       select n.property_id, n.created_at, n.created_at, 4, 'note'
       from public.lead_notes n
       where n.org_id = p_org and n.property_id in (select property_id from base) and n.created_at <= p_at),
-  lt as (select distinct on (u.lead_id) u.lead_id, u.kind from tu u order by u.lead_id, u.ts desc, u.pri),
+  lt as (select distinct on (u.lead_id) u.lead_id, u.kind, u.ts from tu u order by u.lead_id, u.ts desc, u.pri),
   -- The touch facts of my_leads_touch_facts (20261005150000) from tu, without re-projecting the queue: last_touch_at is the
   -- latest touch, last_call_at the latest attempt or outbound call.
   tf as (
@@ -242,7 +242,8 @@ language sql stable security definer set search_path = '' as $$
   nr as (
     select r.property_id as lead_id,
       bool_or(r.status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown')) as calling,
-      min(r.updated_at) filter (where r.status = 'needs_review') as review_at
+      min(r.updated_at) filter (where r.status = 'needs_review') as review_at,
+      (array_agg(r.id order by r.updated_at, r.id) filter (where r.status = 'needs_review'))[1] as review_id
     from public.norma_call_requests r
     where r.org_id = p_org and r.property_id in (select property_id from base) group by r.property_id),
   camp as (
@@ -301,7 +302,7 @@ language sql stable security definer set search_path = '' as $$
     select b.property_id, 'ai_reply_failed', 'review', dl.created_at, dl.id, false
     from base b join public.ai_reply_dead_letters dl on dl.org_id = p_org and dl.property_id = b.property_id and dl.resolved_at is null
     union all
-    select n.lead_id, 'norma_needs_review', 'review', n.review_at, null::uuid, false from nr n where n.review_at is not null),
+    select n.lead_id, 'norma_needs_review', 'review', n.review_at, n.review_id, false from nr n where n.review_at is not null),
   -- A pending AI draft is a label only (never Broken): stale once its reply is handled another way.
   dr as (
     select distinct on (d.property_id) d.property_id as lead_id, d.id as draft_id from public.ai_reply_drafts d
@@ -366,7 +367,7 @@ language sql stable security definer set search_path = '' as $$
         or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at >= p_at - interval '30 minutes') as drip_healthy,
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
-      apx.due_tk, apx.due_snz, apx.missed_tk, apx.missed_snz, apx.future_tk, apx.future_snz, lt.kind as lt_kind,
+      apx.due_tk, apx.due_snz, apx.missed_tk, apx.missed_snz, apx.future_tk, apx.future_snz, lt.kind as lt_kind, lt.ts as lt_ts,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
       coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, dr.draft_id, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
       coalesce(nr.calling, false) as norma_calling, (nt.lead_id is not null) as norma_task,
@@ -511,7 +512,7 @@ language sql stable security definer set search_path = '' as $$
       'broken', coalesce(f.broken_items, '[]'::jsonb), 'aiDraftId', f.draft_id,
       'labels', to_jsonb(f.labels),
       'zip', f.zip, 'contractSignedAt', f.contract_signed_at,
-      'lastTouch', case when f.last_touch_at is null then null else jsonb_build_object('kind', coalesce(f.lt_kind, 'other'), 'at', f.last_touch_at) end,
+      'lastTouch', case when f.last_touch_at is null and f.lt_ts is null then null else jsonb_build_object('kind', coalesce(f.lt_kind, 'other'), 'at', coalesce(f.lt_ts, f.last_touch_at)) end,
       'row', f.row_data) as facts,
     f.search_text, f.next_at
   from fin f;
