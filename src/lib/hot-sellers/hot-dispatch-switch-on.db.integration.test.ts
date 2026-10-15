@@ -596,7 +596,7 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       { anthropic: forbiddenAnthropic },
     );
 
-  it("the assignment update fails: dispatch holds hot_lead_assign_failed, ONE alert pass sends exactly one Slack + one SMS (via the hold); a later hand-off on a NEW text while the hold is open is covered (no second ping)", async () => {
+  it("the assignment update fails: dispatch holds hot_lead_assign_failed, ONE alert pass sends exactly one Slack + one SMS (via its own hot_failed event); a later hand-off on a NEW text while the hold is open is covered (no second ping)", async () => {
     resetMockState();
     installFakeJev();
     const s = await seedScenario();
@@ -624,16 +624,16 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
       expect(sent.every((x) => x.userId === s.owner)).toBe(true);
       const { rows: d1 } = await pg.query("select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel", [s.orgId]);
-      // The hold is keyed by its own flag time (hot_flag:<property>:<flagAt>), property id null.
+      // The failed hand-off alerts through its own event, keyed by the inbound.
       expect(d1.map((d) => [d.channel, d.status])).toEqual([["slack", "sent"], ["sms", "sent"]]);
-      expect(d1.every((d) => new RegExp(`^hot_flag:${s.propertyId}:`).test(d.hold_key))).toBe(true);
+      expect(d1.every((d) => d.hold_key === `hot_failed:${s.inboundMessageId}`)).toBe(true);
       // Same text, further passes: nothing.
       expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
     } finally {
       await unblock();
     }
 
-    // A NEW hot text, block gone: the hand-off succeeds, but the hold is still open so it is covered (no second ping).
+    // A NEW hot text, block gone: the hand-off succeeds. The hold alerted via hot_failed, so covered (no second ping).
     const body2 = "ok seriously, what is your best number?";
     const second = await insertInboundFor(s, body2);
     expect(await assignHotLeadToOwner(admin, s.propertyId, { inboundMessageId: second })).toEqual({ status: "assigned", assigneeUserId: s.owner });

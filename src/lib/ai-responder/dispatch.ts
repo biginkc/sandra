@@ -26,7 +26,7 @@ import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { assignHotLeadToOwner } from "@/lib/hot-sellers/assign";
+import { assignHotLeadToOwner, recordHotFailure } from "@/lib/hot-sellers/assign";
 import { isHotSeller } from "@/lib/hot-sellers/hot";
 
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
@@ -825,7 +825,8 @@ async function dispatchAiResponseCore(
     ? await classifyInboundOnce(supabase, { input, orgId: property.org_id, runCtx: deps.runContext })
     : null;
   const identityHot = identityClassification !== null && (
-    identityClassification.kind === "jev_automatic_failed" || isHotClassification(identityClassification)
+    identityClassification.kind === "jev_automatic_failed" ||
+    (await isHotRouting(supabase, property.org_id, identityClassification))
   );
   if (identityHot) {
     await trace(supabase, {
@@ -1509,6 +1510,8 @@ async function classifyAndHandleNonRouteOutcomes(
         // assigned_unrecorded: the lead IS on My Leads, but its note did not
         // save; the hold keeps a person in the loop and still alerts (hot).
         const assignReason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
+        // Before the flag: the alert comes from this event, never the flag.
+        await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, assignReason);
         const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx);
         await completeClaim(supabase, input.propertyId, {
           claimId: responseClaim.claimId,
@@ -1541,6 +1544,7 @@ async function classifyAndHandleNonRouteOutcomes(
       result: "error",
       detail: { status: applyResult.status },
     }, runCtx);
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
@@ -2904,6 +2908,22 @@ async function classifyInboundOnce(
     { classifierProvider: "jev", classifierMode: "automatic" },
     { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
   );
+}
+
+/**
+ * THE hot / not-hot routing decision for a classified inbound, used before any
+ * identity text: the shared hot definition, plus the nurture "ready within 30
+ * days" person route (the same routeNurture call the main path makes).
+ */
+async function isHotRouting(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  c: ClassificationBridgeResult,
+): Promise<boolean> {
+  if (isHotClassification(c)) return true;
+  if (c.kind !== "jev_nurture") return false;
+  const cfg = await loadNurtureAutoDripConfig(supabase, orgId);
+  return cfg.enabled && routeNurture({ readyTimeframe: c.readyTimeframe, listingStatus: c.listingStatus }).kind === "person";
 }
 
 /** Hot seller by the shared definition (lib/hot-sellers/hot.ts). */

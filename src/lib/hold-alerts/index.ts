@@ -18,8 +18,8 @@ import type {
   OrgAlertSummary,
   Recipient,
 } from "./types";
-import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
+import { hotFailedKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
 
 export { runHoldAlertsForOrg } from "./core";
@@ -133,7 +133,7 @@ export async function loadHotPromotions(
       .from("lead_events")
       .select("id, property_id, source_type, source_id, payload, created_at")
       .eq("org_id", orgId)
-      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE])
+      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, HOT_FAILED_SOURCE_TYPE])
       .gte("created_at", since);
     if (before) q = q.or(`created_at.lt.${before.at},and(created_at.eq.${before.at},id.lt.${before.id})`);
     const { data, error } = await q
@@ -147,7 +147,12 @@ export async function loadHotPromotions(
     const last = page[page.length - 1]!;
     before = { at: last.created_at, id: last.id };
   }
-  const keyOf = (r: Row) => (r.source_type === HOT_TEXT_SOURCE_TYPE ? hotTextKey(r.source_id) : hotHandoffKey(r.source_id));
+  const keyOf = (r: Row) =>
+    r.source_type === HOT_TEXT_SOURCE_TYPE
+      ? hotTextKey(r.source_id)
+      : r.source_type === HOT_FAILED_SOURCE_TYPE
+        ? hotFailedKey(r.source_id)
+        : hotHandoffKey(r.source_id);
   // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
   const done = new Set<string>();
   const keys = [...new Set(rows.map(keyOf))];
@@ -192,18 +197,22 @@ export async function loadHotPromotions(
   }
   const promotions: HotPromotion[] = [];
   for (const r of todo) {
+    const failed = r.source_type === HOT_FAILED_SOURCE_TYPE;
     const to = typeof r.payload?.to === "string" ? r.payload.to : null;
-    if (!to) continue;
+    if (!to && !failed) continue;
     // An open hot hold already pinged Jarrad about this lead.
     if (r.payload?.covered_by_hold === true) continue;
     // A hand-off counts only while the lead really is assigned to that person.
-    if (r.source_type !== HOT_TEXT_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
+    if (r.source_type === HOT_HANDOFF_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
     promotions.push({
       propertyId: r.property_id,
-      assigneeUserId: to,
+      assigneeUserId: to ?? "",
       name: names.get(r.property_id) ?? "Unknown sender",
       assignedAt: r.created_at,
-      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : "handoff",
+      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : failed ? "hot_failed" : "handoff",
+      ...(failed && typeof (r.payload as { reason?: unknown } | null)?.reason === "string"
+        ? { reason: (r.payload as { reason: string }).reason }
+        : {}),
       address: r.source_type === HOT_TEXT_SOURCE_TYPE ? (addresses.get(r.property_id) ?? null) : null,
       key: keyOf(r),
     });

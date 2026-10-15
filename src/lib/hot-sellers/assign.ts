@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { validateActiveAssigneeForProperties } from "@/app/(dashboard)/leads/assignment-safety";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { isHotReason } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, isHotReason } from "@/lib/hot-sellers/hot";
 import type { Database, Json } from "@/lib/supabase/types";
 
 /**
@@ -32,6 +32,12 @@ export const HOT_HANDOFF_SOURCE_TYPE = "hot_seller_handoff";
  * ledger allows once per inbound.
  */
 export const HOT_TEXT_SOURCE_TYPE = "hot_seller_text";
+/**
+ * A hot text whose hand-off failed. Its own event keyed by the inbound, so the
+ * alert never depends on the property's attention flag (which a pre-existing
+ * non-hot flag would leave unchanged).
+ */
+export const HOT_FAILED_SOURCE_TYPE = "hot_seller_failed";
 
 
 export type HotAssignResult =
@@ -85,7 +91,7 @@ export async function assignHotLeadToOwner(
     if (!inbound) return { status: "failed", reason: "db_error", detail: "no inbound message id" };
     const { data: property, error: lookupError } = await db
       .from("properties")
-      .select("id, org_id, assigned_user_id, is_dnc_locked, deleted_at, needs_human_attention, last_ai_escalation_reason")
+      .select("id, org_id, assigned_user_id, is_dnc_locked, deleted_at, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
       .eq("id", propertyId)
       .maybeSingle();
     if (lookupError) return { status: "failed", reason: "db_error", detail: lookupError.message };
@@ -99,12 +105,15 @@ export async function assignHotLeadToOwner(
 
     // An open HOT hold already pinged Jarrad about this lead: more hot texts
     // while it is open are recorded but do not ping again.
-    const coveredByHold = !!property.needs_human_attention && isHotReason(property.last_ai_escalation_reason);
+    // This same text's failed hand-off already pinged him: never twice for one text.
+    const failedBefore = await findBySource(db, HOT_FAILED_SOURCE_TYPE, inbound);
+    const coveredByHold = failedBefore === true || (await isCoveredByHotHold(db, property));
 
     // Replay of a text Sandra already handed off: nothing new.
     const handedOff = await findBySource(db, HOT_HANDOFF_SOURCE_TYPE, inbound);
     if (handedOff === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
-    if (handedOff && property.assigned_user_id === owner) return { status: "already_assigned", assigneeUserId: owner };
+    // Even if the lead was unassigned since: a replay never re-takes it.
+    if (handedOff) return { status: "already_assigned", assigneeUserId: owner };
 
     const previous = property.assigned_user_id;
     if (previous === owner) return hotTextOn(db, propertyId, owner, inbound, coveredByHold);
@@ -121,6 +130,8 @@ export async function assignHotLeadToOwner(
       .maybeSingle();
     if (error) return { status: "failed", reason: "db_error", detail: error.message };
     if (!saved) {
+      // Concurrent runs of the SAME inbound cannot both get here: dispatch
+      // claims each inbound once (claimAiResponse). Guarded anyway below.
       const { data: now, error: recheckError } = await db
         .from("properties")
         .select("assigned_user_id")
@@ -188,4 +199,65 @@ async function recordOnce(
   if (before) return true;
   await recordLeadEvent({ propertyId: e.propertyId, actorType: "ai", eventType: e.eventType, payload: e.payload, sourceType: e.sourceType, sourceId: e.sourceId });
   return (await findBySource(db, e.sourceType, e.sourceId)) === true;
+}
+
+/**
+ * Record a failed hot hand-off as its own event (one per inbound). The alert
+ * goes to the resolved hot owner; an open hot hold already covers it.
+ * Best-effort read back; false = not recorded (the hold still stands).
+ */
+export async function recordHotFailure(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null | undefined,
+  reason: string,
+): Promise<boolean> {
+  if (!inboundMessageId) return false;
+  const { data: property } = await db
+    .from("properties")
+    .select("id, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
+    .eq("id", propertyId)
+    .maybeSingle();
+  const coveredByHold = property ? await isCoveredByHotHold(db, property) : false;
+  return recordOnce(db, {
+    propertyId,
+    eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+    payload: { reason, covered_by_hold: coveredByHold },
+    sourceType: HOT_FAILED_SOURCE_TYPE,
+    sourceId: inboundMessageId,
+  });
+}
+
+/**
+ * An open hot hold covers later hot texts ONLY if it actually pinged Jarrad:
+ * hot flag reason, flag time at/after the cutoff, and a non-skipped delivery
+ * for its key. A pre-cutoff or never-alerted hot hold covers nothing.
+ */
+async function isCoveredByHotHold(
+  db: SupabaseClient<Database>,
+  p: { id: string; needs_human_attention: boolean | null; last_ai_escalation_reason: string | null; last_ai_escalation_at: string | null },
+): Promise<boolean> {
+  if (!p.needs_human_attention || !isHotReason(p.last_ai_escalation_reason) || !p.last_ai_escalation_at) return false;
+  if (Date.parse(p.last_ai_escalation_at) < Date.parse(HOT_ALERTS_START_ISO)) return false;
+  // Which key that hold alerted under: a failed hand-off alerts by its own
+  // event (hot_failed:<inbound>), any other hot hold by hot_flag:<property>:<flagAt>.
+  let key = hotFlagKey(p.id, p.last_ai_escalation_at);
+  if (HOT_HANDOFF_FAILED_REASONS.includes(p.last_ai_escalation_reason ?? "")) {
+    const { data: ev, error: evError } = await db
+      .from("lead_events")
+      .select("source_id, created_at")
+      .eq("property_id", p.id)
+      .eq("source_type", HOT_FAILED_SOURCE_TYPE)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const src = (ev ?? [])[0]?.source_id;
+    if (evError || !src) return false;
+    key = hotFailedKey(src);
+  }
+  const { data, error } = await (db as unknown as { from: (t: string) => ReturnType<SupabaseClient<Database>["from"]> })
+    .from("hold_alert_deliveries")
+    .select("id, status")
+    .eq("hold_key" as never, key as never);
+  if (error) return false;
+  return ((data ?? []) as unknown as Array<{ status: string }>).some((d) => d.status !== "skipped");
 }

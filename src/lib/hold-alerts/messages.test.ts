@@ -34,3 +34,11 @@ describe("hot_text alert copy", () => {
     expect(h).toBe("Hot seller: Pat is now on My Leads under you. https://app.example.com/leads/p1");
   });
 });
+
+describe("hot_failed copy is the existing hold alert copy", () => {
+  const p = { propertyId: "p1", assigneeUserId: "", name: "Pat", assignedAt: "2026-10-15T11:00:00.000Z", kind: "hot_failed" as const, reason: "hot_lead_assign_failed", key: "hot_failed:in-1" };
+  it("Slack and SMS name the hold reason and link the lead only", () => {
+    expect(hotPromotionSlackText(p, "https://app.example.com")).toMatch(/^New hold needs review: Pat \(.+\)\. https:\/\/app\.example\.com\/leads\/p1$/);
+    expect(hotPromotionSmsText(p, "https://app.example.com")).toMatch(/^Hot hold: Pat \(.+\)\. https:\/\/app\.example\.com\/leads\/p1$/);
+  });
+});

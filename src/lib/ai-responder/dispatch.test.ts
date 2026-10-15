@@ -47,10 +47,12 @@ vi.mock("@/lib/events", () => ({
   recordLeadEvent,
 }));
 
-const hotAssign = vi.hoisted(() => ({ assign: vi.fn() }));
-vi.mock("@/lib/hot-sellers/assign", () => ({ assignHotLeadToOwner: hotAssign.assign }));
+const hotAssign = vi.hoisted(() => ({ assign: vi.fn(), recordFailure: vi.fn() }));
+vi.mock("@/lib/hot-sellers/assign", () => ({ assignHotLeadToOwner: hotAssign.assign, recordHotFailure: hotAssign.recordFailure }));
 beforeEach(() => {
   hotAssign.assign.mockReset();
+  hotAssign.recordFailure.mockReset();
+  hotAssign.recordFailure.mockResolvedValue(true);
   hotAssign.assign.mockResolvedValue({ status: "assigned", assigneeUserId: "owner-jarrad" });
 });
 
@@ -2302,9 +2304,11 @@ describe("dispatchAiResponse debounce", () => {
   });
 
   describe("identity question + Jev automatic (PR 2 hot check)", () => {
+    afterEach(() => nurtureDrip.loadConfig.mockReset().mockResolvedValue({ enabled: false }));
     const ID_BODY = "Who is this? I might sell.";
-    const runIdentity = async (outcome: string, id: string, failHttp = false) => {
+    const runIdentity = async (outcome: string, id: string, failHttp = false, nurture?: { drip: boolean; timeframe: string }) => {
       const state = createMockState();
+      if (nurture) nurtureDrip.loadConfig.mockResolvedValue(nurture.drip ? { enabled: true, sequences: {} } : { enabled: false });
       state.config.classifier_provider = "jev";
       state.config.classifier_mode = "automatic";
       state.jevOutcomeThresholds = [
@@ -2319,7 +2323,7 @@ describe("dispatchAiResponse debounce", () => {
         ? { ok: false, status: 401, text: async () => "no", json: async () => ({}) }
         : {
           ok: true, status: 200,
-          json: async () => ({ answers: { outcome: { choice: outcome, confidence: 0.97 }, escalation_reason: { choice: "not_applicable" } } }),
+          json: async () => ({ answers: { outcome: { choice: outcome, confidence: 0.97 }, escalation_reason: { choice: "not_applicable" }, ...(nurture ? { ready_timeframe: { choice: nurture.timeframe } } : {}) } }),
         });
       vi.stubGlobal("fetch", fetchMock);
       try {
@@ -2345,6 +2349,22 @@ describe("dispatchAiResponse debounce", () => {
       expect(sendSmsToContact).toHaveBeenCalledTimes(1);
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
       expect(hotAssign.assign).not.toHaveBeenCalled();
+    });
+
+    it("Jev says nurture, ready within 30 days, auto-drip ON: hot routing, NO identity reply", async () => {
+      const { classifierCalls } = await runIdentity("nurture", "inbound-id-ready30", false, { drip: true, timeframe: "within_30_days" });
+      expect(classifierCalls).toBe(1);
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    });
+
+    it("Jev says nurture, ready within 30 days, auto-drip OFF: not hot, the identity reply still goes out", async () => {
+      await runIdentity("nurture", "inbound-id-ready30-off", false, { drip: false, timeframe: "within_30_days" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+    });
+
+    it("Jev says nurture, a longer timeframe, auto-drip ON: not hot, the identity reply still goes out", async () => {
+      await runIdentity("nurture", "inbound-id-6mo", false, { drip: true, timeframe: "one_to_six_months" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
     });
 
     it("Jev fails (HTTP error): NO seller send, held for a person, classifier called once", async () => {
@@ -2403,6 +2423,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_assign_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-fail", "hot_lead_assign_failed");
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -2429,6 +2450,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_event_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_event_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-unrecorded", "hot_lead_event_failed");
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -3236,6 +3258,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "jev_new_lead_promotion_failed" });
       expect(state.property.status).not.toBe("new_lead");
       expect(state.property.needs_human_attention).toBe(true);
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-new-lead-dnc-locked", "jev_new_lead_promotion_failed");
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 

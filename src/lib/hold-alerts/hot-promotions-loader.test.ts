@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
+import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
 
 import { runHoldAlertsForOrg } from "./core";
 import { HOT_ALERT_LOOKBACK_MS, loadHotPromotions } from "./index";
@@ -16,7 +16,7 @@ type EventRow = {
   source_type: string;
   source_id: string;
   created_at: string;
-  payload: { to: string; inbound?: string; covered_by_hold?: boolean };
+  payload: { to?: string; reason?: string; inbound?: string; covered_by_hold?: boolean };
 };
 type DeliveryRow = { hold_key: string; channel: string; status: string; attempts: number };
 
@@ -392,5 +392,29 @@ describe("hot promotions through the alert pass", () => {
     expect(t.store.rows.map((r) => r.holdKey)).toEqual(["hot_text:inbound-1", "hot_text:inbound-1"]);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(2);
+  });
+});
+
+describe("failed hand-offs (hot_seller_failed)", () => {
+  const failed = (over: Partial<EventRow> = {}): EventRow => ({
+    id: "f1", org_id: ORG, property_id: "prop-f", event_type: "ai_escalated", source_type: HOT_FAILED_SOURCE_TYPE,
+    source_id: "inbound-f", created_at: "2026-10-15T02:00:00.000Z", payload: { reason: "hot_lead_assign_failed", covered_by_hold: false }, ...over,
+  });
+
+  it("becomes kind hot_failed keyed hot_failed:<inbound>, with no assignee needed and the reason carried", async () => {
+    const { db } = fakeDb([failed()]);
+    const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions).toHaveLength(1);
+    expect(promotions[0]).toMatchObject({ kind: "hot_failed", key: "hot_failed:inbound-f", propertyId: "prop-f", reason: "hot_lead_assign_failed", assigneeUserId: "" });
+  });
+
+  it("a failure already covered by an alerted hot hold is dropped", async () => {
+    const { db } = fakeDb([failed({ payload: { reason: "hot_lead_assign_failed", covered_by_hold: true } })]);
+    expect((await loadHotPromotions(db, ORG, MARK, NOW_MS)).promotions).toEqual([]);
+  });
+
+  it("a failure is kept even when the lead is currently owned by someone else (the sender skips it, not the loader)", async () => {
+    const { db } = fakeDb([failed()], { assignees: { "prop-f": "rep-1" } });
+    expect((await loadHotPromotions(db, ORG, MARK, NOW_MS)).promotions.map((p) => p.key)).toEqual(["hot_failed:inbound-f"]);
   });
 });

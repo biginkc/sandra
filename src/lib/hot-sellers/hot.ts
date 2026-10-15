@@ -55,3 +55,11 @@ export function isHotSeller(input: {
 export const hotHandoffKey = (inboundMessageId: string): string => `hot_handoff:${inboundMessageId}`;
 export const hotTextKey = (inboundMessageId: string): string => `hot_text:${inboundMessageId}`;
 export const hotFlagKey = (propertyId: string, flagAt: string): string => `hot_flag:${propertyId}:${flagAt}`;
+/** Alert key for a hot text whose hand-off failed: once per inbound message. */
+export const hotFailedKey = (inboundMessageId: string): string => `hot_failed:${inboundMessageId}`;
+
+/**
+ * Hot alerts start with PR 2. Hot events before this stay silent, so switching
+ * the hot definition on does not page about weeks-old holds.
+ */
+export const HOT_ALERTS_START_ISO = "2026-10-15T00:00:00.000Z";

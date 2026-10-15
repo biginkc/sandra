@@ -402,11 +402,19 @@ describe("assignHotLeadToOwner (real database)", () => {
     const { orgId, owner } = await oneOwnerOrg("covered");
     const propertyId = await createProperty(orgId);
     const inbound = await insertInbound(orgId, propertyId);
+    const flagAt = new Date().toISOString();
     const { error } = await admin
       .from("properties")
-      .update({ needs_human_attention: true, last_ai_escalation_reason: "model:hot_lead", last_ai_escalation_at: new Date().toISOString() })
+      .update({ needs_human_attention: true, last_ai_escalation_reason: "model:hot_lead", last_ai_escalation_at: flagAt })
       .eq("id", propertyId);
     expect(error).toBeNull();
+    // Covered means the hold actually pinged him: a sent delivery for its hot_flag key (flag time as the database stores it).
+    const stored = (await pg.query("select last_ai_escalation_at from public.properties where id = $1", [propertyId])).rows[0].last_ai_escalation_at as Date;
+    await pg.query(
+      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
+       values ($1, null, $2, $3, 'slack', 'first', 'sent', 1, now())`,
+      [orgId, `hot_flag:${propertyId}:${new Date(stored).toISOString().replace("Z", "+00:00")}`, owner],
+    );
 
     expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "assigned", assigneeUserId: owner });
     const events = await handoffEvents(propertyId);

@@ -65,11 +65,14 @@ export function hotTextHeadline(p: HotPromotion): string {
 }
 
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  // A failed hand-off uses the existing hold alert copy.
+  if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
+  if (p.kind === "hot_failed") return `Hot hold: ${p.name} (${holdReasonLabel(p.reason ?? "hold")}). ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "hot_text") return `${hotTextHeadline(p)}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${p.name} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }

@@ -21,6 +21,14 @@ export type HoldInfo = {
   reasonLabel: string;
   /** Hot seller (lib/hot-sellers/hot.ts), nothing else. Only hot holds ping. */
   hot: boolean;
+  /** The flag reason itself is hot. */
+  flagHot?: boolean;
+  /** The hold's run (latest) is hot by its own outcome/reason. */
+  runHot?: boolean;
+  runInbound?: string | null;
+  runStartedAt?: string | null;
+  /** The hold's reason key (its flag reason, else its sources). */
+  reasonKey?: string;
   /** When the hold's flag was set (properties.last_ai_escalation_at): the hot hold's alert key and cutoff time. */
   flagAt?: string | null;
 };
@@ -36,7 +44,9 @@ export type HotPromotion = {
   name: string;
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text";
+  kind?: "handoff" | "hot_text" | "hot_failed";
+  /** hot_failed: the hold reason it carries (for the existing hold alert copy). */
+  reason?: string;
   /** Property address (record data, never seller text); used by the hot_text alert. */
   address?: string | null;
   /** Delivery key: hot_handoff:<inbound> or hot_text:<inbound>. */
