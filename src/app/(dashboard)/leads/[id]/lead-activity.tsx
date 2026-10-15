@@ -338,16 +338,6 @@ export function LeadActivityTimeline(props: Props) {
         </div>
       ) : null}
 
-      {acquisition.page.hasMore && (
-        <Button
-          variant="outline"
-          disabled={acquisition.pending}
-          onClick={acquisition.loadMore}
-          className="mb-3"
-        >
-          Load older outreach and offers
-        </Button>
-      )}
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
           No messages, notes, calls, or activity yet.
@@ -474,7 +464,20 @@ export function LeadActivityTimeline(props: Props) {
               </Fragment>
             );
           })}
+          {activity.trustFloor && activity.trustBoundaryIndex === -1 ? (
+            <ActivityTrustFloor timestamp={activity.trustFloor} />
+          ) : null}
         </div>
+      )}
+      {acquisition.page.hasMore && (
+        <Button
+          variant="outline"
+          disabled={acquisition.pending}
+          onClick={acquisition.loadMore}
+          className="mt-3"
+        >
+          Load older outreach and offers
+        </Button>
       )}
     </div>
   );
@@ -567,7 +570,7 @@ export function normalizeLeadActivityEvents(
   };
   return [...deduplicated.values()].sort(
     (a, b) =>
-      compareActivityTimestamps(a.timestamp, b.timestamp) ||
+      compareActivityTimestamps(b.timestamp, a.timestamp) ||
       sourceOrder[a.source] - sourceOrder[b.source] ||
       a.id.localeCompare(b.id),
   );
@@ -644,7 +647,7 @@ export function buildLeadActivitySnapshot(
         ? -1
         : events.findIndex(
             (event) =>
-              compareActivityTimestamps(event.timestamp, trustFloor) >= 0,
+              compareActivityTimestamps(event.timestamp, trustFloor) < 0,
           ),
     failures: sourceOrder.flatMap((source) => {
       const detail = errors[source];

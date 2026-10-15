@@ -208,11 +208,40 @@ describe("<LeadActivityTimeline /> with lead events", () => {
     expect(bubbles[0]).toHaveAttribute("data-continuation", "false");
     expect(bubbles[1]).toHaveAttribute("data-continuation", "true");
     expect(bubbles[1]).toHaveTextContent("Outbound → Seller");
-    expect(bubbles[1]).toHaveTextContent("Existing SMS bubble stays intact");
+    expect(bubbles[0]).toHaveTextContent("Existing SMS bubble stays intact");
+    expect(bubbles[1]).toHaveTextContent("First existing SMS bubble");
     expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(1);
     expect(
       screen.getByTestId("messages-thread-delivery-status"),
     ).toHaveTextContent("Queued · in Outbox");
+  });
+
+  it("keeps newly received activity first and older-history controls last", () => {
+    const props = {
+      propertyId: "property-1", contactId: null,
+      initialMessages: [], initialNotes: [], initialCalls: [], initialEvents: [],
+      messageError: null, noteError: null, callError: null, eventError: null,
+      authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+    };
+    const first = message({ id: "first", body: "Earlier message", createdAt: "2026-08-25T17:00:00Z", status: "sent" });
+    const latest = message({ id: "latest", body: "Newest message", createdAt: "2026-08-25T18:00:00Z", status: "sent" });
+    const history = {
+      ok: true as const,
+      page: {
+        rows: [{ kind: "offer" as const, id: "offer-old", at: "2026-08-25T16:00:00Z", actorId: null, amountCents: "10000", method: "verbal" as const, followUpAt: null, outcome: "pending" as const, outcomeAt: null }],
+        hasMore: true, cursor: null,
+      },
+    };
+    const view = render(<LeadActivityTimeline {...props} initialMessages={[first]} initialAcquisitionHistory={history} />);
+    view.rerender(<LeadActivityTimeline {...props} initialMessages={[first, latest]} initialAcquisitionHistory={history} />);
+    const bubbles = screen.getAllByTestId("messages-thread-msg");
+    expect(bubbles[0]).toHaveTextContent("Newest message");
+    expect(bubbles[1]).toHaveTextContent("Earlier message");
+    const offer = screen.getByTestId("lead-acquisition-offer-offer-old");
+    const boundary = screen.getByTestId("lead-activity-trust-floor");
+    const more = screen.getByRole("button", { name: "Load older outreach and offers" });
+    expect(offer.compareDocumentPosition(boundary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(boundary.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("clears a stale server activity error after an empty live reconciliation", async () => {
