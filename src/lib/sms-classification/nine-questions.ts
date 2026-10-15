@@ -1,4 +1,4 @@
-import { askJev, type JevAskDeps, type JevNoulQuestion } from "./providers/jev-gateway";
+import { askJev, JevProviderError, type JevAskDeps, type JevNoulQuestion } from "./providers/jev-gateway";
 
 /**
  * Jarrad's nine yes/no questions (Messages v2 redesign, PR 3).
@@ -116,6 +116,12 @@ export async function classifyNineQuestions(
   const result = await askJev(buildNineQuestionRequest(state), deps);
   const answers = result.answers ?? {};
   const raw = Object.fromEntries(NINE_QUESTION_IDS.map((id) => [id, answers[id]?.noul]));
+  // All nine must come back as numbers in [0,1]. A partial answer must never act (a missing
+  // stop / hostile / wrong-person read could hide the very thing that should have won).
+  const incomplete = NINE_QUESTION_IDS.filter((id) => probability(raw[id]) === null);
+  if (incomplete.length > 0) {
+    throw new JevProviderError(`Jev response missing or invalid answers: ${incomplete.join(",")}`, "invalid_response");
+  }
   return {
     ...decideNineQuestions(raw),
     latencyMs: result.latencyMs,

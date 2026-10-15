@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import matrix from "./__fixtures__/nine-questions-matrix.json";
 import {
   actionForNineAnswer,
+  classifyNineQuestions,
   buildNineQuestionRequest,
   decideNineQuestions,
   NINE_QUESTION_CUTOFF,
@@ -163,5 +164,27 @@ describe("recorded matrix (30 scenarios x 3 wordings, synthetic)", () => {
       needs_person: "wait_for_person",
     }[d.answer];
     expect(action.kind).toBe(expectedKind);
+  });
+});
+
+describe("classifyNineQuestions needs all nine answers", () => {
+  const respond = (answers: Record<string, unknown>) =>
+    (async () => new Response(JSON.stringify({ answers, model: "m" }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  const full = (over: Record<string, unknown> = {}) =>
+    Object.fromEntries(NINE_QUESTION_IDS.map((id) => [id, { choice: "noul", noul: over[id] ?? 0.02 }]));
+  const state = { our_last_text_to_homeowner: "x", homeowner_reply: "y" };
+
+  it("a complete response decides", async () => {
+    const r = await classifyNineQuestions(state, { fetch: respond(full({ maybe_later: 0.9 })), apiKey: "k" });
+    expect(r.answer).toBe("maybe_later");
+  });
+  it("a partial response (stop / hostile / wrong_person missing) is a failure, never an action", async () => {
+    const partial = full({ open_to_selling: 0.9 }) as Record<string, unknown>;
+    for (const id of ["asked_stop", "hostile", "wrong_person"]) delete partial[id];
+    await expect(classifyNineQuestions(state, { fetch: respond(partial), apiKey: "k" })).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+  it("a non-numeric or out-of-range probability is a failure", async () => {
+    await expect(classifyNineQuestions(state, { fetch: respond(full({ hostile: "0.9" })), apiKey: "k" })).rejects.toMatchObject({ kind: "invalid_response" });
+    await expect(classifyNineQuestions(state, { fetch: respond(full({ hostile: 1.4 })), apiKey: "k" })).rejects.toMatchObject({ kind: "invalid_response" });
   });
 });

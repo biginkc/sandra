@@ -47,6 +47,8 @@ const realFetch = globalThis.fetch;
 type JevCall = { state: { our_last_text_to_homeowner: string | null; homeowner_reply: string }; questions: Record<string, { instructions: string }> };
 let jevCalls: JevCall[] = [];
 let jevProbabilities: Partial<Record<NineQuestionId, number>> = {};
+/** Questions the fake Jev leaves out of its answer (a partial 200). */
+let jevOmit: NineQuestionId[] = [];
 
 function installFakeJev() {
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -68,7 +70,7 @@ function installFakeJev() {
       );
     }
     const answers = Object.fromEntries(
-      NINE_QUESTION_IDS.map((id) => [id, { choice: "noul", noul: jevProbabilities[id] ?? 0.02 }]),
+      NINE_QUESTION_IDS.filter((id) => !jevOmit.includes(id)).map((id) => [id, { choice: "noul", noul: jevProbabilities[id] ?? 0.02 }]),
     );
     return new Response(JSON.stringify({ answers, model: "jev-test", usage: { input_tokens: 1, output_tokens: 1 } }), {
       status: 200,
@@ -270,6 +272,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     resetMockState();
     jevCalls = [];
     jevProbabilities = {};
+    jevOmit = [];
     // A schema-only throwaway database has no tenant rows: make sure the canonical org exists.
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (nine questions test)" });
     expect(orgError).toBeNull();
@@ -809,6 +812,40 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
   });
   it("held lead + calm non-hot answer: not recorded", async () => {
     expect((await heldLeadText({ maybe_later: 0.8 }, "maybe later")).event).toBeNull();
+  });
+
+  it("a partial Jev answer (stop / hostile / wrong_person missing, open_to_selling 0.9) is a failure: held, nothing promoted", async () => {
+    await seedOrg();
+    await seedOwner();
+    jevOmit = ["asked_stop", "hostile", "wrong_person"];
+    const { lead } = await run({ open_to_selling: 0.9 }, "yes I would sell");
+    const row = await propertyRow(lead.propertyId);
+    expect(row.status).toBe("prospect");
+    expect(row.last_ai_escalation_reason).toBe("jev_automatic_failed:invalid_response");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+  });
+
+  it("classification fails + hostile wording + price keyword: the hostile hold wins", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    const body = `you scammers, ${"how much would you pay"}`;
+    const inbound = await seedThread(lead, body);
+    const keep = globalThis.fetch;
+    globalThis.fetch = (async (i: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof i === "string" ? i : i instanceof URL ? i.toString() : i.url;
+      if (url.includes("api.typesafe.ai")) return new Response("nope", { status: 401 });
+      return realFetch(i, init);
+    }) as typeof fetch;
+    try {
+      await dispatchAiResponse(supabase, { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: body, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY }, { anthropic: NO_ANTHROPIC });
+    } finally {
+      globalThis.fetch = keep;
+    }
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toMatch(/^hostile_needs_confirm/);
+  });
+
+  it("held lead + hostile wording + price keyword: the hot text is not recorded", async () => {
+    expect((await heldLeadText({ maybe_later: 0.8 }, "you scammers, how much would you pay")).event).toBeNull();
   });
 
   it("nine engine in shadow mode: decision recorded, today's path still acts", async () => {

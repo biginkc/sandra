@@ -3130,6 +3130,8 @@ async function classifyOnlyClaimedNine(
     },
     { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx ?? undefined },
   );
+  // Hostile wording waits for a person's confirmation: never recorded as a hot text.
+  if (isHostileInbound(input.inboundBody)) return "skipped";
   const keyword = hasHotPriceKeyword(input.inboundBody, escalationKeywords);
   const answer = cls.kind === "ok" ? cls.result.answer : null;
   const blocked = answer === "asked_stop" || answer === "hostile" || answer === "wrong_person";
@@ -7540,7 +7542,9 @@ export async function runNineQuestionsStep(
   );
   if (cls.kind === "failed") {
     // Never falls back to the other engine: no trusted decision, so a person looks. A price
-    // keyword still makes it a hot hold (alert only), as in the eight-answer path.
+    // keyword still makes it a hot hold (alert only), as in the eight-answer path, but hostile
+    // wording is checked first: that waits for a person's confirmation.
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
     if (hasHotPriceKeyword(input.inboundBody, a.escalationKeywords)) {
       return holdNinePriceKeyword(supabase, a, { kind: "nine_questions", failed: cls.reason });
     }
