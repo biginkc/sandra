@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { FAMILIES } from "./families";
@@ -20,6 +20,8 @@ export type StressOptions = {
   scaleSizes: number[];
   scaleSamples: number;
   outDir: string | null;
+  /** Lane results written by race.dispatch.integration.test.ts (the lanes that drive the real dispatchRepSms). Default: <outDir>/dispatch-lanes.json. */
+  dispatchLanesFile?: string | null;
   log?: (line: string) => void;
 };
 
@@ -61,6 +63,11 @@ export async function runStress(opts: StressOptions, env: Record<string, string 
   if (opts.lanes.includes("races")) {
     log(`race lanes: ${opts.raceReps} reps`);
     lanes.push(...(await runCommittedLanes(url, opts.raceReps, opts.seed)));
+  }
+  const dispatchFile = opts.dispatchLanesFile ?? (opts.outDir ? path.join(opts.outDir, "dispatch-lanes.json") : null);
+  if (opts.lanes.includes("races") && dispatchFile && existsSync(dispatchFile)) {
+    log(`dispatchRepSms lanes: ${dispatchFile}`);
+    lanes.push(...(JSON.parse(readFileSync(dispatchFile, "utf8")) as LaneResult[]));
   }
   if (opts.lanes.includes("scale")) {
     log(`scale lane: ${opts.scaleSizes.join(", ")} leads`);

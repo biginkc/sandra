@@ -8,7 +8,7 @@ import { FULL_DEFAULTS, SMOKE_DEFAULTS, runStress, type StressOptions } from "./
  * never calls a provider. Exit code 0 only when every exit criterion passes.
  *
  *   npx tsx e2e/stress/my-leads-queue/cli.ts [--smoke] [--repeats 20] [--seed N] [--families a,b] [--lanes oracle,refresh,races,scale]
- *       [--race-reps 200] [--scale-sizes 400,2000] [--scale-samples 10] [--out DIR] [--list]
+ *       [--race-reps 200] [--dispatch-lanes FILE] [--scale-sizes 400,2000] [--scale-samples 10] [--out DIR] [--list]
  */
 function parse(argv: string[]): StressOptions | "list" {
   const arg = (name: string) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -21,7 +21,7 @@ function parse(argv: string[]): StressOptions | "list" {
     ...base,
     repeats: num("repeats", base.repeats), seed: num("seed", base.seed), raceReps: num("race-reps", base.raceReps), scaleSamples: num("scale-samples", base.scaleSamples),
     scaleSizes: arg("scale-sizes")?.split(",").map(Number) ?? base.scaleSizes, families: arg("families")?.split(",") ?? base.families, lanes: lanes ?? base.lanes,
-    outDir: arg("out") ? path.resolve(arg("out")!) : base.outDir, log: (l) => console.log(l),
+    outDir: arg("out") ? path.resolve(arg("out")!) : base.outDir, dispatchLanesFile: arg("dispatch-lanes") ? path.resolve(arg("dispatch-lanes")!) : null, log: (l) => console.log(l),
   };
 }
 

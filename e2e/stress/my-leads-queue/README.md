@@ -17,14 +17,21 @@ need an otherwise empty database and an explicit acknowledgement.
      && sed -i '' 's/54321/54721/;s/54322/54722/;s/54320/54720/;s/54329/54729/;s/54323/54723/;s/54324/54724/;s/54327/54727/' "$W/supabase/config.toml" \
      && supabase start --workdir "$W" -x studio,imgproxy,edge-runtime,logflare,vector,mailpit,realtime,storage-api,postgres-meta,supavisor,gotrue
    ```
-2. Full volume run (about 30-40 minutes):
+2. The lanes that drive the real `dispatchRepSms` (fake provider) run under vitest, because they mock the app's server client; run them first so
+   the report can pick up their result (the stack's API must be up; the supabase CLI demo keys are the defaults):
+   ```bash
+   MYLEADS_STRESS_DB_URL=postgresql://postgres:postgres@127.0.0.1:54722/postgres TEST_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54722/postgres \
+   LOCAL_SUPABASE_URL=http://127.0.0.1:54721 MYLEADS_STRESS_DISPOSABLE_DB=1 MYLEADS_STRESS_DISPATCH_REPS=200 \
+   MYLEADS_STRESS_OUT_DIR=test-results/my-leads-queue-stress npm run stress:my-leads-queue:dispatch
+   ```
+3. Full volume run (about 30-40 minutes):
    ```bash
    MYLEADS_STRESS_DB_URL=postgresql://postgres:postgres@127.0.0.1:54722/postgres \
    MYLEADS_STRESS_DISPOSABLE_DB=1 \
    npm run stress:my-leads-queue -- --repeats 20 --out test-results/my-leads-queue-stress
    ```
    Exit code 0 only if every criterion passes. Reports: `report.json` and `report.md` in `--out`.
-3. Useful flags: `--smoke`, `--families a,b`, `--lanes oracle,refresh,races,scale`, `--race-reps 200`, `--scale-sizes 400,2000`,
+4. Useful flags: `--smoke`, `--families a,b`, `--lanes oracle,refresh,races,scale`, `--race-reps 200`, `--scale-sizes 400,2000`,
    `--scale-samples 10`, `--seed N`, `--list`.
 
 ## What it does
@@ -34,7 +41,7 @@ need an otherwise empty database and an explicit acknowledgement.
 | `oracle` | 31 families x (5 inbound wordings x 3 stage contexts) x `--repeats` fresh seeds, timestamps jittered +-1 min around every threshold. Every lead's tab / chip / decision row / headline / Broken actions, every tab and chip view, counts, sort order, the badge, owner-viewing-rep and pagination are compared with the oracle | rolled back |
 | `refresh` | one lead per boundary family: `nextChangeAt` must never be later than the true change + 1 s, no clock-only change may happen before it, and at it the SQL placement must equal the oracle's | rolled back |
 | `refresh` (bind failure) | the stamp RPC is renamed away inside a transaction: the send carries `inbound_stamp_unresolved`, handles nothing, the reply stays New reply | rolled back |
-| `races` | inbound Y 50-500 ms after a stamped send for X begins (fake provider takes 100-900 ms): Y must stay unhandled (`--race-reps`, default 200); a late `delivery_failed` after acceptance while the queue is polled: Texted last, then Broken, X stays handled, a newer inbound makes it New reply | **commits rows**: `MYLEADS_STRESS_DISPOSABLE_DB=1` and a database holding only harness leads |
+| `races` (+ `:dispatch`) | the real `dispatchRepSms` with a fake provider: same Y-after-X race, and the stamp bind RPC removed for real (renamed away and restored in a `finally`); plus the SQL-protocol twin of the race: inbound Y 50-500 ms after a stamped send for X begins (fake provider takes 100-900 ms): Y must stay unhandled (`--race-reps`, default 200); a late `delivery_failed` after acceptance while the queue is polled: Texted last, then Broken, X stays handled, a newer inbound makes it New reply | **commits rows**: `MYLEADS_STRESS_DISPOSABLE_DB=1` and a database holding only harness leads |
 | `scale` | prod-shaped queues of 400 and 2,000 leads (4-12 messages each, ledger receipts linked): p50/p95 of the page per tab and chip and of the badge, budget p95 < 1.5 s; the duplicate queue projections are timed separately (`projection:*`) | rolled back |
 
 Exit criteria (all zero, p95 under budget): wrong-tab, hidden-lead, count/row, wrong-chip, decision-row, headline, Broken-action, view

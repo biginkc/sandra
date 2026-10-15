@@ -30,6 +30,7 @@ export default defineConfig({
     // suite cannot accidentally select it.
     exclude: [
       "e2e/stress/my-leads-queue/smoke.integration.test.ts",
+      "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
       "supabase/migrations/20261009060100_dialpad_outcome_reconciliation.integration.test.ts",
       "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",

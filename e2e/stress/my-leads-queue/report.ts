@@ -128,6 +128,7 @@ export function buildReport(input: {
     if (families.length < 31) fullRunNeeds.push(`only ${families.length} of 31 families ran`);
     if (input.scale.length < 2) fullRunNeeds.push("the scale lane did not run at both 400 and 2,000 leads");
     if (raceRan.length === 0) fullRunNeeds.push("no race lane ran");
+    if (!raceRan.some((l) => l.id.startsWith("race:dispatch_"))) fullRunNeeds.push("the dispatchRepSms race lanes did not run (npm run stress:my-leads-queue:dispatch writes dispatch-lanes.json into --out first)");
   }
   const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0) }]));
   const failReasons = [...criteria.filter((c) => !c.pass).map((c) => `${c.label}: ${c.value ?? "not measured"}`), ...fullRunNeeds];
