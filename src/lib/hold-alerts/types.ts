@@ -48,6 +48,8 @@ export type HotPromotion = {
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
   kind?: "handoff" | "hot_text" | "hot_failed";
+  /** hot_text on a lead that already needs a person: may be unassigned. */
+  heldLead?: boolean;
   /** hot_failed: the hold reason it carries (for the existing hold alert copy). */
   reason?: string;
   /** Property address (record data, never seller text); used by the hot_text alert. */

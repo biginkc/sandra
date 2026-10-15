@@ -120,7 +120,7 @@ export async function loadHotPromotions(
     property_id: string;
     source_type: string;
     source_id: string;
-    payload: { to?: unknown; inbound?: unknown; covered_by_hold?: unknown } | null;
+    payload: { to?: unknown; inbound?: unknown; covered_by_hold?: unknown; held_lead?: unknown; escalation?: unknown } | null;
     created_at: string;
   };
   const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
@@ -231,6 +231,7 @@ export async function loadHotPromotions(
       name: names.get(r.property_id) ?? "Unknown sender",
       assignedAt: inboundAt.get(r.source_id) as string,
       kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : failed ? "hot_failed" : "handoff",
+      ...(r.payload?.held_lead === true ? { heldLead: true } : {}),
       ...(failed && typeof (r.payload as { reason?: unknown } | null)?.reason === "string"
         ? { reason: (r.payload as { reason: string }).reason }
         : {}),

@@ -218,7 +218,9 @@ export async function runHoldAlertsForOrg(
     // the promotion's assignee AND still own the property when the send happens.
     if (hotOwner === null) continue;
     // A failed hand-off has no assignee: it goes to the resolved hot owner.
-    const failedHandoff = p.kind === "hot_failed";
+    // A failed hand-off, or a hot text on a lead that already needs a person,
+    // may be unassigned: it goes to the resolved hot owner.
+    const failedHandoff = p.kind === "hot_failed" || p.heldLead === true;
     if (!failedHandoff && p.assigneeUserId !== hotOwner) continue;
     if (!hotRecipients.some((r) => r.userId === hotOwner)) continue;
     const owner = hotOwner;

@@ -19,7 +19,7 @@ import { resetMockState } from "@/lib/messaging/providers/mock";
 import type { Database } from "@/lib/supabase/types";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
-import { assignHotLeadToOwner, HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE } from "./assign";
+import { assignHotLeadToOwner, HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "./assign";
 
 /**
  * Hot-seller acceptance matrix (Messages v2 PR 2, "Alert and hand-off model") on a DISPOSABLE database that has
@@ -385,6 +385,25 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
     return rows[0]?.payload ?? null;
   };
 
+  /** The hot_seller_text event payload for one inbound (held_lead, covered_by_hold, to ...). */
+  const hotTextPayload = async (inboundMessageId: string): Promise<{ held_lead?: boolean; covered_by_hold?: boolean; to?: string } | null> => {
+    const { rows } = await pg.query("select payload from public.lead_events where property_id = $1 and source_type = $2 and source_id = $3", [propertyId, HOT_TEXT_SOURCE_TYPE, inboundMessageId]);
+    return rows[0]?.payload ?? null;
+  };
+  const hotTextEvents = () =>
+    count("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [propertyId, HOT_TEXT_SOURCE_TYPE]);
+
+  /** Mark a hold's alert as already sent on both channels (rows only; nothing goes through the recording senders). */
+  const seedSentHoldAlert = async (holdKey: string) => {
+    for (const channel of ["slack", "sms"] as const) {
+      await pg.query(
+        `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
+         values ($1, $2, $3, $4, $5, 'first', 'sent', 1, now())`,
+        [orgId, propertyId, holdKey, owner, channel],
+      );
+    }
+  };
+
   /** Seed this hour's DM and SMS caps as already used (20 Slack DMs, 10 SMS). */
   const useUpCaps = async () => {
     for (const [channel, n, label] of [["slack", 20, "dm"], ["sms", 10, "sms"]] as const) {
@@ -431,7 +450,7 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
 
   return {
     orgId, owner, rep, propertyId, sent, baseDeps, newInbound, dispatch, alertPass, handoffEvents, assignee, tape, runOf, expectOneAlertTotal,
-    blockAssignment, repWinsRace, flag, preCutoffReviewHold, blockLeadEvents, noopFlagWrites, flagKey, handoffPayload, useUpCaps, deliveryRows,
+    blockAssignment, repWinsRace, flag, preCutoffReviewHold, blockLeadEvents, noopFlagWrites, flagKey, handoffPayload, useUpCaps, deliveryRows, hotTextPayload, hotTextEvents, seedSentHoldAlert,
     slack: () => sent.filter((s) => s.channel === "slack").length,
     sms: () => sent.filter((s) => s.channel === "sms").length,
     deliveryKeys: async () =>
@@ -501,8 +520,8 @@ const ROWS: Row[] = [
   },
   {
     id: "4",
-    name: "hot text leaves an OPEN failed-hand-off hold: one alert (hot_flag:<property>:<flagAt>); a non-hot text and a later hand-off on a new text (covered by that alerted hold) add nothing",
-    expect: { slack: 1, sms: 1, assigned: 1 },
+    name: "hot text leaves an OPEN failed-hand-off hold: one alert (hot_flag:<property>:<flagAt>); a non-hot text and a later hot text through real dispatch (covered by that alerted hold) add nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
     run: async (h) => {
       const a = await h.newInbound();
       const unblock = await h.blockAssignment();
@@ -522,14 +541,14 @@ const ROWS: Row[] = [
       expect(await h.runOf(b)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
       expect((await h.alertPass()).sent).toBe(0);
       expect(await h.deliveryKeys()).toEqual([`${fk}`]);
-      // Hold still open: Sandra later hands the lead off on another text. The event is covered by the hold: no new ping.
+      expect(await h.hotTextEvents()).toBe(0);
+      // Hold still open: a later HOT text goes through real dispatch. The flagged lead is classified once and a
+      // held-lead hot_text is recorded, covered by the alerted hold: no new ping, no hand-off.
       const c = await h.newInbound("ok seriously, what is your best number?");
-      expect(await assignHotLeadToOwner(admin, h.propertyId, { inboundMessageId: c })).toEqual({ status: "assigned", assigneeUserId: h.owner });
-      const { rows } = await pg.query(
-        "select payload from public.lead_events where property_id = $1 and source_type = $2",
-        [h.propertyId, HOT_HANDOFF_SOURCE_TYPE],
-      );
-      expect((rows[0].payload as { covered_by_hold?: boolean }).covered_by_hold).toBe(true);
+      expect(await h.dispatch(c, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.runOf(c)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(c)).toMatchObject({ held_lead: true, covered_by_hold: true, to: h.owner });
+      expect(await h.assignee()).toBeNull();
       expect((await h.alertPass()).sent).toBe(0);
       await h.expectOneAlertTotal();
     },
@@ -550,18 +569,17 @@ const ROWS: Row[] = [
   },
   {
     id: "5b",
-    name: "pre-cutoff hot hold + a post-cutoff hot text that hands off: one Slack + SMS (hand-off key), one assigned event",
-    expect: { slack: 1, sms: 1, assigned: 1 },
+    name: "pre-cutoff hot hold + a post-cutoff hot text through real dispatch: classified once, held-lead hot_text (not covered), one Slack + SMS (hot_text key), no hand-off",
+    expect: { slack: 1, sms: 1, assigned: 0 },
     run: async (h) => {
-      // A flagged property is never dispatched, so the hot text is handed off directly (as dispatch does).
       await h.flag("hot_lead", "2026-10-14T12:00:00.000Z");
       const a = await h.newInbound();
-      expect(await assignHotLeadToOwner(admin, h.propertyId, { inboundMessageId: a })).toEqual({ status: "assigned", assigneeUserId: h.owner });
-      const { rows } = await pg.query("select payload from public.lead_events where property_id = $1 and source_type = $2", [h.propertyId, HOT_HANDOFF_SOURCE_TYPE]);
-      expect((rows[0].payload as { covered_by_hold?: boolean }).covered_by_hold).toBe(false);
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: false, to: h.owner });
       expect((await h.alertPass()).sent).toBe(2);
-      expect(await h.assignee()).toBe(h.owner);
-      expect(await h.deliveryKeys()).toEqual([`hot_handoff:${a}`]);
+      expect(await h.assignee()).toBeNull();
+      expect(await h.deliveryKeys()).toEqual([`hot_text:${a}`]);
     },
   },
   {
@@ -839,8 +857,8 @@ const ROWS: Row[] = [
   },
   {
     id: "19",
-    name: "a failed hand-off's alert is held back by the caps (both channels pending), then a later hot text is NOT covered by it and alerts once the cap allows",
-    expect: { slack: 2, sms: 2, assigned: 1 },
+    name: "a failed hand-off's alert is held back by the caps (both channels pending), then a later hot text (real dispatch) is NOT covered by it and alerts once the cap allows",
+    expect: { slack: 2, sms: 2, assigned: 0 },
     run: async (h) => {
       await h.useUpCaps();
       const a = await h.newInbound();
@@ -855,20 +873,20 @@ const ROWS: Row[] = [
       expect(await h.deliveryRows(`${fk}`)).toEqual([["slack", "pending"], ["sms", "pending"]]);
       // A later hot text: the hold never pinged anyone, so it covers nothing.
       const b = await h.newInbound("call me, I want to sell");
-      expect(await assignHotLeadToOwner(admin, h.propertyId, { inboundMessageId: b })).toEqual({ status: "assigned", assigneeUserId: h.owner });
-      expect(await h.handoffPayload(b)).toMatchObject({ covered_by_hold: false });
+      expect(await h.dispatch(b, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(b)).toMatchObject({ held_lead: true, covered_by_hold: false });
       expect((await h.alertPass()).sent).toBe(0);
       // The cap allows next hour: the later event alerts (and the held-back failure goes out, once each).
       const later = { now: () => new Date(Date.now() + 61 * 60 * 1000) };
       expect((await h.alertPass(later)).sent).toBe(4);
-      expect(await h.deliveryKeys()).toEqual([`${fk}`, `hot_handoff:${b}`, ...Array.from({ length: 20 }, (_, i) => `seed-dm-${i}`), ...Array.from({ length: 10 }, (_, i) => `seed-sms-${i}`)].sort());
+      expect(await h.deliveryKeys()).toEqual([`${fk}`, `hot_text:${b}`, ...Array.from({ length: 20 }, (_, i) => `seed-dm-${i}`), ...Array.from({ length: 10 }, (_, i) => `seed-sms-${i}`)].sort());
       expect((await h.alertPass(later)).sent).toBe(0);
     },
   },
   {
     id: "20",
-    name: "a failed hand-off's alert fails at the provider (both channels), then a later hot text is NOT covered by it and alerts",
-    expect: { slack: 2, sms: 2, assigned: 1 },
+    name: "a failed hand-off's alert fails at the provider (both channels), then a later hot text (real dispatch) is NOT covered by it and alerts",
+    expect: { slack: 2, sms: 2, assigned: 0 },
     run: async (h) => {
       const a = await h.newInbound();
       const unblock = await h.blockAssignment();
@@ -885,10 +903,10 @@ const ROWS: Row[] = [
       expect((await h.alertPass(providerDown)).sent).toBe(0);
       expect((await h.deliveryRows(`${fk}`)).every(([, status]) => status !== "sent")).toBe(true);
       const b = await h.newInbound("call me, I want to sell");
-      expect(await assignHotLeadToOwner(admin, h.propertyId, { inboundMessageId: b })).toEqual({ status: "assigned", assigneeUserId: h.owner });
-      expect(await h.handoffPayload(b)).toMatchObject({ covered_by_hold: false });
+      expect(await h.dispatch(b, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(b)).toMatchObject({ held_lead: true, covered_by_hold: false });
       expect((await h.alertPass()).sent).toBe(4);
-      expect(await h.deliveryRows(`hot_handoff:${b}`)).toEqual([["slack", "sent"], ["sms", "sent"]]);
+      expect(await h.deliveryRows(`hot_text:${b}`)).toEqual([["slack", "sent"], ["sms", "sent"]]);
       expect((await h.alertPass()).sent).toBe(0);
     },
   },
@@ -951,6 +969,77 @@ const ROWS: Row[] = [
       expect(pass.holds).toBe(1);
       expect(pass.sent).toBe(2);
       expect(await h.deliveryKeys()).toEqual([`hot_text:${a}`]);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "24",
+    name: "flagged pre-cutoff NON-hot hold + a new hot text through real dispatch: classified once, one held-lead hot_text, exactly one Slack + SMS (hot_text key), no hand-off, no seller send",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      const a = await h.newInbound("yes, what would you pay?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(1);
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: false, to: h.owner });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect(await h.deliveryKeys()).toEqual([`hot_text:${a}`]);
+      expect(await h.assignee()).toBeNull();
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "25",
+    name: "flagged hot hold whose alert was already SENT + a new hot text through real dispatch: covered, nothing more (0 Slack, 0 SMS from this row's senders)",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("model:price_or_offer", new Date().toISOString());
+      await h.seedSentHoldAlert(await h.flagKey());
+      const a = await h.newInbound("ok so what is your best number?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: true });
+      expect((await h.alertPass()).sent).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.assignee()).toBeNull();
+    },
+  },
+  {
+    id: "26",
+    name: "flagged property + a non-hot text through real dispatch: classified once, no event, skipped already_terminal, nobody pinged, nothing sent to the seller",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      const a = await h.newInbound("who is this?");
+      expect(await h.dispatch(a, "nurture", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "27",
+    name: "nurture + price_or_offer through real dispatch: hot wins - held for Jarrad (model:price_or_offer), one hot hold alert, no hand-off, no nurture disposition, no seller send",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await pg.query(
+        "insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'nurture', 0.9, true)",
+        [h.orgId],
+      );
+      const a = await h.newInbound("Not right now, maybe check back in a few months");
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "model:price_or_offer" });
+      const { data: prop } = await admin.from("properties").select("outreach_dispo, needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ outreach_dispo: null, needs_human_attention: true, last_ai_escalation_reason: "model:price_or_offer" });
+      const fk = await h.flagKey();
+      const pass = await h.alertPass();
+      expect(pass.holds).toBe(1);
+      expect(pass.sent).toBe(2);
+      expect(await h.deliveryKeys()).toEqual([fk]);
+      expect(await h.assignee()).toBeNull();
       expect((await h.alertPass()).sent).toBe(0);
       await h.expectOneAlertTotal();
     },

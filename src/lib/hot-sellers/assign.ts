@@ -263,3 +263,36 @@ async function isCoveredByHotHold(
   // Pending (capped), sending, failed or skipped never silence a later hot text.
   return ((data ?? []) as unknown as Array<{ status: string }>).some((d) => d.status === "sent");
 }
+
+/**
+ * A hot text on a lead that already needs a person (dispatch's classify-only
+ * step). One `hot_seller_text` event per inbound, flagged `held_lead`, to the
+ * resolved hot owner; nothing is assigned. A rep's or DNC-locked lead, or an
+ * unresolved owner, records nothing. An open hot hold whose alert was sent covers it.
+ */
+export async function recordHotTextOnHeldLead(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null,
+  reason: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<boolean> {
+  if (!inboundMessageId) return false;
+  const { data: property } = await db
+    .from("properties")
+    .select("id, org_id, assigned_user_id, is_dnc_locked, deleted_at, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (!property || property.deleted_at || property.is_dnc_locked) return false;
+  const owner = await resolveHotOwner(db, property.org_id, env).catch(() => null);
+  if (!owner) return false;
+  if (property.assigned_user_id && property.assigned_user_id !== owner) return false;
+  const coveredByHold = await isCoveredByHotHold(db, property);
+  return recordOnce(db, {
+    propertyId,
+    eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+    payload: { to: owner, reason: "hot_seller_text", held_lead: true, escalation: reason, covered_by_hold: coveredByHold },
+    sourceType: HOT_TEXT_SOURCE_TYPE,
+    sourceId: inboundMessageId,
+  });
+}

@@ -26,7 +26,7 @@ import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { assignHotLeadToOwner, recordHotFailure } from "@/lib/hot-sellers/assign";
+import { assignHotLeadToOwner, recordHotFailure, recordHotTextOnHeldLead } from "@/lib/hot-sellers/assign";
 import { isHotSeller } from "@/lib/hot-sellers/hot";
 
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
@@ -411,7 +411,7 @@ export async function checkAiResponderDispatchPreGates(
   const { data: property } = await supabase
     .from("properties")
     .select(
-      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id, last_ai_escalation_reason",
+      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id, last_ai_escalation_reason, is_dnc_locked",
     )
     .eq("id", input.propertyId)
     .maybeSingle();
@@ -449,6 +449,13 @@ export async function checkAiResponderDispatchPreGates(
     }
   }
   if (isTerminalAiResponderProperty(property)) {
+    // PR 2: a lead that already needs a person still gets ONE classify-only
+    // look so a new hot text reaches Jarrad: no reply, no drip, no
+    // disposition, no assignment change; non-hot exits exactly as before.
+    // DNC-locked leads are never classified.
+    if (property.needs_human_attention && !property.is_dnc_locked && input.inboundMessageId) {
+      await classifyOnlyForHotText(supabase, input, property.org_id, runCtx);
+    }
     await blocked("already_terminal");
     return {
       ok: false,
@@ -1195,6 +1202,31 @@ async function classifyAndHandleNonRouteOutcomes(
       runContext: runCtx,
     },
   );
+
+  // PR 2: hot wins. One shared routing decision right after classification,
+  // before any reply, drip or disposition: a nurture / not-interested result
+  // that also says "price or offer" / "call me" is a hot seller. It is held
+  // for Jarrad (hot hold → one Slack + one text); no reply, no disposition.
+  // new_lead promotions and escalations keep their own hot paths.
+  if (
+    (classification.kind === "jev_nurture" || (classification.kind === "jev_route" && classification.route.kind !== "escalate")) &&
+    isHotSeller({ reasons: [classification.escalationReason] })
+  ) {
+    const hotReason = `model:${classification.escalationReason}`;
+    await trace(supabase, {
+      kind: "hold",
+      name: "hot_wins",
+      result: "held",
+      detail: { kind: classification.kind, escalation: classification.escalationReason },
+    }, runCtx);
+    const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, hotReason, runCtx);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      flagOk: hotFlagOk,
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason: hotReason } };
+  }
 
   // Luna fallback SUGGESTION for a below-threshold hold. Fire-and-forget after
   // the response: it never delays or blocks this pipeline, never applies
@@ -2883,6 +2915,42 @@ export async function runApprovedTemplateStep(
       runContext: runCtx,
     }),
   };
+}
+
+/**
+ * Classify-only for an inbound on a property that already needs a person.
+ * With Jev automatic, one classification and the shared hot routing decision;
+ * hot → one hot_text event (alerted to Jarrad by the cron, subject to the
+ * usual cover / owner / cap / cutoff rules). Never sends, enrols, disposes or
+ * assigns. Any failure here changes nothing (the lead is already held).
+ */
+async function classifyOnlyForHotText(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  runCtx: MaybeRunContext,
+): Promise<void> {
+  try {
+    const { data: cfg } = await supabase
+      .from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (!cfg || !isJevAutomatic(cfg)) return;
+    const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
+    if (!(await isHotRouting(supabase, orgId, c))) return;
+    const escalation = "escalationReason" in c ? c.escalationReason : null;
+    const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, escalation ?? "hot_lead");
+    await trace(supabase, {
+      kind: "action",
+      name: "hot_text_on_held_lead",
+      result: recorded ? "applied" : "skipped",
+      detail: { escalation: escalation ?? null },
+    }, runCtx);
+  } catch (error) {
+    reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
+  }
 }
 
 function isJevAutomatic(config: { classifier_provider?: string | null; classifier_mode?: string | null }): boolean {
