@@ -100,5 +100,24 @@ export function prodShapedWorld(counts: ProdCounts, rng: Rng, now: number, opts:
   // leads in states the counts do not name (the 2026-10-14 shape sums to 177 of 181) are plain worked leads
   while (leads.length < counts.leads) mk("other", {});
   while (leads.length > counts.leads) leads.pop();
+  // Homeowners who own more than one house (approved rule 2): ~4% of leads in groups of 2-3 sharing one homeowner contact; the group's
+  // first lead carries a recent contact-only text, answered on a sibling (by a ledger-backed human text) about half the time. Keeps
+  // the scale lane measuring the cross-lead handled check. Assumed share; the 2026-10-14 counts do not record it.
+  const pool = leads.filter((l) => !l.contactGroup && l.stage !== "not_contacted");
+  let g = 0;
+  for (let i = 0; i + 1 < pool.length && i < Math.round(leads.length * 0.04); g += 1) {
+    const size = Math.min(rng.chance(0.5) ? 2 : 3, pool.length - i);
+    const group = pool.slice(i, i + size);
+    i += size;
+    const name = `house${g}`;
+    const at = now - rng.int(1, 72) * HOUR - 37_000;
+    for (const l of group) { l.contactGroup = name; l.contactShared = true; l.tags = [...(l.tags ?? []), "shape:multi_house"]; }
+    group[0]!.messages.push({ ref: "co", dir: "inbound", at, body: "which house?", contactOnly: true });
+    if (rng.chance(0.5)) {
+      const sent = at + rng.int(5, 90) * MIN + 11_000;
+      if (sent < now) group[1]!.messages.push({ ref: "coreply", dir: "outbound", at: sent, body: "back", source: "human", outcome: "delivered",
+        stamp: { kind: "inbound", ref: "co", lead: group[0]!.key }, ledger: { state: "delivered", updatedAt: sent + MIN } });
+    }
+  }
   return { now, leads: leads.map(separateTies) };
 }
