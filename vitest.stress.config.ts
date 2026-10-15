@@ -6,6 +6,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["e2e/stress/**/*.test.ts"],
+    // Database-backed smoke runs have their own local-only runner (vitest.local-integration.config.ts).
+    exclude: ["e2e/stress/**/*.integration.test.ts", "node_modules/**"],
     environment: "node",
     reporters: ["default"],
     testTimeout: 30_000,

@@ -26,10 +26,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
 export async function setupOrg(db: Client): Promise<OrgCtx> {
   const org = randomUUID(), owner = randomUUID(), rep = randomUUID(), otherRep = randomUUID(), outsider = randomUUID(), org2 = randomUUID();
   for (const id of [owner, rep, otherRep, outsider]) await db.query("insert into auth.users(id) values ($1)", [id]);
-  await db.query("insert into public.organizations(id,name) values ($1,'S1 stress')", [org]);
+  await db.query("insert into public.organizations(id,name) values ($1,$2)", [org, `S1 stress ${org}`]);
   await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [owner, org]);
   for (const id of [rep, otherRep]) await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [id, org]);
-  await db.query("insert into public.organizations(id,name) values ($1,'S1 stress other')", [org2]);
+  await db.query("insert into public.organizations(id,name) values ($1,$2)", [org2, `S1 stress other ${org2}`]);
   await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [outsider, org2]);
   await db.query("insert into public.acquisition_org_settings(org_id,my_leads_enabled,needs_sequence_owner_id) values ($1,true,$2)", [org, owner]);
   await db.query("insert into public.acquisition_org_settings(org_id,my_leads_enabled,needs_sequence_owner_id) values ($1,true,$2)", [org2, outsider]);

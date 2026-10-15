@@ -212,6 +212,8 @@ export type RunOptions = {
   onWorld?: (family: string, repeat: number, result: WorldResult) => void;
   /** Stop the whole run when a world throws instead of recording it as an error. */
   failFast?: boolean;
+  /** Apply this SQL instead of the checkout's classifier migration (the harness self-test mutates it to prove the oracle notices). */
+  migrationSql?: string;
 };
 
 export type FamilyRun = {
@@ -236,7 +238,7 @@ export async function runFamilies(url: string, opts: RunOptions): Promise<Family
   try {
     // One outer transaction for the whole run: the migration is applied inside it, every world is a savepoint, nothing commits.
     await db.query("begin");
-    await db.query(loadClassifierMigration());
+    await db.query(opts.migrationSql ?? loadClassifierMigration());
     for (const family of opts.families) {
       const run: FamilyRun = { family: family.id, title: family.title, worlds: 0, leads: 0, checks: 0, mismatches: [], errors: [], timings: {}, ms: 0, variantLeads: {}, variantFailures: {} };
       const t0 = process.hrtime.bigint();
