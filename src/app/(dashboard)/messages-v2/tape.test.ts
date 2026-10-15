@@ -123,6 +123,13 @@ describe("deriveTape", () => {
     expect(v.kind === "decided" && v.did).not.toContain("Handed to Jarrad");
   });
 
+  it("assigned_unrecorded for a hot text (already his) says 'Already on My Leads', not the hand-off sentence", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "assigned_unrecorded", assignee_user_id: "u", note: "hot text event not recorded" })];
+    const v = deriveTape(run({ status: "escalated", steps }), "Sue");
+    expect(v.kind === "decided" && v.did).toContain("Already on My Leads under Jarrad, but the note about it couldn't be saved");
+    expect(v.kind === "decided" && v.did).not.toContain("On My Leads under Jarrad, but");
+  });
+
   it("a failed hand-off says so", () => {
     const v = deriveTape(
       run({ status: "escalated", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "error")] }),

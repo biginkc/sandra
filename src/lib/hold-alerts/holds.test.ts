@@ -136,7 +136,13 @@ describe("toAlertHolds", () => {
       startedAt: "2026-10-08T10:00:00.000Z",
       name: "Dana",
       hot: false,
+      hotKey: "hot_text:msg-1",
     });
+  });
+
+  it("hotKey is null when the hold has no run", () => {
+    const [h] = toAlertHolds([openHold({ run: null } as never)], labels);
+    expect(h.hotKey).toBeNull();
   });
 
   it("carries an unknown start through as null (backlog never alerts)", () => {

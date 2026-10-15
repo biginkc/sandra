@@ -2303,7 +2303,7 @@ describe("dispatchAiResponse debounce", () => {
 
   describe("identity question + Jev automatic (PR 2 hot check)", () => {
     const ID_BODY = "Who is this? I might sell.";
-    const runIdentity = async (outcome: string, id: string) => {
+    const runIdentity = async (outcome: string, id: string, failHttp = false) => {
       const state = createMockState();
       state.config.classifier_provider = "jev";
       state.config.classifier_mode = "automatic";
@@ -2315,31 +2315,44 @@ describe("dispatchAiResponse debounce", () => {
       installSendMock(state);
       seedInboundMessage(state, { id, body: ID_BODY });
       const originalFetch = globalThis.fetch;
-      vi.stubGlobal("fetch", vi.fn(async () => ({
-        ok: true, status: 200,
-        json: async () => ({ answers: { outcome: { choice: outcome, confidence: 0.97 }, escalation_reason: { choice: "not_applicable" } } }),
-      })));
+      const fetchMock = vi.fn(async () => failHttp
+        ? { ok: false, status: 401, text: async () => "no", json: async () => ({}) }
+        : {
+          ok: true, status: 200,
+          json: async () => ({ answers: { outcome: { choice: outcome, confidence: 0.97 }, escalation_reason: { choice: "not_applicable" } } }),
+        });
+      vi.stubGlobal("fetch", fetchMock);
       try {
         const result = await dispatchAiResponse(supabase as never, {
           contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: ID_BODY,
           inboundMessageId: id, propertyId: PROPERTY_ID,
         }, { anthropic: {} as never });
-        return { result, supabase };
+        return { result, supabase, state, classifierCalls: fetchMock.mock.calls.length };
       } finally { vi.stubGlobal("fetch", originalFetch); }
     };
 
     it("Jev says new_lead above threshold: NO identity reply, hot hand-off runs", async () => {
-      const { supabase } = await runIdentity("new_lead", "inbound-id-hot");
+      const { supabase, classifierCalls } = await runIdentity("new_lead", "inbound-id-hot");
+      expect(classifierCalls).toBe(1);
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(hotAssign.assign).toHaveBeenCalledTimes(1);
       expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID, { inboundMessageId: "inbound-id-hot" });
     });
 
     it("Jev says nurture (not hot): the identity reply still goes out, no hand-off", async () => {
-      await runIdentity("nurture", "inbound-id-cold");
+      const { classifierCalls } = await runIdentity("nurture", "inbound-id-cold");
+      expect(classifierCalls).toBe(1);
       expect(sendSmsToContact).toHaveBeenCalledTimes(1);
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
       expect(hotAssign.assign).not.toHaveBeenCalled();
+    });
+
+    it("Jev fails (HTTP error): NO seller send, held for a person, classifier called once", async () => {
+      const { state, classifierCalls } = await runIdentity("nurture", "inbound-id-fail", true);
+      expect(classifierCalls).toBe(1);
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(hotAssign.assign).not.toHaveBeenCalled();
+      expect(state.property.needs_human_attention).toBe(true);
     });
   });
 
@@ -8652,7 +8665,7 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       expect(sentBodies()).not.toContain(NUMBER_BODY);
     });
 
-    it("a classifier outage falls back to the identity reply", async () => {
+    it("a classifier outage fails closed: no identity reply, held for a person", async () => {
       const state = createMockState();
       installSendMock(state);
       vi.mocked(hasSendableNumberSourceTemplate).mockResolvedValue(true);
@@ -8669,7 +8682,8 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
           inboundBody: WHO_AND_NUMBER, inboundMessageId: "inbound-id-out", propertyId: PROPERTY_ID,
         }, { anthropic: {} as never });
       } finally { vi.stubGlobal("fetch", originalFetch); }
-      expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
+      expect(sentBodies()).toEqual([]);
+      expect(state.property.needs_human_attention).toBe(true);
     });
   });
 });

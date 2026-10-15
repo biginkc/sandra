@@ -25,16 +25,17 @@ function fakeDb(rows: Array<{ hold_key: string; channel: string; sent_at: string
 }
 
 describe("hot alert keys and times", () => {
-  it("keys: hand-off -> property key, already_owned -> per-inbound text key, rep-owned -> none", () => {
-    expect(hotAlertKeyForRun(run("a", "m1"))).toBe(hotPromotionKey("prop-1"));
+  it("keys: every hot run is keyed by its own inbound text, rep-owned -> none, no inbound -> property key", () => {
+    expect(hotAlertKeyForRun(run("a", "m1"))).toBe(hotTextKey("m1"));
+    expect(hotAlertKeyForRun({ ...run("d", "m4"), inbound_message_id: null } as never)).toBe(hotPromotionKey("prop-1"));
     expect(hotAlertKeyForRun(run("b", "m2", "already_owned"))).toBe(hotTextKey("m2"));
     expect(hotAlertKeyForRun(run("c", "m3", "owned_by_someone_else"))).toBeNull();
   });
 
   it("a later already_owned run never shows the original hand-off time", async () => {
     const db = fakeDb([
-      { hold_key: hotPromotionKey("prop-1"), channel: "slack", sent_at: "2026-10-15T10:00:00Z" },
-      { hold_key: hotPromotionKey("prop-1"), channel: "sms", sent_at: "2026-10-15T10:00:05Z" },
+      { hold_key: hotTextKey("m1"), channel: "slack", sent_at: "2026-10-15T10:00:00Z" },
+      { hold_key: hotTextKey("m1"), channel: "sms", sent_at: "2026-10-15T10:00:05Z" },
     ]);
     const out = await attachHotAlertTimes(db, "o", [run("first", "m1"), run("later", "m2", "already_owned")]);
     expect(out[0]!.hotAlertSentAt).toBe("2026-10-15T10:00:05Z");

@@ -53,35 +53,35 @@ describe("promotions need the resolved hot owner, like holds", () => {
     expect(t.store.rows).toEqual([]);
   });
 
-  it("the owner changed before send (isPropertyAssignedTo false): both rows skipped 'no_longer_assigned', nothing sent, and a later pass sends nothing", async () => {
-    const asked: Array<[string, string, string]> = [];
+  it("a rep owns it at send time: both rows skipped 'owned_by_someone_else' (final), nothing sent, and a later pass sends nothing", async () => {
+    const asked: Array<[string, string]> = [];
     const t = setup({
       promotions: [promotion],
-      isPropertyAssignedTo: async (org, property, user) => {
-        asked.push([org, property, user]);
-        return false;
+      loadPropertyAssignee: async (org, property) => {
+        asked.push([org, property]);
+        return "rep-1";
       },
     });
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toEqual([]);
     expect(summary.skipped).toBe(2);
     expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
-      ["slack", "skipped", "no_longer_assigned"],
-      ["sms", "skipped", "no_longer_assigned"],
+      ["slack", "skipped", "owned_by_someone_else"],
+      ["sms", "skipped", "owned_by_someone_else"],
     ]);
-    expect(asked[0]).toEqual([ORG, "prop-9", OWNER.userId]);
+    expect(asked[0]).toEqual([ORG, "prop-9"]);
     t.setNow("2026-10-15T14:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toEqual([]);
   });
 
-  it("isPropertyAssignedTo throws: both rows failed but retryable (not terminal), nothing sent, delivered on a later pass", async () => {
+  it("loadPropertyAssignee throws: both rows failed but retryable (not terminal), nothing sent, delivered on a later pass", async () => {
     let broken = true;
     const t = setup({
       promotions: [promotion],
-      isPropertyAssignedTo: async () => {
+      loadPropertyAssignee: async () => {
         if (broken) throw new Error("re-check down");
-        return true;
+        return OWNER.userId;
       },
     });
     const first = await runHoldAlertsForOrg(t.deps, ORG);
@@ -107,7 +107,7 @@ describe("promotions need the resolved hot owner, like holds", () => {
     const order: string[] = [];
     const t = setup({
       promotions: [promotion],
-      isPropertyAssignedTo: async () => (order.push("recheck"), true),
+      loadPropertyAssignee: async () => (order.push("recheck"), OWNER.userId),
       sendSlack: async () => (order.push("slack"), { status: "sent" }),
       sendSms: async () => (order.push("sms"), { status: "sent" }),
     });
@@ -223,25 +223,25 @@ describe("cap re-check that throws", () => {
 });
 
 describe("new-org watermark start", () => {
-  it("a brand-new org starts at now - 24h when that is after the 2026-10-15 cutoff: older backlog is silent, newer hot sellers alert", async () => {
+  it("a brand-new org initialises at the cutoff (no 24h clamp): a post-cutoff hot hold older than 24h still alerts on the first pass", async () => {
     const now = "2026-10-20T12:00:00.000Z";
     const t = setup({
       nowIso: now,
       noWatermark: true,
       promotions: [
-        { ...promotion, propertyId: "old", key: "hot_promotion:old", assignedAt: "2026-10-18T12:00:00.000Z" }, // 48h old
-        { ...promotion, propertyId: "old2", key: "hot_promotion:old2", assignedAt: "2026-10-19T11:00:00.000Z" }, // 25h old
+        { ...promotion, propertyId: "old", key: "hot_promotion:old", assignedAt: "2026-10-18T12:00:00.000Z" }, // 48h old, after cutoff
         { ...promotion, propertyId: "new", key: "hot_promotion:new", assignedAt: "2026-10-20T00:00:00.000Z" }, // 12h old
+        { ...promotion, propertyId: "pre", key: "hot_promotion:pre", assignedAt: "2026-10-14T12:00:00.000Z" }, // before cutoff: silent
       ],
     });
     t.store.watermarks.delete(ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.watermarks.get(ORG)).toBe("2026-10-19T12:00:00.000Z");
-    expect([...new Set(t.store.rows.map((r) => r.holdKey))]).toEqual(["hot_promotion:new"]);
-    expect(chans(t)).toHaveLength(2);
+    expect(t.store.watermarks.get(ORG)).toBe(HOT_ALERTS_START_ISO);
+    expect([...new Set(t.store.rows.map((r) => r.holdKey))].sort()).toEqual(["hot_promotion:new", "hot_promotion:old"]);
+    expect(chans(t)).toHaveLength(4);
   });
 
-  it("before the cutoff + 24h the watermark is the cutoff itself", async () => {
+  it("shortly after the cutoff the watermark is the cutoff itself", async () => {
     const t = setup({ nowIso: "2026-10-15T12:00:00.000Z", noWatermark: true });
     t.store.watermarks.delete(ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
@@ -298,5 +298,61 @@ describe("owner-unknown report", () => {
     const summary = await runHoldAlertsForOrg(t.deps, org);
     expect(summary.hotOwnerUnknown).toBe(false);
     expect(unknownReports()).toHaveLength(0);
+  });
+});
+
+describe("one alert per new hot inbound text", () => {
+  const hotHold = (hotKey: string | null, over: Record<string, unknown> = {}) => hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z", hotKey, ...over } as never);
+
+  it("a hand-off and a hold from the same text share a key: one Slack + one SMS in total", async () => {
+    const t = setup({ promotions: [{ ...promotion, key: "hot_text:in-1" }], holds: [hotHold("hot_text:in-1")] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+    expect([...new Set(t.store.rows.map((r) => r.holdKey))]).toEqual(["hot_text:in-1"]);
+  });
+
+  it("two different hot texts on one property alert twice", async () => {
+    const t = setup({ promotions: [{ ...promotion, key: "hot_text:in-1" }, { ...promotion, key: "hot_text:in-2" }] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(2);
+  });
+
+  it("an unassigned property: the promotion fails retryably (never finalized) but a hold with the same key still alerts in the same pass", async () => {
+    let assignee: string | null = null;
+    const t = setup({
+      promotions: [{ ...promotion, key: "hot_text:in-1" }],
+      holds: [hotHold("hot_text:in-1")],
+      loadPropertyAssignee: async (_o: string, p: string) => (p === promotion.propertyId ? assignee : null),
+    });
+    const hp = t.deps; // hold targets its own property id; make the hold's property unassigned too
+    const first = await runHoldAlertsForOrg(hp, ORG);
+    expect(first.sent).toBeGreaterThanOrEqual(2);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
+    assignee = OWNER.userId;
+    await runHoldAlertsForOrg(hp, ORG);
+    // Same key already delivered by the hold: never a second alert.
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+  });
+
+  it("a promotion with a null assignee alone: failed not_assigned_yet, retryable, sent once it is assigned", async () => {
+    let assignee: string | null = null;
+    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => assignee });
+    const first = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["failed", "not_assigned_yet"], ["failed", "not_assigned_yet"]]);
+    expect(first.failed).toBe(2);
+    assignee = OWNER.userId;
+    t.setNow("2026-10-15T12:05:00.000Z");
+    expect((await runHoldAlertsForOrg(t.deps, ORG)).sent).toBe(2);
+  });
+
+  it("a hot HOLD on a rep-owned property is skipped owned_by_someone_else: nothing sent", async () => {
+    const t = setup({ holds: [hotHold("hot_text:in-9")], loadPropertyAssignee: async () => "rep-1" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["skipped", "owned_by_someone_else"], ["skipped", "owned_by_someone_else"]]);
   });
 });

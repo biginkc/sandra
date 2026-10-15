@@ -114,9 +114,10 @@ export async function runHoldAlertsForOrg(
   // watermark starts no later than HOT_ALERTS_START_ISO, so a hot seller that
   // arrived before the first pass still alerts on it; older backlog stays silent.
   const nowIso = deps.now().toISOString();
-  // max(cutoff, now - 24h), never later than now: a future new org does not alert its whole backlog.
-  const initMs = Math.min(Date.parse(nowIso), Math.max(Date.parse(HOT_ALERTS_START_ISO), Date.parse(nowIso) - 24 * HOUR_MS));
-  const initIso = new Date(initMs).toISOString();
+  // The cutoff is authoritative: a new org's watermark is HOT_ALERTS_START_ISO
+  // (or now, if the clock is somehow before it), so every post-cutoff hot hold
+  // is covered; delivery keys keep each one to a single alert.
+  const initIso = Date.parse(nowIso) > Date.parse(HOT_ALERTS_START_ISO) ? HOT_ALERTS_START_ISO : nowIso;
   const mark = await deps.store.getOrInitAlertsSince(orgId, initIso);
   const alertsSinceMs = Date.parse(mark.alertsSince);
 
@@ -183,9 +184,10 @@ export async function runHoldAlertsForOrg(
     });
   }
   const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
-  // ONE alert key per hot seller (hotPromotionKey), shared by holds and
-  // promotions, property_id null so archive-on-clear never re-fires it: a seller
-  // whose promotion also left a hold gets one Slack + one SMS, not two.
+  // ONE rule: one alert per NEW hot inbound text, whatever the hot kind and
+  // however Jarrad got the lead. Key = hot_text:<inbound> (hotKeyFor), shared by
+  // a promotion and any hold from the same text, property_id null so
+  // archive-on-clear never re-fires it.
   for (const p of promotions) {
     // Same fail-closed rule as holds: only to the resolved hot owner, who must be
     // the promotion's assignee AND still own the property when the send happens.
@@ -199,13 +201,17 @@ export async function runHoldAlertsForOrg(
           // Before any provider call, so a failed check is cleanly retryable.
           const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
           if (ownerCheck) return ownerCheck;
-          let stillAssigned: boolean;
+          let assignee: string | null;
           try {
-            stillAssigned = await deps.isPropertyAssignedTo(orgId, p.propertyId, owner);
+            assignee = await deps.loadPropertyAssignee(orgId, p.propertyId);
           } catch (error) {
             return { status: "failed", error: error instanceof Error ? error.message : String(error) };
           }
-          if (!stillAssigned) return { status: "skipped", reason: "no_longer_assigned" };
+          // A rep has it now: final, no alert to Jarrad.
+          if (assignee !== null && assignee !== owner) return { status: "skipped", reason: "owned_by_someone_else" };
+          // Not (yet) assigned: never finalize the key. Retryable, and a hold
+          // for the same text (same key) can still alert in this pass.
+          if (assignee === null) return { status: "failed", error: "not_assigned_yet" };
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
@@ -218,10 +224,18 @@ export async function runHoldAlertsForOrg(
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
         tasks.push({
-          input: { ...base, propertyId: null, holdKey: hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
+          input: { ...base, propertyId: null, holdKey: hold.hotKey ?? hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
           send: async () => {
             const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
             if (ownerCheck) return ownerCheck;
+            // A lead a rep owns never pings Jarrad, for any hot kind.
+            let assignee: string | null;
+            try {
+              assignee = await deps.loadPropertyAssignee(orgId, hold.propertyId);
+            } catch (error) {
+              return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+            }
+            if (assignee !== null && assignee !== r.userId) return { status: "skipped", reason: "owned_by_someone_else" };
             return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
           },
           requireOwner: true,

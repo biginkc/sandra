@@ -817,16 +817,22 @@ async function dispatchAiResponseCore(
   // sell." would otherwise be answered by the identity shortcut before Jev
   // runs; with Jev in automatic mode, classify first and let a hot decision
   // take the hand-off path below (no reply) instead.
+  // ONE classification serves the identity decision AND the main path below
+  // (passed through as `precomputed`), so the two can never disagree. A
+  // classifier failure fails closed: no identity text; the main path holds.
   const identityQuestion = !hostileInbound && isIdentityQuestion(input.inboundBody);
-  const identityHot = identityQuestion && config
-    ? await isHotClassificationForIdentity(supabase, { input, orgId: property.org_id, config, runCtx: deps.runContext })
-    : false;
+  const identityClassification = identityQuestion && config && isJevAutomatic(config)
+    ? await classifyInboundOnce(supabase, { input, orgId: property.org_id, runCtx: deps.runContext })
+    : null;
+  const identityHot = identityClassification !== null && (
+    identityClassification.kind === "jev_automatic_failed" || isHotClassification(identityClassification)
+  );
   if (identityHot) {
     await trace(supabase, {
       kind: "action",
       name: "identity_reply",
       result: "skipped",
-      detail: { why: "hot_seller" },
+      detail: { why: identityClassification?.kind === "jev_automatic_failed" ? "classifier_failed" : "hot_seller" },
     }, deps.runContext);
   }
 
@@ -841,6 +847,7 @@ async function dispatchAiResponseCore(
       orgId: property.org_id,
       config: config!,
       runCtx: deps.runContext,
+      precomputed: identityClassification,
     });
     // The randomized reply delay was bypassed: an approved template is never sent
     // instantly, so the number-source reply is dropped and a person is told.
@@ -1001,6 +1008,7 @@ async function dispatchAiResponseCore(
     responseClaim,
     deps.runContext,
     templateCtx,
+    identityClassification,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -1160,11 +1168,13 @@ async function classifyAndHandleNonRouteOutcomes(
   runCtx?: MaybeRunContext,
   /** Present only on the reply-eligible path: absent = no template step. */
   templateCtx?: TemplateStepContext,
+  /** The identity check's classification of this same inbound: reused, never recomputed. */
+  precomputed?: ClassificationBridgeResult | null,
 ): Promise<
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
-  const classification = await classifyForDispatch(
+  const classification = precomputed ?? await classifyForDispatch(
     supabase,
     {
       orgId: property.org_id,
@@ -1491,7 +1501,9 @@ async function classifyAndHandleNonRouteOutcomes(
           ? { status: handoff.status, reason: handoff.reason }
           : handoff.status === "owned_by_someone_else"
             ? { status: handoff.status, owner_user_id: handoff.ownerUserId }
-            : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
+            : handoff.status === "assigned_unrecorded"
+              ? { status: handoff.status, assignee_user_id: handoff.assigneeUserId, note: handoff.detail }
+              : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
       }, runCtx);
       if (handoff.status === "failed" || handoff.status === "assigned_unrecorded") {
         // assigned_unrecorded: the lead IS on My Leads, but its note did not
@@ -2869,35 +2881,17 @@ export async function runApprovedTemplateStep(
   };
 }
 
-/**
- * Identity-interceptor helper: when this inbound both asks who we are and asks
- * how we got the number, returns the rendered number-source template, under the
- * same gates the classified path applies (a nurture / not-interested outcome at
- * its cutoff, no human follow-up, label switch on, an approved + mapped
- * template). The classification goes through `classifyForDispatch`, so the Jev
- * decision is saved like any other (`sms_classification_runs`) and the same
- * timeout and retries apply; no outcome is applied (the identity path never
- * applied one). `askedNotSentReason` is set when Jev said yes but no
- * number-source template could go out, so the caller holds for a person.
- * Hostile inbounds never reach this (the identity shortcut is skipped).
- */
-/**
- * Identity questions only: with Jev automatic, classify BEFORE any identity
- * reply and report whether the seller is hot (lib/hot-sellers/hot.ts). Any
- * other mode, or a classifier failure, is "not hot" (today's behaviour).
- */
-async function isHotClassificationForIdentity(
+function isJevAutomatic(config: { classifier_provider?: string | null; classifier_mode?: string | null }): boolean {
+  return config.classifier_provider === "jev" && config.classifier_mode === "automatic";
+}
+
+/** Classify this inbound with Jev automatic. Callers pass the result on instead of classifying again. */
+async function classifyInboundOnce(
   supabase: SupabaseClient<Database>,
-  a: {
-    input: AiDispatchInput;
-    orgId: string;
-    config: { classifier_provider?: string | null; classifier_mode?: string | null };
-    runCtx?: MaybeRunContext;
-  },
-): Promise<boolean> {
-  if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return false;
+  a: { input: AiDispatchInput; orgId: string; runCtx?: MaybeRunContext },
+): Promise<ClassificationBridgeResult> {
   const { input } = a;
-  const c = await classifyForDispatch(
+  return classifyForDispatch(
     supabase,
     {
       orgId: a.orgId,
@@ -2910,12 +2904,28 @@ async function isHotClassificationForIdentity(
     { classifierProvider: "jev", classifierMode: "automatic" },
     { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
   );
+}
+
+/** Hot seller by the shared definition (lib/hot-sellers/hot.ts). */
+function isHotClassification(c: ClassificationBridgeResult): boolean {
   if (c.kind === "jev_promote_new_lead") return true;
   if (c.kind === "jev_needs_decision") return isHotSeller({ jevOutcome: c.outcome });
   if (c.kind === "jev_route" || c.kind === "jev_nurture") return isHotSeller({ reasons: [c.escalationReason] });
   return false;
 }
 
+/**
+ * Identity-interceptor helper: when this inbound both asks who we are and asks
+ * how we got the number, returns the rendered number-source template, under the
+ * same gates the classified path applies (a nurture / not-interested outcome at
+ * its cutoff, no human follow-up, label switch on, an approved + mapped
+ * template). The classification goes through `classifyForDispatch`, so the Jev
+ * decision is saved like any other (`sms_classification_runs`) and the same
+ * timeout and retries apply; no outcome is applied (the identity path never
+ * applied one). `askedNotSentReason` is set when Jev said yes but no
+ * number-source template could go out, so the caller holds for a person.
+ * Hostile inbounds never reach this (the identity shortcut is skipped).
+ */
 async function resolveNumberSourceForIdentity(
   supabase: SupabaseClient<Database>,
   a: {
@@ -2923,6 +2933,7 @@ async function resolveNumberSourceForIdentity(
     orgId: string;
     config: { classifier_provider?: string | null; classifier_mode?: string | null };
     runCtx?: MaybeRunContext;
+    precomputed?: ClassificationBridgeResult | null;
   },
 ): Promise<{
   template:
@@ -2936,19 +2947,7 @@ async function resolveNumberSourceForIdentity(
   const none = { template: null, askedNotSentReason: null };
   if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return none;
   if (!(await hasSendableNumberSourceTemplate(supabase, a.orgId))) return none;
-  const classification = await classifyForDispatch(
-    supabase,
-    {
-      orgId: a.orgId,
-      propertyId: input.propertyId,
-      contactId: input.contactId,
-      conversationId: input.conversationId ?? null,
-      inboundMessageId: input.inboundMessageId ?? null,
-      inboundBody: input.inboundBody,
-    },
-    { classifierProvider: "jev", classifierMode: "automatic" },
-    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
-  );
+  const classification = a.precomputed ?? await classifyInboundOnce(supabase, { input, orgId: a.orgId, runCtx: a.runCtx });
   let outcome: "nurture" | "not_interested" | null = null;
   let asked = false;
   let nativeConfidence: number | null = null;

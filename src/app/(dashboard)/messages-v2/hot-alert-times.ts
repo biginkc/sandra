@@ -43,8 +43,8 @@ export function hotAlertKeyForRun(run: RunWithSteps): string | null {
   if (!step) return null;
   const status = (step.detail as { status?: string } | null)?.status;
   if (status === "owned_by_someone_else") return null;
-  if (status === "already_owned") return run.inbound_message_id ? hotTextKey(run.inbound_message_id) : null;
-  return hotPromotionKey(run.property_id);
+  // One alert per hot inbound text: every hot alert is keyed by its inbound.
+  return run.inbound_message_id ? hotTextKey(run.inbound_message_id) : hotPromotionKey(run.property_id);
 }
 
 /** Runs that handed a hot seller to Jarrad get `hotAlertSentAt` when both alerts are out. */

@@ -103,7 +103,7 @@ export async function loadHotPromotions(
     property_id: string;
     source_type: string;
     source_id: string;
-    payload: { to?: unknown } | null;
+    payload: { to?: unknown; inbound?: unknown } | null;
     created_at: string;
   };
   const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
@@ -130,7 +130,13 @@ export async function loadHotPromotions(
     const last = page[page.length - 1]!;
     before = { at: last.created_at, id: last.id };
   }
-  const keyOf = (r: Row) => (r.source_type === HOT_TEXT_SOURCE_TYPE ? hotTextKey(r.source_id) : hotPromotionKey(r.property_id));
+  // One alert per hot inbound text: a hand-off is keyed by the inbound it
+  // carries (payload.inbound), a hot text by its own inbound (source_id).
+  const keyOf = (r: Row) => {
+    if (r.source_type === HOT_TEXT_SOURCE_TYPE) return hotTextKey(r.source_id);
+    const inbound = typeof r.payload?.inbound === "string" ? r.payload.inbound : null;
+    return inbound ? hotTextKey(inbound) : hotPromotionKey(r.property_id);
+  };
   // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
   const done = new Set<string>();
   const keys = [...new Set(rows.map(keyOf))];
@@ -158,13 +164,15 @@ export async function loadHotPromotions(
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
   const addresses = new Map<string, string>();
+  const assignees = new Map<string, string | null>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
       .from("properties")
-      .select("id, address, city, contacts:homeowner_contact_id(first_name)")
+      .select("id, address, city, assigned_user_id, contacts:homeowner_contact_id(first_name)")
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
-    for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; contacts: { first_name: string | null } | null }>) {
+    for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; assigned_user_id: string | null; contacts: { first_name: string | null } | null }>) {
+      assignees.set(p.id, p.assigned_user_id);
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
       const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
@@ -175,6 +183,8 @@ export async function loadHotPromotions(
   for (const r of todo) {
     const to = typeof r.payload?.to === "string" ? r.payload.to : null;
     if (!to) continue;
+    // A hand-off counts only while the lead really is assigned to that person.
+    if (r.source_type !== HOT_TEXT_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
     promotions.push({
       propertyId: r.property_id,
       assigneeUserId: to,
@@ -206,7 +216,7 @@ export function createHoldAlertDeps(
     loadHotPromotions: (orgId, alertsSince) =>
       loadHotPromotions(db, orgId, alertsSince),
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
-    async isPropertyAssignedTo(orgId, propertyId, userId) {
+    async loadPropertyAssignee(orgId, propertyId) {
       const { data, error } = await db
         .from("properties")
         .select("assigned_user_id")
@@ -214,7 +224,7 @@ export function createHoldAlertDeps(
         .eq("id", propertyId)
         .maybeSingle();
       if (error) throw new Error(`assignment re-check failed: ${error.message}`);
-      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id === userId;
+      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id ?? null;
     },
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db

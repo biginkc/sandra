@@ -16,7 +16,7 @@ type EventRow = {
   source_type: string;
   source_id: string;
   created_at: string;
-  payload: { to: string };
+  payload: { to: string; inbound?: string };
 };
 type DeliveryRow = { hold_key: string; channel: string; status: string; attempts: number };
 
@@ -37,6 +37,7 @@ function fakeDb(
     failPropertiesAt?: number;
     failDeliveriesAt?: number;
     failEventsAt?: number;
+    assignees?: Record<string, string | null>;
   } = {},
 ) {
   // Newest first, id descending on ties: sorted once, then filtered in order.
@@ -67,7 +68,7 @@ function fakeDb(
             const ids = inn.find(([c]) => c === "id")![1] as string[];
             calls.propertyBatches.push(ids.length);
             if (opts.failPropertiesAt === calls.propertyBatches.length) return resolve({ data: null, error: { message: "boom" } });
-            return resolve({ data: ids.map((id) => ({ id, address: `${id} Main St`, city: "Kansas City", contacts: { first_name: `N-${id}` } })), error: null });
+            return resolve({ data: ids.map((id) => ({ id, address: `${id} Main St`, assigned_user_id: opts.assignees && id in opts.assignees ? opts.assignees[id] : OWNER.userId, city: "Kansas City", contacts: { first_name: `N-${id}` } })), error: null });
           }
           if (table === "hold_alert_deliveries") {
             const keys = new Set(inn.find(([c]) => c === "hold_key")![1] as string[]);
@@ -264,6 +265,24 @@ class IndexedStore extends FakeStore {
     return log.length - lo + sending;
   }
 }
+
+describe("loadHotPromotions: keys and assignee guard", () => {
+  it("a hand-off carrying payload.inbound is keyed by that inbound; without one it falls back to the property key", async () => {
+    const [a, b] = events(2);
+    a!.payload = { to: OWNER.userId, inbound: "in-A" };
+    const { db } = fakeDb([a!, b!]);
+    const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions.map((p) => p.key).sort()).toEqual(["hot_promotion:prop-1", "hot_text:in-A"]);
+  });
+
+  it("drops a hand-off whose property is now assigned to someone else (or nobody); hot texts are not dropped", async () => {
+    const hand = events(3);
+    const text = events(1, { sourceType: HOT_TEXT_SOURCE_TYPE }).map((e) => ({ ...e, id: "t0", property_id: "prop-t", source_id: "in-t" }));
+    const { db } = fakeDb([...hand, ...text], { assignees: { "prop-0": "rep-1", "prop-1": null, "prop-t": "rep-1" } });
+    const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-2", "prop-t"]);
+  });
+});
 
 describe("hot promotions through the alert pass", () => {
   const storeRowsAsDeliveries = (store: FakeStore) => () =>

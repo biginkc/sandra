@@ -179,7 +179,7 @@ export function makeDeps(
       return new Set(ids.filter((id) => held.has(id)));
     },
     loadHotPromotions: async () => ({ promotions: over.promotions ?? [], complete: true }),
-    isPropertyAssignedTo: async () => true,
+    loadPropertyAssignee: async () => OWNER.userId,
     loadHotOwner: async () => (over.hotOwner === undefined ? OWNER.userId : over.hotOwner),
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,

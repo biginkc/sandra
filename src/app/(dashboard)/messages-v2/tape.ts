@@ -159,7 +159,12 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
         : "Already on My Leads under Jarrad",
     );
   } else if (handoffStatus === "assigned_unrecorded") {
-    parts.push("On My Leads under Jarrad, but the note about it couldn't be saved");
+    const note = (handoff?.detail as { note?: string } | null | undefined)?.note ?? "";
+    parts.push(
+      note.startsWith("hot text")
+        ? "Already on My Leads under Jarrad, but the note about it couldn't be saved"
+        : "On My Leads under Jarrad, but the note about it couldn't be saved",
+    );
   } else if (handoff) {
     parts.push(
       run.hotAlertSentAt
