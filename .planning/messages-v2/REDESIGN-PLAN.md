@@ -70,6 +70,7 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 - [ ] Remove the dead scorecard and Luna code paths (not just hidden). Keep Luna's tables; drop the UI.
 - [ ] Rename the admin link "Jev thresholds" → "Sandra's rules" (same page).
 - [ ] Retire the app's 8-answer labels from the UI entirely.
+- [ ] Reuse My Leads' shared `MultiHouseBadge` ("Owns N houses") next to the seller's name on tape cards and waiting cards, with its batched org-scoped read. Waits on the My Leads badge PR merging (Jarrad 2026-10-15: badge visible "when you're messaging").
 - [ ] Depends on: PR 3.
 
 ## Stage 5 — Stress test (after PR 4, before the release-candidate review)
