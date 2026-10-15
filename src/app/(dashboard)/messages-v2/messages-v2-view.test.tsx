@@ -589,6 +589,24 @@ describe("MessagesV2View", () => {
     expect(screen.queryByTestId("older-error")).toBeNull();
   });
 
+  it("a failed thread load's 10s retry timer is cleared on unmount (nothing fires after teardown)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const a = run("ra", { inbound_message_id: "m-missing", status: "running" });
+      const { unmount } = render(<MessagesV2View {...props([a])} threads={[]} />);
+      await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+      await waitFor(() => expect(screen.getByTestId("threads-retrying")).toBeInTheDocument());
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(() => vi.advanceTimersByTime(11_000)).not.toThrow();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("thread failures merge across fetches: A fails, a later fetch for B succeeds -> warning stays", async () => {
     const a = run("ra", { inbound_message_id: "m-missing", status: "running" });
     await mount({ ...props([a]), threads: [] });
