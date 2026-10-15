@@ -244,3 +244,94 @@ describe("getNeedsAttentionTopTen", () => {
     expect(mocks.rpc.mock.calls[0][1]).toMatchObject({ p_tab: "needs_attention", p_chip: "all", p_stage: null, p_search: "", p_page: 1, p_size: 10 });
   });
 });
+
+describe("homeowner houses on queue rows", () => {
+  const C1 = "44444444-4444-4444-8444-444444444444";
+  const C2 = "55555555-5555-4555-8555-555555555555";
+  const withContact = (id: string, contactId: string, extra: Record<string, unknown> = {}) =>
+    facts(id, { row: { propertyId: id, stage: "contacted", queueVersion: 1, assignmentEpisodeId: "ep", address: "1 Main", contactId }, ...extra });
+
+  function housesClient(rows: Record<string, unknown>[], error: unknown = null) {
+    const from = vi.fn(() => {
+      const query = {
+        select: () => query, eq: () => query, in: vi.fn(() => query), is: () => query, order: () => query,
+        limit: async () => ({ data: error ? null : rows, error }),
+      };
+      return query;
+    });
+    mocks.viewer.mockResolvedValue({ userId: A, orgId: "org-1", isOwner: false, client: { rpc: mocks.rpc, from } });
+    return from;
+  }
+  const house = (id: string, contact: string, assigned: string) =>
+    ({ id, address: `${id} Oak`, city: "KC", state: "MO", assigned_user_id: assigned, homeowner_contact_id: contact });
+
+  it("adds every house per homeowner with one read for the whole page", async () => {
+    const from = housesClient([house("h1", C1, A), house("h2", C1, B), house("h3", C2, A)]);
+    mocks.rpc.mockResolvedValue({
+      data: { ...pagePayload([A, B]), rows: [withContact(A, C1), withContact(B, C2)] },
+      error: null,
+    });
+    const page = await getWorkPage({ memberId: A, query: QUERY });
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(page.rows[0].homeownerHouses).toEqual({
+      count: 2,
+      houses: [
+        { propertyId: "h1", address: "h1 Oak, KC, MO", assignedUserId: A, isMine: true },
+        { propertyId: "h2", address: "h2 Oak, KC, MO", assignedUserId: B, isMine: false },
+      ],
+    });
+    expect(page.rows[1].homeownerHouses?.count).toBe(1);
+  });
+
+  it("adds houses to refreshed facts too", async () => {
+    housesClient([house("h1", C1, A), house("h2", C1, A)]);
+    mocks.rpc.mockResolvedValue({ data: { rows: [withContact(A, C1)], missing: [], snapshotAt: NOW }, error: null });
+    const result = await getWorkFacts(A, [A]);
+    expect(result.rows[0].homeownerHouses?.count).toBe(2);
+  });
+
+  it("keeps the classifier's homeownerPropertyCount through getWorkPage and skips the read below 2", async () => {
+    const from = housesClient([]);
+    mocks.rpc.mockResolvedValue({
+      data: { ...pagePayload([A]), rows: [withContact(A, C1, { homeownerPropertyCount: 1 })] },
+      error: null,
+    });
+    const page = await getWorkPage({ memberId: A, query: QUERY });
+    expect(page.rows[0].homeownerPropertyCount).toBe(1);
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("keeps the classifier's count through getWorkFacts and still reads houses at 2+", async () => {
+    const from = housesClient([house("h1", C1, A), house("h2", C1, B), house("h3", C1, A)]);
+    mocks.rpc.mockResolvedValue({
+      data: { rows: [withContact(A, C1, { homeownerPropertyCount: 3 })], missing: [], snapshotAt: NOW },
+      error: null,
+    });
+    const result = await getWorkFacts(A, [A]);
+    expect(result.rows[0].homeownerPropertyCount).toBe(3);
+    expect(result.rows[0].homeownerHouses?.count).toBe(3);
+    expect(from).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a malformed classifier count instead of failing the row, and reads houses", async () => {
+    const from = housesClient([house("h1", C1, A), house("h2", C1, A)]);
+    for (const bad of [-1, 2.5, "3", null]) {
+      mocks.rpc.mockResolvedValue({
+        data: { ...pagePayload([A]), rows: [withContact(A, C1, { homeownerPropertyCount: bad })] },
+        error: null,
+      });
+      const page = await getWorkPage({ memberId: A, query: QUERY });
+      expect(page.rows[0]).not.toHaveProperty("homeownerPropertyCount");
+      expect(page.rows[0].homeownerHouses?.count).toBe(2);
+    }
+    expect(from).toHaveBeenCalledTimes(4);
+  });
+
+  it("still shows the queue when the houses read fails", async () => {
+    housesClient([], { message: "boom" });
+    mocks.rpc.mockResolvedValue({ data: { ...pagePayload([A]), rows: [withContact(A, C1)] }, error: null });
+    const page = await getWorkPage({ memberId: A, query: QUERY });
+    expect(page.rows[0].homeownerHouses).toBeUndefined();
+    expect(page.rows[0].propertyId).toBe(A);
+  });
+});
