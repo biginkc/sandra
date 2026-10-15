@@ -5,7 +5,7 @@ vi.mock("@/components/sequences/after-attempt-drip-picker", () => ({
 }));
 vi.mock("../rep-sms-composer", () => ({ RepSmsComposer: () => <span data-testid="composer" /> }));
 
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -286,6 +286,21 @@ describe("row actions", () => {
 });
 
 describe("conversation box and all texts", () => {
+  it("tags the Us line from the message's automation (drip, campaign, Sandra)", async () => {
+    for (const [automation, tag] of [["drip", "Us (drip):"], ["campaign", "Us (campaign):"], ["sandra", "Us (Sandra):"]] as const) {
+      const { h } = setup();
+      const page = messagesPage();
+      const tagged: MyLeadDetailPageResult =
+        page.ok && page.group === "messages"
+          ? { ...page, page: { ...page.page, rows: page.page.rows.map((row) => (row.direction === "outbound" ? { ...row, automation } : row)) } }
+          : page;
+      h.onLoadDetailPage.mockResolvedValue(tagged);
+      await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
+      expect(await screen.findByTestId("conversation-box-a1")).toHaveTextContent(tag);
+      cleanup();
+    }
+  });
+
   it("loads the lead's texts when its row expands and shows the newest of each side", async () => {
     const { h } = setup();
     await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
@@ -359,9 +374,27 @@ describe("deep link", () => {
 });
 
 describe("empty, loading and error states", () => {
-  it("says so when Needs attention is empty", () => {
-    setup({}, makeServer(25).add("w1", lead("w1", "in_drip", { place: "their_move" })));
+  it("says so when Needs attention is empty, and how many are waiting on them", () => {
+    setup({}, makeServer(25).add("w1", lead("w1", "in_drip", { place: "their_move" })).add("w2", lead("w2", "in_drip", { place: "their_move" })));
     expect(screen.getByTestId("work-empty")).toHaveTextContent("Nothing needs you right now.");
+    expect(screen.getByTestId("work-empty-hint")).toHaveTextContent("2 leads are waiting on them.");
+  });
+
+  it("leaves the waiting line out when none are waiting", () => {
+    setup({}, makeServer(25));
+    expect(screen.getByTestId("work-empty")).toHaveTextContent("Nothing needs you right now.");
+    expect(screen.queryByTestId("work-empty-hint")).not.toBeInTheDocument();
+  });
+
+  it("has its own empty line for Waiting on them, All leads and a search", () => {
+    setup({}, makeServer(25), Q({ tab: "waiting" }));
+    expect(screen.getByTestId("work-empty")).toHaveTextContent("Nothing is waiting on them.");
+    cleanup();
+    setup({}, makeServer(25), Q({ tab: "all" }));
+    expect(screen.getByTestId("work-empty")).toHaveTextContent("No leads in your queue.");
+    cleanup();
+    setup({}, makeServer(25), Q({ search: "elm" }));
+    expect(screen.getByTestId("work-empty")).toHaveTextContent("No leads match \u201celm\u201d.");
   });
 
   it("keeps the last list and offers Retry now when a read fails", async () => {
@@ -374,6 +407,15 @@ describe("empty, loading and error states", () => {
     expect(shownIds()).toHaveLength(5);
     await userEvent.click(within(alert).getByRole("button", { name: "Retry now" }));
     await waitFor(() => expect(screen.queryByTestId("work-error")).not.toBeInTheDocument());
+  });
+
+  it("the handle's syncQuery adopts a URL query: loads it, fills the search box, and writes nothing back", async () => {
+    const { h } = setup();
+    act(() => h.handle.current!.syncQuery(Q({ tab: "waiting", search: "elm" })));
+    await waitFor(() => expect(h.loadWorkPage).toHaveBeenCalledWith({ memberId: "rep-1", query: Q({ tab: "waiting", search: "elm" }) }));
+    expect(await screen.findByTestId("work-search-input")).toHaveValue("elm");
+    expect(h.onViewChange).toHaveBeenCalled();
+    expect(h.onQueryChange).not.toHaveBeenCalled();
   });
 
   it("registers a handle the host uses to re-read a lead and to find its queue row", async () => {

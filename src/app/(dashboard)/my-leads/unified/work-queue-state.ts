@@ -112,7 +112,7 @@ export function afterActionDecision(
   const dest = tabForPlace(facts.place);
   return {
     keep: false,
-    notice: dest !== query.tab ? `Moved to ${WORK_TAB_LABELS[dest]}` : "Moved out of this view",
+    notice: dest !== query.tab ? `Moved to ${WORK_TAB_LABELS[dest]}` : "Moved out of this view", // same tab, other chip/stage: the owner gave no line
   };
 }
 
@@ -234,7 +234,8 @@ export function removeRows(state: WorkState, ids: string[], notice: string | nul
   };
 }
 
-const missingNotice = (n: number) => (n === 1 ? "This lead is no longer available." : `${n} leads are no longer available.`);
+const NO_LONGER_IN_QUEUE = "No longer in your queue";
+const missingNotice = () => NO_LONGER_IN_QUEUE;
 
 /**
  * Apply facts for retained rows (and the pinned lead). Updated text/icons/buttons land in place; rows
@@ -251,7 +252,7 @@ export function applyFacts(state: WorkState, rows: WorkFacts[], missing: string[
   if (pinned && tabForPlace(pinned.place) !== state.query.tab) pinned = null;
   const gone = missing.filter((id) => shown.has(id) || id === state.pinned?.propertyId);
   const next: WorkState = { ...state, facts, leftView, pinned };
-  return removeRows(next, gone, gone.length ? missingNotice(gone.length) : null);
+  return removeRows(next, gone, gone.length ? missingNotice() : null);
 }
 
 /** One lead's new facts after a rep action (already decided keep/remove by the caller). */

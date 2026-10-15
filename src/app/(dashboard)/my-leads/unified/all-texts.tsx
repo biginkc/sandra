@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useRef } from "react";
+
 import { MyLeadSmsStrip } from "../_components/sms-strip";
 import type { MyLeadDetailPanelProps } from "../_components/types";
 import { RepSmsComposer } from "../rep-sms-composer";
@@ -23,9 +25,39 @@ export type AllTextsProps = {
   onSent?: (messageId?: string) => void;
 };
 
+/**
+ * Focus the composer's textarea once, as soon as it exists (design-owner answer 9: Reply reveals the thread and focuses
+ * the textarea; focus is enough, the composer is never opened for the rep). The composer renders its textarea only after
+ * the rep opens it and its sender list loads, so this watches the container instead of assuming it is there on mount.
+ * Focus is never taken from a field the rep is typing in elsewhere.
+ */
+function useFocusComposerTextarea(container: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const root = container.current;
+    if (!root) return;
+    const tryFocus = (): boolean => {
+      const textarea = root.querySelector("textarea");
+      if (!textarea) return false;
+      // Never pull focus out of a field the rep is typing in elsewhere (the search box); buttons do not count.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !root.contains(active) && active.matches("input, textarea, select, [contenteditable]")) return true;
+      textarea.focus();
+      return document.activeElement === textarea;
+    };
+    if (tryFocus()) return;
+    const observer = new MutationObserver(() => {
+      if (tryFocus()) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+    return () => observer.disconnect();
+  }, [container]);
+}
+
 export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent }: AllTextsProps) {
+  const container = useRef<HTMLDivElement>(null);
+  useFocusComposerTextarea(container);
   return (
-    <div data-testid={`all-texts-${facts.propertyId}`} className="min-w-0 space-y-3">
+    <div ref={container} data-testid={`all-texts-${facts.propertyId}`} className="min-w-0 space-y-3">
       <MyLeadSmsStrip state={state} onRetry={onRetry} onLoadDetailPage={onLoadDetailPage} />
       <div className="flex flex-wrap items-start gap-2">
         <RepSmsComposer

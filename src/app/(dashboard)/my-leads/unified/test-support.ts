@@ -30,6 +30,9 @@ export function workFacts(reason: WorkReason, rowNo: string, headline: Record<st
     broken: [],
     aiDraftId: null,
     labels: [],
+    zip: null,
+    contractSignedAt: null,
+    lastTouch: null,
     row: queueRowFixture(propertyId),
     ...over,
   };

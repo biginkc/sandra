@@ -20,6 +20,10 @@ function renderRow(facts: WorkFacts, over: Partial<WorkRowProps> = {}, h = handl
 const dueFacts = () => workFacts("due", "4", { at: "2026-10-14T14:30:00Z", soon: false }, { stage: "contacted" });
 
 describe("collapsed row", () => {
+  it("shows the zip after the state when the facts carry one", () => {
+    renderRow(workFacts("due", "4", { at: "2026-10-14T14:30:00Z", soon: false }, { zip: "64111" }));
+    expect(screen.getByTestId("work-row-address-lead-1")).toHaveTextContent("lead-1 Main St, Kansas City, MO 64111");
+  });
   it("shows name, stage pill, full address, bold headline in the reason tone and two buttons", () => {
     renderRow(dueFacts());
     const row = screen.getByTestId("work-row-lead-1");

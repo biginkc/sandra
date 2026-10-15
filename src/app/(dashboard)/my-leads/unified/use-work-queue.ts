@@ -17,6 +17,7 @@
  *  - notice           one-line message ("Moved to Waiting on them"); dismissNotice() clears it.
  *  - snapshotAt       server time of the newest accepted read.
  *  Actions: setTab (also resets chip to "all"), setChip, setStage, setSearch (container debounces), setPage,
+ *  syncQuery (adopt a URL query on Back/Forward; no onQueryChange),
  *  refresh() (swap in the new page, clears listUpdated), retryNow(), afterAction(propertyId), dismissNotice().
  *
  * Concurrency: every page load carries a sequence number; "navigation" loads (query change, Refresh, member change)
@@ -56,6 +57,8 @@ import {
   type WorkState,
 } from "./work-queue-state";
 
+export type QueryChangeOptions = { replace?: boolean };
+
 export type UseWorkQueueOptions = {
   initial: UnifiedInitial;
   memberId: string;
@@ -63,8 +66,11 @@ export type UseWorkQueueOptions = {
   loadFacts: (memberId: string, ids: string[]) => Promise<LoadWorkFactsResult>;
   /** A composer or dialog is open: the timers do not refresh (a skipped refresh runs when this goes false). */
   paused: boolean;
-  /** The container syncs the URL; the hook never touches the router. */
-  onQueryChange?: (query: WorkQuery) => void;
+  /**
+   * The container syncs the URL; the hook never touches the router. A second argument { replace: true } marks a change the
+   * rep did not make (the server clamped the page, the rep switched): rewrite the address, do not add a history entry.
+   */
+  onQueryChange?: (query: WorkQuery, options?: QueryChangeOptions) => void;
   refreshIntervalMs?: number;
   now?: () => number;
 };
@@ -87,6 +93,8 @@ export type UseWorkQueueResult = {
   setStage: (stage: WorkStage | null) => void;
   setSearch: (search: string) => void;
   setPage: (page: number) => void;
+  /** Adopt a whole query from outside (browser Back/Forward). Loads it; does not call onQueryChange. */
+  syncQuery: (query: WorkQuery) => void;
   refresh: () => void;
   retryNow: () => void;
   afterAction: (propertyId: string) => Promise<void>;
@@ -95,8 +103,9 @@ export type UseWorkQueueResult = {
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MIN_BOUNDARY_MS = 1000;
-const READ_FAILED = "Couldn't load your leads. Showing the last list; trying again shortly.";
-const ACTION_READ_FAILED = "Couldn't confirm that change. The row is unchanged; trying again shortly.";
+// Today's page says this when a refresh throws; the banner appends "Displayed counts may be out of date...".
+const READ_FAILED = "My Leads could not refresh.";
+const ACTION_READ_FAILED = READ_FAILED;
 
 const fail = (message: string): UnifiedActionFailure => ({ ok: false, message });
 
@@ -151,7 +160,10 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     }
   }, []);
 
-  const notify = useCallback((query: WorkQuery) => optsRef.current.onQueryChange?.(query), []);
+  const notify = useCallback((query: WorkQuery, replace = false) => {
+    if (replace) optsRef.current.onQueryChange?.(query, { replace: true });
+    else optsRef.current.onQueryChange?.(query);
+  }, []);
 
   /** Navigation load: the response becomes the displayed list. */
   const runNav = useCallback(
@@ -167,7 +179,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
         return;
       }
       commit((s) => swapIn(s, res.page, query));
-      if (res.page.page !== query.page) notify({ ...query, page: res.page.page });
+      if (res.page.page !== query.page) notify({ ...query, page: res.page.page }, true);
     },
     [commit, loadPageSafe, notify],
   );
@@ -193,7 +205,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     if (s.displayedKey !== queryKey(query) || s.revision === null) {
       // Nothing (or a different query) is on screen: this read IS the list.
       commit((cur) => swapIn(cur, page, query));
-      if (clamped) notify({ ...query, page: page.page });
+      if (clamped) notify({ ...query, page: page.page }, true);
       return;
     }
     if (!clamped && page.revision === s.revision) {
@@ -230,7 +242,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     const query = { ...DEFAULT_QUERY, search: stateRef.current.query.search };
     stateRef.current = emptyState(query);
     setState(stateRef.current);
-    notify(query);
+    notify(query, true);
     void runNav(query);
   }, [memberId, notify, runNav]);
 
@@ -277,6 +289,15 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     [commit, notify, runNav],
   );
 
+  const syncQuery = useCallback(
+    (query: WorkQuery) => {
+      if (queryKey(query) === queryKey(stateRef.current.query)) return;
+      commit((cur) => withQuery(cur, query));
+      void runNav(query);
+    },
+    [commit, runNav],
+  );
+
   const afterAction = useCallback(
     async (propertyId: string) => {
       const nav0 = navSeq.current;
@@ -293,7 +314,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
         commit((s) => {
           const shown = s.order.includes(propertyId) || s.pinned?.propertyId === propertyId;
           if (!shown) return s;
-          if (!row) return removeRows(s, [propertyId], "This lead is no longer available.");
+          if (!row) return removeRows(s, [propertyId], "No longer in your queue");
           const decision = afterActionDecision(row, s.query);
           return decision.keep
             ? updateOne(s, row)
@@ -341,6 +362,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     setStage: useCallback((stage: WorkStage | null) => changeQuery({ stage }), [changeQuery]),
     setSearch: useCallback((search: string) => changeQuery({ search }), [changeQuery]),
     setPage: useCallback((page: number) => changeQuery({ page }), [changeQuery]),
+    syncQuery,
     refresh,
     retryNow,
     afterAction,

@@ -101,9 +101,10 @@ const STAGE_PILL: Record<MyLeadStage, string> = {
   under_contract: "border-green-200 bg-green-100 text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-300",
 };
 
-/** "123 Main St, Kansas City, MO" (the queue row carries no zip). */
-export function fullAddress(row: WorkFacts["row"]): string {
-  return [row.address, row.city, row.state].filter((part) => part && part.trim()).join(", ");
+/** "123 Main St, Kansas City, MO 64111": street, city, then state and zip (zip comes from the classifier facts). */
+export function fullAddress(row: WorkFacts["row"], zip: string | null = null): string {
+  const stateZip = [row.state, zip].filter((part) => part && part.trim()).join(" ");
+  return [row.address, row.city, stateZip].filter((part) => part && part.trim()).join(", ");
 }
 
 export function WorkRow({
@@ -130,7 +131,7 @@ export function WorkRow({
   const chips = labelChips(facts);
   const buttons = rowButtons(facts, { canAct, coachAvailable: Boolean(coach) });
   const name = facts.row.homeownerName || "Homeowner unavailable";
-  const address = fullAddress(facts.row);
+  const address = fullAddress(facts.row, facts.zip);
   const showUndo = pinnedUndo || facts.reason === "call_today";
   const readOnly = !canAct;
   const lockedBy = (button: ButtonSpec) => button.disabled || busy;

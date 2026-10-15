@@ -79,7 +79,8 @@ import {
 } from "./actions";
 import { loadTriage, setStripOverride } from "./strip-actions";
 import { UnifiedQueue, type UnifiedQueueHandle } from "./unified/unified-queue";
-import { workQueryToSearchParams } from "./unified/query-params";
+import { parseWorkQuery, workQueryToSearchParams } from "./unified/query-params";
+import type { WorkQuery } from "./unified/contract";
 import { dismissBroken, loadUnifiedKpis, loadWorkFacts, loadWorkPage, pinLead } from "./unified-actions";
 
 type Props = {
@@ -335,6 +336,30 @@ export function MyLeadsClient({
   const registerUnifiedHandle = useCallback((handle: UnifiedQueueHandle | null) => {
     unifiedHandle.current = handle;
   }, []);
+  // Address bar <-> view. Tab, chip, stage and page changes push a history entry so Back/Forward restore the view;
+  // typing in search only rewrites the current entry; changes the rep did not make (page clamp, rep switch) also rewrite.
+  const lastUnifiedQuery = useRef<WorkQuery | null>(unified?.query ?? null);
+  const syncUnifiedUrl = useCallback((query: WorkQuery, options?: { replace?: boolean }) => {
+    const qs = workQueryToSearchParams(query).toString();
+    const url = qs ? `/my-leads?${qs}` : "/my-leads";
+    const previous = lastUnifiedQuery.current;
+    lastUnifiedQuery.current = query;
+    const current = `${window.location.pathname}${window.location.search}`;
+    // Shallow URL update: no server round trip per click.
+    if (options?.replace || !previous || previous.search !== query.search) window.history.replaceState(null, "", url);
+    else if (url !== current) window.history.pushState(null, "", url);
+  }, []);
+  useEffect(() => {
+    if (!unifiedMode) return;
+    const onPopState = () => {
+      if (window.location.pathname !== "/my-leads") return;
+      const query = parseWorkQuery(new URLSearchParams(window.location.search));
+      lastUnifiedQuery.current = query;
+      unifiedHandle.current?.syncQuery(query);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [unifiedMode]);
   // Leads whose workflow was opened since the last unified refresh: re-read after a commit.
   const unifiedTouched = useRef(new Set<string>());
   const softphone = useOptionalSoftphone();
@@ -1516,11 +1541,7 @@ export function MyLeadsClient({
           deepLinkId={target.propertyId}
           deepLinkNonce={target.nonce}
           onViewChange={clearDeepLink}
-          onQueryChange={(query) => {
-            const qs = workQueryToSearchParams(query).toString();
-            // Shallow URL update: no server round trip per click.
-            window.history.replaceState(null, "", qs ? `/my-leads?${qs}` : "/my-leads");
-          }}
+          onQueryChange={syncUnifiedUrl}
           onAction={(kind, propertyId) => action(kind, propertyId)}
           onLoadDetailPage={async (propertyId, group, cursor) => {
             const result = await loadMyLeadDetail({ memberId: member, propertyId, group, cursor });

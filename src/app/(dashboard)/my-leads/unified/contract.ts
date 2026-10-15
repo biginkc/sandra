@@ -49,9 +49,14 @@ export type WorkDrip = {
  *  6 {kind: BrokenKind, action: BrokenAction, at}  6a {variant:'text_waiting', at}  7 {kind:'ready', since}
  *  8 {kind:'follow_up_due'|'follow_up_missing', at}  10 {nextRunAt, scheduledAt, callInProgress, resumeBy}
  *  11 {kind:'offer_out'|'callback_booked', at}  12 {at}  13 {at, by:'human'|'ai'|'campaign', until}
+ *  Rows 4, 9 and 11(callback_booked) also carry {taskKind:'callback'|'appointment', snoozed:boolean} (migration 20261015020200).
  *  14 {kind:'texted_silent'|'drip_finished', at, since}  15 {variant: 'check_texts'|null}  1 {signedAt}
  */
 export type WorkHeadline = Record<string, unknown>;
+
+export type LastTouchKind =
+  | "your_text" | "sandra_reply" | "drip_text" | "campaign_text" | "call_reached" | "call_no_answer"
+  | "voicemail" | "note" | "other";
 
 export type WorkLabel =
   | "norma_calling" | "norma_task" | "do_not_contact" | "text_waiting" | "check_texts" | "broken"
@@ -76,6 +81,12 @@ export type WorkFacts = {
   broken: BrokenItem[];
   aiDraftId: string | null;
   labels: WorkLabel[];
+  /** Added by migration 20261015020200 (design owner answers 1-3). zip comes from properties; null when absent. */
+  zip: string | null;
+  /** When the recorded contract was signed (Under contract rows); null when unknown. */
+  contractSignedAt: string | null;
+  /** What the last touch was and when (null = none yet). 'other' = a touch kind the owner's list does not name. */
+  lastTouch: { kind: LastTouchKind; at: string } | null;
   /** The existing queue row; feeds the existing dialogs/workflows unchanged. */
   row: QueueRow;
 };

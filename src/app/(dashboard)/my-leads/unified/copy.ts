@@ -207,17 +207,30 @@ export function brokenText(kind: BrokenKind, facts: Pick<WorkFacts, "drip">): st
 // The bold line
 // ---------------------------------------------------------------------------
 
+/** The kind word of a due task: callback, appointment or offer follow-up (callback when the task kind is unknown). */
+function taskWord(h: Record<string, unknown>): string {
+  const kind = str(h, "taskKind");
+  if (kind === "appointment") return "appointment";
+  if (kind === "offer_follow_up") return "offer follow-up";
+  return "callback";
+}
+
+const SNOOZED = " (snoozed)";
+const snoozedSuffix = (h: Record<string, unknown>): string => (bool(h, "snoozed") ? SNOOZED : "");
+
 function dueText(h: Record<string, unknown>, now: Date): string {
   const at = str(h, "at");
-  if (!at) return "Due";
-  if (bool(h, "soon")) return `Due soon · callback ${whenLabel(at, now)}`;
+  const word = taskWord(h);
+  const snoozed = snoozedSuffix(h);
+  if (!at) return `Due${snoozed}`;
+  if (bool(h, "soon")) return `Due soon · ${word} ${whenLabel(at, now)}${snoozed}`;
   const date = toDate(at);
-  if (!date) return "Due";
+  if (!date) return `Due${snoozed}`;
   const minutes = Math.floor((now.getTime() - date.getTime()) / 60_000);
-  if (minutes >= 1 && minutes < 60) return `Due · callback ${minutes} min overdue`;
+  if (minutes >= 1 && minutes < 60) return `Due · ${word} ${minutes} min overdue${snoozed}`;
   const days = dayDiff(date, now);
-  if (days >= 1) return `Due · callback ${plural(days, "day")} overdue`;
-  return `Due · callback ${timeLabel(at)}`;
+  if (days >= 1) return `Due · ${word} ${plural(days, "day")} overdue${snoozed}`;
+  return `Due · ${word} ${timeLabel(at)}${snoozed}`;
 }
 
 function dripRunningText(facts: WorkFacts, h: Record<string, unknown>, now: Date): string {
@@ -257,8 +270,8 @@ export function rowHeadline(facts: WorkFacts, now: Date): RowHeadline {
 
   switch (facts.rowNo) {
     case "1": {
-      const signedAt = str(h, "signedAt");
-      return make(signedAt ? `Under contract · signed ${dateLabel(signedAt, now)}` : "Under contract · nothing due");
+      const signedAt = facts.contractSignedAt;
+      return make(signedAt && toDate(signedAt) ? `Under contract · signed ${dateLabel(signedAt, now)}` : "Under contract");
     }
     case "2": {
       const pinnedAt = str(h, "pinnedAt");
@@ -275,12 +288,14 @@ export function rowHeadline(facts: WorkFacts, now: Date): RowHeadline {
       return make(dueText(h, now));
     case "9": {
       const days = num(h, "overdueDays");
-      return make(days === null ? "Due · missed callback" : `Due · callback ${plural(days, "day")} overdue`);
+      const word = taskWord(h);
+      return make(days === null ? `Due · missed ${word}${snoozedSuffix(h)}` : `Due · ${word} ${plural(days, "day")} overdue${snoozedSuffix(h)}`);
     }
     case "5": {
       const at = str(h, "at");
       const missedCall = h.kind === "call";
-      return make(`New reply${at ? ` · ${missedCall ? "missed call " : ""}${whenLabel(at, now, { todayPrefix: true })}` : ""}`);
+      if (!at) return make("New reply");
+      return make(`New reply · ${missedCall ? `missed call ${whenLabel(at, now)}` : whenLabel(at, now, { todayPrefix: true })}`);
     }
     case "6": {
       const kind = (str(h, "kind") ?? facts.broken[0]?.kind) as BrokenKind | undefined;
@@ -304,7 +319,7 @@ export function rowHeadline(facts: WorkFacts, now: Date): RowHeadline {
     case "11": {
       const at = str(h, "at");
       if (facts.reason === "offer_out") return make(`Offer out${at ? ` · follow-up ${dateLabel(at, now)}` : ""}`);
-      return make(`Callback booked${at ? ` · ${whenLabel(at, now)}` : ""}`);
+      return make(`Callback booked${at ? ` · ${whenLabel(at, now)}` : ""}${snoozedSuffix(h)}`);
     }
     case "12": {
       const at = str(h, "at");
@@ -319,12 +334,10 @@ export function rowHeadline(facts: WorkFacts, now: Date): RowHeadline {
     }
     case "14": {
       const at = str(h, "at");
-      const since = str(h, "since");
       if (h.kind === "drip_finished" && at) {
         return make(`Gone quiet · drip finished ${dateLabel(at, now)}, no reply in ${plural(daysSince(at, now), "day")}`);
       }
-      const from = since ?? at;
-      return make(from ? `Gone quiet · no reply in ${plural(daysSince(from, now), "day")}` : "Gone quiet");
+      return make("Gone quiet · no reply in 3 business days");
     }
     default:
       return make(h.variant === "check_texts" ? "Nothing planned (check texts)" : "Nothing planned");
@@ -376,46 +389,63 @@ export function labelChips(facts: WorkFacts): LabelChip[] {
 export type LineLabel = "DRIP" | "NEXT STEP" | "LAST TOUCH" | "ATTEMPTS" | "MOTIVATION" | "PHONE" | "CLEARS";
 export type LabeledLine = { label: LineLabel; text: string; tone?: HeadlineTone };
 
-const PAUSE_REASON_TEXT: Record<string, string> = {
-  inbound_reply: "they replied",
-  rep_sms_human_takeover: "you took over",
-  person_took_over: "a person took over",
-  manual: "paused by hand",
-  appointment_booked: "callback booked",
-  norma_call: "Norma is calling",
-  call_in_progress: "call in progress",
-  terminal_dispo: "lead was closed out",
-  consent_unavailable: "no text consent",
-  template_missing: "text template missing",
-  step_misconfigured: "step is set up wrong",
-  no_phone: "no phone number",
-  provider_failed: "couldn't send",
-  reconciliation_required: "send status unclear",
-  no_approved_sender: "no approved sender",
+/** Why a paused drip is paused, in the owner's words (design-owner answer 3). */
+const PAUSED_PHRASE: Record<string, string> = {
+  inbound_reply: "paused — they replied",
+  appointment_booked: "paused — callback booked",
+  call_in_progress: "paused while you call",
+  manual: "paused by you",
+  rep_sms_human_takeover: "paused by you",
+  norma_call: "paused — Norma call",
+  person_took_over: "paused — needs a person",
 };
+/** Pause reasons that mean the drip hit a problem. */
+const PROBLEM_PAUSES = new Set([
+  "provider_failed", "reconciliation_required", "template_missing", "step_misconfigured",
+  "no_phone", "consent_unavailable", "no_approved_sender",
+]);
 
-/** DRIP line: which drip, where it stopped and why; running with next date; finished; couldn't send; none. */
+/** DRIP line: "none", "starts Thu 10:00 AM · Warm check-in", "running · text 2 of 4 · next Fri 10:00 AM", paused / stopped / finished. */
 export function dripLine(facts: WorkFacts, now: Date): string {
   const drip = facts.drip;
-  if (!drip) return "None";
-  const name = drip.name ?? "Drip";
-  const total = drip.stepsTotal;
+  if (!drip) return "none";
   switch (drip.status) {
     case "active": {
-      if (drip.nextRunAt) return `${name} · running · ${textNofM(drip.step, total)} next ${whenLabel(drip.nextRunAt, now)}`;
-      return `${name} · running`;
+      if (!drip.nextRunAt) return "running";
+      if (!drip.lastSentAt && (drip.step ?? 1) <= 1) {
+        return `starts ${whenLabel(drip.nextRunAt, now)}${drip.name ? ` · ${drip.name}` : ""}`;
+      }
+      return `running · ${textNofM(drip.step, drip.stepsTotal)} · next ${whenLabel(drip.nextRunAt, now)}`;
     }
     case "paused": {
-      const reason = drip.pauseReason ? PAUSE_REASON_TEXT[drip.pauseReason] ?? "paused" : "paused";
-      const broken = facts.broken.some((item) => item.kind === "drip_paused");
-      return `${name} · ${broken ? `couldn't send ${textNofM(drip.step, total)}` : `stopped at ${textNofM(drip.step, total)}`} — ${reason}`;
+      const problem = facts.broken.some((item) => item.kind === "drip_paused") || (drip.pauseReason !== null && PROBLEM_PAUSES.has(drip.pauseReason));
+      if (problem) return "stopped on a problem";
+      return (drip.pauseReason && PAUSED_PHRASE[drip.pauseReason]) || "paused";
     }
     case "completed":
-      return `${name} · finished${drip.completedAt ? ` ${dateLabel(drip.completedAt, now)}` : ""}`;
+      return `finished${drip.completedAt ? ` ${dateLabel(drip.completedAt, now)}` : ""}, no reply`;
     case "opted_out":
-      return `${name} · stopped, seller opted out`;
+      return "stopped, seller opted out";
     default:
-      return `${name} · ${drip.status}`;
+      return drip.status;
+  }
+}
+
+/** LAST TOUCH: what it was and when. "drip text" and "campaign text" give the weekday; the rest are relative. */
+export function lastTouchLine(facts: WorkFacts, now: Date): string {
+  const touch = facts.lastTouch;
+  if (!touch || !toDate(touch.at)) return facts.lastTouchAt ? agoLabel(facts.lastTouchAt, now) : "none yet";
+  const ago = agoLabel(touch.at, now);
+  switch (touch.kind) {
+    case "your_text": return `your text · ${ago}`;
+    case "sandra_reply": return `Sandra's reply · ${ago}`;
+    case "drip_text": return `drip text · ${weekdayLabel(toDate(touch.at) as Date)}`;
+    case "campaign_text": return `campaign text · ${weekdayLabel(toDate(touch.at) as Date)}`;
+    case "call_reached": return `call, reached · ${ago}`;
+    case "call_no_answer": return `call, no answer · ${ago}`;
+    case "voicemail": return `voicemail · ${ago}`;
+    case "note": return `note · ${ago}`;
+    case "other": return ago;
   }
 }
 
@@ -440,14 +470,14 @@ export function expandedLines(facts: WorkFacts, now: Date): LabeledLine[] {
   const lines: LabeledLine[] = [
     { label: "DRIP", text: dripLine(facts, now) },
     { label: "NEXT STEP", text: nextStepLine(facts, now) },
-    { label: "LAST TOUCH", text: facts.lastTouchAt ? agoLabel(facts.lastTouchAt, now) : "None yet" },
+    { label: "LAST TOUCH", text: lastTouchLine(facts, now) },
   ];
   const assigned = assignedLabel(facts.assignedAt, now);
   lines.push({ label: "ATTEMPTS", text: `${plural(facts.attemptsCount, "attempt")}${assigned ? ` · ${assigned}` : ""}` });
   const phoneProblems = [!facts.hasPhone ? "No phone number" : null, facts.contactDnc ? "Do not contact" : null].filter((v): v is string => Boolean(v));
   if (phoneProblems.length) lines.push({ label: "PHONE", text: phoneProblems.join(" · "), tone: "danger" });
   else lines.push({ label: "MOTIVATION", text: motivationLine(facts) });
-  if (facts.reason === "call_today") lines.push({ label: "CLEARS", text: "When you log a call or an attempt, or press Undo" });
+  if (facts.reason === "call_today") lines.push({ label: "CLEARS", text: "when you log the call · Undo" });
   return lines;
 }
 

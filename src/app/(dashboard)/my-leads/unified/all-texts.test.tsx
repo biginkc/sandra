@@ -1,12 +1,17 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const composer = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
+const composer = vi.hoisted(() => ({ props: null as null | Record<string, unknown>, showTextarea: false }));
 vi.mock("../rep-sms-composer", () => ({
   RepSmsComposer: (props: Record<string, unknown>) => {
     composer.props = props;
-    return <button type="button" onClick={() => (props.onSent as (id?: string) => void)("msg-9")}>Text lead</button>;
+    return (
+      <>
+        <button type="button" onClick={() => (props.onSent as (id?: string) => void)("msg-9")}>Text lead</button>
+        {composer.showTextarea && <textarea aria-label="Editable message remainder" />}
+      </>
+    );
   },
 }));
 
@@ -24,7 +29,7 @@ const detailState = {
   },
 };
 
-beforeEach(() => { composer.props = null; });
+beforeEach(() => { composer.props = null; composer.showTextarea = false; });
 
 describe("<AllTexts />", () => {
   it("shows the text history strip and the action-placement composer with the reply-to stamp", () => {
@@ -53,6 +58,27 @@ describe("<AllTexts />", () => {
     await userEvent.click(screen.getByRole("button", { name: "Text lead" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onSent).toHaveBeenCalledExactlyOnceWith("msg-9");
+  });
+  it("focuses the composer textarea when it is already there", () => {
+    composer.showTextarea = true;
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Editable message remainder" })).toHaveFocus();
+  });
+  it("focuses the textarea the first time it appears, without opening the composer", async () => {
+    const view = render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    composer.showTextarea = true;
+    view.rerender(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Editable message remainder" })).toHaveFocus());
+  });
+  it("does not pull focus out of another field the rep is typing in", () => {
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    composer.showTextarea = true;
+    render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={detailState} onRetry={() => {}} />);
+    expect(outside).toHaveFocus();
+    outside.remove();
   });
   it("shows the strip's loading state while detail loads", () => {
     render(<AllTexts facts={{ propertyId: "lead-1", latestInbound: null }} state={{ status: "loading" }} onRetry={() => {}} />);

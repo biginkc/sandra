@@ -35,6 +35,10 @@ describe("<ConversationBox />", () => {
     expect(items[0]).toHaveAttribute("data-direction", "outbound");
     expect(items[1]).toHaveAttribute("data-direction", "inbound");
   });
+  it.each([["drip", "Us (drip):"], ["campaign", "Us (campaign):"], ["sandra", "Us (Sandra):"]] as const)("tags %s outbound texts", (automation, tag) => {
+    setup([out("2026-10-14T12:00:00Z", { automation }), inb("2026-10-14T13:00:00Z")]);
+    expect(screen.getByText(tag)).toBeInTheDocument();
+  });
   it("tags automated outbound as (drip)", () => {
     setup([out("2026-10-14T12:00:00Z", { automated: true }), inb("2026-10-14T13:00:00Z")]);
     expect(screen.getByText("Us (drip):")).toBeInTheDocument();

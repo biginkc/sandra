@@ -69,6 +69,12 @@ export function WorkToolbar({
   onToggleAll,
 }: WorkToolbarProps) {
   const [searchOpen, setSearchOpen] = useState(search.length > 0);
+  // A search that arrives from outside (browser Back/Forward) opens the box so the term is visible.
+  const [seenSearch, setSeenSearch] = useState(search);
+  if (search !== seenSearch) {
+    setSeenSearch(search);
+    if (search.length > 0) setSearchOpen(true);
+  }
   const searchRef = useRef<HTMLInputElement>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const chips = chipsFor(tab);

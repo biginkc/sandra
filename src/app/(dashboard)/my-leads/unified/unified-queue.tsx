@@ -43,7 +43,7 @@ import type {
   WorkTab,
 } from "./contract";
 import { ListUpdatedBanner, RowRemovedNotice } from "./list-updated-banner";
-import { useWorkQueue } from "./use-work-queue";
+import { useWorkQueue, type QueryChangeOptions } from "./use-work-queue";
 import { WorkPagination, totalPagesFor } from "./work-pagination";
 import { WorkRow } from "./work-row";
 import { WorkToolbar } from "./work-toolbar";
@@ -69,6 +69,8 @@ export type UnifiedQueueHandle = {
   refreshNow: () => void;
   /** The queue row of a displayed (or deep-linked) lead; feeds the existing dialogs. */
   rowFor: (propertyId: string) => QueueRow | null;
+  /** Browser Back/Forward: adopt the query parsed from the URL (loads it; does not write the URL). */
+  syncQuery: (query: WorkQuery) => void;
 };
 
 export type UnifiedQueueProps = {
@@ -89,8 +91,8 @@ export type UnifiedQueueProps = {
   deepLinkNonce?: number;
   /** The rep changed the view (tab, chip, stage, search, page, rep): the host drops the deep link. */
   onViewChange?: () => void;
-  /** The host syncs the URL. */
-  onQueryChange?: (query: WorkQuery) => void;
+  /** The host syncs the URL. options.replace = not a rep-made change (page clamp, rep switch): do not add a history entry. */
+  onQueryChange?: (query: WorkQuery, options?: QueryChangeOptions) => void;
   /** Stage commands and Call/Log attempt: the existing workflows in client.tsx. */
   onAction: (kind: MyLeadAction, propertyId: string) => void;
   onLoadDetailPage: (propertyId: string, group: MyLeadDetailGroupName, cursor: string | null) => Promise<MyLeadDetailPageResult>;
@@ -114,8 +116,7 @@ function conversationState(state: MyLeadDetailState | undefined): ConversationBo
   if (state.status === "error") return { status: "error", message: state.message };
   return {
     status: "ready",
-    // The detail messages carry no drip/campaign marker today, so none is tagged "(drip)" (see the report).
-    messages: state.detail.messages.rows.map((m) => ({ direction: m.direction, body: m.body, at: m.createdAt, automated: false })),
+    messages: state.detail.messages.rows.map((m) => ({ direction: m.direction, body: m.body, at: m.createdAt, automation: m.automation ?? null })),
   };
 }
 
@@ -280,7 +281,7 @@ export function UnifiedQueue({
   }, [memberId]);
 
   // ---- the host's handle
-  const { afterAction: hookAfterAction, retryNow } = queue;
+  const { afterAction: hookAfterAction, retryNow, syncQuery: hookSyncQuery } = queue;
   const afterAction = useCallback(
     async (propertyId: string) => {
       reloadMessages(propertyId);
@@ -289,15 +290,18 @@ export function UnifiedQueue({
     },
     [hookAfterAction, reloadKpis, reloadMessages],
   );
+  const syncQueryRef = useRef<(query: WorkQuery) => void>(() => {});
+  const syncFromUrl = useCallback((next: WorkQuery) => syncQueryRef.current(next), []);
   useEffect(() => {
     if (!registerHandle) return;
     registerHandle({
       afterAction,
       refreshNow: retryNow,
       rowFor: (propertyId) => rowsRef.current.find((r) => r.facts.propertyId === propertyId)?.facts.row ?? null,
+      syncQuery: syncFromUrl,
     });
     return () => registerHandle(null);
-  }, [registerHandle, afterAction, retryNow]);
+  }, [registerHandle, afterAction, retryNow, syncFromUrl]);
 
   // ---- notice timeout
   const { notice, dismissNotice } = queue;
@@ -346,6 +350,13 @@ export function UnifiedQueue({
     setExpanded(new Set());
     setTextsOpen(new Set());
   }, [onViewChange]);
+  // Back/Forward: the URL already holds this view, so the box, expanded rows and deep link follow it and nothing is written back.
+  syncQueryRef.current = (next: WorkQuery) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    setSearchText(next.search);
+    viewChanged();
+    hookSyncQuery(next);
+  };
   const changeTab = (tab: WorkTab) => {
     viewChanged();
     queue.setTab(tab);
@@ -505,11 +516,24 @@ export function UnifiedQueue({
   };
 
   const totalPages = totalPagesFor(queue.total, queue.pageSize);
+  // Empty states are the owner's strings; a filtered view with no search has none of its own, so it keeps a neutral line.
+  const unfiltered = query.chip === "all" && !query.stage;
   const emptyText = query.search
-    ? "No leads match your search."
-    : query.tab === "needs_attention" && query.chip === "all" && !query.stage
-      ? "Nothing needs you right now."
-      : "No leads here.";
+    ? `No leads match \u201c${query.search}\u201d.`
+    : !unfiltered
+      ? "No leads here."
+      : query.tab === "needs_attention"
+        ? "Nothing needs you right now."
+        : query.tab === "waiting"
+          ? "Nothing is waiting on them."
+          : "No leads in your queue.";
+  const waitingCount = queue.tabCounts.waiting;
+  const emptyHint =
+    !query.search && unfiltered && query.tab === "needs_attention" && waitingCount > 0
+      ? waitingCount === 1
+        ? "1 lead is waiting on them."
+        : `${waitingCount} leads are waiting on them.`
+      : null;
   const showEmpty = !queue.loading && rows.length === 0 && !queue.error;
 
   return (
@@ -603,6 +627,11 @@ export function UnifiedQueue({
         {showEmpty && (
           <p className="rounded-[10px] border border-dashed border-border p-5 text-center text-sm text-muted-foreground" data-testid="work-empty">
             {emptyText}
+            {emptyHint && (
+              <span className="mt-1 block" data-testid="work-empty-hint">
+                {emptyHint}
+              </span>
+            )}
           </p>
         )}
 

@@ -112,11 +112,25 @@ describe('acquisition text history',()=>{
     expect(Object.fromEntries(property)).toMatchObject({select:'homeowner_contact_id',org_id:`eq.${orgId}`,id:`eq.${propertyId}`,
       assigned_user_id:`eq.${memberId}`,deleted_at:'is.null',is_dnc_locked:'eq.false'});
     const sms=requests('messages')[0].searchParams;
-    expect(Object.fromEntries(sms)).toMatchObject({select:'id,created_at,body,direction,status,metadata',org_id:`eq.${orgId}`,channel:'eq.sms',order:'created_at.desc,id.desc',limit:'21'});
+    expect(Object.fromEntries(sms)).toMatchObject({select:'id,created_at,body,direction,status,metadata,campaign_id',org_id:`eq.${orgId}`,channel:'eq.sms',order:'created_at.desc,id.desc',limit:'21'});
     expect(sms.getAll('or')).toEqual([
       '(direction.eq.inbound,and(direction.eq.outbound,status.in.(sent,delivered,failed,bounced)))',
       `(property_id.eq.${propertyId},and(property_id.is.null,contact_id.eq.${contactId}))`,
     ]);
+  });
+
+  it('derives who sent each outbound text (drip, campaign, Sandra) without changing the other fields',async()=>{
+    const out=(index:number,extra:Record<string,unknown>)=>({...message(index),direction:'outbound',status:'sent',campaign_id:null as unknown,...extra});
+    messages=[
+      out(1,{metadata:{generated_by:'sequence_tick',sequence_enrollment_id:'e'}}),
+      out(2,{campaign_id:'30000000-0000-4000-8000-000000000001'}),
+      out(3,{metadata:{generated_by:'ai_responder_v1'}}),
+      out(4,{metadata:null}),
+      {...message(5),campaign_id:'30000000-0000-4000-8000-000000000001'},
+    ] as typeof messages;
+    const rows=(await getAcquisitionDetail({memberId,propertyId})).groups.messages!.rows;
+    expect(rows.map(row=>row.automation)).toEqual(['drip','campaign','sandra',null,null]);
+    expect(rows[0]).toMatchObject({id:id(1),direction:'outbound',deliveryStatus:'sent',attachmentCount:0});
   });
 
   it.each([
@@ -199,7 +213,7 @@ describe('acquisition text history',()=>{
   it('returns actual direction, failure state, and attachment count without metadata or media URLs',async()=>{
     messages=[{...message(1),body:'',direction:'outbound',status:'failed',metadata:{mediaUrls:['https://provider.example/private.jpg',null,''],providerSecret:'private'}}];
     const page=(await getAcquisitionDetail({memberId,propertyId,group:'messages'})).groups.messages!;
-    expect(page).toEqual({rows:[{id:id(1),at,actorId:null,body:'',direction:'outbound',deliveryStatus:'failed',attachmentCount:1}],cursor:null,hasMore:false});
+    expect(page).toEqual({rows:[{id:id(1),at,actorId:null,automation:null,body:'',direction:'outbound',deliveryStatus:'failed',attachmentCount:1}],cursor:null,hasMore:false});
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
   });
 

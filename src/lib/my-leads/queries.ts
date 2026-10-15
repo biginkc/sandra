@@ -116,10 +116,12 @@ export async function getAcquisitionBadge(): Promise<number> {
   catch(error) { if(error instanceof MyLeadsReadError&&error.code==='FEATURE_DISABLED') return 0; throw error; }
 }
 
+/** Who sent an outbound text when it was not a person: a drip step, a campaign, or Sandra's AI reply. */
+export type MessageAutomation = 'drip'|'campaign'|'sandra'|null;
 export type DetailGroup = 'notes'|'attempts'|'appointments'|'offers'|'history'|'messages';
 export type RepSmsObligationStatus = 'required'|'draft'|'claimed'|'sending'|'accepted'|'delivered'|'failed_not_dispatched'|'unknown'|'blocked'|'delivery_failed'|'voided'|'exception_closed';
 export type DetailFact = { id:string; at:string; actorId:string|null; actorLabel?:string; body?:string; outcome?:string|null; source?:string;
-  direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number;
+  direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number; automation?:MessageAutomation;
   recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; mode?:'phone'|'in_person'|null; location?:string|null; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null;
   followUpObligationId?:string|null; followUpStatus?:RepSmsObligationStatus|null; followUpMessage?:string|null; followUpComposition?:Record<string,unknown>|null; followUpBlockedReason?:string|null; note?:string|null };
 export type AcquisitionDetail = { groups: Partial<Record<DetailGroup,{ rows:DetailFact[];cursor:string|null;hasMore:boolean }>> };
@@ -149,6 +151,16 @@ function decodeSmsCursor(raw:string|null|undefined,scope:SmsScope):SmsCursor|nul
   }
 }
 
+/** Outbound only. Drip texts carry the sequence tick stamp, Sandra's replies the AI responder stamp, campaigns a campaign_id. */
+function messageAutomation(direction:string,campaignId:unknown,metadata:unknown):MessageAutomation {
+  if(direction!=='outbound') return null;
+  const meta=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata as Record<string,unknown>:null;
+  if(meta?.generated_by==='ai_responder_v1') return 'sandra';
+  if(typeof campaignId==='string'&&campaignId.length>0) return 'campaign';
+  if(meta?.generated_by==='sequence_tick'||typeof meta?.sequence_enrollment_id==='string') return 'drip';
+  return null;
+}
+
 async function readAcquisitionSmsHistory(viewer:Awaited<ReturnType<typeof myLeadsViewer>>,scope:SmsScope,rawCursor?:string|null) {
   if(!UUID.test(scope.propertyId)) throw new MyLeadsReadError('INVALID_INPUT','Choose a valid lead.');
   const cursor=decodeSmsCursor(rawCursor,scope);
@@ -162,7 +174,7 @@ async function readAcquisitionSmsHistory(viewer:Awaited<ReturnType<typeof myLead
   const contactId=property.homeowner_contact_id;
   if(contactId!==null&&!UUID.test(contactId)) throw new MyLeadsReadError('READ_FAILED','Text messages could not load. Please retry.');
 
-  let query=viewer.client.from('messages').select('id,created_at,body,direction,status,metadata')
+  let query=viewer.client.from('messages').select('id,created_at,body,direction,status,metadata,campaign_id')
     .eq('org_id',scope.orgId).eq('channel','sms')
     .or('direction.eq.inbound,and(direction.eq.outbound,status.in.(sent,delivered,failed,bounced))');
   // Contact-only texts can predate property linkage. Never include texts explicitly
@@ -179,7 +191,8 @@ async function readAcquisitionSmsHistory(viewer:Awaited<ReturnType<typeof myLead
     const mediaUrls=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata.mediaUrls:null;
     return {id:message.id,at:message.created_at,actorId:null,body:message.body,
       direction:message.direction as 'inbound'|'outbound',deliveryStatus:message.status,
-      attachmentCount:Array.isArray(mediaUrls)?mediaUrls.filter(url=>typeof url==='string'&&url.length>0).length:0};
+      attachmentCount:Array.isArray(mediaUrls)?mediaUrls.filter(url=>typeof url==='string'&&url.length>0).length:0,
+      automation:messageAutomation(message.direction,(message as {campaign_id?:unknown}).campaign_id,metadata)};
   });
   const last=rows.at(-1);
   // This scoped cursor is a pagination position, never an authorization token.

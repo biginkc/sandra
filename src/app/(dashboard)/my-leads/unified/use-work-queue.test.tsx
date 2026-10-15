@@ -100,6 +100,29 @@ describe("query changes", () => {
     expect(loadPage).not.toHaveBeenCalled();
   });
 
+  it("syncQuery adopts a whole query (Back/Forward), loads it, and never calls onQueryChange", async () => {
+    const server = makeServer().addMany("L", 2).add("W", { place: "their_move", reason: "in_drip" });
+    const { result, onQueryChange, loadPage } = setup(server);
+    await act(async () => result.current.syncQuery(Q({ tab: "waiting", search: "elm" })));
+    await flush();
+    expect(loadPage).toHaveBeenCalledWith("m1", Q({ tab: "waiting", search: "elm" }));
+    expect(result.current.query).toEqual(Q({ tab: "waiting", search: "elm" }));
+    expect(onQueryChange).not.toHaveBeenCalled();
+    // Same query again is a no-op.
+    loadPage.mockClear();
+    await act(async () => result.current.syncQuery(Q({ tab: "waiting", search: "elm" })));
+    expect(loadPage).not.toHaveBeenCalled();
+  });
+
+  it("a page clamp after syncQuery rewrites the URL instead of adding history", async () => {
+    const server = makeServer(2).addMany("L", 4);
+    const { result, onQueryChange } = setup(server);
+    await act(async () => result.current.syncQuery(Q({ page: 9 })));
+    await flush();
+    expect(result.current.query.page).toBe(2);
+    expect(onQueryChange).toHaveBeenCalledExactlyOnceWith(Q({ page: 2 }), { replace: true });
+  });
+
   it("drops responses for stale sequences (out-of-order resolution)", async () => {
     const server = makeServer().addMany("L", 2).add("W", { place: "their_move", reason: "in_drip" });
     const { result, loadPage } = setup(server);
@@ -138,7 +161,7 @@ describe("query changes", () => {
     expect(result.current.query.page).toBe(2);
     expect(ids(result)).toEqual(["L3", "L4"]);
     expect(onQueryChange).toHaveBeenNthCalledWith(1, Q({ page: 9 }));
-    expect(onQueryChange).toHaveBeenNthCalledWith(2, Q({ page: 2 }));
+    expect(onQueryChange).toHaveBeenNthCalledWith(2, Q({ page: 2 }), { replace: true });
   });
 });
 
@@ -150,7 +173,7 @@ describe("scope change", () => {
     rerender({ paused: false, memberId: "m2" });
     await flush();
     expect(loadPage).toHaveBeenCalledWith("m2", Q({ search: "elm" }));
-    expect(onQueryChange).toHaveBeenCalledWith(Q({ search: "elm" }));
+    expect(onQueryChange).toHaveBeenCalledWith(Q({ search: "elm" }), { replace: true });
     expect(ids(result)).toEqual(["L2", "L3"]);
   });
 });
@@ -277,7 +300,7 @@ describe("revision changes keep the list", () => {
     server.remove("L2");
     await advance(30_000);
     expect(ids(result)).toEqual(["L1", "L3"]);
-    expect(result.current.notice).toBe("This lead is no longer available.");
+    expect(result.current.notice).toBe("No longer in your queue");
     act(() => result.current.dismissNotice());
     expect(result.current.notice).toBeNull();
   });
@@ -294,7 +317,7 @@ describe("revision changes keep the list", () => {
     await flush();
     expect(result.current.query.page).toBe(2);
     expect(ids(result)).toEqual(["L3", "L4"]);
-    expect(onQueryChange).toHaveBeenLastCalledWith(Q({ page: 2 }));
+    expect(onQueryChange).toHaveBeenLastCalledWith(Q({ page: 2 }), { replace: true });
   });
 
   it("counts always come from one response: all three sets match the newest read while rows are retained", async () => {
@@ -328,7 +351,7 @@ describe("errors", () => {
     const { result, loadPage } = setup(server);
     loadPage.mockRejectedValueOnce(new Error("network"));
     await advance(30_000);
-    expect(result.current.error).toMatch(/Couldn't load/);
+    expect(result.current.error).toBe("My Leads could not refresh.");
     act(() => result.current.retryNow());
     await flush();
     expect(result.current.error).toBeNull();
@@ -422,7 +445,7 @@ describe("afterAction", () => {
     server.set("L1", { place: "their_move", reason: "texted_last" });
     await act(async () => void (await result.current.afterAction("L1")));
     expect(ids(result)).toEqual(["L1", "L2"]);
-    expect(result.current.error).toMatch(/Couldn't confirm/);
+    expect(result.current.error).toBe("My Leads could not refresh.");
     expect(loadPage).not.toHaveBeenCalled();
   });
 
@@ -432,7 +455,7 @@ describe("afterAction", () => {
     server.remove("L1");
     await act(async () => void (await result.current.afterAction("L1")));
     expect(ids(result)).toEqual(["L2"]);
-    expect(result.current.notice).toBe("This lead is no longer available.");
+    expect(result.current.notice).toBe("No longer in your queue");
   });
 
   it("a timer read that started before the action is dropped", async () => {

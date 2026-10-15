@@ -6,6 +6,7 @@ import {
   WORK_PAGE_SIZE,
   WORK_TABS,
   type BrokenItem,
+  type LastTouchKind,
   type WorkDrip,
   type WorkFacts,
   type WorkFactsResult,
@@ -38,6 +39,9 @@ const BROKEN_KINDS: readonly string[] = [
   "text_status_unknown", "text_not_sent", "scheduled_text_overdue", "ai_reply_failed", "norma_needs_review",
 ];
 const BROKEN_ACTIONS: readonly string[] = ["fix_drip", "send_text", "resend", "review", "check_status", "open_campaign"];
+const LAST_TOUCH_KINDS: readonly string[] = [
+  "your_text", "sandra_reply", "drip_text", "campaign_text", "call_reached", "call_no_answer", "voicemail", "note", "other",
+];
 const CHIPS: readonly string[] = [...NEEDS_ATTENTION_CHIPS, ...WAITING_CHIPS];
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -101,6 +105,13 @@ function parseNextStep(value: unknown): WorkFacts["nextStep"] | undefined {
   };
 }
 
+/** Absent (a deploy before the migration) reads as null; present-but-malformed is rejected. */
+function parseLastTouch(value: unknown): WorkFacts["lastTouch"] | undefined {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value) || !LAST_TOUCH_KINDS.includes(value.kind as string) || !isIso(value.at)) return undefined;
+  return { kind: value.kind as LastTouchKind, at: value.at };
+}
+
 /** One classifier row. Returns null when any field the UI relies on is missing or has the wrong type. */
 export function parseWorkFacts(value: unknown): WorkFacts | null {
   if (!isRecord(value)) return null;
@@ -117,7 +128,11 @@ export function parseWorkFacts(value: unknown): WorkFacts | null {
   const broken = parseBroken(value.broken);
   const latestInbound = parseInbound(value.latestInbound);
   const nextStep = parseNextStep(value.nextStep);
-  if (drip === undefined || broken === undefined || latestInbound === undefined || nextStep === undefined) return null;
+  const lastTouch = parseLastTouch(value.lastTouch);
+  const zip = value.zip ?? null;
+  if (zip !== null && typeof zip !== "string") return null;
+  if (!isIsoOrNull(value.contractSignedAt ?? null)) return null;
+  if (drip === undefined || broken === undefined || latestInbound === undefined || nextStep === undefined || lastTouch === undefined) return null;
   return {
     propertyId: id,
     stage: value.stage as WorkStage,
@@ -137,6 +152,9 @@ export function parseWorkFacts(value: unknown): WorkFacts | null {
     broken,
     aiDraftId: (value.aiDraftId as string | null | undefined) ?? null,
     labels: value.labels as WorkLabel[],
+    zip: zip === null || zip.trim() === "" ? null : zip.trim(),
+    contractSignedAt: (value.contractSignedAt as string | null | undefined) ?? null,
+    lastTouch,
     row: value.row,
   };
 }

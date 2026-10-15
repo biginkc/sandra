@@ -189,7 +189,7 @@ describe("MyLeadsClient with the unified queue on", () => {
     const server = fake()
     const pinned = lead("u2", "new_lead", "3", { assignedAt: "2026-10-14T15:00:00Z", firstCallOverdue: false }, { stage: "not_contacted" })
     window.history.replaceState(null, "", "/my-leads?lead=u2")
-    const spy = vi.spyOn(window.history, "replaceState")
+    const push = vi.spyOn(window.history, "pushState")
     renderUnified(
       { focus: { propertyId: "u2", memberId: "rep-1", notice: null, pin: pinned.row } },
       server,
@@ -198,10 +198,45 @@ describe("MyLeadsClient with the unified queue on", () => {
     expect(screen.getByTestId("work-row-u2")).toHaveAttribute("data-expanded", "true")
     expect(document.querySelector("[data-lead-id]")?.getAttribute("data-lead-id")).toBe("u2")
     await user.click(screen.getByTestId("work-tab-waiting"))
-    await waitFor(() => expect(spy).toHaveBeenCalledWith(null, "", "/my-leads?tab=waiting"))
+    await waitFor(() => expect(push).toHaveBeenCalledWith(null, "", "/my-leads?tab=waiting"))
     expect(window.location.search).toBe("?tab=waiting")
     expect(mocks.routerReplace).not.toHaveBeenCalled()
-    spy.mockRestore()
+    push.mockRestore()
+  })
+
+  it("tab, chip and page changes push history entries; typing in search only rewrites the current one", async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, "", "/my-leads")
+    renderUnified({}, fake())
+    const push = vi.spyOn(window.history, "pushState")
+    const replace = vi.spyOn(window.history, "replaceState")
+    await user.click(screen.getByTestId("work-tab-waiting"))
+    await waitFor(() => expect(push).toHaveBeenCalledTimes(1))
+    expect(replace).not.toHaveBeenCalled()
+    await user.click(screen.getByTestId("work-search-open"))
+    await user.type(screen.getByTestId("work-search-input"), "elm")
+    await waitFor(() => expect(window.location.search).toBe("?tab=waiting&q=elm"))
+    expect(push).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalledWith(null, "", "/my-leads?tab=waiting&q=elm")
+    push.mockRestore()
+    replace.mockRestore()
+  })
+
+  it("Back restores the previous view from the URL without adding a history entry", async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, "", "/my-leads")
+    const server = fake()
+    renderUnified({}, server)
+    await user.click(screen.getByTestId("work-tab-waiting"))
+    await waitFor(() => expect(window.location.search).toBe("?tab=waiting"))
+    const push = vi.spyOn(window.history, "pushState")
+    const lengthBefore = window.history.length
+    window.history.back()
+    await waitFor(() => expect(window.location.search).toBe(""))
+    await waitFor(() => expect(screen.getByTestId("work-tab-needs_attention")).toHaveAttribute("aria-selected", "true"))
+    expect(push).not.toHaveBeenCalled()
+    expect(window.history.length).toBe(lengthBefore)
+    push.mockRestore()
   })
 })
 

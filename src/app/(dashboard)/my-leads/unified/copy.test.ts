@@ -3,7 +3,7 @@ import {
   agoLabel, brokenLines, brokenText, CHIP_WORDS, chipLabel, dateLabel, dripLine, expandedLines, labelChips,
   REASON_TONE, rowHeadline, timeLabel, whenLabel,
 } from "./copy";
-import type { WorkDrip, WorkReason } from "./contract";
+import type { LastTouchKind, WorkDrip, WorkReason } from "./contract";
 import { NOW, workFacts } from "./test-support";
 
 // NOW = Wed 2026-10-14 1:00 PM Central.
@@ -61,9 +61,17 @@ describe("rowHeadline: every text starts with its chip word", () => {
     expect(text("due", "4", { at: "2026-10-13T17:50:00Z", soon: false })).toBe("Due · callback 1 day overdue");
     expect(text("due", "9", { at: "2026-10-05T17:50:00Z", overdueDays: 9 })).toBe("Due · callback 9 days overdue");
   });
+  it("Due: kind word from the task and (snoozed)", () => {
+    expect(text("due", "4", { at: "2026-10-14T19:30:00Z", soon: true, taskKind: "appointment", snoozed: false })).toBe("Due soon · appointment 2:30 PM");
+    expect(text("due", "4", { at: "2026-10-14T17:35:00Z", soon: false, taskKind: "callback", snoozed: false })).toBe("Due · callback 25 min overdue");
+    expect(text("due", "4", { at: "2026-10-14T17:35:00Z", soon: false, taskKind: "offer_follow_up", snoozed: false })).toBe("Due · offer follow-up 25 min overdue");
+    expect(text("due", "4", { at: "2026-10-14T19:30:00Z", soon: true, taskKind: "callback", snoozed: true })).toBe("Due soon · callback 2:30 PM (snoozed)");
+    expect(text("due", "9", { at: "2026-10-05T17:50:00Z", overdueDays: 9, taskKind: "appointment", snoozed: true })).toBe("Due · appointment 9 days overdue (snoozed)");
+    expect(text("callback_booked", "11", { kind: "callback_booked", at: "2026-10-15T14:00:00Z", taskKind: "callback", snoozed: true })).toBe("Callback booked · tomorrow 9:00 AM (snoozed)");
+  });
   it("New reply", () => {
     expect(text("new_reply", "5", { at: "2026-10-14T14:12:00Z", kind: "text" })).toBe("New reply · today 9:12 AM");
-    expect(text("new_reply", "5", { at: "2026-10-14T14:12:00Z", kind: "call" })).toBe("New reply · missed call today 9:12 AM");
+    expect(text("new_reply", "5", { at: "2026-10-14T14:12:00Z", kind: "call" })).toBe("New reply · missed call 9:12 AM");
   });
   it("Broken, one line per kind (design 2.1)", () => {
     const d = drip({ step: 2, stepsTotal: 4, status: "paused", pauseReason: "provider_failed" });
@@ -88,7 +96,7 @@ describe("rowHeadline: every text starts with its chip word", () => {
     expect(text("offer", "8", { kind: "follow_up_missing", at: null })).toBe("Offer · follow-up missing");
   });
   it("Gone quiet", () => {
-    expect(text("gone_quiet", "14", { kind: "texted_silent", at: "2026-10-11T15:00:00Z", since: "2026-10-11T15:00:00Z" })).toBe("Gone quiet · no reply in 3 days");
+    expect(text("gone_quiet", "14", { kind: "texted_silent", at: "2026-10-11T15:00:00Z", since: "2026-10-11T15:00:00Z" })).toBe("Gone quiet · no reply in 3 business days");
     expect(text("gone_quiet", "14", { kind: "drip_finished", at: "2026-10-01T15:00:00Z", since: "2026-10-01T14:00:00Z" })).toBe("Gone quiet · drip finished Oct 1, no reply in 13 days");
   });
   it("Nothing planned", () => {
@@ -119,8 +127,8 @@ describe("rowHeadline: every text starts with its chip word", () => {
     expect(text("callback_booked", "11", { kind: "callback_booked", at: "2026-10-15T14:00:00Z" })).toBe("Callback booked · tomorrow 9:00 AM");
   });
   it("Under contract", () => {
-    expect(text("under_contract", "1", { signedAt: "2026-10-02T15:00:00Z" })).toBe("Under contract · signed Oct 2");
-    expect(text("under_contract", "1", { signedAt: null })).toBe("Under contract · nothing due");
+    expect(text("under_contract", "1", {}, { contractSignedAt: "2026-10-02T15:00:00Z" })).toBe("Under contract · signed Oct 2");
+    expect(text("under_contract", "1", {}, { contractSignedAt: null })).toBe("Under contract");
   });
   it("each reason's text starts with its chip word and carries its tone", () => {
     const samples: [WorkReason, string, Record<string, unknown>][] = [
@@ -196,20 +204,51 @@ describe("expandedLines", () => {
     const bare = Object.fromEntries(expandedLines(workFacts("due", "4", {}, { attemptsCount: 1 }), NOW).map((l) => [l.label, l.text]));
     expect(bare["ATTEMPTS"]).toBe("1 attempt · assigned 3d ago");
     expect(bare["NEXT STEP"]).toBe("None");
-    expect(bare["LAST TOUCH"]).toBe("None yet");
+    expect(bare["LAST TOUCH"]).toBe("none yet");
+  });
+  it("LAST TOUCH uses the owner's phrases", () => {
+    const touch = (kind: LastTouchKind, at: string) =>
+      Object.fromEntries(expandedLines(workFacts("due", "4", {}, { lastTouch: { kind, at } }), NOW).map((l) => [l.label, l.text]))["LAST TOUCH"];
+    expect(touch("your_text", "2026-10-14T15:00:00Z")).toBe("your text · 3h ago");
+    expect(touch("sandra_reply", "2026-10-14T15:00:00Z")).toBe("Sandra's reply · 3h ago");
+    expect(touch("drip_text", "2026-10-12T15:00:00Z")).toBe("drip text · Mon");
+    expect(touch("campaign_text", "2026-10-12T15:00:00Z")).toBe("campaign text · Mon");
+    expect(touch("call_reached", "2026-10-12T15:00:00Z")).toBe("call, reached · 2d ago");
+    expect(touch("call_no_answer", "2026-10-11T15:00:00Z")).toBe("call, no answer · 3d ago");
+    expect(touch("voicemail", "2026-10-13T15:00:00Z")).toBe("voicemail · 1d ago");
+    expect(touch("note", "2026-10-12T15:00:00Z")).toBe("note · 2d ago");
+    expect(touch("other", "2026-10-12T15:00:00Z")).toBe("2d ago");
+  });
+  it("CLEARS reads as the owner wrote it", () => {
+    const lines = expandedLines(workFacts("call_today", "2"), NOW);
+    expect(lines.find((l) => l.label === "CLEARS")?.text).toBe("when you log the call · Undo");
   });
 });
 
 describe("dripLine", () => {
   const f = (d: WorkDrip | null, over = {}) => dripLine(workFacts("nothing_planned", "15", {}, { drip: d, ...over }), NOW);
-  it("covers none, running, stopped, couldn't send, finished and opted out", () => {
-    expect(f(null)).toBe("None");
-    expect(f(drip({ step: 2 }))).toBe("Warm check-in · running · text 2 of 4 next Fri 10:00 AM");
-    expect(f(drip({ status: "paused", pauseReason: "inbound_reply", step: 2 }))).toBe("Warm check-in · stopped at text 2 of 4 — they replied");
-    expect(f(drip({ status: "paused", pauseReason: "provider_failed", step: 2 }), { broken: [{ kind: "drip_paused", action: "fix_drip", at: null, refId: "e1" }] }))
-      .toBe("Warm check-in · couldn't send text 2 of 4 — couldn't send");
-    expect(f(drip({ status: "completed", completedAt: "2026-10-01T15:00:00Z" }))).toBe("Warm check-in · finished Oct 1");
-    expect(f(drip({ status: "opted_out" }))).toBe("Warm check-in · stopped, seller opted out");
+  const paused = (pauseReason: string | null, over = {}) => f(drip({ status: "paused", pauseReason, step: 2 }), over);
+  it("none, starts, running", () => {
+    expect(f(null)).toBe("none");
+    expect(f(drip({ step: 1 }))).toBe("starts Fri 10:00 AM · Warm check-in");
+    expect(f(drip({ step: 2, lastSentAt: "2026-10-12T15:00:00Z" }))).toBe("running · text 2 of 4 · next Fri 10:00 AM");
+    expect(f(drip({ nextRunAt: null }))).toBe("running");
+  });
+  it("paused phrases", () => {
+    expect(paused("inbound_reply")).toBe("paused — they replied");
+    expect(paused("appointment_booked")).toBe("paused — callback booked");
+    expect(paused("call_in_progress")).toBe("paused while you call");
+    expect(paused("manual")).toBe("paused by you");
+    expect(paused("rep_sms_human_takeover")).toBe("paused by you");
+    expect(paused("norma_call")).toBe("paused — Norma call");
+    expect(paused("person_took_over")).toBe("paused — needs a person");
+    expect(paused("status_terminal")).toBe("paused");
+  });
+  it("stopped on a problem, finished and opted out", () => {
+    expect(paused("provider_failed")).toBe("stopped on a problem");
+    expect(paused("inbound_reply", { broken: [{ kind: "drip_paused", action: "fix_drip", at: null, refId: "e1" }] })).toBe("stopped on a problem");
+    expect(f(drip({ status: "completed", completedAt: "2026-10-01T15:00:00Z" }))).toBe("finished Oct 1, no reply");
+    expect(f(drip({ status: "opted_out" }))).toBe("stopped, seller opted out");
   });
 });
 

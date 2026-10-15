@@ -23,6 +23,9 @@ export function mkFacts(id: string, over: Partial<WorkFacts> = {}): WorkFacts {
     broken: [],
     aiDraftId: null,
     labels: [],
+    zip: null,
+    contractSignedAt: null,
+    lastTouch: null,
     row: { propertyId: id } as QueueRow,
     ...over,
   };

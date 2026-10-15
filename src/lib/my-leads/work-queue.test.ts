@@ -141,6 +141,28 @@ describe("getWorkPage", () => {
   });
 });
 
+describe("new facts fields (zip, contractSignedAt, lastTouch)", () => {
+  const read = async (extra: Record<string, unknown>) => {
+    mocks.rpc.mockResolvedValue({ data: { ...pagePayload([A]), rows: [facts(A, extra)] }, error: null });
+    return getWorkPage({ memberId: A, query: QUERY });
+  };
+  it("defaults them to null when the payload predates the migration", async () => {
+    const page = await read({});
+    expect(page.rows[0]).toMatchObject({ zip: null, contractSignedAt: null, lastTouch: null });
+  });
+  it("keeps valid values and trims a blank zip to null", async () => {
+    const page = await read({ zip: "64111", contractSignedAt: NOW, lastTouch: { kind: "drip_text", at: NOW } });
+    expect(page.rows[0]).toMatchObject({ zip: "64111", contractSignedAt: NOW, lastTouch: { kind: "drip_text", at: NOW } });
+    expect((await read({ zip: "  " })).rows[0].zip).toBeNull();
+  });
+  it("rejects an unknown last-touch kind, a bad time or a non-text zip", async () => {
+    await expect(read({ lastTouch: { kind: "carrier_pigeon", at: NOW } })).rejects.toMatchObject({ code: "READ_FAILED" });
+    await expect(read({ lastTouch: { kind: "note", at: "nope" } })).rejects.toMatchObject({ code: "READ_FAILED" });
+    await expect(read({ zip: 64111 })).rejects.toMatchObject({ code: "READ_FAILED" });
+    await expect(read({ contractSignedAt: "nope" })).rejects.toMatchObject({ code: "READ_FAILED" });
+  });
+});
+
 describe("getWorkFacts", () => {
   it("returns rows and missing ids", async () => {
     mocks.rpc.mockResolvedValue({ data: { rows: [facts(A)], missing: [B], snapshotAt: NOW }, error: null });

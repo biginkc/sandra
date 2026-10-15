@@ -12,8 +12,10 @@ export type ConversationMessage = {
   body: string;
   /** ISO timestamp. */
   at: string;
-  /** True for drip / campaign / template texts sent by automation. */
-  automated: boolean;
+  /** Who sent it when it was not a person ("Us (drip)", "Us (campaign)", "Us (Sandra)"); null or absent = a person. */
+  automation?: "drip" | "campaign" | "sandra" | null;
+  /** Legacy flag: true tags "(drip)" when `automation` is not known. */
+  automated?: boolean;
 };
 
 export type ConversationBoxState =
@@ -23,7 +25,7 @@ export type ConversationBoxState =
 
 /**
  * The last outbound and the last inbound text of a lead, one line each, newest at the bottom
- * (design v8 section 4). "Us" is tagged "(drip)" when automated. A reply nobody has answered shows in blue.
+ * (design v8 section 4). "Us" is tagged "(drip)", "(campaign)" or "(Sandra)" when automation sent it. A reply nobody has answered shows in blue.
  * There is deliberately no "They said" line. Pure presentation: the container loads the messages.
  */
 export type ConversationBoxProps = {
@@ -39,6 +41,8 @@ export type ConversationBoxProps = {
   onShowAll: () => void;
   onRetry?: () => void;
 };
+
+const US_TAG = { drip: "Us (drip)", campaign: "Us (campaign)", sandra: "Us (Sandra)" } as const;
 
 const oneLine = (body: string) => body.replace(/\s+/g, " ").trim();
 
@@ -74,7 +78,14 @@ export function ConversationBox({ propertyId, state, now, unanswered, onShowAll,
       <ul className="space-y-1">
         {shown.map((message) => {
           const isUnanswered = message.direction === "inbound" && inboundUnanswered;
-          const who = message.direction === "outbound" ? (message.automated ? "Us (drip)" : "Us") : "Them";
+          const who =
+            message.direction === "outbound"
+              ? message.automation
+                ? US_TAG[message.automation]
+                : message.automated
+                  ? US_TAG.drip
+                  : "Us"
+              : "Them";
           return (
             <li
               key={`${message.direction}-${message.at}`}
