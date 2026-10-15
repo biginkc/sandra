@@ -11,19 +11,29 @@ function client(tables: Tables, failTable?: string, lockedIds: string[] = []): L
     const q: Record<string, unknown> = {};
     let wantLocked = false;
     let inIds: string[] = [];
+    let inCol = "";
     for (const m of ["select", "is", "order", "limit", "gte", "lt"]) q[m] = () => q;
     q.eq = (col: string, v: unknown) => {
       if (col === "is_dnc_locked" && v === true) wantLocked = true;
       return q;
     };
-    q.in = (_c: string, ids: string[]) => {
+    q.in = (c: string, ids: string[]) => {
+      inCol = c;
       inIds = ids;
       return q;
     };
     q.range = async (a: number, b: number) =>
       failTable === table ? { data: null, error: { message: "boom" } } : { data: (tables[table] ?? []).slice(a, b + 1), error: null };
     q.then = (resolve: (v: unknown) => unknown) =>
-      resolve({ data: table === "properties" && wantLocked ? inIds.filter((id) => lockedIds.includes(id)).map((id) => ({ id })) : [], error: null });
+      resolve({
+        data:
+          table === "properties" && wantLocked
+            ? inIds.filter((id) => lockedIds.includes(id)).map((id) => ({ id }))
+            : table === "pipeline_runs" && inCol === "id"
+              ? (tables.pipeline_runs ?? []).filter((r) => inIds.includes(r.id as string))
+              : [],
+        error: null,
+      });
     return q;
   };
   return { from, rpc: async () => ({ data: [], error: null }) } as unknown as LooseSupabase;
@@ -130,6 +140,71 @@ describe("ordering data must be complete (fail closed)", () => {
   it("the same failure makes 'Show older' fail instead of returning an unordered slice", async () => {
     const supabase = client({ properties: [prop(1, at(1))] });
     (supabase as unknown as { rpc: unknown }).rpc = async () => ({ data: null, error: { message: "boom" } });
+    expect(await loadHoldsSlice(supabase, "org", null, 10)).toBeNull();
+  });
+});
+
+describe("the waiting list never shows what it cannot verify or order", () => {
+  const run = (id: string, property_id: string | null) => ({
+    id, org_id: "o", inbound_message_id: `m-${id}`, property_id, contact_id: null, conversation_id: null, status: "held", mode: "automatic",
+    final_outcome: null, reason: null, classification_run_id: null, claim_id: null, outbound_message_id: null, inbound_preview: "x",
+    started_at: at(5), completed_at: null,
+  });
+  const draft = (over: Record<string, unknown> = {}) => ({
+    id: "d1", property_id: null, conversation_id: null, inbound_message_id: null, run_id: null, created_at: at(10), body: "hi", edited_body: null, edited_at: null, ...over,
+  });
+
+  it("a propertyless draft linked only by run_id to a DNC-locked property's run does not render", async () => {
+    const supabase = client({ ai_reply_drafts: [draft({ run_id: "r1" })], pipeline_runs: [run("r1", "locked1")] }, undefined, ["locked1"]);
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.error).toBeNull();
+    expect(page.holds).toHaveLength(0);
+  });
+
+  it("the same draft on an UNLOCKED property's run renders, tied to that property", async () => {
+    const supabase = client({ ai_reply_drafts: [draft({ run_id: "r1" })], pipeline_runs: [run("r1", "free1")] });
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.holds.map((h) => h.property_id)).toEqual(["free1"]);
+  });
+
+  it("a linked draft whose run cannot be found is hidden and counted, never shown unverified", async () => {
+    const supabase = client({ ai_reply_drafts: [draft({ run_id: "ghost" })] });
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.holds).toHaveLength(0);
+    expect(page.unverified).toBe(1);
+  });
+
+  it("a draft with no link at all cannot belong to a locked property and still renders", async () => {
+    const page = await loadMessagesV2Page(client({ ai_reply_drafts: [draft()] }), "org");
+    expect(page.holds).toHaveLength(1);
+    expect(page.unverified).toBe(0);
+  });
+
+  it("a failing run lookup by draft run_id renders the error state and zero cards", async () => {
+    const supabase = client({ ai_reply_drafts: [draft({ run_id: "r1" })] });
+    const from = (supabase as unknown as { from: (t: string) => Record<string, unknown> }).from;
+    (supabase as unknown as { from: (t: string) => unknown }).from = (t: string) => {
+      const q = from(t);
+      if (t === "pipeline_runs") {
+        let byId = false;
+        const inFn = q.in as (c: string, ids: string[]) => unknown;
+        q.in = (c: string, ids: string[]) => ((byId ||= c === "id"), inFn(c, ids));
+        q.then = (resolve: (v: unknown) => unknown) => resolve({ data: byId ? null : [], error: byId ? { message: "boom" } : null });
+      }
+      return q;
+    };
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.error).toBe(HOLDS_LOAD_ERROR);
+    expect(page.holds).toHaveLength(0);
+  });
+
+  it("a failing step page renders the error state and zero cards (steps change the order, so a gap is fatal)", async () => {
+    const supabase = client({ properties: [prop(1, at(1))], pipeline_runs: [] }, "pipeline_run_steps");
+    (supabase as unknown as { rpc: unknown }).rpc = async (fn: string) =>
+      fn === "pipeline_runs_latest_for_properties" ? { data: [run("r1", "p1")], error: null } : { data: [], error: null };
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.error).toBe(HOLDS_LOAD_ERROR);
+    expect(page.holds).toHaveLength(0);
     expect(await loadHoldsSlice(supabase, "org", null, 10)).toBeNull();
   });
 });

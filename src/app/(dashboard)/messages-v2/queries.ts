@@ -1,3 +1,4 @@
+import { fetchAllPages } from "./paged";
 import type {
   DeadLetterInfo,
   HeaderStats,
@@ -233,6 +234,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
             draft: {
               id: a.draft.id,
               inbound_message_id: a.draft.inbound_message_id,
+              run_id: a.draft.run_id,
               ...(a.draft.body !== undefined ? { body: a.draft.body } : {}),
               ...(a.draft.edited_body !== undefined ? { edited_body: a.draft.edited_body } : {}),
               ...(a.draft.edited_at !== undefined ? { edited_at: a.draft.edited_at } : {}),
@@ -913,6 +915,8 @@ export async function loadMessagesV2Data(
       ),
     ]),
   ];
+  // A propertyless draft linked only by run_id still needs its run, to resolve (and DNC-verify) its property.
+  const draftRunIds = [...new Set(drafts.flatMap((d) => (d.run_id ? [d.run_id] : [])))];
   const contextErrors: string[] = [];
   // Latest run PER property via the RLS-respecting RPC, 200 ids per call.
   const byProperty: PipelineRun[] = [];
@@ -946,8 +950,19 @@ export async function loadMessagesV2Data(
         contextErrors.push("run lookup by message");
     } else byMessage.push(...((res.data ?? []) as PipelineRun[]));
   }
+  const byDraftRun: PipelineRun[] = [];
+  const draftRunResults = await Promise.all(
+    chunked(draftRunIds).map((ids) =>
+      supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids),
+    ),
+  );
+  for (const res of draftRunResults) {
+    if (res.error) {
+      if (!contextErrors.includes("run lookup by draft")) contextErrors.push("run lookup by draft");
+    } else byDraftRun.push(...((res.data ?? []) as PipelineRun[]));
+  }
   const pool = new Map<string, PipelineRun>();
-  for (const run of [...windowRuns, ...byProperty, ...byMessage]) {
+  for (const run of [...windowRuns, ...byProperty, ...byMessage, ...byDraftRun]) {
     pool.set(run.id, run);
   }
 
@@ -970,22 +985,23 @@ export async function loadMessagesV2Data(
   const stepChunks: string[][] = [];
   for (let i = 0; i < loadedRunIds.length; i += STEP_CHUNK)
     stepChunks.push(loadedRunIds.slice(i, i + STEP_CHUNK));
+  // Steps are paged to exhaustion: a chunk of runs can have more steps than one response holds, and a
+  // silently short result would change a hold's latest-activity order. Any failed page is a failed lookup.
   const stepResults = await Promise.all(
     stepChunks.map((ids) =>
-      supabase
-        .from("pipeline_run_steps")
-        .select("*")
-        .eq("org_id", orgId)
-        .in("run_id", ids)
-        .order("seq", { ascending: true }),
+      fetchAllPages<PipelineRunStep>(() =>
+        supabase
+          .from("pipeline_run_steps")
+          .select("*")
+          .eq("org_id", orgId)
+          .in("run_id", ids)
+          .order("run_id", { ascending: true })
+          .order("seq", { ascending: true }),
+      ),
     ),
   );
   if (stepResults.some((res) => res.error)) contextErrors.push("step lookup");
-  const stepsByRun = groupStepsByRun(
-    stepResults.flatMap(
-      (res) => (res.error ? [] : (res.data ?? [])) as PipelineRunStep[],
-    ),
-  );
+  const stepsByRun = groupStepsByRun(stepResults.flatMap((res) => res.rows));
   const withSteps = (run: PipelineRun): RunWithSteps => ({
     ...run,
     steps: stepsByRun.get(run.id) ?? [],
@@ -1033,15 +1049,20 @@ export async function loadMessagesV2Data(
       (ids) => ["inbound_message_id", ids] as const,
     ),
   ];
-  const deadResults = await Promise.all(
-    deadQueries.map(([col, ids]) =>
-      supabase
-        .from("ai_reply_dead_letters")
-        .select("id, run_id, inbound_message_id, reason")
-        .eq("org_id", orgId)
-        .in(col, ids),
-    ),
-  );
+  const deadResults = (
+    await Promise.all(
+      deadQueries.map(([col, ids]) =>
+        fetchAllPages<{ run_id: string | null; inbound_message_id: string | null; reason?: string | null }>(() =>
+          supabase
+            .from("ai_reply_dead_letters")
+            .select("id, run_id, inbound_message_id, reason")
+            .eq("org_id", orgId)
+            .in(col, ids)
+            .order("id", { ascending: true }),
+        ),
+      ),
+    )
+  ).map((res) => ({ data: res.rows, error: res.error }));
   for (const res of deadResults) {
     if (res.error) {
       const e = res.error as { code?: string; message?: string };

@@ -1,4 +1,5 @@
 import { CHICAGO_TZ } from "./chicago-time";
+import { fetchAllPages } from "./paged";
 import { groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
@@ -121,16 +122,19 @@ export async function loadRunsWindow(
   const runs = (res.data ?? []) as PipelineRun[];
   const stepResults = await Promise.all(
     chunk(runs.map((r) => r.id), STEP_RUNS_PER_QUERY).map((ids) =>
-      supabase
-        .from("pipeline_run_steps")
-        .select("*")
-        .eq("org_id", orgId)
-        .in("run_id", ids)
-        .order("seq", { ascending: true }),
+      fetchAllPages<PipelineRunStep>(() =>
+        supabase
+          .from("pipeline_run_steps")
+          .select("*")
+          .eq("org_id", orgId)
+          .in("run_id", ids)
+          .order("run_id", { ascending: true })
+          .order("seq", { ascending: true }),
+      ),
     ),
   );
   if (stepResults.some((r) => r.error)) return { runs: [], error: "The earlier tape could not be loaded." };
-  const steps = groupStepsByRun(stepResults.flatMap((r) => (r.data ?? []) as PipelineRunStep[]));
+  const steps = groupStepsByRun(stepResults.flatMap((r) => r.rows));
   return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), error: null };
 }
 

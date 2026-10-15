@@ -61,6 +61,8 @@ export type MessagesV2ViewProps = {
   holdsTotal?: number;
   /** The hold lookup failed (reason): say so, never "nothing is waiting". */
   holdsError?: string | null;
+  /** Waiting texts hidden because their property (and so its DNC lock) could not be determined. */
+  holdsUnverified?: number;
   /** "Show older": the next slice of the same latest-activity order. */
   loadOlderHolds?: LoadOlderHolds;
   /** Feed window query failed (reason text, already prefixed "Feed unavailable"). */
@@ -504,6 +506,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             meta={meta}
             total={props.holdsTotal ?? holds.length}
             error={props.holdsError}
+            unverified={props.holdsUnverified}
             loadOlder={props.loadOlderHolds}
             refreshKey={props.holds}
             actions={props.actions}

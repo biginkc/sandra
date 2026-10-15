@@ -21,6 +21,7 @@ import {
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Page } from "./holds-by-activity";
+import { fetchAllPages } from "./paged";
 import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
 import { loadOlderHoldsAction } from "./backlog-actions";
@@ -82,13 +83,16 @@ async function loadNurtureAutoDrip(
         .select("id, nurture_auto_drip, nurture_drip_maybe_later_sequence_id, nurture_drip_check_in_60_sequence_id, nurture_drip_listed_not_selling_sequence_id, nurture_drip_hot_book_appointment_sequence_id")
         .eq("org_id", orgId)
         .maybeSingle(),
-      supabase
-        .from("sequences")
-        .select("id, name")
-        .eq("org_id", orgId)
-        .eq("active", true)
-        .is("archived_at", null)
-        .order("name"),
+      fetchAllPages<{ id: string; name: string }>(() =>
+        supabase
+          .from("sequences")
+          .select("id, name")
+          .eq("org_id", orgId)
+          .eq("active", true)
+          .is("archived_at", null)
+          .order("name")
+          .order("id"),
+      ),
     ]);
     const row = cfg.data as {
       id: string;
@@ -108,7 +112,7 @@ async function loadNurtureAutoDrip(
         listedNotSelling: row.nurture_drip_listed_not_selling_sequence_id,
         hotBookAppointment: row.nurture_drip_hot_book_appointment_sequence_id,
       },
-      sequences: (seqs.data ?? []) as Array<{ id: string; name: string }>,
+      sequences: seqs.rows,
     };
   } catch {
     return null;
@@ -220,6 +224,7 @@ export default async function MessagesV2Page() {
         holdsMeta={data.holdsMeta}
         holdsTotal={loaded.holds.length}
         holdsError={loaded.error}
+        holdsUnverified={loaded.unverified}
         loadOlderHolds={loadOlderHoldsAction}
         runs={data.runs}
         holds={data.holds}

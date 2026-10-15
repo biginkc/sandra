@@ -411,7 +411,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte"]) {
+      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte", "range"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -1099,6 +1099,7 @@ describe("Phase 1: pending draft exposed for the hold actions", () => {
     expect(holds[0]!.draft).toEqual({
       id: "new",
       inbound_message_id: "m1",
+      run_id: null,
       body: "newer",
       edited_body: "edited",
     });
@@ -1112,7 +1113,7 @@ describe("Phase 1: pending draft exposed for the hold actions", () => {
       drafts: [draft({ id: "d1" })],
       runs: [],
     });
-    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1" });
+    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1", run_id: null });
   });
 
   it("includeDraftBody selects body and edited_body; the default never does", async () => {

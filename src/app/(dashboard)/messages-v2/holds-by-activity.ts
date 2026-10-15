@@ -1,5 +1,6 @@
 import { holdsAfter, sortNewestFirst, type HoldCursor } from "./hold-activity";
 import { lockedPropertyIds, withoutDncLocked } from "./dnc-locked";
+import { fetchAllPages } from "./paged";
 import {
   DECISION_COLUMNS,
   draftColumns,
@@ -15,9 +16,6 @@ import {
 } from "./queries";
 import type { OpenHold, RunWithSteps } from "./types";
 
-/** Rows per request while paging a source to exhaustion. */
-const SOURCE_PAGE = 1000;
-
 export type OpenHoldSources = {
   properties: HoldPropertyRow[];
   decisions: HoldDecisionRow[];
@@ -29,18 +27,12 @@ export type OpenHoldSources = {
   failed: boolean;
 };
 
-/** Pages one source table until it returns a short page. No row cap: a failure is reported, a long table is not truncated. */
+/** Pages one source table to exhaustion; a failed page fails the whole source. */
 async function pageAll<T>(
   make: () => { range(from: number, to: number): PromiseLike<{ data: unknown; error: unknown }> },
 ): Promise<{ rows: T[]; failed: boolean }> {
-  const rows: T[] = [];
-  for (let from = 0; ; from += SOURCE_PAGE) {
-    const res = await make().range(from, from + SOURCE_PAGE - 1);
-    if (res.error) return { rows: [], failed: true };
-    const page = (res.data ?? []) as T[];
-    rows.push(...page);
-    if (page.length < SOURCE_PAGE) return { rows, failed: false };
-  }
+  const res = await fetchAllPages<T>(make);
+  return { rows: res.rows, failed: res.error !== null };
 }
 
 /**
@@ -124,7 +116,27 @@ export type SortedHolds = {
   holds: OpenHold<RunWithSteps>[];
   /** The waiting list could not be loaded or verified: show this and no cards. */
   error: string | null;
+  /** Waiting texts hidden because their property could not be determined (so its DNC lock is unknown). */
+  unverified: number;
 };
+
+/**
+ * A propertyless hold whose draft IS linked (to a run or an inbound message) but whose link did not resolve
+ * cannot have its property's DNC lock verified, so it is not shown. A draft with no link at all (or one whose
+ * run is known to have no property) cannot belong to a locked property and is shown.
+ */
+export function splitUnverifiable(holds: readonly OpenHold<RunWithSteps>[]): { holds: OpenHold<RunWithSteps>[]; unverified: number } {
+  const keep: OpenHold<RunWithSteps>[] = [];
+  let unverified = 0;
+  for (const h of holds) {
+    const d = h.draft;
+    const linked = !!h.conversation_id || (!!d && (!!d.run_id || !!d.inbound_message_id));
+    const resolved = !!h.run && ((!!d?.run_id && h.run.id === d.run_id) || (!!d?.inbound_message_id && h.run.inbound_message_id === d.inbound_message_id));
+    if (h.property_id === null && linked && !resolved) unverified += 1;
+    else keep.push(h);
+  }
+  return { holds: keep, unverified };
+}
 
 export const HOLDS_LOAD_ERROR = "Waiting list could not be loaded. Reload to retry.";
 
@@ -149,8 +161,9 @@ export async function loadMessagesV2Page(
   });
   // Ordering needs every hold's latest run and steps. If any of that is missing, a sort would be wrong: fail closed.
   const verified = sources.failed || !orderingDataComplete(data.holdsMeta) ? null : await withoutDncLocked(supabase, orgId, data.holds);
-  if (!verified) return { ...data, holds: [], error: HOLDS_LOAD_ERROR };
-  return { ...data, holds: sortNewestFirst(verified), error: null };
+  if (!verified) return { ...data, holds: [], error: HOLDS_LOAD_ERROR, unverified: 0 };
+  const { holds, unverified } = splitUnverifiable(verified);
+  return { ...data, holds: sortNewestFirst(holds), error: null, unverified };
 }
 
 /**
@@ -175,6 +188,6 @@ export async function loadHoldsSlice(
   if (!orderingDataComplete(data.holdsMeta)) return null;
   const verified = await withoutDncLocked(supabase, orgId, data.holds);
   if (!verified) return null;
-  const after = holdsAfter(sortNewestFirst(verified), cursor);
+  const after = holdsAfter(sortNewestFirst(splitUnverifiable(verified).holds), cursor);
   return { holds: after.slice(0, limit), remaining: Math.max(0, after.length - limit) };
 }

@@ -140,6 +140,7 @@ export function WaitingColumn({
   meta,
   total,
   error,
+  unverified,
   loadOlder,
   refreshKey,
   actions,
@@ -151,6 +152,8 @@ export function WaitingColumn({
   /** All waiting holds on the server. */
   total: number;
   error?: string | null;
+  /** Texts hidden because their property could not be determined. */
+  unverified?: number;
   loadOlder?: LoadOlderHolds;
   /** Changes when the server data refreshes (drops stale older slices). */
   refreshKey?: unknown;
@@ -223,6 +226,11 @@ export function WaitingColumn({
             </Button>
           )}
         </div>
+      )}
+      {!!unverified && unverified > 0 && (
+        <p data-testid="holds-unverified" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          {unverified.toLocaleString("en-US")} waiting {unverified === 1 ? "text is" : "texts are"} hidden because {unverified === 1 ? "its" : "their"} property could not be determined.
+        </p>
       )}
       {failures.length > 0 && (
         <p role="alert" data-testid="holds-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">

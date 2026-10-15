@@ -189,6 +189,8 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   draft?: {
     id: string;
     inbound_message_id: string | null;
+    /** The run this draft was written for; lets a propertyless draft resolve (and DNC-verify) its property. */
+    run_id?: string | null;
     body?: string;
     edited_body?: string | null;
     /** Version of the human edit (null = never edited). Sent back with Send / Edit so a changed draft is refused. */
