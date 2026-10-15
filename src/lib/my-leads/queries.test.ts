@@ -5,7 +5,7 @@ vi.mock('@/lib/supabase/server',()=>({createClient:async()=>({rpc:mocks.rpc,from
 vi.mock('@/lib/auth/team-roster',()=>({loadOrgTeamMembers:mocks.teamMembers}));
 vi.mock('@/lib/auth/memberships',()=>({getCallerMemberships:mocks.memberships}));
 vi.mock('./unified-queue',()=>({unifiedQueueEnabled:mocks.unified}));
-import { getAcquisitionBadge,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster,getMyLeadsQueueRow } from './queries';
+import { getAcquisitionBadge,getAcquisitionBadgeState,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster,getMyLeadsQueueRow } from './queries';
 beforeEach(()=>{
   vi.resetAllMocks();
   mocks.teamMembers.mockResolvedValue([]);
@@ -56,6 +56,13 @@ it('reads the distinct-lead badge while the unified queue is on',async()=>{
   await expect(getAcquisitionBadge()).rejects.toMatchObject({code:'READ_FAILED'});
   mocks.rpc.mockResolvedValue({data:null,error:{code:'42501',message:'FEATURE_DISABLED'}});
   expect(await getAcquisitionBadge()).toBe(0);
+});
+it('says what the badge counts: needs attention only while the unified queue is on',async()=>{
+  mocks.rpc.mockResolvedValue({data:3,error:null});
+  expect(await getAcquisitionBadgeState()).toEqual({count:3,needsAttention:false});
+  mocks.unified.mockResolvedValue(true);
+  mocks.rpc.mockResolvedValue({data:5,error:null});
+  expect(await getAcquisitionBadgeState()).toEqual({count:5,needsAttention:true});
 });
 it('does not pick an arbitrary organization',async()=>{
   mocks.memberships.mockResolvedValue([{user_id:'rep',org_id:'one',role:'member'},{user_id:'rep',org_id:'two',role:'member'}]);
