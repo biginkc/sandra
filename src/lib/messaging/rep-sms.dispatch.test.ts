@@ -314,12 +314,16 @@ describe("dispatchRepSms inbound reply stamp", () => {
     }
   });
 
-  it("without an id the metadata has only repSms and no lookup happens", async () => {
+  it("without an id the metadata has only repSms and no stamp bind or lookup happens", async () => {
     claim();
     await dispatchRepSms(base);
     const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
     expect(Object.keys(metadata)).toEqual(["repSms"]);
     expect(mocks.stampRow).not.toHaveBeenCalled();
+    // Complete sequence: the persisted-stamp read only. No bind with a null id.
+    expect(mocks.readRpc).toHaveBeenCalledTimes(1);
+    expect(mocks.bindRpc).not.toHaveBeenCalled();
+    expect(mocks.adminRpc.mock.calls.map((c) => c[0])).toEqual(["fn_claim_rep_sms_delivery_with_composition"]);
   });
 });
 
@@ -410,11 +414,36 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
     const outcome = await resumeWithObligation(NEWER);
     expect(outcome.status).toBe("sent");
     expect(mocks.bindRpc).toHaveBeenCalledTimes(2); // one retry
-    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata).not.toHaveProperty("inbound_message_id");
+    const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
+    expect(metadata).not.toHaveProperty("inbound_message_id");
+    expect(metadata.inbound_stamp_unresolved).toBe(true);
+  });
+
+  it("stored value unreadable AND bind fails -> marker, no inbound_message_id, send not blocked", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.readRpc.mockResolvedValue({ data: null, error: { message: "timeout" } });
+    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "timeout" } });
+    const outcome = await resumeWithObligation(NEWER);
+    expect(outcome.status).toBe("sent");
+    const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
+    expect(metadata).not.toHaveProperty("inbound_message_id");
+    expect(metadata.inbound_stamp_unresolved).toBe(true);
+  });
+
+  it("nothing captured and the store is unreadable -> marker", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.readRpc.mockResolvedValue({ data: null, error: { message: "timeout" } });
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111" });
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_stamp_unresolved).toBe(true);
   });
 
   it("nothing stored and the bind succeeds -> the browser id is stamped", async () => {
     await resumeWithObligation(NEWER);
-    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(NEWER);
+    const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
+    expect(metadata.inbound_message_id).toBe(NEWER);
+    expect(metadata).not.toHaveProperty("inbound_stamp_unresolved");
   });
 });

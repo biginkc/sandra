@@ -101,7 +101,14 @@ export async function sendSmsFromLeadStamped(
       to: to ?? undefined,
       queueOnly: queueOnly ?? false,
       requireStickyFrom: true,
-      ...(inboundStamp ? { metadata: { inbound_message_id: inboundStamp } } : {}),
+      // A captured id that fails validation is marked unresolved (not plainly
+      // unstamped) so the classifier does not credit the text with replies that
+      // arrived while it was being written.
+      ...(inboundStamp
+        ? { metadata: { inbound_message_id: inboundStamp } }
+        : inboundMessageId
+          ? { metadata: { inbound_stamp_unresolved: true } }
+          : {}),
     });
     return ok({ outcome });
   } catch (e) {

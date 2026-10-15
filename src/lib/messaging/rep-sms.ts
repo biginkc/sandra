@@ -592,25 +592,29 @@ async function recordRepSmsLedgerResult(
 }
 
 /**
- * Reply-to stamp for a human rep text. A browser-supplied id is validated, bound
- * once (first writer wins) to the durable obligation or ledger row, and read back
- * so a resume, retry or recovered draft reuses the ORIGINAL stamp instead of one
- * captured after reload. The persisted stamp is read first; the browser's id is
- * used only when the bind succeeds and nothing was stored. If the bind fails the
- * send goes out unstamped; a stamp problem never blocks a send.
+ * Reply-to stamp for a human rep text. The persisted stamp (on the obligation or
+ * ledger row) wins and is read through a read-only function; otherwise the
+ * browser's validated id is bound once (first writer wins). When the
+ * authoritative value cannot be established the text still sends, but carries
+ * `inbound_stamp_unresolved` instead of an id: a plain unstamped text would be
+ * credited by time ordering with replies that arrived while it was being
+ * written, the marker makes it handle none.
  */
+type RepSmsInboundStamp = { stamp: string | null; unresolved: boolean };
+
 async function resolveRepSmsInboundStamp(args: {
   orgId: string;
   propertyId: string;
   supplied: string | null | undefined;
   target: { kind: "obligation" | "draft"; id: string } | null;
-}): Promise<string | null> {
+}): Promise<RepSmsInboundStamp> {
   const scope = { orgId: args.orgId, propertyId: args.propertyId };
-  const needsLookup = Boolean(args.supplied) || args.target !== null;
-  if (!needsLookup) return null;
+  const captured = Boolean(args.supplied);
+  if (!captured && !args.target) return { stamp: null, unresolved: false };
   const admin = createAdminClient();
-  const supplied = args.supplied ? await resolveInboundStamp(admin, args.supplied, scope) : null;
-  if (!args.target) return supplied;
+  const supplied = captured ? await resolveInboundStamp(admin, args.supplied, scope) : null;
+  // A capture that does not validate (or could not be checked) is unresolved.
+  if (!args.target) return { stamp: supplied, unresolved: captured && !supplied };
   const rpc = admin as unknown as {
     rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
   };
@@ -628,20 +632,22 @@ async function resolveRepSmsInboundStamp(args: {
     return { ok: false as const };
   };
   const key = { p_kind: args.target.kind, p_id: args.target.id, p_org_id: args.orgId };
-  // 1. The persisted stamp wins. It is read through a read-only function so a
-  //    failing bind cannot cost the original.
+  // 1. The persisted stamp wins. A stored value that no longer validates is
+  //    dropped and never replaced by a newer browser capture.
   const stored = await call("fn_get_rep_sms_inbound_stamp", key);
   if (stored.ok && typeof stored.data === "string") {
-    // Re-validated; an invalid stored value is dropped, never replaced by a
-    // newer browser capture.
-    return resolveInboundStamp(admin, stored.data, scope);
+    const valid = await resolveInboundStamp(admin, stored.data, scope);
+    return { stamp: valid, unresolved: !valid };
   }
-  // 2. Nothing readable is stored: bind the browser's validated id (first writer
-  //    wins, so a concurrent bind is returned instead). If the bind fails, send
-  //    unstamped: unstamped only over-flags, it never hides a reply.
+  // 2. Nothing readable is stored. With nothing captured there is nothing to
+  //    bind; an unreadable store with no capture is unresolved.
+  if (!supplied) return { stamp: null, unresolved: captured || !stored.ok };
+  // 3. Bind the browser's validated id (a concurrent bind is returned instead).
   const bound = await call("fn_bind_rep_sms_inbound_stamp", { ...key, p_inbound_message_id: supplied });
-  if (!bound.ok || typeof bound.data !== "string") return bound.ok ? supplied : null;
-  return resolveInboundStamp(admin, bound.data, scope);
+  if (!bound.ok) return { stamp: null, unresolved: true };
+  if (typeof bound.data !== "string") return { stamp: null, unresolved: true };
+  const valid = await resolveInboundStamp(admin, bound.data, scope);
+  return { stamp: valid, unresolved: !valid };
 }
 
 export type DispatchRepSmsInput = {
@@ -746,7 +752,8 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
         : null,
   });
   const metadata = {
-    ...(inboundStamp ? { inbound_message_id: inboundStamp } : {}),
+    ...(inboundStamp.stamp ? { inbound_message_id: inboundStamp.stamp } : {}),
+    ...(inboundStamp.unresolved ? { inbound_stamp_unresolved: true } : {}),
     repSms: {
       workflow: composition.acquisitionsManager === REP_SMS_ASSISTANT ? "maria-through-mel" : "manager-through-mel",
       policyVersion: composition.policyVersion,

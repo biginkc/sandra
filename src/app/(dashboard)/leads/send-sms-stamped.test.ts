@@ -75,7 +75,7 @@ describe("sendSmsFromLeadStamped inbound reply stamp (non-rep branch)", () => {
     mocks.createClient.mockResolvedValue(client({ direction: "inbound", org_id: "org-1", property_id: "prop-9", conversation_id: null }));
     const result = await sendSmsFromLeadStamped("prop-1", "hi", null, false, "+18165550123", INBOUND);
     expect(result.ok).toBe(true);
-    expect(mocks.sendSmsToContact.mock.calls[0][1]).not.toHaveProperty("metadata");
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata).toEqual({ inbound_stamp_unresolved: true });
   });
 
   it("sends exactly today's input when no id is given", async () => {
