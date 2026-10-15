@@ -1,5 +1,3 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-
 /**
  * Reply-to stamp for human SMS sends. The composer captures the newest inbound
  * message id it showed when it opened; the outbound row carries it as top-level
@@ -34,7 +32,10 @@ type StampRow = {
 
 /** Returns the id when valid for this send, otherwise null. Never throws. */
 export async function resolveInboundStamp(
-  client: Pick<SupabaseClient, "from">,
+  // Structural so both the user-scoped and admin clients fit without the
+  // generated Database generics.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: { from: (table: any) => any },
   inboundMessageId: unknown,
   scope: InboundStampScope,
 ): Promise<string | null> {

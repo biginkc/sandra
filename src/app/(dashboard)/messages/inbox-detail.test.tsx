@@ -1052,6 +1052,7 @@ describe("<InboxDetail />", () => {
         data.threadBusinessPhone,
         false,
         data.replyToPhone,
+        "prior-authoritative-route",
       );
     });
   });
@@ -1151,6 +1152,7 @@ describe("<InboxDetail />", () => {
         priorRoute.to_address,
         false,
         priorRoute.from_address,
+        "prior-route-before-late-failure",
       );
     });
   });
@@ -1376,6 +1378,7 @@ describe("<InboxDetail />", () => {
         data.threadBusinessPhone,
         false,
         "+15550000002",
+        "initial-live-refresh",
       );
     });
   });

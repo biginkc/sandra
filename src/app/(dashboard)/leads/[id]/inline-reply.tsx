@@ -108,13 +108,14 @@ export function InlineReply({
     startTransition(async () => {
       try {
       const result = await callAction(
-        sendAction ? sendAction(submittedBody, effectiveToPhone, submittedInbound) : sendSmsFromLead(
+        sendAction ? sendAction(submittedBody, effectiveToPhone, ...(submittedInbound ? [submittedInbound] : [])) : sendSmsFromLead(
           propertyId,
           submittedBody,
           fromNumber,
           false,
           effectiveToPhone,
-          submittedInbound,
+          // Omitted entirely when absent so an unstamped send is the same call as before.
+          ...(submittedInbound ? [submittedInbound] : []),
         ),
         {
           fallbackMessage: "Send not confirmed",
