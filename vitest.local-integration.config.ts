@@ -130,6 +130,8 @@ export default defineConfig({
       "tests/search-oracle/oracle-comparison.integration.test.ts",
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
       "supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts",
+      "e2e/stress/my-leads-queue/smoke.integration.test.ts",
+      "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

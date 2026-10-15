@@ -551,6 +551,29 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts
 
+      # Last on purpose (defense in depth): the race lanes commit rows (and delete them again); nothing after them shares the database.
+      # Keeps the stress harness itself green (1 repeat, 3 families, one rep of each lane). The full volume run is manual:
+      # e2e/stress/my-leads-queue/README.md. It never runs against anything but this disposable database.
+      - name: My Leads queue stress harness smoke (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DISPOSABLE_DB: "1"
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts e2e/stress/my-leads-queue/smoke.integration.test.ts
+
+      - name: "My Leads queue stress: dispatchRepSms race lanes, fake provider (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DISPOSABLE_DB: "1"
+          MYLEADS_STRESS_DISPATCH_REPS: "4"
+          MYLEADS_STRESS_OUT_DIR: ${{ runner.temp }}/my-leads-queue-stress
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts e2e/stress/my-leads-queue/race.dispatch.integration.test.ts
+
       - name: Destroy disposable database
         if: always() && env.E2E_LOCAL_WORKDIR != ''
         run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
