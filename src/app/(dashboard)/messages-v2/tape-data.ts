@@ -3,67 +3,98 @@ import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const CHUNK = 50;
 
-function chunk<T>(items: readonly T[]): T[][] {
+function chunk<T>(items: readonly T[], size = CHUNK): T[][] {
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += CHUNK) out.push(items.slice(i, i + CHUNK));
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
+
+/** Runs per step query: a run has ~10-20 steps and a response is capped at 1,000 rows, so keep well under it. */
+const STEP_RUNS_PER_QUERY = 25;
 
 /** The two texts shown beside a seller's text: what we last sent them, and the reply Sandra sent (if any). */
 export type RunThread = { lastOutbound: string | null; reply: string | null };
 
+const PARALLEL = 10;
+
+/** Runs `task` over `items` with a small fixed concurrency. */
+async function inBatches<T>(items: readonly T[], task: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += PARALLEL) await Promise.all(items.slice(i, i + PARALLEL).map(task));
+}
+
 /**
  * Display text for each run's thread. `lastOutbound` is the newest outbound
  * message in the run's conversation sent before the seller's text arrived;
- * `reply` is the outbound message the run itself produced. Safe in the browser
- * (RLS scopes every table), like loadRunLabels.
+ * `reply` is the outbound message the run itself produced. Each run gets its own
+ * bounded query (newest outbound before the run, limit 1), so a busy conversation
+ * can never crowd another run's text out of a shared row limit. Safe in the
+ * browser (RLS scopes every table), like loadRunLabels.
  */
 export async function loadRunThreads(
   supabase: LooseSupabase,
   runs: ReadonlyArray<Pick<PipelineRun, "id" | "conversation_id" | "outbound_message_id" | "started_at">>,
 ): Promise<Map<string, RunThread>> {
   const replyIds = [...new Set(runs.flatMap((r) => (r.outbound_message_id ? [r.outbound_message_id] : [])))];
-  const conversationIds = [...new Set(runs.flatMap((r) => (r.conversation_id ? [r.conversation_id] : [])))];
-
   const replyBodies = new Map<string, string>();
-  const outboundByConversation = new Map<string, Array<{ body: string; at: number }>>();
+  const lastOutbound = new Map<string, string>();
 
   await Promise.all([
-    ...chunk(replyIds).map(async (ids) => {
+    inBatches(chunk(replyIds), async (ids) => {
       const { data } = await supabase.from("messages").select("id, body").in("id", ids);
       for (const row of (data ?? []) as Array<{ id: string; body: string | null }>) {
         if (row.body) replyBodies.set(row.id, row.body);
       }
     }),
-    ...chunk(conversationIds).map(async (ids) => {
-      const { data } = await supabase
-        .from("messages")
-        .select("conversation_id, body, created_at")
-        .in("conversation_id", ids)
-        .eq("direction", "outbound")
-        .order("created_at", { ascending: false })
-        .limit(1000);
-      for (const row of (data ?? []) as Array<{ conversation_id: string; body: string | null; created_at: string }>) {
-        if (!row.body) continue;
-        const list = outboundByConversation.get(row.conversation_id) ?? [];
-        list.push({ body: row.body, at: Date.parse(row.created_at) });
-        outboundByConversation.set(row.conversation_id, list);
-      }
-    }),
+    inBatches(
+      runs.filter((r) => r.conversation_id),
+      async (run) => {
+        const { data } = await supabase
+          .from("messages")
+          .select("body")
+          .eq("conversation_id", run.conversation_id)
+          .eq("direction", "outbound")
+          .lt("created_at", run.started_at)
+          .order("created_at", { ascending: false })
+          .limit(1);
+        const body = ((data ?? []) as Array<{ body: string | null }>)[0]?.body;
+        if (body) lastOutbound.set(run.id, body);
+      },
+    ),
   ]);
 
   const out = new Map<string, RunThread>();
   for (const run of runs) {
-    const startedAt = Date.parse(run.started_at);
-    const before = run.conversation_id
-      ? (outboundByConversation.get(run.conversation_id) ?? []).find((m) => m.at < startedAt)
-      : undefined;
     out.set(run.id, {
-      lastOutbound: before?.body ?? null,
+      lastOutbound: lastOutbound.get(run.id) ?? null,
       reply: run.outbound_message_id ? (replyBodies.get(run.outbound_message_id) ?? null) : null,
     });
   }
   return out;
+}
+
+/** Page cursor over (started_at, id) descending: stable when several runs share one timestamp. */
+export type RunCursor = { at: string; id: string };
+
+/** A cursor from untrusted input: a strict timestamp and a uuid, so nothing else can reach the filter string. */
+export function parseRunCursor(input: unknown): RunCursor | null {
+  if (!input || typeof input !== "object") return null;
+  const { at, id } = input as { at?: unknown; id?: unknown };
+  if (typeof at !== "string" || typeof id !== "string") return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/.test(at)) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+  return { at: at.replace(/\+00:00$/, "Z"), id };
+}
+
+/** PostgREST `or` filter for "strictly older than the cursor" in (started_at, id) order. */
+export function olderThanCursorFilter(c: RunCursor): string {
+  return `started_at.lt.${c.at},and(started_at.eq.${c.at},id.lt.${c.id})`;
+}
+
+/** Same rule in code, for tests and for sanity checks. */
+export function isOlderThanCursor(run: { started_at: string; id: string }, c: RunCursor): boolean {
+  const a = Date.parse(run.started_at);
+  const b = Date.parse(c.at);
+  return a < b || (a === b && run.id < c.id);
 }
 
 /** Runs that started in [fromIso, toIso), newest first, with their steps. Same shape as the page's feed query. */
@@ -72,19 +103,23 @@ export async function loadRunsWindow(
   orgId: string,
   fromIso: string,
   toIso: string,
+  before?: RunCursor | null,
 ): Promise<{ runs: RunWithSteps[]; error: string | null }> {
-  const res = await supabase
+  let query = supabase
     .from("pipeline_runs")
     .select("*")
     .eq("org_id", orgId)
     .gte("started_at", fromIso)
-    .lt("started_at", toIso)
+    .lt("started_at", toIso);
+  if (before) query = query.or(olderThanCursorFilter(before));
+  const res = await query
     .order("started_at", { ascending: false })
+    .order("id", { ascending: false })
     .limit(MAX_RUNS);
   if (res.error) return { runs: [], error: "The earlier tape could not be loaded." };
   const runs = (res.data ?? []) as PipelineRun[];
   const stepResults = await Promise.all(
-    chunk(runs.map((r) => r.id)).map((ids) =>
+    chunk(runs.map((r) => r.id), STEP_RUNS_PER_QUERY).map((ids) =>
       supabase
         .from("pipeline_run_steps")
         .select("*")
@@ -144,21 +179,11 @@ export function chicagoDayStartMs(key: string): number {
   return guess;
 }
 
-/**
- * One America/Chicago calendar day as an instant range. `before` narrows it to
- * the part of the day older than a cursor, for a day with more runs than one
- * page holds. Null on a malformed day.
- */
-export function chicagoDayWindow(day: string, before?: string | null): { from: string; to: string } | null {
+/** One America/Chicago calendar day as an instant range. Null on a malformed day. */
+export function chicagoDayWindow(day: string): { from: string; to: string } | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
   const start = chicagoDayStartMs(day);
   const end = chicagoDayStartMs(nextDayKey(day));
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  let to = end;
-  if (before) {
-    const cursor = Date.parse(before);
-    if (!Number.isFinite(cursor)) return null;
-    to = Math.min(end, Math.max(start, cursor));
-  }
-  return { from: new Date(start).toISOString(), to: new Date(to).toISOString() };
+  return { from: new Date(start).toISOString(), to: new Date(end).toISOString() };
 }

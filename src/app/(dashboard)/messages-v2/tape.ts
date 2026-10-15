@@ -161,8 +161,17 @@ function sentenceFor(tag: TapeTag | null, who: string, o: { replySent: boolean; 
   }
 }
 
-/** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". */
-export function deriveTape(run: RunWithSteps, who: string): TapeView {
+/**
+ * The ONE effective reason for a held run: the run's own reason, else the property's flag reason.
+ * Both the tape card and the "Waiting for a person" card read it from here, so they cannot disagree.
+ */
+export function withEffectiveReason<T extends { reason: string | null }>(run: T, flagReason?: string | null): T {
+  return run.reason || !flagReason ? run : { ...run, reason: flagReason };
+}
+
+/** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". `flagReason` is the hold's flag reason when this run is the hold's current run. */
+export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null): TapeView {
+  const run = withEffectiveReason(rawRun, flagReason);
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 

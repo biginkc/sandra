@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveTape, holdReasonSentence, reasonWord, tapeTagForRun, tapeTagForWord } from "./tape";
+import { deriveTape, holdReasonSentence, reasonWord, tapeTagForRun, tapeTagForWord, withEffectiveReason } from "./tape";
 import type { PipelineRunStep, RunWithSteps } from "./types";
 
 const step = (seq: number, kind: PipelineRunStep["kind"], name: string, result: PipelineRunStep["result"], detail: Record<string, unknown> = {}): PipelineRunStep => ({
@@ -132,6 +132,18 @@ describe("deriveTape", () => {
     expect(deriveTape(r, "Martha").kind === "decided" && (deriveTape(r, "Martha") as { sentence: string }).sentence).toBe(card);
     // a flag-only fallback still works when the run has no reason
     expect(holdReasonSentence(run({ reason: null }), "model:opt_out" , "Dee")).toBe("Dee asked to stop. Nothing sent.");
+  });
+
+  it("when the run has no reason, the tape and the waiting card both fall back to the same flag reason", () => {
+    const r = run({ status: "held", reason: null, steps: [step(1, "hold", "needs_confirm", "held")] });
+    const flag = "model:opt_out";
+    const eff = withEffectiveReason(r, flag);
+    const card = holdReasonSentence(eff, eff.reason ?? flag, "Dee");
+    const tape = deriveTape(r, "Dee", flag);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Dee asked to stop. Nothing sent.");
+    // without the fallback the two would diverge: that is what the shared helper prevents
+    expect(deriveTape(r, "Dee").kind === "decided" && (deriveTape(r, "Dee") as { sentence: string }).sentence).not.toBe(card);
   });
 
   it("a held not_interested says what Sandra thought and why it waited", () => {

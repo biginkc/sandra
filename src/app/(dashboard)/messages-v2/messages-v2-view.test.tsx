@@ -325,9 +325,9 @@ describe("MessagesV2View", () => {
     await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
     await userEvent.click(screen.getByTestId("show-earlier"));
     await waitFor(() => expect(loadTapeDay).toHaveBeenCalledTimes(2));
-    const calls = loadTapeDay.mock.calls as unknown as Array<[{ day: string; before: string | null }]>;
+    const calls = loadTapeDay.mock.calls as unknown as Array<[{ day: string; before: { at: string; id: string } | null }]>;
     expect(calls[1][0].day).toBe(calls[0][0].day);
-    expect(Date.parse(calls[1][0].before!)).toBe(NOW - 3600_000 * 2 - 199 * 60_000);
+    expect(calls[1][0].before).toEqual({ at: runs[199].started_at, id: "y199" }); // (started_at, id) cursor from the last row returned
   });
 
   it("skips empty days on its own so one click shows the next day with texts", async () => {

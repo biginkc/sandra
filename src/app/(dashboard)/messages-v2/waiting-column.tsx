@@ -9,7 +9,7 @@ import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
 import { HOLD_SORT_CAP, holdActivityMs, sortNewestFirst } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
-import { holdReasonSentence } from "./tape";
+import { holdReasonSentence, withEffectiveReason } from "./tape";
 import type { HoldSource, HoldsMeta, OpenHold, RunLabel, RunWithSteps } from "./types";
 
 const PAGE = 20;
@@ -45,6 +45,7 @@ function WaitingCard({
 }) {
   const run = hold.run;
   const who = sellerWho(label);
+  const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
   const draft = effectiveDraftBody(hold);
   const activity = holdActivityMs(hold);
   const alertText = alertLine(hold.alert);
@@ -76,7 +77,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {holdReasonSentence(run, run?.reason ?? hold.flag_reason, who)}
+        <b>Sandra:</b> {holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">

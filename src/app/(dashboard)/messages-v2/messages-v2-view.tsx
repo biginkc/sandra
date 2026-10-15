@@ -21,7 +21,7 @@ import { RulesPanel } from "./rules-panel";
 import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
 import { TapeCard } from "./tape-card";
-import { chicagoDayKey, loadRunThreads, previousDayKey, type RunThread } from "./tape-data";
+import { chicagoDayKey, loadRunThreads, previousDayKey, type RunCursor, type RunThread } from "./tape-data";
 import type { TapeDayPage } from "./tape-actions";
 import { WaitingColumn } from "./waiting-column";
 import type {
@@ -79,7 +79,7 @@ export type MessagesV2ViewProps = {
   /** Server-resolved thread text (our last text, Sandra's reply), as [runId, thread] pairs. */
   threads?: Array<[string, RunThread]>;
   /** "Show yesterday's tape": loads the 24 hours before the given instant. */
-  loadTapeDay?: (input: { day: string; before?: string | null }) => Promise<Result<TapeDayPage>>;
+  loadTapeDay?: (input: { day: string; before?: RunCursor | null }) => Promise<Result<TapeDayPage>>;
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
@@ -127,7 +127,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [threads, setThreads] = useState(() => new Map(props.threads ?? []));
   // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
   const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
-  const [cursor, setCursor] = useState<{ day: string; before: string | null } | null>(null);
+  const [cursor, setCursor] = useState<{ day: string; before: RunCursor | null } | null>(null);
   const [earlierBusy, setEarlierBusy] = useState(false);
   const [earlierNote, setEarlierNote] = useState<string | null>(null);
   const { undoJevAction, findJevUndo } = props;
@@ -313,7 +313,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const allRuns = useMemo(() => {
     const seen = new Set(runs.map((r) => r.id));
     return [...runs, ...earlier.filter((r) => !seen.has(r.id))].sort(
-      (x, y) => Date.parse(y.started_at) - Date.parse(x.started_at),
+      (x, y) => Date.parse(y.started_at) - Date.parse(x.started_at) || (x.id < y.id ? 1 : x.id > y.id ? -1 : 0),
     );
   }, [runs, earlier]);
 
@@ -321,8 +321,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     if (!props.loadTapeDay || earlierBusy) return;
     // Start at the Chicago day of the oldest run on screen, only the part older than that run; step back a whole
     // calendar day at a time, skipping empty days (up to a week) so one click always shows something or says why not.
-    const oldest = allRuns.length ? Date.parse(allRuns[allRuns.length - 1].started_at) : nowMs;
-    let next = cursor ?? { day: chicagoDayKey(oldest), before: new Date(oldest).toISOString() as string | null };
+    const oldestRun = allRuns[allRuns.length - 1];
+    let next: { day: string; before: RunCursor | null } =
+      cursor ??
+      (oldestRun
+        ? { day: chicagoDayKey(Date.parse(oldestRun.started_at)), before: { at: oldestRun.started_at, id: oldestRun.id } }
+        : { day: chicagoDayKey(nowMs), before: null });
     setEarlierBusy(true);
     setEarlierNote(null);
     try {
@@ -339,9 +343,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setThreads((curr) => new Map([...curr, ...res.data.threads]));
         for (const r of got) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
         // A full page means this day was cut off: continue the same day from the oldest run returned.
+        // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
+        const last = got[got.length - 1];
         next =
-          got.length >= MAX_RUNS
-            ? { day: next.day, before: new Date(Math.min(...got.map((r) => Date.parse(r.started_at)))).toISOString() }
+          got.length >= MAX_RUNS && last
+            ? { day: next.day, before: { at: last.started_at, id: last.id } }
             : { day: previousDayKey(next.day), before: null };
         if (got.length > 0) {
           setCursor(next);
@@ -356,6 +362,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       setEarlierBusy(false);
     }
   };
+
+  // A hold's flag reason applies only to the run the hold is showing, so old runs are never relabelled by a later flag.
+  const flagByRun = new Map(holds.flatMap((h) => (h.run && h.flag_reason ? [[h.run.id, h.flag_reason] as const] : [])));
 
   const week = weekSummary(props.scorecardRows);
   const on = sandraIsOn(badges);
@@ -470,6 +479,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   run={item.run}
                   label={labels.get(item.run.id)}
                   thread={threads.get(item.run.id)}
+                  flagReason={flagByRun.get(item.run.id)}
                   undoControls={undoControls}
                 />
               ),

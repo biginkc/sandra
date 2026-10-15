@@ -65,14 +65,17 @@ export function TapeCard({
   run,
   label,
   thread,
+  flagReason,
   undoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   thread?: RunThread;
+  /** The hold's flag reason, only when this run is the hold's current run (see withEffectiveReason). */
+  flagReason?: string | null;
   undoControls?: UndoControls;
 }) {
-  const view = deriveTape(run, sellerWho(label));
+  const view = deriveTape(run, sellerWho(label), flagReason);
 
   if (view.kind === "quiet") {
     return (

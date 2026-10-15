@@ -1,7 +1,6 @@
 import { HOLD_SORT_CAP, sortNewestFirst } from "./hold-activity";
-import { withoutDncLocked } from "./dnc-locked";
+import { lockedPropertyIds, withoutDncLocked } from "./dnc-locked";
 import {
-  compareInstants,
   DECISION_COLUMNS,
   draftColumns,
   loadMessagesV2Data,
@@ -24,10 +23,8 @@ export type OpenHoldSources = {
   decisions: HoldDecisionRow[];
   reviews: HoldReviewRow[];
   drafts: HoldDraftRow[];
-  /** Distinct holds before any ceiling (a property, or a propertyless draft, is one hold). */
+  /** Distinct holds (a property, or a propertyless draft, is one hold), DNC-locked excluded. */
   total: number;
-  /** More holds than HOLD_SORT_CAP: only the newest are kept. Never silent. */
-  cut: boolean;
   /** A source query failed: show "unavailable", never an empty column. */
   failed: boolean;
 };
@@ -46,12 +43,10 @@ async function pageAll<T>(
   }
 }
 
-const newer = (a: string | null | undefined, b: string | null | undefined) => (a && (!b || compareInstants(a, b) > 0) ? a : b);
-
 /**
  * EVERY open hold source row, straight from the tables that own the state: flagged properties (DNC-locked
  * excluded), pending decisions, pending reviews and pending reply drafts including propertyless ones. Each
- * is paged to exhaustion. Only above HOLD_SORT_CAP distinct holds are the oldest dropped, and `cut` says so.
+ * is paged to exhaustion and locked properties are removed. Nothing is cut here: the ceiling comes after sorting.
  */
 export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: string, includeDraftBody = true): Promise<OpenHoldSources> {
   const [props, decs, revs, drafts] = await Promise.all([
@@ -71,7 +66,8 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
         .eq("org_id", orgId)
         .eq("status", "pending")
         .order("created_at", { ascending: true })
-        .order("source_inbound_message_id", { ascending: true }),
+        .order("source_inbound_message_id", { ascending: true })
+        .order("property_id", { ascending: true }),
     ),
     pageAll<HoldReviewRow>(() =>
       supabase
@@ -80,7 +76,8 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
         .eq("org_id", orgId)
         .eq("status", "pending")
         .order("created_at", { ascending: true })
-        .order("source_inbound_message_id", { ascending: true }),
+        .order("source_inbound_message_id", { ascending: true })
+        .order("property_id", { ascending: true }),
     ),
     pageAll<HoldDraftRow>(() =>
       supabase
@@ -93,36 +90,37 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
     ),
   ]);
   const failed = props.failed || decs.failed || revs.failed || drafts.failed;
-  const base = { properties: props.rows, decisions: decs.rows, reviews: revs.rows, drafts: drafts.rows };
 
-  // A hold is a property, or one propertyless draft. Its source-time is the newest instant among its own rows.
-  const latest = new Map<string, string>();
-  const bump = (key: string, at: string | null | undefined) => {
-    const cur = newer(at, latest.get(key));
-    if (cur) latest.set(key, cur);
-  };
-  for (const p of base.properties) bump(p.id, p.needs_human_attention_since ?? p.last_ai_escalation_at);
-  for (const d of base.decisions) bump(d.property_id, d.created_at);
-  for (const r of base.reviews) bump(r.property_id, r.created_at);
-  for (const d of base.drafts) bump(d.property_id ?? `draft:${d.id}`, d.created_at);
-  const total = latest.size;
-  if (total <= HOLD_SORT_CAP) return { ...base, total, cut: false, failed };
+  // Locked properties never count: drop their decision / review / draft rows before anything is loaded or sorted.
+  const referenced = [
+    ...decs.rows.map((d) => d.property_id),
+    ...revs.rows.map((r) => r.property_id),
+    ...drafts.rows.flatMap((d) => (d.property_id ? [d.property_id] : [])),
+  ];
+  const locked = referenced.length ? await lockedPropertyIds(supabase, orgId, referenced) : new Set<string>();
+  const open = (id: string | null | undefined) => !id || !locked || !locked.has(id);
 
-  const keep = new Set(
-    [...latest.entries()]
-      .sort((a, b) => compareInstants(b[1], a[1]))
-      .slice(0, HOLD_SORT_CAP)
-      .map(([key]) => key),
-  );
-  return {
-    properties: base.properties.filter((p) => keep.has(p.id)),
-    decisions: base.decisions.filter((d) => keep.has(d.property_id)),
-    reviews: base.reviews.filter((r) => keep.has(r.property_id)),
-    drafts: base.drafts.filter((d) => keep.has(d.property_id ?? `draft:${d.id}`)),
-    total,
-    cut: true,
-    failed,
+  const base = {
+    properties: props.rows,
+    decisions: decs.rows.filter((d) => open(d.property_id)),
+    reviews: revs.rows.filter((r) => open(r.property_id)),
+    drafts: drafts.rows.filter((d) => open(d.property_id)),
   };
+  // No ceiling here: activity (runs, steps) is only known after load, so the ceiling is applied after sorting.
+  const holdKeys = new Set<string>([
+    ...base.properties.map((p) => p.id),
+    ...base.decisions.map((d) => d.property_id),
+    ...base.reviews.map((r) => r.property_id),
+    ...base.drafts.map((d) => d.property_id ?? `draft:${d.id}`),
+  ]);
+  return { ...base, total: holdKeys.size, failed };
+}
+
+/** Newest HOLD_SORT_CAP of an already-sorted list, plus the full count when it had to cut (never silent). */
+export function applyHoldCeiling<T>(sorted: readonly T[]): { holds: T[]; cutFrom: number | null } {
+  return sorted.length > HOLD_SORT_CAP
+    ? { holds: sorted.slice(0, HOLD_SORT_CAP), cutFrom: sorted.length }
+    : { holds: [...sorted], cutFrom: null };
 }
 
 export type SortedHolds = {
@@ -148,11 +146,11 @@ export async function loadMessagesV2Page(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  const holds = sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds));
+  const { holds, cutFrom } = applyHoldCeiling(sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds)));
   return {
     ...data,
     holds,
-    cutFrom: sources.cut ? sources.total : null,
+    cutFrom,
     error: sources.failed ? "a hold source query failed" : null,
   };
 }
@@ -173,11 +171,11 @@ export async function loadHoldsSlice(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  const sorted = sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds));
+  const { holds: sorted, cutFrom } = applyHoldCeiling(sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds)));
   return {
     holds: sorted.slice(offset, offset + limit),
     total: sorted.length,
-    cutFrom: sources.cut ? sources.total : null,
+    cutFrom,
     failed: data.holdsMeta.failed.length > 0,
   };
 }
