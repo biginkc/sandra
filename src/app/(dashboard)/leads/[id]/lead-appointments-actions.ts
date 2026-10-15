@@ -30,17 +30,20 @@ export async function loadLeadAppointmentHistory(
     message: "Appointment history could not be loaded. Retry.",
   };
   try {
-    // The cursor is interpolated into a PostgREST filter; accept only a real
-    // instant and a UUID.
+    // The cursor is interpolated into a PostgREST filter; accept only a
+    // timestamptz as PostgREST returns it, and a UUID. The string is passed
+    // through unchanged so sub-millisecond precision is not lost at the page
+    // boundary.
+    const TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::?\d{2})?)$/;
     const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (
       !UUID.test(propertyId) ||
       (cursor &&
-        (!UUID.test(cursor.id) || Number.isNaN(Date.parse(cursor.dueAt))))
+        (!UUID.test(cursor.id) || !TIMESTAMP.test(cursor.dueAt)))
     ) {
       return failure;
     }
-    const safeDueAt = cursor ? new Date(cursor.dueAt).toISOString() : null;
+    const safeDueAt = cursor ? cursor.dueAt : null;
     const supabase = await createClient();
     let query = supabase
       .from("tasks")
