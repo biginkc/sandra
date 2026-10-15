@@ -316,11 +316,15 @@ export async function runFamilies(url: string, opts: RunOptions): Promise<Family
   const db = new Client({ connectionString: url });
   await db.connect();
   const runs: FamilyRun[] = [];
+  const migrationSql = opts.migrationSql ?? loadClassifierMigration();
   try {
-    // One outer transaction for the whole run: the migration is applied inside it, every world is a savepoint, nothing commits.
-    await db.query("begin");
-    await db.query(opts.migrationSql ?? loadClassifierMigration());
+    // One outer transaction PER FAMILY: the migration is applied inside it, every world is a savepoint, nothing commits.
+    // Not one per run: Postgres keeps the SQL-function caches built while calling the classifier until the top-level
+    // transaction ends (rolling back a savepoint does not free them), so a whole-run transaction grew the backend by
+    // ~30 MB/s until the 8 GB VM killed it (diagnosis in PR #879).
     for (const family of opts.families) {
+      await db.query("begin");
+      await db.query(migrationSql);
       const run: FamilyRun = { family: family.id, title: family.title, worlds: 0, leads: 0, checks: 0, mismatches: [], errors: [], timings: {}, ms: 0, variantLeads: {}, variantFailures: {} };
       const t0 = process.hrtime.bigint();
       for (let repeat = 0; repeat < opts.repeats; repeat += 1) {
@@ -341,6 +345,7 @@ export async function runFamilies(url: string, opts: RunOptions): Promise<Family
       }
       run.ms = MS(t0);
       runs.push(run);
+      await db.query("rollback");
     }
   } finally {
     await db.query("rollback").catch(() => {});
