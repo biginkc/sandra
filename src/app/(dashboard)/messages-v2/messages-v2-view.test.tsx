@@ -970,6 +970,16 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("hostile-confirm")).toBeInTheDocument();
   });
 
+  it("outbound changes and the new reply cannot be read: the old reply is not shown as current; retry notice shown", async () => {
+    const r = run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o1", status: "replied" });
+    await mount({ ...props([r]), threads: [["v", { lastOutbound: null, reply: "OLD reply" }]] });
+    expect(screen.getByTestId("tape-reply")).toHaveTextContent("OLD reply");
+    // The default client mock returns no rows, so the new outbound row o2 cannot be read -> the fetch fails.
+    await fire("UPDATE", "pipeline_runs", run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o2", status: "replied" }));
+    await waitFor(() => expect(screen.getByTestId("threads-retrying")).toBeInTheDocument());
+    expect(screen.queryByText("OLD reply")).toBeNull();
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

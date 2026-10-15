@@ -188,6 +188,8 @@ export type ThreadTable = {
   failed: ReadonlySet<string>;
   /** Per run: the request sequence that last decided it (two fetches of one version settle in request order). */
   seqs?: ReadonlyMap<string, number>;
+  /** Per run: the version the cached text belongs to (absent = unknown, e.g. server-rendered text). */
+  textVersions?: ReadonlyMap<string, string>;
 };
 
 /**
@@ -208,16 +210,30 @@ export function applyThreads(
   const text = new Map(table.text);
   const failed = new Set(table.failed);
   const seqs = new Map(table.seqs ?? []);
+  const textVersions = new Map(table.textVersions ?? []);
   const fresh = (id: string) => isCurrent(stamp, now, id) && seq >= (seqs.get(id) ?? -1);
   const okSet = new Set(loadedOk);
   const failSet = new Set(failedIds);
   const decided = new Set([...okSet, ...failSet]);
   const take = new Set([...decided].filter(fresh));
-  for (const [id, t] of loaded) if (take.has(id) && !failSet.has(id)) text.set(id, t);
+  for (const [id, t] of loaded)
+    if (take.has(id) && !failSet.has(id)) {
+      text.set(id, t);
+      const v = stamp.versions?.get(id);
+      if (v !== undefined) textVersions.set(id, v);
+    }
   for (const id of take) {
-    if (failSet.has(id)) failed.add(id);
-    else failed.delete(id);
+    if (failSet.has(id)) {
+      failed.add(id);
+      // A failed fetch for a DIFFERENT version than the cached text: the cached text is no longer this run's text,
+      // so it is removed (the tape shows the retry state, never the old reply as current). Same version: kept.
+      const v = stamp.versions?.get(id);
+      if (v === undefined || textVersions.get(id) !== v) {
+        text.delete(id);
+        textVersions.delete(id);
+      }
+    } else failed.delete(id);
     seqs.set(id, seq);
   }
-  return { snapshotKey: table.snapshotKey, text, failed, seqs };
+  return { snapshotKey: table.snapshotKey, text, failed, seqs, textVersions };
 }

@@ -145,10 +145,17 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [labels, setLabels] = useState(() => new Map(props.labels));
   // Thread text and failures for the current snapshot (`snapshotKey` = a counter bumped on every new snapshot).
   // Every writer commits through commitIfCurrent + applyThreads (client-state.ts): (snapshot, run id, version).
+  // Server-rendered texts belong to the run versions the server rendered.
+  const serverTextVersions = (p: MessagesV2ViewProps) =>
+    new Map((p.threads ?? []).flatMap(([id]) => {
+      const r = p.runs.find((x) => x.id === id);
+      return r ? [[id, `${r.id}:${r.outbound_message_id ?? ""}`] as const] : [];
+    }));
   const [threadTable, setThreadTable] = useState<ThreadTable>(() => ({
     snapshotKey: 0,
     text: new Map(props.threads ?? []),
     failed: new Set(props.threadFailedRunIds ?? []),
+    textVersions: serverTextVersions(props),
   }));
   /** The current thread snapshot key, for async writers (mirrors threadTable.snapshotKey). */
   const threadEpoch = useRef<unknown>(0);
@@ -197,6 +204,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       snapshotKey: (prev.snapshotKey as number) + 1,
       text: new Map([...prev.text, ...(props.threads ?? [])]),
       failed: new Set(props.threadFailedRunIds ?? []),
+      seqs: prev.seqs,
+      textVersions: new Map([...(prev.textVersions ?? []), ...serverTextVersions(props)]),
     }));
   }
   useEffect(() => {

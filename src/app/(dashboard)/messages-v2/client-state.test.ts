@@ -210,6 +210,25 @@ describe("thread writers: every pair, every outcome, every finish order", () => 
       });
     }
 
+  it("cached text for an older version is removed when the newer version's fetch fails; kept when the same version fails; later success shows the new text", () => {
+    let version = "r:o1";
+    const now = (): Now => ({ snapshotKey: 1, versionOf: () => version });
+    const v1: Stamp = { snapshotKey: 1, seq: 1, versions: new Map([["r", "r:o1"]]) };
+    const loaded = applyThreads(T(1), v1, now(), [["r", { lastOutbound: null, reply: "OLD" }]], ["r"], []);
+    expect(loaded.text.get("r")?.reply).toBe("OLD");
+    // Same version fails on a retry: the text it already had is still right.
+    const sameFail = applyThreads(loaded, { snapshotKey: 1, seq: 2, versions: new Map([["r", "r:o1"]]) }, now(), [], [], ["r"]);
+    expect(sameFail.text.get("r")?.reply).toBe("OLD");
+    // The run's outbound message changes; the new row cannot be read.
+    version = "r:o2";
+    const newFail = applyThreads(loaded, { snapshotKey: 1, seq: 3, versions: new Map([["r", "r:o2"]]) }, now(), [], [], ["r"]);
+    expect(newFail.text.has("r")).toBe(false);
+    expect(newFail.failed.has("r")).toBe(true);
+    const later = applyThreads(newFail, { snapshotKey: 1, seq: 4, versions: new Map([["r", "r:o2"]]) }, now(), [["r", { lastOutbound: null, reply: "NEW" }]], ["r"], []);
+    expect(later.text.get("r")?.reply).toBe("NEW");
+    expect(later.failed.has("r")).toBe(false);
+  });
+
   it("retry success for an older version after the newer version failed: failure stays", () => {
     const now: Now = { snapshotKey: 1, versionOf: () => "r:2" };
     const newerFail = applyThreads(T(1), { snapshotKey: 1, seq: 2, versions: new Map([["r", "r:2"]]) }, now, [], [], ["r"]);
