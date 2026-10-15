@@ -27,7 +27,7 @@ import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { assignHotLeadToOwner, recordHotFailure, recordHotTextOnHeldLead } from "@/lib/hot-sellers/assign";
-import { isHotSeller } from "@/lib/hot-sellers/hot";
+import { isHotReason, isHotSeller } from "@/lib/hot-sellers/hot";
 
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
@@ -432,11 +432,14 @@ export async function checkAiResponderDispatchPreGates(
     // hold's timestamp moves. Nothing is sent and nothing is suppressed.
     const now = new Date().toISOString();
     const own = property.last_ai_escalation_reason === NUMBER_SOURCE_AWAITING_ANSWER_REASON;
+    // A HOT flag keeps its own time: its alert key (hot_flag:<property>:<flagAt>)
+    // must not move, or a non-hot answer would page Jarrad again.
+    const keepFlagTime = isHotReason(property.last_ai_escalation_reason);
     let q = supabase
       .from("properties")
       .update({
         ...(own ? { last_ai_escalation_reason: NUMBER_SOURCE_ANSWER_RECEIVED_REASON } : {}),
-        last_ai_escalation_at: now,
+        ...(keepFlagTime ? {} : { last_ai_escalation_at: now }),
         updated_at: now,
       })
       .eq("id", input.propertyId)

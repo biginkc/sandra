@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const events = vi.hoisted(() => ({ rows: [] as Array<{ source_type: string; source_id: string; payload: Record<string, unknown> }> }));
 
@@ -21,7 +21,8 @@ const FLAG_AT = "2026-10-15T10:00:00.000Z";
 
 type Delivery = { hold_key: string; status: string; recipient_user_id: string };
 
-function makeDb(opts: { owners: string[]; deliveries: Delivery[]; property?: Record<string, unknown> }) {
+function makeDb(opts: { owners: string[]; deliveries: Delivery[]; property?: Record<string, unknown>; alertsSince?: string | null | "error"; now?: string }) {
+  const alertsSince = opts.alertsSince === undefined ? "2026-10-15T00:00:00.000Z" : opts.alertsSince;
   const property = {
     id: PROP, org_id: ORG, assigned_user_id: null, is_dnc_locked: false, deleted_at: null,
     needs_human_attention: true, last_ai_escalation_reason: "model:price_or_offer", last_ai_escalation_at: FLAG_AT,
@@ -40,7 +41,13 @@ function makeDb(opts: { owners: string[]; deliveries: Delivery[]; property?: Rec
     q.select = () => q;
     q.eq = (c: string, v: unknown) => { filters.push([c, v]); return q; };
     q.limit = () => q;
-    q.maybeSingle = async () => ({ data: rows()[0] ?? null, error: null });
+    q.maybeSingle = async () => {
+      if (table === "hold_alert_settings") {
+        if (alertsSince === "error") return { data: null, error: { message: "boom" } };
+        return { data: alertsSince ? { alerts_since: alertsSince } : null, error: null };
+      }
+      return { data: rows()[0] ?? null, error: null };
+    };
     q.then = (resolve: (v: unknown) => unknown) => resolve({ data: rows(), error: null });
     return q;
   };
@@ -51,7 +58,8 @@ const KEY = hotFlagKey(PROP, FLAG_AT);
 const covered = () => events.rows.at(-1)?.payload.covered_by_hold;
 
 describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent alert to the CURRENT owner", () => {
-  beforeEach(() => { events.rows.length = 0; });
+  beforeEach(() => { events.rows.length = 0; vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z")); });
+  afterEach(() => { vi.useRealTimers(); });
 
   it("sent to the current owner: covered", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
@@ -59,7 +67,7 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
     expect(covered()).toBe(true);
   });
 
-  it("sent to a PREVIOUS owner only (owner changed to B, B has no rows yet): covered - the hold will alert B itself", async () => {
+  it("sent to a PREVIOUS owner only (owner changed to B, B has no rows yet) and the hold will alert B (flag after alerts_since, within 7 days): covered", async () => {
     const db = makeDb({ owners: [OWNER_B], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
     expect(await recordHotTextOnHeldLead(db, PROP, "m2", "price_or_offer", {})).toBe(true);
     expect(covered()).toBe(true);
@@ -99,9 +107,32 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
     expect(covered()).toBe(false);
   });
 
-  it("no delivery rows at all for the hold: covered (the hold alerts the owner itself)", async () => {
+  it("no delivery rows at all and the hold will alert the owner (branch b): covered", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [] });
     await recordHotTextOnHeldLead(db, PROP, "m7", "price_or_offer", {});
+    expect(covered()).toBe(true);
+  });
+
+  it("branch b fails: no rows for the owner but the hold will NOT alert them -> not covered", async () => {
+    const cases: Array<[string, Parameters<typeof makeDb>[0]]> = [
+      ["flag older than alerts_since", { owners: [OWNER_A], deliveries: [], alertsSince: "2026-10-15T11:00:00.000Z" }],
+      ["no settings row", { owners: [OWNER_A], deliveries: [], alertsSince: null }],
+      ["settings lookup fails", { owners: [OWNER_A], deliveries: [], alertsSince: "error" }],
+      ["flag older than 7 days", { owners: [OWNER_A], deliveries: [], property: { last_ai_escalation_at: "2026-10-15T10:00:00.000Z" }, alertsSince: "2026-10-15T00:00:00.000Z", now: "2026-10-22T10:00:01.000Z" }],
+      ["flag before the cutoff", { owners: [OWNER_A], deliveries: [], property: { last_ai_escalation_at: "2026-10-14T10:00:00.000Z" }, alertsSince: "2026-10-01T00:00:00.000Z" }],
+    ];
+    for (const [label, opts] of cases) {
+      events.rows.length = 0;
+      vi.setSystemTime(new Date(opts.now ?? "2026-10-15T12:00:00.000Z"));
+      await recordHotTextOnHeldLead(makeDb(opts), PROP, `mb-${label}`, "price_or_offer", {});
+      expect(covered(), label).toBe(false);
+    }
+  });
+
+  it("branch b boundary: flag exactly 7 days old is still inside the window", async () => {
+    vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
+    const db = makeDb({ owners: [OWNER_A], deliveries: [], property: { last_ai_escalation_at: "2026-10-15T12:00:00.000Z" }, alertsSince: "2026-10-15T00:00:00.000Z" });
+    await recordHotTextOnHeldLead(db, PROP, "m-edge", "price_or_offer", {});
     expect(covered()).toBe(true);
   });
 

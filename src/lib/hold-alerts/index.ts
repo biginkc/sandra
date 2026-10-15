@@ -98,13 +98,13 @@ async function loadAlertHolds(
 
 const HOT_PROMOTION_PAGE = 200;
 
-/** Hot alerts older than this are stale; the pass never looks further back. */
-export const HOT_ALERT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
+/** Same 7-day window as the frozen hold loader (and never before HOT_ALERTS_START_ISO via the watermark). */
+export const HOT_ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Hot sellers to alert: Sandra's hand-off ('assigned', source hot_seller_handoff)
  * and hot texts on a lead Jarrad already owned ('ai_escalated', source
- * hot_seller_text), since max(watermark, now - 48h), NEWEST first, keyset-paged
+ * hot_seller_text), since max(watermark, now - 7 days), NEWEST first, keyset-paged
  * to exhaustion, minus keys whose deliveries are already finished (one bulk
  * query). So history never grows a pass and the newest seller is never starved.
  * First name from the homeowner contact (+ address for hot texts); never message text.

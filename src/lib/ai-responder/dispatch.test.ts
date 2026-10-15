@@ -8731,15 +8731,32 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
     state.property.needs_human_attention = false;
     await run(state, "inbound-ns-held1", "how did you get my number?", answers("nurture", "yes"));
     // Simulate "held for another reason first": the hold reason is not ours.
-    state.property.last_ai_escalation_reason = "price_or_offer";
+    state.property.last_ai_escalation_reason = "send_timeout:abc";
     state.property.last_ai_escalation_at = "2026-01-01T00:00:00.000Z";
     vi.mocked(sendSmsToContact).mockClear();
 
     const { result } = await run(state, "inbound-ns-held2", "yes take me off", answers("opted_out", "no", 0.99));
 
     expect(result).toEqual({ outcome: "skipped", reason: "number_source_answer_received" });
-    expect(state.property.last_ai_escalation_reason).toBe("price_or_offer");
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:abc");
     expect(state.property.last_ai_escalation_at).not.toBe("2026-01-01T00:00:00.000Z");
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("hot-flagged lead: the seller's number-source answer keeps the flag time (the hot alert key must not move); updated_at still moves", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    bothMapped("nurture");
+    await run(state, "inbound-ns-hot1", "how did you get my number?", answers("nurture", "yes"));
+    state.property.last_ai_escalation_reason = "price_or_offer";
+    state.property.last_ai_escalation_at = "2026-01-01T00:00:00.000Z";
+    vi.mocked(sendSmsToContact).mockClear();
+
+    const { result } = await run(state, "inbound-ns-hot2", "yes take me off", answers("opted_out", "no", 0.99));
+
+    expect(result).toEqual({ outcome: "skipped", reason: "number_source_answer_received" });
+    expect(state.property.last_ai_escalation_reason).toBe("price_or_offer");
+    expect(state.property.last_ai_escalation_at).toBe("2026-01-01T00:00:00.000Z");
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 

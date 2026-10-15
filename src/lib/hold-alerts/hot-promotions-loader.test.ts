@@ -157,17 +157,19 @@ describe("loadHotPromotions keyset paging", () => {
     expect((await loadHotPromotions(db, ORG, MARK, NOW_MS)).promotions).toHaveLength(3);
   });
 
-  it("looks back at most 48 hours, even when the watermark is older", async () => {
-    expect(HOT_ALERT_LOOKBACK_MS).toBe(48 * HOUR);
+  it("looks back at most 7 days, even when the watermark is older", async () => {
+    expect(HOT_ALERT_LOOKBACK_MS).toBe(7 * 24 * HOUR);
     const at = (msAgo: number) => new Date(NOW_MS - msAgo).toISOString();
     const rows: EventRow[] = [
-      { ...events(1)[0]!, id: "old", property_id: "p-old", source_id: "in-old", created_at: at(49 * HOUR) },
-      { ...events(1)[0]!, id: "edge", property_id: "p-edge", source_id: "in-edge", created_at: at(47 * HOUR) },
+      { ...events(1)[0]!, id: "old", property_id: "p-old", source_id: "in-old", created_at: at(8 * 24 * HOUR) },
+      { ...events(1)[0]!, id: "three", property_id: "p-three", source_id: "in-three", created_at: at(3 * 24 * HOUR) },
+      { ...events(1)[0]!, id: "edge", property_id: "p-edge", source_id: "in-edge", created_at: at(6 * 24 * HOUR) },
       { ...events(1)[0]!, id: "new", property_id: "p-new", source_id: "in-new", created_at: at(HOUR) },
     ];
     const { db } = fakeDb(rows);
-    const weekAgo = new Date(NOW_MS - 7 * 24 * HOUR).toISOString();
-    expect((await loadHotPromotions(db, ORG, weekAgo, NOW_MS)).promotions.map((p) => p.propertyId)).toEqual(["p-new", "p-edge"]);
+    const monthAgo = new Date(NOW_MS - 30 * 24 * HOUR).toISOString();
+    // 8 days old: never loaded. 3 days old (undelivered, after the cutoff): still loads.
+    expect((await loadHotPromotions(db, ORG, monthAgo, NOW_MS)).promotions.map((p) => p.propertyId)).toEqual(["p-new", "p-three", "p-edge"]);
     // A watermark newer than the look-back wins.
     expect((await loadHotPromotions(db, ORG, at(2 * HOUR), NOW_MS)).promotions.map((p) => p.propertyId)).toEqual(["p-new"]);
   });

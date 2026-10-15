@@ -24,6 +24,9 @@ import type { Database, Json } from "@/lib/supabase/types";
  * assignment (the update returning the row is the proof). A lead already
  * owned by SOMEONE ELSE is never taken from them.
  */
+/** The frozen hold loader's look-back (7 days). */
+const HOLD_ALERT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 export const HOT_HANDOFF_SOURCE_TYPE = "hot_seller_handoff";
 /**
  * A hot text on a lead Jarrad already owns: no reassignment and no 'assigned'
@@ -248,7 +251,7 @@ export async function recordHotFailure(
  */
 async function isCoveredByHotHold(
   db: SupabaseClient<Database>,
-  p: { id: string; needs_human_attention: boolean | null; last_ai_escalation_reason: string | null; last_ai_escalation_at: string | null },
+  p: { id: string; org_id: string; needs_human_attention: boolean | null; last_ai_escalation_reason: string | null; last_ai_escalation_at: string | null },
   /** The CURRENT hot owner; null (unresolved) never counts as covered. */
   owner: string | null,
 ): Promise<boolean> {
@@ -263,15 +266,29 @@ async function isCoveredByHotHold(
     .select("id, status, recipient_user_id")
     .eq("hold_key" as never, key as never);
   if (error) return false;
-  // For the CURRENT owner: covered when the hold's alert was CONFIRMED sent
-  // to them (at least one channel), or when the hold has no delivery for them
-  // yet (it will alert them itself on the next pass, e.g. after an owner
-  // change), so one seller never pings twice. A pending (capped), sending,
-  // failed or skipped delivery to them never covers.
+  // For the CURRENT owner, covered only if:
+  //  (a) a delivery for this hold's key was CONFIRMED sent to them, or
+  //  (b) there is no delivery for them yet AND the hold is guaranteed to alert
+  //      them on the next pass (hot flag, flagAt at/after the cutoff, at/after
+  //      the org's alerts_since watermark, and inside the 7-day loader window),
+  //      so an owner change never pings the new owner twice.
+  // Any pending, sending, failed or skipped row to them, a failed lookup, or a
+  // hold failing (b) → NOT covered: a possible double ping beats a silence.
   const mine = ((data ?? []) as unknown as Array<{ status: string; recipient_user_id: string }>).filter(
     (d) => d.recipient_user_id === owner,
   );
-  return mine.length === 0 || mine.some((d) => d.status === "sent");
+  if (mine.some((d) => d.status === "sent")) return true;
+  if (mine.length > 0) return false;
+  const flagMs = Date.parse(p.last_ai_escalation_at);
+  if (!Number.isFinite(flagMs) || Date.now() - flagMs > HOLD_ALERT_WINDOW_MS) return false;
+  const { data: settings, error: settingsError } = await (db as unknown as { from: (t: string) => ReturnType<SupabaseClient<Database>["from"]> })
+    .from("hold_alert_settings")
+    .select("alerts_since")
+    .eq("org_id" as never, p.org_id as never)
+    .maybeSingle();
+  if (settingsError || !settings) return false;
+  const since = Date.parse((settings as unknown as { alerts_since: string }).alerts_since);
+  return Number.isFinite(since) && flagMs >= since;
 }
 
 /**
