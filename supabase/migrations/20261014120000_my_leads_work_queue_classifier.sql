@@ -182,12 +182,13 @@ language sql stable security definer set search_path = '' as $$
   apx as (
     select lead_id,
       min(eff) as any_min,
-      min(eff) filter (where not is_offer and eff <= p_at + interval '15 minutes' and eff >= p_at - interval '7 days') as due_min,
-      min(eff) filter (where not is_offer and eff < p_at - interval '7 days') as missed_min,
+      min(eff) filter (where not is_offer and eff <= p_at + interval '15 minutes' and eff >= ((p_at at time zone 'America/Chicago') - interval '7 days') at time zone 'America/Chicago') as due_min,
+      min(eff) filter (where not is_offer and eff < ((p_at at time zone 'America/Chicago') - interval '7 days') at time zone 'America/Chicago') as missed_min,
       min(eff) filter (where not is_offer and eff > p_at + interval '15 minutes') as future_min,
       min(eff) filter (where is_offer) as chain_eff,
       min(eff - interval '15 minutes') filter (where eff - interval '15 minutes' > p_at) as next_boundary,
-      min(eff + interval '7 days') filter (where not is_offer and eff + interval '7 days' > p_at) as next_missed
+      min(((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago')
+        filter (where not is_offer and ((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' > p_at) as next_missed
     from ap group by lead_id),
   nt as (
     select distinct t.related_property_id as lead_id
@@ -267,7 +268,7 @@ language sql stable security definer set search_path = '' as $$
       or exists (select 1 from public.sequence_enrollments se
                  where se.org_id = p_org and se.property_id = b0.lead_id and se.enrolled_by_user_id is not null and se.enrolled_at > b0.at))),
   bka as (
-    select lead_id, count(*)::integer as n,
+    select lead_id, count(*)::integer as n, (count(*) filter (where kind = 'ai_reply_needs_ok'))::integer as draft_n,
       (array_agg(kind order by at, kind))[1] as first_kind, (array_agg(action order by at, kind))[1] as first_action,
       min(at) as first_at,
       jsonb_agg(jsonb_build_object('kind', kind, 'action', action, 'at', at, 'refId', ref_id) order by at, kind) as items
@@ -311,7 +312,7 @@ language sql stable security definer set search_path = '' as $$
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
-      coalesce(bka.n, 0) as broken_n, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
+      coalesce(bka.n, 0) as broken_n, coalesce(bka.draft_n, 0) as draft_n, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
       coalesce(nr.calling, false) as norma_calling, (nt.lead_id is not null) as norma_task,
       tmn.next_at
     from base b
@@ -338,7 +339,7 @@ language sql stable security definer set search_path = '' as $$
   pl as (
     select fe.*,
       case
-        when fe.stage = 'under_contract' and coalesce(fe.any_min > p_at + interval '15 minutes', true) then '1'
+        when fe.stage = 'under_contract' and fe.any_min is null then '1'
         when fe.pinned then '2'
         when fe.stage = 'not_contacted' and fe.attempts_count = 0 then '3'
         when fe.due_min is not null then '4'
@@ -380,7 +381,8 @@ language sql stable security definer set search_path = '' as $$
         case when cl.dnc then 'do_not_contact' end,
         case when cl.manual_at is not null then 'text_waiting' end,
         case when cl.in_contact_only and cl.in_ts is not null then 'check_texts' end,
-        case when cl.broken_n > 0 and cl.row_no <> '6' then 'broken' end
+        case when cl.broken_n - cl.draft_n > 0 and cl.row_no <> '6' then 'broken' end,
+        case when cl.draft_n > 0 and cl.row_no <> '6' then 'ai_draft_waiting' end
       ], null) || case when cardinality(cl.phones) = 0 then array['no_phone'] else array[]::text[] end as labels,
       case cl.place when 'your_move' then 0 when 'their_move' then 1 else 2 end::smallint as place_rank,
       case when cl.place <> 'your_move' then 0

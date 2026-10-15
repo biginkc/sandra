@@ -244,9 +244,12 @@ fixture('D1 under contract with nothing due is Neither (All leads only)', async 
 fixture('D1 under contract with a callback in 10 min is Due (row 1 yields to row 4)', async (w) => {
   const id = await w.lead('uc', { stage: 'under_contract' }); await w.appt(id, w.at(10 * MIN)); return id;
 }, { place: NA, reason: 'due', row: '4' });
-fixture('D1 under contract with a callback in 2 hours stays Neither', async (w) => {
-  const id = await w.lead('uc', { stage: 'under_contract' }); await w.appt(id, w.at(2 * HOUR)); return id;
-}, { place: NE, reason: 'under_contract', row: '1' });
+fixture('D1 under contract with a callback tomorrow is Waiting · Callback booked', async (w) => {
+  const id = await w.lead('uc', { stage: 'under_contract' }); await w.appt(id, w.at(DAY)); return id;
+}, { place: WT, reason: 'callback_booked', row: '11' });
+fixture('D1 under contract with a snoozed callback is not Neither', async (w) => {
+  const id = await w.lead('uc', { stage: 'under_contract' }); await w.appt(id, w.at(-HOUR), { status: 'snoozed', snoozedUntil: w.at(2 * DAY) }); return id;
+}, { place: WT, reason: 'callback_booked', row: '11' });
 fixture('D2 Call today pin without expiry', async (w) => {
   const id = await w.lead('pin'); await w.pin(id, w.at(-2 * HOUR), null); return id;
 }, { place: NA, reason: 'call_today', row: '2' });
@@ -343,9 +346,9 @@ fixture('S AI-written reply goes out', async (w) => {
   const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR));
   await w.text(id, 'outbound', w.at(-2 * MIN), { meta: { generated_by: 'ai_responder_v1', inbound_message_id: randomUUID() } }); return id;
 }, { place: WT, reason: 'texted_last', row: '13', headline: { by: 'ai' } });
-fixture('S AI holds the reply for your OK (decision table order: New reply, Broken label)', async (w) => {
+fixture('S AI holds the reply for your OK: New reply with the AI-draft-waiting label', async (w) => {
   const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR)); await w.aiDraft(id, w.at(-2 * HOUR)); return id;
-}, { place: NA, reason: 'new_reply', row: '5', labels: ['broken'], brokenKinds: ['ai_reply_needs_ok'] });
+}, { place: NA, reason: 'new_reply', row: '5', labels: ['ai_draft_waiting'], brokenKinds: ['ai_reply_needs_ok'] });
 fixture('S AI hold with no inbound left is Broken · AI reply needs your OK', async (w) => {
   const id = await w.lead('s'); await w.aiDraft(id, w.at(-2 * HOUR)); return id;
 }, { place: NA, reason: 'broken', row: '6', headline: { kind: 'ai_reply_needs_ok' } });
@@ -542,6 +545,14 @@ fixture('S DST starts over the weekend: Friday 4 PM CST text, Wednesday 3:30 PM 
   { place: WT, reason: 'texted_last', row: '13', at: () => iso('2027-03-17T20:30:00Z') });
 fixture('S DST starts over the weekend: window closes Wednesday 4 PM CDT (21:00Z)', (w) => bdText(w, '2027-03-12T22:00:00Z'),
   { place: NA, reason: 'gone_quiet', row: '14', at: () => iso('2027-03-17T21:00:00Z') });
+// 7 Chicago calendar days (rows 4/9), not a rolling 7x24 hours.
+const chicagoWeek = (name: string, callbackAt: string, row: string, reason: string, now: string) =>
+  fixture(name, async (w) => { const id = await w.lead('cw'); await w.appt(id, callbackAt); return id; },
+    { place: NA, reason, row, at: () => iso(now) });
+chicagoWeek('S Callback at the 7-day Chicago cutoff (no DST) is still Due', '2026-10-13T15:00:00Z', '4', 'due', '2026-10-20T15:00:00Z');
+chicagoWeek('S Callback one minute past the 7-day Chicago cutoff is a missed callback', '2026-10-13T14:59:00Z', '9', 'due', '2026-10-20T15:00:00Z');
+chicagoWeek('S Across the fall-back weekend the cutoff is 14:00Z, not 15:00Z: at the cutoff is Due', '2026-10-28T14:00:00Z', '4', 'due', '2026-11-04T15:00:00Z');
+chicagoWeek('S Across the fall-back weekend: one minute before the cutoff is a missed callback', '2026-10-28T13:59:00Z', '9', 'due', '2026-11-04T15:00:00Z');
 fixture('S Due callback and unanswered reply on the same lead: Due, reply still on the lead', async (w) => {
   const id = await w.lead('s'); await w.appt(id, w.at(-30 * MIN)); await w.text(id, 'inbound', w.at(-2 * HOUR)); return id;
 }, { place: NA, reason: 'due', row: '4' });
