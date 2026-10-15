@@ -21,6 +21,7 @@ test.beforeAll(async () => {
     ["next/navigation", `export const useRouter=()=>({refresh(){},push(){},replace(){}}); export const useSearchParams=()=>new URLSearchParams(window.location.search);`],
     ["next/link", `export default function Link({children, prefetch: _prefetch, ...props}) { return <a {...props}>{children}</a>; }`],
     ["rep-sms-composer", `export const RepSmsComposer=()=>null;`],
+    ["homeowner-houses-action", `export async function loadHomeownerHousesAction(){return {};} export async function loadMoreHomeownerHousesAction(){return {ok:false,message:"Not in the harness."};}`],
     ["appointments", `export const BookAppointmentPopover=()=>null;`],
     ["softphone", `export const useOptionalSoftphone=()=>null;`],
     ["my-leads-actions", `
@@ -78,6 +79,7 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /^next\/navigation$/ }, () => virtual("next/navigation"))
         build.onResolve({ filter: /^next\/link$/ }, () => virtual("next/link"))
         build.onResolve({ filter: /rep-sms-composer$/ }, () => virtual("rep-sms-composer"))
+        build.onResolve({ filter: /homeowner-houses-action$/ }, () => virtual("homeowner-houses-action"))
         build.onResolve({ filter: /book-appointment-popover$/ }, () => virtual("appointments"))
         build.onResolve({ filter: /softphone-provider$/ }, () => virtual("softphone"))
         build.onResolve({ filter: /sms-actions$/ }, () => virtual("sms-actions"))
