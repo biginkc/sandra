@@ -60,7 +60,7 @@ describe("hold action controls", () => {
   it("shows the pending draft and enables all five actions", () => {
     renderRail();
     expect(screen.getByTestId("draft-text")).toHaveTextContent("Draft text for the seller");
-    for (const name of ["Send", "Edit", "Open thread", "Assign", "Dismiss"]) {
+    for (const name of ["Send", "Edit", "Take over \\(Sandra stops\\)", "Assign", "Dismiss"]) {
       expect(button(new RegExp(`^${name}`))).toBeEnabled();
     }
   });
@@ -74,7 +74,7 @@ describe("hold action controls", () => {
     renderRail(hold({ draft: undefined, draft_held: false, sources: ["needs_attention"] }));
     expect(button(/^Send/)).toBeDisabled();
     expect(button(/^Edit/)).toBeDisabled();
-    expect(button(/^Open thread/)).toBeEnabled();
+    expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
     expect(button(/^Assign/)).toBeEnabled();
     expect(button(/^Dismiss/)).toBeEnabled();
   });
@@ -159,7 +159,7 @@ describe("hold action controls", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(message);
       expect(button(/^Send/)).toBeDisabled();
       expect(button(/^Edit/)).toBeDisabled();
-      expect(button(/^Open thread/)).toBeEnabled();
+      expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
     });
   });
 
@@ -200,10 +200,10 @@ describe("hold action controls", () => {
     });
   });
 
-  describe("Open thread", () => {
+  describe("Take over (Sandra stops)", () => {
     it("marks the lead human-owned and offers the lead link", async () => {
       const actions = renderRail();
-      await userEvent.click(button(/^Open thread/));
+      await userEvent.click(button(/^Take over \(Sandra stops\)/));
       expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1", seen: SEEN_HOLD });
       const link = await screen.findByRole("link", { name: /open lead/i });
       expect(link).toHaveAttribute("href", "/leads/p1");
@@ -212,9 +212,9 @@ describe("hold action controls", () => {
 
     it("rolls back on failure", async () => {
       renderRail(hold(), api({ takeOver: vi.fn().mockResolvedValue(fail("HOLD_RESOLVE_FAILED", "Could not update that hold.")) }));
-      await userEvent.click(button(/^Open thread/));
+      await userEvent.click(button(/^Take over \(Sandra stops\)/));
       expect(await screen.findByRole("alert")).toHaveTextContent(/could not update/i);
-      expect(button(/^Open thread/)).toBeEnabled();
+      expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
     });
   });
 

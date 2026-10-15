@@ -3,7 +3,8 @@
 import { useRef, useState } from "react";
 
 import { isConfirmDncReason } from "@/lib/ai-responder/hostile";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
@@ -15,7 +16,7 @@ import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./typ
 type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
 
-const ACTIONS = ["Send", "Edit", "Open thread", "Assign", "Dismiss"] as const;
+const ACTIONS = ["Send", "Edit", "Open thread", "Take over (Sandra stops)", "Assign", "Dismiss"] as const;
 
 /** Disabled stand-ins, used when the page supplies no handlers. */
 export function DisabledHoldActions({ title }: { title: string }) {
@@ -402,8 +403,22 @@ export function HoldActionControls({
         >
           Edit
         </Button>
+        {propertyId ? (
+          <a
+            href={`/leads/${encodeURIComponent(propertyId)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(buttonVariants({ size: "xs", variant: "outline" }))}
+          >
+            Open thread
+          </a>
+        ) : (
+          <Button type="button" size="xs" variant="outline" disabled>
+            Open thread
+          </Button>
+        )}
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={takeOver}>
-          Open thread
+          Take over (Sandra stops)
         </Button>
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={openAssign}>
           Assign

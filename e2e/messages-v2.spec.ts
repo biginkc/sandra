@@ -61,7 +61,7 @@ test.describe("/messages-v2 page face", () => {
     await page.getByTestId("open-rules").click();
     const panel = page.getByTestId("rules-panel");
     await expect(panel).toBeVisible();
-    await expect(panel.getByRole("heading", { name: "Goes to Jarrad" })).toBeVisible();
+    await expect(panel.getByRole("heading", { name: "Becomes a lead" })).toBeVisible();
     await expect(panel.getByRole("heading", { name: "Sandra handles alone" })).toBeVisible();
     await expect(panel.getByRole("heading", { name: "Waits for a person" })).toBeVisible();
     await expect(panel).not.toContainText(/\bJev\b/);
@@ -81,9 +81,20 @@ test.describe("/messages-v2 seeded rows", () => {
   let seedError: string | null = null;
   const addr = (n: number) => `${tag} ${n} Golden Path Ln`;
 
+  // Skipping is allowed only when this machine has no Supabase test env at all. In CI a failed seed must fail loudly.
+  const hasTestEnv = Boolean(
+    (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL) &&
+      (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY),
+  );
+  const requireSeed = () => {
+    if (seedError === null) return;
+    if (process.env.CI || hasTestEnv) throw new Error(`messages-v2 seeding failed: ${seedError}`);
+    test.skip(true, `no Supabase test env: ${seedError}`);
+  };
+
   test.beforeAll(async () => {
-    const admin = adminClient();
     try {
+      const admin = adminClient();
       // One decided run: Martha said no, Sandra replied and closed it.
       const { data: contact, error: contactError } = await admin
         .from("contacts")
@@ -156,6 +167,7 @@ test.describe("/messages-v2 seeded rows", () => {
   });
 
   test.afterAll(async () => {
+    if (!hasTestEnv) return;
     const admin = adminClient();
     if (ids.runs.length) await admin.from("pipeline_runs" as never).delete().in("id", ids.runs);
     if (ids.messages.length) await admin.from("messages").delete().in("id", ids.messages);
@@ -164,7 +176,7 @@ test.describe("/messages-v2 seeded rows", () => {
   });
 
   test("a decided card shows the seller's text, a vocabulary tag and one plain sentence", async ({ page }) => {
-    test.skip(seedError !== null, `seeding failed: ${seedError}`);
+    requireSeed();
     await page.goto("/messages-v2");
     const card = page.getByTestId("tape-card").filter({ hasText: "The house is sold." });
     await expect(card).toBeVisible();
@@ -174,7 +186,7 @@ test.describe("/messages-v2 seeded rows", () => {
   });
 
   test("waiting column lists the newest flag first and hides the do-not-contact locked property", async ({ page }) => {
-    test.skip(seedError !== null, `seeding failed: ${seedError}`);
+    requireSeed();
     await page.goto("/messages-v2");
     const column = page.getByTestId("waiting-column");
     await expect(column.getByText(addr(2), { exact: false })).toBeVisible();

@@ -80,9 +80,9 @@ describe("deriveTape", () => {
     expect(v).toMatchObject({ kind: "decided", stage: "replying", did: expect.stringContaining("Replying in a few minutes") });
   });
 
-  it("a promoted new lead is handed to Jarrad", () => {
+  it("a promoted new lead is marked as a lead", () => {
     const v = deriveTape(run({ steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied")] }), "Sue");
-    expect(v).toMatchObject({ kind: "decided", tag: { label: "Wants an offer" }, did: "Handed to Jarrad" });
+    expect(v).toMatchObject({ kind: "decided", tag: { label: "Wants an offer" }, did: "Marked as a lead" });
   });
 
   it("a drip shows its label and first-text date", () => {

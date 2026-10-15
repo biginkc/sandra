@@ -8,14 +8,13 @@ import { Button } from "@/components/ui/button";
 import type { Result } from "@/lib/errors/result";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns/format";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
 import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
-import { describeCoverage, type LooseSupabase } from "./queries";
+import { describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { ReplyGeneration } from "./reply-generation";
 import type { SetReplyGenerationAction } from "./reply-generation-toggle";
 import { RulesPanel } from "./rules-panel";
@@ -99,11 +98,15 @@ function sandraIsOn(badges: ModeBadge[]): boolean {
   return badges.length === 0 || badges.some((b) => b.mode === "AUTO" || b.mode === "HELD");
 }
 
+// Fixed zone so the server render and the browser agree on which day a card belongs to.
+const TAPE_TZ = "America/Chicago";
+const dayKey = (ms: number) => new Date(ms).toLocaleDateString("en-CA", { timeZone: TAPE_TZ });
+
 function dayLabel(ms: number, nowMs: number): string {
-  const startOfToday = new Date(nowMs).setHours(0, 0, 0, 0);
-  if (ms >= startOfToday) return "Today";
-  if (ms >= startOfToday - DAY_MS) return "Yesterday";
-  return format(new Date(ms), "EEEE, MMM d");
+  const key = dayKey(ms);
+  if (key === dayKey(nowMs)) return "Today";
+  if (key === dayKey(nowMs - DAY_MS)) return "Yesterday";
+  return new Date(ms).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: TAPE_TZ });
 }
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
@@ -185,37 +188,26 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     const missing = runs.filter((r) => !requested.current.has(r.id));
     if (missing.length === 0) return;
     for (const r of missing) requested.current.add(r.id);
-    let cancelled = false;
+    // Not cancelled when `runs` changes again: the results are keyed by run id, so a late answer is still right.
     loadRunLabels(createClient() as unknown as LooseSupabase, missing)
-      .then((fetched) => {
-        if (!cancelled) setLabels((curr) => new Map([...curr, ...fetched]));
-      })
+      .then((fetched) => setLabels((curr) => new Map([...curr, ...fetched])))
       .catch(() => {
         for (const r of missing) requested.current.delete(r.id);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [runs]);
 
   // Fetch thread text (our last text, Sandra's reply) for runs that arrive over
   // realtime, and again when a run gains its sent reply.
-  const requestedThreads = useRef(new Set<string>((props.threads ?? []).map(([id]) => id)));
+  const requestedThreads = useRef(new Set<string>(props.runs.filter((r) => (props.threads ?? []).some(([id]) => id === r.id)).map((r) => `${r.id}:${r.outbound_message_id ?? ""}`)));
   useEffect(() => {
     const missing = runs.filter((r) => !requestedThreads.current.has(`${r.id}:${r.outbound_message_id ?? ""}`));
     if (missing.length === 0) return;
     for (const r of missing) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
-    let cancelled = false;
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
-      .then((fetched) => {
-        if (!cancelled) setThreads((curr) => new Map([...curr, ...fetched]));
-      })
+      .then((fetched) => setThreads((curr) => new Map([...curr, ...fetched])))
       .catch(() => {
         for (const r of missing) requestedThreads.current.delete(`${r.id}:${r.outbound_message_id ?? ""}`);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [runs]);
 
   useEffect(() => {
@@ -338,7 +330,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setThreads((curr) => new Map([...curr, ...res.data.threads]));
         for (const r of res.data.runs) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
-        setLoadedBefore(before - DAY_MS);
+        // A full page means the day was cut off: step back from the oldest run returned, not a whole day.
+        const returned = res.data.runs.map((r) => Date.parse(r.started_at));
+        setLoadedBefore(res.data.runs.length >= MAX_RUNS ? Math.min(...returned) : before - DAY_MS);
         if (res.data.runs.length === 0) setEarlierNote("No texts came in that day.");
       } else {
         setEarlierNote(res.error.message);
@@ -352,6 +346,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
 
   const week = weekSummary(props.scorecardRows);
   const on = sandraIsOn(badges);
+  const statusText = props.badgesError
+    ? "Sandra's status couldn't be checked"
+    : on
+      ? "Sandra is on"
+      : "Sandra is watching, not acting yet";
 
   // Day dividers: "Today", "Yesterday", then the date.
   const tapeItems: Array<{ kind: "day"; label: string } | { kind: "run"; run: RunWithSteps }> = [];
@@ -385,9 +384,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             <span
               aria-hidden
               title={live ? "Live" : "Connecting"}
-              className={cn("size-2 rounded-full", live && on ? "bg-emerald-600" : "bg-muted-foreground")}
+              className={cn("size-2 rounded-full", live && on && !props.badgesError ? "bg-emerald-600" : "bg-muted-foreground")}
             />
-            <span className="font-medium">{on ? "Sandra is on" : "Sandra is watching, not acting yet"}</span>
+            <span className="font-medium">{statusText}</span>
             {week && (
               <span className="text-muted-foreground">
                 · {week.texts.toLocaleString("en-US")} texts this week

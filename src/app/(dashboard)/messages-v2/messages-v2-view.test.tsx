@@ -155,7 +155,7 @@ describe("MessagesV2View rules panel", () => {
     expect(screen.queryByText(/\[AUTO/)).not.toBeInTheDocument();
     expect(screen.getByTestId("open-rules")).toHaveTextContent("Sandra's rules");
     const panel = await openRules();
-    expect(within(panel).getByRole("heading", { name: "Goes to Jarrad" })).toBeInTheDocument();
+    expect(within(panel).getByRole("heading", { name: "Becomes a lead" })).toBeInTheDocument();
     expect(within(panel).getByRole("heading", { name: "Sandra handles alone" })).toBeInTheDocument();
     expect(within(panel).getByRole("heading", { name: "Waits for a person" })).toBeInTheDocument();
   });
@@ -246,6 +246,33 @@ describe("MessagesV2View", () => {
     const text = screen.getByTestId("header-status").textContent ?? "";
     expect(text).toContain("7 texts this week");
     expect(text).not.toContain("right");
+  });
+
+  it("does not claim Sandra is on when the rule status could not be loaded", async () => {
+    await mount({ ...props(), badgesError: "Mode badges unavailable — x" });
+    const text = screen.getByTestId("header-status").textContent ?? "";
+    expect(text).toContain("couldn't be checked");
+    expect(text).not.toContain("Sandra is on");
+  });
+
+  it("Open thread is a plain link, separate from the Take over button that switches Sandra off", async () => {
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [openHold("p1")]), actions });
+    const link = screen.getByRole("link", { name: "Open thread" });
+    expect(link).toHaveAttribute("href", "/leads/p1");
+    expect(screen.getByRole("button", { name: "Take over (Sandra stops)" })).toBeInTheDocument();
+  });
+
+  it("steps back from the oldest run returned when a day comes back full", async () => {
+    const runs = Array.from({ length: 200 }, (_, i) => run(`y${i}`, { started_at: new Date(NOW - 3600_000 * 2 - i * 60_000).toISOString(), status: "closed" }));
+    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [] } }));
+    await mount({ ...props([run("today", { started_at: new Date(NOW).toISOString() })]), loadTapeDay });
+    await userEvent.click(screen.getByTestId("show-earlier"));
+    await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
+    await userEvent.click(screen.getByTestId("show-earlier"));
+    await waitFor(() => expect(loadTapeDay).toHaveBeenCalledTimes(2));
+    const second = (loadTapeDay.mock.calls as unknown as Array<[{ before: string }]>)[1][0].before;
+    expect(Date.parse(second)).toBe(NOW - 3600_000 * 2 - 199 * 60_000);
   });
 
   it("says Sandra is watching, not on, when every rule is watch-only", async () => {
@@ -364,11 +391,13 @@ describe("MessagesV2View", () => {
   });
 
   it("renders server-derived holds with a plain reason and relabelled actions, including a runless card", async () => {
-    await mount(props([run("a")], [openHold("p1", run("a", { status: "closed" })), openHold("p2")], null));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([run("a")], [openHold("p1", run("a", { status: "closed" })), openHold("p2")], null), actions });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(2);
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("2");
-    expect(screen.getAllByRole("button", { name: "Open thread" })).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: /take over/i })).toBeNull();
+    expect(screen.getAllByRole("link", { name: "Open thread" })).toHaveLength(2);
+    expect(actions.takeOver).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("button", { name: "Take over (Sandra stops)" })).toHaveLength(2);
   });
 
   it("stays quiet while coverage is healthy and highlights a gap", async () => {

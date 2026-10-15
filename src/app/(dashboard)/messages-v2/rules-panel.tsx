@@ -25,7 +25,7 @@ type RuleGroup = { heading: string; rows: RuleRow[] };
 /** Today's five switches, in plain English, grouped by who ends up acting. Same switches as the old header badges. */
 const GROUPS: RuleGroup[] = [
   {
-    heading: "Goes to Jarrad",
+    heading: "Becomes a lead",
     rows: [
       {
         outcome: "new_lead",
@@ -189,9 +189,7 @@ export function RulesPanel({
               )}
             </section>
 
-            <p className="pt-3 text-xs text-muted-foreground">
-              Every change is logged with who made it and when.
-            </p>
+
           </div>
         </SheetContent>
       </Sheet>

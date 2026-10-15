@@ -18,7 +18,7 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
-import { withoutDncLocked } from "./dnc-locked";
+import { visibleBacklogTotal, withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Split, type LooseSupabase } from "./queries";
@@ -183,8 +183,10 @@ export default async function MessagesV2Page() {
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
   // Permanently do-not-contact locked properties are never shown as waiting: nobody can act on them.
+  const backlogVisible = await visibleBacklogTotal(supabase, orgId, loaded.split.backlogTotal);
   const data = {
     ...loaded,
+    split: { ...loaded.split, backlogTotal: backlogVisible },
     holds: await withoutDncLocked(supabase, orgId, await withFreshSeen(supabase, orgId, loaded.holds)),
   };
 

@@ -125,7 +125,7 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
   if (replySent) parts.push("Reply sent");
   const drip = run.steps.map(dripEnrollmentSummary).find((s) => s !== null);
   if (drip) parts.push(`Drip started: ${drip}`);
-  if (hasStep(run.steps, "promote_new_lead", "applied")) parts.push("Handed to Jarrad");
+  if (hasStep(run.steps, "promote_new_lead", "applied")) parts.push("Marked as a lead");
   if (!replySent && !drip && hasStep(run.steps, "opted_out", "applied")) parts.push("Stopped texting this number");
   if (parts.length === 0 && stage === "waiting") parts.push('Moved to "Waiting for a person"');
   if (parts.length === 0 && (hasStep(run.steps, "not_interested", "applied") || hasStep(run.steps, "wrong_number", "applied"))) {
