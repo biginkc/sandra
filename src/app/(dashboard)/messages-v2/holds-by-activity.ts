@@ -1,4 +1,5 @@
-import type { HoldCursor } from "./hold-activity";
+import { normalizeInstant } from "./chicago-time";
+import type { PageCursor } from "./hold-list";
 import { effectiveFlagReasons, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, pageHolds } from "./hold-list";
 import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldsMeta, OpenHold, RunWithSteps } from "./types";
@@ -11,7 +12,7 @@ export type WaitingList = {
   holdsMeta: HoldsMeta;
   total: number;
   remaining: number;
-  nextCursor: HoldCursor | null;
+  nextCursor: PageCursor | null;
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
   /** [runId, flag reason] for the run each eligible hold shows, over the COMPLETE list (tape and card share it). */
@@ -45,16 +46,18 @@ export async function loadMessagesV2Page(
   orgId: string,
   nowMs: number = Date.now(),
 ): Promise<Omit<MessagesV2Data, "holds" | "holdsMeta"> & WaitingList> {
+  // The snapshot this page (and every "Show older" from it) is ordered at.
+  const snapshotAt = normalizeInstant(new Date(nowMs).toISOString())!;
   const [feed, list] = await Promise.all([
     // Feed only: an empty hold scope means no hold queries run here.
     loadMessagesV2Data(supabase, orgId, nowMs, { scope: { propertyIds: [], noPropertyDrafts: false } }),
-    loadEligibleHolds(supabase, orgId),
+    loadEligibleHolds(supabase, orgId, snapshotAt),
   ]);
   const { holds: _ignored, holdsMeta: _ignoredMeta, ...rest } = feed;
   void _ignored;
   void _ignoredMeta;
   if (!list.ok) return { ...rest, ...FAILED, holdsMeta: meta(0, 0, [], false) };
-  const page = pageHolds(list.holds, null, FIRST_PAGE);
+  const page = pageHolds(list.holds, null, FIRST_PAGE, snapshotAt);
   const enriched = await enrichPage(supabase, orgId, page.holds);
   return {
     ...rest,
@@ -73,12 +76,13 @@ export async function loadMessagesV2Page(
 export async function loadHoldsSlice(
   supabase: LooseSupabase,
   orgId: string,
-  cursor: HoldCursor | null,
+  cursor: PageCursor,
   limit: number,
-): Promise<{ holds: OpenHold<RunWithSteps>[]; total: number; remaining: number; nextCursor: HoldCursor | null; unverified: number; contextErrors: string[] } | null> {
-  const list = await loadEligibleHolds(supabase, orgId);
+): Promise<{ holds: OpenHold<RunWithSteps>[]; total: number; remaining: number; nextCursor: PageCursor | null; unverified: number; contextErrors: string[] } | null> {
+  // Same snapshot as the page that issued the cursor: activity after it is ignored, so the order cannot shift.
+  const list = await loadEligibleHolds(supabase, orgId, cursor.snapshotAt);
   if (!list.ok) return null;
-  const page = pageHolds(list.holds, cursor, limit);
+  const page = pageHolds(list.holds, { at: cursor.at, id: cursor.id }, limit, cursor.snapshotAt);
   const enriched = await enrichPage(supabase, orgId, page.holds);
   return {
     holds: enriched.holds,

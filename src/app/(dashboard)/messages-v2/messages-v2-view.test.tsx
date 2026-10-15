@@ -81,6 +81,7 @@ const run = (id: string, over: Partial<RunWithSteps> = {}): RunWithSteps => ({
 });
 
 const NOW = Date.now();
+const SNAP = "2099-01-01T00:00:00.000000Z";
 const openHold = (
   id: string,
   r: RunWithSteps | null = null,
@@ -259,7 +260,7 @@ describe("MessagesV2View", () => {
 
   // A server over a mutable list, like loadHoldsSlice: pages after the cursor IT issued, and issues the next one.
   const keysetServer = (list: () => OpenHold<RunWithSteps>[]) =>
-    vi.fn(async (input: { cursor: { at: string | null; id: string } | null; limit?: number }) => {
+    vi.fn(async (input: { cursor: { at: string | null; id: string; snapshotAt: string } | null; limit?: number }) => {
       const sorted = sortNewestFirst(list());
       const after = holdsAfter(sorted, input.cursor);
       const holdsPage = after.slice(0, input.limit ?? 50);
@@ -272,7 +273,7 @@ describe("MessagesV2View", () => {
           remaining,
           total: sorted.length,
           unverified: 0,
-          nextCursor: remaining > 0 ? holdCursor(holdsPage[holdsPage.length - 1]) : null,
+          nextCursor: remaining > 0 ? { ...holdCursor(holdsPage[holdsPage.length - 1]), snapshotAt: SNAP } : null,
           contextErrors: [] as string[],
         },
       };
@@ -282,10 +283,10 @@ describe("MessagesV2View", () => {
   it("'Show older' echoes the server's cursor verbatim and says how many remain", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = keysetServer(() => all);
-    const serverCursor = { at: "2026-01-01T00:00:00.000000Z", id: "server-issued" };
+    const serverCursor = { at: "2026-01-01T00:00:00.000000Z", id: "server-issued", snapshotAt: SNAP };
     loadOlderHolds.mockImplementationOnce(async (input) => {
       expect(input.cursor).toBe(serverCursor); // the exact object the server sent, never rebuilt
-      return keysetServer(() => all)({ cursor: holdCursor(all[2]), limit: input.limit });
+      return keysetServer(() => all)({ cursor: { ...holdCursor(all[2]), snapshotAt: SNAP }, limit: input.limit });
     });
     await mount({ ...props([], all.slice(0, 3)), holdsTotal: 5, holdsRemaining: 2, holdsNextCursor: serverCursor, loadOlderHolds });
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("5");
@@ -307,7 +308,7 @@ describe("MessagesV2View", () => {
   it("a hold arriving between page 1 and 'Show older' causes no repeat and no skip; the last hold is reachable", async () => {
     let server = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = keysetServer(() => server);
-    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, holdsRemaining: 3, holdsNextCursor: holdCursor(server[2]), loadOlderHolds });
+    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, holdsRemaining: 3, holdsNextCursor: { ...holdCursor(server[2]), snapshotAt: SNAP }, loadOlderHolds });
     server = [{ ...openHold("brand-new"), ...at(0.1) }, ...server];
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
@@ -597,7 +598,7 @@ describe("MessagesV2View", () => {
       ok: true as const,
       data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], remaining: 0, total: 23, unverified: 0, nextCursor: null, contextErrors: [] },
     }));
-    await mount({ ...props([], holds), holdsTotal: 23, holdsRemaining: 1, holdsNextCursor: holdCursor(holds[21]), loadOlderHolds });
+    await mount({ ...props([], holds), holdsTotal: 23, holdsRemaining: 1, holdsNextCursor: { ...holdCursor(holds[21]), snapshotAt: SNAP }, loadOlderHolds });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
     await userEvent.click(screen.getByTestId("show-older"));
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(22);

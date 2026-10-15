@@ -10,6 +10,7 @@ import type { HoldCursor } from "./hold-activity";
 import type { OpenHold, RunWithSteps } from "./types";
 
 type Row = Record<string, unknown>;
+const SNAP = "2099-01-01T00:00:00.000000Z";
 const u = (n: number, ns = 0) => `${String(ns).padStart(8, "0")}-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const t = (sec: number, micros = "000000") => {
   const d = new Date(Date.UTC(2026, 9, 1) + sec * 1000).toISOString().slice(0, 19);
@@ -61,7 +62,7 @@ const walk = (sorted: OpenHold<RunWithSteps>[], limit: number) => {
   const ids: string[] = [];
   let cursor: HoldCursor | null = null;
   for (;;) {
-    const page = pageHolds(sorted, cursor, limit);
+    const page = pageHolds(sorted, cursor, limit, SNAP);
     ids.push(...page.holds.map((h) => h.id));
     if (!page.nextCursor) return ids;
     cursor = page.nextCursor;
@@ -79,13 +80,13 @@ describe("I1 every eligible hold is reachable in one order", () => {
 
   it("a hold resolved between pages does not shift the rest", async () => {
     const tables: Record<string, Row[]> = { properties: Array.from({ length: 100 }, (_, i) => flagged(i, t(i))) };
-    const first = pageHolds((await eligible(tables)).holds, null, 41);
+    const first = pageHolds((await eligible(tables)).holds, null, 41, SNAP);
     const resolved = (await eligible(tables)).holds[50].id; // on what would be page 2
     tables.properties = tables.properties.filter((p) => p.id !== resolved);
     const rest = walk((await eligible(tables)).holds, 41).filter((id) => !first.holds.some((h) => h.id === id));
     const expected = (await eligible(tables)).holds.map((h) => h.id).filter((id) => !first.holds.some((h) => h.id === id));
     expect(rest).toEqual(expected);
-    const second = pageHolds((await eligible(tables)).holds, first.nextCursor, 1000);
+    const second = pageHolds((await eligible(tables)).holds, first.nextCursor, 1000, SNAP);
     expect(second.holds.map((h) => h.id)).toEqual(expected); // nothing skipped, nothing repeated
   });
 
@@ -96,9 +97,9 @@ describe("I1 every eligible hold is reachable in one order", () => {
       pipeline_runs: [runRow(1, { conversation_id: u(9, 2), property_id: null, started_at: t(900) })], // newest; also in the feed window
     };
     const page = await loadMessagesV2Page(db(tables).client, "org");
-    const slice = await loadHoldsSlice(db(tables).client, "org", null, 50);
+    const listed = await eligible(tables);
     expect(page.holds.map((h) => h.id)).toEqual([u(1), u(2)]); // the conversation run lifted property 1
-    expect(slice?.holds.map((h) => h.id)).toEqual(page.holds.map((h) => h.id));
+    expect(listed.holds.map((h) => h.id)).toEqual(page.holds.map((h) => h.id)); // slices walk this same list
   });
 });
 
@@ -240,7 +241,7 @@ describe("I6 one effective reason from the complete list", () => {
     expect(page.holds.some((h) => h.id === u(0))).toBe(false); // oldest: not on page 1
     const reason = new Map(page.flagReasons).get(u(0, 5));
     expect(reason).toBe("model:opt_out");
-    const slice = await loadHoldsSlice(db({ properties, pipeline_runs: runs }).client, "org", page.nextCursor, 50);
+    const slice = await loadHoldsSlice(db({ properties, pipeline_runs: runs }).client, "org", page.nextCursor!, 50);
     const hold = slice!.holds.find((h) => h.id === u(0))!;
     const eff = withEffectiveReason(hold.run!, hold.flag_reason);
     const card = holdReasonSentence(eff, eff.reason ?? hold.flag_reason, "Dee");
@@ -264,7 +265,8 @@ describe("I8 totals exclude locked and unverifiable holds", () => {
     expect(page.total).toBe(42);
     expect(page.remaining).toBe(2);
     expect(page.unverified).toBe(1);
-    expect(page.nextCursor).toEqual(holdCursor(page.holds[page.holds.length - 1]));
+    expect(page.nextCursor).toMatchObject(holdCursor(page.holds[page.holds.length - 1]));
+    expect(page.nextCursor?.snapshotAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
     expect(page.nextCursor?.at).toBe(normalizeInstant(t(2)));
   });
 });
@@ -344,5 +346,53 @@ describe("Codex round 9", () => {
       pipeline_runs: [runRow(1, { property_id: null, conversation_id: u(5, 2), started_at: t(900), reason: null })],
     };
     expect(effectiveFlagReasons((await eligible(tables)).holds)).toEqual([[u(1, 5), "model:opt_out"]]);
+  });
+});
+
+describe("Codex round 11", () => {
+  it("a property-less run linked to A by inbound message and to B by conversation is owned by ONE hold; tape and cards agree", async () => {
+    const tables = {
+      properties: [flagged(1, t(10), { last_ai_escalation_reason: "model:opt_out" }), flagged(2, t(20), { last_ai_escalation_reason: "model:price_or_offer" })],
+      jev_lead_decisions: [
+        decision(1, u(1), t(10), { source_inbound_message_id: u(1, 6), conversation_id: u(8, 2) }),
+        decision(2, u(2), t(20), { conversation_id: u(5, 2) }),
+      ],
+      pipeline_runs: [runRow(1, { property_id: null, inbound_message_id: u(1, 6), conversation_id: u(5, 2), started_at: t(900), reason: null })],
+    };
+    const list = await eligible(tables);
+    const showing = list.holds.filter((h) => h.run?.id === u(1, 5));
+    expect(showing).toHaveLength(1);
+    expect(showing[0].id).toBe(u(2)); // newer activity before the run wins
+    const reasons = new Map(effectiveFlagReasons(list.holds));
+    for (const h of list.holds) {
+      if (!h.run) continue;
+      const eff = withEffectiveReason(h.run, h.flag_reason);
+      const card = holdReasonSentence(eff, eff.reason ?? h.flag_reason, "Dee");
+      const tape = deriveTape(h.run, "Dee", reasons.get(h.run.id));
+      expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    }
+  });
+
+  it("snapshot paging: a hold that gains activity after the snapshot keeps its place; a brand-new hold waits for a reload", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))],
+      pipeline_runs: [],
+    };
+    const snap = normalizeInstant(t(600))!;
+    const page1 = pageHolds((await eligible(tables)).holds.filter(() => true), null, 1, snap);
+    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
+    // Between pages: hold 3 gets a fresh run, and a brand-new hold 4 is flagged.
+    tables.pipeline_runs = [runRow(3, { property_id: u(3), started_at: t(900) })];
+    tables.properties = [...tables.properties, flagged(4, t(950))];
+    const ids: string[] = [...page1.holds.map((h) => h.id)];
+    let cursor = page1.nextCursor;
+    while (cursor) {
+      const slice = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
+      ids.push(...slice!.holds.map((h) => h.id));
+      cursor = slice!.nextCursor;
+    }
+    expect(ids).toEqual([u(1), u(2), u(3)]); // 3 is still reached at its snapshot place; 4 is not in this walk
+    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
+    expect(reloaded.ok && reloaded.holds.map((h) => h.id).slice(0, 2)).toEqual([u(4), u(3)]); // a reload shows both at the top
   });
 });

@@ -131,7 +131,7 @@ type OlderState = {
   error: string | null;
 };
 
-type HoldCursorInput = { at: string | null; id: string };
+type HoldCursorInput = { at: string | null; id: string; snapshotAt: string };
 
 /**
  * "Waiting for a person": ONE list, in the order the server built over every eligible hold. The client shows

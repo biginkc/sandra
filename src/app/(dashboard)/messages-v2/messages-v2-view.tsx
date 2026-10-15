@@ -61,7 +61,7 @@ export type MessagesV2ViewProps = {
   holdsTotal?: number;
   /** Holds after the first page, and the server-issued cursor to fetch them. */
   holdsRemaining?: number;
-  holdsNextCursor?: { at: string | null; id: string } | null;
+  holdsNextCursor?: { at: string | null; id: string; snapshotAt: string } | null;
   /** [runId, flag reason] over the complete eligible waiting list. */
   flagReasons?: Array<[string, string]>;
   /** Runs whose thread text failed to load on the server: fetched again in the browser. */

@@ -152,6 +152,8 @@ export async function loadHoldActivity(
   orgId: string,
   holds: OpenHold<PipelineRun>[],
   links: { convsByProperty: Map<string, Set<string>>; draftRunsByProperty: Map<string, Set<string>> },
+  /** Snapshot: ignore runs and steps after this instant (normalized), so a cursor's order never changes. */
+  asOf: string | null = null,
 ): Promise<OpenHold<RunWithSteps>[] | null> {
   const propertyIds = holds.map((h) => h.id);
   const msgIds = uniq(holds.flatMap((h) => h.message_ids ?? []));
@@ -200,25 +202,26 @@ export async function loadHoldActivity(
   ]);
   if (failed) return null;
 
-  const all = [...runs.values()];
-  const ownRelated = new Map<string, PipelineRun[]>(); // everything except property-less conversation runs
-  const convCandidates = new Map<string, string[]>(); // property-less run id -> holds whose conversations contain it
+  const upTo = (at: string) => asOf === null || compareInstants(at, asOf) <= 0;
+  const all = [...runs.values()].filter((r) => upTo(r.started_at));
+
+  // Every (run -> hold) link from every path: property, source message, draft run, property-less conversation run.
+  const candidates = new Map<string, string[]>();
   for (const h of holds) {
     const msgs = new Set(h.message_ids ?? []);
     const draftRuns = links.draftRunsByProperty.get(h.id) ?? new Set<string>();
     const convs = links.convsByProperty.get(h.id) ?? new Set<string>();
-    const own: PipelineRun[] = [];
     for (const r of all) {
-      if (r.property_id === h.id || msgs.has(r.inbound_message_id) || draftRuns.has(r.id)) own.push(r);
-      else if (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id)) {
-        convCandidates.set(r.id, [...(convCandidates.get(r.id) ?? []), h.id]);
-      }
+      const linked =
+        r.property_id === h.id ||
+        msgs.has(r.inbound_message_id) ||
+        draftRuns.has(r.id) ||
+        (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id));
+      if (linked) candidates.set(r.id, [...(candidates.get(r.id) ?? []), h.id]);
     }
-    ownRelated.set(h.id, own);
   }
 
-  // Steps for EVERY related run (own and conversation candidates): a later step on an older run is still activity.
-  const stepRunIds = uniq([...[...ownRelated.values()].flatMap((rs) => rs.map((r) => r.id)), ...convCandidates.keys()]);
+  const stepRunIds = [...candidates.keys()];
   const steps = new Map<string, PipelineRunStep[]>();
   const stepResults = await Promise.all(
     chunks(stepRunIds).map((ids) =>
@@ -227,6 +230,7 @@ export async function loadHoldActivity(
   );
   if (stepResults.some((r) => r.error)) return null;
   for (const st of stepResults.flatMap((r) => r.rows)) {
+    if (!upTo(st.created_at)) continue;
     const list = steps.get(st.run_id) ?? [];
     list.push(st);
     steps.set(st.run_id, list);
@@ -236,15 +240,23 @@ export async function loadHoldActivity(
   const newest = (vals: Array<string | null | undefined>): string | null =>
     vals.reduce<string | null>((m, v) => (!v ? m : m === null || compareInstants(v, m) > 0 ? v : m), null);
   const runActivity = (r: PipelineRun) => newest([r.started_at, ...(steps.get(r.id) ?? []).map((st) => st.created_at)]);
-  const baseActivity = new Map(
-    holds.map((h) => [h.id, newest([h.since, h.last_activity, ...(ownRelated.get(h.id) ?? []).map(runActivity)])] as const),
-  );
 
-  // A property-less conversation run belongs to AT MOST ONE hold: the one in that conversation with the newest
-  // activity (tie: lowest hold id). Other holds never use it for context, reason or activity, so tape and card agree.
-  const related = new Map<string, PipelineRun[]>([...ownRelated].map(([k, v]) => [k, [...v]]));
-  for (const [runId, holdIds] of convCandidates) {
-    const winner = [...holdIds].sort((x, y) => {
+  // Each run belongs to EXACTLY ONE hold, globally, before any context or reason is computed:
+  //   - a run on a held property belongs to that property's hold;
+  //   - otherwise (a property-less run, or one linked to several holds by different paths) it goes to the linked
+  //     hold with the newest activity counting only its uncontested runs (tie: lowest hold id).
+  const uncontested = new Map<string, PipelineRun[]>();
+  for (const r of all) {
+    const c = candidates.get(r.id);
+    if (!c) continue;
+    const solo = r.property_id && c.includes(r.property_id) ? r.property_id : c.length === 1 ? c[0] : null;
+    if (solo) uncontested.set(solo, [...(uncontested.get(solo) ?? []), r]);
+  }
+  const baseActivity = new Map(
+    holds.map((h) => [h.id, newest([h.since, h.last_activity, ...(uncontested.get(h.id) ?? []).map(runActivity)])] as const),
+  );
+  const pick = (ids: string[]) =>
+    [...ids].sort((x, y) => {
       const ax = baseActivity.get(x) ?? null;
       const ay = baseActivity.get(y) ?? null;
       if (ax !== ay) {
@@ -255,7 +267,12 @@ export async function loadHoldActivity(
       }
       return x < y ? -1 : x > y ? 1 : 0;
     })[0];
-    related.get(winner)!.push(runs.get(runId)!);
+  const related = new Map<string, PipelineRun[]>();
+  for (const r of all) {
+    const c = candidates.get(r.id);
+    if (!c) continue;
+    const owner = r.property_id && c.includes(r.property_id) ? r.property_id : pick(c);
+    related.set(owner, [...(related.get(owner) ?? []), r]);
   }
 
   return holds.map((h) => {
@@ -275,10 +292,21 @@ export type EligibleHolds =
   | { ok: false; error: string };
 
 /** Steps 1-5: the COMPLETE eligible list, sorted newest activity first. */
-export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string): Promise<EligibleHolds> {
+/**
+ * `asOf` (normalized instant) makes the list a SNAPSHOT: sources created, flags raised, runs started and steps
+ * written after it are ignored, so the order a cursor walks never changes under it. A reload takes a new snapshot.
+ */
+export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, asOf: string | null = null): Promise<EligibleHolds> {
   const fail = { ok: false as const, error: HOLDS_LOAD_ERROR };
-  const sources = await loadHoldSources(supabase, orgId);
-  if (!sources) return fail;
+  const loaded = await loadHoldSources(supabase, orgId);
+  if (!loaded) return fail;
+  const upTo = (at: string | null | undefined) => asOf === null || !at || compareInstants(at, asOf) <= 0;
+  const sources: HoldSources = {
+    properties: loaded.properties.filter((p) => upTo(p.needs_human_attention_since ?? p.last_ai_escalation_at)),
+    decisions: loaded.decisions.filter((d) => upTo(d.created_at)),
+    reviews: loaded.reviews.filter((r) => upTo(r.created_at)),
+    drafts: loaded.drafts.filter((d) => upTo(d.created_at)),
+  };
   const candidates = await resolveDraftProperties(supabase, orgId, sources.drafts);
   if (!candidates) return fail;
 
@@ -321,7 +349,7 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
   }
 
   const base = deriveOpenHolds({ properties, decisions, reviews, drafts, runs: [] });
-  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty });
+  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty }, asOf);
   if (!withRuns) return fail;
   return { ok: true, holds: sortNewestFirst(withRuns), unverified };
 }
@@ -332,15 +360,23 @@ export type HoldPage = {
   total: number;
   remaining: number;
   /** Echo this back for the next page; null = nothing more. */
-  nextCursor: HoldCursor | null;
+  nextCursor: PageCursor | null;
 };
 
+/** A "Show older" cursor: the snapshot it belongs to plus the last hold's place. */
+export type PageCursor = HoldCursor & { snapshotAt: string };
+
 /** Step 5: the keyset page after `cursor` (null = the first page). */
-export function pageHolds(sorted: readonly OpenHold<RunWithSteps>[], cursor: HoldCursor | null, limit: number): HoldPage {
+export function pageHolds(
+  sorted: readonly OpenHold<RunWithSteps>[],
+  cursor: HoldCursor | null,
+  limit: number,
+  snapshotAt: string,
+): HoldPage {
   const after = holdsAfter(sorted, cursor);
   const holds = after.slice(0, limit);
   const remaining = after.length - holds.length;
-  return { holds, total: sorted.length, remaining, nextCursor: remaining > 0 && holds.length ? holdCursor(holds[holds.length - 1]) : null };
+  return { holds, total: sorted.length, remaining, nextCursor: remaining > 0 && holds.length ? { ...holdCursor(holds[holds.length - 1]), snapshotAt } : null };
 }
 
 /**

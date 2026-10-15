@@ -44,6 +44,14 @@ export function holdsAfter(sorted: readonly OpenHold<RunWithSteps>[], cursor: Ho
   return cursor ? sorted.filter((h) => compareHoldOrder(holdCursor(h), cursor) > 0) : [...sorted];
 }
 
+/** A "Show older" cursor from untrusted input: hold cursor plus the snapshot instant it belongs to. */
+export function parsePageCursor(input: unknown): (HoldCursor & { snapshotAt: string }) | null {
+  const base = parseHoldCursor(input);
+  const snap = (input as { snapshotAt?: unknown } | null)?.snapshotAt;
+  if (!base || typeof snap !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(snap)) return null;
+  return { ...base, snapshotAt: snap };
+}
+
 /** A cursor from untrusted input: a normalized timestamp (or null) and a uuid (every hold is keyed by its property). It is only ever compared, never put in a query. */
 export function parseHoldCursor(input: unknown): HoldCursor | null {
   if (!input || typeof input !== "object") return null;
