@@ -865,6 +865,17 @@ it('next_change_at covers drip late-window, call-in-progress, ledger and campaig
   });
 });
 
+it('exposes the pending AI draft id for the Fix action', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('d'); await w.text(id, 'inbound', w.at(-HOUR)); await w.aiDraft(id, w.at(-30 * MIN));
+    const draft = (await db.query('select id from public.ai_reply_drafts where property_id=$1', [id])).rows[0].id;
+    const r = await w.one(id);
+    expect(r.facts).toMatchObject({ reason: 'new_reply', aiDraftId: draft });
+    expect(r.labels).toContain('ai_draft_waiting');
+  });
+});
+
 it('next_change_at includes the instant a Call today pin lapses', async () => {
   await withDb(async (db) => {
     const w = await world(db);

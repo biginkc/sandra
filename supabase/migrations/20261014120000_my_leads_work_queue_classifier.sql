@@ -258,8 +258,9 @@ language sql stable security definer set search_path = '' as $$
     select n.lead_id, 'norma_needs_review', 'review', n.review_at, null::uuid, false from nr n where n.review_at is not null),
   -- A pending AI draft is a label only (never Broken): stale once its reply is handled another way.
   dr as (
-    select distinct d.property_id as lead_id from public.ai_reply_drafts d
-    where d.org_id = p_org and d.status = 'pending' and d.property_id in (select property_id from base)),
+    select distinct on (d.property_id) d.property_id as lead_id, d.id as draft_id from public.ai_reply_drafts d
+    where d.org_id = p_org and d.status = 'pending' and d.property_id in (select property_id from base)
+    order by d.property_id, d.created_at desc, d.id),
   bko as (
     select b0.* from bk0 b0
     where not b0.failure or not (
@@ -313,7 +314,7 @@ language sql stable security definer set search_path = '' as $$
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
-      coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
+      coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, dr.draft_id, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
       coalesce(nr.calling, false) as norma_calling, (nt.lead_id is not null) as norma_task,
       tmn.next_at
     from base b
@@ -450,7 +451,7 @@ language sql stable security definer set search_path = '' as $$
       'latestInbound', case when f.in_ts is null then null else jsonb_build_object(
         'at', f.in_ts, 'kind', f.in_kind, 'messageId', f.in_mid, 'handled', f.in_handled, 'contactOnly', f.in_contact_only) end,
       'hasPhone', cardinality(f.phones) > 0, 'contactDnc', f.dnc,
-      'broken', coalesce(f.broken_items, '[]'::jsonb),
+      'broken', coalesce(f.broken_items, '[]'::jsonb), 'aiDraftId', f.draft_id,
       'labels', to_jsonb(f.labels),
       'row', f.row_data) as facts,
     f.search_text, f.next_at
