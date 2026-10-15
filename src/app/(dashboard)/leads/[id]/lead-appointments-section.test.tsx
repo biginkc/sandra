@@ -159,6 +159,16 @@ describe("<LeadAppointmentsSection />", () => {
     expect(screen.queryByTestId("stub-task-actions-cb")).not.toBeInTheDocument();
   });
 
+  it("lists follow-up tasks labelled Follow-up, with no lifecycle controls (parity with the panel)", () => {
+    renderSection({
+      appointments: [makeRow({ id: "fu", type: "follow_up", title: "Check back" })],
+    });
+    const item = screen.getByTestId("lead-appointment-fu");
+    expect(item).toHaveTextContent("Follow-up");
+    expect(screen.queryByTestId("stub-upcoming-actions-fu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("stub-task-actions-fu")).not.toBeInTheDocument();
+  });
+
   it("never shows controls on finished history rows, even for the owner", () => {
     renderSection({
       viewerId: "boss",

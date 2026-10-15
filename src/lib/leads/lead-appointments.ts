@@ -7,7 +7,7 @@ export type LeadAppointmentRow = {
   due_at: string;
   end_at: string | null;
   assignee_id: string;
-  type: "appointment" | "callback";
+  type: "appointment" | "callback" | "follow_up";
   status: "open" | "snoozed" | "completed" | "cancelled";
   outcome: string | null;
 };

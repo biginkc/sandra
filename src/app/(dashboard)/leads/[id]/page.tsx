@@ -311,7 +311,7 @@ export default async function LeadDetailPage({
     .from("tasks")
     .select(LEAD_APPOINTMENT_COLUMNS)
     .eq("related_property_id", lead.id)
-    .in("type", ["appointment", "callback"])
+    .in("type", ["appointment", "callback", "follow_up"])
     .in("status", ["open", "snoozed"])
     .order("due_at", { ascending: true });
   const appointmentHistoryPromise = loadLeadAppointmentHistory(lead.id);

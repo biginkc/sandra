@@ -150,9 +150,9 @@ export function LeadAppointmentsSection({
         <div className="min-w-0 flex-1">
           <div className="text-foreground truncate text-sm font-bold">
             {row.title}
-            {row.type === "callback" && (
+            {row.type !== "appointment" && (
               <span className="text-muted-foreground ml-2 text-xs font-medium">
-                Callback
+                {row.type === "callback" ? "Callback" : "Follow-up"}
               </span>
             )}
           </div>
@@ -162,6 +162,7 @@ export function LeadAppointmentsSection({
           </div>
         </div>
         {canAct &&
+          row.type !== "follow_up" &&
           (row.type === "callback" ? (
             <TaskActionsRow taskId={row.id} onChanged={() => router.refresh()} />
           ) : past ? (

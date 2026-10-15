@@ -49,7 +49,7 @@ export async function loadLeadAppointmentHistory(
       .from("tasks")
       .select(LEAD_APPOINTMENT_COLUMNS)
       .eq("related_property_id", propertyId)
-      .in("type", ["appointment", "callback"])
+      .in("type", ["appointment", "callback", "follow_up"])
       .in("status", ["completed", "cancelled"])
       .order("due_at", { ascending: false })
       .order("id", { ascending: false })
