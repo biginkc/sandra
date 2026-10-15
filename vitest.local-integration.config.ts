@@ -121,6 +121,7 @@ export default defineConfig({
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
+      "supabase/migrations/20261016030000_nine_rule_switches.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
       "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",

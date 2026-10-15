@@ -91,7 +91,7 @@ let orgId = "";
 let phoneCounter = 0;
 const DRIPS = ["Maybe later", "Asked who is texting", "Not interested", "Confirmed owner"] as const;
 
-async function seedOrg(opts: { engine?: string; provider?: string; mode?: string; thresholds?: boolean; drips?: readonly string[]; templates?: boolean; newLeadAuto?: boolean; nurtureDrip?: boolean; templateText?: Partial<Record<"nurture" | "not_interested" | "wrong_number", string>>; outboundMode?: string } = {}) {
+async function seedOrg(opts: { engine?: string; provider?: string; mode?: string; thresholds?: boolean; drips?: readonly string[]; templates?: boolean; newLeadAuto?: boolean; nurtureDrip?: boolean; identityReply?: boolean; confirmedOwnerDrip?: boolean; templateText?: Partial<Record<"nurture" | "not_interested" | "wrong_number", string>>; outboundMode?: string } = {}) {
   await supabase.from("ai_responder_configs").delete().eq("org_id", orgId);
   const { error } = await supabase.from("ai_responder_configs").insert({
     org_id: orgId,
@@ -101,6 +101,8 @@ async function seedOrg(opts: { engine?: string; provider?: string; mode?: string
     classifier_mode: opts.mode ?? "automatic",
     classifier_engine: opts.engine ?? "nine_questions",
     ...(opts.outboundMode ? { outbound_mode: opts.outboundMode } : {}),
+    ...(opts.identityReply === false ? { nine_identity_reply: false } : {}),
+    ...(opts.confirmedOwnerDrip === false ? { nine_confirmed_owner_drip: false } : {}),
   });
   expect(error).toBeNull();
 
@@ -495,6 +497,32 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const row = await propertyRow(lead.propertyId);
     expect(row.outreach_dispo).toBeNull();
     expect(row.needs_human_attention).toBe(true);
+  });
+
+  it("PR 4 identity-reply switch OFF: nothing sent, no drip, held for a person", async () => {
+    await seedOrg({ identityReply: false });
+    const { lead } = await run({ asked_who: 0.9 }, "who is this");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(getMockMessageLog()).toHaveLength(0);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect(await propertyRow(lead.propertyId)).toMatchObject({
+      needs_human_attention: true,
+      last_ai_escalation_reason: "nine_automation_disabled:asked_who",
+    });
+  });
+
+  it("PR 4 Confirmed owner drip switch OFF: no text, nobody enrolled, no hold", async () => {
+    await seedOrg({ confirmedOwnerDrip: false });
+    const { lead } = await run({ confirmed_owner: 0.9 }, "yes its me");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
+  });
+
+  it("PR 4 switches do not govern each other (identity off: Confirmed owner still enrols)", async () => {
+    await seedOrg({ identityReply: false });
+    const { lead } = await run({ confirmed_owner: 0.9 }, "yes its me");
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([{ name: "Confirmed owner", status: "active", step: 0 }]);
   });
 
   it("nurture auto-drip switch OFF: the Maybe later reply still goes out, nobody is enrolled, no hold", async () => {

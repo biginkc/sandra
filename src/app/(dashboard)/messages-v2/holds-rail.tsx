@@ -219,7 +219,7 @@ export function HoldCard({
 
 const SOURCE_NAME: Record<HoldSource, string> = {
   needs_attention: "needs-attention",
-  jev_decision: "Jev decision",
+  jev_decision: "Sandra decision",
   disposition_review: "disposition review",
   pending_draft: "reply draft",
 };

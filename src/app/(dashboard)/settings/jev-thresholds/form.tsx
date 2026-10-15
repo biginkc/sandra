@@ -96,7 +96,7 @@ export function JevThresholdsForm({
   return (
     <div className="flex max-w-2xl flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        Native TypeSafe confidence must be at or above this value for Jev to apply the outcome
+        Native TypeSafe confidence must be at or above this value for Sandra to apply the outcome
         automatically. Defaults are provisional operational choices, not claimed accuracy.
         DNC and unclear outcomes, and any missing or invalid confidence, are always routed to a
         human regardless of threshold. Edits take effect on the next classification — no

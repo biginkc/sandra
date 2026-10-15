@@ -1,11 +1,14 @@
 "use client";
 
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
 import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 
+import { useHomeownerHouses } from "./homeowner-houses";
 import { pageText } from "./page-text";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, SnapshotEntry, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
@@ -60,9 +63,12 @@ function WaitingCard({
   pinned,
   paused,
   selected = false,
+  houses,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
+  /** "Owns N houses" for this hold's homeowner, from the waiting pile's one batched read. */
+  houses?: HomeownerHouses | null;
   /** The snapshot time this card was ordered by (shown instead of the live one). */
   at?: string | null;
   /** Newer activity arrived after this list was built: actions are locked until the list is refreshed. */
@@ -104,6 +110,12 @@ function WaitingCard({
     >
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
         <span className="font-semibold text-foreground">{label?.name ?? "Unknown sender"}</span>
+        <MultiHouseBadge
+          houses={houses}
+          contactId={run?.contact_id}
+          ownerName={label?.name}
+          currentPropertyId={hold.property_id ?? undefined}
+        />
         {label?.address && <span>· {label.address}</span>}
         {updated && (
           <span data-testid="hold-updated" className="rounded-full bg-status-new-bg px-2 py-px text-xs font-medium text-status-new-fg">
@@ -539,6 +551,13 @@ export function WaitingColumn({
 
   const failures = meta?.failed ?? [];
   const labelFor = (id: string) => labels.get(id) ?? older.labels.get(id);
+  // One batched "Owns N houses" read for every homeowner in the pile (first page, older pages, pinned card).
+  const houseIds = [...live.values(), ...(focusPinned ? [focusPinned] : [])].map((h) => h.run?.contact_id ?? null);
+  const housesByContact = useHomeownerHouses(houseIds);
+  const housesFor = (h: OpenHold<RunWithSteps> | undefined) => {
+    const id = h?.run?.contact_id;
+    return id ? housesByContact.get(id) ?? null : null;
+  };
   return (
     <aside aria-label="Waiting for a person" data-testid="waiting-column" className="flex min-w-0 flex-col gap-3">
       <div className="flex items-baseline gap-3">
@@ -580,6 +599,7 @@ export function WaitingColumn({
                 hold={hold}
                 at={e ? e.at : undefined}
                 label={labelFor(focusPinned.id)}
+                houses={housesFor(focusPinned)}
                 actions={actions}
                 onReload={onReload}
                 updated={st.updated}
@@ -641,6 +661,7 @@ export function WaitingColumn({
               hold={hold}
               at={snapshot ? e.at : undefined}
               label={labelFor(e.id)}
+              houses={housesFor(live.get(e.id))}
               actions={actions}
               onReload={onReload}
               updated={st.updated}
