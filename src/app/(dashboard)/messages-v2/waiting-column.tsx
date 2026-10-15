@@ -285,6 +285,7 @@ export function WaitingColumn({
     try {
       const requestedFrom = older.nextPos;
       const requestKey = refreshKey;
+      const sliceSeq = ++cardCheckSeq.current;
       const res = await loadOlder({ ids });
       // Tagged with the snapshot it was asked for: a response landing after a new snapshot loaded is discarded.
       if (refreshKeyRef.current !== requestKey) return;
@@ -309,6 +310,7 @@ export function WaitingColumn({
           requestKey,
           res.data.holds.map((h) => h.id),
           res.data.contextErrors.includes(SEEN_CHECK_FAILED) ? "failed" : "ok",
+          sliceSeq,
         );
         setVisible((v) => v + PAGE);
       } else {
@@ -332,23 +334,28 @@ export function WaitingColumn({
   // R-A: actions are enabled PER CARD, only from that card's own last successful check in the current snapshot.
   // "ok" = its load ran the fresh version check, or a later live re-check of THAT card succeeded; "failed" = its
   // load's version check or its last re-check failed. A card with no status (never checked) is paused.
-  const initialChecks = (): Map<string, "ok" | "failed"> => {
-    const m = new Map<string, "ok" | "failed">();
+  // Each card's status carries the sequence number of the check that produced it (load = 0). A result is applied
+  // only if its sequence is newer than the card's current one, so a late slice can never undo a newer failed check.
+  type CardCheck = { s: "ok" | "failed"; q: number };
+  const initialChecks = (): Map<string, CardCheck> => {
+    const m = new Map<string, CardCheck>();
     const firstFailed = !!meta?.contextErrors.includes(SEEN_CHECK_FAILED);
-    for (const h of holds) m.set(h.id, firstFailed ? "failed" : "ok");
-    if (focusHold) m.set(focusHold.id, focusHoldErrors?.includes(SEEN_CHECK_FAILED) ? "failed" : "ok");
+    for (const h of holds) m.set(h.id, { s: firstFailed ? "failed" : "ok", q: 0 });
+    if (focusHold) m.set(focusHold.id, { s: focusHoldErrors?.includes(SEEN_CHECK_FAILED) ? "failed" : "ok", q: 0 });
     return m;
   };
-  const [checkStore, setCheckStore] = useState<{ forKey: unknown; status: Map<string, "ok" | "failed"> }>(() => ({ forKey: refreshKey, status: initialChecks() }));
+  const [checkStore, setCheckStore] = useState<{ forKey: unknown; status: Map<string, CardCheck> }>(() => ({ forKey: refreshKey, status: initialChecks() }));
   const checkStatus = checkStore.forKey === refreshKey ? checkStore.status : initialChecks();
-  const pausedCard = (id: string) => checkStatus.get(id) !== "ok";
-  /** Records check outcomes for exactly these card ids, only while `key` is still the current snapshot (R-B). */
-  const recordChecks = (key: unknown, ids: readonly string[], outcome: "ok" | "failed") =>
+  const pausedCard = (id: string) => checkStatus.get(id)?.s !== "ok";
+  /** One counter for every check that can set a card's status (slice loads and live re-checks), in request order. */
+  const cardCheckSeq = useRef(0);
+  /** Records outcomes for exactly these ids, only for the current snapshot and only if `q` is newer per card (R-B). */
+  const recordChecks = (key: unknown, ids: readonly string[], outcome: "ok" | "failed", q: number) =>
     setCheckStore((prev) => {
       if (refreshKeyRef.current !== key) return prev;
       const base = prev.forKey === key ? prev.status : initialChecks();
       const status = new Map(base);
-      for (const id of ids) status.set(id, outcome);
+      for (const id of ids) if (q > (status.get(id)?.q ?? -1)) status.set(id, { s: outcome, q });
       return { forKey: key, status };
     });
   const checkSeq = useRef(0);
@@ -371,6 +378,7 @@ export function WaitingColumn({
     const check = async () => {
       const seq = ++checkSeq.current;
       const key = refreshKeyRef.current;
+      const q = ++cardCheckSeq.current;
       const ids = shownIdsRef.current;
       if (!ids.length) return;
       const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
@@ -381,13 +389,13 @@ export function WaitingColumn({
         try {
           res = await revalidate({ ids: ids.slice(i, i + 100) });
         } catch {
-          if (alive && seq === checkSeq.current) recordChecks(key, ids, "failed");
+          if (alive && seq === checkSeq.current) recordChecks(key, ids, "failed", q);
           return;
         }
         // Stale responses are discarded entirely: only the newest check may touch any state.
         if (!alive || seq !== checkSeq.current) return;
         if (!res.ok) {
-          recordChecks(key, ids, "failed");
+          recordChecks(key, ids, "failed", q);
           return;
         }
         for (const st of res.data) {
@@ -406,7 +414,7 @@ export function WaitingColumn({
         }
       }
       if (!alive || seq !== checkSeq.current || refreshKeyRef.current !== key) return; // only the latest check of this snapshot commits
-      recordChecks(key, ids, "ok");
+      recordChecks(key, ids, "ok", q);
       if (gone.length)
         setOlder((prev) => {
           const cur = prev.forKey === refreshKey ? prev : fresh();
@@ -437,7 +445,8 @@ export function WaitingColumn({
       (h.draft ? h.draft.sendable === true : false) !== (e.d ? e.ds === true : false) ||
       (h.flag_reason ?? null) !== reason ||
       // A flag re-stamped during enrichment arrives in the fresh `seen`: compared at render, not only on the next poll.
-      (h.seen !== undefined && e.fa !== null && (h.seen.flagReason ?? null) !== reason) ||
+      // Unconditional: a null snapshot flag time gates only the time comparison, never the reason.
+      (h.seen !== undefined && (h.seen.flagReason ?? null) !== reason) ||
       (h.seen?.through ?? null) !== (e.th ?? null) ||
       (h.seen?.flagAt ?? null) !== e.fa ||
       holdActivityAt(h) !== e.at ||
@@ -481,7 +490,7 @@ export function WaitingColumn({
           {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
-      {[...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])].some((id) => checkStatus.get(id) === "failed") && (
+      {[...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])].some((id) => checkStatus.get(id)?.s === "failed") && (
         <p role="alert" data-testid="holds-recheck-failed" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
           Couldn&apos;t re-check this list. Actions are paused until it can be checked.
         </p>

@@ -164,6 +164,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         : undefined,
     [undoJevAction, findJevUndo],
   );
+  // Runs whose thread text failed, merged across fetches: an id leaves only when ITS own text loads.
+  const [threadFailed, setThreadFailed] = useState<ReadonlySet<string>>(() => new Set(props.threadFailedRunIds ?? []));
   const [nowMs, setNowMs] = useState(props.nowMs);
   const [live, setLive] = useState(false);
   if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
@@ -172,6 +174,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     // effect below mirrors committed state into it.
     setRunsState(props.runs);
     setLabels((curr) => new Map([...curr, ...props.labels]));
+    // New snapshot: adopt the server's thread text and failures (its texts win over anything fetched before).
+    setThreads((curr) => new Map([...curr, ...(props.threads ?? [])]));
+    setThreadFailed(new Set(props.threadFailedRunIds ?? []));
   }
   useEffect(() => {
     runsRef.current = runs;
@@ -237,9 +242,21 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         .map(threadKey),
     ),
   );
-  // Runs whose thread text failed, merged across fetches: an id leaves only when ITS own text loads.
-  const [threadFailed, setThreadFailed] = useState<ReadonlySet<string>>(() => new Set(props.threadFailedRunIds ?? []));
   const [threadRetry, setThreadRetry] = useState(0);
+  // Thread results are keyed to (snapshot, run id, version): on a new snapshot, in-flight results from the previous
+  // one are dropped and the request bookkeeping restarts from the server's threads.
+  const threadEpoch = useRef(0);
+  const epochFor = useRef<unknown>(lastInitial);
+  useEffect(() => {
+    if (epochFor.current === lastInitial) return;
+    epochFor.current = lastInitial;
+    threadEpoch.current += 1;
+    requestedThreads.current = new Set(
+      lastInitial.runs
+        .filter((r) => (lastInitial.threads ?? []).some(([id]) => id === r.id) && !(lastInitial.threadFailedRunIds ?? []).includes(r.id))
+        .map(threadKey),
+    );
+  }, [lastInitial]);
   useEffect(() => {
     const pool = [...runs, ...earlier];
     const missing = pool.filter((r) => !requestedThreads.current.has(threadKey(r)));
@@ -248,7 +265,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     // Versioned (R-B): every result -- thread text AND the failure / retry bookkeeping -- is committed only for runs
     // still at the version they were fetched for, so a late result for an older version touches nothing.
     const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
+    const epochAtRequest = threadEpoch.current;
     const stillCurrent = () => {
+      if (threadEpoch.current !== epochAtRequest) return () => false;
       const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
       return (id: string) => current.get(id) === versionAtRequest.get(id);
     };
@@ -398,6 +417,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         : { day: chicagoDayKey(nowMs), before: null });
     setEarlierBusy(true);
     setEarlierNote(null);
+    const dayEpoch = threadEpoch.current;
     try {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const res = await props.loadTapeDay(next);
@@ -410,6 +430,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setDayFlagReasons((curr) => [...curr, ...(res.data.flagReasons ?? [])]);
+        // A refresh happened while this day loaded: its thread results belong to the previous snapshot.
+        if (threadEpoch.current !== dayEpoch) {
+          setCursor(next);
+          return;
+        }
         // Same versioned commit as the browser fetch: a delayed day response never overwrites a newer reply.
         const dayVersion = new Map(got.map((r) => [r.id, threadKey(r)]));
         const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));

@@ -756,6 +756,85 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("snapshot flag time unknown (fa null) but the reason changed: Updated, actions disabled", async () => {
+    const snapHold = { ...openHold("pn"), ...at(5), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: null } };
+    const enriched = { ...snapHold, seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: null } };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [enriched]), holdsSnapshot: buildSnapshot([snapHold]), actions });
+    expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+  });
+
+  it("R-B per card: a slice success requested before a newer failed re-check never re-enables that card", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+      const snapshot = buildSnapshot(all);
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => (release = r));
+      const server = byIdsServer(() => all);
+      const loadOlderHolds = vi.fn(async (input: { ids: string[] }) => {
+        await gate;
+        return server(input);
+      });
+      const revalidateHolds = vi.fn(async () => ({ ok: false as const, error: { code: "X", message: "x" } }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({
+        ...props([], all.slice(0, 3)),
+        holdsSnapshot: snapshot,
+        loadOlderHolds,
+        revalidateHolds,
+        actions,
+        focusDeadLetter: { deadLetterId: "dl-1", propertyId: "h5" },
+        focusHold: all[4],
+      });
+      expect(within(screen.getByTestId("focus-pinned")).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+      await act(async () => {
+        screen.getByTestId("show-older").click(); // slice requested first (older sequence)
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60_000); // newer re-check of shown + pinned fails
+      });
+      await waitFor(() => expect(within(screen.getByTestId("focus-pinned")).getByRole("button", { name: "Dismiss" })).toBeDisabled());
+      await act(async () => {
+        release();
+        await gate;
+      });
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
+      const card = screen.getAllByTestId("waiting-card").find((c) => c.getAttribute("data-selected") === "true")!;
+      expect(within(card).getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("R-B snapshot key: an in-flight thread result from before a refresh is ignored; the refreshed threads are shown", async () => {
+    const realFrom = mocks.client.from.getMockImplementation()!;
+    let releaseOld: () => void = () => {};
+    const oldGate = new Promise<void>((r) => (releaseOld = r));
+    mocks.client.from.mockImplementation(((table: string) => {
+      const q = (realFrom as (t: string) => Record<string, unknown>)(table);
+      q.then = (resolve: (v: unknown) => unknown) =>
+        oldGate.then(() => resolve({ data: table === "messages" ? [{ id: "o1", body: "OLD reply", created_at: "2026-10-14T12:00:00Z" }] : [], error: null }));
+      return q;
+    }) as never);
+    try {
+      const r = run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o1", status: "replied" });
+      const p1 = { ...props([r]), threads: [] as Array<[string, { lastOutbound: string | null; reply: string | null }]> };
+      const { rerender } = render(<MessagesV2View {...p1} />);
+      await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+      rerender(<MessagesV2View {...p1} runs={[{ ...r }]} threads={[["v", { lastOutbound: null, reply: "NEW reply" }]]} />);
+      await waitFor(() => expect(screen.getByTestId("tape-reply")).toHaveTextContent("NEW reply"));
+      await act(async () => {
+        releaseOld();
+        await oldGate;
+      });
+      expect(screen.getByTestId("tape-reply")).toHaveTextContent("NEW reply");
+    } finally {
+      mocks.client.from.mockImplementation(realFrom as never);
+    }
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
