@@ -171,3 +171,20 @@ describe("holdReasonSentence", () => {
     expect(holdReasonSentence(null, "send_timeout_then_sent", "They")).toBe("Needs a person to look at it. Nothing sent.");
   });
 });
+
+describe("snapshot reason wins (pinned)", () => {
+  it("a run whose own reason and outcome say price shows the snapshot's Hostile on tape and card", () => {
+    const r = run({ status: "held", reason: "model:price_or_offer", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" })] });
+    const tape = deriveTape(r, "Dee", "hostile_needs_confirm", true);
+    expect(tape.kind === "decided" && tape.tag?.label).toBe("Hostile");
+    const cardRun = { ...r, reason: "hostile_needs_confirm" };
+    const card = holdReasonSentence(cardRun, "hostile_needs_confirm", "Dee", true);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Hostile text. Nothing sent.");
+  });
+
+  it("without a snapshot hold the run's own reason still applies", () => {
+    const r = run({ status: "held", reason: "model:price_or_offer", steps: [] });
+    expect(deriveTape(r, "Dee", "hostile_needs_confirm", false).kind === "decided" && (deriveTape(r, "Dee", "hostile_needs_confirm", false) as { tag: { label: string } }).tag.label).toBe("Talked price");
+  });
+});

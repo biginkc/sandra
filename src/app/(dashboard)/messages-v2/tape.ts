@@ -76,7 +76,10 @@ function classifyOutcome(steps: readonly PipelineRunStep[]): string | null {
 }
 
 /** The tag for a run: escalation reason first (it is more specific), then the classifier outcome, then the terminal action. */
-export function tapeTagForRun(run: Pick<RunWithSteps, "reason" | "steps">): TapeTag | null {
+export function tapeTagForRun(run: Pick<RunWithSteps, "reason" | "steps">, pinnedReason?: string | null): TapeTag | null {
+  // A reason frozen by the waiting-list snapshot beats anything the run itself says (old reason or old outcome).
+  const pinned = pinnedReason ? tapeTagForWord(reasonWord(pinnedReason)) : null;
+  if (pinned) return pinned;
   const word = reasonWord(run.reason);
   if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm") {
     return tapeTagForWord(word);
@@ -170,12 +173,13 @@ export function withEffectiveReason<T extends { reason: string | null }>(run: T,
 }
 
 /** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". `flagReason` is the hold's flag reason when this run is the hold's current run. */
-export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null): TapeView {
-  const run = withEffectiveReason(rawRun, flagReason);
+export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null, pinned = false): TapeView {
+  // `pinned`: the reason is the waiting-list snapshot's, and it wins over the run's own reason and outcome.
+  const run = pinned && flagReason ? { ...rawRun, reason: flagReason } : withEffectiveReason(rawRun, flagReason);
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 
-  const tag = tapeTagForRun(run);
+  const tag = tapeTagForRun(run, pinned ? flagReason : null);
   const terminal = TERMINAL.has(run.status);
   const delayed = hasStep(run.steps, "reply_delay_scheduled", "applied");
   const replySent = run.status === "replied" || run.steps.some((s) => s.kind === "reply" && s.result === "sent");
@@ -206,15 +210,20 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
     // A held run reads exactly like its card in "Waiting for a person": what Sandra thought and why it waited.
     sentence:
       waiting && !handed
-        ? holdReasonSentence(run, run.reason, who)
+        ? holdReasonSentence(run, run.reason, who, pinned)
         : sentenceFor(tag, who, { replySent, closed, waiting: false, handed }),
     did: didLine(run, stage, replySent),
   };
 }
 
 /** Plain reason sentence for a hold in the "Waiting for a person" column. */
-export function holdReasonSentence(run: Pick<RunWithSteps, "reason" | "steps"> | null, flagReason: string | null | undefined, who: string): string {
-  const tag = run ? tapeTagForRun(run) : null;
+export function holdReasonSentence(
+  run: Pick<RunWithSteps, "reason" | "steps"> | null,
+  flagReason: string | null | undefined,
+  who: string,
+  pinned = false,
+): string {
+  const tag = run ? tapeTagForRun(run, pinned ? flagReason : null) : null;
   const word = reasonWord(flagReason);
   const t = tag ?? tapeTagForWord(word);
   switch (t?.label) {

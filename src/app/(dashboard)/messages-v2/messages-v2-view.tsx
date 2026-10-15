@@ -404,6 +404,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   // Snapshot reasons win (the tape must match the cards); earlier days add reasons for runs the snapshot does not cover.
   const [dayFlagReasons, setDayFlagReasons] = useState<Array<[string, string]>>([]);
   const flagByRun = useMemo(() => new Map([...dayFlagReasons, ...(props.flagReasons ?? [])]), [dayFlagReasons, props.flagReasons]);
+  const snapshotRuns = useMemo(() => new Set((props.flagReasons ?? []).map(([runId]) => runId)), [props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);
   const on = sandraIsOn(badges);
@@ -519,6 +520,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   label={labels.get(item.run.id)}
                   thread={threads.get(item.run.id)}
                   flagReason={flagByRun.get(item.run.id)}
+                  flagPinned={snapshotRuns.has(item.run.id)}
                   undoControls={undoControls}
                 />
               ),

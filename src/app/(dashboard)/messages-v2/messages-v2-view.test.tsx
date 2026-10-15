@@ -323,26 +323,37 @@ describe("MessagesV2View", () => {
     expect(loadOlderHolds.mock.calls.map((c) => c[0].ids)).toEqual([["h2", "h3"], ["h2", "h3"]]);
   });
 
-  it("R2: a reason changed after the snapshot renders the snapshot reason (card = tape), marks Updated, and actions carry the snapshot reason so they come back STALE", async () => {
-    const snapHold = { ...openHold("p45"), ...at(5), flag_reason: "model:opt_out", seen: { through: null, flagReason: "model:opt_out", flagAt: "2026-10-01T00:00:00.000000Z" } };
+  it("R2: a reason changed after the snapshot renders the snapshot reason (card = tape tag) and locks the card's actions", async () => {
+    const snapHold = { ...openHold("p45"), ...at(5), flag_reason: "hostile_needs_confirm", seen: { through: null, flagReason: "hostile_needs_confirm", flagAt: "2026-10-01T00:00:00.000000Z" } };
     const liveHold = { ...snapHold, flag_reason: "model:price_or_offer", seen: { through: null, flagReason: "model:price_or_offer", flagAt: "2026-10-02T00:00:00.000000Z" } };
     const others = [1, 2].map((m) => ({ ...openHold(`p${m}`), ...at(m) }));
-    const snapshot = buildSnapshot([...others, snapHold]);
     const loadOlderHolds = byIdsServer(() => [...others, liveHold]);
-    const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));
-    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss, listAssignees: vi.fn() };
-    await mount({ ...props([], others), holdsSnapshot: snapshot, loadOlderHolds, actions });
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], others), holdsSnapshot: buildSnapshot([...others, snapHold]), loadOlderHolds, actions });
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(3));
     const card = screen.getAllByTestId("waiting-card")[2];
-    expect(within(card).getByTestId("waiting-reason")).toHaveTextContent("asked to stop");
-    expect(within(card).getByTestId("hold-updated")).toBeInTheDocument();
-    await userEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
-    await userEvent.type(within(card).getByLabelText("Reason for dismissing"), "done");
-    await userEvent.click(within(card).getByRole("button", { name: "Confirm dismiss" }));
-    expect(dismiss).toHaveBeenCalledWith(
-      expect.objectContaining({ propertyId: "p45", seen: expect.objectContaining({ flagReason: "model:opt_out", flagAt: "2026-10-01T00:00:00.000000Z" }) }),
-    );
+    expect(within(card).getByTestId("waiting-reason")).toHaveTextContent("Hostile text. Nothing sent.");
+    expect(within(card).getByTestId("hold-changed")).toHaveTextContent("Changed since this list loaded. Refresh to act.");
+    for (const b of within(card).getAllByRole("button").filter((el) => el.getAttribute("data-testid") !== "hold-refresh")) expect(b).toBeDisabled();
+    expect(actions.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("flag cleared while another source is still pending: actions locked; after a refresh they work and send the NEW version", async () => {
+    const snapHold = { ...openHold("p9"), ...at(5), sources: ["needs_attention", "jev_decision"] as OpenHold["sources"], flag_reason: "model:unclear", seen: { through: "2026-10-01T00:00:00Z", flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+    const cleared = { ...snapHold, sources: ["jev_decision"] as OpenHold["sources"], flag_reason: null, seen: { through: "2026-10-01T00:00:00Z", flagReason: null, flagAt: null } };
+    const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss, listAssignees: vi.fn() };
+    const { rerender } = render(<MessagesV2View {...props([], [cleared])} holdsSnapshot={buildSnapshot([snapHold])} actions={actions} />);
+    expect(screen.getByTestId("hold-changed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    // Refresh: the server sends a new snapshot built from the live state.
+    rerender(<MessagesV2View {...props([], [cleared])} holdsSnapshot={buildSnapshot([cleared])} actions={actions} />);
+    expect(screen.queryByTestId("hold-changed")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await userEvent.type(screen.getByLabelText("Reason for dismissing"), "done");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm dismiss" }));
+    expect(dismiss).toHaveBeenCalledWith(expect.objectContaining({ propertyId: "p9", seen: expect.objectContaining({ flagReason: null, flagAt: null }) }));
   });
 
   it("renders the snapshot time, not the live time", async () => {

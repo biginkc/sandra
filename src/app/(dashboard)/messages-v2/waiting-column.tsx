@@ -39,19 +39,26 @@ function WaitingCard({
   onReload,
   updated,
   at,
+  pinned,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   /** The snapshot time this card was ordered by (shown instead of the live one). */
   at?: string | null;
-  /** Newer activity arrived after this list was built. */
+  /** Newer activity arrived after this list was built: actions are locked until the list is refreshed. */
   updated?: boolean;
+  /** flag_reason is the snapshot's reason: it wins over the run's own reason and outcome (as on the tape). */
+  pinned?: boolean;
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
   const run = hold.run;
   const who = sellerWho(label);
-  const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
+  const effectiveRun = run
+    ? pinned && hold.flag_reason
+      ? { ...run, reason: hold.flag_reason }
+      : withEffectiveReason(run, hold.flag_reason)
+    : null;
   const draft = effectiveDraftBody(hold);
   const activity = at !== undefined ? at : holdActivityAt(hold);
   const alertText = alertLine(hold.alert);
@@ -86,7 +93,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
+        <b>Sandra:</b> {holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who, pinned)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">
@@ -113,7 +120,21 @@ function WaitingCard({
           The reply text was saved for review.
         </p>
       )}
+      {!informational && updated && (
+        <div data-testid="hold-changed" className="flex flex-col gap-2">
+          <p className="text-xs text-amber-800">Changed since this list loaded. Refresh to act.</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <DisabledHoldActions title="Changed since this list loaded. Refresh to act." />
+            {onReload && (
+              <Button type="button" size="xs" variant="outline" data-testid="hold-refresh" onClick={onReload}>
+                Refresh
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
       {!informational &&
+        !updated &&
         (actions ? (
           <HoldActionControls
             // A changed draft or hold remounts the controls, so no stale edit text or status survives a reload.
@@ -246,7 +267,8 @@ export function WaitingColumn({
       hold: {
         ...h,
         ...(reason ? { flag_reason: reason } : { flag_reason: null }),
-        seen: { through: h.seen?.through ?? null, flagReason: h.seen?.flagReason !== undefined && h.seen?.flagReason !== null ? reason : null, flagAt: h.seen?.flagAt ? e.fa : null },
+        // Always the SNAPSHOT flag version, never the live one (the server compares it and refuses a changed hold).
+        seen: { through: h.seen?.through ?? null, flagReason: e.fa ? reason : null, flagAt: e.fa },
       },
       changed,
     };
@@ -319,6 +341,7 @@ export function WaitingColumn({
               actions={actions}
               onReload={onReload}
               updated={changed || updatedIds?.has(e.id)}
+              pinned={!!snapshot}
             />
           );
         })

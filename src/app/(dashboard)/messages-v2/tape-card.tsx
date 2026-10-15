@@ -65,16 +65,19 @@ export function TapeCard({
   label,
   thread,
   flagReason,
+  flagPinned,
   undoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   thread?: RunThread;
+  /** True when flagReason is the waiting-list snapshot's reason: it then wins over the run's own reason and outcome. */
+  flagPinned?: boolean;
   /** The hold's flag reason, only when this run is the hold's current run (see withEffectiveReason). */
   flagReason?: string | null;
   undoControls?: UndoControls;
 }) {
-  const view = deriveTape(run, sellerWho(label), flagReason);
+  const view = deriveTape(run, sellerWho(label), flagReason, flagPinned);
 
   if (view.kind === "quiet") {
     return (

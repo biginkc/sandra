@@ -42,20 +42,6 @@ test.describe("/messages-v2 page face", () => {
     await expect(page.locator("main")).not.toContainText(/\bJev\b/);
   });
 
-  test("tape cards use plain sentences and tags from the vocabulary, never engine words", async ({ page }) => {
-    await page.goto("/messages-v2");
-    const decided = page.locator('[data-testid="tape-card"][data-kind="decided"]');
-    const count = await decided.count();
-    for (let i = 0; i < Math.min(count, 10); i += 1) {
-      const card = decided.nth(i);
-      await expect(card.getByTestId("tape-sentence")).toContainText("Sandra:");
-      const tag = card.getByTestId("tape-tag");
-      if (await tag.count()) expect(TAG_VOCABULARY).toContain((await tag.innerText()).trim());
-      const text = await card.innerText();
-      for (const word of ENGINE_WORDS) expect(text).not.toContain(word);
-    }
-  });
-
   test("the Sandra's rules button opens a side panel grouped by who acts", async ({ page }) => {
     await page.goto("/messages-v2");
     await page.getByTestId("open-rules").click();
@@ -67,12 +53,6 @@ test.describe("/messages-v2 page face", () => {
     await expect(panel).not.toContainText(/\bJev\b/);
   });
 
-  test("the waiting column is never oldest-first", async ({ page }) => {
-    await page.goto("/messages-v2");
-    const times = await page.getByTestId("waiting-time").locator("time").evaluateAll((els) => els.map((el) => el.getAttribute("datetime") ?? ""));
-    const stamps = times.filter(Boolean).map((t) => Date.parse(t));
-    expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
-  });
 });
 
 test.describe("/messages-v2 seeded rows", () => {
@@ -194,5 +174,32 @@ test.describe("/messages-v2 seeded rows", () => {
     await expect(column.getByText(addr(3), { exact: false })).toHaveCount(0);
     const text = await column.innerText();
     expect(text.indexOf(addr(2))).toBeLessThan(text.indexOf(addr(1)));
+  });
+
+  test("tape cards (at least one) use plain sentences and tags from the vocabulary, never engine words", async ({ page }) => {
+    requireSeed();
+    await page.goto("/messages-v2");
+    const decided = page.locator('[data-testid="tape-card"][data-kind="decided"]');
+    await expect(decided.first()).toBeVisible();
+    const count = await decided.count();
+    expect(count, "no decided tape cards rendered: the seed did not reach the page").toBeGreaterThan(0);
+    for (let i = 0; i < Math.min(count, 10); i += 1) {
+      const card = decided.nth(i);
+      await expect(card.getByTestId("tape-sentence")).toContainText("Sandra:");
+      const tag = card.getByTestId("tape-tag");
+      if (await tag.count()) expect(TAG_VOCABULARY).toContain((await tag.innerText()).trim());
+      const text = await card.innerText();
+      for (const word of ENGINE_WORDS) expect(text).not.toContain(word);
+    }
+  });
+
+  test("the waiting column (at least two cards) is never oldest-first", async ({ page }) => {
+    requireSeed();
+    await page.goto("/messages-v2");
+    await expect(page.getByTestId("waiting-card").nth(1)).toBeVisible();
+    const times = await page.getByTestId("waiting-time").locator("time").evaluateAll((els) => els.map((el) => el.getAttribute("datetime") ?? ""));
+    const stamps = times.filter(Boolean).map((t) => Date.parse(t));
+    expect(stamps.length, "fewer than two waiting cards rendered: the seed did not reach the page").toBeGreaterThan(1);
+    expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
   });
 });
