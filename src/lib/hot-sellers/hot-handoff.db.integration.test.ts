@@ -419,18 +419,27 @@ describe("assignHotLeadToOwner (real database)", () => {
     const { orgId, owner } = await oneOwnerOrg("covered");
     const propertyId = await createProperty(orgId);
     const inbound = await insertInbound(orgId, propertyId);
-    const flagAt = new Date().toISOString();
+    // A flag time with a trailing-zero millisecond, so the key format is pinned every run.
+    const flagAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 120).toISOString();
     const { error } = await admin
       .from("properties")
       .update({ needs_human_attention: true, last_ai_escalation_reason: "model:hot_lead", last_ai_escalation_at: flagAt })
       .eq("id", propertyId);
     expect(error).toBeNull();
     // Covered means the hold actually pinged him: a sent delivery for its hot_flag key (flag time as the database stores it).
-    const stored = (await pg.query("select last_ai_escalation_at from public.properties where id = $1", [propertyId])).rows[0].last_ai_escalation_at as Date;
+    // Read it back the way production does (PostgREST string, trailing zeros
+    // trimmed), never rebuilt from a JS Date: ".120" is stored as ".12".
+    const { data: storedRow, error: storedError } = await admin
+      .from("properties")
+      .select("last_ai_escalation_at")
+      .eq("id", propertyId)
+      .single();
+    expect(storedError).toBeNull();
+    const stored = storedRow!.last_ai_escalation_at as string;
     await pg.query(
       `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
        values ($1, null, $2, $3, 'slack', 'first', 'sent', 1, now())`,
-      [orgId, `hot_flag:${propertyId}:${new Date(stored).toISOString().replace("Z", "+00:00")}`, owner],
+      [orgId, `hot_flag:${propertyId}:${stored}`, owner],
     );
 
     expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "assigned", assigneeUserId: owner });
