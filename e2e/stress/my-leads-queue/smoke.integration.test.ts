@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import { assertEnvLooksLocal, resolveDbUrl } from "./guards";
-import { loadClassifierMigration } from "./migration";
+import { lastClassifierMigration, loadClassifierMigration } from "./migration";
 import { preflightCommitLanes, laneStampedSendVsInbound, unstampedSendDriver } from "./races";
 import { FAMILIES } from "./families";
 import { SMOKE_DEFAULTS, runStress } from "./run";
@@ -25,9 +25,12 @@ describe("my-leads queue stress harness smoke", () => {
   }, 240_000);
 
   it("notices a broken classifier: widening the Due window from 15 to 16 minutes is caught by the callback-boundary family", async () => {
+    // Mutate the LAST classifier file (a later fix would overwrite a mutation of an earlier one), then apply all of them in order.
     const sql = loadClassifierMigration();
-    const mutated = sql.replace("eff <= p_at + interval '15 minutes' and eff >= ((p_at", "eff <= p_at + interval '16 minutes' and eff >= ((p_at");
-    expect(mutated).not.toBe(sql);
+    const last = lastClassifierMigration();
+    const mutatedLast = last.sql.replace("eff <= p_at + interval '15 minutes' and eff >= ((p_at", "eff <= p_at + interval '16 minutes' and eff >= ((p_at");
+    expect(mutatedLast).not.toBe(last.sql);
+    const mutated = `${sql}\n;\n${mutatedLast}`;
     const runs = await runFamilies(url, { families: FAMILIES.filter((f) => f.id === "callback_boundary"), repeats: 1, seed: 1, migrationSql: mutated });
     const kinds = runs[0]!.mismatches.map((m) => m.kind);
     expect(runs[0]!.errors).toEqual([]);

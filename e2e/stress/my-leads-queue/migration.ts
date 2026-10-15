@@ -8,7 +8,7 @@ import path from "node:path";
  * in filename order. Nothing is committed.
  */
 export const CLASSIFIER_MIGRATION_PREFIX = "20261015010000_my_leads_work_queue_classifier";
-const CLASSIFIER_FUNCTIONS = /\b(my_leads_work_classified|fn_my_leads_work_page|fn_my_leads_work_facts|fn_my_leads_badge_v2|my_leads_add_business_days)\b/;
+const CLASSIFIER_FUNCTIONS = /create\s+or\s+replace\s+function\s+public\.(my_leads_work_classified|fn_my_leads_work_page|fn_my_leads_work_facts|fn_my_leads_badge_v2|my_leads_add_business_days)\b/i;
 /** The migration that carries the SQ2 fix (design v9 17, PR #876). Its presence retires the SQ2 excusal. */
 export const SQ2_FIX_MIGRATION_PREFIX = "20261015020200";
 
@@ -23,12 +23,23 @@ export function classifierMigrationFiles(root = defaultRoot()): string[] {
   return files.filter((f) => f >= first && (f === first || CLASSIFIER_FUNCTIONS.test(readFileSync(path.join(dir, f), "utf8"))));
 }
 
-const unwrap = (sql: string) => sql.replace(/^\s*begin;\s*/im, "").replace(/\s*commit;\s*$/i, "");
+function unwrap(sql: string, file = "migration"): string {
+  // A file without its begin;/commit; wrapper could carry an inner commit that would commit the "rolled-back" lane: refuse it.
+  if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper missing or changed`);
+  return sql.replace(/^\s*begin;\s*/im, "").replace(/\s*commit;\s*$/i, "");
+}
+
+/** The last classifier file's SQL alone (unwrapped): the smoke mutation edits this one so a later file cannot overwrite the mutation. */
+export function lastClassifierMigration(root = defaultRoot()): { file: string; sql: string } {
+  const files = classifierMigrationFiles(root);
+  const file = files[files.length - 1]!;
+  return { file, sql: unwrap(readFileSync(path.join(migrationsDir(root), file), "utf8"), file) };
+}
 
 /** Every classifier migration, in order, as one script without transaction wrappers. */
 export function loadClassifierMigration(root = defaultRoot()): string {
   const dir = migrationsDir(root);
-  return classifierMigrationFiles(root).map((f) => `-- ${f}\n${unwrap(readFileSync(path.join(dir, f), "utf8"))}`).join("\n;\n");
+  return classifierMigrationFiles(root).map((f) => `-- ${f}\n${unwrap(readFileSync(path.join(dir, f), "utf8"), f)}`).join("\n;\n");
 }
 
 /** True once the SQ2 fix migration is in this checkout: from then on SQ2 mismatches gate the run like any other. */

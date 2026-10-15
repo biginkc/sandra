@@ -1,3 +1,4 @@
+import { classifierMigrationFiles, sq2FixLanded } from "./migration";
 import { EXPECTED_UNTIL, FIX_PENDING, SPEC_QUESTIONS } from "./oracle";
 import type { FamilyRun, Mismatch, MismatchKind, Timing } from "./runner";
 
@@ -63,6 +64,8 @@ export type Report = {
   repeats: number;
   sha: string;
   database: string;
+  /** Classifier migration files every rolled-back lane applied, in order. */
+  migrations: string[];
   families: FamilyReport[];
   lanes: LaneResult[];
   scale: ScaleSize[];
@@ -147,11 +150,11 @@ export function buildReport(input: {
     if (raceRan.length === 0) fullRunNeeds.push("no race lane ran");
     if (!raceRan.some((l) => l.id.startsWith("race:dispatch_"))) fullRunNeeds.push("the dispatchRepSms race lanes did not run (npm run stress:my-leads-queue:dispatch writes dispatch-lanes.json into --out first)");
   }
-  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0), expectedUntil: EXPECTED_UNTIL[id] ?? FIX_PENDING[id], gating: !EXPECTED_UNTIL[id] }]));
+  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0), expectedUntil: (sq2FixLanded() ? undefined : EXPECTED_UNTIL[id]) ?? FIX_PENDING[id], gating: sq2FixLanded() || !EXPECTED_UNTIL[id] }]));
   const failReasons = [...criteria.filter((c) => !c.pass).map((c) => `${c.label}: ${c.value ?? "not measured"}`), ...fullRunNeeds];
   return {
     schema: "my-leads-queue-stress/v1", mode: input.mode, startedAt: input.startedAt, finishedAt: new Date().toISOString(), seed: input.seed, repeats: input.repeats,
-    sha: input.sha, database: input.database, families, lanes: input.lanes, scale: input.scale, specQuestions, criteria,
+    sha: input.sha, database: input.database, migrations: classifierMigrationFiles(), families, lanes: input.lanes, scale: input.scale, specQuestions, criteria,
     verdict: failReasons.length === 0 ? "PASS" : "FAIL", failReasons,
   };
 }
@@ -162,6 +165,7 @@ export function renderMarkdown(r: Report): string {
   const L: string[] = [];
   L.push(`# My Leads unified queue stress report`, "");
   L.push(`**Verdict: ${r.verdict}** (${r.mode} run, seed ${r.seed}, ${r.repeats} repeat${r.repeats === 1 ? "" : "s"}, ${r.sha}, ${r.database})`, "");
+  L.push(`Classifier SQL applied (in order): ${r.migrations.map((m) => `\`${m}\``).join(", ")}`, "");
   if (r.failReasons.length) { L.push("Blocking:"); for (const f of r.failReasons) L.push(`- ${f}`); L.push(""); }
   L.push("## Exit criteria", "", "| Criterion | Value | Limit | Result |", "|---|---:|---:|---|");
   for (const c of r.criteria) L.push(`| ${c.label}${c.note ? ` — ${c.note}` : ""} | ${c.value ?? "n/a"} | ${c.id === "p95" ? `< ${c.limit} ms` : c.limit} | ${!c.evaluated ? "not evaluated" : !c.pass ? "FAIL" : c.note?.startsWith("WARN") ? "WARN" : "pass"} |`);

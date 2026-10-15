@@ -14,8 +14,8 @@ export type ScaleOptions = {
   samples: number;
   seed: number;
   messages?: [number, number];
-  /** Also EXPLAIN below 2,000 leads. */
-  explainAll?: boolean;
+  /** EXPLAIN ANALYZE breakdown for every measured size (default on). */
+  explain?: boolean;
 };
 
 type RawPlan = { "Node Type": string; "Actual Total Time": number; "Actual Loops": number; "Actual Rows": number; Plans?: RawPlan[]; "CTE Name"?: string; "Subplan Name"?: string; "Relation Name"?: string; "Function Name"?: string; "Index Name"?: string; "Parent Relationship"?: string };
@@ -94,7 +94,7 @@ export async function runScale(url: string, opts: ScaleOptions): Promise<{ sizes
           (reader.timings[label] ??= []).push(Number(process.hrtime.bigint() - t) / 1e6);
         }
       }
-      const explainTop = n >= 2000 || opts.explainAll ? await explainClassifier(db, ctx.org, ctx.rep, new Date(now).toISOString()) : undefined;
+      const explainTop = opts.explain !== false ? await explainClassifier(db, ctx.org, ctx.rep, new Date(now).toISOString()) : undefined;
       const timings = Object.fromEntries(Object.entries(reader.timings).map(([k, v]) => [k, stat(v)]));
       const budgeted = Object.entries(timings).filter(([k]) => !k.startsWith("projection:"));
       sizes.push({ explainTop, leads: n, messagesPerLead: opts.messages ?? [4, 12], messages, seedMs, timings, worstP95Ms: budgeted.reduce((a, [, v]) => Math.max(a, v.p95), 0), budgetMs: P95_BUDGET_MS });

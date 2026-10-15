@@ -31,7 +31,6 @@ export type Placement = {
 /** Places where the design text and the A1 SQL disagree. Registered so the report can group mismatches. */
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
   SQ5: "v9 17: a contact-only inbound counts only when its contact is homeowner on exactly one queue lead; otherwise never New reply (label check texts). The A1 SQL counts it on every lead sharing the contact. Confirmed SQL bug; fix in A1.2 (classifier performance PR). Still gating.",
-  SQ6: "Row 13/14 'last seller-facing outbound' is read as the last ACCEPTED outbound (later failed/queued/pending texts are ignored), by both the oracle and the SQL. The text could also be read as 'the last outbound must itself be accepted'. Not seeded; recorded for a decision.",
   SQ2: "v9 17: ledger/obligation 'unknown' younger than 15 min is in flight, not Broken (oracle follows this). The A1 SQL still marks it Broken; fix routed to PR #876 migration 20261015020200.",
 };
 
@@ -242,7 +241,9 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   const futureSet = normal.filter((a) => effTime(a) > now + SOON);
   const min = (xs: Appointment[]) => (xs.length ? Math.min(...xs.map(effTime)) : null);
   const dueAt = min(dueSet), missedAt = min(missedSet), futureAt = min(futureSet);
-  const chainEff = min(chainTasks);
+  // Rows 8/12 name the open chain task's due_at: an offer-chain task's follow-up time ignores snoozed_until (Fable, v9 17);
+  // the effective time (greatest(due, snoozed_until)) applies only to non-chain callbacks/appointments.
+  const chainEff = chainTasks.length ? Math.min(...chainTasks.map((a) => a.due)) : null;
 
   const inbound = latestInbound(lead);
   const unhandled = inbound ? !isHandled(lead, inbound) : false;
@@ -258,6 +259,8 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
     ? (chainEff ?? (offer!.hasChain ? null : offer!.followUpAt))
     : null;
 
+  // Rows 13/14 "last seller-facing outbound" = the latest ACCEPTED outbound: a failed, queued or pending text is not a seller-facing
+  // touch (design v9 17, Fable ruling).
   const acceptedOut = lead.messages.filter((m) => isOutbound(m) && accepted(m)).sort((a, b) => sendTime(b) - sendTime(a) || (b.ref > a.ref ? 1 : -1));
   const lo = acceptedOut[0] ?? null;
   const inboundAfterLo = !!(inbound && lo && inbound.at > sendTime(lo));

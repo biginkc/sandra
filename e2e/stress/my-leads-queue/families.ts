@@ -126,6 +126,9 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("cancelled", { stage: "offer_sent", offer, appointments: [k.appt("c", k.now - DAY, { offerChain: true, status: "cancelled" })] }),
       k.lead("with_callback", { stage: "offer_sent", offer, appointments: [k.appt("c", k.now - DAY, { offerChain: true, status: "completed" }), k.appt("cb", k.now + 2 * DAY)] }),
       k.lead("offer_declined", { stage: "offer_sent", offer: { ...offer, outcome: "declined" } }),
+      // snoozed chain task: rows 8/12 use its due_at, not the snooze (due now-1h snoozed to tomorrow = Offer follow-up due)
+      k.lead("chain_snoozed", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - HOUR }, appointments: [k.appt("c", k.now - HOUR, { offerChain: true, status: "snoozed", snoozedUntil: k.now + DAY })] }),
+      k.lead("chain_snoozed_future", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 3 * DAY })] }),
     ];
   } },
   { id: "needs_offer", title: "needs offer", build: (k) => [
@@ -308,7 +311,11 @@ export const FAMILIES: readonly FamilyDef[] = [
   { id: "texted_last_short", title: "texted last at 1h / 2 business days", now: (rng) => Date.UTC(2026, 9, 14, 17) + rng.int(0, 30) * DAY, build: (k) => {
     const src = (): OutboundSource => pick(k, ["human", "approved_draft", "ai_template", "ai_written", "campaign"] as const);
     const mk = (key: string, at: number) => k.lead(key, { messages: [k.out("o", at, { source: src() })] });
-    return [mk("one_hour", k.j(k.now - HOUR)), mk("two_bd", k.j(addBusinessDaysBack(k.now, 2))), mk("later_inbound", k.now - 2 * HOUR), k.lead("then_inbound", { messages: [k.out("o", k.now - 2 * HOUR), k.inb("i", k.now - HOUR)] })];
+    return [mk("one_hour", k.j(k.now - HOUR)), mk("two_bd", k.j(addBusinessDaysBack(k.now, 2))), mk("later_inbound", k.now - 2 * HOUR),
+      // rows 13/14 follow the latest ACCEPTED outbound (v9 17)
+      k.lead("accepted_then_old_failure", { messages: [k.out("o", k.now - 9 * DAY), k.out("f", k.now - 8 * DAY, { outcome: "failed", failedAt: k.now - 8 * DAY + MIN })] }),
+      k.lead("accepted_then_dismissed_failure", { messages: [k.out("o", k.now - 2 * HOUR), k.out("f", k.now - HOUR, { outcome: "failed", failedAt: k.now - HOUR + MIN })], events: [{ type: "rep_sms_failure_dismissed", at: k.now - 30 * MIN, actor: "user", dismisses: "f" }] }),
+      k.lead("then_inbound", { messages: [k.out("o", k.now - 2 * HOUR), k.inb("i", k.now - HOUR)] })];
   } },
   { id: "texted_last_bd_boundary", title: "texted last 3 business days +1 s, Fri→Mon and DST", now: (rng) => addBusinessDays(rng.pick(BD_SENDS), 3), build: (k) => {
     // `now` is the 3-business-day deadline of a text sent at `s0` (Fri 4 PM, both DST weekends, a plain Wednesday). A text sent one
