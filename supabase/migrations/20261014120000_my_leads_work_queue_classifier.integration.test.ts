@@ -238,6 +238,7 @@ function fixture(name: string, build: (w: World) => Promise<string>, expected: E
 }
 const NA = 'your_move', WT = 'their_move', NE = 'neither';
 const iso = (s: string) => new Date(s);
+const plus1ms = (t: string) => new Date(new Date(t).getTime() + 1).toISOString();
 
 // Decision table rows (1.1)
 fixture('D1 under contract with nothing due is Neither (All leads only)', async (w) => w.lead('uc', { stage: 'under_contract' }), { place: NE, reason: 'under_contract', row: '1' });
@@ -864,11 +865,11 @@ it('next_change_at covers drip late-window, call-in-progress, ledger and campaig
   await withDb(async (db) => {
     const w = await world(db);
     const a = await w.lead('a'); await w.drip(a, { next: w.at(30 * MIN) });
-    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(w.at(90 * MIN));
+    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(plus1ms(w.at(90 * MIN)));
     const b = await w.lead('b'); await w.drip(b, { status: 'paused', pause: 'call_in_progress', updated: w.at(-10 * MIN) });
-    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(w.at(20 * MIN));
+    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(plus1ms(w.at(20 * MIN)));
     const c = await w.lead('c'); await w.ledger(c, 'sending', w.at(-5 * MIN));
-    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(w.at(10 * MIN));
+    expect(new Date((await w.page(w.sam, { tab: 'all' })).nextChangeAt).toISOString()).toBe(plus1ms(w.at(10 * MIN)));
   });
 });
 
@@ -901,9 +902,9 @@ it('a fresh unknown step claim (not yet 15 minutes old) schedules the stuck boun
     const id = await w.lead('s'); const d = await w.drip(id, { next: w.at(HOUR) }); await w.staleClaim(d.enr, d.steps[0], w.at(-5 * MIN));
     const r = await w.page(w.sam, { tab: 'waiting' });
     expect(r.ids).toEqual([id]);
-    expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(10 * MIN));
-    // 'older than 15 min' is strict, so look one second past the boundary
-    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(new Date(r.nextChangeAt).getTime() + 1000) });
+    expect(new Date(r.nextChangeAt).toISOString()).toBe(plus1ms(w.at(10 * MIN)));
+    // the reported boundary is the first instant at which the strict 'older than 15 min' rule is true
+    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
     expect(later.rows[0]).toMatchObject({ reason: 'broken' });
   });
 });

@@ -279,6 +279,7 @@ language sql stable security definer set search_path = '' as $$
       jsonb_agg(jsonb_build_object('kind', kind, 'action', action, 'at', at, 'refId', ref_id) order by at, kind) as items
     from bko group by lead_id),
   -- Clock-only boundaries (section 6 next_change_at): every instant at which placement can change with no write.
+  -- Thresholds that are strict ("older than N minutes") carry +1 ms so a refresh AT the boundary really sees the change.
   tm as (
     select lead_id, t from (
       select b.property_id as lead_id, b.next_warning_at as t from base b
@@ -289,13 +290,13 @@ language sql stable security definer set search_path = '' as $$
       union all select lead_id, follow_up_at - interval '15 minutes' from po where pending and chain is null
       union all select lead_id, ts from (select lo.lead_id, public.my_leads_add_business_days(lo.ts, 3) as ts from lo
                                         where lo.cls in ('human', 'ai', 'campaign')) d
-      union all select lead_id, next_run_at + interval '60 minutes' from en where enr_status = 'active'
-      union all select lead_id, enr_updated_at + interval '30 minutes' from en where enr_status = 'paused' and pause_reason = 'call_in_progress'
-      union all select lead_id, claim_at + interval '15 minutes' from en
-      union all select lead_id, healthy_at + interval '30 minutes' from camp
-      union all select m.lead_id, m.created_at + interval '15 minutes' from mf m where m.status = 'pending' and m.cls = 'human'
+      union all select lead_id, next_run_at + interval '60 minutes 1 millisecond' from en where enr_status = 'active'
+      union all select lead_id, enr_updated_at + interval '30 minutes 1 millisecond' from en where enr_status = 'paused' and pause_reason = 'call_in_progress'
+      union all select lead_id, claim_at + interval '15 minutes 1 millisecond' from en
+      union all select lead_id, healthy_at + interval '30 minutes 1 millisecond' from camp
+      union all select m.lead_id, m.created_at + interval '15 minutes 1 millisecond' from mf m where m.status = 'pending' and m.cls = 'human'
       union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status = 'failed' and m.cls = 'human'
-      union all select b.property_id, l.updated_at + interval '15 minutes' from base b
+      union all select b.property_id, l.updated_at + interval '15 minutes 1 millisecond' from base b
         join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id and l.state in ('reserved', 'sending')
       union all select b.property_id, o.lease_expires_at from base b
         join public.rep_sms_obligations o on o.org_id = p_org and o.property_id = b.property_id and o.state in ('claimed', 'sending')
