@@ -23,10 +23,17 @@ import type { Database } from "@/lib/supabase/types";
  * A lead already owned by SOMEONE ELSE is never taken from them.
  */
 export const HOT_HANDOFF_SOURCE_TYPE = "hot_seller_handoff";
+/**
+ * A hot text on a lead Jarrad already owns: no reassignment and no 'assigned'
+ * event, but one alert per hot decision. Recorded as an `ai_escalated` lead
+ * event with source identity (hot_seller_text, inbound message id), which the
+ * ledger allows once per inbound.
+ */
+export const HOT_TEXT_SOURCE_TYPE = "hot_seller_text";
 
 export type HotAssignResult =
   | { status: "assigned" | "already_assigned"; assigneeUserId: string }
-  /** Jarrad already owned the lead before Sandra saw it hot: no event, no "now on My Leads" alert. */
+  /** Jarrad already owned the lead (a person assigned it): no reassignment, one "hot text on your lead" alert. */
   | { status: "already_owned"; assigneeUserId: string }
   /** The lead IS on My Leads under Jarrad, but the 'assigned' event could not be saved. */
   | { status: "assigned_unrecorded"; assigneeUserId: string; detail: string }
@@ -65,8 +72,9 @@ export async function resolveHotOwner(
 export async function assignHotLeadToOwner(
   db: SupabaseClient<Database>,
   propertyId: string,
-  env: Record<string, string | undefined> = process.env,
+  opts: { inboundMessageId?: string | null; env?: Record<string, string | undefined> } = {},
 ): Promise<HotAssignResult> {
+  const env = opts.env ?? process.env;
   try {
     const { data: property, error: lookupError } = await db
       .from("properties")
@@ -86,13 +94,24 @@ export async function assignHotLeadToOwner(
     let status: "assigned" | "already_assigned" = "already_assigned";
     const previous = property.assigned_user_id;
     if (previous === owner) {
-      // Already his. A hand-off event exists only if Sandra made the assignment
-      // (a replay); otherwise a person did, and there is nothing to announce.
       const prior = await findHandoffEvent(db, propertyId);
       if (prior === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
-      return prior ? { status: "already_assigned", assigneeUserId: owner } : { status: "already_owned", assigneeUserId: owner };
-    }
-    {
+      // A replay of Sandra's own hand-off.
+      if (prior) return { status: "already_assigned", assigneeUserId: owner };
+      // His already, with no hand-off event. If no 'assigned' event names him
+      // either, Sandra's own hand-off was interrupted between the update and
+      // the event: finish it (back-fill + alert) below.
+      const byPerson = await findAssignedEventTo(db, propertyId, owner);
+      if (byPerson === "error") return { status: "failed", reason: "db_error", detail: "assignment history lookup" };
+      if (byPerson) {
+        // A person gave him this lead: no reassignment, one alert for this hot text.
+        const recorded = await recordHotText(db, propertyId, owner, opts.inboundMessageId ?? null);
+        return recorded
+          ? { status: "already_owned", assigneeUserId: owner }
+          : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
+      }
+      status = "assigned";
+    } else {
       if (previous !== null) return { status: "failed", reason: "owned_by_someone_else" };
       const { data: saved, error } = await db
         .from("properties")
@@ -148,4 +167,51 @@ async function findHandoffEvent(db: SupabaseClient<Database>, propertyId: string
     .limit(1);
   if (error) return "error";
   return (data ?? []).length > 0;
+}
+
+async function findAssignedEventTo(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+  userId: string,
+): Promise<boolean | "error"> {
+  const { data, error } = await db
+    .from("lead_events")
+    .select("id")
+    .eq("property_id", propertyId)
+    .eq("event_type", LEAD_EVENT_TYPES.ASSIGNED)
+    .eq("payload->>to", userId)
+    .limit(1);
+  if (error) return "error";
+  return (data ?? []).length > 0;
+}
+
+/** One `ai_escalated` hot-text event per inbound message, read back. False = not recorded. */
+async function recordHotText(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+  owner: string,
+  inboundMessageId: string | null,
+): Promise<boolean> {
+  if (!inboundMessageId) return false;
+  const find = async () => {
+    const { data, error } = await db
+      .from("lead_events")
+      .select("id")
+      .eq("source_type", HOT_TEXT_SOURCE_TYPE)
+      .eq("source_id", inboundMessageId)
+      .limit(1);
+    return error ? null : (data ?? []).length > 0;
+  };
+  const before = await find();
+  if (before === null) return false;
+  if (before) return true;
+  await recordLeadEvent({
+    propertyId,
+    actorType: "ai",
+    eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+    payload: { to: owner, reason: "hot_seller_text" },
+    sourceType: HOT_TEXT_SOURCE_TYPE,
+    sourceId: inboundMessageId,
+  });
+  return (await find()) === true;
 }

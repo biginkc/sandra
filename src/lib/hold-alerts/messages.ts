@@ -54,10 +54,12 @@ export function smsText(hold: HoldInfo, baseUrl: string): string {
 }
 
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  if (p.kind === "hot_text") return `Hot text on your lead: ${escapeSlack(p.name)}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
+  if (p.kind === "hot_text") return `Hot text on your lead: ${p.name}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${p.name} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 

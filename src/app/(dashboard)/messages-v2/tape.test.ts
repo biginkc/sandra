@@ -93,11 +93,18 @@ describe("deriveTape", () => {
     });
   });
 
-  it("a lead Jarrad already owned reads 'Already on My Leads under Jarrad' and never claims a Slack/text alert", () => {
+  it("a lead Jarrad already owned reads 'Already on My Leads under Jarrad', with the alert time once both channels are sent", () => {
     const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "already_owned", assignee_user_id: "u" })];
     const v = deriveTape(run({ steps, hotAlertSentAt: "2026-10-15T19:05:00Z" }), "Sue");
     expect(v.kind === "decided" && v.did).toContain("Already on My Leads under Jarrad");
     expect(v.kind === "decided" && v.did).not.toContain("Handed to Jarrad");
+    expect(v.kind === "decided" && v.did).toContain("Already on My Leads under Jarrad · Slack and text sent ");
+  });
+
+  it("already_owned with no alert time yet claims no Slack/text alert", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "already_owned", assignee_user_id: "u" })];
+    const v = deriveTape(run({ steps }), "Sue");
+    expect(v.kind === "decided" && v.did).toContain("Already on My Leads under Jarrad");
     expect(v.kind === "decided" && v.did).not.toContain("Slack and text sent");
   });
 

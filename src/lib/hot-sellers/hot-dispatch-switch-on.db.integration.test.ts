@@ -13,7 +13,7 @@ import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/moc
 import type { Database } from "@/lib/supabase/types";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
-import { HOT_HANDOFF_SOURCE_TYPE } from "./assign";
+import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "./assign";
 
 /**
  * Full hot-seller path with the new_lead switch ON, on a DISPOSABLE database
@@ -147,7 +147,7 @@ async function createMember(orgId: string, role: "owner" | "member"): Promise<st
   return data.user.id;
 }
 
-async function seedScenario(opts: { watermark?: boolean } = {}) {
+async function seedScenario(opts: { watermark?: boolean; personAssigned?: boolean } = {}) {
   const orgId = randomUUID();
   const { error: orgError } = await admin.from("organizations").insert({ id: orgId, name: `hot-switch-on ${orgId}` });
   if (orgError) throw new Error(`org insert failed: ${orgError.message}`);
@@ -206,12 +206,25 @@ async function seedScenario(opts: { watermark?: boolean } = {}) {
       state: "MO",
       status: "prospect",
       homeowner_contact_id: contact.id,
+      ...(opts.personAssigned ? { assigned_user_id: owner } : {}),
     })
     .select("id, status, assigned_user_id")
     .single();
   if (propertyError || !property) throw new Error(`property insert failed: ${propertyError?.message}`);
   expect(property.status).toBe("prospect");
-  expect(property.assigned_user_id).toBeNull();
+  expect(property.assigned_user_id).toBe(opts.personAssigned ? owner : null);
+  if (opts.personAssigned) {
+    // A person (not Sandra) gave him this lead: the ledger has an 'assigned' event naming him.
+    const { error: assignedError } = await admin.from("lead_events").insert({
+      org_id: orgId,
+      property_id: property.id,
+      actor_type: "user",
+      actor_id: owner,
+      event_type: "assigned",
+      payload: { from: null, to: owner },
+    } as never);
+    if (assignedError) throw new Error(`assigned event seed failed: ${assignedError.message}`);
+  }
 
   const body = "yes I might sell, what could you pay for it?";
   const { data: inbound, error: inboundError } = await admin
@@ -408,7 +421,10 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     // The pass created the watermark (no later than the 2026-10-15 cutoff).
     const { rows: marks } = await pg.query("select alerts_since from public.hold_alert_settings where org_id = $1", [s.orgId]);
     expect(marks).toHaveLength(1);
-    expect(new Date(marks[0].alerts_since).getTime()).toBeLessThanOrEqual(Date.parse("2026-10-15T00:00:00.000Z"));
+    // init = min(now, max(2026-10-15 cutoff, now - 24h)): never in the future, never more than 24h back once past the cutoff.
+    const markMs = new Date(marks[0].alerts_since).getTime();
+    expect(markMs).toBeLessThanOrEqual(Date.now());
+    expect(markMs).toBeLessThanOrEqual(Math.max(Date.parse("2026-10-15T00:00:00.000Z"), Date.now() - 24 * 60 * 60 * 1000) + 1000);
     const { rows: deliveries } = await pg.query(
       "select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel",
       [s.orgId],
@@ -421,5 +437,84 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     sent.length = 0;
     expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
     expect(sent).toHaveLength(0);
+  }, 120_000);
+  it("a lead a person already assigned to the owner: one Slack + one SMS 'Hot text on your lead', no reassignment, no new 'assigned' event; same inbound again sends nothing more", async () => {
+    resetMockState();
+    installFakeJev();
+    const s = await seedScenario({ personAssigned: true });
+
+    const sent: Array<{ channel: "slack" | "sms"; userId: string; text: string }> = [];
+    const real = createHoldAlertDeps(admin, { HOLD_ALERTS_ENABLED: "1" });
+    const deps: HoldAlertDeps = {
+      ...real,
+      async sendSlack(userId, text) {
+        sent.push({ channel: "slack", userId, text });
+        return { status: "sent" };
+      },
+      async sendSms(userId, text) {
+        sent.push({ channel: "sms", userId, text });
+        return { status: "sent" };
+      },
+    };
+    const dispatchOnce = () =>
+      dispatchAiResponse(
+        admin,
+        {
+          propertyId: s.propertyId,
+          contactId: s.contactId,
+          conversationId: s.conversationId,
+          inboundMessageId: s.inboundMessageId,
+          inboundFromPhone: s.phone,
+          inboundBody: s.body,
+        },
+        { anthropic: forbiddenAnthropic },
+      );
+    const assignedEvents = () =>
+      count("select count(*)::int as n from public.lead_events where property_id = $1 and event_type = 'assigned'", [s.propertyId]);
+    const hotTextEvents = () =>
+      count("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [s.propertyId, HOT_TEXT_SOURCE_TYPE]);
+
+    expect(await assignedEvents()).toBe(1); // the person's own event
+    const episodesBefore = await count("select count(*)::int as n from public.acquisition_assignment_episodes where property_id = $1", [s.propertyId]);
+
+    const outcome = await dispatchOnce();
+    expect(outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+
+    // No reassignment, no new 'assigned' event, no hand-off event; one hot_seller_text event keyed to this inbound.
+    expect((await admin.from("properties").select("assigned_user_id").eq("id", s.propertyId).single()).data?.assigned_user_id).toBe(s.owner);
+    expect(await assignedEvents()).toBe(1);
+    expect(
+      await count("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [s.propertyId, HOT_HANDOFF_SOURCE_TYPE]),
+    ).toBe(0);
+    expect(await hotTextEvents()).toBe(1);
+    const { rows: textEvents } = await pg.query(
+      "select event_type, source_id from public.lead_events where property_id = $1 and source_type = $2",
+      [s.propertyId, HOT_TEXT_SOURCE_TYPE],
+    );
+    expect(textEvents[0]).toMatchObject({ event_type: "ai_escalated", source_id: s.inboundMessageId });
+    expect(await count("select count(*)::int as n from public.acquisition_assignment_episodes where property_id = $1", [s.propertyId])).toBe(episodesBefore);
+
+    const alerts = await runHoldAlertsForOrg(deps, s.orgId);
+    expect(alerts.sent).toBe(2);
+    expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
+    expect(sent.every((x) => x.userId === s.owner)).toBe(true);
+    expect(sent.every((x) => x.text.startsWith("Hot text on your lead: Hannah."))).toBe(true);
+    expect(sent.every((x) => !x.text.includes("what could you pay"))).toBe(true);
+    const { rows: deliveries } = await pg.query(
+      "select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel",
+      [s.orgId],
+    );
+    expect(deliveries.map((d) => [d.channel, d.status, d.hold_key])).toEqual([
+      ["slack", "sent", `hot_text:${s.inboundMessageId}`],
+      ["sms", "sent", `hot_text:${s.inboundMessageId}`],
+    ]);
+
+    // Same inbound again: dispatch and the alert pass add nothing.
+    await dispatchOnce();
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
+    expect(sent).toHaveLength(2);
+    expect(await assignedEvents()).toBe(1);
+    expect(await hotTextEvents()).toBe(1);
+    expect(await count("select count(*)::int as n from public.hold_alert_deliveries where org_id = $1", [s.orgId])).toBe(2);
   }, 120_000);
 });

@@ -64,15 +64,16 @@ describe("first stage alerts (hot hold, owner only)", () => {
     expect(t.sent.some((s) => s.channel === "email")).toBe(true);
   });
 
-  it("an unknown hot owner does not stop a promotion from reaching its own assignee", async () => {
+  it("an unknown hot owner stops promotions too: zero deliveries, hotOwnerUnknown set", async () => {
     const t = makeDeps({
       hotOwner: null,
       holds: [],
       promotions: [{ propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T09:30:00.000Z" }],
     });
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
-    expect(summary.hotOwnerUnknown).toBe(false);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows).toEqual([]);
+    expect(summary.hotOwnerUnknown).toBe(true);
   });
 
   it("a hot hold and a promotion for the same property in one pass send exactly one Slack and one SMS", async () => {

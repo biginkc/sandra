@@ -19,7 +19,7 @@ export type HoldInfo = {
   name: string;
   /** Short human reason for the hold ("price talk"); never message text. */
   reasonLabel: string;
-  /** Hot seller (lib/hot-sellers/hot.ts) or an extra HOLD_ALERT_HOT_REASONS match. Only hot holds ping. */
+  /** Hot seller (lib/hot-sellers/hot.ts), nothing else. Only hot holds ping. */
   hot: boolean;
 };
 
@@ -33,6 +33,10 @@ export type HotPromotion = {
   /** First name (or "Unknown sender"); never message text or address. */
   name: string;
   assignedAt: string;
+  /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
+  kind?: "handoff" | "hot_text";
+  /** Delivery key; defaults to hotPromotionKey(propertyId). */
+  key?: string;
 };
 
 export type DeliveryRow = {
@@ -146,6 +150,8 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
+  /** Send-time check: the property is still assigned to this user. */
+  isPropertyAssignedTo(orgId: string, propertyId: string, userId: string): Promise<boolean>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**
@@ -173,7 +179,7 @@ export type OrgAlertSummary = {
   archived: number;
   /** Ran out of the time budget; remaining rows are picked up next run. */
   budgetExhausted: boolean;
-  /** Hot holds existed but Jarrad could not be identified: none were sent (fail closed). */
+  /** Hot holds or promotions existed but Jarrad could not be identified: none were sent (fail closed). */
   hotOwnerUnknown: boolean;
 };
 

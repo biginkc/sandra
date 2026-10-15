@@ -1513,7 +1513,7 @@ async function classifyAndHandleNonRouteOutcomes(
         });
       }
       // Hot seller (PR 2): the lead goes on My Leads under Jarrad (shared with the nine-question path).
-      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, responseClaim, runCtx);
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, responseClaim, runCtx, input.inboundMessageId);
       if (handoffEscalation) return { handled: true, outcome: handoffEscalation };
       const newLeadHoldOk = classification.askedHowNumberObtained
         // A new lead never auto-replies (PLAN D5), so the number-source reply
@@ -7171,7 +7171,7 @@ async function routeNineHot(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
-      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx);
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx, input.inboundMessageId);
       if (handoffEscalation) return handoffEscalation;
       await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
       return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
@@ -7442,8 +7442,9 @@ async function handOffHotLead(
   propertyId: string,
   claim: { claimId: string | null },
   runCtx?: MaybeRunContext,
+  inboundMessageId?: string | null,
 ): Promise<AiDispatchOutcome | null> {
-  const handoff = await assignHotLeadToOwner(supabase, propertyId);
+  const handoff = await assignHotLeadToOwner(supabase, propertyId, { inboundMessageId });
   await trace(supabase, {
     kind: "action",
     name: "assign_hot_lead",

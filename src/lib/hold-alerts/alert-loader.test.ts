@@ -89,14 +89,13 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
   });
 
   it("end to end through the cron's own deps (createHoldAlertDeps -> toAlertHolds -> isHotHold): the hold is NOT hot", async () => {
-    const env = { HOLD_ALERT_HOT_REASONS: "model:hot_lead" };
-    const deps = createHoldAlertDeps(db(fixture()) as never, env);
+    const deps = createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:hot_lead" });
     const res = await deps.loadHolds("org", at(7 * 24 * 60));
     expect(res.complete).toBe(true);
     expect(res.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: false }]);
-    // Positive control: the same path DOES mark the hold hot when its actual reason is listed.
-    const control = await createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:unclear" }).loadHolds("org", at(7 * 24 * 60));
-    expect(control.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: true }]);
+    // The env list is gone: setting it changes nothing.
+    const withEnv = await createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:unclear" }).loadHolds("org", at(7 * 24 * 60));
+    expect(withEnv.holds.map((h) => h.hot)).toEqual([false]);
   });
 
   /**
@@ -113,7 +112,7 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     deps.loadHolds = loader === "cron" ? real.loadHolds : async (orgId, since) => {
       const { toAlertHolds } = await import("./holds");
       const data = await pageLoader(db(fixture()), orgId, NOW, { alertsSince: since });
-      return { holds: toAlertHolds(data.holds, new Map(), ["model:hot_lead"]), complete: true };
+      return { holds: toAlertHolds(data.holds, new Map()), complete: true };
     };
     deps.loadHeldPropertyIds = real.loadHeldPropertyIds;
     await runHoldAlertsForOrg(deps, "org");

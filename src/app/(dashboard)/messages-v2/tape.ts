@@ -163,7 +163,11 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
   const handoff = run.steps.find((s) => s.name === "assign_hot_lead" && s.result === "applied");
   const handoffStatus = (handoff?.detail as { status?: string } | null | undefined)?.status;
   if (handoffStatus === "already_owned") {
-    parts.push("Already on My Leads under Jarrad");
+    parts.push(
+      run.hotAlertSentAt
+        ? `Already on My Leads under Jarrad · Slack and text sent ${chicagoClock(run.hotAlertSentAt)}`
+        : "Already on My Leads under Jarrad",
+    );
   } else if (handoffStatus === "assigned_unrecorded") {
     parts.push("On My Leads under Jarrad, but the note about it couldn't be saved");
   } else if (handoff) {
