@@ -9,6 +9,7 @@ import { withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { BACKLOG_PAGE, loadBacklogHolds, type LooseSupabase } from "./queries";
+import { parseHoldCursor } from "./hold-activity";
 import { loadHoldsSlice } from "./holds-by-activity";
 import type { BacklogPage, OlderHoldsPage } from "./hold-action-types";
 
@@ -60,6 +61,9 @@ export async function loadBacklogHoldsAction(input: {
     return err({ code: "BACKLOG_UNAVAILABLE", message: "Backlog holds could not be loaded." });
   }
   const holds = await withoutDncLocked(supabase, orgId, await withFreshSeen(supabase, orgId, page.holds));
+  if (!holds) {
+    return err({ code: "BACKLOG_UNAVAILABLE", message: "Backlog holds could not be verified." });
+  }
   const labels = await loadRunLabels(
     supabase,
     holds.map((h) => ({
@@ -86,7 +90,7 @@ export async function loadBacklogHoldsAction(input: {
  * activity first, DNC-locked excluded) across every open hold, New and Backlog.
  */
 export async function loadOlderHoldsAction(input: {
-  offset: number;
+  cursor: { at: number | null; id: string } | null;
   limit?: number;
 }): Promise<Result<OlderHoldsPage>> {
   let orgId: string | null = null;
@@ -105,11 +109,12 @@ export async function loadOlderHoldsAction(input: {
   if (!orgId) {
     return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
   }
-  const offset = clampInt(input?.offset, 0, 1_000_000);
+  const cursor = parseHoldCursor(input?.cursor);
+  if (input?.cursor && !cursor) return err({ code: "VALIDATION", message: "Bad cursor." });
   const limit = Math.max(1, clampInt(input?.limit, 50, MAX_PAGE));
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const slice = await loadHoldsSlice(supabase, orgId, offset, limit);
-  if (!slice || slice.failed) {
+  const slice = await loadHoldsSlice(supabase, orgId, cursor, limit);
+  if (!slice) {
     return err({ code: "OLDER_UNAVAILABLE", message: "Older waiting texts could not be loaded." });
   }
   const holds = await withFreshSeen(supabase, orgId, slice.holds);
@@ -122,5 +127,5 @@ export async function loadOlderHoldsAction(input: {
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  return { ok: true, data: { holds, labels: [...labels.entries()], total: slice.total, cutFrom: slice.cutFrom } };
+  return { ok: true, data: { holds, labels: [...labels.entries()], remaining: slice.remaining, cutFrom: slice.cutFrom } };
 }

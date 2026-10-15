@@ -45,14 +45,18 @@ export type BacklogPage = {
 export type OlderHoldsPage = {
   holds: OpenHold<RunWithSteps>[];
   labels: Array<[string, RunLabel]>;
-  /** All waiting holds, so the column can say how many are still to load. */
-  total: number;
+  /** Holds still to load after this page. */
+  remaining: number;
   /** All holds when more than the sort ceiling exist; null otherwise. */
   cutFrom?: number | null;
 };
 
-/** Server action behind "Show older": the next slice after `offset` already-loaded holds. */
-export type LoadOlderHolds = (input: { offset: number; limit?: number }) => Promise<Result<OlderHoldsPage>>;
+/** Server action behind "Show older": the next keyset page after the last loaded hold. */
+export type LoadOlderHolds = (input: {
+  /** The last card the client has: (activity time, id). The server returns holds strictly after it; no offsets. */
+  cursor: { at: number | null; id: string } | null;
+  limit?: number;
+}) => Promise<Result<OlderHoldsPage>>;
 
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
 export type LoadBacklog = (input: {

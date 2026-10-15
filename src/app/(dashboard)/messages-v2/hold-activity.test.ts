@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { holdActivityMs, sortNewestFirst } from "./hold-activity";
+import { holdActivityMs, holdCursor, holdsAfter, parseHoldCursor, sortNewestFirst } from "./hold-activity";
 import type { OpenHold, PipelineRunStep, RunWithSteps } from "./types";
 
 const iso = (n: number) => new Date(n).toISOString();
@@ -65,5 +65,48 @@ describe("deriveOpenHolds last_activity", () => {
     });
     expect(holds[0].since).toBe("2026-01-01T00:00:00Z");
     expect(holds[0].last_activity).toBe("2026-10-14T12:00:00Z");
+  });
+});
+
+describe("keyset paging (holdsAfter)", () => {
+  const mk = (id: string, last: number) => base(id, iso(last), { last_activity: iso(last) });
+
+  it("a hold arriving between page 1 and page 2 causes no repeat and no skip, and the last hold stays reachable", () => {
+    let server = ["a", "b", "c", "d", "e", "f"].map((id, i) => mk(id, 10_000 - i * 100)); // a newest ... f oldest
+    const page = (cursor: ReturnType<typeof holdCursor> | null, limit: number) => holdsAfter(sortNewestFirst(server), cursor).slice(0, limit);
+    const page1 = page(null, 3);
+    expect(page1.map((h) => h.id)).toEqual(["a", "b", "c"]);
+    // A brand-new hold lands on top between the two requests.
+    server = [mk("new", 20_000), ...server];
+    const page2 = page(holdCursor(page1[page1.length - 1]), 3);
+    expect(page2.map((h) => h.id)).toEqual(["d", "e", "f"]); // "c" not repeated, nothing skipped, "f" reachable
+    expect(page(holdCursor(page2[page2.length - 1]), 3)).toEqual([]);
+  });
+
+  it("holds sharing an activity time are ordered by id and never skipped at the edge", () => {
+    const server = [mk("b", 5_000), mk("a", 5_000), mk("c", 5_000), mk("d", 1_000)];
+    const sorted = sortNewestFirst(server);
+    const seen: string[] = [];
+    let cursor: ReturnType<typeof holdCursor> | null = null;
+    for (;;) {
+      const p = holdsAfter(sorted, cursor).slice(0, 1);
+      if (!p.length) break;
+      seen.push(p[0].id);
+      cursor = holdCursor(p[0]);
+    }
+    expect(seen).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("holds with no known time page last, after every dated hold", () => {
+    const sorted = sortNewestFirst([base("x", null), mk("dated", 1_000)]);
+    expect(holdsAfter(sorted, holdCursor(sorted[0])).map((h) => h.id)).toEqual(["x"]);
+  });
+
+  it("only a finite number (or null) and a short id are accepted as a cursor", () => {
+    expect(parseHoldCursor({ at: 5, id: "p1" })).toEqual({ at: 5, id: "p1" });
+    expect(parseHoldCursor({ at: null, id: "p1" })).toEqual({ at: null, id: "p1" });
+    expect(parseHoldCursor({ at: "5", id: "p1" })).toBeNull();
+    expect(parseHoldCursor({ at: Number.NaN, id: "p1" })).toBeNull();
+    expect(parseHoldCursor({ at: 5, id: "" })).toBeNull();
   });
 });

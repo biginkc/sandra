@@ -19,14 +19,14 @@ function client(locked: string[], error: unknown = null): LooseSupabase {
 describe("withoutDncLocked", () => {
   it("drops holds on permanently do-not-contact locked properties and keeps the rest", async () => {
     const out = await withoutDncLocked(client(["b"]), "org", [hold("a"), hold("b"), hold("c")]);
-    expect(out.map((h) => h.id)).toEqual(["a", "c"]);
+    expect(out?.map((h) => h.id)).toEqual(["a", "c"]);
   });
   it("keeps holds with no property (nothing to look up)", async () => {
     const out = await withoutDncLocked(client(["a"]), "org", [hold("x", null)]);
     expect(out).toHaveLength(1);
   });
-  it("keeps every hold when the lookup fails: a visible extra card beats a silently hidden one", async () => {
+  it("FAILS CLOSED when the lookup fails: null, so the caller renders an error and no cards", async () => {
     const out = await withoutDncLocked(client(["a"], { message: "boom" }), "org", [hold("a"), hold("b")]);
-    expect(out).toHaveLength(2);
+    expect(out).toBeNull();
   });
 });

@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
 import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
-import { HOLD_SORT_CAP, holdActivityMs, sortNewestFirst } from "./hold-activity";
+import { HOLD_SORT_CAP, holdActivityMs, holdCursor, sortNewestFirst } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
 import { holdReasonSentence, withEffectiveReason } from "./tape";
@@ -125,7 +125,8 @@ type OlderState = {
   forKey: unknown;
   holds: OpenHold<RunWithSteps>[];
   labels: Map<string, RunLabel>;
-  total: number;
+  /** Holds still to load after the last page, from the server; null until the first "Show older". */
+  remaining: number | null;
   error: string | null;
 };
 
@@ -162,11 +163,11 @@ export function WaitingColumn({
   onReload?: () => void;
 }) {
   const [visible, setVisible] = useState(PAGE);
-  const [stored, setOlder] = useState<OlderState>({ forKey: refreshKey, holds: [], labels: new Map(), total, error: null });
+  const [stored, setOlder] = useState<OlderState>({ forKey: refreshKey, holds: [], labels: new Map(), remaining: null, error: null });
   const [busy, setBusy] = useState(false);
 
   const older: OlderState =
-    stored.forKey === refreshKey ? stored : { forKey: refreshKey, holds: [], labels: new Map(), total, error: null };
+    stored.forKey === refreshKey ? stored : { forKey: refreshKey, holds: [], labels: new Map(), remaining: null, error: null };
 
   // Page 1 is the top of the server order (re-sorting it is a no-op unless a live step moved it); later slices
   // continue that order and are never re-sorted across the seam.
@@ -174,8 +175,9 @@ export function WaitingColumn({
   const loaded = [...sortNewestFirst(holds), ...older.holds.filter((h) => !seen.has(h.id))];
   const shown = loaded.slice(0, visible);
   const hiddenLoaded = loaded.length - shown.length;
-  const serverTotal = Math.max(older.total, total);
-  const notLoadedYet = Math.max(0, serverTotal - loaded.length);
+  // Before the first "Show older" the page's own total says how many are left; after it, the server's keyset answer does.
+  const notLoadedYet = older.remaining ?? Math.max(0, total - loaded.length);
+  const serverTotal = loaded.length + notLoadedYet;
   const canLoadMore = !!loadOlder && notLoadedYet > 0;
 
   const showOlder = async () => {
@@ -186,13 +188,13 @@ export function WaitingColumn({
     if (!loadOlder || busy || !canLoadMore) return;
     setBusy(true);
     try {
-      const res = await loadOlder({ offset: loaded.length, limit: OLDER_PAGE });
+      const res = await loadOlder({ cursor: loaded.length ? holdCursor(loaded[loaded.length - 1]) : null, limit: OLDER_PAGE });
       if (res.ok) {
         setOlder({
           forKey: refreshKey,
           holds: [...older.holds, ...res.data.holds],
           labels: new Map([...older.labels, ...res.data.labels]),
-          total: res.data.total,
+          remaining: res.data.remaining,
           error: null,
         });
         setVisible((v) => v + PAGE);
@@ -218,9 +220,14 @@ export function WaitingColumn({
       </div>
       <p className="text-[13px] text-muted-foreground">Not urgent. Check once a day.</p>
       {error && (
-        <p role="alert" data-testid="holds-split-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-          Waiting texts unavailable — {error}
-        </p>
+        <div role="alert" data-testid="holds-split-unavailable" className="flex flex-col items-start gap-2 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          <p>{error}</p>
+          {onReload && (
+            <Button type="button" size="xs" variant="outline" data-testid="holds-retry" onClick={onReload}>
+              Retry
+            </Button>
+          )}
+        </div>
       )}
       {cutFrom != null && (
         <p data-testid="holds-capped" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">

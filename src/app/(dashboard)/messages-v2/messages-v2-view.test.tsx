@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { holdsAfter, sortNewestFirst } from "./hold-activity";
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
   OpenHold,
@@ -255,35 +256,46 @@ describe("MessagesV2View", () => {
     expect(text).not.toContain("Sandra is on");
   });
 
-  it("'Show older' asks the server for the next slice of the same order and says how many remain", async () => {
-    const holds = Array.from({ length: 3 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
-    const loadOlderHolds = vi.fn(async (input: { offset: number; limit?: number }) => ({
-      ok: true as const,
-      data: { holds: [{ ...openHold(`older${input.offset}`), since: new Date(NOW - 50 * 86_400_000).toISOString() }], labels: [], total: 5 },
-    }));
-    await mount({ ...props([], holds), holdsTotal: 5, loadOlderHolds });
+  // A keyset server over a mutable list, like loadHoldsSlice: strictly after the client's last card, `remaining` after the page.
+  const keysetServer = (list: () => OpenHold<RunWithSteps>[]) =>
+    vi.fn(async (input: { cursor: { at: number | null; id: string } | null; limit?: number }) => {
+      const after = holdsAfter(sortNewestFirst(list()), input.cursor);
+      const holdsPage = after.slice(0, input.limit ?? 50);
+      return { ok: true as const, data: { holds: holdsPage, labels: [] as Array<[string, { name: string; address: null }]>, remaining: after.length - holdsPage.length } };
+    });
+  const at = (minsAgo: number) => ({ since: new Date(NOW - minsAgo * 60_000).toISOString() });
+
+  it("'Show older' asks for the holds strictly after its last card and says how many remain", async () => {
+    const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    const loadOlderHolds = keysetServer(() => all);
+    await mount({ ...props([], all.slice(0, 3)), holdsTotal: 5, loadOlderHolds });
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("5");
     expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
     await userEvent.click(screen.getByTestId("show-older"));
-    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
-    expect(loadOlderHolds).toHaveBeenLastCalledWith({ offset: 3, limit: 50 });
-    await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
-    expect(loadOlderHolds).toHaveBeenLastCalledWith({ offset: 4, limit: 50 });
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ cursor: { at: Date.parse(all[2].since!), id: "h3" }, limit: 50 });
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
-  it("keeps the server's order across the page seam: a later slice never jumps above page one", async () => {
-    const page1 = [{ ...openHold("newest"), since: new Date(NOW - 1000).toISOString() }];
-    const loadOlderHolds = vi.fn(async () => ({
-      ok: true as const,
-      data: { holds: [{ ...openHold("later-slice"), since: new Date(NOW - 5000).toISOString() }], labels: [], total: 2 },
-    }));
-    await mount({ ...props([], page1), holdsTotal: 2, loadOlderHolds });
+  it("a hold arriving between page 1 and 'Show older' causes no repeat and no skip; the last hold is reachable", async () => {
+    let server = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    const loadOlderHolds = keysetServer(() => server);
+    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, loadOlderHolds });
+    server = [{ ...openHold("brand-new"), ...at(0.1) }, ...server]; // lands on top while the page is open
     await userEvent.click(screen.getByTestId("show-older"));
-    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(2));
-    const texts = screen.getAllByTestId("waiting-card").map((c) => c.textContent);
-    expect(texts).toHaveLength(2);
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
+    const ids = screen.getAllByTestId("waiting-card").map((c) => c.textContent ?? "");
+    expect(ids).toHaveLength(6); // h1..h6, no repeat of h3, no skip of h4-h6; the new arrival waits for a refresh
+    expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("fails closed: when the waiting list could not be verified it shows the error and a retry, and no cards", async () => {
+    await mount({ ...props([], []), holdsError: "Waiting list could not be loaded. Reload to retry." });
+    expect(screen.getByTestId("holds-split-unavailable")).toHaveTextContent("Waiting list could not be loaded. Reload to retry.");
+    expect(screen.queryAllByTestId("waiting-card")).toHaveLength(0);
+    expect(screen.queryByText(/nothing is waiting for you/i)).toBeNull();
+    await userEvent.click(screen.getByTestId("holds-retry"));
+    expect(mocks.refresh).toHaveBeenCalled();
   });
 
   it("says 'Showing the newest 5,000 of N' when waiting texts were cut, never silently", async () => {
@@ -533,7 +545,7 @@ describe("MessagesV2View", () => {
     const holds = Array.from({ length: 22 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
     const loadOlderHolds = vi.fn(async () => ({
       ok: true as const,
-      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], total: 23 },
+      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], remaining: 0 },
     }));
     await mount({ ...props([], holds), holdsTotal: 23, loadOlderHolds });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
@@ -542,7 +554,7 @@ describe("MessagesV2View", () => {
     expect(loadOlderHolds).not.toHaveBeenCalled();
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(23));
-    expect(loadOlderHolds).toHaveBeenCalledWith({ offset: 22, limit: 50 });
+    expect(loadOlderHolds).toHaveBeenCalledTimes(1);
   });
 
   it("'Show yesterday's tape' loads the earlier day and shows it under its own day heading", async () => {

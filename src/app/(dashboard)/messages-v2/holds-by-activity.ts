@@ -1,4 +1,4 @@
-import { HOLD_SORT_CAP, sortNewestFirst } from "./hold-activity";
+import { HOLD_SORT_CAP, holdsAfter, sortNewestFirst, type HoldCursor } from "./hold-activity";
 import { lockedPropertyIds, withoutDncLocked } from "./dnc-locked";
 import {
   DECISION_COLUMNS,
@@ -89,7 +89,9 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
         .order("id", { ascending: true }),
     ),
   ]);
-  const failed = props.failed || decs.failed || revs.failed || drafts.failed;
+  // Fail closed: if ANY source or the lock lookup fails, no cards are built from partial or unverified data.
+  const sourceFailed = props.failed || decs.failed || revs.failed || drafts.failed;
+  if (sourceFailed) return { properties: [], decisions: [], reviews: [], drafts: [], total: 0, failed: true };
 
   // Locked properties never count: drop their decision / review / draft rows before anything is loaded or sorted.
   const referenced = [
@@ -98,7 +100,8 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
     ...drafts.rows.flatMap((d) => (d.property_id ? [d.property_id] : [])),
   ];
   const locked = referenced.length ? await lockedPropertyIds(supabase, orgId, referenced) : new Set<string>();
-  const open = (id: string | null | undefined) => !id || !locked || !locked.has(id);
+  if (!locked) return { properties: [], decisions: [], reviews: [], drafts: [], total: 0, failed: true };
+  const open = (id: string | null | undefined) => !id || !locked.has(id);
 
   const base = {
     properties: props.rows,
@@ -113,7 +116,7 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
     ...base.reviews.map((r) => r.property_id),
     ...base.drafts.map((d) => d.property_id ?? `draft:${d.id}`),
   ]);
-  return { ...base, total: holdKeys.size, failed };
+  return { ...base, total: holdKeys.size, failed: false };
 }
 
 /** Newest HOLD_SORT_CAP of an already-sorted list, plus the full count when it had to cut (never silent). */
@@ -124,13 +127,15 @@ export function applyHoldCeiling<T>(sorted: readonly T[]): { holds: T[]; cutFrom
 }
 
 export type SortedHolds = {
-  /** All open holds, DNC-locked excluded, latest activity first. */
+  /** All open holds, DNC-locked excluded, latest activity first. Empty (with `error`) if anything could not be verified. */
   holds: OpenHold<RunWithSteps>[];
   /** All open holds when more than HOLD_SORT_CAP exist (only the newest are kept); null otherwise. Never silent. */
   cutFrom: number | null;
-  /** The source lookup failed: show "unavailable", not an empty column. */
+  /** The waiting list could not be loaded or verified: show this and no cards. */
   error: string | null;
 };
+
+export const HOLDS_LOAD_ERROR = "Waiting list could not be loaded. Reload to retry.";
 
 const NO_SCOPE = { propertyIds: [] as string[], noPropertyDrafts: false };
 
@@ -146,23 +151,23 @@ export async function loadMessagesV2Page(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  const { holds, cutFrom } = applyHoldCeiling(sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds)));
-  return {
-    ...data,
-    holds,
-    cutFrom,
-    error: sources.failed ? "a hold source query failed" : null,
-  };
+  const verified = sources.failed ? null : await withoutDncLocked(supabase, orgId, data.holds);
+  if (!verified) return { ...data, holds: [], cutFrom: null, error: HOLDS_LOAD_ERROR };
+  const { holds, cutFrom } = applyHoldCeiling(sortNewestFirst(verified));
+  return { ...data, holds, cutFrom, error: null };
 }
 
-/** One slice of the same ordering, for "Show older". Holds only: no feed, badges or totals. */
+/**
+ * The next keyset page of the same ordering: holds strictly after `cursor` (the last card the client has),
+ * `limit` of them, plus how many remain after those. Null when anything could not be verified (fail closed).
+ */
 export async function loadHoldsSlice(
   supabase: LooseSupabase,
   orgId: string,
-  offset: number,
+  cursor: HoldCursor | null,
   limit: number,
   nowMs: number = Date.now(),
-): Promise<{ holds: OpenHold<RunWithSteps>[]; total: number; cutFrom: number | null; failed: boolean } | null> {
+): Promise<{ holds: OpenHold<RunWithSteps>[]; remaining: number; cutFrom: number | null } | null> {
   const sources = await collectOpenHoldSources(supabase, orgId);
   if (sources.failed) return null;
   const data = await loadMessagesV2Data(supabase, orgId, nowMs, {
@@ -171,11 +176,10 @@ export async function loadHoldsSlice(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  const { holds: sorted, cutFrom } = applyHoldCeiling(sortNewestFirst(await withoutDncLocked(supabase, orgId, data.holds)));
-  return {
-    holds: sorted.slice(offset, offset + limit),
-    total: sorted.length,
-    cutFrom,
-    failed: data.holdsMeta.failed.length > 0,
-  };
+  if (data.holdsMeta.failed.length > 0) return null;
+  const verified = await withoutDncLocked(supabase, orgId, data.holds);
+  if (!verified) return null;
+  const { holds: sorted, cutFrom } = applyHoldCeiling(sortNewestFirst(verified));
+  const after = holdsAfter(sorted, cursor);
+  return { holds: after.slice(0, limit), remaining: Math.max(0, after.length - limit), cutFrom };
 }

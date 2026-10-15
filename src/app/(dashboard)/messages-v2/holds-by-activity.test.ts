@@ -79,21 +79,36 @@ describe("collectOpenHoldSources", () => {
     expect(applyHoldCeiling(Array.from({ length: out.total })).cutFrom).toBeNull();
   });
 
-  it("keeps rows when the lock lookup fails (a visible extra card beats a hidden one)", async () => {
-    const bad = client({ jev_lead_decisions: [{ property_id: "p9", conversation_id: "c", source_inbound_message_id: "m", created_at: at(1) }] });
+  it("FAILS CLOSED when the lock lookup fails: no rows from unverified properties", async () => {
+    const bad = client({ properties: [prop(1, at(1))], jev_lead_decisions: [{ property_id: "p9", conversation_id: "c", source_inbound_message_id: "m", created_at: at(1) }] });
     const orig = (bad as unknown as { from: (t: string) => Record<string, unknown> }).from;
     (bad as unknown as { from: (t: string) => unknown }).from = (t: string) => {
       const q = orig(t);
-      if (t === "properties") q.then = (resolve: (v: unknown) => unknown) => resolve({ data: null, error: { message: "x" } });
+      if (t === "properties") {
+        const eq = q.eq as (c: string, v: unknown) => unknown;
+        let wantLocked = false;
+        q.eq = (c: string, v: unknown) => ((wantLocked ||= c === "is_dnc_locked" && v === true), eq(c, v));
+        q.then = (resolve: (v: unknown) => unknown) => resolve({ data: wantLocked ? null : [], error: wantLocked ? { message: "x" } : null });
+      }
       return q;
     };
     const out = await collectOpenHoldSources(bad, "org");
-    expect(out.decisions).toHaveLength(1);
+    expect(out.failed).toBe(true);
+    expect(out.properties).toHaveLength(0);
+    expect(out.decisions).toHaveLength(0);
+    expect(out.total).toBe(0);
+  });
+
+  it("FAILS CLOSED when one source fails: the others' rows are not used either", async () => {
+    const out = await collectOpenHoldSources(client({ properties: [prop(1, at(1))], jev_lead_decisions: [{ property_id: "p1", conversation_id: "c", source_inbound_message_id: "m", created_at: at(2) }] }, "ai_disposition_reviews"), "org");
+    expect(out.failed).toBe(true);
+    expect(out.properties).toHaveLength(0);
+    expect(out.decisions).toHaveLength(0);
   });
   it("reports a failed source instead of an empty list", async () => {
     const out = await collectOpenHoldSources(client({ properties: [prop(1, at(1))] }, "ai_reply_drafts"), "org");
     expect(out.failed).toBe(true);
-    expect(await loadHoldsSlice(client({}, "ai_reply_drafts"), "org", 0, 10)).toBeNull();
+    expect(await loadHoldsSlice(client({}, "ai_reply_drafts"), "org", null, 10)).toBeNull();
   });
 });
 

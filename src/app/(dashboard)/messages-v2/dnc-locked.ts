@@ -5,8 +5,7 @@ const CHUNK = 100;
 
 /**
  * Which of these properties are permanently do-not-contact locked. Returns null
- * when any lookup fails: callers keep everything (a visible extra card is safer
- * than a silently hidden one).
+ * when any lookup fails: callers must fail closed (error state, no cards).
  */
 export async function lockedPropertyIds(
   supabase: LooseSupabase,
@@ -35,16 +34,18 @@ export async function lockedPropertyIds(
 /**
  * Drops holds whose property is permanently do-not-contact locked
  * (`properties.is_dnc_locked`): nobody can act on them, so they must not sit in
- * "Waiting for a person". If the lookup fails the holds are kept.
+ * "Waiting for a person". FAILS CLOSED: if the lock lookup fails this returns
+ * null and the caller must show an error and render no cards, because a hold
+ * on an unverified property could be a locked one.
  */
 export async function withoutDncLocked(
   supabase: LooseSupabase,
   orgId: string,
   holds: OpenHold<RunWithSteps>[],
-): Promise<OpenHold<RunWithSteps>[]> {
+): Promise<OpenHold<RunWithSteps>[] | null> {
   const ids = holds.flatMap((h) => (h.property_id ? [h.property_id] : []));
   if (ids.length === 0) return holds;
   const locked = await lockedPropertyIds(supabase, orgId, ids);
-  if (!locked) return holds;
+  if (!locked) return null;
   return holds.filter((h) => !h.property_id || !locked.has(h.property_id));
 }
