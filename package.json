@@ -63,7 +63,10 @@
     "smoke:ai-escalation-prod": "tsx scripts/smoke-ai-responder-escalation-prod.ts",
     "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts",
     "smoke:sendillo-webhook-prod": "tsx scripts/smoke-sendillo-webhook-prod.ts",
-    "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs"
+    "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs",
+    "stress:messages-v2": "tsx scripts/messages-v2/stress/cli.ts",
+    "stress:messages-v2:db": "vitest run --config vitest.messages-v2-stress.config.ts",
+    "test:messages-v2-stress-unit": "vitest run scripts/messages-v2/stress/core.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",

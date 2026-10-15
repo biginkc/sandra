@@ -1,0 +1,590 @@
+{
+  "_about": "Messages v2 Stage 5 wording corpus: 30 seller situations x 10 wordings. Seller wordings are TEST DATA authored for the harness (they are what a homeowner might text, not Sandra's words). The openers (our_last_text) are the synthetic fixture openers from src/lib/sms-classification/__fixtures__/nine-questions-matrix.json and real masked openers from .planning/messages-v2/REPLAY-NINE-QUESTIONS.md with [name]/[address] filled in. No question text, reply text or drip text is defined here: the harness imports those from the product.",
+  "_expected_rule": "expected_buckets follow the precedence in code: up-front non-price keyword gate (dispatch.ts step 2) > hostile wording or hostile answer > asked_stop > wrong_person > hot (talked_price / open_to_selling, or any other answer yielding to a price keyword) > maybe_later > not_interested > asked_who > confirmed_owner > needs_person; responder off for the property = nothing at all. Group order and cutoff come from src/lib/sms-classification/nine-questions.ts (Jarrad, memory note jev-approved-questions).",
+  "openers": {
+    "A": "Hi, are you interested in selling 123 Oak St?",
+    "B": "Would you consider a cash offer?",
+    "C": "Hi Mary, apologies for the cold text. Still own over at 123 Oak St?",
+    "D": "Thank you for your reply. When is a good time for us to hop on a quick call? Shouldn't take very long.",
+    "E": "Would you be interested in a cash offer? We buy as-is without repairs.",
+    "F": "Mary, Mel here. Quick one, are you the owner of 123 Oak St?"
+  },
+  "scenarios": [
+    {
+      "id": "open_plain",
+      "title": "Wants an offer, said plainly",
+      "opener": "A",
+      "expected_answers": ["open_to_selling", "talked_price"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "Yes, make me an offer",
+        "yeah im open to it",
+        "Sure, what can you do for the house?",
+        "I would sell for the right number",
+        "Yes we are looking to sell this year",
+        "Open to it. What are you thinking?",
+        "Possibly. Send me what you have in mind",
+        "Yes. The house needs work but we want out",
+        "We've talked about selling, go ahead",
+        "Im interested, call me"
+      ]
+    },
+    {
+      "id": "yes_to_offer_opener",
+      "title": "\"Yes\" to an offer opener",
+      "opener": "B",
+      "expected_answers": ["open_to_selling"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "Yes",
+        "yes",
+        "Sure",
+        "Yes I would",
+        "Ok",
+        "Yeah why not",
+        "Yes please",
+        "I would consider it",
+        "Sure thing",
+        "Yes, depending on the number"
+      ]
+    },
+    {
+      "id": "yes_to_still_own_opener",
+      "title": "\"Yes\" to a still-own opener (confirmed owner)",
+      "opener": "C",
+      "expected_answers": ["confirmed_owner"],
+      "expected_buckets": ["confirmed_owner"],
+      "wordings": [
+        "Yes",
+        "yes i do",
+        "Yep still mine",
+        "Yes I still own it",
+        "That's correct",
+        "Still ours",
+        "Yes this is Mary",
+        "I do",
+        "Yes, been here 20 years",
+        "Yes it's still my place"
+      ]
+    },
+    {
+      "id": "price_ask",
+      "title": "Asks how much we would pay",
+      "opener": "B",
+      "expected_answers": ["talked_price", "open_to_selling"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "How much would you pay?",
+        "whats your offer",
+        "Depends on the price",
+        "What kind of number are we talking",
+        "how much",
+        "Give me a figure",
+        "What would you pay for it as is?",
+        "Make me an offer and we'll see",
+        "Price?",
+        "What are you offering"
+      ]
+    },
+    {
+      "id": "dollar_amount",
+      "title": "Names a dollar amount",
+      "opener": "B",
+      "expected_answers": ["talked_price"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "$150k",
+        "150k",
+        "$150,000 and it's yours",
+        "I need at least 150 thousand",
+        "Wouldn't take less than $180k",
+        "Zillow says 160k",
+        "$200k cash",
+        "I owe 120k on it so somewhere above that",
+        "Around $175,000",
+        "2 million lol"
+      ]
+    },
+    {
+      "id": "price_with_refusal",
+      "title": "Price demand wrapped in a refusal",
+      "opener": "E",
+      "expected_answers": ["talked_price", "hostile", "asked_stop", "not_interested"],
+      "expected_buckets": ["hot", "stop_person", "not_interested"],
+      "review": "Jarrad 2026-10-03 sided with Jev on curt price-demand refusals staying in Stop texting; the engine routes a talked_price answer hot. Jarrad to pick one bucket for this shape; until then both are accepted and the scenario is not gated.",
+      "wordings": [
+        "$5M take it or leave it",
+        "Not for sale. Unless you have 900k.",
+        "non negotiable, 400k, otherwise don't bother",
+        "I'm not selling but if you want it it's $750,000",
+        "Only if you pay double what it's worth",
+        "Not interested unless you're paying $600k",
+        "No. Maybe at 500k. Doubt you have it.",
+        "Lol you can't afford my price",
+        "You can't pay what I want, 1.2 million",
+        "Not selling for less than a million so no"
+      ]
+    },
+    {
+      "id": "stop_plus_price",
+      "title": "Stop plus price in one text (stop wins)",
+      "opener": "B",
+      "expected_answers": ["asked_stop", "hostile"],
+      "expected_buckets": ["stop_person"],
+      "wordings": [
+        "STOP, what's your price",
+        "Take me off your list. And no I don't want an offer",
+        "stop texting me about offers",
+        "Remove my number. Nobody is paying $300k anyway",
+        "Unsubscribe. Not taking any offer",
+        "Stop. The price would be too high for you",
+        "Do not text me again, I dont care how much",
+        "Please stop. I know what it's worth, $250k",
+        "STOP",
+        "Stop messaging me, whatever your offer is"
+      ]
+    },
+    {
+      "id": "hostile_plus_price",
+      "title": "Hostile plus price (hostile wins)",
+      "opener": "E",
+      "expected_answers": ["hostile", "asked_stop", "talked_price"],
+      "expected_buckets": ["stop_person"],
+      "wordings": [
+        "Fuck off unless you have $400k",
+        "Scammers. Your offer is garbage",
+        "Leave me alone, I'm not taking some lowball offer",
+        "This is spam. Nobody wants your 100k",
+        "Go to hell with your offers",
+        "Piss off, $500k or nothing",
+        "You idiots keep texting about a price",
+        "Quit texting me about how much you'd pay",
+        "F off. $2 million. Bye.",
+        "Harassing people for offers now?"
+      ]
+    },
+    {
+      "id": "hostile_not_stop",
+      "title": "Hostile but did not ask to stop",
+      "opener": "F",
+      "expected_answers": ["hostile", "not_interested"],
+      "expected_buckets": ["stop_person"],
+      "wordings": [
+        "Fuck you",
+        "You people are scum",
+        "Idiot",
+        "Go to hell",
+        "This is a scam and you know it",
+        "Piss off",
+        "What a bunch of vultures. Pathetic.",
+        "Spam.",
+        "Leave me alone",
+        "You absolute asshole"
+      ]
+    },
+    {
+      "id": "asked_stop_plain",
+      "title": "Asked to stop, no price",
+      "opener": "C",
+      "expected_answers": ["asked_stop", "hostile"],
+      "expected_buckets": ["stop_person"],
+      "wordings": [
+        "Please stop texting me",
+        "Take me off your list",
+        "Remove this number",
+        "Unsubscribe",
+        "stop",
+        "Don't text this number again",
+        "Quit texting",
+        "I'm on the do not call list, remove me",
+        "No more texts please",
+        "Stop contacting me"
+      ]
+    },
+    {
+      "id": "wrong_person_plain",
+      "title": "Wrong person or doesn't own it",
+      "opener": "F",
+      "expected_answers": ["wrong_person"],
+      "expected_buckets": ["wrong_person"],
+      "wordings": [
+        "Wrong number",
+        "I don't own that house",
+        "You have the wrong person",
+        "This isn't Mary",
+        "Never heard of that address",
+        "wrong #",
+        "I'm not the owner, I rent",
+        "No that's not me",
+        "I think you have an old number, I'm not Mary",
+        "Not mine. Wrong person."
+      ]
+    },
+    {
+      "id": "wrong_person_plus_price",
+      "title": "Wrong person who also mentions price (wrong person wins)",
+      "opener": "E",
+      "expected_answers": ["wrong_person"],
+      "expected_buckets": ["wrong_person"],
+      "wordings": [
+        "I don't own that house, but how much do you pay?",
+        "Wrong number. What's your offer though",
+        "Not my property. Curious what the price would be",
+        "You have the wrong person, I'd never sell for under $300k anyway",
+        "I don't own it. The owner wants 250k I think",
+        "Wrong person but I have a house, make me an offer",
+        "That's not me. How much are you offering people",
+        "Not mine, sold it in 2019 for 180k",
+        "I rent there. The landlord might take an offer",
+        "I'm not the owner. What price are you paying"
+      ]
+    },
+    {
+      "id": "asked_who_plain",
+      "title": "Asked who is texting",
+      "opener": "C",
+      "expected_answers": ["asked_who"],
+      "expected_buckets": ["asked_who"],
+      "wordings": [
+        "Who is this?",
+        "who dis",
+        "How did you get my number?",
+        "Who are you and why are you texting me",
+        "Sorry, who's this?",
+        "What company is this",
+        "Do I know you?",
+        "Where did you get this number",
+        "Who is asking?",
+        "Why are you asking?"
+      ]
+    },
+    {
+      "id": "asked_who_plus_price",
+      "title": "Asked who, and asked about price (hot wins)",
+      "opener": "E",
+      "expected_answers": ["asked_who", "talked_price", "open_to_selling"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "Who is this? How much are you offering",
+        "Who are you and what's your offer",
+        "How'd you get my number? What's the price",
+        "Who is this and how much would you pay",
+        "Which company? I'd want $300k",
+        "Who dis? Whats the offer",
+        "Who are you with? Depends on the price",
+        "Who's asking and how much",
+        "Who is this. Not for less than 200k",
+        "Who are you? What are you offering?"
+      ]
+    },
+    {
+      "id": "maybe_later_plain",
+      "title": "Maybe later, not right now",
+      "opener": "E",
+      "expected_answers": ["maybe_later"],
+      "expected_buckets": ["maybe_later"],
+      "wordings": [
+        "Not right now, maybe next year",
+        "Possibly down the road",
+        "Not at this time but check back in the spring",
+        "We're not ready yet. Try me in 6 months",
+        "Maybe later, not now",
+        "Not yet. Ask again after the holidays",
+        "Eventually, but not this year",
+        "Someday. Not at the moment",
+        "Not now. Keep my number though",
+        "Give us a year and we might"
+      ]
+    },
+    {
+      "id": "maybe_later_plus_offer",
+      "title": "Maybe later, but asks about the offer (hot wins)",
+      "opener": "E",
+      "expected_answers": ["maybe_later", "talked_price", "open_to_selling"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "Not now but what would you offer?",
+        "Maybe next year. What kind of price are we talking",
+        "Not yet, but how much",
+        "Down the road maybe. Ballpark offer?",
+        "Not this year unless the offer is crazy",
+        "Not ready, but curious what your price is",
+        "Later probably. Would you pay 300k?",
+        "Not now. What do you usually offer?",
+        "Give me a year. Although for $400k I'd move faster",
+        "Eventually. Whats the offer look like"
+      ]
+    },
+    {
+      "id": "not_interested_plain",
+      "title": "Not interested",
+      "opener": "E",
+      "expected_answers": ["not_interested"],
+      "expected_buckets": ["not_interested"],
+      "wordings": [
+        "Not interested",
+        "No thanks",
+        "No",
+        "Not selling",
+        "No, we love it here",
+        "Not interested, thank you",
+        "We're keeping it",
+        "Nope",
+        "No thank you, not selling",
+        "Not for sale"
+      ]
+    },
+    {
+      "id": "not_interested_plus_price",
+      "title": "Not interested but mentions price or offer (hot wins by code)",
+      "opener": "E",
+      "expected_answers": ["not_interested", "talked_price"],
+      "expected_buckets": ["hot"],
+      "review": "By code any not_interested answer yields to a price keyword, so \"no thanks, not interested in an offer\" lands on Jarrad's My Leads. Jarrad to confirm that is what he wants; until then reported, not gated.",
+      "wordings": [
+        "Not interested unless it's over $600k",
+        "No thanks, not interested in an offer",
+        "Not selling, the price would have to be insane",
+        "No. We'd need 500k and you won't pay that",
+        "Not interested. How much though?",
+        "No thanks. Nobody offers what it's worth",
+        "Not interested in your offer",
+        "No, unless you're paying $1M",
+        "Not selling at your price",
+        "No thank you, I know what offers you people make"
+      ]
+    },
+    {
+      "id": "unclear_plain",
+      "title": "Can't read it (noise)",
+      "opener": "C",
+      "expected_answers": ["needs_person"],
+      "expected_buckets": ["needs_person"],
+      "wordings": [
+        "Ll",
+        "Hm",
+        ".",
+        "👍",
+        "k",
+        "Idk",
+        "Huh",
+        "Received",
+        "Ty",
+        "Sent from my iPhone"
+      ]
+    },
+    {
+      "id": "unclear_plus_price",
+      "title": "Noise plus a price word (hot by keyword)",
+      "opener": "C",
+      "expected_answers": ["needs_person", "talked_price", "confirmed_owner"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "hmm price",
+        "$300?",
+        "offer",
+        "how much tho",
+        "k price",
+        "?? 300k",
+        "Price pls",
+        "idk, offer?",
+        "Yes. 400k",
+        "Hm how much"
+      ]
+    },
+    {
+      "id": "lawyer_plus_price",
+      "title": "Lawyer plus price (up-front keyword hold, hot alert)",
+      "opener": "E",
+      "expected_answers": null,
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "Talk to my lawyer. Offer has to be over $300k",
+        "My attorney handles it, anything under 250k is a no",
+        "Send any offer over $400,000 to my lawyer",
+        "Legal matter. $250k minimum.",
+        "My attorney says 350k in writing",
+        "The estate lawyer wants 400k",
+        "You'd have to go through my attorney, $500k",
+        "Lawyer says no contract under $500k",
+        "Put $275k in writing to my attorney",
+        "$1 million, and it goes through legal"
+      ]
+    },
+    {
+      "id": "lawyer_only",
+      "title": "Lawyer or legal, no price (person, no hot alert)",
+      "opener": "F",
+      "expected_answers": null,
+      "expected_buckets": ["keyword_hold"],
+      "wordings": [
+        "My attorney handles all of that",
+        "Talk to my lawyer",
+        "It's in a legal dispute",
+        "There's a contract on it already",
+        "We're in closing with someone",
+        "Lawyer says don't respond",
+        "Legal is handling the property",
+        "My attorney will contact you",
+        "It's tied up in a lawsuit",
+        "Escrow already opened"
+      ]
+    },
+    {
+      "id": "real_person_request",
+      "title": "Wants a real person (handoff keyword, person)",
+      "opener": "C",
+      "expected_answers": null,
+      "expected_buckets": ["keyword_hold"],
+      "wordings": [
+        "Is this a real person?",
+        "Am I talking to a human",
+        "Can I speak to someone",
+        "Stop the bot and have a real human text me",
+        "Is this a real agent or a robot",
+        "Connect me with a person",
+        "I want to talk to a human being",
+        "Real person please",
+        "Are you a bot? Let me speak to a real agent",
+        "Can a real human call me"
+      ]
+    },
+    {
+      "id": "gave_time_to_call",
+      "title": "Gave a time to call (known gap: no question covers it)",
+      "opener": "D",
+      "expected_answers": ["open_to_selling"],
+      "expected_buckets": ["hot"],
+      "known_gap": "Jarrad 2026-10-14: 'gave a time to call' stays under Wants an offer, no new question. No question asks it, so today these land in needs_person (REPLAY-NINE-QUESTIONS.md rows 9, 31, 32, 37). Reported, not gated.",
+      "wordings": [
+        "Anytime",
+        "noon is best",
+        "Tomorrow around 9am is fine",
+        "You can call in the morning",
+        "I'm working until 8pm",
+        "After 5 works",
+        "Call me now",
+        "Weekends are better",
+        "I can be available at 10 or 12 today",
+        "Of course, tomorrow around 8 or 9am cst is fine"
+      ]
+    },
+    {
+      "id": "confirmed_owner_long",
+      "title": "Confirmed owner, long and chatty",
+      "opener": "C",
+      "expected_answers": ["confirmed_owner"],
+      "expected_buckets": ["confirmed_owner"],
+      "wordings": [
+        "Yes this is Mary, I've owned the house since 1998 and my kids grew up there",
+        "Yes it's still mine. We moved in right after we got married and never left",
+        "Yes I do still own it, my husband and I bought it from his parents",
+        "That's my place, yes. Been paying that mortgage for 15 years",
+        "Yes still own it. Just put a new roof on it last summer actually",
+        "Yes ma'am, still the owner. Lived here my whole life",
+        "Yep, still mine. It was my mom's house before that",
+        "Yes it's ours, we've been fixing it up over the years",
+        "Yes I'm Mary and yes I still have the Oak St house",
+        "Still own it, yes. It's the only home the kids have known"
+      ]
+    },
+    {
+      "id": "not_interested_typos",
+      "title": "Not interested, typos and lowercase",
+      "opener": "E",
+      "expected_answers": ["not_interested"],
+      "expected_buckets": ["not_interested"],
+      "wordings": [
+        "nto intrested",
+        "no thx",
+        "nah im good",
+        "not intrested sorry",
+        "nope not sellin",
+        "no ty",
+        "not interseted",
+        "we r not selling",
+        "no tnx keeping it",
+        "nawt interested"
+      ]
+    },
+    {
+      "id": "slang_open",
+      "title": "Open to selling, slang",
+      "opener": "B",
+      "expected_answers": ["open_to_selling", "talked_price"],
+      "expected_buckets": ["hot"],
+      "wordings": [
+        "yea lets talk numbers",
+        "im down, shoot me an offer",
+        "bet. what u payin",
+        "fr? yeah lets hear it",
+        "ya we could do that",
+        "for sure, hit me with a number",
+        "lets do it, how much",
+        "aight im listening",
+        "yeah we been wanting to sell tbh",
+        "sure thing boss, whats the price"
+      ]
+    },
+    {
+      "id": "sold_already",
+      "title": "Already sold it (which bucket?)",
+      "opener": "C",
+      "expected_answers": ["wrong_person", "not_interested"],
+      "expected_buckets": ["wrong_person", "not_interested", "needs_person"],
+      "review": "'I sold it' is neither wrong number nor not interested. The nine answers have no 'sold' bucket; by code wrong_person sends the wrong-number reply and closes. Jarrad to decide the right bucket; until then reported, not gated.",
+      "wordings": [
+        "I sold it last year",
+        "We sold that house in 2022",
+        "Sold it. Not mine anymore",
+        "No longer own it, sold in March",
+        "That was sold years ago",
+        "We don't own it anymore, it sold",
+        "Sold already sorry",
+        "I sold that property",
+        "Not ours anymore, closed on the sale last fall",
+        "Already sold"
+      ]
+    },
+    {
+      "id": "deceased_owner",
+      "title": "Owner died (distressed keyword, person)",
+      "opener": "F",
+      "expected_answers": null,
+      "expected_buckets": ["keyword_hold"],
+      "wordings": [
+        "My mother passed away, this was her house",
+        "The owner died last year",
+        "He's deceased. I'm his son.",
+        "It's in probate",
+        "She passed away in June",
+        "This was my dad's, he died",
+        "The estate is handling it",
+        "Owner is deceased",
+        "My wife passed away, I'm not ready to talk about the house",
+        "Dad passed away, we're sorting the estate"
+      ]
+    },
+    {
+      "id": "responder_off",
+      "title": "Responder off for this property (nothing happens)",
+      "opener": "B",
+      "expected_answers": null,
+      "expected_buckets": ["silent_off"],
+      "db_only": true,
+      "property_disabled": true,
+      "wordings": [
+        "Yes, make me an offer",
+        "How much would you pay?",
+        "$150k",
+        "STOP",
+        "Not interested",
+        "Who is this?",
+        "Wrong number",
+        "Maybe next year",
+        "Fuck off",
+        "Talk to my lawyer"
+      ]
+    }
+  ]
+}
