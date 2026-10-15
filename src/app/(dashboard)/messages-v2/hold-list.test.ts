@@ -48,7 +48,26 @@ const latestRpc = (tables: Record<string, Row[]>) => ({
   },
 });
 
+/**
+ * Pending decisions / reviews must reference a source message and a conversation that exist in their org. Fixtures
+ * written for other invariants get those rows added here (property-less, so no draft resolution changes); tests of
+ * the reference check itself mark their rows `_noRefs: true`.
+ */
+function withRefs(tables: Record<string, Row[]>) {
+  const msgs = (tables.messages ??= []);
+  for (const r of [...(tables.jev_lead_decisions ?? []), ...(tables.ai_disposition_reviews ?? [])]) {
+    if (r._noRefs) continue;
+    const id = r.source_inbound_message_id as string | null;
+    if (id && !msgs.some((m) => m.id === id)) msgs.push({ id, org_id: r.org_id, conversation_id: null, property_id: null, direction: "inbound", body: "b", created_at: r.created_at });
+    const conv = r.conversation_id as string | null;
+    if (conv && !msgs.some((m) => m.conversation_id === conv && m.org_id === r.org_id))
+      msgs.push({ id: `conv-${conv}`, org_id: r.org_id, conversation_id: conv, property_id: null, direction: "outbound", body: "b", created_at: r.created_at });
+  }
+  return tables;
+}
+
 function db(tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) {
+  withRefs(tables);
   return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), hold_alert_latest_status: () => ({ data: [], error: null }), ...(opts.rpc ?? {}) } });
 }
 
@@ -1002,4 +1021,43 @@ describe("Opus: Show older of a hold that lost a shared run on the whole list re
     expect(slice.holds[0].recheck_changed).toBeUndefined();
     expect(slice.snapshot.entries[0].run).toBe(pinned.run);
   });
+});
+
+describe("Sol r3: decisions and reviews pass the same in-org reference check as drafts", () => {
+  const otherOrgMsgs: Row[] = [
+    message(80, { id: u(80, 3), org_id: "other", conversation_id: u(80, 2) }),
+  ];
+  const pendingRow = (kind: "decision" | "review", over: Row): Row =>
+    kind === "decision"
+      ? decision(1, u(3), t(5), { _noRefs: true, ...over })
+      : { id: u(1, 8), org_id: "org", status: "pending", property_id: u(3), disposition: "x", created_at: t(5), _noRefs: true, ...over };
+  const good = { source_inbound_message_id: u(81, 3), conversation_id: u(81, 2) };
+  const goodMsgs: Row[] = [message(81, { id: u(81, 3), conversation_id: u(81, 2) })];
+  const cases: Array<[string, Row]> = [
+    ["a missing source message", { ...good, source_inbound_message_id: u(99, 3) }],
+    ["another org's source message", { ...good, source_inbound_message_id: u(80, 3) }],
+    ["a conversation with no message in the org", { ...good, conversation_id: u(99, 2) }],
+    ["another org's conversation", { ...good, conversation_id: u(80, 2) }],
+  ];
+  for (const kind of ["decision", "review"] as const) {
+    const table = kind === "decision" ? "jev_lead_decisions" : "ai_disposition_reviews";
+    it(`${kind} with readable references is a hold (control)`, async () => {
+      const tables: Record<string, Row[]> = { properties: [plainProp(3)], [table]: [pendingRow(kind, good)], messages: [...goodMsgs, ...otherOrgMsgs] };
+      const list = await eligible(tables);
+      expect(list.holds.map((h) => h.id)).toEqual([u(3)]);
+      expect(list.unverified).toBe(0);
+    });
+    for (const [name, over] of cases) {
+      it(`${kind} with ${name}: hidden + counted; missing on paging; not eligible on re-check; dropped by the final check`, async () => {
+        const tables: Record<string, Row[]> = { properties: [plainProp(3)], [table]: [pendingRow(kind, over)], messages: [...goodMsgs, ...otherOrgMsgs] };
+        const list = await eligible(tables);
+        expect(list.holds).toHaveLength(0);
+        expect(list.unverified).toBe(1);
+        expect((await loadHoldsByIds(db(tables).client, "org", [u(3)]))!.missing).toEqual([u(3)]);
+        expect((await liveStateOf(db(tables).client, "org", [u(3)]))![0].eligible).toBe(false); // actions paused
+        const before = await eligible({ properties: [plainProp(3)], [table]: [pendingRow(kind, good)], messages: [...goodMsgs] });
+        expect([...(await recheckOpen(db(tables).client, "org", before.holds))!.open]).toEqual([]);
+      });
+    }
+  }
 });

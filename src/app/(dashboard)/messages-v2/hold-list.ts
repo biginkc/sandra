@@ -157,29 +157,23 @@ async function scopedDrafts(supabase: LooseSupabase, orgId: string, propertyIds:
   return { rows: [...byId.values()], error: null };
 }
 
-/** Step 2. Every property each draft could belong to. Null when any lookup fails. */
-export async function resolveDraftProperties(
+/**
+ * THE shared in-org reference check for every pending source (drafts, decisions, reviews): which referenced
+ * messages exist in this org (and their property), and which conversations have at least one message in this org
+ * (and the properties on them). A reference with no row here is UNRESOLVED (absent or another org's), never
+ * "no property". Null when any lookup fails.
+ */
+export type MessageReferences = { msgProperty: Map<string, string | null>; convProperties: Map<string, Set<string>> };
+export async function readMessageReferences(
   supabase: LooseSupabase,
   orgId: string,
-  drafts: readonly HoldDraftRow[],
-): Promise<Map<string, Set<string>> | null> {
-  const runIds = uniq(drafts.flatMap((d) => (d.run_id ? [d.run_id] : [])));
-  const msgIds = uniq(drafts.flatMap((d) => (d.inbound_message_id ? [d.inbound_message_id] : [])));
-  const convIds = uniq(drafts.flatMap((d) => (d.conversation_id ? [d.conversation_id] : [])));
-
-  const runProperty = new Map<string, string | null>();
+  msgIds: readonly string[],
+  convIds: readonly string[],
+): Promise<MessageReferences | null> {
   const msgProperty = new Map<string, string | null>();
   const convProperties = new Map<string, Set<string>>();
   let failed = false;
-
   await Promise.all([
-    ...chunks(runIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ id: string; property_id: string | null; started_at: string }>(() =>
-        supabase.from("pipeline_runs").select("id, property_id, started_at").eq("org_id", orgId).in("id", ids),
-      );
-      if (res.error) failed = true;
-      else for (const r of res.rows) runProperty.set(r.id, r.property_id);
-    }),
     // (A referenced run or message with no row in this org is UNRESOLVED, not "no property": see below.)
     ...chunks(msgIds).map(async (ids) => {
       const res = await fetchAllKeyset<{ id: string; property_id: string | null; created_at: string }>(() =>
@@ -204,7 +198,38 @@ export async function resolveDraftProperties(
         }
     }),
   ]);
-  if (failed) return null;
+  return failed ? null : { msgProperty, convProperties };
+}
+
+/** Every non-null message / conversation reference resolved in this org (see readMessageReferences). */
+export const referencesReadable = (refs: MessageReferences, messageId: string | null | undefined, conversationId: string | null | undefined): boolean =>
+  (!messageId || refs.msgProperty.has(messageId)) && (!conversationId || refs.convProperties.has(conversationId));
+
+/** Step 2. Every property each draft could belong to. Null when any lookup fails. */
+export async function resolveDraftProperties(
+  supabase: LooseSupabase,
+  orgId: string,
+  drafts: readonly HoldDraftRow[],
+): Promise<Map<string, Set<string>> | null> {
+  const runIds = uniq(drafts.flatMap((d) => (d.run_id ? [d.run_id] : [])));
+  const msgIds = uniq(drafts.flatMap((d) => (d.inbound_message_id ? [d.inbound_message_id] : [])));
+  const convIds = uniq(drafts.flatMap((d) => (d.conversation_id ? [d.conversation_id] : [])));
+
+  const runProperty = new Map<string, string | null>();
+  let failed = false;
+
+  const [refs] = await Promise.all([
+    readMessageReferences(supabase, orgId, msgIds, convIds),
+    ...chunks(runIds).map(async (ids) => {
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null; started_at: string }>(() =>
+        supabase.from("pipeline_runs").select("id, property_id, started_at").eq("org_id", orgId).in("id", ids),
+      );
+      if (res.error) failed = true;
+      else for (const r of res.rows) runProperty.set(r.id, r.property_id);
+    }),
+  ]);
+  if (failed || !refs) return null;
+  const { msgProperty, convProperties } = refs;
 
   // Every candidate property, from any path, must exist in THIS org; otherwise the draft is unverifiable (an
   // org-scoped lock check could not see it). Keyset-paged, fail closed.
@@ -224,11 +249,7 @@ export async function resolveDraftProperties(
   for (const d of drafts) {
     // A reference that could not be read (absent, another org's, or hidden) might point anywhere: the draft is
     // unverifiable even if another link names a readable property.
-    if (
-      (d.run_id && !runProperty.has(d.run_id)) ||
-      (d.inbound_message_id && !msgProperty.has(d.inbound_message_id)) ||
-      (d.conversation_id && !convProperties.has(d.conversation_id))
-    ) {
+    if ((d.run_id && !runProperty.has(d.run_id)) || !referencesReadable(refs, d.inbound_message_id, d.conversation_id)) {
       out.set(d.id, new Set());
       continue;
     }
@@ -520,8 +541,25 @@ async function buildEligible(
     }
     return true;
   };
-  const decisions = sources.decisions.filter((d) => keep(d.property_id));
-  const reviews = sources.reviews.filter((r) => keep(r.property_id));
+  // Decisions and reviews pass the SAME reference check as drafts: an unresolved source message or conversation
+  // makes the row unverifiable (hidden + counted), even when its property verifies.
+  const pendingRefs = await readMessageReferences(
+    supabase,
+    orgId,
+    uniq([...sources.decisions, ...sources.reviews].flatMap((r) => (r.source_inbound_message_id ? [r.source_inbound_message_id] : []))),
+    uniq([...sources.decisions, ...sources.reviews].flatMap((r) => (r.conversation_id ? [r.conversation_id] : []))),
+  );
+  if (!pendingRefs) return fail;
+  const keepPending = (r: { property_id: string; source_inbound_message_id: string | null; conversation_id: string | null }) => {
+    if (locked.has(r.property_id)) return false;
+    if (!referencesReadable(pendingRefs, r.source_inbound_message_id, r.conversation_id)) {
+      unverified += 1;
+      return false;
+    }
+    return keep(r.property_id);
+  };
+  const decisions = sources.decisions.filter(keepPending);
+  const reviews = sources.reviews.filter(keepPending);
   const properties = sources.properties.filter((p) => keep(p.id));
 
   const convsByProperty = new Map<string, Set<string>>();
