@@ -27,7 +27,7 @@ import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { assignHotLeadToOwner, recordHotFailure, recordHotTextOnHeldLead } from "@/lib/hot-sellers/assign";
-import { isHotReason, isHotSeller } from "@/lib/hot-sellers/hot";
+import { HOT_KEYWORD_TIER, isHotReason, isHotSeller } from "@/lib/hot-sellers/hot";
 
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
@@ -836,7 +836,7 @@ async function dispatchAiResponseCore(
     : null;
   const identityHot = identityClassification !== null && (
     identityClassification.kind === "jev_automatic_failed" ||
-    (await isHotRouting(supabase, property.org_id, identityClassification))
+    (await isHotRouting(supabase, property.org_id, identityClassification, input.inboundBody))
   );
   if (identityHot) {
     await trace(supabase, {
@@ -2975,8 +2975,38 @@ async function classifyOnlyForHotText(
       .eq("source_inbound_message_id", inboundId)
       .limit(1);
     if (seenError || (seen ?? []).length > 0) return;
+    // Claim the inbound atomically (the response-claim table's unique key)
+    // before classifying: concurrent runs of the same held inbound cannot both
+    // call Jev or both act. No real claim row → do nothing (fail closed).
+    const claim2 = await claimAiResponse(supabase, {
+      orgId,
+      inboundMessageId: inboundId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+    });
+    if (!claim2.claimed || !claim2.claimId) return;
+    let classifyOnlyOutcome = "skipped";
+    try {
+      classifyOnlyOutcome = await classifyOnlyClaimed(supabase, input, orgId, runCtx);
+    } finally {
+      await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
+  }
+}
+
+/** The classify-only work, under its claim. Returns the claim outcome. */
+async function classifyOnlyClaimed(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  runCtx: MaybeRunContext,
+): Promise<string> {
+  {
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
-    if (!(await isHotRouting(supabase, orgId, c))) return;
+    if (!(await isHotRouting(supabase, orgId, c, input.inboundBody))) return "skipped";
     const escalation = "escalationReason" in c ? c.escalationReason : null;
     const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, escalation ?? "hot_lead");
     await trace(supabase, {
@@ -2985,8 +3015,7 @@ async function classifyOnlyForHotText(
       result: recorded ? "applied" : "skipped",
       detail: { escalation: escalation ?? null },
     }, runCtx);
-  } catch (error) {
-    reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
+    return recorded ? "escalated" : "skipped";
   }
 }
 
@@ -3024,8 +3053,11 @@ async function isHotRouting(
   supabase: SupabaseClient<Database>,
   orgId: string,
   c: ClassificationBridgeResult,
+  /** The inbound text: the price_offer keyword is hot unless stop / DNC / wrong / bad number won. */
+  inboundBody?: string,
 ): Promise<boolean> {
   if (isHotClassification(c)) return true;
+  if (inboundBody && !stopOrDncWins(c) && matchEscalationKeyword(inboundBody)?.tier === HOT_KEYWORD_TIER) return true;
   if (c.kind !== "jev_nurture") return false;
   const cfg = await loadNurtureAutoDripConfig(supabase, orgId);
   return cfg.enabled && routeNurture({ readyTimeframe: c.readyTimeframe, listingStatus: c.listingStatus }).kind === "person";
@@ -3045,6 +3077,18 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
   }
   // "Unclear" + a hot escalation is hot; "bad_number" sits with wrong-number and never is.
   if (c.kind === "jev_no_action") return c.outcome === "unclear" && hotEsc(c.escalationReason);
+  return false;
+}
+
+/** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */
+function stopOrDncWins(c: ClassificationBridgeResult): boolean {
+  if (c.kind === "jev_route") {
+    return c.route.kind === "opt_out" || c.route.kind === "close_dnc" || c.route.kind === "auto_close_wrong_number";
+  }
+  if (c.kind === "jev_needs_decision") {
+    return c.outcome === "opted_out" || c.outcome === "dnc" || c.outcome === "wrong_number" || c.outcome === "bad_number";
+  }
+  if (c.kind === "jev_no_action") return c.outcome === "bad_number";
   return false;
 }
 

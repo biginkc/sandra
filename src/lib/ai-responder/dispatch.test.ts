@@ -7626,23 +7626,24 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     });
 
       describe("PR 2 round 10: classify-only runs the same gates as a send", () => {
-        const heldRun = async (state: MockState, id: string, opts: { outcome?: string; noConversation?: boolean } = {}) => {
+        const heldRun = async (state: MockState, id: string, opts: { outcome?: string; noConversation?: boolean; body?: string; reason?: string; wrap?: (sb: Record<string, unknown>) => void } = {}) => {
           state.property.needs_human_attention = true;
           state.config.classifier_provider = "jev";
           state.config.classifier_mode = "automatic";
           state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
           const supabase = createMockSupabase(state);
+          opts.wrap?.(supabase as never);
           installSendMock(state);
-          seedInboundMessage(state, { id, body: "text body" });
+          seedInboundMessage(state, { id, body: opts.body ?? "text body" });
           const originalFetch = globalThis.fetch;
           const fetchMock = vi.fn(async () => ({
             ok: true, status: 200,
-            json: async () => ({ answers: { outcome: { choice: opts.outcome ?? "nurture", confidence: 0.97 }, escalation_reason: { choice: "price_or_offer" }, ...nurtureAnswers } }),
+            json: async () => ({ answers: { outcome: { choice: opts.outcome ?? "nurture", confidence: 0.97 }, escalation_reason: { choice: opts.reason ?? "price_or_offer" }, ...nurtureAnswers } }),
           }));
           vi.stubGlobal("fetch", fetchMock);
           try {
             const result = await dispatchAiResponse(supabase as never, {
-              contactId: CONTACT_ID, conversationId: opts.noConversation ? (undefined as never) : CONVERSATION_ID, inboundBody: "text body",
+              contactId: CONTACT_ID, conversationId: opts.noConversation ? (undefined as never) : CONVERSATION_ID, inboundBody: opts.body ?? "text body",
               inboundMessageId: id, propertyId: PROPERTY_ID,
             }, { anthropic: {} as never });
             return { result, classifierCalls: fetchMock.mock.calls.length };
@@ -7714,6 +7715,70 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           expect(r.classifierCalls).toBe(0);
           expect(hotAssign.recordHeld).not.toHaveBeenCalled();
           expect(sendSmsToContact).not.toHaveBeenCalled();
+        });
+
+        describe("round 13: price keyword is hot (unless stop/DNC wins) and classify-only is claimed", () => {
+          const PRICE = "What's your price?";
+          it("held lead + price keyword + Jev non-hot (unclear, no escalation): hot_text recorded", async () => {
+            const state = createMockState();
+            const r = await heldRun(state, "inbound-r13-price", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(r.classifierCalls).toBe(1);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it.each(["opted_out", "dnc", "wrong_number", "bad_number"])(
+            "held lead + price keyword + Jev %s: stop/DNC/wrong/bad wins, nothing recorded",
+            async (outcome) => {
+              const state = createMockState();
+              const r = await heldRun(state, `inbound-r13-${outcome}`, { body: "STOP, what's your price", outcome, reason: "not_applicable" });
+              expect(r.classifierCalls).toBe(1);
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            },
+          );
+          it("claim not obtained (23505 on insert): no classify, nothing recorded", async () => {
+            const state = createMockState();
+            const r = await heldRun(state, "inbound-r13-23505", {
+              body: PRICE, outcome: "unclear", reason: "not_applicable",
+              wrap: (sb) => {
+                const realFrom = (sb as { from: (t: string) => unknown }).from.bind(sb);
+                (sb as { from: unknown }).from = (table: string) => {
+                  const q = realFrom(table) as Record<string, unknown>;
+                  if (table !== "ai_response_claims") return q;
+                  q.insert = () => ({ select: () => ({ single: async () => ({ data: null, error: { code: "23505", message: "duplicate" } }) }) });
+                  return q;
+                };
+              },
+            });
+            expect(r.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          });
+          it("single-flight mode off (no real claim row): no classify, nothing recorded", async () => {
+            const prev = process.env.AI_RESPONDER_SINGLE_FLIGHT_MODE;
+            process.env.AI_RESPONDER_SINGLE_FLIGHT_MODE = "off";
+            try {
+              const state = createMockState();
+              const r = await heldRun(state, "inbound-r13-off", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+              expect(r.classifierCalls).toBe(0);
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+            } finally {
+              if (prev === undefined) delete process.env.AI_RESPONDER_SINGLE_FLIGHT_MODE; else process.env.AI_RESPONDER_SINGLE_FLIGHT_MODE = prev;
+            }
+          });
+          it("claim completed with outcome escalated when hot_text recorded", async () => {
+            const state = createMockState();
+            await heldRun(state, "inbound-r13-done-hot", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r13-done-hot") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.outcome).toBe("escalated");
+          });
+          it("claim completed with outcome skipped when not hot", async () => {
+            const state = createMockState();
+            await heldRun(state, "inbound-r13-done-cold", { outcome: "nurture", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r13-done-cold") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.outcome).toBe("skipped");
+          });
         });
       });
 

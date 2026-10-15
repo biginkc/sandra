@@ -1382,7 +1382,11 @@ const ROWS: Row[] = [
     expect: { slack: 2, sms: 2, assigned: 0 },
     run: async (h) => {
       // Harness alerts_since is 1 hour ago; the flag is 3 hours ago (still after the cutoff and inside 7 days).
-      await h.flag("model:price_or_offer", new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString());
+      // Same guard as row 44: nothing earlier than the fixed cutoff (2026-10-15), whatever time of day this runs.
+      const cutoffMs = Date.parse("2026-10-15T00:00:00.000Z");
+      const sinceMs = Math.max(cutoffMs + 120_000, Date.now() - 60 * 60 * 1000);
+      await pg.query("update public.hold_alert_settings set alerts_since = $2 where org_id = $1", [h.orgId, new Date(sinceMs).toISOString()]);
+      await h.flag("model:price_or_offer", new Date(Math.max(cutoffMs + 60_000, sinceMs - 2 * 60 * 60 * 1000)).toISOString());
       const a = await h.newInbound("ok so what is your best number?");
       expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
       expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: false, to: h.owner });
@@ -1390,6 +1394,48 @@ const ROWS: Row[] = [
       expect(h.sent.every((x) => x.userId === h.owner)).toBe(true);
       expect(await h.deliveryKeys()).toEqual([await h.flagKey(), `hot_text:${a}`].sort());
       expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "47",
+    name: "held lead + \"What's your price?\" and Jev says unclear with NO escalation, through real dispatch: the price keyword alone is hot - one hot_text event, one Slack + one SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("What's your price?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "48",
+    name: "held lead + \"STOP, what's your price\" and Jev says opted_out, through real dispatch: stop wins over the price keyword - no hot_text event, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("STOP, what's your price");
+      await h.dispatch(a, "opted_out", NON_HOT_ESC);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "49",
+    name: "two CONCURRENT dispatches of the same held hot inbound (Promise.all): exactly one Jev call, one hot_text event, one Slack + one SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("What's your price?");
+      await Promise.all([h.dispatch(a, "unclear", NON_HOT_ESC), h.dispatch(a, "unclear", NON_HOT_ESC)]);
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
     },
   },
 ];
