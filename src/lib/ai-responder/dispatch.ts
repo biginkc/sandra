@@ -104,7 +104,7 @@ import {
 } from "./nine-questions-engine";
 import { actionForNineAnswer, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
-import { matchEscalationKeyword } from "./keywords";
+import { hasNonPriceEscalationPhrase, matchEscalationKeyword } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
   NUMBER_SOURCE_AWAITING_ANSWER_REASON,
@@ -639,7 +639,10 @@ async function dispatchAiResponseCore(
   // your price" stays an opt-out (stop / DNC / wrong / bad number win).
   const deferPriceKeyword =
     !!config && config.active === true && isJevAutomatic(config) &&
-    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+    isPriceKeyword(input.inboundBody, config.escalation_keywords) &&
+    // A text that ALSO carries a non-price signal (died, lawyer, "real person")
+    // keeps main's up-front hold so a person always sees it.
+    !hasNonPriceEscalationPhrase(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined });
   if (deferPriceKeyword) {
     await trace(supabase, {
       kind: "gate",
@@ -876,14 +879,15 @@ async function dispatchAiResponseCore(
   // (passed through as `precomputed`), so the two can never disagree. A
   // classifier failure fails closed: no identity text; the main path holds.
   // With the nine questions on (automatic) the wording shortcut never runs, and neither does
-  // the eight-answer pre-classification it would need.
-  const identityQuestion = !hostileInbound && !nineEngineOn && isIdentityQuestion(input.inboundBody);
+  // the eight-answer pre-classification it would need. A price-keyword text never takes the
+  // identity shortcut (it goes to the shared hot decision instead).
+  const identityQuestion = !hostileInbound && !nineEngineOn && !deferPriceKeyword && isIdentityQuestion(input.inboundBody);
   const identityClassification = identityQuestion && config && isJevAutomatic(config)
     ? await classifyInboundOnce(supabase, { input, orgId: property.org_id, runCtx: deps.runContext })
     : null;
   const identityHot = identityClassification !== null && (
     identityClassification.kind === "jev_automatic_failed" ||
-    (await isHotRouting(supabase, property.org_id, identityClassification, input.inboundBody))
+    (await isHotRouting(supabase, property.org_id, identityClassification, input.inboundBody, config?.escalation_keywords ?? null))
   );
   if (identityHot) {
     await trace(supabase, {
@@ -1297,7 +1301,7 @@ async function classifyAndHandleNonRouteOutcomes(
   // hot path. If Jev failed, the keyword alone marks hot (alert only).
   const priceKeyword =
     !!config && isJevAutomatic(config) &&
-    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+    isPriceKeyword(input.inboundBody, config.escalation_keywords);
   if (
     priceKeyword &&
     classification.kind !== "jev_promote_new_lead" &&
@@ -3070,6 +3074,7 @@ async function classifyOnlyForHotText(
       .eq("active", true)
       .maybeSingle();
     if (!cfg || !isJevAutomatic(cfg)) return;
+    const escalationKeywords = (cfg as { escalation_keywords?: string[] | null }).escalation_keywords ?? null;
     // An unreadable switch runs nothing. The nine-question engine gets its own classify-only look.
     const engine = await readClassifierEngine(supabase, orgId);
     if (engine === "unreadable") return;
@@ -3096,8 +3101,8 @@ async function classifyOnlyForHotText(
     let classifyOnlyOutcome = "skipped";
     try {
       classifyOnlyOutcome = engine === "nine_questions"
-        ? await classifyOnlyClaimedNine(supabase, input, orgId, cfg.escalation_keywords ?? null, runCtx)
-        : await classifyOnlyClaimed(supabase, input, orgId, runCtx);
+        ? await classifyOnlyClaimedNine(supabase, input, orgId, escalationKeywords, runCtx)
+        : await classifyOnlyClaimed(supabase, input, orgId, runCtx, escalationKeywords);
     } finally {
       await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
     }
@@ -3153,10 +3158,11 @@ async function classifyOnlyClaimed(
   input: AiDispatchInput,
   orgId: string,
   runCtx: MaybeRunContext,
+  escalationKeywords: ReadonlyArray<string> | null,
 ): Promise<string> {
   {
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
-    if (!(await isHotRouting(supabase, orgId, c, input.inboundBody))) return "skipped";
+    if (!(await isHotRouting(supabase, orgId, c, input.inboundBody, escalationKeywords))) return "skipped";
     const escalation = "escalationReason" in c ? c.escalationReason : null;
     const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, escalation ?? "hot_lead");
     await trace(supabase, {
@@ -3205,9 +3211,11 @@ async function isHotRouting(
   c: ClassificationBridgeResult,
   /** The inbound text: the price_offer keyword is hot unless stop / DNC / wrong / bad number won. */
   inboundBody?: string,
+  /** The org's configured escalation phrases (ai_responder_configs.escalation_keywords), same as the normal path. */
+  escalationKeywords?: ReadonlyArray<string> | null,
 ): Promise<boolean> {
   if (isHotClassification(c)) return true;
-  if (inboundBody && !stopOrDncWins(c) && matchEscalationKeyword(inboundBody)?.tier === HOT_KEYWORD_TIER) return true;
+  if (inboundBody && !stopOrDncWins(c) && isPriceKeyword(inboundBody, escalationKeywords)) return true;
   if (c.kind !== "jev_nurture") return false;
   const cfg = await loadNurtureAutoDripConfig(supabase, orgId);
   return cfg.enabled && routeNurture({ readyTimeframe: c.readyTimeframe, listingStatus: c.listingStatus }).kind === "person";
@@ -3228,6 +3236,11 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
   // "Unclear" + a hot escalation is hot; "bad_number" sits with wrong-number and never is.
   if (c.kind === "jev_no_action") return c.outcome === "unclear" && hotEsc(c.escalationReason);
   return false;
+}
+
+/** The price_offer keyword, matched against the ORG's configured phrases on every path. */
+function isPriceKeyword(body: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return matchEscalationKeyword(body, { allowedPhrases: escalationKeywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
 }
 
 /** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */
@@ -7401,7 +7414,7 @@ async function holdNinePriceKeyword(
 
 /** A price keyword (or org escalation phrase of that tier) in the text; same test PR 2 uses. */
 function hasHotPriceKeyword(inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
-  return matchEscalationKeyword(inboundBody, { allowedPhrases: escalationKeywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+  return isPriceKeyword(inboundBody, escalationKeywords);
 }
 
 /**

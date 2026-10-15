@@ -134,3 +134,24 @@ export function matchEscalationKeyword(
 
   return null;
 }
+
+/**
+ * True when the body also carries an escalation phrase of a NON-price tier
+ * (handoff request, legal / contract, distressed seller), honouring the org's
+ * allowed phrases. matchEscalationKeyword returns one tier and price wins, so
+ * this is how a caller sees "Dad died, how much?" is also distress.
+ */
+export function hasNonPriceEscalationPhrase(
+  body: string,
+  opts: { allowedPhrases?: ReadonlyArray<string> } = {},
+): boolean {
+  if (!body) return false;
+  const lower = body.toLowerCase();
+  const allowed = opts.allowedPhrases ? new Set(opts.allowedPhrases.map((p) => p.toLowerCase())) : null;
+  for (const [phrase, tier] of PHRASE_TO_TIER) {
+    if (tier === "price_offer") continue;
+    if (allowed && !allowed.has(phrase)) continue;
+    if (lower.includes(phrase)) return true;
+  }
+  return false;
+}

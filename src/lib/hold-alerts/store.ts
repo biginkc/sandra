@@ -100,6 +100,20 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return Array.isArray(data) && data.length === 1;
     },
 
+    async claimWithCap(row, cap) {
+      const { data, error } = await db.rpc("hold_alert_claim_with_cap", {
+        p_id: row.id,
+        p_attempts: row.attempts,
+        p_org_id: cap.orgId,
+        p_channel: cap.channel,
+        p_recipient_user_id: cap.recipientUserId,
+        p_cap: cap.cap,
+        p_since: cap.sinceIso,
+      });
+      if (error) fail("claimWithCap", error);
+      return data === "claimed" || data === "capped" ? data : "lost";
+    },
+
     async failInterrupted(cutoffIso) {
       const { data, error } = await table()
         .update({ status: "failed", attempts: MAX_ATTEMPTS, last_error: "interrupted" })

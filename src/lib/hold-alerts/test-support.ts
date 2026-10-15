@@ -60,6 +60,24 @@ export class FakeStore implements DeliveryStore {
     live.sendingAt = this.clock().toISOString();
     return true;
   }
+  /** Same semantics as hold_alert_claim_with_cap: count + claim in one synchronous step (atomic in JS). */
+  async claimWithCap(row: DeliveryRow, cap: { orgId: string; channel: string; recipientUserId: string | null; cap: number; sinceIso: string }) {
+    const n = this.rows.filter(
+      (r) =>
+        r.orgId === cap.orgId &&
+        r.channel === cap.channel &&
+        (!cap.recipientUserId || r.recipientUserId === cap.recipientUserId) &&
+        ((r.status === "sent" && r.sentAt !== null && r.sentAt >= cap.sinceIso) ||
+          (r.status === "sending" && r.sendingAt != null && r.sendingAt >= cap.sinceIso)),
+    ).length;
+    if (n >= cap.cap) return "capped" as const;
+    const live = this.rows.find((r) => r.id === row.id);
+    if (!live || (live.status !== "pending" && live.status !== "failed") || live.attempts !== row.attempts) return "lost" as const;
+    live.attempts += 1;
+    live.status = "sending";
+    live.sendingAt = this.clock().toISOString();
+    return "claimed" as const;
+  }
   async failInterrupted(cutoffIso: string) {
     const stuck = this.rows.filter((r) => r.status === "sending" && r.sendingAt != null && r.sendingAt < cutoffIso);
     for (const r of stuck) {

@@ -1493,7 +1493,130 @@ const ROWS: Row[] = [
       await expectHotHeld(h, a);
     },
   },
+  {
+    id: "54",
+    name: "round 15: held lead, org allow-list WITHOUT price, \"What's your price?\" and Jev says unclear, through real dispatch: the org's phrases decide - not keyword-hot, no hot_text event, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["how much"]);
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("What's your price?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "55",
+    name: "round 15: held lead, org allow-list with \"how much\", \"how much?\" and Jev says unclear: keyword-hot - one hot_text event, one Slack + one SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["how much"]);
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("how much?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(2);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "56",
+    name: "round 15: UNFLAGGED lead, org allow-list WITHOUT price, \"What's your price?\" and Jev says unclear (normal path): not keyword-hot - no keyword hold, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["how much"]);
+      const a = await h.newInbound("What's your price?");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "57",
+    name: "round 15: UNFLAGGED lead, org allow-list with \"how much\", \"how much?\" and Jev says unclear (normal path): keyword-hot - held keyword:price_offer, 1 Slack + 1 SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["how much"]);
+      const a = await h.newInbound("how much?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "58",
+    name: "round 15: identity question + price keyword, Jev says wrong_number (normal path): no identity reply to the seller, not hot, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("Who is this? What's your price?");
+      const result = await h.dispatch(a, "wrong_number", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "59",
+    name: "round 15: identity question + price keyword, Jev says dnc (normal path): no identity reply to the seller, not hot, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("Who is this? What's your price?");
+      const result = await h.dispatch(a, "dnc", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "60",
+    name: "round 15: identity question + price keyword, Jev says unclear (normal path): held keyword:price_offer, no identity reply, one hot hold alert (1 Slack + 1 SMS)",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("Who is this? What's your price?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(1);
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "61",
+    name: "round 15: \"He died, what's your price\" and Jev says wrong_number (normal path): the up-front keyword hold runs as on main (a person sees it), no deferral, no classifier call",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("He died, what's your price");
+      expect(await h.dispatch(a, "wrong_number", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(jevCalls).toBe(0);
+      expect(await hotWinsCount(a)).toBe(0);
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "62",
+    name: "round 15 (pins current behaviour): property with ai_responder_disabled + a hot price text (normal path): skipped, no Sandra hold, no flag, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await pg.query("update public.properties set ai_responder_disabled = true where id = $1", [h.propertyId]);
+      const a = await h.newInbound("What's your price?");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).toMatchObject({ outcome: "skipped" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop?.needs_human_attention).toBe(false);
+      expect(prop?.last_ai_escalation_reason).toBeNull();
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
 ];
+
+/** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */
+async function setKeywords(h: Harness, phrases: string[]): Promise<void> {
+  await pg.query("update public.ai_responder_configs set escalation_keywords = $2::text[] where org_id = $1", [h.orgId, phrases]);
+}
 
 /** The classification kind the hot-wins step recorded for this inbound's run. */
 async function hotWinsKind(inboundMessageId: string): Promise<string | null> {

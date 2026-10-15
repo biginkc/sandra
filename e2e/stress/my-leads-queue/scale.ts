@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { createRng } from "../prng";
 import { materializeWorld, setupOrg } from "./materialize";
 import { loadClassifierMigration } from "./migration";
-import { NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place } from "./oracle";
+import { NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, placeWorld } from "./oracle";
 import { PROD_SHAPE_2026_10_14, prodShapedWorld, scaleCounts } from "./prod-shape";
 import { P95_BUDGET_MS, stat, type PlanNode, type ScaleSize } from "./report";
 import { Reader, type Mismatch } from "./runner";
@@ -67,7 +67,7 @@ export async function runScale(url: string, opts: ScaleOptions): Promise<{ sizes
       const messages = world.leads.reduce((a, l) => a + l.messages.length, 0);
 
       const reader = new Reader(db, ctx, ctx.rep, new Date(now), ctx.rep);
-      const placements = new Map(world.leads.map((l) => [l.key, place(l, now)]));
+      const placements = placeWorld(world.leads, now);
       const { views, badge } = expectedViews(placements);
       const wanted: Array<[string, string | null]> = [["needs_attention", null], ["waiting", null], ["all", null],
         ...NEEDS_ATTENTION_CHIPS.map((c): [string, string | null] => ["needs_attention", c]), ...WAITING_CHIPS.map((c): [string, string | null] => ["waiting", c])];

@@ -174,32 +174,30 @@ describe("hot decisions (frozen fixture)", () => {
     const holds = [0, 1, 2].map((i) => hold({ hot: true, holdKey: `c${i}:hot_lead`, propertyId: `c${i}`, startedAt: "2026-10-15T11:00:00.000Z" }));
     const t = setup({ holds });
     seedSent(t, "sms", 9, OWNER.userId, "2026-10-15T11:45:00.000Z");
-    let released = 0;
-    const realRelease = t.store.release.bind(t.store);
-    t.store.release = async (id: string) => {
-      released += 1;
-      await realRelease(id);
-    };
-    // Force the race: both passes finish their under-cap check before either claims, and they claim different rows.
-    const realClaim = t.store.claim.bind(t.store);
+    // Force the race: both passes reach claimWithCap before either finishes it, and they go for different rows.
+    // claimWithCap is the atomic count+claim, so the second one in must see the first's 'sending' row.
+    const realClaim = t.store.claimWithCap.bind(t.store);
     let waiting = 0;
     let open!: () => void;
     const gate = new Promise<void>((resolve) => (open = resolve));
-    t.store.claim = async (row) => {
+    let capped = 0;
+    t.store.claimWithCap = async (row, cap) => {
       if (row.channel === "sms" && waiting < 2) {
         waiting += 1;
         if (waiting === 2) open();
         await gate;
       }
-      return realClaim(row);
+      const result = await realClaim(row, cap);
+      if (result === "capped") capped += 1;
+      return result;
     };
     const reversed = { ...t.deps, loadHolds: async () => ({ holds: [...holds].reverse(), complete: true }) };
     await Promise.all([runHoldAlertsForOrg(t.deps, ORG), runHoldAlertsForOrg(reversed, ORG)]);
-    expect(released).toBeGreaterThan(0); // the post-claim re-check really fired
+    expect(capped).toBeGreaterThan(0); // the atomic claim really refused the over-cap row
     const inHour = t.store.rows.filter((r) => r.channel === "sms" && (r.status === "sent" || r.status === "sending"));
     expect(inHour.length).toBeLessThanOrEqual(MAX_SMS_PER_HOUR);
     expect(by(t, "sms").length).toBeLessThanOrEqual(1);
-    // The over-cap rows were given back, not lost: next hour they go out, once each.
+    // The over-cap rows stayed pending, not lost: next hour they go out, once each.
     t.setNow("2026-10-15T13:30:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(by(t, "sms")).toHaveLength(3);
