@@ -71,6 +71,7 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 - [ ] Rename the admin link "Jev thresholds" → "Sandra's rules" (same page).
 - [ ] Retire the app's 8-answer labels from the UI entirely.
 - [ ] Reuse My Leads' shared `MultiHouseBadge` ("Owns N houses") next to the seller's name on tape cards and waiting cards, with its batched org-scoped read. Waits on the My Leads badge PR merging (Jarrad 2026-10-15: badge visible "when you're messaging").
+  - Contract (My Leads PR #885, merged 65c84b91): `MultiHouseBadge` in src/components/leads/multi-house-badge.tsx (client; nothing below 2 houses; owns popover, labels, paging). Data: `loadHomeownerHouses(client, { orgId, viewerId, contactIds })` in src/lib/leads/homeowner-houses.ts (one query per <=100 contacts, user client only) and `loadHomeownerHousesAction` / `loadMoreHomeownerHousesAction` in src/lib/leads/homeowner-houses-action.ts. One batched read per list page, never per card. Stub homeowner-houses-action in any esbuild synthetic spec (see e2e/synthetic/my-leads-unified-queue.spec.ts).
 - [ ] Depends on: PR 3.
 
 ## Stage 5 — Stress test (after PR 4, before the release-candidate review)
