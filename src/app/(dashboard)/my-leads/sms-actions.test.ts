@@ -419,3 +419,47 @@ describe("rep SMS inbound reply stamp threading", () => {
     expect(sent.inboundMessageId).toBe(INBOUND)
   })
 })
+
+describe("replacing a verified definitive failure", () => {
+  const target = (over: Record<string, unknown> = {}) => ({ sourceKind: "ledger", refId: "led-1", disposition: "replace", state: "delivery_failed", submissionKey: "key-old", body: "b", composition: null, assignmentId: "sender-1", from: null, to: null, reason: null, ...over })
+  const payload = { propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "key-new", composition, replaceFailed: { sourceKind: "ledger" as const, refId: "led-1" } }
+
+  it("dispatches under the NEW key with the server-only replacement flag after re-reading that exact record", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target() })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    const result = await sendRepSms(payload)
+    expect(result.ok).toBe(true)
+    expect(mocks.readContext).toHaveBeenCalledWith("property-1", { sourceKind: "ledger", refId: "led-1" })
+    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "key-new", replacingFailedSend: true }))
+  })
+
+  it("refuses when the record is no longer a definitive failure (now unverified) and never dispatches", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target({ disposition: "check", state: "unknown" }) })
+    const result = await sendRepSms(payload)
+    expect(result.ok).toBe(false)
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("refuses to reuse the failed receipt's own key", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target() })
+    const result = await sendRepSms({ ...payload, idempotencyKey: "key-old" })
+    expect(result.ok).toBe(false)
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("ignores a forged replacingFailedSend flag on a normal send", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed") })
+    mocks.dispatch.mockResolvedValue({ status: "sent" })
+    await sendRepSms({ propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "k", composition, replacingFailedSend: true } as never)
+    // The normal path stops at the lead's saved follow-up before dispatch.
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("acknowledges a chosen (non-newest) receipt only when that receipt owns the key", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), obligation: null, submission: { key: "newest" }, target: target({ disposition: "check", submissionKey: "key-chosen" }) })
+    const ok = await acknowledgeRepSmsSubmission({ propertyId: "property-1", idempotencyKey: "key-chosen", target: { sourceKind: "ledger", refId: "led-1" } })
+    expect(ok.ok).toBe(true)
+    const bad = await acknowledgeRepSmsSubmission({ propertyId: "property-1", idempotencyKey: "someone-else", target: { sourceKind: "ledger", refId: "led-1" } })
+    expect(bad.ok).toBe(false)
+  })
+})

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 
 import { MyLeadSmsStrip } from "../_components/sms-strip";
 import type { MyLeadDetailPanelProps } from "../_components/types";
-import { RepSmsComposer } from "../rep-sms-composer";
+import { RepSmsComposer, type RepSmsComposerTarget } from "../rep-sms-composer";
 import type { WorkFacts } from "./contract";
 
 /**
@@ -29,6 +29,8 @@ export type AllTextsProps = {
   defaultOpen?: boolean;
   /** False while an owner views another rep: history only, no composer. Default true. */
   canCompose?: boolean;
+  /** The Broken item's exact record: the composer resumes / resends / checks THAT one, not the lead's saved submission. */
+  target?: RepSmsComposerTarget;
 };
 
 /**
@@ -70,7 +72,7 @@ function newestDisplayedInbound(state: AllTextsProps["state"]): { id: string; cr
   return newest;
 }
 
-export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent, defaultOpen = false, canCompose = true }: AllTextsProps) {
+export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent, defaultOpen = false, canCompose = true, target }: AllTextsProps) {
   const container = useRef<HTMLDivElement>(null);
   useFocusComposerTextarea(container);
   // The reply-to stamp is the newest inbound DISPLAYED in the loaded thread, never the classifier's latest: a reply that
@@ -108,6 +110,7 @@ export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone
       <div className="flex flex-wrap items-start gap-2">
         <RepSmsComposer
           defaultOpen={defaultOpen}
+          {...(target ? { target } : {})}
           propertyId={facts.propertyId}
           placement="action"
           replyToPhone={replyToPhone}

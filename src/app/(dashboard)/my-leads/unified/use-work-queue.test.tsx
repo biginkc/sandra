@@ -669,6 +669,26 @@ describe("shared read clock", () => {
     ).toBe(4);
   });
 
+  it("(c) an older navigation response keeps the newer counts and the removed row stays gone, with a fresh read", async () => {
+    const server = makeServer().addMany("L", 3);
+    const { result, loadPage } = setup(server);
+    const slow = deferred<LoadWorkPageResult>();
+    const oldPage = server.page(Q({ page: 1, search: "x" }));
+    loadPage.mockImplementationOnce(() => slow.promise);
+    act(() => result.current.setSearch("x")); // nav starts (deferred, stamped first)
+    await flush();
+    server.set("L2", { place: "their_move", reason: "texted_last" });
+    await act(async () => void (await result.current.afterAction("L2")));
+    const newer = result.current.tabCounts;
+    expect(newer.needs_attention).toBe(2);
+    await act(async () => slow.resolve({ ok: true, page: oldPage }));
+    await flush();
+    expect(result.current.tabCounts).toEqual(newer);
+    expect(result.current.tabCounts.needs_attention).not.toBe(oldPage.tabCounts.needs_attention);
+    expect(ids(result)).not.toContain("L2");
+    expect(loadPage.mock.calls.length).toBe(3); // nav, after-action counts, fresh read
+  });
+
   it("refreshes an off-page pinned lead on every accepted refresh, not only when the revision changes", async () => {
     const server = makeServer(2).addMany("L", 4).add("P"); // P is on page 3, off the displayed page
     const { result, loadFacts } = setup(server, Q(), { pinned: mkFacts("P") });

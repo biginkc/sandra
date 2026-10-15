@@ -19,6 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import type { AcquisitionKpis, QueueRow } from "@/lib/my-leads/queries";
 import { kpiTiles } from "../adapter";
 import { MyLeadsMetrics } from "../_components/metrics";
+import type { RepSmsComposerTarget } from "../rep-sms-composer";
 import { StickyMyLeadsMetrics } from "../_components/sticky-metrics";
 import type {
   MyLeadAction,
@@ -29,6 +30,7 @@ import type {
   MyLeadRepOption,
 } from "../_components/types";
 import { AllTexts } from "./all-texts";
+import { brokenTarget, messagesDeadLetterHref, normaReviewHref } from "./broken-target";
 import { ConversationBox, type ConversationBoxState } from "./conversation-box";
 import type {
   BrokenItem,
@@ -120,9 +122,11 @@ function conversationState(state: MyLeadDetailState | undefined): ConversationBo
   };
 }
 
-function openLeadWindow(propertyId: string, review?: { kind: string; refId: string | null }) {
-  const params = review ? new URLSearchParams({ broken: review.kind, ...(review.refId ? { ref: review.refId } : {}) }).toString() : "";
-  window.open(`/leads/${propertyId}${params ? `?${params}` : ""}`, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
+function openLeadWindow(propertyId: string) {
+  window.open(`/leads/${propertyId}`, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
+}
+function openRelatedWindow(href: string) {
+  window.open(href, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
 }
 
 export function UnifiedQueue({
@@ -149,6 +153,8 @@ export function UnifiedQueue({
   const [textsOpen, setTextsOpen] = useState<ReadonlySet<string>>(new Set());
   // Rows whose all-texts thread was revealed by Reply / Send text: the composer starts open (and focused).
   const [composerOpen, setComposerOpen] = useState<ReadonlySet<string>>(new Set());
+  // The Broken item whose record the composer was opened for (cleared by any other way of opening/closing the texts).
+  const [composerTarget, setComposerTarget] = useState<Readonly<Record<string, RepSmsComposerTarget>>>({});
   const [dripFor, setDripFor] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
@@ -397,12 +403,22 @@ export function UnifiedQueue({
     setExpanded(next);
   };
 
-  const openTexts = (propertyId: string, withComposer = false) => {
+  const setTarget = (propertyId: string, target: RepSmsComposerTarget | null) =>
+    setComposerTarget((prev) => {
+      if (!target && !(propertyId in prev)) return prev;
+      const next = { ...prev };
+      if (target) next[propertyId] = target;
+      else delete next[propertyId];
+      return next;
+    });
+  const openTexts = (propertyId: string, withComposer = false, target: RepSmsComposerTarget | null = null) => {
+    setTarget(propertyId, target);
     if (withComposer) setComposerOpen((prev) => new Set(prev).add(propertyId));
     setExpanded((prev) => new Set(prev).add(propertyId));
     setTextsOpen((prev) => new Set(prev).add(propertyId));
   };
   const closeTexts = (propertyId: string) => {
+    setTarget(propertyId, null);
     setComposerOpen((prev) => {
       if (!prev.has(propertyId)) return prev;
       const next = new Set(prev);
@@ -457,20 +473,20 @@ export function UnifiedQueue({
         setActionError("The change could not be saved. Please retry.");
       }
     });
-  // Each fix routes to an existing workflow and carries the item's refId. The composer resumes the lead's saved
-  // follow-up (required/draft/failed obligation, or a durable ledger draft) and offers its own reconcile / resume
-  // actions, so Send text, Resend and Check status open it; blocked texts show their reason there too. AI dead
-  // letters and Norma review have no in-page surface, so they open the lead page on that item.
+  // Each fix routes to an existing workflow and carries the item's {sourceKind, refId}: the composer loads THAT ledger
+  // receipt / obligation / message (a lead can have several failures) and resumes, resends (prefilled, new submission key)
+  // or checks it. AI dead letters and Norma review open the surfaces that already handle them by id.
   const brokenAction = (item: BrokenItem, propertyId: string) => {
     switch (item.action) {
       case "send_text":
       case "resend":
       case "check_status":
-        openTexts(propertyId, true);
+        openTexts(propertyId, true, brokenTarget(item));
         break;
       case "review":
-        if (item.kind === "ai_reply_failed" || item.kind === "norma_needs_review") openLeadWindow(propertyId, { kind: item.kind, refId: item.refId });
-        else openTexts(propertyId, true);
+        if (item.kind === "ai_reply_failed") openRelatedWindow(messagesDeadLetterHref(item.refId, propertyId));
+        else if (item.kind === "norma_needs_review") openRelatedWindow(normaReviewHref(item.refId, propertyId));
+        else openTexts(propertyId, true, brokenTarget(item));
         break;
       case "fix_drip":
       case "open_campaign":
@@ -518,9 +534,10 @@ export function UnifiedQueue({
         {textsOpen.has(id) && (
           <div className="space-y-2">
             <AllTexts
-              key={composerOpen.has(id) ? "composer-open" : "composer-closed"}
+              key={`${composerOpen.has(id) ? "composer-open" : "composer-closed"}:${composerTarget[id]?.sourceKind ?? ""}:${composerTarget[id]?.refId ?? ""}`}
               facts={facts}
               defaultOpen={composerOpen.has(id)}
+              target={composerTarget[id]}
               canCompose={canAct}
               state={state ?? { status: "loading" }}
               onRetry={() => reloadMessages(id)}

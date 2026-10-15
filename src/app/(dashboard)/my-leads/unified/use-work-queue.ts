@@ -137,6 +137,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
   const clock = useRef(0);
   const propAccepted = useRef(new Map<string, number>());
   const viewAccepted = useRef(0);
+  const runReadRef = useRef<() => Promise<void>>(async () => {});
 
   // Refs mirror props for the stable callbacks below. Effects run in order, so this one comes first.
   useEffect(() => {
@@ -259,10 +260,26 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
         return;
       }
       const page = reconcilePage(res.page, stamp, stateRef.current);
-      commit((s) => swapIn(s, page, query));
+      // A newer read (after-action counts) may have been accepted while this navigation was in flight: its counts and
+      // clock fields stay, and a fresh read follows so the older rows are re-checked against the newest view.
+      const older = stamp < viewAccepted.current;
+      commit((s) => {
+        const next = swapIn(s, page, query);
+        return older
+          ? {
+              ...next,
+              tabCounts: s.tabCounts,
+              chipCounts: s.chipCounts,
+              stageCounts: s.stageCounts,
+              nextChangeAt: s.nextChangeAt,
+              snapshotAt: s.snapshotAt,
+            }
+          : next;
+      });
       recordPage(page, stamp);
       if (res.page.page !== query.page)
         notify({ ...query, page: res.page.page }, true);
+      if (older) void runReadRef.current();
     },
     [commit, loadPageSafe, notify, reconcilePage, recordPage],
   );
@@ -344,6 +361,10 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     record,
     recordPage,
   ]);
+
+  useEffect(() => {
+    runReadRef.current = runRead;
+  }, [runRead]);
 
   /** Timer / visibility entry point: respects hidden tab and paused composers. */
   const tick = useCallback(() => {

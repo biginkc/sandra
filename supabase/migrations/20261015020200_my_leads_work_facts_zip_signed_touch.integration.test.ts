@@ -355,10 +355,14 @@ it('lastTouch: an outbound text is timed by when it was sent, not created (campa
     await w.note(earlySend, t(-2 * DAY));                                                   // the note is later than the send
     await applyNew();
     const r = await rows(w, db);
+    const at = (id: string) => new Date(r[id].facts.lastTouch.at).getTime();
     expect(r[straddle].facts.lastTouch.kind).toBe('campaign_text');
     expect(r[earlySend].facts.lastTouch.kind).toBe('note');
-    // lastTouch.at is still last_touch_at (created_at based, unchanged), so for the straddle lead the kind and the time can disagree.
-    expect(new Date(r[straddle].facts.lastTouch.at).getTime()).toBe(new Date(r[straddle].facts.lastTouchAt).getTime());
+    // kind and at come from the same source: the straddle lead's touch is its send time (Thursday), not the created_at-based lastTouchAt.
+    expect(at(straddle)).toBe(new Date(t(-DAY)).getTime());
+    expect(at(earlySend)).toBe(new Date(t(-2 * DAY)).getTime());
+    // the legacy key keeps its created_at-based value (ranking unchanged)
+    expect(new Date(r[straddle].facts.lastTouchAt).getTime()).not.toBeNaN();
   });
 });
 
@@ -444,6 +448,19 @@ it('unknown ledger/obligation states are in flight for 15 minutes, then Broken (
     const later = await rows(w, db, boundary);
     expect(kinds(later, l10)).toEqual(['text_status_unknown']);
     expect(kinds(later, o10)).toEqual(['followup_text_status_unknown']);
+  });
+});
+
+it('norma_needs_review carries the needs_review request id as refId', async () => {
+  await withDb(async (db, applyNew) => {
+    const w = await world(db);
+    const id = await w.lead('norma');
+    await w.norma(id, 'needs_review', w.at(-3 * HOUR));
+    await applyNew();
+    const oldest = (await db.query("select id from public.norma_call_requests where property_id=$1 and status='needs_review'", [id])).rows[0].id;
+    const items = ((await rows(w, db))[id].facts.broken as Json[]).filter((b) => b.kind === 'norma_needs_review');
+    expect(items).toHaveLength(1);
+    expect(items[0].refId).toBe(oldest);
   });
 });
 

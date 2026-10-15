@@ -17,7 +17,7 @@ import {
   type RepSmsComposition,
 } from "@/lib/messaging/rep-sms-composition"
 
-import type { RepSmsContext, RepSmsPendingSubmission } from "@/lib/messaging/rep-sms"
+import type { RepSmsContext, RepSmsPendingSubmission, RepSmsTargetRequest } from "@/lib/messaging/rep-sms"
 import { acknowledgeRepSmsSubmission, loadRepSmsContext, sendRepSms } from "./sms-actions"
 
 /** The fixed identity used by Acquisitions texts. The remainder stays editable. */
@@ -35,8 +35,17 @@ export type RepSmsSendState =
   | "unknown"
   | "resume"
 
+/**
+ * The exact Broken-item record this composer was opened for. Additive: undefined keeps today's behavior (the lead's
+ * saved submission/obligation). `mode` is what the rep clicked; the server's reading of that record decides what is
+ * actually safe (a stale "Resend" on a record that is now unverified becomes Check status).
+ */
+export type RepSmsComposerTarget = RepSmsTargetRequest & { mode: "send" | "resend" | "check" | "review" }
+
 type RepSmsComposerProps = {
   propertyId: string
+  /** Open for ONE specific failed/unverified record (see RepSmsComposerTarget). */
+  target?: RepSmsComposerTarget
   onSent?: (id?: string) => void
   /** The exact saved phone used by an open Messages thread, when available. */
   replyToPhone?: string | null
@@ -267,6 +276,7 @@ const STATE_LABELS: Record<RepSmsSendState, string> = {
 
 export function RepSmsComposer({
   propertyId,
+  target,
   onSent,
   replyToPhone = null,
   inboundMessageId = null,
@@ -291,6 +301,11 @@ export function RepSmsComposer({
   const submission = useRef<StoredRepSmsSubmission | null>(null)
   const templateRequest = useRef(0)
   const previousPropertyId = useRef(propertyId)
+  const targetSource = target?.sourceKind ?? null
+  const targetRef = target?.refId ?? null
+  const targetChecked = useRef(false)
+  const onSentRef = useRef(onSent)
+  onSentRef.current = onSent
   const openedInbound = useRef<string | null>(inboundMessageId)
   // After a successful send the next draft answers whatever is shown by then, so
   // it takes a fresh capture when it starts. Composition and retries keep theirs.
@@ -328,7 +343,7 @@ export function RepSmsComposer({
     setSendState(INITIAL_SEND_STATE)
     setRestoredSubmissionBlocked(false)
     submission.current = null
-    void loadRepSmsContext(propertyId)
+    void loadRepSmsContext(propertyId, targetSource && targetRef ? { sourceKind: targetSource, refId: targetRef } : null)
       .then((result) => {
         if (!active) return
         if (!result.ok) {
@@ -336,6 +351,49 @@ export function RepSmsComposer({
           return
         }
         setContext(result.data)
+        const chosen = result.data.target
+        if (chosen && chosen.disposition !== "resume") {
+          // The selected record, not the lead's saved submission. Never restore another receipt's key/body here.
+          const chosenSender = chosen.assignmentId ? result.data.senders.find((candidate) => candidate.id === chosen.assignmentId) : undefined
+          setSenderId(chosenSender?.id ?? result.data.senders.find((sender) => sender.isDefault)?.id ?? result.data.senders[0]?.id ?? "")
+          const saved = chosen.composition
+          if (chosen.disposition === "replace" && saved) {
+            // Prefill THAT body. The send below is a new submission (fresh key), never the failed record's key.
+            setAcquisitionsManager(typeof saved.acquisitionsManager === "string" ? saved.acquisitionsManager : REP_SMS_ASSISTANT)
+            if (typeof saved.introId === "string") setIntroId(saved.introId)
+            if (typeof saved.templateId === "string") setSelectedTemplateId(saved.templateId)
+            if (typeof saved.remainder === "string") setRemainder(saved.remainder)
+          }
+          const why = chosen.reason ? ` (${chosen.reason})` : ""
+          if (chosen.disposition === "replace") {
+            setSendState({ status: "idle", message: `This text did not go out${why}. Review it, then send it as a new text.` })
+          } else if (chosen.disposition === "review") {
+            setSendState({ status: "blocked", message: chosen.reason ?? "Sandra blocked this text before delivery." })
+          } else if (chosen.disposition === "check") {
+            if (targetChecked.current) setSendState({ status: "unknown", message: "Still no final result for this text. Check again in a few minutes." })
+            else setSendState({ status: "unknown", message: "Sandra has no final result for this text yet. Check its status; it is never sent again from here." })
+            const durable = chosen.sourceKind === "ledger" && chosen.submissionKey && chosen.from && chosen.to && chosen.assignmentId && chosen.body
+              ? restoreDurableRepSmsSubmission(result.data.orgId, result.data.actorId, result.data.contactId ?? "", {
+                  key: chosen.submissionKey, receiptId: chosen.refId, state: chosen.state ?? "unknown", assignmentId: chosen.assignmentId,
+                  from: chosen.from, to: chosen.to, body: chosen.body, composition: chosen.composition,
+                  providerMessageId: null, providerError: null, createdAt: null, updatedAt: null,
+                })
+              : null
+            if (durable && chosenSender && chosenSender.number === durable.from) {
+              durable.inboundMessageId = null
+              submission.current = durable
+              setIntroId(durable.composition.introId)
+              setAcquisitionsManager(durable.composition.acquisitionsManager)
+              setSelectedTemplateId(durable.composition.templateId ?? "")
+              setRemainder(durable.composition.remainder)
+              setSendState({ status: "resume", message: "Sandra has no final result for this text yet. Check status re-reads the saved request; it never sends a second text." })
+            }
+          } else {
+            setSendState({ status: "idle", message: chosen.disposition === "resolved" ? "This text is no longer failing." : (chosen.reason ?? "That text could not be found.") })
+            if (chosen.disposition === "resolved" && targetChecked.current) onSentRef.current?.()
+          }
+          return
+        }
         const obligation = result.data.obligation
         // A saved follow-up owns the exact sender captured with the no-answer
         // attempt. Keep that assignment selected even when the current
@@ -413,10 +471,16 @@ export function RepSmsComposer({
     return () => {
       active = false
     }
-  }, [propertyId, activated, retry])
+  }, [propertyId, activated, retry, targetSource, targetRef])
 
   const sender = context?.senders.find((candidate) => candidate.id === senderId)
-  const obligation = context?.obligation ?? null
+  const chosenTarget = target && context?.target && context.target.refId === target.refId ? context.target : null
+  const targetDisposition = chosenTarget?.disposition ?? null
+  const targetReplace = targetDisposition === "replace"
+  // check / review / resolved / unavailable never offer a fresh send; ledger "check" keeps the saved request (reconcile only).
+  const targetNoSend = targetDisposition === "check" || targetDisposition === "review" || targetDisposition === "resolved" || targetDisposition === "unavailable"
+  // A replacement is a new text: the lead's other (failed) obligation must not lock the sender, recipient or template.
+  const obligation = targetReplace || targetNoSend ? null : context?.obligation ?? null
   // A resumed obligation owns the destination captured when the no-answer
   // attempt was recorded. The thread phone is only a hint for a new text and
   // must never make the preview disagree with the fenced server send.
@@ -455,8 +519,8 @@ export function RepSmsComposer({
   const needsTemplate = Boolean(resumableObligationId)
   const missingTemplate = needsTemplate && !selectedTemplateId
   const tooLong = smsInfo.units > 1600
-  const canSend = Boolean(!restoredSubmissionBlocked && sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && sendState.status !== "provider_unknown" && sendState.status !== "unknown" && !pending && !sendInFlight.current)
-  const canReconcile = Boolean(!restoredSubmissionBlocked && submission.current && sender && recipient && composition && !tooLong && !pending && !sendInFlight.current && (sendState.status === "provider_unknown" || sendState.status === "unknown" || sendState.status === "resume"))
+  const canSend = Boolean(!targetNoSend && !restoredSubmissionBlocked && sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && sendState.status !== "provider_unknown" && sendState.status !== "unknown" && !pending && !sendInFlight.current)
+  const canReconcile = Boolean(!(targetNoSend && targetDisposition !== "check") && !restoredSubmissionBlocked && submission.current && sender && recipient && composition && !tooLong && !pending && !sendInFlight.current && (sendState.status === "provider_unknown" || sendState.status === "unknown" || sendState.status === "resume"))
 
   const selectTemplate = (id: string) => {
     setSelectedTemplateId(id)
@@ -499,6 +563,7 @@ export function RepSmsComposer({
       }
       return submission.current.key
     })()
+    const replaceFailed = targetReplace && chosenTarget ? { sourceKind: chosenTarget.sourceKind, refId: chosenTarget.refId } : null
     setPending(true)
     setSendState({ status: "sending", message: mode === "reconcile" ? "Sandra is reconciling the saved SMS request." : "Sandra is checking contact restrictions and sending this text." })
     void sendRepSms({
@@ -506,6 +571,7 @@ export function RepSmsComposer({
       assignmentId: sender.id,
       to: recipient,
       obligationId: resumableObligationId,
+      ...(replaceFailed ? { replaceFailed } : {}),
       idempotencyKey,
       // A recovered or retried submission keeps the stamp it was created with,
       // even if that is none; never re-stamp it with replies seen after reload.
@@ -544,7 +610,7 @@ export function RepSmsComposer({
             // request succeeds. If the original action response was lost,
             // reload uses the server draft and the same key instead of
             // creating a second provider request.
-            const acknowledged = await acknowledgeRepSmsSubmission({ propertyId, idempotencyKey })
+            const acknowledged = await acknowledgeRepSmsSubmission({ propertyId, idempotencyKey, ...(targetDisposition === "check" && target ? { target: { sourceKind: target.sourceKind, refId: target.refId } } : {}) })
             if (!acknowledged.ok) {
               setSendState({ status: "unknown", message: "The SMS was accepted, but Sandra could not record the acknowledgement. The exact send is preserved; reconcile it before starting another message." })
               if (onSent) onSent(messageId)
@@ -589,6 +655,13 @@ export function RepSmsComposer({
         setPending(false)
       })
   }
+
+  // Check status on a record with no replayable saved request (obligation, bare message): re-read that record only.
+  const checkTargetAgain = () => {
+    targetChecked.current = true
+    setRetry((value) => value + 1)
+  }
+  const checkOnly = targetDisposition === "check" && !submission.current
 
   const resetForRetry = () => {
     if (!resumableObligationId) clearSubmission()
@@ -703,13 +776,14 @@ export function RepSmsComposer({
         {sendState.status !== "idle" && <div role={sendState.status === "sending" ? "status" : "alert"} aria-live="polite" className="rounded-md border px-3 py-2 text-sm">
           <p className="font-medium">{STATE_LABELS[sendState.status]}</p>
           {sendState.message && <p className="mt-0.5 text-muted-foreground">{sendState.message}</p>}
-          {(sendState.status === "unknown" || sendState.status === "delivery_failed") && !reviewOnlyObligation && !submission.current && <Button type="button" variant="link" size="xs" disabled={pending} onClick={resetForRetry}>Resume draft</Button>}
-          {canReconcile && !reviewOnlyObligation && sendState.status !== "resume" && <Button type="button" variant="link" size="xs" disabled={pending} onClick={() => send("reconcile")}>Reconcile saved send</Button>}
+          {checkOnly && <Button type="button" variant="link" size="xs" disabled={pending} onClick={checkTargetAgain}>Check status</Button>}
+          {(sendState.status === "unknown" || sendState.status === "delivery_failed") && !reviewOnlyObligation && !submission.current && !targetNoSend && <Button type="button" variant="link" size="xs" disabled={pending} onClick={resetForRetry}>Resume draft</Button>}
+          {canReconcile && !reviewOnlyObligation && !targetNoSend && sendState.status !== "resume" && <Button type="button" variant="link" size="xs" disabled={pending} onClick={() => send("reconcile")}>Reconcile saved send</Button>}
         </div>}
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">{needsTemplate ? "No answer recorded. A curated follow-up template is required." : "Review the complete preview before sending."}</p>
-          <Button type="button" disabled={!canSend} onClick={() => send("send")}>{pending ? "Sending…" : sendState.status === "resume" ? (submission.current ? "Reconcile saved send" : "Send resumed draft") : "Send text"}</Button>
+          {!(targetNoSend && !(targetDisposition === "check" && submission.current)) && <Button type="button" disabled={!(targetDisposition === "check" ? canReconcile : canSend)} onClick={() => send(targetDisposition === "check" ? "reconcile" : "send")}>{pending ? (targetDisposition === "check" ? "Checking…" : "Sending…") : targetDisposition === "check" ? "Check status" : sendState.status === "resume" ? (submission.current ? "Reconcile saved send" : "Send resumed draft") : "Send text"}</Button>}
         </div>
       </>}
     </div>}

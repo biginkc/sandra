@@ -447,3 +447,37 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
     expect(metadata).not.toHaveProperty("inbound_stamp_unresolved");
   });
 });
+
+describe("dispatchRepSms replacing a failed send", () => {
+  const withLeadObligation = (status: string) => {
+    const client = setupClient();
+    const obligation = {
+      id: "obligation-9", attemptId: "attempt-9", status, messageBody: "x", composition,
+      blockedReason: null, senderAssignmentId: "sender-1", fromNumber: "+18163706846", toNumber: "+18165550123",
+    };
+    client.rpc.mockImplementation(((name: string) => Promise.resolve(
+      name === "fn_get_rep_sms_context"
+        ? { data: { ...contextData, obligation }, error: null }
+        : { data: { draft: null }, error: null },
+    )) as never);
+  };
+  const send = (extra: Record<string, unknown>) => dispatchRepSms({
+    propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "33333333-3333-4333-8333-333333333333", composition, ...extra,
+  } as never);
+
+  it("a terminal-failed lead obligation (delivery_failed) does not block a verified replacement", async () => {
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "r", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    withLeadObligation("delivery_failed");
+    await expect(send({ replacingFailedSend: true })).resolves.toMatchObject({ status: "sent" });
+  });
+
+  it("without the server-set flag, or with a live obligation (required), the saved follow-up still blocks a generic send", async () => {
+    withLeadObligation("delivery_failed");
+    await expect(send({})).rejects.toThrow(/saved SMS follow-up/);
+    withLeadObligation("required");
+    await expect(send({ replacingFailedSend: true })).rejects.toThrow(/saved SMS follow-up/);
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
+  });
+});

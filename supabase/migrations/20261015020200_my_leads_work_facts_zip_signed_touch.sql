@@ -7,7 +7,7 @@
 -- Nothing else in placement, ordering, thresholds, strictness or next_change_at moves. fn_my_leads_work_page / _facts read facts as-is.
 --   zip              properties.zip (null when blank)
 --   contractSignedAt acquisition_queue_states.signed_at (set by fn_record_acquisition_contract; null when none)
---   lastTouch        kind of the source with the greatest timestamp counted by my_leads_touch_facts; at = last_touch_at
+--   lastTouch        kind of the source with the greatest timestamp counted by my_leads_touch_facts; at = the timestamp of that same source (a text counts at its send time)
 --   taskKind/snoozed 'callback'|'appointment' (tasks.type) and snoozed_until set, of the earliest task behind the headline time
 begin;
 
@@ -193,7 +193,7 @@ language sql stable security definer set search_path = '' as $$
   -- (sent/delivered outbound texts, attempts, outbound calls, notes). Ties: texts, then calls/attempts, then notes.
   -- Texts are timed by eff_at (when they went out, design 16), so a campaign created Monday and sent Thursday beats a Wednesday note.
   lt as (
-    select distinct on (u.lead_id) u.lead_id, u.kind
+    select distinct on (u.lead_id) u.lead_id, u.kind, u.ts
     from (
       select m.lead_id, m.eff_at as ts, 1 as pri,
         case m.cls when 'human' then 'your_text' when 'ai' then 'sandra_reply' when 'drip' then 'drip_text'
@@ -223,7 +223,8 @@ language sql stable security definer set search_path = '' as $$
   nr as (
     select r.property_id as lead_id,
       bool_or(r.status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown')) as calling,
-      min(r.updated_at) filter (where r.status = 'needs_review') as review_at
+      min(r.updated_at) filter (where r.status = 'needs_review') as review_at,
+      (array_agg(r.id order by r.updated_at, r.id) filter (where r.status = 'needs_review'))[1] as review_id
     from public.norma_call_requests r
     where r.org_id = p_org and r.property_id in (select property_id from base) group by r.property_id),
   camp as (
@@ -282,7 +283,7 @@ language sql stable security definer set search_path = '' as $$
     select b.property_id, 'ai_reply_failed', 'review', dl.created_at, dl.id, false
     from base b join public.ai_reply_dead_letters dl on dl.org_id = p_org and dl.property_id = b.property_id and dl.resolved_at is null
     union all
-    select n.lead_id, 'norma_needs_review', 'review', n.review_at, null::uuid, false from nr n where n.review_at is not null),
+    select n.lead_id, 'norma_needs_review', 'review', n.review_at, n.review_id, false from nr n where n.review_at is not null),
   -- A pending AI draft is a label only (never Broken): stale once its reply is handled another way.
   dr as (
     select distinct on (d.property_id) d.property_id as lead_id, d.id as draft_id from public.ai_reply_drafts d
@@ -343,7 +344,7 @@ language sql stable security definer set search_path = '' as $$
         or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at >= p_at - interval '30 minutes') as drip_healthy,
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
-      apx.due_tk, apx.due_snz, apx.missed_tk, apx.missed_snz, apx.future_tk, apx.future_snz, lt.kind as lt_kind,
+      apx.due_tk, apx.due_snz, apx.missed_tk, apx.missed_snz, apx.future_tk, apx.future_snz, lt.kind as lt_kind, lt.ts as lt_ts,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
       coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, dr.draft_id, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
       coalesce(nr.calling, false) as norma_calling, (nt.lead_id is not null) as norma_task,
@@ -488,7 +489,7 @@ language sql stable security definer set search_path = '' as $$
       'broken', coalesce(f.broken_items, '[]'::jsonb), 'aiDraftId', f.draft_id,
       'labels', to_jsonb(f.labels),
       'zip', f.zip, 'contractSignedAt', f.contract_signed_at,
-      'lastTouch', case when f.last_touch_at is null then null else jsonb_build_object('kind', coalesce(f.lt_kind, 'other'), 'at', f.last_touch_at) end,
+      'lastTouch', case when f.last_touch_at is null and f.lt_ts is null then null else jsonb_build_object('kind', coalesce(f.lt_kind, 'other'), 'at', coalesce(f.lt_ts, f.last_touch_at)) end,
       'row', f.row_data) as facts,
     f.search_text, f.next_at
   from fin f;
