@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { fakePostgrest } from "./fake-postgrest.test-util";
 import { parseSnapshotIds } from "./hold-activity";
 import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
-import { buildSnapshot, draftStillOn, effectiveFlagReasons, liveStateOf, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
+import { buildSnapshot, draftStillOn, enrichPage, effectiveFlagReasons, liveStateOf, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
 import { deriveTape, holdReasonSentence, withEffectiveReason } from "./tape";
 import type { OpenHold, RunWithSteps } from "./types";
 
@@ -533,6 +533,25 @@ describe("final check re-resolves drafts", () => {
     expect(decodeSnapshot(page.snapshot).entries.map((e) => e.id)).toEqual([u(3)]);
     expect(page.holds).toHaveLength(0);
     expect(page.missing).toEqual([u(3)]);
+  });
+});
+
+describe("fresh version check", () => {
+  it("a failed fresh-seen lookup is reported (column pauses actions), never silently kept", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };
+    const list = await eligible(tables);
+    const res = await enrichPage(db(tables, { fail: (table) => table === "jev_lead_decisions" }).client, "org", list.holds);
+    expect(res.contextErrors).toContain("version check");
+    const ok = await enrichPage(db(tables).client, "org", list.holds);
+    expect(ok.contextErrors).not.toContain("version check");
+  });
+
+  it("the final check returns each hold's current flag and pending version", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };
+    const list = await eligible(tables);
+    tables.properties = tables.properties.map((p) => ({ ...p, last_ai_escalation_reason: "hostile_needs_confirm", last_ai_escalation_at: t(50) }));
+    const still = (await recheckOpen(db(tables).client, "org", list.holds))!;
+    expect(still.version.get(u(1))).toMatchObject({ flagReason: "hostile_needs_confirm", flagAt: t(50) });
   });
 });
 

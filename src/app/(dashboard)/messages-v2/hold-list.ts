@@ -15,7 +15,8 @@
  */
 import { lockedPropertyIds } from "./dnc-locked";
 import { holdActivityAt, sortNewestFirst } from "./hold-activity";
-import { withFreshSeen } from "./hold-seen";
+import { loadFreshSeen, mergeSeen } from "./hold-seen";
+import { SEEN_CHECK_FAILED } from "./snapshot-codec";
 import { fetchAllKeyset } from "./paged";
 import {
   compareInstants,
@@ -31,7 +32,7 @@ import {
   type HoldReviewRow,
   type LooseSupabase,
 } from "./queries";
-import type { OpenHold, PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
+import type { HoldSeen, OpenHold, PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const CHUNK = 100;
 
@@ -444,6 +445,7 @@ export function effectiveFlagReasons(holds: readonly OpenHold<RunWithSteps>[]): 
 }
 
 /** Step 6 (returned page only): draft text, dead letters, alert status, fresh "seen". Failures are notes. */
+
 export async function enrichPage(
   supabase: LooseSupabase,
   orgId: string,
@@ -465,7 +467,22 @@ export async function enrichPage(
     return b && h.draft ? { ...h, draft: { ...h.draft, body: b.body, edited_body: b.edited_body, edited_at: b.edited_at } } : h;
   });
   const enriched = await enrichHoldCards(supabase, orgId, withBodies);
-  const seen = await withFreshSeen(supabase, orgId, enriched.holds);
+  // The fresh version check. On failure the cards keep their window seen but the column pauses their actions
+  // ("Couldn't re-check") until a live re-check succeeds: never actionable without a successful version check.
+  const pids = enriched.holds.flatMap((h) => (h.property_id ? [h.property_id] : []));
+  let fresh: Map<string, HoldSeen> | null = null;
+  try {
+    fresh = pids.length ? await loadFreshSeen(supabase, orgId, pids) : new Map();
+  } catch {
+    fresh = null;
+  }
+  if (!fresh) contextErrors.push(SEEN_CHECK_FAILED);
+  const seen = fresh
+    ? enriched.holds.map((h) => {
+        const f = h.property_id ? fresh!.get(h.property_id) : undefined;
+        return f ? { ...h, seen: mergeSeen(h.seen, f) } : h;
+      })
+    : enriched.holds;
   return {
     holds: seen,
     contextErrors: [...contextErrors, ...enriched.contextErrors],
@@ -482,9 +499,18 @@ export async function recheckOpen(
   supabase: LooseSupabase,
   orgId: string,
   holds: readonly OpenHold<RunWithSteps>[],
-): Promise<{ open: Set<string>; badDraft: Set<string> } | null> {
+): Promise<{ open: Set<string>; badDraft: Set<string>; version: Map<string, HoldSeen> } | null> {
   const ids = holds.map((h) => h.id);
-  if (!ids.length) return { open: new Set(), badDraft: new Set() };
+  if (!ids.length) return { open: new Set(), badDraft: new Set(), version: new Map() };
+  // The hold's version as of this check (flag reason/time and newest pending row), so the column can compare it
+  // with the snapshot and mark the card Updated on any difference.
+  const flagNow = new Map<string, { reason: string | null; at: string | null }>();
+  const throughNow = new Map<string, string>();
+  const bump = (id: string, at: string | null | undefined) => {
+    if (!at) return;
+    const cur = throughNow.get(id);
+    if (!cur || compareInstants(at, cur) > 0) throughNow.set(id, at);
+  };
   const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
   const open = new Set<string>();
   const locked = new Set<string>();
@@ -494,23 +520,40 @@ export async function recheckOpen(
   let failed = false;
   await Promise.all([
     ...chunks(ids).map(async (c) => {
-      const res = await fetchAllKeyset<{ id: string; needs_human_attention: boolean; is_dnc_locked: boolean }>(() =>
-        supabase.from("properties").select("id, needs_human_attention, is_dnc_locked").eq("org_id", orgId).in("id", c),
+      const res = await fetchAllKeyset<{
+        id: string;
+        needs_human_attention: boolean;
+        is_dnc_locked: boolean;
+        last_ai_escalation_reason: string | null;
+        last_ai_escalation_at: string | null;
+      }>(() =>
+        supabase
+          .from("properties")
+          .select("id, needs_human_attention, is_dnc_locked, last_ai_escalation_reason, last_ai_escalation_at")
+          .eq("org_id", orgId)
+          .in("id", c),
       );
       if (res.error) failed = true;
       else
         for (const p of res.rows) {
+          const flagged = p.needs_human_attention === true;
+          flagNow.set(p.id, { reason: flagged ? (p.last_ai_escalation_reason ?? null) : null, at: flagged ? (p.last_ai_escalation_at ?? null) : null });
           if (p.is_dnc_locked) locked.add(p.id);
           else if (p.needs_human_attention) open.add(p.id);
         }
     }),
     ...(["jev_lead_decisions", "ai_disposition_reviews"] as const).flatMap((table) =>
       chunks(ids).map(async (c) => {
-        const res = await fetchAllKeyset<{ property_id: string | null }>(() =>
-          supabase.from(table).select("id, property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", c),
+        const res = await fetchAllKeyset<{ property_id: string | null; created_at: string | null }>(() =>
+          supabase.from(table).select("id, property_id, created_at").eq("org_id", orgId).eq("status", "pending").in("property_id", c),
         );
         if (res.error) failed = true;
-        else for (const r of res.rows) if (r.property_id) open.add(r.property_id);
+        else
+          for (const r of res.rows)
+            if (r.property_id) {
+              open.add(r.property_id);
+              bump(r.property_id, r.created_at);
+            }
       }),
     ),
     // A draft counts only if it is still pending AND still resolves to exactly this hold's property, unlocked:
@@ -551,6 +594,7 @@ export async function recheckOpen(
         if (c.length === 1 && idSet.has(c[0]) && !lockedNow.has(c[0])) {
           draftOk.add(c[0]);
           validDraftIds.add(`${d.id}|${c[0]}`);
+          bump(c[0], d.created_at);
         }
       }
     })(),
@@ -569,7 +613,10 @@ export async function recheckOpen(
   // A displayed draft that no longer belongs to this hold's property (moved, locked, gone) is dropped from the card,
   // so Send/Edit cannot act on it; if nothing else keeps the hold open it is missing.
   const badDraft = new Set(holds.filter((h) => h.draft && !validDraftIds.has(`${h.draft.id}|${h.id}`)).map((h) => h.id));
-  return { open: new Set(ids.filter((id) => open.has(id) && !locked.has(id))), badDraft };
+  const version = new Map<string, HoldSeen>(
+    ids.map((id) => [id, { through: throughNow.get(id) ?? null, flagReason: flagNow.get(id)?.reason ?? null, flagAt: flagNow.get(id)?.at ?? null }]),
+  );
+  return { open: new Set(ids.filter((id) => open.has(id) && !locked.has(id))), badDraft, version };
 }
 
 /** What a rendered card is checked against while the page stays open (no migration: properties is not in realtime). */

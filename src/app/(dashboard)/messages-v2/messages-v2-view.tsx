@@ -235,16 +235,22 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         .map(threadKey),
     ),
   );
-  const [threadFailures, setThreadFailures] = useState(() => (props.threadFailedRunIds ?? []).length);
+  // Runs whose thread text failed, merged across fetches: an id leaves only when ITS own text loads.
+  const [threadFailed, setThreadFailed] = useState<ReadonlySet<string>>(() => new Set(props.threadFailedRunIds ?? []));
   const [threadRetry, setThreadRetry] = useState(0);
   useEffect(() => {
     const pool = [...runs, ...earlier];
     const missing = pool.filter((r) => !requestedThreads.current.has(threadKey(r)));
     if (missing.length === 0) return;
     for (const r of missing) requestedThreads.current.add(threadKey(r));
-    const retryLater = (ids: readonly string[]) => {
+    const retryLater = (ids: readonly string[], loaded: readonly string[] = []) => {
       for (const r of missing) if (ids.includes(r.id)) requestedThreads.current.delete(threadKey(r));
-      setThreadFailures(ids.length);
+      setThreadFailed((prev) => {
+        const next = new Set(prev);
+        for (const id of loaded) next.delete(id);
+        for (const id of ids) next.add(id);
+        return next;
+      });
       if (ids.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
     };
     // Versioned: each result is committed only if the run is still at the version it was fetched for (an older fetch
@@ -255,7 +261,10 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
         const fresh = [...fetched].filter(([id]) => current.get(id) === versionAtRequest.get(id));
         setThreads((curr) => new Map([...curr, ...fresh]));
-        retryLater(failedRunIds);
+        retryLater(
+          failedRunIds,
+          missing.filter((r) => !failedRunIds.includes(r.id)).map((r) => r.id),
+        );
       })
       .catch(() => retryLater(missing.map((r) => r.id)));
     // threadRetry re-runs this after a failure.
@@ -398,6 +407,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         const freshDay = res.data.threads.filter(([id]) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id));
         setThreads((curr) => new Map([...curr, ...freshDay]));
         const failedIds = res.data.failedRunIds ?? [];
+        setThreadFailed((prev) => {
+          const next = new Set(prev);
+          for (const r of got) if (!failedIds.includes(r.id)) next.delete(r.id);
+          for (const id of failedIds) next.add(id);
+          return next;
+        });
         for (const r of got) if (!failedIds.includes(r.id) && freshDay.some(([id]) => id === r.id)) requestedThreads.current.add(threadKey(r));
         // A full page means this day was cut off: continue the same day from the oldest run returned.
         // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
@@ -553,7 +568,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
               ),
             )
           )}
-          {threadFailures > 0 && (
+          {threadFailed.size > 0 && (
             <p data-testid="threads-retrying" className="text-center text-xs text-amber-700">
               Some texts couldn&apos;t load. Retrying…
             </p>

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
+import { SEEN_CHECK_FAILED } from "./snapshot-codec";
 import { holdActivityAt } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
@@ -300,6 +301,7 @@ export function WaitingColumn({
             error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
           };
         });
+        if (res.data.contextErrors.includes(SEEN_CHECK_FAILED)) setCheckFailed(true);
         setVisible((v) => v + PAGE);
       } else {
         // Position kept: the same ids are asked for again on retry.
@@ -320,7 +322,8 @@ export function WaitingColumn({
   const [stale, setStale] = useState<{ forKey: unknown; ids: Set<string> }>({ forKey: refreshKey, ids: new Set() });
   const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
   // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
-  const [checkFailed, setCheckFailed] = useState(false);
+  // Paused from the start when the server could not run the fresh version check for the first page.
+  const [checkFailed, setCheckFailed] = useState(() => !!meta?.contextErrors.includes(SEEN_CHECK_FAILED));
   const checkSeq = useRef(0);
   const refreshKeyRef = useRef<unknown>(refreshKey);
   const shownIdsRef = useRef<string[]>([]);

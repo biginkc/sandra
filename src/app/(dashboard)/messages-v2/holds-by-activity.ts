@@ -1,7 +1,7 @@
 import { encodeSnapshot, type CompactSnapshot } from "./snapshot-codec";
 import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
-import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
-import type { HoldsMeta, OpenHold, RunWithSteps } from "./types";
+import { compareInstants, loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
+import type { HoldSeen, HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
 export { HOLDS_LOAD_ERROR };
 
@@ -34,11 +34,18 @@ const meta = (shown: number, total: number, contextErrors: string[], deadLetterU
 /** Applies the final check: holds no longer open -> missing; a displayed draft that no longer validates is removed. */
 function finalCards(
   holds: OpenHold<RunWithSteps>[],
-  still: { open: Set<string>; badDraft: Set<string> },
+  still: { open: Set<string>; badDraft: Set<string>; version?: Map<string, HoldSeen> },
 ): { holds: OpenHold<RunWithSteps>[]; missing: string[] } {
   const kept = holds
     .filter((h) => still.open.has(h.id))
-    .map((h) => (still.badDraft.has(h.id) ? { ...h, draft: undefined, draft_held: false } : h));
+    .map((h) => (still.badDraft.has(h.id) ? { ...h, draft: undefined, draft_held: false } : h))
+    // The final check's version: the card renders it, so any difference from the snapshot marks it Updated.
+    .map((h) => {
+      const v = still.version?.get(h.id);
+      if (!v) return h;
+      const through = h.seen?.through && (!v.through || compareInstants(h.seen.through, v.through) > 0) ? h.seen.through : v.through;
+      return { ...h, seen: { through, flagReason: v.flagReason, flagAt: v.flagAt } };
+    });
   return { holds: kept, missing: holds.filter((h) => !still.open.has(h.id)).map((h) => h.id) };
 }
 

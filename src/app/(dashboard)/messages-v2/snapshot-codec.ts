@@ -1,3 +1,6 @@
+/** contextErrors marker: the fresh version check failed; the column pauses actions until a re-check succeeds. */
+export const SEEN_CHECK_FAILED = "version check";
+
 import type { SnapshotEntry, WaitingSnapshot } from "./hold-list";
 
 /**

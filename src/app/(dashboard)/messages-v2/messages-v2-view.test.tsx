@@ -567,6 +567,41 @@ describe("MessagesV2View", () => {
     expect(screen.queryByTestId("older-error")).toBeNull();
   });
 
+  it("thread failures merge across fetches: A fails, a later fetch for B succeeds -> warning stays", async () => {
+    const a = run("ra", { inbound_message_id: "m-missing", status: "running" });
+    await mount({ ...props([a]), threads: [] });
+    await waitFor(() => expect(screen.getByTestId("threads-retrying")).toBeInTheDocument());
+    await fire("INSERT", "pipeline_runs", run("rb", { inbound_message_id: "", status: "running" }));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId("threads-retrying")).toBeInTheDocument();
+  });
+
+  it("a failed fresh version check pauses actions from the start; a later successful re-check enables them", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1) };
+      const snapshot = buildSnapshot([a]);
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, through: null, draftId: null, draftProperty: null, draftSendable: false })),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      const holdsMeta = { total: 1, shown: 1, truncated: false, totalState: "exact" as const, failed: [], contextErrors: ["version check"], deadLetterUnavailable: false };
+      await mount({ ...props([], [a]), holdsMeta, holdsSnapshot: snapshot, revalidateHolds, actions });
+      expect(screen.getByTestId("holds-recheck-failed")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.queryByTestId("holds-recheck-failed")).toBeNull());
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
