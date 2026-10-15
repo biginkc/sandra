@@ -289,6 +289,16 @@ export function RepSmsComposer({
   const templateRequest = useRef(0)
   const previousPropertyId = useRef(propertyId)
   const openedInbound = useRef<string | null>(inboundMessageId)
+  // After a successful send the next draft answers whatever is shown by then, so
+  // it takes a fresh capture when it starts. Composition and retries keep theirs.
+  const latestInbound = useRef<string | null>(inboundMessageId)
+  latestInbound.current = inboundMessageId
+  const recaptureNextDraft = useRef(false)
+  const startDraft = () => {
+    if (!recaptureNextDraft.current) return
+    recaptureNextDraft.current = false
+    openedInbound.current = latestInbound.current
+  }
 
   // A retained component can be reused for a different queue row. Never let
   // the previous lead's draft or selected sender bleed into that new lead.
@@ -450,6 +460,7 @@ export function RepSmsComposer({
     if (!id) return
     const template = templates.find((candidate) => candidate.id === id)
     if (!template) return
+    startDraft()
     const requestId = ++templateRequest.current
     // Curated follow-up copy contains a plain editable remainder. Keep the
     // request token so a rapid selection remains deterministic if a future
@@ -540,6 +551,7 @@ export function RepSmsComposer({
           }
           setRemainder((current) => current === remainder ? "" : current)
           setSelectedTemplateId("")
+          recaptureNextDraft.current = true
           if (onSent) {
             onSent(messageId)
           }
@@ -664,7 +676,7 @@ export function RepSmsComposer({
             id={`rep-sms-remainder-${propertyId}`}
             aria-label="Editable message remainder"
             value={remainder}
-            onChange={(event) => setRemainder(event.target.value)}
+            onChange={(event) => { startDraft(); setRemainder(event.target.value) }}
             disabled={pending || submissionLocked}
             maxLength={2000}
             rows={4}

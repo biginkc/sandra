@@ -595,8 +595,9 @@ async function recordRepSmsLedgerResult(
  * Reply-to stamp for a human rep text. A browser-supplied id is validated, bound
  * once (first writer wins) to the durable obligation or ledger row, and read back
  * so a resume, retry or recovered draft reuses the ORIGINAL stamp instead of one
- * captured after reload. If the bind function is unavailable the validated
- * supplied id is used; a stamp problem never blocks a send.
+ * captured after reload. A failed bind sends unstamped (never the browser's
+ * newer id) unless the function does not exist yet; a stamp problem never
+ * blocks a send.
  */
 async function resolveRepSmsInboundStamp(args: {
   orgId: string;
@@ -610,27 +611,39 @@ async function resolveRepSmsInboundStamp(args: {
   const admin = createAdminClient();
   const supplied = args.supplied ? await resolveInboundStamp(admin, args.supplied, scope) : null;
   if (!args.target) return supplied;
-  try {
-    const bind = admin as unknown as {
-      rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
-    };
-    const result = await bind.rpc("fn_bind_rep_sms_inbound_stamp", {
-      p_kind: args.target.kind,
-      p_id: args.target.id,
-      p_org_id: args.orgId,
-      p_inbound_message_id: supplied,
-    });
-    if (result.error) {
-      console.warn(`[inbound-stamp] bind failed for ${args.target.kind} ${args.target.id}: ${result.error.message ?? "unknown"}`);
-      return supplied;
+  const bind = admin as unknown as {
+    rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string; code?: string } | null }>;
+  };
+  let lastError: { message?: string; code?: string } | null = null;
+  // One retry for a transient failure. A stored stamp must never be replaced by
+  // a newer browser capture just because the read failed.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await bind.rpc("fn_bind_rep_sms_inbound_stamp", {
+        p_kind: args.target.kind,
+        p_id: args.target.id,
+        p_org_id: args.orgId,
+        p_inbound_message_id: supplied,
+      });
+      if (!result.error) {
+        if (typeof result.data !== "string") return supplied;
+        // Stored wins, re-validated; an invalid stored value is dropped, never
+        // replaced by a newer capture.
+        return resolveInboundStamp(admin, result.data, scope);
+      }
+      lastError = result.error;
+    } catch (error) {
+      lastError = { message: error instanceof Error ? error.message : String(error) };
     }
-    if (typeof result.data !== "string") return supplied;
-    // Stored wins, re-validated; an invalid stored value is dropped, never replaced
-    // by a newer capture.
-    return resolveInboundStamp(admin, result.data, scope);
-  } catch {
-    return supplied;
   }
+  console.warn(`[inbound-stamp] bind failed for ${args.target.kind} ${args.target.id}: ${lastError?.message ?? "unknown"}`);
+  // Only a function that does not exist (migration not applied yet) means nothing
+  // can be stored, so the validated supplied id is safe to use. Any other
+  // failure may hide a stored original: send unstamped instead of claiming a
+  // newer reply was handled.
+  const missing = lastError?.code === "42883" || lastError?.code === "PGRST202" ||
+    /could not find the function|does not exist/i.test(lastError?.message ?? "");
+  return missing ? supplied : null;
 }
 
 export type DispatchRepSmsInput = {

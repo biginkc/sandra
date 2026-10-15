@@ -361,6 +361,22 @@ describe("RepSmsComposer reply stamp", () => {
     expect(mocks.send.mock.calls[1][0].inboundMessageId).toBe("inbound-X")
   })
 
+  it("stamps a second text with the reply shown after the first send, without closing the composer", async () => {
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    const user = userEvent.setup()
+    const view = render(<RepSmsComposer propertyId="property-1" inboundMessageId="inbound-X" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await typeAndSend(user)
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(1))
+    expect(mocks.send.mock.calls[0][0].inboundMessageId).toBe("inbound-X")
+    await waitFor(() => expect(screen.getByLabelText("Editable message remainder")).toHaveValue(""))
+    view.rerender(<RepSmsComposer propertyId="property-1" inboundMessageId="inbound-Y" />)
+    await user.type(screen.getByLabelText("Editable message remainder"), "Following up on your reply.")
+    await user.click(screen.getByRole("button", { name: "Send text" }))
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
+    expect(mocks.send.mock.calls[1][0].inboundMessageId).toBe("inbound-Y")
+  })
+
   it("sends a resumed obligation with the stamp captured at open", async () => {
     mocks.load.mockResolvedValue({ ok: true, data: context("failed_not_dispatched") })
     const user = userEvent.setup()

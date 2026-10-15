@@ -27,7 +27,7 @@ it('binds the reply stamp first-writer-wins, org-scoped, service_role only, and 
 
     const org = randomUUID(), otherOrg = randomUUID(), rep = randomUUID();
     await db.query('insert into auth.users(id) values ($1)', [rep]);
-    for (const id of [org, otherOrg]) await db.query("insert into public.organizations(id,name) values ($1,'stamp')", [id]);
+    for (const id of [org, otherOrg]) await db.query("insert into public.organizations(id,name) values ($1,$2)", [id, `stamp-${id}`]);
     const property = randomUUID(), contact = randomUUID();
     await db.query("insert into public.properties(id,org_id,address,state,status) values ($1,$2,'Stamp Main','MO','new_lead')", [property, org]);
     const attempt = randomUUID();
@@ -51,7 +51,11 @@ it('binds the reply stamp first-writer-wins, org-scoped, service_role only, and 
       expect(await bind(kind, id, org, null)).toBe(x);         // read-back with no supplied value
       expect(await bind(kind, id, otherOrg, y)).toBeNull();    // cross-org sees and changes nothing
     }
+    // A SQL exception aborts the transaction; recover with a savepoint so the
+    // permission and rollback checks below still execute.
+    await db.query('savepoint bad_kind');
     await expect(bind('nope', obligation, org, x)).rejects.toThrow(/unknown stamp kind/);
+    await db.query('rollback to savepoint bad_kind');
 
     // Only service_role may call it.
     await db.query('savepoint denied');
