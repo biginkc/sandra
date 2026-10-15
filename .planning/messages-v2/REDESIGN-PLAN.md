@@ -48,7 +48,7 @@ Goal: "wants an offer" and "talked price" become a lead on My Leads under Jarrad
 Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, and starts Jarrad's six drips.
 
 - [ ] Load the nine questions verbatim from memory note `jev-approved-questions` (never retyped by a model). Jarrad re-approves the exact text in the PR body, one block.
-- [ ] Group order (first yes wins): Stop texting (asked_stop or hostile) > Wrong person > Talked price > Open to selling > Maybe later > Not interested > Asked who > Confirmed owner > Needs a person. Jarrad approves this order explicitly (it was never formally approved).
+- [x] Group order (first yes wins): Stop texting (asked_stop or hostile) > Wrong person > Talked price > Open to selling > Maybe later > Not interested > Asked who > Confirmed owner > Needs a person. Approved by Jarrad 2026-10-14 ("yes").
 - [ ] Decide the open gap: "gave a time to call" (e.g. "Anytime", "noon is best"). Today it rides on the hot-lead path; Jarrad decides whether it needs its own question. If a new question is added, its text needs verbatim approval.
 - [ ] Actions per question (per Jarrad 2026-10-14): 1 and 9 → Jarrad (PR 2 path). 2, 3, 4, 5, 8 → approved reply + matching drip. 6, 7 → waiting for a person. Unclear → waiting for a person.
 - [ ] Drip wiring: Maybe later → "Maybe later"; Asked who → "Asked who is texting"; Not interested → "Not interested"; Confirmed owner → "Confirmed owner". Wrong person → close, no drip. "Talking price", "Book appointment", "Curious" are never auto-started.
@@ -74,4 +74,4 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 
 ## Decisions still open for Jarrad
 
-1. Approve the tie-breaker order above (PR 3): stop > wrong person > price > wants offer > maybe later > not interested > asked who > confirmed owner.
+None. All design decisions are closed as of 2026-10-14. Each PR still needs its own "go".
