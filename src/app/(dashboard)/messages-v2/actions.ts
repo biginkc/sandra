@@ -50,6 +50,7 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
       admin,
       orgId,
       userId,
+      draftOwner: (draftId: string, propertyId: string) => draftStillOn(admin as unknown as LooseSupabase, orgId, draftId, propertyId),
       suppressNumber: async ({ propertyId, contactId, phone, inboundMessageId }) => {
         try {
           // The existing human suppression path: phone-level suppression,
@@ -125,12 +126,16 @@ async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Pro
   }
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * The property the clicker saw must still own the draft (it can be re-pointed at another property after the list
- * loaded). Refused with HOLD_STALE, the code the card already turns into a reload. A failed check also refuses.
+ * Send / Edit carry the property the clicker saw, REQUIRED: missing or malformed -> HOLD_STALE, never sent.
+ * An early check fails fast; the binding check runs again inside the leased send path (hold-actions.ts).
  */
-async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: string | undefined): Promise<Result<null>> {
-  if (!propertyId) return { ok: true, data: null };
+async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: unknown): Promise<Result<null>> {
+  if (typeof propertyId !== "string" || !UUID.test(propertyId)) {
+    return err({ code: "HOLD_STALE", message: "Could not tell which lead this draft was for. Nothing was sent; refresh and try again." });
+  }
   const verdict = await draftStillOn(d.admin as unknown as LooseSupabase, d.orgId, draftId, propertyId);
   if (verdict === "ok") return { ok: true, data: null };
   return err({
@@ -139,22 +144,23 @@ async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: s
   });
 }
 
-export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft; propertyId?: string }) {
+export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft; propertyId: string }) {
   return run(async (d) => {
-    const guard = await guardDraftOwner(d, String(input.draftId), input.propertyId ? String(input.propertyId) : undefined);
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
     if (!guard.ok) return guard;
-    return sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) });
+    return sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen), expectedPropertyId: String(input.propertyId) });
   });
 }
 
-export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft; propertyId?: string }) {
+export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft; propertyId: string }) {
   return run(async (d) => {
-    const guard = await guardDraftOwner(d, String(input.draftId), input.propertyId ? String(input.propertyId) : undefined);
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
     if (!guard.ok) return guard;
     return editAndSendHeldDraft(d, {
       draftId: String(input.draftId),
       body: String(input.body ?? ""),
       seen: seenDraft(input.seen),
+      expectedPropertyId: String(input.propertyId),
     });
   });
 }

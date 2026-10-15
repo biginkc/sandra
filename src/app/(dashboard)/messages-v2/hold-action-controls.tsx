@@ -208,7 +208,7 @@ export function HoldActionControls({
     seenDraft &&
     perform(
       "Sending…",
-      () => actions.send({ draftId: draft.id, seen: seenDraft, ...(propertyId ? { propertyId } : {}) }),
+      () => actions.send({ draftId: draft.id, seen: seenDraft, propertyId: propertyId ?? "" }),
       () => ({ text: "Sent" }),
     );
 
@@ -217,7 +217,7 @@ export function HoldActionControls({
     seenDraft &&
     perform(
       "Sending…",
-      () => actions.editAndSend({ draftId: draft.id, body: editText, seen: seenDraft, ...(propertyId ? { propertyId } : {}) }),
+      () => actions.editAndSend({ draftId: draft.id, body: editText, seen: seenDraft, propertyId: propertyId ?? "" }),
       () => ({ text: "Sent (edited)" }),
     );
 
