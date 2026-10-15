@@ -193,6 +193,47 @@ export type ThreadTable = {
 };
 
 /**
+ * THE rule for keeping a run's cached reply on screen (used by a failed fetch AND by a refresh): only when the cached
+ * text belongs to the run's current version and the run is not failed at that version.
+ */
+export function keepCachedText(cachedVersion: string | undefined, currentVersion: string | undefined, failedNow: boolean): boolean {
+  return !failedNow && cachedVersion !== undefined && currentVersion !== undefined && cachedVersion === currentVersion;
+}
+
+/**
+ * Refresh: adopt the server's threads and failures. Server text wins for the runs it rendered; a cached text is kept
+ * only when keepCachedText allows it for that run's refreshed version (a run the refreshed page does not list keeps
+ * its text unless the server reports it failed).
+ */
+export function adoptServerThreads(
+  prev: ThreadTable,
+  nextKey: unknown,
+  serverText: ReadonlyArray<readonly [string, ThreadText]>,
+  serverFailed: readonly string[],
+  versionOf: (id: string) => string | undefined,
+): ThreadTable {
+  const failed = new Set(serverFailed);
+  const text = new Map<string, ThreadText>();
+  const textVersions = new Map<string, string>();
+  for (const [id, t] of prev.text) {
+    const cachedV = prev.textVersions?.get(id);
+    const nowV = versionOf(id);
+    const keep = nowV === undefined ? !failed.has(id) && cachedV !== undefined : keepCachedText(cachedV, nowV, failed.has(id));
+    if (keep) {
+      text.set(id, t);
+      if (cachedV !== undefined) textVersions.set(id, cachedV);
+    }
+  }
+  for (const [id, t] of serverText) {
+    if (failed.has(id)) continue;
+    text.set(id, t);
+    const v = versionOf(id);
+    if (v !== undefined) textVersions.set(id, v);
+  }
+  return { snapshotKey: nextKey, text, failed, seqs: prev.seqs, textVersions };
+}
+
+/**
  * Applies a thread fetch result stamped with (snapshot, per-run version, seq). Only runs still at the requested
  * version in the same snapshot, and not already decided by a newer request, change; a run leaves `failed` only when
  * its own text loads at its current version.
@@ -227,8 +268,7 @@ export function applyThreads(
       failed.add(id);
       // A failed fetch for a DIFFERENT version than the cached text: the cached text is no longer this run's text,
       // so it is removed (the tape shows the retry state, never the old reply as current). Same version: kept.
-      const v = stamp.versions?.get(id);
-      if (v === undefined || textVersions.get(id) !== v) {
+      if (!keepCachedText(textVersions.get(id), stamp.versions?.get(id), false)) {
         text.delete(id);
         textVersions.delete(id);
       }

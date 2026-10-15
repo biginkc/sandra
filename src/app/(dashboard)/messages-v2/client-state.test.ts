@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   actionsEnabled,
+  adoptServerThreads,
+  keepCachedText,
   applyResults,
   applyThreads,
   commitIfCurrent,
@@ -227,6 +229,28 @@ describe("thread writers: every pair, every outcome, every finish order", () => 
     const later = applyThreads(newFail, { snapshotKey: 1, seq: 4, versions: new Map([["r", "r:o2"]]) }, now(), [["r", { lastOutbound: null, reply: "NEW" }]], ["r"], []);
     expect(later.text.get("r")?.reply).toBe("NEW");
     expect(later.failed.has("r")).toBe(false);
+  });
+
+  it("refresh adopts server threads with the same keep rule: changed or failed runs lose their cached reply", () => {
+    const prev: ThreadTable = {
+      snapshotKey: 1,
+      text: new Map([
+        ["a", { lastOutbound: null, reply: "A old" }],
+        ["b", { lastOutbound: null, reply: "B cached" }],
+        ["c", { lastOutbound: null, reply: "C cached" }],
+      ]),
+      failed: new Set(),
+      textVersions: new Map([["a", "a:o1"], ["b", "b:o1"], ["c", "c:o1"]]),
+    };
+    const versions = new Map([["a", "a:o2"], ["b", "b:o1"], ["c", "c:o1"]]);
+    const next = adoptServerThreads(prev, 2, [], ["a", "c"], (id) => versions.get(id));
+    expect(next.text.has("a")).toBe(false); // outbound changed and the new lookup failed
+    expect(next.text.get("b")?.reply).toBe("B cached"); // same version, not failed
+    expect(next.text.has("c")).toBe(false); // failed at its current version
+    expect([...next.failed].sort()).toEqual(["a", "c"]);
+    expect(keepCachedText("x:1", "x:1", false)).toBe(true);
+    expect(keepCachedText("x:1", "x:2", false)).toBe(false);
+    expect(keepCachedText("x:1", "x:1", true)).toBe(false);
   });
 
   it("retry success for an older version after the newer version failed: failure stays", () => {

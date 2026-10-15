@@ -23,7 +23,7 @@ import { RulesPanel } from "./rules-panel";
 import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
 import { TapeCard } from "./tape-card";
-import { applyThreads, commitIfCurrent, isCurrent, type Now, type Stamp, type ThreadTable } from "./client-state";
+import { adoptServerThreads, applyThreads, commitIfCurrent, isCurrent, type Now, type Stamp, type ThreadTable } from "./client-state";
 import { chicagoDayKey, loadRunThreads, previousDayKey, type RunCursor, type RunThread } from "./tape-data";
 import type { TapeDayPage } from "./tape-actions";
 import { WaitingColumn } from "./waiting-column";
@@ -200,13 +200,10 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(props.runs);
     setLabels((curr) => new Map([...curr, ...props.labels]));
     // New snapshot: adopt the server's thread text and failures (its texts win over anything fetched before).
-    setThreadTable((prev) => ({
-      snapshotKey: (prev.snapshotKey as number) + 1,
-      text: new Map([...prev.text, ...(props.threads ?? [])]),
-      failed: new Set(props.threadFailedRunIds ?? []),
-      seqs: prev.seqs,
-      textVersions: new Map([...(prev.textVersions ?? []), ...serverTextVersions(props)]),
-    }));
+    setThreadTable((prev) => {
+      const versions = new Map(props.runs.map((r) => [r.id, `${r.id}:${r.outbound_message_id ?? ""}`] as const));
+      return adoptServerThreads(prev, (prev.snapshotKey as number) + 1, props.threads ?? [], props.threadFailedRunIds ?? [], (id) => versions.get(id));
+    });
   }
   useEffect(() => {
     runsRef.current = runs;

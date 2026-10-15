@@ -980,6 +980,18 @@ describe("MessagesV2View", () => {
     expect(screen.queryByText("OLD reply")).toBeNull();
   });
 
+  it("refresh: cached reply, outbound changed and the run in threadFailedRunIds -> no reply bubble, retry notice", async () => {
+    const r = run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o1", status: "replied" });
+    const p1 = { ...props([r]), threads: [["v", { lastOutbound: null, reply: "OLD reply" }]] as Array<[string, { lastOutbound: string | null; reply: string | null }]> };
+    const { rerender } = render(<MessagesV2View {...p1} />);
+    await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+    expect(screen.getByTestId("tape-reply")).toHaveTextContent("OLD reply");
+    const changed = { ...r, outbound_message_id: "o2" };
+    rerender(<MessagesV2View {...p1} runs={[changed]} threads={[]} threadFailedRunIds={["v"]} />);
+    await waitFor(() => expect(screen.getByTestId("threads-retrying")).toBeInTheDocument());
+    expect(screen.queryByText("OLD reply")).toBeNull();
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
