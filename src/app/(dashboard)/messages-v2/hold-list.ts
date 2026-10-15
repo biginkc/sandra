@@ -317,9 +317,10 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, 
   const sources: HoldSources = {
     // A flag raised after the snapshot is a new hold (not in this walk); a later escalation on an older flag is
     // read as of the snapshot (the newer value is ignored), so it cannot move the hold ahead of the cursor.
-    properties: loaded.properties
-      .filter((p) => (p.needs_human_attention_since ? snap.ok(p.needs_human_attention_since) : snap.ok(p.last_ai_escalation_at)))
-      .map((p) => ({ ...p, last_ai_escalation_at: snap.clamp(p.last_ai_escalation_at) })),
+    // Flag start: needs_human_attention_since only changes when the flag goes off -> on (a NEW hold), so a value
+    // after the snapshot means this hold is not part of the walk. last_ai_escalation_at is mutable (re-escalation
+    // overwrites it), so it is NOT used for ordering: escalation activity comes from the immutable lead_events log.
+    properties: loaded.properties.filter((p) => snap.ok(p.needs_human_attention_since)),
     decisions: loaded.decisions.filter((d) => snap.ok(d.created_at)),
     reviews: loaded.reviews.filter((r) => snap.ok(r.created_at)),
     drafts: loaded.drafts.filter((d) => snap.ok(d.created_at)),
@@ -365,7 +366,28 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, 
     add(draftRunsByProperty, d.property_id!, d.run_id);
   }
 
-  const base = deriveOpenHolds({ properties, decisions, reviews, drafts, runs: [] });
+  // Escalation activity from the append-only lead_events log (ai_escalated), as of the snapshot. It replaces the
+  // mutable last_ai_escalation_at for ordering; the card's flag reason and "seen" still read the live column.
+  const escalations = new Map<string, string>();
+  const escResults = await Promise.all(
+    chunks(properties.map((p) => p.id)).map((ids) =>
+      fetchAllKeyset<{ property_id: string; created_at: string }>(() =>
+        supabase.from("lead_events").select("id, property_id, created_at").eq("org_id", orgId).eq("event_type", "ai_escalated").in("property_id", ids),
+      ),
+    ),
+  );
+  if (escResults.some((r) => r.error)) return fail;
+  for (const e of escResults.flatMap((r) => r.rows)) {
+    if (!snap.ok(e.created_at)) continue;
+    const cur = escalations.get(e.property_id);
+    if (!cur || compareInstants(e.created_at, cur) > 0) escalations.set(e.property_id, e.created_at);
+  }
+  const ordered = properties.map((p) => ({ ...p, last_ai_escalation_at: escalations.get(p.id) ?? null }));
+  const base = deriveOpenHolds({ properties: ordered, decisions, reviews, drafts, runs: [] }).map((h) => {
+    const live = properties.find((p) => p.id === h.id);
+    // Keep the live flag time for the card's stale-click guard; ordering already used the event-derived value.
+    return live && h.seen ? { ...h, seen: { ...h.seen, flagAt: live.last_ai_escalation_at } } : h;
+  });
   const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty }, snapshotAt);
   if (!withRuns) return fail;
   return { ok: true, holds: sortNewestFirst(withRuns), unverified };

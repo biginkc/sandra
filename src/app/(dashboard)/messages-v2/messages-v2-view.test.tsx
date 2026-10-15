@@ -506,6 +506,19 @@ describe("MessagesV2View", () => {
     expect(cards[1]).toContain("first");
   });
 
+  it("a run or step arriving after the snapshot does not change a waiting card's run or time; it only marks it Updated", async () => {
+    const shown = run("snap-run", { property_id: "p1", status: "held", started_at: new Date(NOW - 3600_000).toISOString() });
+    const held = { ...openHold("p1", shown), since: new Date(NOW - 7200_000).toISOString() };
+    await mount(props([shown], [held]));
+    const before = screen.getByTestId("waiting-time").textContent;
+    await fire("INSERT", "pipeline_runs", run("live-run", { property_id: "p1", started_at: new Date(NOW).toISOString() }));
+    await fire("INSERT", "pipeline_run_steps", {
+      id: "late", run_id: "snap-run", org_id: "o", seq: 9, kind: "action", name: "x", result: "applied", detail: {}, created_at: new Date(NOW).toISOString(),
+    } satisfies PipelineRunStep);
+    expect(screen.getByTestId("waiting-time").textContent).toBe(before);
+    expect(screen.getByTestId("hold-updated")).toHaveTextContent("Updated · refresh to reorder");
+  });
+
   it("keeps the waiting list in exactly the order the server sent (the server owns the order)", async () => {
     const hold = (id: string, minsAgo: number) => ({ ...openHold(id), since: new Date(NOW - minsAgo * 60_000).toISOString() });
     const sent = [hold("newest", 5), hold("middle", 120), hold("old", 600)];

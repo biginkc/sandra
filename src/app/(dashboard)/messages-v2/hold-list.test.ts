@@ -420,6 +420,7 @@ describe("Codex round 12: one snapshot rule for every input", () => {
     const { page1, next } = await walkFrom(tables, snap);
     expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
     tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, last_ai_escalation_at: t(950) } : p)); // flag time kept
+    tables.lead_events = [{ id: u(3, 9), org_id: "org", event_type: "ai_escalated", property_id: u(3), created_at: t(950) }];
     expect(await next()).toEqual([u(2), u(3)]);
     const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
     expect(reloaded.ok && reloaded.holds[0].id).toBe(u(3)); // a reload sees the escalation
@@ -446,5 +447,45 @@ describe("Codex round 12: one snapshot rule for every input", () => {
     const { next } = await walkFrom(tables, normalizeInstant(t(600))!);
     tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, is_dnc_locked: true } : p));
     expect(await next()).toEqual([u(2)]);
+  });
+});
+
+describe("Codex round 13: immutable escalation history", () => {
+  const esc = (n: number, property: string, at: string): Row => ({ id: u(n, 9), org_id: "org", event_type: "ai_escalated", property_id: property, created_at: at });
+
+  it("a hold shown on page 1 that escalates again between pages is neither repeated nor skipped", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(100)), flagged(2, t(90)), flagged(3, t(80))],
+      lead_events: [esc(1, u(1), t(500)), esc(2, u(2), t(400)), esc(3, u(3), t(300))],
+    };
+    const snap = normalizeInstant(t(600))!;
+    const first = await loadEligibleHolds(db(tables).client, "org", snap);
+    const page1 = pageHolds(first.ok ? first.holds : [], null, 1, snap);
+    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
+    // Re-escalation after the snapshot: the mutable column is overwritten and a new event is logged.
+    tables.properties = tables.properties.map((p) => (p.id === u(1) ? { ...p, last_ai_escalation_at: t(900) } : p));
+    tables.lead_events = [...tables.lead_events, esc(4, u(1), t(900))];
+    const ids: string[] = [];
+    let cursor = page1.nextCursor;
+    while (cursor) {
+      const s = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
+      ids.push(...s!.holds.map((h) => h.id));
+      cursor = s!.nextCursor;
+    }
+    expect(ids).toEqual([u(2), u(3)]);
+  });
+
+  it("the mutable escalation column never drives order; the event log does", async () => {
+    const list = await eligible({
+      properties: [flagged(1, t(10), { last_ai_escalation_at: t(999) }), flagged(2, t(20))],
+      lead_events: [esc(1, u(2), t(500))],
+    });
+    expect(list.holds.map((h) => h.id)).toEqual([u(2), u(1)]);
+  });
+
+  it("a failed escalation-history read fails the list closed", async () => {
+    const page = await loadMessagesV2Page(db({ properties: [flagged(1, t(1))] }, { fail: (tb) => tb === "lead_events" }).client, "org");
+    expect(page.error).not.toBeNull();
+    expect(page.holds).toHaveLength(0);
   });
 });

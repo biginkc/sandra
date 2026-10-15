@@ -37,9 +37,12 @@ function WaitingCard({
   label,
   actions,
   onReload,
+  updated,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
+  /** Newer activity arrived after this list was built. */
+  updated?: boolean;
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
@@ -63,6 +66,11 @@ function WaitingCard({
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
         <span className="font-semibold text-foreground">{label?.name ?? "Unknown sender"}</span>
         {label?.address && <span>· {label.address}</span>}
+        {updated && (
+          <span data-testid="hold-updated" className="rounded-full bg-status-new-bg px-2 py-px text-xs font-medium text-status-new-fg">
+            Updated · refresh to reorder
+          </span>
+        )}
         <span data-testid="waiting-time" className="ml-auto tabular-nums">
           {activity !== null ? (
             <time dateTime={activity}>{chicagoDateClock(activity)}</time>
@@ -149,6 +157,7 @@ export function WaitingColumn({
   unverified,
   loadOlder,
   refreshKey,
+  updatedIds,
   actions,
   onReload,
 }: {
@@ -167,6 +176,8 @@ export function WaitingColumn({
   loadOlder?: LoadOlderHolds;
   /** Changes when the server data refreshes (drops stale older slices). */
   refreshKey?: unknown;
+  /** Holds with activity newer than the snapshot they were ordered at (shown as "Updated", not reordered). */
+  updatedIds?: ReadonlySet<string>;
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
@@ -277,7 +288,7 @@ export function WaitingColumn({
         )
       ) : (
         shown.map((hold) => (
-          <WaitingCard key={hold.id} hold={hold} label={labelFor(hold.id)} actions={actions} onReload={onReload} />
+          <WaitingCard key={hold.id} hold={hold} label={labelFor(hold.id)} actions={actions} onReload={onReload} updated={updatedIds?.has(hold.id)} />
         ))
       )}
       {(hiddenLoaded > 0 || canLoadMore) && (

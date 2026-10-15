@@ -164,13 +164,24 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     runsRef.current = runs;
   }, [runs]);
 
-  // Holds are server-derived from the flag / pending rows; a hold's run card
-  // is swapped for the live copy when the feed has it (streamed steps).
-  const holds = useMemo(() => {
-    const live = new Map(runs.map((r) => [r.id, r]));
-    return props.holds.map((h) =>
-      h.run ? { ...h, run: live.get(h.run.id) ?? h.run } : h,
-    );
+  // Waiting cards keep exactly the snapshot data the server ordered them by (run, time, reason). Realtime never
+  // swaps it: a card whose property has newer activity only gets an "Updated" mark until the list is refreshed.
+  const holds = props.holds;
+  const updatedHoldIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const h of props.holds) {
+      if (!h.property_id) continue;
+      const shown = h.run;
+      const newer = runs.some(
+        (r) =>
+          r.property_id === h.property_id &&
+          (!shown || r.id !== shown.id
+            ? !shown || compareInstants(r.started_at, shown.started_at) > 0
+            : r.steps.length > shown.steps.length),
+      );
+      if (newer) out.add(h.id);
+    }
+    return out;
   }, [runs, props.holds]);
 
   const meta = props.holdsMeta;
@@ -543,6 +554,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             unverified={props.holdsUnverified}
             loadOlder={props.loadOlderHolds}
             refreshKey={props.holds}
+            updatedIds={updatedHoldIds}
             actions={props.actions}
             onReload={() => router.refresh()}
           />
