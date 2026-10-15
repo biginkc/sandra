@@ -1611,6 +1611,42 @@ const ROWS: Row[] = [
       expect(await h.deliveryKeys()).toEqual([]);
     },
   },
+  {
+    id: "63",
+    name: "round 16: held lead + hot text, the hot_seller_text ledger write fails ONCE (real dispatch): no alert and the claim is released as error; a replay classifies again (2 Jev calls), writes the event, alerts exactly once (1 Slack + 1 SMS); a further replay does nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("What's your price?");
+      const unblock = await h.blockLeadEvents(HOT_TEXT_SOURCE_TYPE);
+      try {
+        expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      } finally {
+        await unblock();
+      }
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      const claims = await pg.query("select status, outcome, error_message, lease_expires_at <= now() as released from public.ai_response_claims where inbound_message_id = $1", [a]);
+      expect(claims.rows).toHaveLength(1);
+      expect(claims.rows[0]).toMatchObject({ status: "error", error_message: "hot_text_event_not_recorded", released: true });
+      // Replay: classified again, the event is written, the alert goes out once.
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(2);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      const done = await pg.query("select status from public.ai_response_claims where inbound_message_id = $1", [a]);
+      expect(done.rows.map((r) => r.status)).toEqual(["completed"]);
+      // A further replay: nothing more (completed claim).
+      await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(jevCalls).toBe(2);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
 ];
 
 /** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */

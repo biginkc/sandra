@@ -63,13 +63,13 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
 
   it("sent to the current owner: covered", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m1", "price_or_offer", {})).toBe(true);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m1", "price_or_offer", {})).toBe("recorded");
     expect(covered()).toBe(true);
   });
 
   it("sent to a PREVIOUS owner only (owner changed to B, B has no rows yet) and the hold will alert B (flag after alerts_since, within 7 days): covered", async () => {
     const db = makeDb({ owners: [OWNER_B], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m2", "price_or_offer", {})).toBe(true);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m2", "price_or_offer", {})).toBe("recorded");
     expect(covered()).toBe(true);
     expect(events.rows.at(-1)?.payload.to).toBe(OWNER_B);
   });
@@ -138,13 +138,13 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
 
   it("owner unresolved (two active owners, no pick): nothing recorded, never covered", async () => {
     const db = makeDb({ owners: [OWNER_A, OWNER_B], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m4", "price_or_offer", {})).toBe(false);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m4", "price_or_offer", {})).toBe("skipped");
     expect(events.rows).toHaveLength(0);
   });
 
   it("explicit pick naming a non-owner (owner null): nothing recorded", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m5", "price_or_offer", { HOT_LEAD_ASSIGNEE_USER_ID: "someone-else" })).toBe(false);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m5", "price_or_offer", { HOT_LEAD_ASSIGNEE_USER_ID: "someone-else" })).toBe("skipped");
     expect(events.rows).toHaveLength(0);
   });
 });

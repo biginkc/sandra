@@ -295,7 +295,8 @@ async function isCoveredByHotHold(
  * A hot text on a lead that already needs a person (dispatch's classify-only
  * step). One `hot_seller_text` event per inbound, flagged `held_lead`, to the
  * resolved hot owner; nothing is assigned. A rep's or DNC-locked lead, or an
- * unresolved owner, records nothing. An open hot hold whose alert was sent covers it.
+ * unresolved owner, records nothing ("skipped"); a failed ledger write is
+ * "write_failed" so the caller keeps the inbound retryable.
  */
 export async function recordHotTextOnHeldLead(
   db: SupabaseClient<Database>,
@@ -303,23 +304,24 @@ export async function recordHotTextOnHeldLead(
   inboundMessageId: string | null,
   reason: string,
   env: Record<string, string | undefined> = process.env,
-): Promise<boolean> {
-  if (!inboundMessageId) return false;
+): Promise<"recorded" | "skipped" | "write_failed"> {
+  if (!inboundMessageId) return "skipped";
   const { data: property } = await db
     .from("properties")
     .select("id, org_id, assigned_user_id, is_dnc_locked, deleted_at, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("id", propertyId)
     .maybeSingle();
-  if (!property || property.deleted_at || property.is_dnc_locked) return false;
+  if (!property || property.deleted_at || property.is_dnc_locked) return "skipped";
   const owner = await resolveHotOwner(db, property.org_id, env).catch(() => null);
-  if (!owner) return false;
-  if (property.assigned_user_id && property.assigned_user_id !== owner) return false;
+  if (!owner) return "skipped";
+  if (property.assigned_user_id && property.assigned_user_id !== owner) return "skipped";
   const coveredByHold = await isCoveredByHotHold(db, property, owner);
-  return recordOnce(db, {
+  const ok = await recordOnce(db, {
     propertyId,
     eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
     payload: { to: owner, reason: "hot_seller_text", held_lead: true, escalation: reason, covered_by_hold: coveredByHold },
     sourceType: HOT_TEXT_SOURCE_TYPE,
     sourceId: inboundMessageId,
   });
+  return ok ? "recorded" : "write_failed";
 }

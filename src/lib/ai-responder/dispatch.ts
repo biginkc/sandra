@@ -3010,11 +3010,12 @@ async function classifyOnlyForHotText(
       .eq("inbound_message_id", inboundId)
       .limit(1);
     if (claimError) return;
-    // Handled, or another run holds a live lease: stop. An expired
-    // 'processing' claim (a crashed run) is reclaimed below; the
-    // classification-run check still prevents a second paid Jev call.
     const prior = (claim ?? [])[0] as { status: string; lease_expires_at: string | null } | undefined;
-    if (prior && (prior.status !== "processing" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
+    // Done ('completed') or another run's live lease: stop. A released
+    // 'error' claim (an earlier hot-text write failed) or an expired
+    // 'processing' claim (a crashed run) is retried.
+    if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
+    const retryOfFailedWrite = prior?.status === "error";
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode, escalation_keywords")
@@ -3031,7 +3032,9 @@ async function classifyOnlyForHotText(
       .select("id")
       .eq("source_inbound_message_id", inboundId)
       .limit(1);
-    if (seenError || (seen ?? []).length > 0) return;
+    // (A retry of a failed hot-text write classifies again: one extra call
+    // beats a lost alert.)
+    if (seenError || ((seen ?? []).length > 0 && !retryOfFailedWrite)) return;
     // Claim the inbound atomically (the response-claim table's unique key)
     // before classifying: concurrent runs of the same held inbound cannot both
     // call Jev or both act. No real claim row → do nothing (fail closed).
@@ -3043,11 +3046,27 @@ async function classifyOnlyForHotText(
       conversationId: input.conversationId ?? null,
     });
     if (!claim2.claimed || !claim2.claimId) return;
-    let classifyOnlyOutcome = "skipped";
+    let classifyOnlyOutcome: "escalated" | "skipped" | "write_failed" = "write_failed";
     try {
       classifyOnlyOutcome = await classifyOnlyClaimed(supabase, input, orgId, runCtx, escalationKeywords);
     } finally {
-      await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+      if (classifyOnlyOutcome === "write_failed") {
+        // The hot text's event (or the run itself) failed: never mark the
+        // inbound done. Release the claim (error, lease expired) so a replay
+        // classifies and writes again.
+        reportError(new Error("hot text on held lead not recorded; claim released for retry"), {
+          tags: { surface: "hot_text_on_held_lead" },
+          extra: { propertyId: input.propertyId, inboundMessageId: inboundId },
+        });
+        await completeAiResponseClaim(supabase, {
+          claimId: claim2.claimId,
+          outcome: "hot_text_write_failed",
+          errorMessage: "hot_text_event_not_recorded",
+          releaseLease: true,
+        });
+      } else {
+        await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+      }
     }
   } catch (error) {
     reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
@@ -3061,7 +3080,7 @@ async function classifyOnlyClaimed(
   orgId: string,
   runCtx: MaybeRunContext,
   escalationKeywords: ReadonlyArray<string> | null,
-): Promise<string> {
+): Promise<"escalated" | "skipped" | "write_failed"> {
   {
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
     if (!(await isHotRouting(supabase, orgId, c, input.inboundBody, escalationKeywords))) return "skipped";
@@ -3070,10 +3089,10 @@ async function classifyOnlyClaimed(
     await trace(supabase, {
       kind: "action",
       name: "hot_text_on_held_lead",
-      result: recorded ? "applied" : "skipped",
+      result: recorded === "recorded" ? "applied" : recorded === "write_failed" ? "error" : "skipped",
       detail: { escalation: escalation ?? null },
     }, runCtx);
-    return recorded ? "escalated" : "skipped";
+    return recorded === "recorded" ? "escalated" : recorded;
   }
 }
 

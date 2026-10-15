@@ -53,7 +53,7 @@ beforeEach(() => {
   hotAssign.assign.mockReset();
   hotAssign.recordFailure.mockReset();
   hotAssign.recordHeld.mockReset();
-  hotAssign.recordHeld.mockResolvedValue(true);
+  hotAssign.recordHeld.mockResolvedValue("recorded");
   hotAssign.recordFailure.mockResolvedValue(true);
   hotAssign.assign.mockResolvedValue({ status: "assigned", assigneeUserId: "owner-jarrad" });
 });
@@ -7791,6 +7791,56 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r13-done-cold") as Record<string, unknown>;
             expect(row).toBeTruthy();
             expect(row.outcome).toBe("skipped");
+          });
+
+          // Round 16: a failed hot-text write never marks the inbound done.
+          it("recordHotTextOnHeldLead write_failed: claim released as error (lease expired), not completed", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("write_failed");
+            await heldRun(state, "inbound-r16-wf", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-wf") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.status).toBe("error");
+            expect(row.status).not.toBe("completed");
+            expect(row.error_message).toBe("hot_text_event_not_recorded");
+            expect(row.outcome).toBe("hot_text_write_failed");
+            expect(Date.parse(String(row.lease_expires_at))).toBeLessThanOrEqual(Date.now());
+          });
+          it("recordHotTextOnHeldLead skipped: claim completed with outcome skipped", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("skipped");
+            await heldRun(state, "inbound-r16-skip", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-skip") as Record<string, unknown>;
+            expect(row.status).toBe("completed");
+            expect(row.outcome).toBe("skipped");
+          });
+          it("replay after a released error claim: classified again and recorded, claim completed escalated", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("write_failed");
+            const first = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(first.classifierCalls).toBe(1);
+            expect((state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-replay") as Record<string, unknown>).status).toBe("error");
+            const second = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(second.classifierCalls).toBe(1);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(2);
+            const rows = state.aiClaims.filter((c) => c.inbound_message_id === "inbound-r16-replay") as Array<Record<string, unknown>>;
+            expect(rows).toHaveLength(1);
+            expect(rows[0].status).toBe("completed");
+            expect(rows[0].outcome).toBe("escalated");
+            // A third replay stops: completed.
+            const third = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(third.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(2);
+          });
+          it("an exception thrown inside classify-only: claim released as error, not completed", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockRejectedValueOnce(new Error("boom"));
+            await heldRun(state, "inbound-r16-throw", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-throw") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.status).toBe("error");
+            expect(row.error_message).toBe("hot_text_event_not_recorded");
+            expect(Date.parse(String(row.lease_expires_at))).toBeLessThanOrEqual(Date.now());
           });
 
           // Round 14: claim pre-check reads status + lease.
