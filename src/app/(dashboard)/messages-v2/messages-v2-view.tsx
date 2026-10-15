@@ -23,6 +23,7 @@ import { RulesPanel } from "./rules-panel";
 import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
 import { TapeCard } from "./tape-card";
+import { applyThreads, commitIfCurrent, isCurrent, type Now, type Stamp, type ThreadTable } from "./client-state";
 import { chicagoDayKey, loadRunThreads, previousDayKey, type RunCursor, type RunThread } from "./tape-data";
 import type { TapeDayPage } from "./tape-actions";
 import { WaitingColumn } from "./waiting-column";
@@ -140,7 +141,15 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(next);
   }, []);
   const [labels, setLabels] = useState(() => new Map(props.labels));
-  const [threads, setThreads] = useState(() => new Map(props.threads ?? []));
+  // Thread text and failures for the current snapshot (`snapshotKey` = a counter bumped on every new snapshot).
+  // Every writer commits through commitIfCurrent + applyThreads (client-state.ts): (snapshot, run id, version).
+  const [threadTable, setThreadTable] = useState<ThreadTable>(() => ({
+    snapshotKey: 0,
+    text: new Map(props.threads ?? []),
+    failed: new Set(props.threadFailedRunIds ?? []),
+  }));
+  const threads = threadTable.text;
+  const threadFailed = threadTable.failed;
   // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
   const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
   const earlierRef = useRef<RunWithSteps[]>([]);
@@ -164,8 +173,6 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         : undefined,
     [undoJevAction, findJevUndo],
   );
-  // Runs whose thread text failed, merged across fetches: an id leaves only when ITS own text loads.
-  const [threadFailed, setThreadFailed] = useState<ReadonlySet<string>>(() => new Set(props.threadFailedRunIds ?? []));
   const [nowMs, setNowMs] = useState(props.nowMs);
   const [live, setLive] = useState(false);
   if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
@@ -175,8 +182,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(props.runs);
     setLabels((curr) => new Map([...curr, ...props.labels]));
     // New snapshot: adopt the server's thread text and failures (its texts win over anything fetched before).
-    setThreads((curr) => new Map([...curr, ...(props.threads ?? [])]));
-    setThreadFailed(new Set(props.threadFailedRunIds ?? []));
+    setThreadTable((prev) => ({
+      snapshotKey: (prev.snapshotKey as number) + 1,
+      text: new Map([...prev.text, ...(props.threads ?? [])]),
+      failed: new Set(props.threadFailedRunIds ?? []),
+    }));
   }
   useEffect(() => {
     runsRef.current = runs;
@@ -245,12 +255,16 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [threadRetry, setThreadRetry] = useState(0);
   // Thread results are keyed to (snapshot, run id, version): on a new snapshot, in-flight results from the previous
   // one are dropped and the request bookkeeping restarts from the server's threads.
-  const threadEpoch = useRef(0);
+  const threadEpoch = useRef<unknown>(0);
+  /** Request order for every thread writer (live fetches and earlier-day loads). */
+  const threadSeq = useRef(0);
   const epochFor = useRef<unknown>(lastInitial);
+  useEffect(() => {
+    threadEpoch.current = threadTable.snapshotKey;
+  }, [threadTable.snapshotKey]);
   useEffect(() => {
     if (epochFor.current === lastInitial) return;
     epochFor.current = lastInitial;
-    threadEpoch.current += 1;
     requestedThreads.current = new Set(
       lastInitial.runs
         .filter((r) => (lastInitial.threads ?? []).some(([id]) => id === r.id) && !(lastInitial.threadFailedRunIds ?? []).includes(r.id))
@@ -264,37 +278,28 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     for (const r of missing) requestedThreads.current.add(threadKey(r));
     // Versioned (R-B): every result -- thread text AND the failure / retry bookkeeping -- is committed only for runs
     // still at the version they were fetched for, so a late result for an older version touches nothing.
-    const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
-    const epochAtRequest = threadEpoch.current;
-    const stillCurrent = () => {
-      if (threadEpoch.current !== epochAtRequest) return () => false;
+    const stamp: Stamp = { snapshotKey: threadEpoch.current, seq: ++threadSeq.current, versions: new Map(missing.map((r) => [r.id, threadKey(r)])) };
+    const now = (): Now => {
       const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
-      return (id: string) => current.get(id) === versionAtRequest.get(id);
+      return { snapshotKey: threadEpoch.current, versionOf: (id) => current.get(id) };
     };
-    const retryLater = (failedIds: readonly string[], loaded: readonly string[]) => {
-      const isCurrent = stillCurrent();
-      const failed = failedIds.filter(isCurrent);
-      const ok = loaded.filter(isCurrent);
-      for (const r of missing) if (failed.includes(r.id)) requestedThreads.current.delete(threadKey(r));
-      setThreadFailed((prev) => {
-        const next = new Set(prev);
-        for (const id of ok) next.delete(id);
-        for (const id of failed) next.add(id);
-        return next;
-      });
-      if (failed.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
+    const commit = (fetched: ReadonlyArray<readonly [string, RunThread]>, loadedOk: readonly string[], failedIds: readonly string[]) => {
+      const n = now();
+      // Retry only runs still current: a stale failure neither shows a warning nor schedules a retry.
+      const failedNow = failedIds.filter((id) => isCurrent(stamp, n, id));
+      for (const r of missing) if (failedNow.includes(r.id)) requestedThreads.current.delete(threadKey(r));
+      commitIfCurrent<ThreadTable>(stamp, now, setThreadTable, (t) => applyThreads(t, stamp, now(), fetched, loadedOk, failedIds));
+      if (failedNow.length) window.setTimeout(() => setThreadRetry((k) => k + 1), 10_000);
     };
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
-      .then(({ threads: fetched, failedRunIds }) => {
-        const isCurrent = stillCurrent();
-        const fresh = [...fetched].filter(([id]) => isCurrent(id));
-        setThreads((curr) => new Map([...curr, ...fresh]));
-        retryLater(
-          failedRunIds,
+      .then(({ threads: fetched, failedRunIds }) =>
+        commit(
+          [...fetched],
           missing.filter((r) => !failedRunIds.includes(r.id)).map((r) => r.id),
-        );
-      })
-      .catch(() => retryLater(missing.map((r) => r.id), []));
+          failedRunIds,
+        ),
+      )
+      .catch(() => commit([], [], missing.map((r) => r.id)));
     // threadRetry re-runs this after a failure.
   }, [runs, earlier, threadRetry]);
 
@@ -418,6 +423,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setEarlierBusy(true);
     setEarlierNote(null);
     const dayEpoch = threadEpoch.current;
+    const daySeq = ++threadSeq.current;
     try {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const res = await props.loadTapeDay(next);
@@ -430,25 +436,19 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setDayFlagReasons((curr) => [...curr, ...(res.data.flagReasons ?? [])]);
-        // A refresh happened while this day loaded: its thread results belong to the previous snapshot.
-        if (threadEpoch.current !== dayEpoch) {
-          setCursor(next);
-          return;
-        }
-        // Same versioned commit as the browser fetch: a delayed day response never overwrites a newer reply.
+        // Same commit path as the browser fetch, keyed to (snapshot, run id, version): a day response from before a
+        // refresh, or for a run that has a newer version meanwhile, changes nothing.
         const dayVersion = new Map(got.map((r) => [r.id, threadKey(r)]));
-        const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
-        const freshDay = res.data.threads.filter(([id]) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id));
-        setThreads((curr) => new Map([...curr, ...freshDay]));
+        const dayStamp: Stamp = { snapshotKey: dayEpoch, seq: daySeq, versions: dayVersion };
+        const dayNow = (): Now => {
+          const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
+          return { snapshotKey: threadEpoch.current, versionOf: (id) => current.get(id) ?? dayVersion.get(id) };
+        };
         const failedIds = res.data.failedRunIds ?? [];
-        // R-B: failure bookkeeping only for runs still at the version this day response carried.
-        const dayCurrent = (id: string) => (current.get(id) ?? dayVersion.get(id)) === dayVersion.get(id);
-        setThreadFailed((prev) => {
-          const next = new Set(prev);
-          for (const r of got) if (!failedIds.includes(r.id) && dayCurrent(r.id)) next.delete(r.id);
-          for (const id of failedIds) if (dayCurrent(id)) next.add(id);
-          return next;
-        });
+        const okIds = got.filter((r) => !failedIds.includes(r.id)).map((r) => r.id);
+        commitIfCurrent<ThreadTable>(dayStamp, dayNow, setThreadTable, (t) => applyThreads(t, dayStamp, dayNow(), res.data.threads, okIds, failedIds));
+        const nowDay = dayNow();
+        const freshDay = res.data.threads.filter(([id]) => isCurrent(dayStamp, nowDay, id));
         for (const r of got) if (!failedIds.includes(r.id) && freshDay.some(([id]) => id === r.id)) requestedThreads.current.add(threadKey(r));
         // A full page means this day was cut off: continue the same day from the oldest run returned.
         // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.

@@ -9,6 +9,21 @@ import { Button } from "@/components/ui/button";
 import { pageText } from "./page-text";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
+import {
+  actionsEnabled,
+  applyResults,
+  cardFlags,
+  commitIfCurrent,
+  isCurrent,
+  loadedCard,
+  type CardRecord,
+  type CardTable,
+  type CheckResult,
+  type LiveView,
+  type Now,
+  type Pinned,
+  type Stamp,
+} from "./client-state";
 import { SEEN_CHECK_FAILED } from "./snapshot-codec";
 import { holdActivityAt } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
@@ -260,16 +275,60 @@ export function WaitingColumn({
   const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
 
   const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
-  const present = entries.filter((e) => !older.missing.has(e.id));
+
+  // ---- Per-card records (client-state.ts): one record per card, every writer commits through commitIfCurrent.
+  const refreshKeyRef = useRef<unknown>(refreshKey);
+  const nowState = (): Now => ({ snapshotKey: refreshKeyRef.current });
+  /** One counter for every check that can set a card's status (slice loads and live re-checks), in request order. */
+  const cardCheckSeq = useRef(0);
+  const entryById = new Map(entries.map((e) => [e.id, e] as const));
+  const pinsOf = (id: string, h?: OpenHold<RunWithSteps>): Pinned | undefined => {
+    const e = snapshot ? entryById.get(id) : undefined;
+    if (e)
+      return {
+        pinnedDraft: e.d ?? null,
+        pinnedDraftSendable: e.d ? e.ds === true : false,
+        pinnedReason: reasonOf(e.r),
+        pinnedFa: e.fa,
+        pinnedRun: e.run,
+        pinnedAt: e.at,
+        seenVersion: e.th ?? null,
+      };
+    if (!h) return undefined;
+    // No snapshot entry (tests without a snapshot, or a pinned card outside it): pinned to the card as it loaded.
+    return {
+      pinnedDraft: h.draft?.id ?? null,
+      pinnedDraftSendable: h.draft?.sendable === true,
+      pinnedReason: h.flag_reason ?? null,
+      pinnedFa: h.seen?.flagAt ?? null,
+      pinnedRun: h.run?.id ?? null,
+      pinnedAt: holdActivityAt(h),
+      seenVersion: h.seen?.through ?? null,
+    };
+  };
+  const initialTable = (): CardTable => {
+    const cards = new Map<string, CardRecord>();
+    const firstOk = !meta?.contextErrors.includes(SEEN_CHECK_FAILED);
+    for (const h of holds) cards.set(h.id, loadedCard(refreshKey, pinsOf(h.id, h)!, firstOk));
+    if (focusHold) cards.set(focusHold.id, loadedCard(refreshKey, pinsOf(focusHold.id, focusHold)!, !focusHoldErrors?.includes(SEEN_CHECK_FAILED)));
+    return { snapshotKey: refreshKey, cards };
+  };
+  const [storedTable, setTable] = useState<CardTable>(initialTable);
+  const table = storedTable.snapshotKey === refreshKey ? storedTable : initialTable();
+  /** Functional update against the CURRENT snapshot's table (a stored table for an older snapshot is replaced). */
+  const updateTable = (fn: (t: CardTable) => CardTable) =>
+    setTable((prev) => fn(prev.snapshotKey === refreshKeyRef.current ? prev : initialTable()));
+  const missingIds = new Set([...older.missing, ...[...table.cards].filter(([, c]) => c.status === "missing").map(([id]) => id)]);
+  const present = entries.filter((e) => !missingIds.has(e.id));
   const loadedEntries = present.filter((e) => live.has(e.id));
   const shown = loadedEntries.slice(0, visible);
   const hiddenLoaded = loadedEntries.length - shown.length;
-  const unrequested = entries.slice(older.nextPos).filter((e) => !live.has(e.id) && !older.missing.has(e.id));
+  const unrequested = entries.slice(older.nextPos).filter((e) => !live.has(e.id) && !missingIds.has(e.id));
   const notLoadedYet = unrequested.length;
   const focusInShown = !!focus?.propertyId && shown.some((e) => live.get(e.id)?.property_id === focus.propertyId);
   // Beyond the first page: the server loaded it by id; pinned on top until it appears in place.
   const focusPinned =
-    !focusInShown && focusHold && !older.missing.has(focusHold.id) ? focusHold : null;
+    !focusInShown && focusHold && !missingIds.has(focusHold.id) ? focusHold : null;
   const serverTotal = present.length;
   const hiddenUnverified = older.unverified ?? unverified ?? 0;
   const canLoadMore = !!loadOlder && notLoadedYet > 0;
@@ -286,15 +345,13 @@ export function WaitingColumn({
       const requestedFrom = older.nextPos;
       const requestKey = refreshKey;
       const sliceSeq = ++cardCheckSeq.current;
+      const stamp: Stamp = { snapshotKey: requestKey, seq: sliceSeq };
       const res = await loadOlder({ ids });
-      // Tagged with the snapshot it was asked for: a response landing after a new snapshot loaded is discarded.
-      if (refreshKeyRef.current !== requestKey) return;
       if (res.ok) {
         // Functional and monotonic: merge into the LATEST state (a re-check may have removed cards meanwhile);
         // `missing` only grows within a snapshot, so a removed card is never brought back by a later slice.
-        setOlder((prev) => {
-          const cur = prev.forKey === refreshKey ? prev : fresh();
-          if (cur.forKey !== refreshKey) return cur;
+        commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) => {
+          const cur = prev.forKey === requestKey ? prev : fresh();
           const missing = new Set([...cur.missing, ...res.data.missing]);
           return {
             ...cur,
@@ -306,21 +363,28 @@ export function WaitingColumn({
             error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
           };
         });
-        recordChecks(
-          requestKey,
-          res.data.holds.map((h) => h.id),
-          res.data.contextErrors.includes(SEEN_CHECK_FAILED) ? "failed" : "ok",
-          sliceSeq,
+        // Each loaded card's own check: its load ran the fresh version check (ok) or not (paused).
+        const outcome: CheckResult = res.data.contextErrors.includes(SEEN_CHECK_FAILED) ? "failed" : "ok";
+        const byId = new Map(res.data.holds.map((h) => [h.id, h] as const));
+        commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) =>
+          applyResults(
+            t,
+            stamp,
+            [...res.data.holds.map((h) => [h.id, outcome] as const), ...res.data.missing.map((id) => [id, "gone"] as const)],
+            (id) => pinsOf(id, byId.get(id)),
+          ),
         );
-        setVisible((v) => v + PAGE);
+        if (isCurrent(stamp, nowState())) setVisible((v) => v + PAGE);
       } else {
         // Position kept: the same ids are asked for again on retry.
         const message = res.error.message;
-        setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: message }));
+        commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) => ({ ...(prev.forKey === requestKey ? prev : fresh()), error: message }));
       }
     } catch {
-      if (refreshKeyRef.current !== refreshKey) return;
-      setOlder((prev) => ({ ...(prev.forKey === refreshKey ? prev : fresh()), error: "Older texts could not be loaded." }));
+      commitIfCurrent<OlderState>({ snapshotKey: refreshKey }, nowState, setOlder, (prev) => ({
+        ...(prev.forKey === refreshKey ? prev : fresh()),
+        error: "Older texts could not be loaded.",
+      }));
     } finally {
       setBusy(false);
     }
@@ -329,37 +393,6 @@ export function WaitingColumn({
   // Live re-check of rendered cards: properties (flag, DNC lock) is not in the realtime publication, so every
   // 60 seconds and on tab focus the rendered ids are checked against the CURRENT list. No longer eligible ->
   // missing (removed); any snapshot field differs -> Updated (actions locked).
-  const [stale, setStale] = useState<{ forKey: unknown; ids: Set<string> }>({ forKey: refreshKey, ids: new Set() });
-  const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
-  // R-A: actions are enabled PER CARD, only from that card's own last successful check in the current snapshot.
-  // "ok" = its load ran the fresh version check, or a later live re-check of THAT card succeeded; "failed" = its
-  // load's version check or its last re-check failed. A card with no status (never checked) is paused.
-  // Each card's status carries the sequence number of the check that produced it (load = 0). A result is applied
-  // only if its sequence is newer than the card's current one, so a late slice can never undo a newer failed check.
-  type CardCheck = { s: "ok" | "failed"; q: number };
-  const initialChecks = (): Map<string, CardCheck> => {
-    const m = new Map<string, CardCheck>();
-    const firstFailed = !!meta?.contextErrors.includes(SEEN_CHECK_FAILED);
-    for (const h of holds) m.set(h.id, { s: firstFailed ? "failed" : "ok", q: 0 });
-    if (focusHold) m.set(focusHold.id, { s: focusHoldErrors?.includes(SEEN_CHECK_FAILED) ? "failed" : "ok", q: 0 });
-    return m;
-  };
-  const [checkStore, setCheckStore] = useState<{ forKey: unknown; status: Map<string, CardCheck> }>(() => ({ forKey: refreshKey, status: initialChecks() }));
-  const checkStatus = checkStore.forKey === refreshKey ? checkStore.status : initialChecks();
-  const pausedCard = (id: string) => checkStatus.get(id)?.s !== "ok";
-  /** One counter for every check that can set a card's status (slice loads and live re-checks), in request order. */
-  const cardCheckSeq = useRef(0);
-  /** Records outcomes for exactly these ids, only for the current snapshot and only if `q` is newer per card (R-B). */
-  const recordChecks = (key: unknown, ids: readonly string[], outcome: "ok" | "failed", q: number) =>
-    setCheckStore((prev) => {
-      if (refreshKeyRef.current !== key) return prev;
-      const base = prev.forKey === key ? prev.status : initialChecks();
-      const status = new Map(base);
-      for (const id of ids) if (q > (status.get(id)?.q ?? -1)) status.set(id, { s: outcome, q });
-      return { forKey: key, status };
-    });
-  const checkSeq = useRef(0);
-  const refreshKeyRef = useRef<unknown>(refreshKey);
   const shownIdsRef = useRef<string[]>([]);
   const entriesRef = useRef(entries);
   const olderRef = useRef(older);
@@ -376,52 +409,49 @@ export function WaitingColumn({
     if (!revalidate || !snapshot) return;
     let alive = true;
     const check = async () => {
-      const seq = ++checkSeq.current;
       const key = refreshKeyRef.current;
-      const q = ++cardCheckSeq.current;
+      const stamp: Stamp = { snapshotKey: key, seq: ++cardCheckSeq.current };
       const ids = shownIdsRef.current;
       if (!ids.length) return;
       const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
-      const gone: string[] = [];
-      const changedIds: string[] = [];
+      const results: Array<readonly [string, CheckResult]> = [];
+      const fail = () => {
+        if (alive) commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, ids.map((id) => [id, "failed"] as const)));
+      };
       for (let i = 0; i < ids.length; i += 100) {
         let res;
         try {
           res = await revalidate({ ids: ids.slice(i, i + 100) });
         } catch {
-          if (alive && seq === checkSeq.current) recordChecks(key, ids, "failed", q);
+          fail();
           return;
         }
-        // Stale responses are discarded entirely: only the newest check may touch any state.
-        if (!alive || seq !== checkSeq.current) return;
+        if (!alive) return;
         if (!res.ok) {
-          recordChecks(key, ids, "failed", q);
+          fail();
           return;
         }
         for (const st of res.data) {
           if (!st.eligible) {
-            gone.push(st.id);
+            results.push([st.id, "gone"]);
             continue;
           }
           const e = byId.get(st.id);
-          if (!e) continue; // a pinned card outside the snapshot: eligibility only
-          else {
-            // Compared against the SNAPSHOT's draft (id, property, sendable), never the already-updated card.
-            const snapDraft = e.d ?? null;
-            const draftMoved = st.draftId !== snapDraft || (snapDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== (e.ds === true)));
-            if (draftMoved || st.through !== (e.th ?? null) || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
+          if (!e) {
+            results.push([st.id, "ok"]); // a pinned card outside the snapshot: eligibility only
+            continue;
           }
+          // Compared against the SNAPSHOT's draft (id, property, sendable), never the already-updated card.
+          const snapDraft = e.d ?? null;
+          const draftMoved = st.draftId !== snapDraft || (snapDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== (e.ds === true)));
+          const changed =
+            draftMoved || st.through !== (e.th ?? null) || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at;
+          results.push([st.id, changed ? "updated" : "ok"]);
         }
       }
-      if (!alive || seq !== checkSeq.current || refreshKeyRef.current !== key) return; // only the latest check of this snapshot commits
-      recordChecks(key, ids, "ok", q);
-      if (gone.length)
-        setOlder((prev) => {
-          const cur = prev.forKey === refreshKey ? prev : fresh();
-          return { ...cur, missing: new Set([...cur.missing, ...gone]) };
-        });
-      // Updated is monotonic within a snapshot too.
-      setStale((prev) => ({ forKey: refreshKey, ids: new Set([...(prev.forKey === refreshKey ? prev.ids : []), ...changedIds]) }));
+      if (!alive) return;
+      // Per card: facts (gone / updated) always apply; ok only when newer than that card's last check (R-A, R-B).
+      commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, results));
     };
     const id = window.setInterval(check, 60_000);
     const onFocus = () => void check();
@@ -436,32 +466,37 @@ export function WaitingColumn({
   }, [revalidate, snapshot, refreshKey]);
 
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
-  const asSnapshot = (e: (typeof entries)[number], h: OpenHold<RunWithSteps> = live.get(e.id)!): { hold: OpenHold<RunWithSteps>; changed: boolean } => {
-    if (!snapshot) return { hold: h, changed: false };
+  /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
+  const asSnapshot = (e: (typeof entries)[number], h: OpenHold<RunWithSteps> = live.get(e.id)!): OpenHold<RunWithSteps> => {
+    if (!snapshot) return h;
     const reason = reasonOf(e.r);
-    // Updated = ANY snapshot field differs from live: reason, flag time, activity time or the shown run.
-    const changed =
-      (h.draft?.id ?? null) !== (e.d ?? null) ||
-      (h.draft ? h.draft.sendable === true : false) !== (e.d ? e.ds === true : false) ||
-      (h.flag_reason ?? null) !== reason ||
-      // A flag re-stamped during enrichment arrives in the fresh `seen`: compared at render, not only on the next poll.
-      // Unconditional: a null snapshot flag time gates only the time comparison, never the reason.
-      (h.seen !== undefined && (h.seen.flagReason ?? null) !== reason) ||
-      (h.seen?.through ?? null) !== (e.th ?? null) ||
-      (h.seen?.flagAt ?? null) !== e.fa ||
-      holdActivityAt(h) !== e.at ||
-      (h.run?.id ?? null) !== e.run;
     return {
-      hold: {
-        ...h,
-        ...(reason ? { flag_reason: reason } : { flag_reason: null }),
-        // Always the SNAPSHOT flag version, never the live one (the server compares it and refuses a changed hold).
-        // The snapshot's versions, all three: the reason even when the flag time is unknown, and the pending-row
-        // version the card was built from (never a newer one fetched during enrichment).
-        seen: { through: e.th ?? null, flagReason: reason, flagAt: e.fa },
-      },
-      changed,
+      ...h,
+      ...(reason ? { flag_reason: reason } : { flag_reason: null }),
+      // Always the SNAPSHOT versions (reason, flag time, pending-row version), never the live ones: the server
+      // compares them and refuses a changed hold.
+      seen: { through: e.th ?? null, flagReason: reason, flagAt: e.fa },
     };
+  };
+  /** The live values the card shows now, for the one actions rule. */
+  const liveViewOf = (h: OpenHold<RunWithSteps>): LiveView => ({
+    draftId: h.draft?.id ?? null,
+    draftSendable: h.draft?.sendable === true,
+    flagReason: h.flag_reason ?? null,
+    seenFlagReason: h.seen ? (h.seen.flagReason ?? null) : undefined,
+    seenFlagAt: h.seen?.flagAt ?? null,
+    seenThrough: h.seen?.through ?? null,
+    activityAt: holdActivityAt(h),
+    runId: h.run?.id ?? null,
+  });
+  /** updated / paused for a card, from its record and live view only (actionsEnabled is the single rule). */
+  const cardState = (id: string, h: OpenHold<RunWithSteps>) => {
+    const rec = table.cards.get(id);
+    const extra = !!updatedIds?.has(id);
+    const view = liveViewOf(h);
+    const enabled = actionsEnabled(rec, view, extra);
+    const flags = cardFlags(rec, view, extra);
+    return { updated: flags.updated, paused: !enabled && !flags.updated };
   };
 
   const failures = meta?.failed ?? [];
@@ -490,7 +525,7 @@ export function WaitingColumn({
           {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
-      {[...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])].some((id) => checkStatus.get(id)?.s === "failed") && (
+      {[...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])].some((id) => table.cards.get(id)?.status === "paused") && (
         <p role="alert" data-testid="holds-recheck-failed" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
           Couldn&apos;t re-check this list. Actions are paused until it can be checked.
         </p>
@@ -500,7 +535,8 @@ export function WaitingColumn({
           <p className="text-xs font-medium text-sky-700">Opened from My Leads</p>
           {(() => {
             const e = entries.find((x) => x.id === focusPinned.id);
-            const { hold, changed } = e ? asSnapshot(e, focusPinned) : { hold: focusPinned, changed: false };
+            const hold = e ? asSnapshot(e, focusPinned) : focusPinned;
+            const st = cardState(focusPinned.id, focusPinned);
             return (
               <WaitingCard
                 hold={hold}
@@ -508,9 +544,9 @@ export function WaitingColumn({
                 label={labelFor(focusPinned.id)}
                 actions={actions}
                 onReload={onReload}
-                updated={changed || updatedIds?.has(focusPinned.id) || staleIds.has(focusPinned.id)}
+                updated={st.updated}
                 pinned={!!snapshot && !!e}
-                paused={pausedCard(focusPinned.id)}
+                paused={st.paused}
                 selected
               />
             );
@@ -528,9 +564,9 @@ export function WaitingColumn({
           </p>
         )
       )}
-      {older.missing.size > 0 && (
+      {missingIds.size > 0 && (
         <p data-testid="holds-missing" className="rounded-xl border bg-secondary p-3 text-xs text-muted-foreground">
-          {older.missing.size.toLocaleString("en-US")} {older.missing.size === 1 ? "was" : "were"} handled or {older.missing.size === 1 ? "is" : "are"} no longer available since this list loaded.
+          {missingIds.size.toLocaleString("en-US")} {missingIds.size === 1 ? "was" : "were"} handled or {missingIds.size === 1 ? "is" : "are"} no longer available since this list loaded.
         </p>
       )}
       {failures.length > 0 && (
@@ -559,7 +595,8 @@ export function WaitingColumn({
         )
       ) : (
         shown.map((e) => {
-          const { hold, changed } = asSnapshot(e);
+          const hold = asSnapshot(e);
+          const st = cardState(e.id, live.get(e.id)!);
           return (
             <WaitingCard
               key={e.id}
@@ -568,9 +605,9 @@ export function WaitingColumn({
               label={labelFor(e.id)}
               actions={actions}
               onReload={onReload}
-              updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
+              updated={st.updated}
               pinned={!!snapshot}
-              paused={pausedCard(e.id)}
+              paused={st.paused}
               selected={!!focus?.propertyId && live.get(e.id)?.property_id === focus.propertyId}
             />
           );
