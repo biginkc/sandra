@@ -147,6 +147,16 @@ describe("messages-v2 hold server actions", () => {
     expect(m.takeOverHold).toHaveBeenCalledWith(expect.anything(), { propertyId: "p1", seen: SEEN_HOLD });
   });
 
+  it("wire the in-lease draft check to draftStillOn with the server-resolved org and the admin client", async () => {
+    await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" });
+    const deps = m.sendHeldDraft.mock.calls[0]?.[0] as { draftOwner: (draftId: string, propertyId: string) => Promise<string> };
+    expect(typeof deps.draftOwner).toBe("function");
+    m.draftStillOn.mockClear();
+    m.draftStillOn.mockResolvedValue("stale");
+    expect(await deps.draftOwner("d2", "p2")).toBe("stale");
+    expect(m.draftStillOn).toHaveBeenCalledWith({ admin: true }, "org-1", "d2", "p2");
+  });
+
   it("list assignees only for an authorized caller", async () => {
     m.listPropertyOrgUsers.mockResolvedValue({ ok: true, data: [{ id: "u9" }] });
     expect(await listHoldAssigneesAction({ propertyId: "p1" })).toEqual({ ok: true, data: [{ id: "u9" }] });

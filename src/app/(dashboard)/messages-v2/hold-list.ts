@@ -49,6 +49,16 @@ const chunks = <T,>(items: readonly T[], size = CHUNK): T[][] => {
 };
 const uniq = <T,>(items: Iterable<T>): T[] => [...new Set(items)];
 
+/**
+ * Optional narrowing of a build to some held properties (the final check, Show older, live re-check, the tape).
+ * Every pending draft is still resolved and lock-checked (a draft's property is only known after resolution), so
+ * `unverified` stays the whole-org count; only drafts resolving to a scoped property are built into holds.
+ */
+export type HoldScope = { propertyIds: readonly string[] };
+
+/** Columns a list build reads from pipeline_run_steps: enough for activity, never `detail`. */
+export const ACTIVITY_STEP_COLUMNS = "id, run_id, seq, created_at";
+
 export type HoldSources = {
   properties: HoldPropertyRow[];
   decisions: Array<HoldDecisionRow & { id: string }>;
@@ -57,21 +67,34 @@ export type HoldSources = {
 };
 
 /** Step 1. Null when any source fails. */
-export async function loadHoldSources(supabase: LooseSupabase, orgId: string): Promise<HoldSources | null> {
+export async function loadHoldSources(supabase: LooseSupabase, orgId: string, scope?: HoldScope): Promise<HoldSources | null> {
+  // Unscoped: one keyset read. Scoped: one keyset read per chunk of property ids, merged; any failure fails all.
+  const read = async <T,>(make: (ids: string[] | null) => unknown): Promise<{ rows: T[]; error: unknown }> => {
+    if (!scope) return fetchAllKeyset<T>(() => make(null));
+    const parts = await Promise.all(chunks(uniq(scope.propertyIds)).map((ids) => fetchAllKeyset<T>(() => make(ids))));
+    const bad = parts.find((r) => r.error);
+    return bad ? { rows: [], error: bad.error } : { rows: parts.flatMap((r) => r.rows), error: null };
+  };
+  type Q = { in(col: string, v: string[]): unknown };
+  const narrow = (q: unknown, col: string, ids: string[] | null) => (ids ? (q as Q).in(col, ids) : q);
   const [properties, decisions, reviews, drafts] = await Promise.all([
-    fetchAllKeyset<HoldPropertyRow>(() =>
-      supabase
-        .from("properties")
-        .select(PROPERTY_COLUMNS)
-        .eq("org_id", orgId)
-        .eq("needs_human_attention", true)
-        .eq("is_dnc_locked", false),
+    read<HoldPropertyRow>((ids) =>
+      narrow(
+        supabase
+          .from("properties")
+          .select(PROPERTY_COLUMNS)
+          .eq("org_id", orgId)
+          .eq("needs_human_attention", true)
+          .eq("is_dnc_locked", false),
+        "id",
+        ids,
+      ),
     ),
-    fetchAllKeyset<HoldDecisionRow & { id: string }>(() =>
-      supabase.from("jev_lead_decisions").select(`id, ${DECISION_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"),
+    read<HoldDecisionRow & { id: string }>((ids) =>
+      narrow(supabase.from("jev_lead_decisions").select(`id, ${DECISION_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"), "property_id", ids),
     ),
-    fetchAllKeyset<HoldReviewRow & { id: string }>(() =>
-      supabase.from("ai_disposition_reviews").select(`id, ${REVIEW_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"),
+    read<HoldReviewRow & { id: string }>((ids) =>
+      narrow(supabase.from("ai_disposition_reviews").select(`id, ${REVIEW_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"), "property_id", ids),
     ),
     fetchAllKeyset<HoldDraftRow>(() =>
       supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending"),
@@ -164,7 +187,11 @@ export async function resolveDraftProperties(
 const newerRun = <R extends PipelineRun>(a: R | null, b: R): R =>
   !a || compareInstants(b.started_at, a.started_at) > 0 || (compareInstants(b.started_at, a.started_at) === 0 && b.id > a.id) ? b : a;
 
-/** Step 4. Attaches each hold's newest related run (with ALL its steps). Null when any lookup fails. */
+/**
+ * Step 4. Attaches each hold's newest related run. Its `steps` carry only ACTIVITY_STEP_COLUMNS (id, run_id, seq,
+ * created_at): enough to order, never rendered. enrichPage swaps in full steps for the runs a page shows. Null when
+ * any lookup fails.
+ */
 export async function loadHoldActivity(
   supabase: LooseSupabase,
   orgId: string,
@@ -240,7 +267,9 @@ export async function loadHoldActivity(
   const steps = new Map<string, PipelineRunStep[]>();
   const stepResults = await Promise.all(
     chunks(stepRunIds).map((ids) =>
-      fetchAllKeyset<PipelineRunStep>(() => supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids)),
+      fetchAllKeyset<PipelineRunStep>(() =>
+        supabase.from("pipeline_run_steps").select(ACTIVITY_STEP_COLUMNS).eq("org_id", orgId).in("run_id", ids),
+      ),
     ),
   );
   if (stepResults.some((r) => r.error)) return null;
@@ -305,14 +334,17 @@ export type EligibleHolds =
   | { ok: true; holds: OpenHold<RunWithSteps>[]; unverified: number }
   | { ok: false; error: string };
 
-/** Steps 1-5: the COMPLETE eligible list, sorted newest activity first. */
-/** Steps 1-5: the COMPLETE eligible list from CURRENT sources, sorted newest activity first. */
-export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string): Promise<EligibleHolds> {
+/**
+ * Steps 1-5: the COMPLETE eligible list from CURRENT sources, sorted newest activity first. With `scope`, the same
+ * build for only those properties (see HoldScope).
+ */
+export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, scope?: HoldScope): Promise<EligibleHolds> {
   const fail = { ok: false as const, error: HOLDS_LOAD_ERROR };
-  const sources = await loadHoldSources(supabase, orgId);
+  const sources = await loadHoldSources(supabase, orgId, scope);
   if (!sources) return fail;
   const candidates = await resolveDraftProperties(supabase, orgId, sources.drafts);
   if (!candidates) return fail;
+  const inScope = scope ? new Set(scope.propertyIds) : null;
 
   const every = uniq([
     ...sources.properties.map((p) => p.id),
@@ -332,6 +364,7 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
       unverified += 1; // no property, or more than one: cannot be verified
       continue;
     }
+    if (inScope && !inScope.has(c[0])) continue; // another hold's draft: counted above, not built here
     drafts.push({ ...d, property_id: c[0] });
   }
   const decisions = sources.decisions.filter((d) => !locked.has(d.property_id));
@@ -459,12 +492,34 @@ export function effectiveFlagReasons(holds: readonly OpenHold<RunWithSteps>[]): 
 
 /** Step 6 (returned page only): draft text, dead letters, alert status, fresh "seen". Failures are notes. */
 
+/** Full steps (with detail), in seq order, for the runs a page shows. Null when any lookup fails. */
+export async function loadShownSteps(
+  supabase: LooseSupabase,
+  orgId: string,
+  runIds: readonly string[],
+): Promise<Map<string, PipelineRunStep[]> | null> {
+  const results = await Promise.all(
+    chunks(uniq(runIds)).map((ids) =>
+      fetchAllKeyset<PipelineRunStep>(() => supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids)),
+    ),
+  );
+  if (results.some((r) => r.error)) return null;
+  const steps = new Map<string, PipelineRunStep[]>();
+  for (const st of results.flatMap((r) => r.rows)) steps.set(st.run_id, [...(steps.get(st.run_id) ?? []), st]);
+  for (const list of steps.values()) list.sort((a, b) => a.seq - b.seq);
+  return steps;
+}
+
+/** Null when the shown runs' full steps cannot be loaded (fail closed: a card never renders activity-only steps). */
 export async function enrichPage(
   supabase: LooseSupabase,
   orgId: string,
-  holds: OpenHold<RunWithSteps>[],
-): Promise<{ holds: OpenHold<RunWithSteps>[]; contextErrors: string[]; deadLetterUnavailable: boolean }> {
+  listed: OpenHold<RunWithSteps>[],
+): Promise<{ holds: OpenHold<RunWithSteps>[]; contextErrors: string[]; deadLetterUnavailable: boolean } | null> {
   const contextErrors: string[] = [];
+  const full = await loadShownSteps(supabase, orgId, listed.flatMap((h) => (h.run ? [h.run.id] : [])));
+  if (!full) return null;
+  const holds = listed.map((h) => (h.run ? { ...h, run: { ...h.run, steps: full.get(h.run.id) ?? [] } } : h));
   const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
   const bodies = new Map<string, { body: string; edited_body: string | null; edited_at: string | null }>();
   for (const ids of chunks(draftIds)) {
@@ -534,7 +589,8 @@ export async function recheckOpen(
   const version = new Map<string, HoldSeen>();
   const changed = new Set<string>();
   if (!holds.length) return { open, badDraft, version, changed, unsendable };
-  const list = await loadEligibleHolds(supabase, orgId);
+  // Recomputed from CURRENT data for these holds only (not the whole list): cost follows the page, not the backlog.
+  const list = await loadEligibleHolds(supabase, orgId, { propertyIds: holds.map((h) => h.id) });
   if (!list.ok) return null;
   const current = new Map(list.holds.map((h) => [h.id, h]));
   const pinsOf = (h: OpenHold<RunWithSteps>) => {
@@ -585,7 +641,7 @@ export type HoldLiveState = {
 
 /** Current state of some ids, from the CURRENT eligible list (locked / resolved / unverifiable -> eligible false). */
 export async function liveStateOf(supabase: LooseSupabase, orgId: string, ids: readonly string[]): Promise<HoldLiveState[] | null> {
-  const list = await loadEligibleHolds(supabase, orgId);
+  const list = ids.length ? await loadEligibleHolds(supabase, orgId, { propertyIds: ids }) : ({ ok: true, holds: [], unverified: 0 } as const);
   if (!list.ok) return null;
   const byId = new Map(list.holds.map((h) => [h.id, h]));
   return ids.map((id) => {

@@ -13,6 +13,8 @@ import type { RunLabel, RunWithSteps } from "./types";
 
 export type TapeDayPage = {
   runs: RunWithSteps[];
+  /** This day has runs older than the last one returned (continue the same day from it). */
+  hasMore: boolean;
   labels: Array<[string, RunLabel]>;
   threads: Array<[string, RunThread]>;
   /** Runs whose thread text failed to load: the client retries them. */
@@ -49,17 +51,20 @@ export async function loadTapeDayAction(input: { day: string; before?: RunCursor
   if (!window || (input?.before && !before)) return err({ code: "VALIDATION", message: "Missing day." });
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const { runs, error } = await loadRunsWindow(supabase, orgId, window.from, window.to, before);
+  const { runs, hasMore, error } = await loadRunsWindow(supabase, orgId, window.from, window.to, before);
   if (error) return err({ code: "TAPE_UNAVAILABLE", message: error });
+  const dayPropertyIds = [...new Set(runs.flatMap((r) => (r.property_id ? [r.property_id] : [])))];
   const [labels, thread, list] = await Promise.all([
     loadRunLabels(supabase, runs),
-    loadRunThreads(supabase, runs),
-    loadEligibleHolds(supabase, orgId),
+    loadRunThreads(supabase, orgId, runs),
+    // Only the holds on this day's runs' properties: the tape's fill-in reasons need nothing else (a run shown by
+    // a hold on ANOTHER property gets no claimed reason here; the browser's snapshot map still covers page holds).
+    dayPropertyIds.length ? loadEligibleHolds(supabase, orgId, { propertyIds: dayPropertyIds }) : ({ ok: true, holds: [], unverified: 0 } as const),
   ]);
   const dayRunIds = new Set(runs.map((r) => r.id));
   const flagReasons = list.ok ? effectiveFlagReasons(list.holds).filter(([runId]) => dayRunIds.has(runId)) : [];
   return {
     ok: true,
-    data: { runs, labels: [...labels.entries()], threads: [...thread.threads.entries()], failedRunIds: thread.failedRunIds, flagReasons },
+    data: { runs, hasMore, labels: [...labels.entries()], threads: [...thread.threads.entries()], failedRunIds: thread.failedRunIds, flagReasons },
   };
 }

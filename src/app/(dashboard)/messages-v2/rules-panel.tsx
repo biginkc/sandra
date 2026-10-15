@@ -31,7 +31,7 @@ const GROUPS: RuleGroup[] = [
       {
         outcome: "new_lead",
         title: "Open to selling or wants an offer",
-        detail: "Marks the seller as a lead for a person to follow up. Sandra never replies to this one.",
+        detail: "Marks the seller as a lead for a person to follow up.",
       },
     ],
   },
@@ -39,8 +39,8 @@ const GROUPS: RuleGroup[] = [
     heading: "Sandra handles alone",
     rows: [
       { outcome: "nurture", title: "Maybe later", detail: "Sends the approved reply. The drip switch below decides whether a drip starts." },
-      { outcome: "not_interested", title: "Not interested", detail: "Sends the approved reply and closes the property." },
-      { outcome: "wrong_number", title: "Wrong person", detail: "Sends the approved reply and closes the property." },
+      { outcome: "not_interested", title: "Not interested", detail: "Sends the approved reply." },
+      { outcome: "wrong_number", title: "Wrong person", detail: "Sends the approved reply." },
     ],
   },
   {
@@ -179,7 +179,7 @@ export function RulesPanel({
                 </Row>
               )}
               {replyGeneration && (
-                <Row title="Sandra writes reply drafts" detail="Off means every seller text that needs an answer waits for a person.">
+                <Row title="Sandra writes reply drafts" detail="Off means Sandra writes no reply drafts.">
                   <ReplyGenerationToggle
                     configId={replyGeneration.configId}
                     replyGeneration={replyGeneration.replyGeneration}

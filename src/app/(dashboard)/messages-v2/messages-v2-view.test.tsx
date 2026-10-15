@@ -360,7 +360,7 @@ describe("MessagesV2View", () => {
     const held = run("r-null", { status: "held", reason: "model:price_or_offer", started_at: new Date(NOW - 60_000).toISOString() });
     const loadTapeDay = vi.fn(async () => ({
       ok: true as const,
-      data: { runs: [], labels: [], threads: [], failedRunIds: [], flagReasons: [["r-null", "model:opt_out"]] as Array<[string, string]> },
+      data: { runs: [], labels: [], threads: [], failedRunIds: [], hasMore: false, flagReasons: [["r-null", "model:opt_out"]] as Array<[string, string]> },
     }));
     await mount({ ...props([held]), flagReasons: [["r-null", null]], loadTapeDay });
     const tagBefore = within(screen.getByTestId("tape-card")).getByTestId("tape-tag").textContent;
@@ -637,6 +637,16 @@ describe("MessagesV2View", () => {
     expect(document.body.textContent ?? "").not.toMatch(/\bJev\b/);
   });
 
+  it("Undo is offered on today's texts only, never on an earlier day", async () => {
+    const applied = run("u2", {
+      status: "closed",
+      steps: [{ id: "s2", run_id: "u2", org_id: "o", seq: 1, kind: "action", name: "wrong_number", result: "applied", detail: {}, created_at: "2026-10-08T10:00:01Z" }],
+    });
+    await mount({ ...props([applied]), nowMs: NOW + 3 * 86_400_000, undoJevAction: vi.fn(), findJevUndo: vi.fn(async () => "undo-1") });
+    expect(await screen.findByTestId("tape-did")).toBeInTheDocument();
+    expect(screen.queryByTestId("undo-jev-action")).toBeNull();
+  });
+
   it("success, then a refresh whose version check failed: the new cards start paused", async () => {
     const a = { ...openHold("aaaa"), ...at(1) };
     const ok = { total: 1, shown: 1, truncated: false, totalState: "exact" as const, failed: [], contextErrors: [] as string[], deadLetterUnavailable: false };
@@ -879,7 +889,7 @@ describe("MessagesV2View", () => {
       await gate;
       return {
         ok: true as const,
-        data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey Old", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], flagReasons: [["y1", "model:unclear"]] as Array<[string, string]> },
+        data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey Old", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], hasMore: false, flagReasons: [["y1", "model:unclear"]] as Array<[string, string]> },
       };
     });
     const p1 = { ...props([run("today")]), loadTapeDay };
@@ -1099,7 +1109,7 @@ describe("MessagesV2View", () => {
       await gate;
       return {
         ok: true as const,
-        data: { runs: [older], labels: [] as Array<[string, { name: string; address: null }]>, threads: [["v", { lastOutbound: null, reply: "STALE reply" }]] as Array<[string, { lastOutbound: string | null; reply: string | null }]>, failedRunIds: [], flagReasons: [] },
+        data: { runs: [older], labels: [] as Array<[string, { name: string; address: null }]>, threads: [["v", { lastOutbound: null, reply: "STALE reply" }]] as Array<[string, { lastOutbound: string | null; reply: string | null }]>, failedRunIds: [], hasMore: false, flagReasons: [] },
       };
     });
     await mount({ ...props([newer]), threads: [["v", { lastOutbound: null, reply: "Thanks, take care." }]], loadTapeDay });
@@ -1210,12 +1220,12 @@ describe("MessagesV2View", () => {
     await mount({ ...props([], [openHold("p1")]), actions });
     const link = screen.getByRole("link", { name: "Open thread" });
     expect(link).toHaveAttribute("href", "/leads/p1");
-    expect(screen.getByRole("button", { name: "Take over (Sandra stops)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Take over" })).toBeInTheDocument();
   });
 
   it("continues the same Chicago day from the oldest run returned when a day comes back full", async () => {
     const runs = Array.from({ length: 200 }, (_, i) => run(`y${i}`, { started_at: new Date(NOW - 3600_000 * 2 - i * 60_000).toISOString(), status: "closed" }));
-    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [], failedRunIds: [], flagReasons: [] } }));
+    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [], failedRunIds: [], hasMore: true, flagReasons: [] } }));
     await mount({ ...props([run("today", { started_at: new Date(NOW).toISOString() })]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
     await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
@@ -1229,7 +1239,7 @@ describe("MessagesV2View", () => {
   it("skips empty days on its own so one click shows the next day with texts", async () => {
     const loadTapeDay = vi.fn(async (_input: { day: string }) => ({
       ok: true as const,
-      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [], failedRunIds: [], flagReasons: [] },
+      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [], failedRunIds: [], hasMore: false, flagReasons: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
@@ -1390,7 +1400,7 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("2");
     expect(screen.getAllByRole("link", { name: "Open thread" })).toHaveLength(2);
     expect(actions.takeOver).not.toHaveBeenCalled();
-    expect(screen.getAllByRole("button", { name: "Take over (Sandra stops)" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Take over" })).toHaveLength(2);
   });
 
   it("stays quiet while coverage is healthy and highlights a gap", async () => {
@@ -1475,7 +1485,7 @@ describe("MessagesV2View", () => {
     const yesterdayRun = run("y1", { started_at: new Date(NOW - 20 * 3600_000).toISOString(), status: "closed" });
     const loadTapeDay = vi.fn(async () => ({
       ok: true as const,
-      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], flagReasons: [] },
+      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], hasMore: false, flagReasons: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     expect(screen.getAllByTestId("tape-card")).toHaveLength(1);

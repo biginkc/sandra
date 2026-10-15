@@ -22,7 +22,8 @@ export type FakeOptions = {
 
 export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions = {}) {
   const requests = new Map<string, number>();
-  const log: Array<{ table: string; ops: Op[] }> = [];
+  const log: Array<{ table: string; ops: Op[]; select: string | null }> = [];
+  const rpcLog: string[] = [];
   const from = (table: string) => {
     const ops: Op[] = [];
     const orders: Array<{ col: string; asc: boolean }> = [];
@@ -30,15 +31,25 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
     let range: [number, number] | null = null;
     let single = false;
     let patch: Row | null = null;
+    let select: string | null = null;
     const q: Record<string, unknown> = {};
-    q.select = () => q;
+    q.select = (cols = "*") => ((select = cols), q);
     q.eq = (col: string, v: unknown) => (ops.push({ k: "eq", col, v }), q);
     q.gt = (col: string, v: unknown) => (ops.push({ k: "gt", col, v }), q);
     q.gte = (col: string, v: unknown) => (ops.push({ k: "gte", col, v }), q);
     q.lt = (col: string, v: unknown) => (ops.push({ k: "lt", col, v }), q);
     q.in = (col: string, v: unknown[]) => (ops.push({ k: "in", col, v }), q);
-    q.is = (col: string, v: null) => (void v, ops.push({ k: "isnull", col, not: false }), q);
-    q.not = (col: string, _op: string, v: null) => (void v, ops.push({ k: "isnull", col, not: true }), q);
+    // Only the null forms are implemented; anything else throws so a test can never pass on an ignored filter.
+    q.is = (col: string, v: unknown) => {
+      if (v !== null) throw new Error(`fake is(${col}, ${String(v)}) unsupported: only null`);
+      ops.push({ k: "isnull", col, not: false });
+      return q;
+    };
+    q.not = (col: string, op: string, v: unknown) => {
+      if (op !== "is" || v !== null) throw new Error(`fake not(${col}, ${op}, ${String(v)}) unsupported: only "is", null`);
+      ops.push({ k: "isnull", col, not: true });
+      return q;
+    };
     q.order = (col: string, o: { ascending: boolean } = { ascending: true }) => (orders.push({ col, asc: o.ascending }), q);
     q.limit = (n: number) => ((limit = n), q);
     q.range = (a: number, b: number) => ((range = [a, b]), q);
@@ -54,7 +65,7 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
     q.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
       const n = (requests.get(table) ?? 0) + 1;
       requests.set(table, n);
-      log.push({ table, ops: [...ops] });
+      log.push({ table, ops: [...ops], select });
       if (opts.fail?.(table, n, ops)) return Promise.resolve({ data: null, error: { message: `fail ${table}` } }).then(resolve, reject);
       const cmp = (a: unknown, b: unknown) => (String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0);
       let rows = (tables[table] ?? []).filter((r) =>
@@ -103,9 +114,12 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
   const client = {
     from,
     rpc: async (fn: string, args: Record<string, unknown>) => {
+      rpcLog.push(fn);
       const h = opts.rpc?.[fn];
-      return h ? h(args) : { data: [], error: null };
+      // An RPC the test did not register is a bug in the test, never an empty success.
+      if (!h) throw new Error(`fake rpc ${fn} not registered`);
+      return h(args);
     },
   } as unknown as LooseSupabase;
-  return { client, requests, log };
+  return { client, requests, log, rpcLog };
 }

@@ -49,7 +49,7 @@ const latestRpc = (tables: Record<string, Row[]>) => ({
 });
 
 function db(tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) {
-  return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), ...(opts.rpc ?? {}) } });
+  return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), hold_alert_latest_status: () => ({ data: [], error: null }), ...(opts.rpc ?? {}) } });
 }
 
 const eligible = async (tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) => {
@@ -637,9 +637,9 @@ describe("fresh version check", () => {
     const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };
     const list = await eligible(tables);
     const res = await enrichPage(db(tables, { fail: (table) => table === "jev_lead_decisions" }).client, "org", list.holds);
-    expect(res.contextErrors).toContain("version check");
+    expect(res!.contextErrors).toContain("version check");
     const ok = await enrichPage(db(tables).client, "org", list.holds);
-    expect(ok.contextErrors).not.toContain("version check");
+    expect(ok!.contextErrors).not.toContain("version check");
   });
 
   it("the final check returns each hold's current flag and pending version", async () => {
@@ -737,5 +737,116 @@ describe("Send / Edit guard: the draft must still be on the property the clicker
   it("liveStateOf reports the hold's current draft and its property", async () => {
     const states = (await liveStateOf(db({ properties: [flagged(3, t(1)), plainProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] }).client, "org", [u(3)]))!;
     expect(states[0]).toMatchObject({ id: u(3), eligible: true, draftId: null, draftProperty: null }); // the draft now belongs to 4, not 3
+  });
+});
+
+describe("scale: one light build per request, full steps only for shown runs, checks scoped to shown ids", () => {
+  const step = (run: string, seq: number, at: string): Row => ({
+    id: `${run}-s${String(seq).padStart(3, "0")}`, run_id: run, org_id: "org", seq, kind: "hold", name: "held", result: "held", detail: { big: "x".repeat(50) }, created_at: at,
+  });
+  const world = (n: number) => {
+    const tables: Record<string, Row[]> = { properties: [], pipeline_runs: [], pipeline_run_steps: [] };
+    for (let i = 1; i <= n; i++) {
+      tables.properties.push(flagged(i, t(i)));
+      tables.pipeline_runs.push(runRow(i, { property_id: u(i), started_at: t(i) }));
+      tables.pipeline_run_steps.push(step(u(i, 5), 1, t(i)), step(u(i, 5), 2, t(i + 1)));
+    }
+    return tables;
+  };
+  type Log = ReturnType<typeof fakePostgrest>["log"];
+  const holdPropertyReads = (log: Log) =>
+    log.filter((l) => l.table === "properties" && l.ops.some((o) => o.k === "eq" && "col" in o && o.col === "needs_human_attention"));
+  // One keyset read = its first page (no cursor); later pages carry a `gt` on id.
+  const unscoped = (log: Log) => holdPropertyReads(log).filter((l) => !l.ops.some((o) => o.k === "in" || o.k === "gt"));
+  const inIds = (l: Log[number], col: string) => l.ops.flatMap((o) => (o.k === "in" && o.col === col ? (o.v as string[]) : []));
+
+  it("a list build reads steps with activity columns only (never detail) and in a bounded number of requests", async () => {
+    const tables = world(60);
+    const { client, log, requests } = db(tables);
+    const list = await loadEligibleHolds(client, "org");
+    expect(list.ok && list.holds).toHaveLength(60);
+    const stepReads = log.filter((l) => l.table === "pipeline_run_steps");
+    expect(stepReads.length).toBeGreaterThan(0);
+    for (const l of stepReads) expect(l.select).toBe("id, run_id, seq, created_at");
+    for (const l of log.filter((x) => x.table === "pipeline_runs")) expect(l.select).not.toContain("detail");
+    expect(unscoped(log)).toHaveLength(1);
+    expect(requests.get("properties")).toBeLessThanOrEqual(4); // 1 source read (+ its empty last page) + draft org check
+  });
+
+  it("the page builds the whole list ONCE; enrichment loads full steps only for first-page runs; the final check is scoped to them", async () => {
+    const tables = world(60);
+    const { client, log } = db(tables);
+    const page = await loadMessagesV2Page(client, "org");
+    expect(decodeSnapshot(page.snapshot).entries).toHaveLength(60);
+    expect(page.holds).toHaveLength(40);
+    expect(unscoped(log)).toHaveLength(1);
+    const shown = new Set(page.holds.map((h) => h.id));
+    const scopedReads = holdPropertyReads(log).filter((l) => l.ops.some((o) => o.k === "in"));
+    expect(scopedReads.length).toBeGreaterThan(0);
+    for (const l of scopedReads) for (const id of inIds(l, "id")) expect(shown.has(id)).toBe(true);
+    const shownRuns = new Set(page.holds.map((h) => h.run!.id));
+    // Full steps are read for every shown run (the feed, loadMessagesV2Data, also reads its own recent runs' steps;
+    // the list build itself reads activity columns only, asserted above and in Show older below).
+    const fullIds = new Set(log.filter((l) => l.table === "pipeline_run_steps" && l.select === "*").flatMap((l) => inIds(l, "run_id")));
+    expect([...shownRuns].every((id) => fullIds.has(id))).toBe(true);
+    // Cards render full steps (with detail), in seq order.
+    expect(page.holds[0].run!.steps.map((s) => s.seq)).toEqual([1, 2]);
+    expect(page.holds[0].run!.steps[0].detail).toEqual({ big: "x".repeat(50) });
+  });
+
+  it("Show older and the live re-check never build the whole list: every hold read is scoped to the requested ids", async () => {
+    const tables = world(60);
+    const ids = [u(3), u(7), u(11)];
+    const older = db(tables);
+    const slice = (await loadHoldsByIds(older.client, "org", ids))!;
+    expect(slice.holds.map((h) => h.id).sort()).toEqual([...ids].sort());
+    expect(unscoped(older.log)).toHaveLength(0);
+    for (const l of holdPropertyReads(older.log)) for (const id of inIds(l, "id")) expect(ids).toContain(id);
+    const full = older.log.filter((l) => l.table === "pipeline_run_steps" && l.select === "*");
+    expect(new Set(full.flatMap((l) => inIds(l, "run_id")))).toEqual(new Set(ids.map((id) => tables.pipeline_runs.find((r) => r.property_id === id)!.id)));
+    expect(slice.holds.every((h) => h.run!.steps.every((s) => s.detail !== undefined))).toBe(true);
+
+    const live = db(tables);
+    const states = (await liveStateOf(live.client, "org", ids))!;
+    expect(states.every((s) => s.eligible)).toBe(true);
+    expect(unscoped(live.log)).toHaveLength(0);
+    expect(live.log.filter((l) => l.table === "pipeline_run_steps").every((l) => l.select === "id, run_id, seq, created_at")).toBe(true);
+  });
+
+  it("a scoped build keeps the whole-org unverified count and still lock-checks every candidate of an in-scope draft", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(1)), flagged(2, t(2)), lockedProp(9), plainProp(3)],
+      // ambiguous (two properties) -> unverified; on a locked property -> hidden, not counted; to hold 2 -> out of scope
+      ai_reply_drafts: [
+        draft(1, { property_id: u(3), run_id: u(1, 5) }),
+        draft(2, { property_id: u(1), run_id: u(2, 5) }),
+        draft(3, { property_id: u(2) }),
+      ],
+      pipeline_runs: [runRow(1, { property_id: u(1) }), runRow(2, { property_id: u(9) })],
+    };
+    const full = await eligible(tables);
+    const scoped = await loadEligibleHolds(db(tables).client, "org", { propertyIds: [u(1)] });
+    expect(scoped.ok && scoped.unverified).toBe(full.unverified);
+    expect(full.unverified).toBe(1);
+    expect(scoped.ok && scoped.holds.map((h) => h.id)).toEqual([u(1)]);
+    expect(scoped.ok && scoped.holds[0].draft).toBeUndefined(); // draft 2 also resolves to locked 9: never shown
+  });
+
+  it("a full-step lookup failure during enrichment fails the page closed (no cards with activity-only steps)", async () => {
+    const tables = world(3);
+    const list = await eligible(tables);
+    const failing = db(tables, { fail: (tb) => tb === "pipeline_run_steps" });
+    expect(await enrichPage(failing.client, "org", list.holds)).toBeNull();
+  });
+});
+
+describe("the test fake refuses forms it does not implement", () => {
+  it(".is with a non-null value, .not other than (is, null), and an unregistered RPC all throw", async () => {
+    const { client } = fakePostgrest({ t: [] });
+    const q = client.from("t") as unknown as { is: (c: string, v: unknown) => unknown; not: (c: string, op: string, v: unknown) => unknown };
+    expect(() => q.is("a", true)).toThrow(/unsupported/);
+    expect(() => q.not("a", "eq", 1)).toThrow(/unsupported/);
+    expect(() => q.not("a", "is", "x")).toThrow(/unsupported/);
+    await expect(client.rpc("nope", {})).rejects.toThrow(/not registered/);
   });
 });

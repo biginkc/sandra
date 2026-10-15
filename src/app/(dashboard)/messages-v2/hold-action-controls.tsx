@@ -20,7 +20,7 @@ type Mode = "idle" | "editing" | "dismissing" | "assigning";
 /** Matches the server: only drafts tied directly to a property can be sent from a hold card. */
 const NOT_SENDABLE_HERE = "Can't send from here yet, open the thread.";
 
-const ACTIONS = ["Send", "Edit", "Open thread", "Take over (Sandra stops)", "Assign", "Dismiss"] as const;
+const ACTIONS = ["Send", "Edit", "Open thread", "Take over", "Assign", "Dismiss"] as const;
 
 /** Disabled stand-ins, used when the page supplies no handlers. */
 export function DisabledHoldActions({ title }: { title: string }) {
@@ -434,7 +434,7 @@ export function HoldActionControls({
           </Button>
         )}
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={takeOver}>
-          Take over (Sandra stops)
+          Take over
         </Button>
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={openAssign}>
           Assign
@@ -462,7 +462,7 @@ export function HoldActionControls({
             rows={4}
           />
           <div className="flex gap-2">
-            <Button type="button" size="xs" disabled={editText.trim() === "" || sendLocked} onClick={sendEdit}>
+            <Button type="button" size="xs" disabled={editText.trim() === "" || sendLocked || draft?.sendable === false} onClick={sendEdit}>
               Send edit
             </Button>
             <Button type="button" size="xs" variant="ghost" onClick={() => setMode("idle")}>

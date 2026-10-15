@@ -29,8 +29,6 @@ const clampInt = (v: unknown, fallback: number, max: number): number => {
 export async function loadBacklogHoldsAction(input: {
   offset: number;
   limit?: number;
-  /** Which bucket to page: the New holds beyond the first page, or the pre-cutover Backlog (default). */
-  bucket?: "new" | "backlog";
 }): Promise<Result<BacklogPage>> {
   let orgId: string | null = null;
   try {
@@ -56,7 +54,7 @@ export async function loadBacklogHoldsAction(input: {
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const page = await loadBacklogHolds(supabase, orgId, offset, limit, undefined, {
     includeLuna: false, // Luna suggestions are no longer rendered on the page
-    bucket: input?.bucket === "new" ? "new" : "backlog",
+    bucket: "backlog",
   });
   if (!page || page.failed) {
     return err({ code: "BACKLOG_UNAVAILABLE", message: "Backlog holds could not be loaded." });
