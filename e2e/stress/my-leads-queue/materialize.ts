@@ -114,7 +114,7 @@ async function insertLead(db: Client, ctx: OrgCtx, member: string, now: number, 
   if (lead.enrollment) {
     const e = lead.enrollment;
     const seq = randomUUID(), enrId = randomUUID();
-    await raw(db, "insert into public.sequences(id,org_id,name) values ($1,$2,$3)", [seq, org, `Warm check-in ${seq.slice(0, 4)}`]);
+    await raw(db, "insert into public.sequences(id,org_id,name) values ($1,$2,$3)", [seq, org, `Warm check-in ${seq}`]);
     const steps: string[] = [];
     for (let i = 0; i < e.steps; i += 1) {
       const sid = randomUUID();

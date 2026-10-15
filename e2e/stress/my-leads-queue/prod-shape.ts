@@ -54,6 +54,16 @@ function history(rng: Rng, now: number, key: string, count: number): Msg[] {
   return out;
 }
 
+/** Two messages of one lead at the same instant are ordered by random uuid in the database; the oracle cannot (and should not) predict that, so never generate one. */
+export function separateTies(lead: Lead): Lead {
+  const seen = new Set<number>();
+  for (const m of [...lead.messages].sort((a, b) => a.at - b.at || a.ref.localeCompare(b.ref))) {
+    while (seen.has(m.at)) m.at += 7_000;
+    seen.add(m.at);
+  }
+  return lead;
+}
+
 export type ShapedLead = Lead & { shape: string };
 
 export function prodShapedWorld(counts: ProdCounts, rng: Rng, now: number, opts: { messages?: [number, number] } = {}): World {
@@ -90,5 +100,5 @@ export function prodShapedWorld(counts: ProdCounts, rng: Rng, now: number, opts:
   // leads in states the counts do not name (the 2026-10-14 shape sums to 177 of 181) are plain worked leads
   while (leads.length < counts.leads) mk("other", {});
   while (leads.length > counts.leads) leads.pop();
-  return { now, leads };
+  return { now, leads: leads.map(separateTies) };
 }

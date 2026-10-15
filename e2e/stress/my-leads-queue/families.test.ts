@@ -35,4 +35,10 @@ describe("scenario families", () => {
     const w = buildFamilyWorld(FAMILIES.find((f) => f.id === "callback_boundary")!, 5, 0);
     expect(new Set(w.leads.map((l) => place(l, w.now).row))).toEqual(new Set(["4", "11"]));
   });
+  it("never puts two messages of a lead at the same instant (database order of ties is random)", () => {
+    for (const f of FAMILIES) for (let r = 0; r < 20; r += 1) {
+      const w = buildFamilyWorld(f, 9, r);
+      for (const l of w.leads) expect(new Set(l.messages.map((m) => m.at)).size, `${f.id} ${l.key}`).toBe(l.messages.length);
+    }
+  });
 });

@@ -35,4 +35,10 @@ describe("prod-shaped generator", () => {
     const rows = new Set(w.leads.map((l) => place(l, w.now).row));
     expect(rows.size).toBeGreaterThan(3);
   });
+  it("never puts two messages of a lead at the same instant", () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const w = prodShapedWorld(scaleCounts(PROD_SHAPE_2026_10_14, 400), createRng(seed), 1_760_000_000_000);
+      for (const l of w.leads) expect(new Set(l.messages.map((m) => m.at)).size).toBe(l.messages.length);
+    }
+  });
 });
