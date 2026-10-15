@@ -46,6 +46,7 @@ export async function myLeadsViewer() {
   if(memberships.length!==1) throw new MyLeadsReadError('FORBIDDEN','A single active organization is required.');
   return {userId:user.id,orgId:memberships[0].org_id,isOwner:memberships[0].role==='owner',acquisitions:isAcquisitionsCaller(memberships[0]),client};
 }
+export type MyLeadsViewer = Awaited<ReturnType<typeof myLeadsViewer>>;
 export async function readRpc<T>(client: unknown,name: string,args: Record<string,Json>): Promise<T> {
   const {data,error}=await (client as ReadClient).rpc(name,args);
   if(error) {
@@ -92,8 +93,8 @@ export async function getMyLeadsQueueRow(input:{memberId:string;propertyId:strin
   if(result.status==='unavailable'&&typeof result.reason==='string'&&ROW_REASONS.includes(result.reason)) return {status:'unavailable',reason:result.reason as MyLeadRowReason};
   throw new MyLeadsReadError('READ_FAILED','My Leads returned an unexpected response.');
 }
-export async function getAcquisitionKpis(input: {memberId:string;period:AcquisitionPeriod|'custom';startDate?:string;endDate?:string}): Promise<AcquisitionKpis> {
-  const viewer=await myLeadsViewer();
+export async function getAcquisitionKpis(input: {memberId:string;period:AcquisitionPeriod|'custom';startDate?:string;endDate?:string;viewer?:MyLeadsViewer}): Promise<AcquisitionKpis> {
+  const viewer=input.viewer??await myLeadsViewer();
   if(!viewer.isOwner&&input.memberId!==viewer.userId) throw new MyLeadsReadError('FORBIDDEN','You can view only your own KPIs.');
   let bounds;
   try {

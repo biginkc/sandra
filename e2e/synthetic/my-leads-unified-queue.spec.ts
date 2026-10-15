@@ -128,6 +128,58 @@ test("page numbers move to page 2 and the URL carries it", async ({ page }) => {
   await expect.poll(() => rowIds(page).then((ids) => ids.length)).toBe(10)
 })
 
+test("Back and Forward restore tab, stage, page and search from the address bar", async ({ page }) => {
+  await open(page)
+  const step = async (label: string) => ({ label, url: new URL(page.url()), ids: await rowIds(page) })
+  const params = (u: URL) => Object.fromEntries(u.searchParams)
+  // Entry 1: default view. Entry 2: All leads. Entry 3: + stage. Entry 4: + page 2. Search then rewrites entry 4 (no new entry).
+  const start = await step("default")
+  await page.getByTestId("work-tab-all").click()
+  await expect(page.getByTestId("work-tab-all")).toHaveAttribute("aria-selected", "true")
+  await expect.poll(() => page.url()).toContain("tab=all")
+  const allTab = await step("all")
+  await page.getByTestId("work-stage-select").selectOption("contacted")
+  await expect.poll(() => page.url()).toContain("stage=contacted")
+  await expect.poll(async () => (await rowIds(page)).join()).not.toBe(allTab.ids.join())
+  const staged = await step("stage")
+  await page.getByRole("button", { name: "Page 2" }).click()
+  await expect.poll(() => page.url()).toContain("page=2")
+  await expect(page.getByRole("button", { name: "Page 2" })).toHaveAttribute("aria-current", "page")
+  const paged = await step("page2")
+  expect(paged.ids[0]).not.toBe(staged.ids[0])
+  expect(params(paged.url)).toEqual({ tab: "all", stage: "contacted", page: "2" })
+  await page.getByTestId("work-search-open").click()
+  await page.getByTestId("work-search-input").fill("Dana")
+  await expect.poll(() => page.url()).toContain("q=Dana")
+  await expect.poll(() => rowIds(page).then((ids) => ids.length)).toBeGreaterThan(0)
+  expect(params(new URL(page.url()))).toEqual({ tab: "all", stage: "contacted", q: "Dana" })
+
+  // Back from the searched entry: it was a replace, so Back skips to the stage entry (page 1, no search).
+  await page.goBack()
+  await expect.poll(() => page.url()).toContain("stage=contacted")
+  await expect.poll(() => page.url()).not.toContain("q=")
+  await expect.poll(async () => (await rowIds(page)).join()).toBe(staged.ids.join())
+  expect(params(new URL(page.url()))).toEqual(params(staged.url))
+  await expect(page.getByTestId("work-tab-all")).toHaveAttribute("aria-selected", "true")
+  await expect(page.getByTestId("work-stage-select")).toHaveValue("contacted")
+
+  await page.goBack()
+  await expect.poll(() => page.url()).not.toContain("stage=")
+  await expect.poll(async () => (await rowIds(page)).join()).toBe(allTab.ids.join())
+  await expect(page.getByTestId("work-stage-select")).toHaveValue("")
+
+  await page.goBack()
+  await expect.poll(() => page.url()).not.toContain("tab=")
+  await expect(page.getByTestId("work-tab-needs_attention")).toHaveAttribute("aria-selected", "true")
+  await expect.poll(async () => (await rowIds(page)).join()).toBe(start.ids.join())
+
+  // Forward replays the pushed entries.
+  await page.goForward()
+  await page.goForward()
+  await expect.poll(() => page.url()).toContain("stage=contacted")
+  await expect.poll(async () => (await rowIds(page)).join()).toBe(staged.ids.join())
+})
+
 test("a deep link pins its row at the top of the tab it belongs to, expanded", async ({ page }) => {
   await open(page, "?lead=dr3")
   await expect(page.getByTestId("work-tab-waiting")).toHaveAttribute("aria-selected", "true")

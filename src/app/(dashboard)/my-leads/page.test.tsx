@@ -810,19 +810,40 @@ describe("MyLeadsPage unified work queue", () => {
     expect(mocks.reportError).toHaveBeenCalled();
   });
 
-  it("flag on: comps the top ten of Needs attention after the response, whatever filter is showing", async () => {
+  it("flag on, first paint is Needs attention page 1: comps the first ten ids from it without another read", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    const ids = Array.from({ length: 12 }, (_, i) => `id-${i}`);
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage({ ids }));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
+    expect(unifiedMocks.afterTasks).toHaveLength(1);
+    await unifiedMocks.afterTasks[0]();
+    expect(unifiedMocks.enqueueStripComps).toHaveBeenCalledWith("org-1", ids.slice(0, 10));
+  });
+
+  it("flag on, another filter showing: reads the top ten during render, never inside after()", async () => {
     unifiedMocks.enabled.mockResolvedValue(true);
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ tab: "all", q: "zzz" }) }));
-    expect(unifiedMocks.afterTasks).toHaveLength(1);
-    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
-    await unifiedMocks.afterTasks[0]();
     expect(unifiedMocks.getNeedsAttentionTopTen).toHaveBeenCalledWith("user-1");
+    unifiedMocks.getNeedsAttentionTopTen.mockClear();
+    expect(unifiedMocks.afterTasks).toHaveLength(1);
+    await unifiedMocks.afterTasks[0]();
+    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
     expect(unifiedMocks.enqueueStripComps).toHaveBeenCalledWith("org-1", [LEAD]);
   });
 
-  it("flag on: a comps failure is reported, never thrown", async () => {
+  it("flag on: a failed top-ten read is reported and the page still renders without scheduling comps", async () => {
     unifiedMocks.enabled.mockResolvedValue(true);
     unifiedMocks.getNeedsAttentionTopTen.mockRejectedValue(new Error("boom"));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ tab: "waiting" }) }));
+    expect(unifiedMocks.afterTasks).toHaveLength(0);
+    expect(mocks.reportError).toHaveBeenCalled();
+  });
+
+  it("flag on: a comps enqueue failure is reported, never thrown", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage({ ids: [LEAD] }));
+    unifiedMocks.enqueueStripComps.mockRejectedValue(new Error("boom"));
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
     await expect(unifiedMocks.afterTasks[0]()).resolves.toBeUndefined();
     expect(mocks.reportError).toHaveBeenCalled();

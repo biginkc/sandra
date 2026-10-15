@@ -3,7 +3,9 @@ vi.mock("@/components/sequences/after-attempt-drip-picker", () => ({
     <button type="button" data-testid="drip-picker" onClick={() => onDripChanged?.()}>Picker {propertyId}</button>
   ),
 }));
-vi.mock("../rep-sms-composer", () => ({ RepSmsComposer: () => <span data-testid="composer" /> }));
+vi.mock("../rep-sms-composer", () => ({
+  RepSmsComposer: ({ defaultOpen }: { defaultOpen?: boolean }) => <span data-testid="composer" data-default-open={defaultOpen ? "true" : "false"} />,
+}));
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -330,6 +332,18 @@ describe("conversation box and all texts", () => {
     expect(document.querySelector("[data-lead-id='a1']")).toHaveAttribute("data-expanded", "true");
   });
 
+  it("Show all texts leaves the composer closed; Reply opens it (defaultOpen)", async () => {
+    setup();
+    await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
+    await userEvent.click(await screen.findByTestId("conversation-show-all-a1"));
+    expect(await screen.findByTestId("composer")).toHaveAttribute("data-default-open", "false");
+    await userEvent.click(screen.getByTestId("all-texts-hide-a1"));
+    await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
+    await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
+    await userEvent.click(screen.getByTestId("work-row-primary-a1"));
+    expect(await screen.findByTestId("composer")).toHaveAttribute("data-default-open", "true");
+  });
+
   it("pauses background refreshes while a thread is open", async () => {
     const { h } = setup();
     await userEvent.click(screen.getByTestId("work-row-primary-a1"));
@@ -338,6 +352,16 @@ describe("conversation box and all texts", () => {
     fireEvent(window, new Event("focus"));
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     expect(h.loadWorkPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("owner view texts", () => {
+  it("shows the history but never the composer when viewing another rep", async () => {
+    setup({ canAct: false });
+    await userEvent.click(screen.getByTestId("work-row-toggle-a1"));
+    await userEvent.click(await screen.findByTestId("conversation-show-all-a1"));
+    expect(await screen.findByTestId("all-texts-a1")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
   });
 });
 

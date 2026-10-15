@@ -133,6 +133,33 @@ function focusForSelectedLead(
   };
 }
 
+function reportCompsFailure(error: unknown) {
+  reportError(error instanceof Error ? error : new Error("unified comps enqueue failed"), {
+    errorClass: "database",
+    tags: { surface: "database", operation: "my_leads_unified_comps" },
+  });
+}
+
+/** First ten Needs attention ids: reuse the first paint when it already is that page, else one small read. */
+async function topTenForComps(userId: string, unified: UnifiedInitial): Promise<string[]> {
+  const { query, page } = unified;
+  if (
+    page &&
+    query.tab === "needs_attention" &&
+    query.chip === "all" &&
+    query.stage === null &&
+    query.search === "" &&
+    query.page === 1
+  )
+    return page.ids.slice(0, 10);
+  try {
+    return await getNeedsAttentionTopTen(userId);
+  } catch (error) {
+    reportCompsFailure(error);
+    return [];
+  }
+}
+
 export default async function MyLeadsPage({
   searchParams,
 }: {
@@ -239,16 +266,9 @@ export default async function MyLeadsPage({
       retryHref,
     }));
     // Comp the top ten of Needs attention after the response is sent, whatever page or filter is showing.
-    after(async () => {
-      try {
-        await enqueueStripComps(viewer.orgId, await getNeedsAttentionTopTen(viewer.userId));
-      } catch (error) {
-        reportError(error instanceof Error ? error : new Error("unified comps enqueue failed"), {
-          errorClass: "database",
-          tags: { surface: "database", operation: "my_leads_unified_comps" },
-        });
-      }
-    });
+    // The ids are read during render: after() cannot call cookies(), which every queue read needs.
+    const compIds = await topTenForComps(viewer.userId, unified);
+    if (compIds.length > 0) after(() => enqueueStripComps(viewer.orgId, compIds).catch(reportCompsFailure));
   } else if (selectedLeadLink.status === "requested" && roster.settings.enabled) {
     try {
       const lookup = await getMyLeadsQueueRow({

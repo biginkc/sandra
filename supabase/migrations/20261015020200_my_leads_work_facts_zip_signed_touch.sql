@@ -1,7 +1,10 @@
 -- My Leads unified queue, Phase B1 (design-owner answers 1-3): the facts object also carries zip,
 -- contractSignedAt, lastTouch {kind, at} and, on headline rows 4, 9 and 11 (callback_booked), taskKind + snoozed.
--- Purely additive: only my_leads_work_classified is replaced; placement, ordering, thresholds, strictness,
--- next_change_at and every existing key are untouched. fn_my_leads_work_page / _facts read facts as-is.
+-- Facts are purely additive: only my_leads_work_classified is replaced, and every existing key is untouched.
+-- ONE PLACEMENT CHANGE, per design 2.1 v9: a ledger or obligation in state 'unknown' now gets the same 15-minute
+-- in-flight grace as reserved/sending (it only counts as Broken once updated_at is older than 15 minutes), so
+-- a lead whose only problem is a fresh 'unknown' send stays out of Broken (and the badge) for its first 15 minutes.
+-- Nothing else in placement, ordering, thresholds, strictness or next_change_at moves. fn_my_leads_work_page / _facts read facts as-is.
 --   zip              properties.zip (null when blank)
 --   contractSignedAt acquisition_queue_states.signed_at (set by fn_record_acquisition_contract; null when none)
 --   lastTouch        kind of the source with the greatest timestamp counted by my_leads_touch_facts; at = last_touch_at

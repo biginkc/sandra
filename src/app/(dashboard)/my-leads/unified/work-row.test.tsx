@@ -38,6 +38,27 @@ describe("collapsed row", () => {
     expect(screen.getByTestId("work-row-open-lead-lead-1")).toBeInTheDocument();
     expect(screen.queryByTestId("work-row-call-lead-1")).not.toBeInTheDocument();
   });
+  it("collapsed action group has exactly the design's button count", () => {
+    const count = () => {
+      const group = within(screen.getByRole("group", { name: /Actions for/ }));
+      return group.queryAllByRole("button").length + group.queryAllByRole("link").length;
+    };
+    // Primary + Open lead.
+    const due = renderRow(dueFacts());
+    expect(count()).toBe(2);
+    due.unmount();
+    // Documented exception: a Call today row also shows Undo (it is the only way back from a pin), so three.
+    const pinned = renderRow(workFacts("call_today", "2", {}, { stage: "contacted" }));
+    expect(count()).toBe(3);
+    expect(screen.getByTestId("work-row-undo-lead-1")).toBeInTheDocument();
+    pinned.unmount();
+    // Waiting rows and Under contract rows carry nothing asked of the rep: Open lead only.
+    const waiting = renderRow(workFacts("texted_last", "13", { at: "2026-10-14T15:00:00Z", by: "human" }));
+    expect(count()).toBe(1);
+    waiting.unmount();
+    renderRow(workFacts("under_contract", "12", {}, { stage: "under_contract" }));
+    expect(count()).toBe(1);
+  });
   it("stage colors the border", () => {
     const stages = { not_contacted: "border-l-blue-500", contacted: "border-l-teal-600", needs_offer: "border-l-amber-500", offer_sent: "border-l-violet-500", under_contract: "border-l-green-600" } as const;
     for (const [stage, cls] of Object.entries(stages)) {
@@ -78,6 +99,13 @@ describe("collapsed row", () => {
     const { h } = renderRow(workFacts("nothing_planned", "15", {}));
     await userEvent.click(screen.getByTestId("work-row-primary-lead-1"));
     expect(h.onSetDrip).toHaveBeenCalledExactlyOnceWith("lead-1");
+  });
+  it("Nothing planned with a waiting text: primary is Send text (opens the thread), not Set drip", async () => {
+    const { h } = renderRow(workFacts("nothing_planned", "6a", { variant: "text_waiting", at: "2026-10-14T15:00:00Z" }, { labels: ["text_waiting"] }));
+    expect(screen.getByTestId("work-row-primary-lead-1")).toHaveTextContent("Send text");
+    await userEvent.click(screen.getByTestId("work-row-primary-lead-1"));
+    expect(h.onOpenText).toHaveBeenCalledExactlyOnceWith("lead-1");
+    expect(h.onSetDrip).not.toHaveBeenCalled();
   });
   it("Broken primary is the first item's fix", async () => {
     const item = { kind: "drip_stuck" as const, action: "fix_drip" as const, at: null, refId: "e1" };

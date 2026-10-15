@@ -18,6 +18,12 @@ describe("primary button per reason", () => {
     expect(label("gone_quiet")).toBe("Set drip");
     expect(label("nothing_planned")).toBe("Set drip");
   });
+  it("Nothing planned with a waiting text is Send text (text command), gated like Reply", () => {
+    const f = workFacts("nothing_planned", "6a", { variant: "text_waiting" }, { labels: ["text_waiting"] });
+    expect(primaryButton(f)).toMatchObject({ label: "Send text", command: { type: "text" }, disabled: false });
+    expect(primaryButton({ ...f, hasPhone: false })).toMatchObject({ label: "Send text", disabled: true, disabledReason: "No phone number" });
+    expect(label("nothing_planned", {}, { labels: ["check_texts"] })).toBe("Set drip");
+  });
   it("Waiting reasons and Under contract have no primary", () => {
     for (const reason of ["in_drip", "texted_last", "offer_out", "callback_booked", "under_contract"] as const) expect(label(reason)).toBeNull();
   });

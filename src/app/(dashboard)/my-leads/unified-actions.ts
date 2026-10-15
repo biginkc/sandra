@@ -5,6 +5,7 @@ import {
   getAcquisitionKpis,
   MyLeadsReadError,
   myLeadsViewer,
+  type MyLeadsViewer,
   type AcquisitionKpis,
 } from "@/lib/my-leads/queries";
 import { unifiedQueueEnabled } from "@/lib/my-leads/unified-queue";
@@ -37,15 +38,16 @@ function failure(operation: string, error: unknown, fallback: string): UnifiedAc
 }
 
 /** Server-side flag re-check: a client that kept an old bundle can never reach the unified RPCs while the org is off. */
-async function flagIsOff(): Promise<boolean> {
+async function resolveViewer(): Promise<{ viewer: MyLeadsViewer; off: boolean }> {
   const viewer = await myLeadsViewer();
-  return !(await unifiedQueueEnabled(viewer.orgId));
+  return { viewer, off: !(await unifiedQueueEnabled(viewer.orgId)) };
 }
 
 export async function loadWorkPage(input: { memberId: string; query: WorkQuery }): Promise<LoadWorkPageResult> {
   try {
-    if (await flagIsOff()) return FEATURE_OFF;
-    return { ok: true, page: await getWorkPage({ memberId: input.memberId, query: input.query }) };
+    const { viewer, off } = await resolveViewer();
+    if (off) return FEATURE_OFF;
+    return { ok: true, page: await getWorkPage({ memberId: input.memberId, query: input.query, viewer }) };
   } catch (error) {
     return failure("my_leads_work_page", error, "My Leads could not load. Please retry.");
   }
@@ -53,8 +55,9 @@ export async function loadWorkPage(input: { memberId: string; query: WorkQuery }
 
 export async function loadWorkFacts(input: { memberId: string; ids: string[] }): Promise<LoadWorkFactsResult> {
   try {
-    if (await flagIsOff()) return FEATURE_OFF;
-    return { ok: true, facts: await getWorkFacts(input.memberId, input.ids) };
+    const { viewer, off } = await resolveViewer();
+    if (off) return FEATURE_OFF;
+    return { ok: true, facts: await getWorkFacts(input.memberId, input.ids, viewer) };
   } catch (error) {
     return failure("my_leads_work_facts", error, "My Leads could not refresh. Please retry.");
   }
@@ -68,8 +71,9 @@ export async function pinLead(input: {
   if (input.action !== "pin" && input.action !== "clear")
     return { ok: false, code: "INVALID_INPUT", message: "That action is not available." };
   try {
-    if (await flagIsOff()) return FEATURE_OFF;
-    const { pinnedAt } = await setPin(input.memberId, input.propertyId, input.action);
+    const { viewer, off } = await resolveViewer();
+    if (off) return FEATURE_OFF;
+    const { pinnedAt } = await setPin(input.memberId, input.propertyId, input.action, viewer);
     return { ok: true, pinnedAt };
   } catch (error) {
     return failure("my_leads_pin", error, "The change could not be saved. Please retry.");
@@ -82,8 +86,9 @@ export async function dismissBroken(input: {
   sourceId: string;
 }): Promise<{ ok: true } | UnifiedActionFailure> {
   try {
-    if (await flagIsOff()) return FEATURE_OFF;
-    await dismissBrokenRpc(input.memberId, input.propertyId, input.sourceId);
+    const { viewer, off } = await resolveViewer();
+    if (off) return FEATURE_OFF;
+    await dismissBrokenRpc(input.memberId, input.propertyId, input.sourceId, viewer);
     return { ok: true };
   } catch (error) {
     return failure("my_leads_dismiss_broken", error, "The change could not be saved. Please retry.");
@@ -94,8 +99,9 @@ export async function loadUnifiedKpis(input: {
   memberId: string;
 }): Promise<{ ok: true; kpis: AcquisitionKpis } | UnifiedActionFailure> {
   try {
-    if (await flagIsOff()) return FEATURE_OFF;
-    return { ok: true, kpis: await getAcquisitionKpis({ memberId: input.memberId, period: "today" }) };
+    const { viewer, off } = await resolveViewer();
+    if (off) return FEATURE_OFF;
+    return { ok: true, kpis: await getAcquisitionKpis({ memberId: input.memberId, period: "today", viewer }) };
   } catch (error) {
     return failure("my_leads_unified_kpis", error, "The numbers could not load. Please retry.");
   }

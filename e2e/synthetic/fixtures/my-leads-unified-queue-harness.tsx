@@ -1,9 +1,10 @@
+import { useEffect, useRef } from "react"
 import { createRoot } from "react-dom/client"
 import { queueRowFixture } from "../../../src/app/(dashboard)/my-leads/_components/call-next-test-support"
 import type { MyLeadDetailPageResult } from "../../../src/app/(dashboard)/my-leads/_components/types"
 import type { UnifiedInitial, WorkFacts, WorkQuery } from "../../../src/app/(dashboard)/my-leads/unified/contract"
 import { parseWorkQuery, workQueryToSearchParams } from "../../../src/app/(dashboard)/my-leads/unified/query-params"
-import { UnifiedQueue, type UnifiedQueueActions } from "../../../src/app/(dashboard)/my-leads/unified/unified-queue"
+import { UnifiedQueue, type UnifiedQueueActions, type UnifiedQueueHandle } from "../../../src/app/(dashboard)/my-leads/unified/unified-queue"
 import { makeServer } from "../../../src/app/(dashboard)/my-leads/unified/work-queue-fixtures"
 import { workFacts } from "../../../src/app/(dashboard)/my-leads/unified/test-support"
 
@@ -144,6 +145,29 @@ function messages(): MyLeadDetailPageResult {
 }
 
 function Harness() {
+  // Mirrors client.tsx's address-bar sync: tab/chip/stage/page changes push, search edits and changes the rep did not
+  // make replace, and popstate (Back/Forward) hands the parsed URL back to the queue.
+  const handle = useRef<UnifiedQueueHandle | null>(null)
+  const lastQuery = useRef<WorkQuery | null>(initial.query)
+  const syncUrl = (next: WorkQuery, options?: { replace?: boolean }) => {
+    const qs = workQueryToSearchParams(next).toString()
+    const target = qs ? `/my-leads?${qs}` : "/my-leads"
+    const previous = lastQuery.current
+    lastQuery.current = next
+    const current = `${window.location.pathname}${window.location.search}`
+    if (options?.replace || !previous || previous.search !== next.search) window.history.replaceState(null, "", target)
+    else if (target !== current) window.history.pushState(null, "", target)
+  }
+  useEffect(() => {
+    const onPopState = () => {
+      if (window.location.pathname !== "/my-leads") return
+      const query = parseWorkQuery(new URLSearchParams(window.location.search))
+      lastQuery.current = query
+      handle.current?.syncQuery(query)
+    }
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
   return (
     <>
       <header data-testid="top-nav" className="fixed inset-x-0 top-0 z-40 h-16 bg-slate-900 text-white md:left-64">Top navigation</header>
@@ -162,10 +186,8 @@ function Harness() {
             onRepChange={() => {}}
             deepLinkId={linked && pinned ? linked : null}
             deepLinkNonce={1}
-            onQueryChange={(next) => {
-              const qs = workQueryToSearchParams(next).toString()
-              window.history.replaceState(null, "", qs ? `/my-leads?${qs}` : "/my-leads")
-            }}
+            onQueryChange={syncUrl}
+            registerHandle={(next) => { handle.current = next }}
             onAction={(kind, id) => note(`action:${kind}:${id}`)}
             onLoadDetailPage={async () => messages()}
           />

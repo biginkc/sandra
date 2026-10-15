@@ -50,6 +50,8 @@ type RepSmsComposerProps = {
    * for surfaces that use the composer as a standalone block.
    */
   placement?: "inline" | "action"
+  /** Start with the composer already open (and its sender list loading). Default false: closed until the rep opens it. */
+  defaultOpen?: boolean
 }
 
 type SendState = {
@@ -270,9 +272,10 @@ export function RepSmsComposer({
   inboundMessageId = null,
   templates: providedTemplates,
   placement = "inline",
+  defaultOpen = false,
 }: RepSmsComposerProps) {
-  const [open, setOpen] = useState(false)
-  const [activated, setActivated] = useState(false)
+  const [open, setOpen] = useState(defaultOpen)
+  const [activated, setActivated] = useState(defaultOpen)
   const [pending, setPending] = useState(false)
   const [context, setContext] = useState<RepSmsContext | null>(null)
   const [senderId, setSenderId] = useState("")

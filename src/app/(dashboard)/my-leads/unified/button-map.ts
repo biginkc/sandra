@@ -59,7 +59,7 @@ const callSpec = (facts: WorkFacts) => spec("call", "Call", { type: "action", ac
  * Null when the reason has none (Under contract, and every Waiting reason where nothing is asked of the rep).
  *  New lead / Call today / Due -> Call;  New reply -> Reply;  Broken -> the first item's fix;
  *  Offer -> Log offer when no offer is logged yet, Call for a follow-up due or missing;
- *  Gone quiet / Nothing planned -> Set drip.
+ *  Gone quiet / Nothing planned -> Set drip, except Nothing planned with a waiting text -> Send text.
  */
 export function primaryButton(facts: WorkFacts): ButtonSpec | null {
   switch (facts.reason) {
@@ -79,8 +79,11 @@ export function primaryButton(facts: WorkFacts): ButtonSpec | null {
         ? spec("log-offer", "Log offer", { type: "action", action: "log-offer" })
         : callSpec(facts);
     }
-    case "gone_quiet":
     case "nothing_planned":
+      // A text is waiting for the rep to send: the move is sending it, not planning a drip (design owner, round 3).
+      if (facts.labels.includes("text_waiting")) return spec("send-text", "Send text", { type: "text" }, contactBlock(facts));
+      return spec("set-drip", "Set drip", { type: "set-drip" });
+    case "gone_quiet":
       return spec("set-drip", "Set drip", { type: "set-drip" });
     default:
       return null;

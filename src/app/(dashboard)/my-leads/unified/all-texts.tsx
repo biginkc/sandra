@@ -23,6 +23,10 @@ export type AllTextsProps = {
   replyToPhone?: string | null;
   /** After a send: reload the thread and refresh the row. */
   onSent?: (messageId?: string) => void;
+  /** Show the composer open (Reply / Send text reveal it this way); "Show all texts" leaves it closed. */
+  defaultOpen?: boolean;
+  /** False while an owner views another rep: history only, no composer. Default true. */
+  canCompose?: boolean;
 };
 
 /**
@@ -53,14 +57,16 @@ function useFocusComposerTextarea(container: React.RefObject<HTMLElement | null>
   }, [container]);
 }
 
-export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent }: AllTextsProps) {
+export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone = null, onSent, defaultOpen = false, canCompose = true }: AllTextsProps) {
   const container = useRef<HTMLDivElement>(null);
   useFocusComposerTextarea(container);
   return (
     <div ref={container} data-testid={`all-texts-${facts.propertyId}`} className="min-w-0 space-y-3">
       <MyLeadSmsStrip state={state} onRetry={onRetry} onLoadDetailPage={onLoadDetailPage} />
+      {canCompose && (
       <div className="flex flex-wrap items-start gap-2">
         <RepSmsComposer
+          defaultOpen={defaultOpen}
           propertyId={facts.propertyId}
           placement="action"
           replyToPhone={replyToPhone}
@@ -71,6 +77,7 @@ export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone
           }}
         />
       </div>
+      )}
     </div>
   );
 }

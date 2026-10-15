@@ -38,6 +38,19 @@ beforeEach(() => {
   mocks.acknowledge.mockResolvedValue({ ok: true, data: { ok: true, state: "accepted" } })
 })
 
+describe("RepSmsComposer defaultOpen", () => {
+  it("starts open and loads its senders without a click; the default stays closed", async () => {
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    const { unmount } = render(<RepSmsComposer propertyId="property-1" />)
+    expect(screen.getByRole("button", { name: "Text lead" })).toHaveAttribute("aria-expanded", "false")
+    expect(mocks.load).not.toHaveBeenCalled()
+    unmount()
+    render(<RepSmsComposer propertyId="property-1" defaultOpen />)
+    expect(screen.getByRole("button", { name: "Hide text" })).toHaveAttribute("aria-expanded", "true")
+    expect(await screen.findByLabelText("Editable message remainder")).toBeVisible()
+  })
+})
+
 describe("RepSmsComposer obligation resume", () => {
   it("restores the exact manager on a legacy saved follow-up", async () => {
     const data = context("failed_not_dispatched") as any

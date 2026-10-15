@@ -35,6 +35,17 @@ describe("slotIconFor priority", () => {
   });
 });
 
+describe("slotIconFor contact-only inbound", () => {
+  const contactOnly = { ...unanswered, contactOnly: true };
+  it("keeps not-in-a-drip even for a new lead or healthy drip", () => {
+    expect(slotIconFor(workFacts("new_lead", "3", {}, { latestInbound: contactOnly, stage: "not_contacted", drip: healthy }))).toBe("no_drip");
+    expect(slotIconFor(workFacts("in_drip", "10", {}, { latestInbound: contactOnly, drip: healthy }))).toBe("no_drip");
+  });
+  it("broken still wins", () => {
+    expect(slotIconFor(workFacts("broken", "6", {}, { latestInbound: contactOnly, broken }))).toBe("broken");
+  });
+});
+
 describe("<SlotIconView />", () => {
   it.each(Object.keys(SLOT_ICON_LABELS) as (keyof typeof SLOT_ICON_LABELS)[])("%s has an accessible name", (icon) => {
     render(<SlotIconView icon={icon} />);

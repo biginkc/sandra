@@ -14,6 +14,8 @@ export function slotIconFor(
   const inbound = facts.latestInbound;
   if (inbound && !inbound.handled && !inbound.contactOnly) return "new_reply";
   if (facts.broken.length > 0 || facts.labels.includes("broken")) return "broken";
+  // Unclear attribution keeps the not-in-a-drip icon (the row's "check texts" label carries the rest).
+  if (inbound?.contactOnly) return "no_drip";
   if (facts.stage === "not_contacted" && facts.attemptsCount === 0) return "new_lead";
   if (facts.drip?.healthy) return "in_drip";
   return "no_drip";

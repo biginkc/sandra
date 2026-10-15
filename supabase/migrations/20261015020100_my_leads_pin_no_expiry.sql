@@ -11,7 +11,8 @@
 --     Used only by the unified page.
 --   * fn_dismiss_my_leads_broken: member-only "Dismiss" on a Broken row. Appends the lead_events
 --     row `rep_sms_failure_dismissed` (actor_type user, source_id = the ledger / obligation /
---     message id) that the classifier reads, idempotently.
+--     message id) that the classifier reads, idempotently. The source id must belong to the same
+--     org and lead in one of the classifier's Broken sources, else NOT_FOUND (P0002).
 -- No data step. No existing row changes meaning.
 begin;
 
@@ -120,6 +121,22 @@ begin
   end if;
   if not exists (select 1 from public.my_leads_queue_rows_for(p_org_id, p_member_id, v_now, p_property_id) r
                  where r.property_id = p_property_id) then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  -- The id must be a Broken source of THIS lead in THIS org (ledger, obligation, message by property
+  -- or by the homeowner contact, AI dead letter, or drip enrollment); otherwise a member could plant a
+  -- dismissal row for an arbitrary id.
+  if not (
+    exists (select 1 from public.rep_sms_delivery_ledger x where x.id = p_source_id and x.org_id = p_org_id and x.property_id = p_property_id)
+    or exists (select 1 from public.rep_sms_obligations x where x.id = p_source_id and x.org_id = p_org_id and x.property_id = p_property_id)
+    or exists (select 1 from public.messages x
+               where x.id = p_source_id and x.org_id = p_org_id
+                 and (x.property_id = p_property_id
+                      or (x.property_id is null and x.contact_id is not null
+                          and x.contact_id = (select p.homeowner_contact_id from public.properties p where p.id = p_property_id and p.org_id = p_org_id))))
+    or exists (select 1 from public.ai_reply_dead_letters x where x.id = p_source_id and x.org_id = p_org_id and x.property_id = p_property_id)
+    or exists (select 1 from public.sequence_enrollments x where x.id = p_source_id and x.org_id = p_org_id and x.property_id = p_property_id)
+  ) then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
   insert into public.lead_events(org_id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id)

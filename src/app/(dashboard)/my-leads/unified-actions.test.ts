@@ -40,9 +40,11 @@ const S = "33333333-3333-4333-8333-333333333333";
 const QUERY = { tab: "needs_attention", chip: "all", stage: null, search: "", page: 1 } as const;
 const OFF = { ok: false, code: "FEATURE_DISABLED", message: expect.any(String) };
 
+const VIEWER = { userId: M, orgId: "org-1" };
+
 beforeEach(() => {
   vi.resetAllMocks();
-  mocks.viewer.mockResolvedValue({ userId: M, orgId: "org-1" });
+  mocks.viewer.mockResolvedValue(VIEWER);
   mocks.enabled.mockResolvedValue(true);
 });
 
@@ -63,19 +65,33 @@ describe("flag on", () => {
   it("loads a page and facts", async () => {
     mocks.page.mockResolvedValue({ rows: [], ids: [] });
     expect(await loadWorkPage({ memberId: M, query: QUERY })).toEqual({ ok: true, page: { rows: [], ids: [] } });
-    expect(mocks.page).toHaveBeenCalledWith({ memberId: M, query: QUERY });
+    expect(mocks.page).toHaveBeenCalledWith({ memberId: M, query: QUERY, viewer: VIEWER });
     mocks.facts.mockResolvedValue({ rows: [], missing: [P], snapshotAt: "t" });
     expect(await loadWorkFacts({ memberId: M, ids: [P] })).toEqual({ ok: true, facts: { rows: [], missing: [P], snapshotAt: "t" } });
-    expect(mocks.facts).toHaveBeenCalledWith(M, [P]);
+    expect(mocks.facts).toHaveBeenCalledWith(M, [P], VIEWER);
   });
 
   it("pins, clears and dismisses", async () => {
     mocks.pin.mockResolvedValue({ pinnedAt: "2026-10-15T15:00:00Z" });
     expect(await pinLead({ memberId: M, propertyId: P, action: "pin" })).toEqual({ ok: true, pinnedAt: "2026-10-15T15:00:00Z" });
-    expect(mocks.pin).toHaveBeenCalledWith(M, P, "pin");
+    expect(mocks.pin).toHaveBeenCalledWith(M, P, "pin", VIEWER);
     mocks.dismiss.mockResolvedValue(undefined);
     expect(await dismissBroken({ memberId: M, propertyId: P, sourceId: S })).toEqual({ ok: true });
-    expect(mocks.dismiss).toHaveBeenCalledWith(M, P, S);
+    expect(mocks.dismiss).toHaveBeenCalledWith(M, P, S, VIEWER);
+  });
+
+  it("resolves the viewer once per action", async () => {
+    mocks.page.mockResolvedValue({ rows: [], ids: [] });
+    mocks.facts.mockResolvedValue({ rows: [], missing: [], snapshotAt: "t" });
+    mocks.pin.mockResolvedValue({ pinnedAt: null });
+    mocks.dismiss.mockResolvedValue(undefined);
+    mocks.kpis.mockResolvedValue({});
+    await loadWorkPage({ memberId: M, query: QUERY });
+    await loadWorkFacts({ memberId: M, ids: [P] });
+    await pinLead({ memberId: M, propertyId: P, action: "clear" });
+    await dismissBroken({ memberId: M, propertyId: P, sourceId: S });
+    await loadUnifiedKpis({ memberId: M });
+    expect(mocks.viewer).toHaveBeenCalledTimes(5);
   });
 
   it("rejects an unknown pin action before anything runs", async () => {
@@ -87,7 +103,7 @@ describe("flag on", () => {
   it("loads today's KPIs", async () => {
     mocks.kpis.mockResolvedValue({ attempts: 3 });
     expect(await loadUnifiedKpis({ memberId: M })).toEqual({ ok: true, kpis: { attempts: 3 } });
-    expect(mocks.kpis).toHaveBeenCalledWith({ memberId: M, period: "today" });
+    expect(mocks.kpis).toHaveBeenCalledWith({ memberId: M, period: "today", viewer: VIEWER });
   });
 
   it("returns the typed code and message of a read error and reports it", async () => {

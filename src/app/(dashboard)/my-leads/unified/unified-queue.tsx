@@ -146,6 +146,8 @@ export function UnifiedQueue({
 }: UnifiedQueueProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(deepLinkId ? [deepLinkId] : []));
   const [textsOpen, setTextsOpen] = useState<ReadonlySet<string>>(new Set());
+  // Rows whose all-texts thread was revealed by Reply / Send text: the composer starts open (and focused).
+  const [composerOpen, setComposerOpen] = useState<ReadonlySet<string>>(new Set());
   const [dripFor, setDripFor] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
@@ -394,16 +396,24 @@ export function UnifiedQueue({
     setExpanded(next);
   };
 
-  const openTexts = (propertyId: string) => {
+  const openTexts = (propertyId: string, withComposer = false) => {
+    if (withComposer) setComposerOpen((prev) => new Set(prev).add(propertyId));
     setExpanded((prev) => new Set(prev).add(propertyId));
     setTextsOpen((prev) => new Set(prev).add(propertyId));
   };
-  const closeTexts = (propertyId: string) =>
+  const closeTexts = (propertyId: string) => {
+    setComposerOpen((prev) => {
+      if (!prev.has(propertyId)) return prev;
+      const next = new Set(prev);
+      next.delete(propertyId);
+      return next;
+    });
     setTextsOpen((prev) => {
       const next = new Set(prev);
       next.delete(propertyId);
       return next;
     });
+  };
 
   // ---- actions on a row
   const withBusy = async (propertyId: string, work: () => Promise<void>) => {
@@ -500,7 +510,10 @@ export function UnifiedQueue({
         {textsOpen.has(id) && (
           <div className="space-y-2">
             <AllTexts
+              key={composerOpen.has(id) ? "composer-open" : "composer-closed"}
               facts={facts}
+              defaultOpen={composerOpen.has(id)}
+              canCompose={canAct}
               state={state ?? { status: "loading" }}
               onRetry={() => reloadMessages(id)}
               onLoadDetailPage={(group, cursor) => loadTextsPage(id, group, cursor)}
@@ -639,7 +652,7 @@ export function UnifiedQueue({
           {rows.map(({ facts, leftView, pinned }) => {
             const id = facts.propertyId;
             return (
-              <div key={id} className={leftView || queue.loading ? "opacity-60 transition-opacity" : undefined} data-left-view={leftView || undefined}>
+              <div key={id} className={leftView || queue.loading || queue.stale ? "opacity-60 transition-opacity" : undefined} data-left-view={leftView || undefined}>
                 <WorkRow
                   facts={facts}
                   now={now}
@@ -650,7 +663,7 @@ export function UnifiedQueue({
                   conversation={conversationFor(facts)}
                   onToggle={() => toggleOne(id)}
                   onAction={onAction}
-                  onOpenText={openTexts}
+                  onOpenText={(leadId) => openTexts(leadId, true)}
                   onCallToday={(leadId) => void pin(leadId, "pin")}
                   onUndoCallToday={(leadId) => void pin(leadId, "clear")}
                   onSetDrip={setDripFor}

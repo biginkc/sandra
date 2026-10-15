@@ -18,7 +18,7 @@ import {
   type WorkStage,
   type WorkTab,
 } from "@/app/(dashboard)/my-leads/unified/contract";
-import { isQueueRowFor, MyLeadsReadError, myLeadsViewer, readBadgeV2, readRpc } from "./queries";
+import { isQueueRowFor, MyLeadsReadError, myLeadsViewer, readBadgeV2, readRpc, type MyLeadsViewer } from "./queries";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_FACT_IDS = 50;
@@ -225,6 +225,8 @@ export async function getWorkPage(input: {
   memberId: string;
   query: WorkQuery;
   size?: number;
+  /** Pass the caller's already-resolved viewer to skip a second auth lookup. */
+  viewer?: MyLeadsViewer;
 }): Promise<WorkPage> {
   const { query } = input;
   const size = input.size ?? WORK_PAGE_SIZE;
@@ -238,7 +240,7 @@ export async function getWorkPage(input: {
     query.search.length > 200
   )
     throw new MyLeadsReadError("INVALID_INPUT", "Refresh the queue or check the selected filters.");
-  const viewer = await myLeadsViewer();
+  const viewer = input.viewer ?? (await myLeadsViewer());
   assertReadable(viewer, input.memberId);
   const data = await readRpc<unknown>(viewer.client, "fn_my_leads_work_page", {
     p_org_id: viewer.orgId,
@@ -255,10 +257,10 @@ export async function getWorkPage(input: {
 }
 
 /** Current facts for up to 50 leads (retained rows, or the one row an action touched). */
-export async function getWorkFacts(memberId: string, ids: string[]): Promise<WorkFactsResult> {
+export async function getWorkFacts(memberId: string, ids: string[], resolved?: MyLeadsViewer): Promise<WorkFactsResult> {
   if (!UUID.test(memberId) || ids.length > MAX_FACT_IDS || !ids.every((id) => UUID.test(id)))
     throw new MyLeadsReadError("INVALID_INPUT", "Refresh the queue and try again.");
-  const viewer = await myLeadsViewer();
+  const viewer = resolved ?? (await myLeadsViewer());
   assertReadable(viewer, memberId);
   const data = await readRpc<unknown>(viewer.client, "fn_my_leads_work_facts", {
     p_org_id: viewer.orgId,
@@ -274,10 +276,11 @@ export async function setPin(
   memberId: string,
   propertyId: string,
   action: "pin" | "clear",
+  resolved?: MyLeadsViewer,
 ): Promise<{ pinnedAt: string | null }> {
   if (action !== "pin" && action !== "clear") throw new MyLeadsReadError("INVALID_INPUT", "That action is not available.");
   if (!UUID.test(propertyId)) throw new MyLeadsReadError("INVALID_INPUT", "Choose a valid lead.");
-  const viewer = await myLeadsViewer();
+  const viewer = resolved ?? (await myLeadsViewer());
   if (memberId !== viewer.userId) throw new MyLeadsReadError("FORBIDDEN", "Open your own queue to change Call today.");
   const data = await readRpc<unknown>(viewer.client, "fn_set_my_leads_pin", {
     p_org_id: viewer.orgId,
@@ -292,9 +295,9 @@ export async function setPin(
 }
 
 /** Dismiss on a Broken row; sourceId is the refId the classifier reported. Repeating it is a no-op. */
-export async function dismissBroken(memberId: string, propertyId: string, sourceId: string): Promise<void> {
+export async function dismissBroken(memberId: string, propertyId: string, sourceId: string, resolved?: MyLeadsViewer): Promise<void> {
   if (!UUID.test(propertyId) || !UUID.test(sourceId)) throw new MyLeadsReadError("INVALID_INPUT", "Choose a valid lead.");
-  const viewer = await myLeadsViewer();
+  const viewer = resolved ?? (await myLeadsViewer());
   if (memberId !== viewer.userId) throw new MyLeadsReadError("FORBIDDEN", "Open your own queue to dismiss this.");
   const data = await readRpc<unknown>(viewer.client, "fn_dismiss_my_leads_broken", {
     p_org_id: viewer.orgId,

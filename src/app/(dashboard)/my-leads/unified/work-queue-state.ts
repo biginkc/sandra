@@ -49,6 +49,8 @@ export type WorkState = {
   /** Bumped by every accepted read so the clock timer re-arms even when nextChangeAt is unchanged. */
   readCount: number;
   loading: boolean;
+  /** A navigation read failed: the rows on screen belong to an earlier view and are greyed until a read succeeds. */
+  stale: boolean;
   error: string | null;
   notice: string | null;
   listUpdated: ListUpdated | null;
@@ -80,6 +82,7 @@ export function emptyState(query: WorkQuery): WorkState {
     snapshotAt: null,
     readCount: 0,
     loading: false,
+    stale: false,
     error: null,
     notice: null,
     listUpdated: null,
@@ -170,6 +173,7 @@ export function swapIn(state: WorkState, page: WorkPage, requested: WorkQuery): 
     revision: page.revision,
     listUpdated: null,
     loading: false,
+    stale: false,
   };
 }
 
@@ -249,10 +253,16 @@ export function applyFacts(state: WorkState, rows: WorkFacts[], missing: string[
   for (const id of state.order) if (byId[id]) facts[id] = byId[id];
   const leftView = state.order.filter((id) => facts[id] && !placementMatches(facts[id], state.query));
   let pinned = refreshPinned(state.pinned, byId);
-  if (pinned && tabForPlace(pinned.place) !== state.query.tab) pinned = null;
+  let pinnedNotice: string | null = null;
+  if (pinned && tabForPlace(pinned.place) !== state.query.tab) {
+    // The deep-linked lead's facts moved it out of this view: say where it went, like a row that moved after an action.
+    pinnedNotice = `Moved to ${WORK_TAB_LABELS[tabForPlace(pinned.place)]}`;
+    pinned = null;
+  }
   const gone = missing.filter((id) => shown.has(id) || id === state.pinned?.propertyId);
   const next: WorkState = { ...state, facts, leftView, pinned };
-  return removeRows(next, gone, gone.length ? missingNotice() : null);
+  if (!gone.length) return pinnedNotice ? { ...next, notice: pinnedNotice } : next;
+  return removeRows(next, gone, missingNotice());
 }
 
 /** One lead's new facts after a rep action (already decided keep/remove by the caller). */

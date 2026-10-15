@@ -84,6 +84,8 @@ export type UseWorkQueueResult = {
   chipCounts: WorkState["chipCounts"];
   stageCounts: WorkState["stageCounts"];
   loading: boolean;
+  /** The last navigation read failed: the displayed rows are from an earlier view (grey them) until a retry succeeds. */
+  stale: boolean;
   error: string | null;
   listUpdated: ListUpdated | null;
   notice: string | null;
@@ -123,6 +125,8 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
   const mutEpoch = useRef(0);
   const navInFlight = useRef(false);
   const missedWhilePaused = useRef(false);
+  // Per-property facts sequence: a facts response only lands for a property if no newer facts read for it has started.
+  const factsSeq = useRef(new Map<string, number>());
 
   // Refs mirror props for the stable callbacks below. Effects run in order, so this one comes first.
   useEffect(() => {
@@ -160,6 +164,17 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     }
   }, []);
 
+  const claimFacts = useCallback((ids: string[]) => {
+    const claim = new Map<string, number>();
+    for (const id of ids) {
+      const n = (factsSeq.current.get(id) ?? 0) + 1;
+      factsSeq.current.set(id, n);
+      claim.set(id, n);
+    }
+    return claim;
+  }, []);
+  const stillCurrent = (claim: Map<string, number>, id: string) => factsSeq.current.get(id) === claim.get(id);
+
   const notify = useCallback((query: WorkQuery, replace = false) => {
     if (replace) optsRef.current.onQueryChange?.(query, { replace: true });
     else optsRef.current.onQueryChange?.(query);
@@ -175,7 +190,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
       if (seq !== navSeq.current) return;
       navInFlight.current = false;
       if (!res.ok) {
-        commit((s) => ({ ...s, loading: false, error: res.message }));
+        commit((s) => ({ ...s, loading: false, stale: s.order.length > 0 || s.pinned !== null, error: res.message }));
         return;
       }
       commit((s) => swapIn(s, res.page, query));
@@ -217,10 +232,19 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     const ids = [...s.order];
     if (s.pinned && !ids.includes(s.pinned.propertyId)) ids.push(s.pinned.propertyId);
     if (!ids.length) return;
+    const claim = claimFacts(ids);
     const facts = await loadFactsAll(member, ids);
     if (stale()) return;
-    commit((cur) => (facts.ok ? applyFacts(cur, facts.rows, facts.missing) : { ...cur, error: facts.message }));
-  }, [commit, loadFactsAll, loadPageSafe, notify]);
+    commit((cur) =>
+      facts.ok
+        ? applyFacts(
+            cur,
+            facts.rows.filter((r) => stillCurrent(claim, r.propertyId)),
+            facts.missing.filter((id) => stillCurrent(claim, id)),
+          )
+        : { ...cur, error: facts.message },
+    );
+  }, [claimFacts, commit, loadFactsAll, loadPageSafe, notify]);
 
   /** Timer / visibility entry point: respects hidden tab and paused composers. */
   const tick = useCallback(() => {
@@ -304,8 +328,11 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
       const member = memberRef.current;
       mutEpoch.current++;
       try {
+        const claim = claimFacts([propertyId]);
         const facts = await loadFactsAll(member, [propertyId]);
         if (nav0 !== navSeq.current) return;
+        // A newer facts read for this lead started while this one was in flight: it owns the row.
+        if (!stillCurrent(claim, propertyId)) return;
         if (!facts.ok) {
           commit((s) => ({ ...s, error: ACTION_READ_FAILED }));
           return;
@@ -331,7 +358,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
         mutEpoch.current++;
       }
     },
-    [commit, loadFactsAll, loadPageSafe],
+    [claimFacts, commit, loadFactsAll, loadPageSafe],
   );
 
   const refresh = useCallback(() => void runNav(stateRef.current.query), [runNav]);
@@ -353,6 +380,7 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     chipCounts: state.chipCounts,
     stageCounts: state.stageCounts,
     loading: state.loading,
+    stale: state.stale,
     error: state.error,
     listUpdated: state.listUpdated,
     notice: state.notice,

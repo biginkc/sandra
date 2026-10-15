@@ -17,6 +17,11 @@ const read = (file: string) => {
 const classifierSql = read('20261015010000_my_leads_work_queue_classifier.sql');
 const flagSql = read('20261015020000_my_leads_unified_queue_flag.sql');
 const migrationSql = read('20261015020100_my_leads_pin_no_expiry.sql');
+const rollbackSql = (() => {
+  const sql = readFileSync(new URL('../rollbacks/20261015020100_my_leads_pin_no_expiry.sql', import.meta.url), 'utf8');
+  if (!/\bbegin;/i.test(sql) || !/commit;\s*$/i.test(sql)) throw new Error('transaction wrapper changed in the rollback');
+  return sql.replace(/^[\s\S]*?\bbegin;\s*/i, '').replace(/\s*commit;\s*$/i, '');
+})();
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -129,10 +134,10 @@ it('the check constraint accepts a no-expiry pin and still rejects both-null and
     await ins(b, now, later, null)();            // expiring pin (old)
     await ins(c, null, null, later)();           // Not today (old)
     expect(await w.overrides(a)).toHaveLength(1);
-    await w.expectError(ins(d, null, null, null), /my_leads_strip_overrides_one_kind_check/);   // both expiries null, no pin
-    await w.expectError(ins(d, now, later, later), /my_leads_strip_overrides_one_kind_check/);  // both expiries set
-    await w.expectError(ins(e, null, later, null), /my_leads_strip_overrides_one_kind_check/);  // expiring pin without a pin timestamp
-    await w.expectError(ins(f, now, null, later), /my_leads_strip_overrides_one_kind_check/);   // pin timestamp with a hide expiry
+    await w.expectError(ins(d, null, null, null), /^new row for relation "my_leads_strip_overrides" violates check constraint "my_leads_strip_overrides_one_kind_check"$/);   // both expiries null, no pin
+    await w.expectError(ins(d, now, later, later), /^new row for relation "my_leads_strip_overrides" violates check constraint "my_leads_strip_overrides_one_kind_check"$/);  // both expiries set
+    await w.expectError(ins(e, null, later, null), /^new row for relation "my_leads_strip_overrides" violates check constraint "my_leads_strip_overrides_one_kind_check"$/);  // expiring pin without a pin timestamp
+    await w.expectError(ins(f, now, null, later), /^new row for relation "my_leads_strip_overrides" violates check constraint "my_leads_strip_overrides_one_kind_check"$/);   // pin timestamp with a hide expiry
   });
 });
 
@@ -163,15 +168,15 @@ it('fn_set_my_leads_pin: validates input and is member-only', async () => {
     const w = await world(db);
     const mine = await w.lead('mine');
     const theirs = await w.lead('theirs', w.other);
-    await w.expectError(() => w.pin(w.sam, mine, 'snooze'), /INVALID_INPUT/);
-    await w.expectError(() => w.pin(w.sam, mine, null as unknown as string), /INVALID_INPUT/);
-    await w.expectError(() => w.pin(w.sam, randomUUID(), 'pin'), /NOT_FOUND/);
-    await w.expectError(() => w.pin(w.sam, theirs, 'pin'), /NOT_FOUND/);                       // a lead in someone else's queue
-    await w.expectError(() => w.pin(w.owner, mine, 'pin'), /FORBIDDEN/);                       // owner viewing a rep's queue may read, not write
-    await w.expectError(() => w.pin(w.other, mine, 'pin'), /FORBIDDEN|NOT_FOUND/);             // another rep, same org
-    await w.expectError(() => w.pin(w.outsider, mine, 'pin'), /FORBIDDEN|NOT_FOUND/);          // other org, this org's id
-    await w.expectError(() => w.pin(w.outsider, mine, 'pin', { member: w.outsider, orgId: w.org2 }), /NOT_FOUND/);   // other org, its own id: the lead is not theirs
-    await w.expectError(() => w.as('anon', null, async () => db.query('select public.fn_set_my_leads_pin($1,$2,$3,$4)', [w.org, w.sam, mine, 'pin'])), /permission denied/);
+    await w.expectError(() => w.pin(w.sam, mine, 'snooze'), /^INVALID_INPUT$/);
+    await w.expectError(() => w.pin(w.sam, mine, null as unknown as string), /^INVALID_INPUT$/);
+    await w.expectError(() => w.pin(w.sam, randomUUID(), 'pin'), /^NOT_FOUND$/);
+    await w.expectError(() => w.pin(w.sam, theirs, 'pin'), /^NOT_FOUND$/);                       // a lead in someone else's queue
+    await w.expectError(() => w.pin(w.owner, mine, 'pin'), /^FORBIDDEN$/);                       // owner viewing a rep's queue may read, not write
+    await w.expectError(() => w.pin(w.other, mine, 'pin'), /^FORBIDDEN$/);             // another rep, same org
+    await w.expectError(() => w.pin(w.outsider, mine, 'pin'), /^FORBIDDEN$/);          // other org, this org's id
+    await w.expectError(() => w.pin(w.outsider, mine, 'pin', { member: w.outsider, orgId: w.org2 }), /^NOT_FOUND$/);   // other org, its own id: the lead is not theirs
+    await w.expectError(() => w.as('anon', null, async () => db.query('select public.fn_set_my_leads_pin($1,$2,$3,$4)', [w.org, w.sam, mine, 'pin'])), /^permission denied for function fn_(set_my_leads_pin|dismiss_my_leads_broken)$/);
     expect(await w.overrides(mine)).toHaveLength(0);
     expect(await w.overrides(theirs)).toHaveLength(0);
   });
@@ -242,15 +247,54 @@ it('fn_dismiss_my_leads_broken: input checks, member-only, cross-org negatives, 
     const mine = await w.lead('mine');
     const theirs = await w.lead('theirs', w.other);
     const src = randomUUID();
-    await w.expectError(() => w.dismiss(w.sam, mine, null), /INVALID_INPUT/);
-    await w.expectError(() => w.dismiss(w.sam, null as unknown as string, src), /INVALID_INPUT/);
-    await w.expectError(() => w.dismiss(w.sam, randomUUID(), src), /NOT_FOUND/);
-    await w.expectError(() => w.dismiss(w.sam, theirs, src), /NOT_FOUND/);
-    await w.expectError(() => w.dismiss(w.owner, mine, src), /FORBIDDEN/);
-    await w.expectError(() => w.dismiss(w.other, mine, src), /FORBIDDEN|NOT_FOUND/);
-    await w.expectError(() => w.dismiss(w.outsider, mine, src), /FORBIDDEN|NOT_FOUND/);
-    await w.expectError(() => w.dismiss(w.outsider, mine, src, { member: w.outsider, orgId: w.org2 }), /NOT_FOUND/);
-    await w.expectError(() => w.as('anon', null, async () => db.query('select public.fn_dismiss_my_leads_broken($1,$2,$3,$4)', [w.org, w.sam, mine, src])), /permission denied/);
-    expect(await w.dismissEvents(src)).toHaveLength(0);
+    const mineLedger = await w.ledger(mine, 'blocked', new Date(Date.now() - HOUR).toISOString());
+    const theirLedger = await w.ledger(theirs, 'blocked', new Date(Date.now() - HOUR).toISOString());
+    await w.expectError(() => w.dismiss(w.sam, mine, null), /^INVALID_INPUT$/);
+    await w.expectError(() => w.dismiss(w.sam, mine, src), /^NOT_FOUND$/);                     // an id that is no Broken source at all
+    await w.expectError(() => w.dismiss(w.sam, mine, theirLedger), /^NOT_FOUND$/);             // another lead's ledger id, even in the same org
+    await w.expectError(() => w.dismiss(w.sam, mine, mine), /^NOT_FOUND$/);                    // a lead id is not a source id
+    await w.expectError(() => w.dismiss(w.sam, null as unknown as string, src), /^INVALID_INPUT$/);
+    await w.expectError(() => w.dismiss(w.sam, randomUUID(), src), /^NOT_FOUND$/);
+    await w.expectError(() => w.dismiss(w.sam, theirs, src), /^NOT_FOUND$/);
+    await w.expectError(() => w.dismiss(w.owner, mine, src), /^FORBIDDEN$/);
+    await w.expectError(() => w.dismiss(w.other, mine, src), /^FORBIDDEN$/);
+    await w.expectError(() => w.dismiss(w.outsider, mine, src), /^FORBIDDEN$/);
+    await w.expectError(() => w.dismiss(w.outsider, mine, src, { member: w.outsider, orgId: w.org2 }), /^NOT_FOUND$/);
+    await w.expectError(() => w.as('anon', null, async () => db.query('select public.fn_dismiss_my_leads_broken($1,$2,$3,$4)', [w.org, w.sam, mine, src])), /^permission denied for function fn_(set_my_leads_pin|dismiss_my_leads_broken)$/);
+    for (const id of [src, theirLedger, mine]) expect(await w.dismissEvents(id)).toHaveLength(0);
+    expect(await w.dismiss(w.sam, mine, mineLedger)).toEqual({ ok: true });                    // its own source still works
+  });
+});
+
+it('rollback round trip: up, down, up leaves the old function, check and pins behaving, then restores the new ones', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('rt');
+    const fn = (name: string) => db.query(`select to_regprocedure('${name}') as f`).then((r) => r.rows[0].f);
+    const NEW = ['public.fn_set_my_leads_pin(uuid,uuid,uuid,text)', 'public.fn_dismiss_my_leads_broken(uuid,uuid,uuid,uuid)'];
+    for (const f of NEW) expect(await fn(f)).not.toBeNull();
+    await w.pin(w.sam, id, 'pin');
+    expect(await w.overrides(id)).toHaveLength(1);
+
+    // down
+    await db.query(rollbackSql);
+    for (const f of NEW) expect(await fn(f)).toBeNull();
+    expect(await w.overrides(id)).toHaveLength(0);                                              // the no-expiry pin was removed
+    const noExpiry = () => db.query('insert into public.my_leads_strip_overrides(org_id,member_id,property_id,pinned_at) values ($1,$2,$3,now())', [w.org, w.sam, id]);
+    await w.expectError(noExpiry, /^new row for relation "my_leads_strip_overrides" violates check constraint "my_leads_strip_overrides_one_kind_check"$/);
+    const old = await w.as('authenticated', w.sam, async () => (await db.query('select public.fn_set_my_leads_strip_override($1,$2,$3,$4) as r', [w.org, w.sam, id, 'call_today'])).rows[0].r as Json);
+    expect(old.ok).toBe(true);
+    expect(await w.overrides(id)).toHaveLength(1);
+    expect((await w.overrides(id))[0].pinned_until).not.toBeNull();                              // the old midnight-expiring pin works again
+
+    // up again
+    await db.query(migrationSql);
+    for (const f of NEW) expect(await fn(f)).not.toBeNull();
+    expect((await w.pin(w.sam, id, 'pin')).ok).toBe(true);
+    const row = (await w.overrides(id))[0];
+    expect(row.pinned_until).toBeNull();
+    const ledgerId = await w.ledger(id, 'blocked', new Date(Date.now() - HOUR).toISOString());
+    expect(await w.dismiss(w.sam, id, ledgerId)).toEqual({ ok: true });
+    await w.expectError(() => w.dismiss(w.sam, id, randomUUID()), /^NOT_FOUND$/);
   });
 });

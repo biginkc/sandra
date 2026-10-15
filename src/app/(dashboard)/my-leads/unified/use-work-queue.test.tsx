@@ -380,9 +380,25 @@ describe("errors", () => {
     await flush();
     expect(result.current.error).toBe("boom");
     expect(ids(result)).toEqual(["L1", "L2"]);
+    expect(result.current.stale).toBe(true); // the rows belong to the earlier view
     await advance(30_000);
     expect(ids(result)).toEqual(["W"]);
     expect(result.current.error).toBeNull();
+    expect(result.current.stale).toBe(false);
+  });
+
+  it("a failed navigation read marks the rows stale until a retry succeeds", async () => {
+    const server = makeServer().addMany("L", 2).add("W", { place: "their_move", reason: "in_drip" });
+    const { result, loadPage } = setup(server);
+    expect(result.current.stale).toBe(false);
+    loadPage.mockResolvedValueOnce({ ok: false, message: "boom" });
+    await act(async () => result.current.setTab("waiting"));
+    await flush();
+    expect(result.current.stale).toBe(true);
+    await act(async () => result.current.retryNow());
+    await flush();
+    expect(result.current.stale).toBe(false);
+    expect(ids(result)).toEqual(["W"]);
   });
 });
 
@@ -447,6 +463,24 @@ describe("afterAction", () => {
     expect(ids(result)).toEqual(["L1", "L2"]);
     expect(result.current.error).toBe("My Leads could not refresh.");
     expect(loadPage).not.toHaveBeenCalled();
+  });
+
+  it("an older facts response cannot overwrite a newer one for the same lead", async () => {
+    const server = makeServer().addMany("L", 2);
+    const { result, loadFacts } = setup(server);
+    const slow = deferred<LoadWorkFactsResult>();
+    const oldFacts = server.facts(["L1"]); // taken before the write
+    loadFacts.mockImplementationOnce(() => slow.promise);
+    const first = result.current.afterAction("L1");
+    await flush();
+    server.set("L1", { reason: "due", headline: { marker: "new" } });
+    await act(async () => void (await result.current.afterAction("L1"))); // newer read, default impl
+    expect(result.current.rows.find((r) => r.facts.propertyId === "L1")!.facts.reason).toBe("due");
+    await act(async () => {
+      slow.resolve({ ok: true, facts: oldFacts });
+      await first;
+    });
+    expect(result.current.rows.find((r) => r.facts.propertyId === "L1")!.facts.reason).toBe("due");
   });
 
   it("a lead the server no longer knows is removed with a notice", async () => {
@@ -523,5 +557,6 @@ describe("pinned deep-linked lead", () => {
     server.set("P", { place: "their_move", reason: "texted_last" });
     await advance(30_000);
     expect(result.current.rows.some((r) => r.pinned)).toBe(false);
+    expect(result.current.notice).toBe("Moved to Waiting on them");
   });
 });
