@@ -7779,6 +7779,105 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(row).toBeTruthy();
             expect(row.outcome).toBe("skipped");
           });
+
+          // Round 14: claim pre-check reads status + lease.
+          it("expired 'processing' claim: reclaimed, classified once, hot_text recorded", async () => {
+            const state = createMockState();
+            state.aiClaims.push({ id: "claim-exp", inbound_message_id: "inbound-r14-exp", response_kind: "sms_ai_responder_v1", status: "processing", lease_expires_at: new Date(Date.now() - 60_000).toISOString() } as never);
+            const r = await heldRun(state, "inbound-r14-exp", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(r.classifierCalls).toBe(1);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("live-lease 'processing' claim: no classify, nothing recorded", async () => {
+            const state = createMockState();
+            state.aiClaims.push({ id: "claim-live", inbound_message_id: "inbound-r14-live", response_kind: "sms_ai_responder_v1", status: "processing", lease_expires_at: new Date(Date.now() + 60_000).toISOString() } as never);
+            const r = await heldRun(state, "inbound-r14-live", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(r.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          });
+          it("completed claim: no classify, nothing recorded", async () => {
+            const state = createMockState();
+            state.aiClaims.push({ id: "claim-done", inbound_message_id: "inbound-r14-done", response_kind: "sms_ai_responder_v1", status: "completed", lease_expires_at: new Date(Date.now() - 60_000).toISOString() } as never);
+            const r = await heldRun(state, "inbound-r14-done", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(r.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          });
+        });
+
+        describe("round 14: normal path defers the price keyword to the shared hot decision", () => {
+          const PRICE = "What's your price?";
+          const normalRun = async (
+            state: MockState,
+            id: string,
+            opts: { outcome?: string; jev?: boolean; failJev?: boolean; body?: string } = {},
+          ) => {
+            if (opts.jev !== false) {
+              state.config.classifier_provider = "jev";
+              state.config.classifier_mode = "automatic";
+            }
+            state.config.escalation_keywords = ["price", "offer", "how much", "your offer"];
+            state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+            const supabase = createMockSupabase(state);
+            installSendMock(state);
+            seedInboundMessage(state, { id, body: opts.body ?? PRICE });
+            pipelineSteps.recordStep.mockClear();
+            const originalFetch = globalThis.fetch;
+            const fetchMock = vi.fn(async () => opts.failJev
+              ? ({ ok: false, status: 500, json: async () => ({}) })
+              : ({ ok: true, status: 200, json: async () => ({ answers: { outcome: { choice: opts.outcome ?? "unclear", confidence: 0.97 }, escalation_reason: { choice: "not_applicable" }, ...nurtureAnswers } }) }));
+            vi.stubGlobal("fetch", fetchMock);
+            try {
+              const result = await dispatchAiResponse(supabase as never, {
+                contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: opts.body ?? PRICE,
+                inboundMessageId: id, propertyId: PROPERTY_ID,
+              }, { anthropic: {} as never });
+              const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { kind?: string; name: string; result?: string; detail?: Record<string, unknown> });
+              return { result, steps, classifierCalls: fetchMock.mock.calls.length };
+            } finally { vi.stubGlobal("fetch", originalFetch); }
+          };
+
+          it("Jev opted_out + price keyword: no keyword hold, no hot flag, no reply", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r14-oo", { outcome: "opted_out", body: "STOP, what's your price" });
+            expect(r.result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.last_ai_escalation_reason).not.toBe("keyword:price_offer");
+            expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.deferred).toBe("shared_hot_decision");
+            expect(r.steps.some((x) => x.name === "hot_wins")).toBe(false);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it.each(["dnc", "wrong_number", "bad_number"])("Jev %s + price keyword: not hot", async (outcome) => {
+            const state = createMockState();
+            const r = await normalRun(state, `inbound-r14-${outcome}`, { outcome, body: "wrong number, what's your price" });
+            expect(r.result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.last_ai_escalation_reason).not.toBe("keyword:price_offer");
+            expect(r.steps.some((x) => x.name === "hot_wins")).toBe(false);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("Jev unclear + price keyword: held keyword:price_offer, no reply", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r14-unclear", { outcome: "unclear" });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.needs_human_attention).toBe(true);
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
+            expect(r.steps.find((x) => x.name === "hot_wins")?.result).toBe("held");
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("Jev failure + price keyword: keyword alone holds hot", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r14-fail", { failJev: true });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("legacy (non-Jev) config keeps the up-front keyword gate", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r14-legacy", { jev: false });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(r.classifierCalls).toBe(0);
+            expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.deferred).toBeUndefined();
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
         });
       });
 

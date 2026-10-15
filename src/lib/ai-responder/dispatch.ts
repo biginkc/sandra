@@ -609,12 +609,29 @@ async function dispatchAiResponseCore(
   //    signal on lead detail regardless). If no config and no match,
   //    we'll skip below.
   // --------------------------------------------------------------------------
-  const keywordEscalation = await applyKeywordEscalation(supabase, {
-    propertyId: input.propertyId,
-    inboundBody: input.inboundBody,
-    escalationKeywords: config?.escalation_keywords ?? null,
-    runContext: deps.runContext,
-  });
+  // PR 2: with Jev automatic, the price_offer keyword is NOT a hot flag on its
+  // own here. It is decided after the consent / suppression gates and the
+  // classification, by the shared hot decision, so "STOP texting me, what's
+  // your price" stays an opt-out (stop / DNC / wrong / bad number win).
+  const deferPriceKeyword =
+    !!config && config.active === true && isJevAutomatic(config) &&
+    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+  if (deferPriceKeyword) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "pass",
+      detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
+    }, deps.runContext);
+  }
+  const keywordEscalation = deferPriceKeyword
+    ? ({ escalated: false } as const)
+    : await applyKeywordEscalation(supabase, {
+        propertyId: input.propertyId,
+        inboundBody: input.inboundBody,
+        escalationKeywords: config?.escalation_keywords ?? null,
+        runContext: deps.runContext,
+      });
 
   if (keywordEscalation.escalated) {
     return { outcome: "escalated", reason: keywordEscalation.reason };
@@ -1211,6 +1228,35 @@ async function classifyAndHandleNonRouteOutcomes(
   // that also says "price or offer" / "call me" is a hot seller. It is held
   // for Jarrad (hot hold → one Slack + one text); no reply, no disposition.
   // new_lead promotions and escalations keep their own hot paths.
+  // The deferred price_offer keyword (Jev automatic): hot unless stop / DNC /
+  // wrong / bad number won; a promotion or a hot escalate route keeps its own
+  // hot path. If Jev failed, the keyword alone marks hot (alert only).
+  const priceKeyword =
+    !!config && isJevAutomatic(config) &&
+    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+  if (
+    priceKeyword &&
+    classification.kind !== "jev_promote_new_lead" &&
+    !(classification.kind === "jev_route" && classification.route.kind === "escalate") &&
+    !stopOrDncWins(classification) &&
+    !hotWinsOver(classification)
+  ) {
+    const keywordReason = `keyword:${HOT_KEYWORD_TIER}`;
+    await trace(supabase, {
+      kind: "hold",
+      name: "hot_wins",
+      result: "held",
+      detail: { kind: classification.kind, keyword: HOT_KEYWORD_TIER },
+    }, runCtx);
+    const kwFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, keywordReason, runCtx);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      flagOk: kwFlagOk,
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason: keywordReason } };
+  }
+
   // Hot wins ONLY over nurture and not-interested (at or below their cutoff).
   // Stop / DNC / wrong-number always beat hot (Jarrad's approved order puts
   // "asked to stop" above "talked price"): their human review paths run.
@@ -2955,10 +3001,15 @@ async function classifyOnlyForHotText(
     if (!input.conversationId) return;
     const { data: claim, error: claimError } = await supabase
       .from("ai_response_claims")
-      .select("id")
+      .select("id, status, lease_expires_at")
       .eq("inbound_message_id", inboundId)
       .limit(1);
-    if (claimError || (claim ?? []).length > 0) return;
+    if (claimError) return;
+    // Handled, or another run holds a live lease: stop. An expired
+    // 'processing' claim (a crashed run) is reclaimed below; the
+    // classification-run check still prevents a second paid Jev call.
+    const prior = (claim ?? [])[0] as { status: string; lease_expires_at: string | null } | undefined;
+    if (prior && (prior.status !== "processing" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode")

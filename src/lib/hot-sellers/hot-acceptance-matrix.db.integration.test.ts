@@ -37,7 +37,7 @@ const admin = createClient<Database>(process.env.TEST_SUPABASE_URL!, process.env
 
 const created = { orgs: [] as string[], users: [] as string[] };
 const realFetch = globalThis.fetch;
-let jevOutcome: "new_lead" | "nurture" | "unclear" | "bad_number" | "opted_out" | "dnc" = "new_lead";
+let jevOutcome: "new_lead" | "nurture" | "unclear" | "bad_number" | "wrong_number" | "opted_out" | "dnc" = "new_lead";
 // Set explicitly for EVERY dispatch (no hot default): a "non-hot" follow-up must say so.
 let jevEscalation = "not_applicable";
 let jevTimeframe: string | null = null;
@@ -269,7 +269,7 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
   /** Both Jev answers are explicit on every call: outcome and escalation reason (HOT_ESC or NON_HOT_ESC). */
   const dispatch = async (
     inboundMessageId: string,
-    jev: "new_lead" | "nurture" | "unclear" | "bad_number" | "opted_out" | "dnc",
+    jev: "new_lead" | "nurture" | "unclear" | "bad_number" | "wrong_number" | "opted_out" | "dnc",
     escalation: string,
     opts: { timeframe?: string } = {},
   ) => {
@@ -1436,6 +1436,61 @@ const ROWS: Row[] = [
       expect((await h.alertPass()).sent).toBe(2);
       expect((await h.alertPass()).sent).toBe(0);
       await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "50",
+    name: "UNFLAGGED lead + \"STOP, what's your price\" and Jev says opted_out, through real dispatch (normal path): the price keyword is deferred and stop wins - no hot flag, no hot_wins hold, the opt-out review row is created as today, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("STOP, what's your price");
+      const result = await h.dispatch(a, "opted_out", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect(await reviewRows(h)).toBeGreaterThanOrEqual(1);
+      const { data: prop } = await admin.from("properties").select("last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop?.last_ai_escalation_reason).not.toBe("keyword:price_offer");
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "51",
+    name: "UNFLAGGED lead + a price keyword and Jev says dnc, through real dispatch (normal path): DNC wins - not hot, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("put me on the do not call list, what's your price anyway");
+      const result = await h.dispatch(a, "dnc", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "52",
+    name: "UNFLAGGED lead + a price keyword and Jev says wrong_number, through real dispatch (normal path): wrong number wins - not hot, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("wrong number, what's your price though");
+      const result = await h.dispatch(a, "wrong_number", NON_HOT_ESC);
+      expect(result).not.toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "53",
+    name: "UNFLAGGED lead + \"What's your price?\" and Jev says unclear with NO escalation, through real dispatch (normal path): the price keyword alone is hot - held keyword:price_offer, one hot hold alert (1 Slack + 1 SMS), no reply, no hand-off",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("What's your price?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "keyword:price_offer" });
+      expect(jevCalls).toBe(1);
+      expect(await hotWinsCount(a)).toBe(1);
+      await expectHotHeld(h, a);
     },
   },
 ];
