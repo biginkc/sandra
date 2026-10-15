@@ -396,3 +396,55 @@ describe("Codex round 11", () => {
     expect(reloaded.ok && reloaded.holds.map((h) => h.id).slice(0, 2)).toEqual([u(4), u(3)]); // a reload shows both at the top
   });
 });
+
+describe("Codex round 12: one snapshot rule for every input", () => {
+  const walkFrom = async (tables: Record<string, Row[]>, snap: string) => {
+    const first = await loadEligibleHolds(db(tables).client, "org", snap);
+    if (!first.ok) throw new Error(first.error);
+    const page1 = pageHolds(first.holds, null, 1, snap);
+    return { page1, next: async () => {
+      const ids: string[] = [];
+      let cursor = page1.nextCursor;
+      while (cursor) {
+        const s = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
+        ids.push(...s!.holds.map((h) => h.id));
+        cursor = s!.nextCursor;
+      }
+      return ids;
+    } };
+  };
+
+  it("an escalation AFTER the snapshot on an older flag does not move the hold ahead of the cursor", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))] };
+    const snap = normalizeInstant(t(600))!;
+    const { page1, next } = await walkFrom(tables, snap);
+    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
+    tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, last_ai_escalation_at: t(950) } : p)); // flag time kept
+    expect(await next()).toEqual([u(2), u(3)]);
+    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
+    expect(reloaded.ok && reloaded.holds[0].id).toBe(u(3)); // a reload sees the escalation
+  });
+
+  it("a message added after the snapshot does not change draft resolution within the walk; it does after reload", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(500)), flagged(2, t(400))],
+      ai_reply_drafts: [draft(1, { conversation_id: u(3, 9), created_at: t(450) })], // no property yet: unverifiable
+      messages: [],
+    };
+    const snap = normalizeInstant(t(600))!;
+    const first = await loadEligibleHolds(db(tables).client, "org", snap);
+    expect(first.ok && first.unverified).toBe(1);
+    const { next } = await walkFrom(tables, snap);
+    tables.messages = [message(1, { conversation_id: u(3, 9), property_id: u(30), created_at: t(900) })];
+    expect(await next()).toEqual([u(2)]); // the late message does not make the draft eligible mid-walk
+    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
+    expect(reloaded.ok && reloaded.holds.map((h) => h.id)).toContain(u(30));
+  });
+
+  it("a DNC lock set after the snapshot still hides the hold (the lock is never snapshotted)", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))] };
+    const { next } = await walkFrom(tables, normalizeInstant(t(600))!);
+    tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, is_dnc_locked: true } : p));
+    expect(await next()).toEqual([u(2)]);
+  });
+});

@@ -33,6 +33,16 @@ import {
 import type { OpenHold, PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const CHUNK = 100;
+
+/**
+ * The ONE snapshot rule for a cursor walk: every timestamp that feeds eligibility or ordering is read "as of"
+ * the snapshot. `ok(t)` = the row existed by then (null/unknown counts as existing); `clamp(t)` = the value, or null
+ * if it is newer than the snapshot. A null snapshot (no walk) reads everything. The DNC lock is never snapshotted.
+ */
+export function asOf(snapshotAt: string | null) {
+  const ok = (t: string | null | undefined) => snapshotAt === null || !t || compareInstants(t, snapshotAt) <= 0;
+  return { ok, clamp: (t: string | null | undefined): string | null => (t && ok(t) ? t : null) };
+}
 const LATEST_RUN_CHUNK = 200;
 
 export const HOLDS_LOAD_ERROR = "Waiting list could not be loaded. Reload to retry.";
@@ -83,7 +93,9 @@ export async function resolveDraftProperties(
   supabase: LooseSupabase,
   orgId: string,
   drafts: readonly HoldDraftRow[],
+  snapshotAt: string | null = null,
 ): Promise<Map<string, Set<string>> | null> {
+  const snap = asOf(snapshotAt);
   const runIds = uniq(drafts.flatMap((d) => (d.run_id ? [d.run_id] : [])));
   const msgIds = uniq(drafts.flatMap((d) => (d.inbound_message_id ? [d.inbound_message_id] : [])));
   const convIds = uniq(drafts.flatMap((d) => (d.conversation_id ? [d.conversation_id] : [])));
@@ -95,24 +107,24 @@ export async function resolveDraftProperties(
 
   await Promise.all([
     ...chunks(runIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ id: string; property_id: string | null }>(() =>
-        supabase.from("pipeline_runs").select("id, property_id").eq("org_id", orgId).in("id", ids),
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null; started_at: string }>(() =>
+        supabase.from("pipeline_runs").select("id, property_id, started_at").eq("org_id", orgId).in("id", ids),
       );
       if (res.error) failed = true;
-      else for (const r of res.rows) runProperty.set(r.id, r.property_id);
+      else for (const r of res.rows) if (snap.ok(r.started_at)) runProperty.set(r.id, r.property_id);
     }),
     ...chunks(msgIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ id: string; property_id: string | null }>(() =>
-        supabase.from("messages").select("id, property_id").eq("org_id", orgId).in("id", ids),
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null; created_at: string }>(() =>
+        supabase.from("messages").select("id, property_id, created_at").eq("org_id", orgId).in("id", ids),
       );
       if (res.error) failed = true;
-      else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
+      else for (const m of res.rows) if (snap.ok(m.created_at)) msgProperty.set(m.id, m.property_id);
     }),
     ...chunks(convIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string }>(() =>
+      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string; created_at: string }>(() =>
         supabase
           .from("messages")
-          .select("id, conversation_id, property_id")
+          .select("id, conversation_id, property_id, created_at")
           .eq("org_id", orgId)
           .in("conversation_id", ids)
           .not("property_id", "is", null),
@@ -120,6 +132,7 @@ export async function resolveDraftProperties(
       if (res.error) failed = true;
       else
         for (const m of res.rows) {
+          if (!snap.ok(m.created_at)) continue;
           const set = convProperties.get(m.conversation_id) ?? new Set<string>();
           set.add(m.property_id);
           convProperties.set(m.conversation_id, set);
@@ -152,8 +165,8 @@ export async function loadHoldActivity(
   orgId: string,
   holds: OpenHold<PipelineRun>[],
   links: { convsByProperty: Map<string, Set<string>>; draftRunsByProperty: Map<string, Set<string>> },
-  /** Snapshot: ignore runs and steps after this instant (normalized), so a cursor's order never changes. */
-  asOf: string | null = null,
+  /** Snapshot: runs and steps after this instant are ignored (see asOf). */
+  snapshotAt: string | null = null,
 ): Promise<OpenHold<RunWithSteps>[] | null> {
   const propertyIds = holds.map((h) => h.id);
   const msgIds = uniq(holds.flatMap((h) => h.message_ids ?? []));
@@ -202,8 +215,8 @@ export async function loadHoldActivity(
   ]);
   if (failed) return null;
 
-  const upTo = (at: string) => asOf === null || compareInstants(at, asOf) <= 0;
-  const all = [...runs.values()].filter((r) => upTo(r.started_at));
+  const snap = asOf(snapshotAt);
+  const all = [...runs.values()].filter((r) => snap.ok(r.started_at));
 
   // Every (run -> hold) link from every path: property, source message, draft run, property-less conversation run.
   const candidates = new Map<string, string[]>();
@@ -230,7 +243,7 @@ export async function loadHoldActivity(
   );
   if (stepResults.some((r) => r.error)) return null;
   for (const st of stepResults.flatMap((r) => r.rows)) {
-    if (!upTo(st.created_at)) continue;
+    if (!snap.ok(st.created_at)) continue;
     const list = steps.get(st.run_id) ?? [];
     list.push(st);
     steps.set(st.run_id, list);
@@ -296,18 +309,22 @@ export type EligibleHolds =
  * `asOf` (normalized instant) makes the list a SNAPSHOT: sources created, flags raised, runs started and steps
  * written after it are ignored, so the order a cursor walks never changes under it. A reload takes a new snapshot.
  */
-export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, asOf: string | null = null): Promise<EligibleHolds> {
+export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, snapshotAt: string | null = null): Promise<EligibleHolds> {
   const fail = { ok: false as const, error: HOLDS_LOAD_ERROR };
   const loaded = await loadHoldSources(supabase, orgId);
   if (!loaded) return fail;
-  const upTo = (at: string | null | undefined) => asOf === null || !at || compareInstants(at, asOf) <= 0;
+  const snap = asOf(snapshotAt);
   const sources: HoldSources = {
-    properties: loaded.properties.filter((p) => upTo(p.needs_human_attention_since ?? p.last_ai_escalation_at)),
-    decisions: loaded.decisions.filter((d) => upTo(d.created_at)),
-    reviews: loaded.reviews.filter((r) => upTo(r.created_at)),
-    drafts: loaded.drafts.filter((d) => upTo(d.created_at)),
+    // A flag raised after the snapshot is a new hold (not in this walk); a later escalation on an older flag is
+    // read as of the snapshot (the newer value is ignored), so it cannot move the hold ahead of the cursor.
+    properties: loaded.properties
+      .filter((p) => (p.needs_human_attention_since ? snap.ok(p.needs_human_attention_since) : snap.ok(p.last_ai_escalation_at)))
+      .map((p) => ({ ...p, last_ai_escalation_at: snap.clamp(p.last_ai_escalation_at) })),
+    decisions: loaded.decisions.filter((d) => snap.ok(d.created_at)),
+    reviews: loaded.reviews.filter((r) => snap.ok(r.created_at)),
+    drafts: loaded.drafts.filter((d) => snap.ok(d.created_at)),
   };
-  const candidates = await resolveDraftProperties(supabase, orgId, sources.drafts);
+  const candidates = await resolveDraftProperties(supabase, orgId, sources.drafts, snapshotAt);
   if (!candidates) return fail;
 
   const every = uniq([
@@ -349,7 +366,7 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, 
   }
 
   const base = deriveOpenHolds({ properties, decisions, reviews, drafts, runs: [] });
-  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty }, asOf);
+  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty }, snapshotAt);
   if (!withRuns) return fail;
   return { ok: true, holds: sortNewestFirst(withRuns), unverified };
 }
