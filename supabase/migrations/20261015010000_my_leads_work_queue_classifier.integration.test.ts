@@ -13,7 +13,12 @@ import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url'
 const migration = (() => {
   const sql = readFileSync(new URL('./20261015010000_my_leads_work_queue_classifier.sql', import.meta.url), 'utf8');
   if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error('transaction wrapper changed');
-  return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
+  const strip = (t: string) => t.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
+  // Later migrations that replace the classifier, applied after this one by the shipped-body variant
+  // (20261015030000_my_leads_work_classified_perf.integration.test.ts); empty for this suite on its own.
+  const extra = (process.env.MY_LEADS_CLASSIFIER_EXTRA_MIGRATIONS ?? '').split(',').filter(Boolean)
+    .map((f) => strip(readFileSync(new URL(`./${f}`, import.meta.url), 'utf8')));
+  return [strip(sql), ...extra].join('\n;\n');
 })();
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;

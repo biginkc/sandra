@@ -15,7 +15,10 @@ const read = (file: string) => {
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
 const classifierSql = read('20261015010000_my_leads_work_queue_classifier.sql');
-const migrationSql = read('20261015020200_my_leads_work_facts_zip_signed_touch.sql');
+// Later migrations that replace the classifier are applied with this one by the shipped-body variant
+// (20261015030000_my_leads_work_classified_perf.integration.test.ts); empty for this suite on its own.
+const migrationSql = [read('20261015020200_my_leads_work_facts_zip_signed_touch.sql'),
+  ...(process.env.MY_LEADS_CLASSIFIER_EXTRA_MIGRATIONS ?? '').split(',').filter(Boolean).map(read)].join('\n;\n');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;
 const HOUR = 60 * MIN;

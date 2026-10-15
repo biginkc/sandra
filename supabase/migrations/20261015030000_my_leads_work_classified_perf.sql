@@ -2,10 +2,11 @@
 -- Profiling (EXPLAIN ANALYZE, 2,000 prod-shaped leads) put ~3.6 s of ~4.2 s in the handled-reply check, which scanned the whole
 -- message set once per latest inbound (and again per stamped reply), and ~0.4 s in a nested loop over my_leads_touch_facts,
 -- which also re-projected the queue. This replaces only the function body:
---   hdt   handled-by-a-text is one join over mf, the reply-to stamp check an anti-join (was a correlated scan per inbound)
---   evx   latest handling user event per lead; "an event after T" is "the latest is after T" (was a scan of ev per row)
---   hx    latest accepted human outbound per lead, the same rewrite for failure supersession in bko
---   tf    last_touch_at / last_call_at from the last-touch sources lt already reads (tu), no second queue projection
+--   hdt       handled-by-a-text is one join of inb with mf grouped per lead (was a correlated scan of mf per inbound)
+--   stamp_at  the stamped inbound's time, one correlated primary-key lookup per stamped outbound (was a scan of mf)
+--   evx, hx   latest handling event / accepted human text per lead; "one after T" is "the latest is after T"
+--   tu, tf    last_touch_at / last_call_at from the last-touch sources (texts by created_at, as my_leads_touch_facts),
+--             while lt keeps ordering texts by eff_at; no second queue projection
 -- Decision table, thresholds, handling rules, ordering, next_change_at, facts keys and grants are unchanged.
 -- Rollback: supabase/rollbacks/20261015030000_my_leads_work_classified_perf.sql.
 begin;
@@ -76,7 +77,7 @@ language sql stable security definer set search_path = '' as $$
       -- A scheduled/campaign text created days before it was sent is measured from the send.
       case when x.direction = 'outbound' then coalesce(x.sent_at, x.delivered_at, x.created_at) else x.created_at end as eff_at,
       -- created_at of the inbound an outbound text is stamped as replying to, when that inbound is one of this lead's texts
-      -- (the same attribution as mx); one primary-key lookup per stamped outbound
+      -- (the same attribution as mx above): one correlated primary-key lookup per stamped outbound
       case when x.direction = 'outbound' and x.stamp ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (
         select sm.created_at from public.messages sm
         where sm.id = x.stamp::uuid and sm.org_id = p_org and sm.channel = 'sms' and sm.direction = 'inbound' and sm.created_at <= p_at
@@ -120,7 +121,7 @@ language sql stable security definer set search_path = '' as $$
     order by lead_id, ts desc, mid desc nulls last),
   -- Latest inbounds answered by a later accepted human/AI text: one hash join of inb with mf, grouped per lead
   -- (was a scan of mf per inbound, and of mf again per stamped reply). A text stamped as replying to an inbound older
-  -- than this one does not answer it (stamp_at is that inbound's time).
+  -- than this one does not answer it (stamp_at is that inbound's time, from the correlated lookup in mf).
   hdt as (
     select i.lead_id
     from inb i
@@ -205,30 +206,33 @@ language sql stable security definer set search_path = '' as $$
     from ap group by lead_id),
   -- What produced the last touch: the greatest-timestamp source among the ones my_leads_touch_facts counts
   -- (sent/delivered outbound texts, attempts, outbound calls, notes). Ties: texts, then calls/attempts, then notes.
+  -- Texts are timed by eff_at (when they went out, design 16), so a campaign created Monday and sent Thursday beats a Wednesday note.
+  -- tu: every touch, ts for the last-touch kind (texts by eff_at) and touch_ts for the touch facts (texts by created_at,
+  -- exactly as my_leads_touch_facts in 20261005150000 counts them; keep the two source lists in step).
   tu as materialized (
-      select m.lead_id, m.created_at as ts, 1 as pri,
+      select m.lead_id, m.eff_at as ts, m.created_at as touch_ts, 1 as pri,
         case m.cls when 'human' then 'your_text' when 'ai' then 'sandra_reply' when 'drip' then 'drip_text'
           when 'campaign' then 'campaign_text' else 'other' end as kind
       from mf m where m.direction = 'outbound' and m.status in ('sent', 'delivered')
       union all
-      select a.property_id, a.occurred_at, 2,
+      select a.property_id, a.occurred_at, a.occurred_at, 2,
         case a.outcome when 'reached' then 'call_reached' when 'no_answer' then 'call_no_answer' when 'voicemail' then 'voicemail' else 'other' end
       from public.acquisition_attempts a
       where a.org_id = p_org and a.property_id in (select property_id from base) and a.occurred_at <= p_at
       union all
-      select c.property_id, c.started_at, 3, case when coalesce(c.talk_duration_seconds, 0) > 0 then 'call_reached' else 'call_no_answer' end
+      select c.property_id, c.started_at, c.started_at, 3, case when coalesce(c.talk_duration_seconds, 0) > 0 then 'call_reached' else 'call_no_answer' end
       from public.call_activities c
       where c.org_id = p_org and c.property_id in (select property_id from base) and c.direction is distinct from 'inbound'
         and c.started_at is not null and c.started_at <= p_at
       union all
-      select n.property_id, n.created_at, 4, 'note'
+      select n.property_id, n.created_at, n.created_at, 4, 'note'
       from public.lead_notes n
       where n.org_id = p_org and n.property_id in (select property_id from base) and n.created_at <= p_at),
   lt as (select distinct on (u.lead_id) u.lead_id, u.kind from tu u order by u.lead_id, u.ts desc, u.pri),
-  -- The touch facts (my_leads_touch_facts) from the same sources, without re-projecting the queue: last_touch_at is the
-  -- latest of all of them, last_call_at of attempts and outbound calls only.
+  -- The touch facts of my_leads_touch_facts (20261005150000) from tu, without re-projecting the queue: last_touch_at is the
+  -- latest touch, last_call_at the latest attempt or outbound call.
   tf as (
-    select u.lead_id as property_id, max(u.ts) as last_touch_at, max(u.ts) filter (where u.pri in (2, 3)) as last_call_at
+    select u.lead_id as property_id, max(u.touch_ts) as last_touch_at, max(u.touch_ts) filter (where u.pri in (2, 3)) as last_call_at
     from tu u group by u.lead_id),
   nt as (
     select distinct t.related_property_id as lead_id

@@ -182,10 +182,11 @@ language sql stable security definer set search_path = '' as $$
     from ap group by lead_id),
   -- What produced the last touch: the greatest-timestamp source among the ones my_leads_touch_facts counts
   -- (sent/delivered outbound texts, attempts, outbound calls, notes). Ties: texts, then calls/attempts, then notes.
+  -- Texts are timed by eff_at (when they went out, design 16), so a campaign created Monday and sent Thursday beats a Wednesday note.
   lt as (
     select distinct on (u.lead_id) u.lead_id, u.kind
     from (
-      select m.lead_id, m.created_at as ts, 1 as pri,
+      select m.lead_id, m.eff_at as ts, 1 as pri,
         case m.cls when 'human' then 'your_text' when 'ai' then 'sandra_reply' when 'drip' then 'drip_text'
           when 'campaign' then 'campaign_text' else 'other' end as kind
       from mf m where m.direction = 'outbound' and m.status in ('sent', 'delivered')
