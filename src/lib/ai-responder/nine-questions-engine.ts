@@ -29,22 +29,34 @@ export type ClassifierEngine = (typeof CLASSIFIER_ENGINES)[number];
 export const NINE_SCHEMA_VERSION = "nine_questions_v1";
 export const NINE_POLICY_VERSION = "2026-10-15-nine-questions";
 
+/** Hold reason when the engine switch cannot be read: neither engine runs, a person looks. */
+export const CLASSIFIER_ENGINE_UNREADABLE = "classifier_engine_unreadable";
+
+/** Only "the column is not there yet" (a database before the migration) may mean outcome_v1. */
+export function isMissingEngineColumnError(error: { code?: string | null; message?: string | null }): boolean {
+  if (error.code === "42703") return true;
+  const m = error.message ?? "";
+  return /classifier_engine/i.test(m) && /(does not exist|could not find|schema cache)/i.test(m);
+}
+
 /**
  * The org's engine. Read on its own (not in the big config select) so that code
- * reaching a database without the column yet, or any read error, keeps today's
- * eight-answer path instead of breaking the whole responder config read.
+ * reaching a database without the column yet keeps today's eight-answer path.
+ * Any OTHER read error is `unreadable`: the caller must hold the message for a
+ * person and run neither engine (the switch state is unknown).
  */
 export async function readClassifierEngine(
   supabase: SupabaseClient<Database>,
   orgId: string,
-): Promise<ClassifierEngine> {
+): Promise<ClassifierEngine | "unreadable"> {
   const { data, error } = await supabase
     .from("ai_responder_configs")
     .select("classifier_engine")
     .eq("org_id", orgId)
     .eq("active", true)
     .maybeSingle();
-  if (error || !data) return "outcome_v1";
+  if (error) return isMissingEngineColumnError(error) ? "outcome_v1" : "unreadable";
+  if (!data) return "outcome_v1";
   return data.classifier_engine === "nine_questions" ? "nine_questions" : "outcome_v1";
 }
 

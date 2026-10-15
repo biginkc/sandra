@@ -16,6 +16,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "nine_asked_stop",
   "nine_needs_person",
   "reply_text_not_approved",
+  "classifier_engine_unreadable",
   "drip_switch_off", // tape step only (nurture auto-drip switch off); never a hold
   "hot_lead",
   "price_or_offer",

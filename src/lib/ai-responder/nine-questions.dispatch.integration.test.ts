@@ -642,6 +642,60 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(queue).toEqual([]);
   });
 
+  /** The same client, except the engine-switch read answers with the given error. */
+  function withEngineReadError(error: { code?: string; message: string }) {
+    return new Proxy(supabase, {
+      get(target, prop, receiver) {
+        if (prop !== "from") return Reflect.get(target, prop, receiver);
+        return (table: string) => {
+          const builder = target.from(table as never) as unknown as { select: (...a: unknown[]) => unknown };
+          return new Proxy(builder, {
+            get(b, p2) {
+              if (p2 !== "select") return Reflect.get(b, p2);
+              return (cols: unknown, ...rest: unknown[]) => {
+                if (table === "ai_responder_configs" && cols === "classifier_engine") {
+                  const chain: Record<string, unknown> = {};
+                  chain.eq = () => chain;
+                  chain.maybeSingle = async () => ({ data: null, error });
+                  return chain;
+                }
+                return b.select(cols, ...rest);
+              };
+            },
+          });
+        };
+      },
+    });
+  }
+
+  it("engine switch unreadable (not a missing column): held as classifier_engine_unreadable, neither engine runs", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, "maybe later");
+    const outcome = await dispatchAiResponse(
+      withEngineReadError({ code: "57014", message: "statement timeout" }),
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "maybe later", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect(outcome).toEqual({ outcome: "escalated", reason: "classifier_engine_unreadable" });
+    expect(jevCalls).toHaveLength(0);
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("classifier_engine_unreadable");
+  });
+
+  it("engine column missing (pre-migration): today's path, no hold for it, nine never asked", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, "maybe later");
+    await dispatchAiResponse(
+      withEngineReadError({ code: "42703", message: "column ai_responder_configs.classifier_engine does not exist" }),
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "maybe later", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect(jevCalls.every((c) => !("our_last_text_to_homeowner" in c.state))).toBe(true);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).not.toBe("classifier_engine_unreadable");
+  });
+
   it("nine engine in shadow mode: decision recorded, today's path still acts", async () => {
     await seedOrg({ mode: "shadow" });
     const lead = await seedLead();

@@ -36,7 +36,11 @@ describe("nine-question tape tag", () => {
   });
 
   it("a shadow run (shadow_engine) reads as old-engine", () => {
-    expect(tapeTagForRun(run([step({ shadow_engine: "nine_questions", answer: "hostile", outcome: "nurture" })]))?.label).toBe("Maybe later");
+    const shadow: PipelineRunStep = { ...step({ shadow_engine: "nine_questions", answer: "hostile", probabilities: { hostile: 0.9 } }), id: "s0", seq: 0, kind: "shadow" as PipelineRunStep["kind"], name: "nine_classify" };
+    const real = { ...step({ outcome: "nurture" }), id: "s1", seq: 1 };
+    expect(tapeTagForRun(run([shadow, real]))?.label).toBe("Maybe later");
+    // Belt and braces: a shadow detail on a jev/classify step is skipped too.
+    expect(tapeTagForRun(run([step({ shadow_engine: "nine_questions", outcome: "hostile" })]))).toBeNull();
   });
 
   it.each([

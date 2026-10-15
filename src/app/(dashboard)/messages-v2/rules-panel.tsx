@@ -57,7 +57,8 @@ const GROUPS: RuleGroup[] = [
   },
 ];
 
-const HOT_DETAIL = "Sandra marks this seller as a lead for a person to follow up. She never texts them back on her own.";
+// Same sentence as the PR 2 "Open to selling" row; its approval status is whatever PR 2 gives it.
+const HOT_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.";
 
 /**
  * Nine-question rows. Reused sentences carry no marker; every row marked PLACEHOLDER is new text.
@@ -89,6 +90,7 @@ const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | 
 /** Nine-question answer -> the per-label switch that still gates it. */
 const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
   open_to_selling: "new_lead",
+  talked_price: "new_lead",
   maybe_later: "nurture",
   not_interested: "not_interested",
   wrong_person: "wrong_number",

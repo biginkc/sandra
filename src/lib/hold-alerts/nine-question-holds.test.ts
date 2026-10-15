@@ -18,6 +18,7 @@ const NINE_REASONS: Array<[string, boolean]> = [
   ["nine_needs_person", false],
   ["hostile_needs_confirm:msg-1", false],
   ["reply_text_not_approved", false],
+  ["classifier_engine_unreadable", false],
   ["nine_reply_not_sent:quiet_hours_recipient:x", false],
   ["nine_automation_disabled:wrong_number", false],
   ["drip_enroll_failed:drip_not_found", false],
