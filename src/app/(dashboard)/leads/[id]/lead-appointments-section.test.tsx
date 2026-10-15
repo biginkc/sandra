@@ -282,7 +282,9 @@ describe("<LeadAppointmentsSection />", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("History unavailable");
     expect(screen.getByTestId("lead-appointment-h1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Load more history" })).toBeEnabled();
+    // The alert can commit before the transition settles; wait for the button
+    // to leave its "Loading…" state rather than asserting it synchronously.
+    expect(await screen.findByRole("button", { name: "Load more history" })).toBeEnabled();
   });
 
   it("formats times in the passed timezone, not the runtime's zone", () => {
