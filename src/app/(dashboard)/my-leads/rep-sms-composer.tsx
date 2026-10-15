@@ -589,7 +589,8 @@ export function RepSmsComposer({
       size={actionPlacement ? "sm" : "default"}
       onClick={() => {
         // Capture the newest inbound shown right now, not at send time.
-        if (!open) openedInbound.current = inboundMessageId
+        // Re-showing a composer that already holds a draft keeps its stamp.
+        if (!open && !submission.current && !remainder.trim()) openedInbound.current = inboundMessageId
         setActivated(true)
         setOpen((value) => !value)
       }}
