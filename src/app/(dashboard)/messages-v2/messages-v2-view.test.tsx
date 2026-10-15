@@ -516,6 +516,22 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent(/could not be found/);
   });
 
+  it("?deadLetter= for a hold at snapshot position 200: loaded by id, pinned on top, highlighted and marked", async () => {
+    const all = Array.from({ length: 201 }, (_, i) => ({ ...openHold(`h${i}`), property_id: `h${i}`, ...at(i + 1) }));
+    await mount({ ...props([], all.slice(0, 40)), holdsSnapshot: buildSnapshot(all), focusDeadLetter: { deadLetterId: "dl-1", propertyId: "h200" }, focusHold: all[200] });
+    const pinned = screen.getByTestId("focus-pinned");
+    expect(pinned).toHaveTextContent("Opened from My Leads");
+    expect(within(pinned).getByTestId("waiting-card")).toHaveAttribute("data-selected", "true");
+    expect(screen.queryByTestId("dead-letter-focus-missing")).toBeNull();
+  });
+
+  it("?deadLetter= for a hold no longer eligible: the handled notice, no pinned card", async () => {
+    const all = Array.from({ length: 50 }, (_, i) => ({ ...openHold(`h${i}`), property_id: `h${i}`, ...at(i + 1) }));
+    await mount({ ...props([], all.slice(0, 40)), holdsSnapshot: buildSnapshot(all), focusDeadLetter: { deadLetterId: "dl-1", propertyId: "h45" }, focusHold: null });
+    expect(screen.queryByTestId("focus-pinned")).toBeNull();
+    expect(screen.getByTestId("dead-letter-focus-missing")).toHaveTextContent("This item was handled or is no longer available.");
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

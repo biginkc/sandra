@@ -95,6 +95,8 @@ export type MessagesV2ViewProps = {
   actions?: HoldActionsApi;
   /** Opened with ?deadLetter=<id>: that failed reply's lead (null when the id did not resolve). */
   focusDeadLetter?: { deadLetterId: string; propertyId: string | null } | null;
+  /** That lead's hold when it is beyond the first page (null = no longer eligible). */
+  focusHold?: OpenHold<RunWithSteps> | null;
 };
 
 /** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
@@ -586,6 +588,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             actions={props.actions}
             onReload={() => router.refresh()}
             focus={props.focusDeadLetter ?? null}
+            focusHold={props.focusHold}
           />
         </div>
       </div>

@@ -19,7 +19,7 @@ import {
   findJevUndoAction,
 } from "./actions";
 import { loadRunLabels } from "./labels";
-import { loadMessagesV2Page } from "./holds-by-activity";
+import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
 import { fetchAllKeyset } from "./paged";
 import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
@@ -34,7 +34,7 @@ import { loadReplayBatchId } from "./replay-batch";
 import { loadTapeDayAction } from "./tape-actions";
 import { loadRunThreads } from "./tape-data";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
-import type { PipelineCoverage } from "./types";
+import type { OpenHold, PipelineCoverage, RunWithSteps } from "./types";
 
 export const dynamic = "force-dynamic";
 
@@ -212,10 +212,17 @@ export default async function MessagesV2Page({
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
   ]);
   const data = loaded;
+  // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.
+  const focusPid = focusDeadLetter?.propertyId ?? null;
+  let focusHold: OpenHold<RunWithSteps> | null | undefined;
+  if (focusPid && !loaded.error && !data.holds.some((h) => h.property_id === focusPid)) {
+    const byId = await loadHoldsByIds(supabase, orgId, [focusPid]);
+    focusHold = byId ? (byId.holds.find((h) => h.property_id === focusPid) ?? null) : undefined;
+  }
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
-  const holdLabelInputs = data.holds.map((h) => ({
+  const holdLabelInputs = [...data.holds, ...(focusHold ? [focusHold] : [])].map((h) => ({
     id: h.id,
     contact_id: h.run?.contact_id ?? null,
     property_id: h.property_id,
@@ -260,6 +267,7 @@ export default async function MessagesV2Page({
         loadTapeDay={loadTapeDayAction}
         nowMs={data.nowMs}
         focusDeadLetter={focusDeadLetter}
+        focusHold={focusHold}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,

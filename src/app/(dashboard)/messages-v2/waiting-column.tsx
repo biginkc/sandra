@@ -198,9 +198,15 @@ export function WaitingColumn({
   actions,
   onReload,
   focus,
+  focusHold,
 }: {
   /** Opened with ?deadLetter=<id>: that failed reply's lead; its card is selected. */
   focus?: { deadLetterId: string; propertyId: string | null } | null;
+  /**
+   * The focused hold loaded by id when it is beyond the first page (null = no longer eligible; undefined = not
+   * looked up because it was already in the first page or there is no focus).
+   */
+  focusHold?: OpenHold<RunWithSteps> | null;
   holds: readonly OpenHold<RunWithSteps>[];
   /** First-page snapshot ids the server dropped in its final check. */
   initialMissing?: readonly string[];
@@ -255,6 +261,10 @@ export function WaitingColumn({
   const hiddenLoaded = loadedEntries.length - shown.length;
   const unrequested = entries.slice(older.nextPos).filter((e) => !live.has(e.id) && !older.missing.has(e.id));
   const notLoadedYet = unrequested.length;
+  const focusInShown = !!focus?.propertyId && shown.some((e) => live.get(e.id)?.property_id === focus.propertyId);
+  // Beyond the first page: the server loaded it by id; pinned on top until it appears in place.
+  const focusPinned =
+    !focusInShown && focusHold && !older.missing.has(focusHold.id) ? focusHold : null;
   const serverTotal = present.length;
   const hiddenUnverified = older.unverified ?? unverified ?? 0;
   const canLoadMore = !!loadOlder && notLoadedYet > 0;
@@ -314,7 +324,7 @@ export function WaitingColumn({
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
     liveRef.current = live;
-    shownIdsRef.current = shown.map((e) => e.id);
+    shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned && entries.some((e) => e.id === focusPinned.id) ? [focusPinned.id] : [])];
     entriesRef.current = entries;
     olderRef.current = older;
   });
@@ -377,8 +387,7 @@ export function WaitingColumn({
   }, [revalidate, snapshot, refreshKey]);
 
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
-  const asSnapshot = (e: (typeof entries)[number]): { hold: OpenHold<RunWithSteps>; changed: boolean } => {
-    const h = live.get(e.id)!;
+  const asSnapshot = (e: (typeof entries)[number], h: OpenHold<RunWithSteps> = live.get(e.id)!): { hold: OpenHold<RunWithSteps>; changed: boolean } => {
     if (!snapshot) return { hold: h, changed: false };
     const reason = reasonOf(e.r);
     // Updated = ANY snapshot field differs from live: reason, flag time, activity time or the shown run.
@@ -434,12 +443,38 @@ export function WaitingColumn({
           Couldn&apos;t re-check this list. Actions are paused until it can be checked.
         </p>
       )}
-      {focus && !shown.some((e) => e.id === focus.propertyId) && (
-        <p role="status" data-testid="dead-letter-focus-missing" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          {focus.propertyId
-            ? "The failed reply you opened is not among the texts shown. Try Show older, or it may already be resolved."
-            : "The failed reply you opened could not be found. It may already be resolved."}
-        </p>
+      {focusPinned ? (
+        <div data-testid="focus-pinned" className="flex flex-col gap-1.5">
+          <p className="text-xs font-medium text-sky-700">Opened from My Leads</p>
+          {(() => {
+            const e = entries.find((x) => x.id === focusPinned.id);
+            const { hold, changed } = e ? asSnapshot(e, focusPinned) : { hold: focusPinned, changed: false };
+            return (
+              <WaitingCard
+                hold={hold}
+                at={snapshot && e ? e.at : undefined}
+                label={labelFor(focusPinned.id)}
+                actions={actions}
+                onReload={onReload}
+                updated={changed || updatedIds?.has(focusPinned.id) || staleIds.has(focusPinned.id)}
+                pinned={!!snapshot && !!e}
+                paused={checkFailed}
+                selected
+              />
+            );
+          })()}
+        </div>
+      ) : (
+        focus &&
+        !focusInShown && (
+          <p role="status" data-testid="dead-letter-focus-missing" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            {focus.propertyId
+              ? focusHold === undefined
+                ? "The failed reply you opened is not among the texts shown. Try Show older, or it may already be resolved."
+                : "This item was handled or is no longer available."
+              : "The failed reply you opened could not be found. It may already be resolved."}
+          </p>
+        )
       )}
       {older.missing.size > 0 && (
         <p data-testid="holds-missing" className="rounded-xl border bg-secondary p-3 text-xs text-muted-foreground">
@@ -484,7 +519,7 @@ export function WaitingColumn({
               updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
               pinned={!!snapshot}
               paused={checkFailed}
-              selected={!!focus && focus.propertyId === e.id}
+              selected={!!focus?.propertyId && live.get(e.id)?.property_id === focus.propertyId}
             />
           );
         })

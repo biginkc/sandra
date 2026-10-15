@@ -466,7 +466,7 @@ describe("review round 1: Dismiss / Take over from a stale view", () => {
       if (table === "properties" && !calls.some((c) => c.method === "update") && has(calls, "in", "id", ["prop-1"])) {
         return { data: [{ id: "prop-1", needs_human_attention: true, last_ai_escalation_reason: "draft_held", last_ai_escalation_at: "2026-10-07T13:00:00+00:00" }] };
       }
-      if (table === "jev_lead_decisions") return { data: [{ property_id: "prop-1", created_at: "2026-10-07T14:00:00+00:00" }] };
+      if (table === "jev_lead_decisions") return calls.some((c) => c.method === "gt") ? { data: [] } : { data: [{ id: "a", property_id: "prop-1", created_at: "2026-10-07T14:00:00+00:00" }] };
       if (table === "ai_disposition_reviews" || (table === "ai_reply_drafts" && has(calls, "in", "property_id", ["prop-1"]))) return { data: [] };
       return reply(table, calls);
     };

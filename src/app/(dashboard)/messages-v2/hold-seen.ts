@@ -1,4 +1,5 @@
 import { compareInstants, type LooseSupabase } from "./queries";
+import { fetchAllKeyset } from "./paged";
 import type { HoldSeen } from "./types";
 
 /**
@@ -12,10 +13,9 @@ import type { HoldSeen } from "./types";
  */
 
 const CHUNK = 25;
-const ROW_LIMIT = 1000;
 const PENDING_TABLES = ["jev_lead_decisions", "ai_disposition_reviews", "ai_reply_drafts"] as const;
 
-type TimeRow = { property_id: string | null; created_at: string };
+type TimeRow = { id: string; property_id: string | null; created_at: string };
 type FlagRow = {
   id: string;
   needs_human_attention: boolean | null;
@@ -50,36 +50,18 @@ export async function loadFreshSeen(
     const flags = new Map(((flagRes.data ?? []) as FlagRow[]).map((r) => [r.id, r]));
 
     for (const table of PENDING_TABLES) {
-      const res = await supabase
-        .from(table)
-        .select("property_id, created_at")
-        .eq("org_id", orgId)
-        .eq("status", "pending")
-        .in("property_id", chunk)
-        .order("created_at", { ascending: false })
-        .limit(ROW_LIMIT);
+      // Every pending row, keyset-paged to exhaustion (a server cap can never hide a newer row); any error fails closed.
+      const res = await fetchAllKeyset<TimeRow>(() =>
+        supabase
+          .from(table)
+          .select("id, property_id, created_at")
+          .eq("org_id", orgId)
+          .eq("status", "pending")
+          .in("property_id", chunk),
+      );
       if (res.error) return null;
-      const rows = (res.data ?? []) as TimeRow[];
-      const absorb = (r: TimeRow) => {
+      for (const r of res.rows) {
         if (r.property_id) through.set(r.property_id, later(through.get(r.property_id) ?? null, r.created_at)!);
-      };
-      rows.forEach(absorb);
-      // Newest-first and truncated: a property missing from the result may still
-      // have rows, so ask for its newest one directly.
-      if (rows.length >= ROW_LIMIT) {
-        const present = new Set(rows.map((r) => r.property_id));
-        for (const id of chunk.filter((c) => !present.has(c))) {
-          const one = await supabase
-            .from(table)
-            .select("property_id, created_at")
-            .eq("org_id", orgId)
-            .eq("status", "pending")
-            .in("property_id", [id])
-            .order("created_at", { ascending: false })
-            .limit(1);
-          if (one.error) return null;
-          ((one.data ?? []) as TimeRow[]).forEach(absorb);
-        }
       }
     }
 
