@@ -55,7 +55,7 @@ function openHold(over: Partial<OpenHold<PipelineRun>> = {}): OpenHold<PipelineR
 const labels = new Map([["prop-1", { name: "Dana", address: "12 Oak St, Kansas City" }]]);
 
 describe("HOT_HOLD_REASONS", () => {
-  it("is empty by default: no hold is hot until reasons are configured", () => {
+  it("is empty by default: no EXTRA env reasons are configured (built-in hot reasons still apply)", () => {
     expect([...HOT_HOLD_REASONS]).toEqual([]);
   });
 });
@@ -93,8 +93,12 @@ describe("holdKeyFor", () => {
 
 describe("isHotHold", () => {
   const HOT = ["jev_below_threshold:new_lead", "price_or_offer", "distress"];
-  it("is never hot with no configured reasons", () => {
-    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(false);
+  it("built-in hot reasons are hot with no configured reasons; non-hot reasons are not", () => {
+    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "model:hot_lead" }))).toBe(true);
+    expect(isHotHold(openHold({ run: run({ reason: "model:hot_lead" }) }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "draft_held" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "price_quoted" }))).toBe(false);
   });
   it("matches only an exact reason from HOT_HOLD_REASONS: flag reason, run outcome or run reason", () => {
     expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }), HOT)).toBe(true);
@@ -162,10 +166,10 @@ describe("toAlertHolds", () => {
 
 describe("payloads never carry seller message text", () => {
   it("no channel's text contains the run's inbound_preview", async () => {
-    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer" })], labels, ["price_or_offer"]);
+    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer", since: "2026-10-15T10:00:00.000Z", alert_since: "2026-10-15T10:00:00.000Z" })], labels, ["price_or_offer"]);
     expect(JSON.stringify(holds)).not.toContain("SELLER SAID");
     const t = makeDeps({ holds, emailEnabled: true });
-    t.setNow("2026-10-08T12:00:00.000Z");
+    t.setNow("2026-10-15T12:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     const channels = new Set(t.sent.map((s) => s.channel));
     expect(channels).toEqual(new Set(["slack", "sms", "email"]));
@@ -191,7 +195,7 @@ describe("nurture auto-drip hold reasons are known", () => {
   });
 });
 
-import { holdReasonLabel, leadLink, slackNudgeText } from "./messages";
+import { holdReasonLabel, leadLink, slackFirstText } from "./messages";
 import { hold as mkHold } from "./test-support";
 
 describe("alert labels and links", () => {
@@ -200,8 +204,8 @@ describe("alert labels and links", () => {
     expect(holdReasonLabel("call_request")).toBe("call request");
     expect(holdReasonLabel("weird+unknown")).toBe("needs review");
   });
-  it("nudge links the lead and keeps the label", () => {
-    const text = slackNudgeText(mkHold({ propertyId: "p-7", reasonLabel: "call request" }), "https://x.test/");
+  it("first DM links the lead and keeps the label", () => {
+    const text = slackFirstText(mkHold({ propertyId: "p-7", reasonLabel: "call request" }), "https://x.test/");
     expect(text).toContain("https://x.test/leads/p-7");
     expect(text).toContain("call request");
     expect(leadLink("https://x.test/", "a b")).toBe("https://x.test/leads/a%20b");

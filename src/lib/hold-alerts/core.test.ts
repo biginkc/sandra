@@ -3,82 +3,56 @@ import { describe, expect, it, vi } from "vitest";
 import { reportError } from "@/lib/errors/report";
 
 import { runHoldAlertsForOrg } from "./core";
-import { ACQ, hold, makeDeps, ORG, OWNER } from "./test-support";
+import { ACQ, hold, makeDeps as baseMakeDeps, ORG, OWNER } from "./test-support";
+
+/** Only HOT holds alert (PR 2), so the default hold here is hot. Tests that need a cold hold pass holds explicitly. */
+const makeDeps = (over: Parameters<typeof baseMakeDeps>[0] = {}) => baseMakeDeps({ holds: [hold({ hot: true })], ...over });
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const HOUR = 60 * 60 * 1000;
 
-describe("first stage Slack DMs", () => {
-  it("creates a delivery and sends one DM per owner and acquisitions member", async () => {
+describe("first stage alerts (hot hold, owner only)", () => {
+  it("sends exactly one Slack DM and one SMS, both to the hot owner, and nothing to acquisitions", async () => {
     const t = makeDeps();
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     const slack = t.sent.filter((s) => s.channel === "slack");
-    expect(slack.map((s) => s.userId).sort()).toEqual(["acq-1", "owner-1"]);
+    const sms = t.sent.filter((s) => s.channel === "sms");
+    expect(slack.map((s) => s.userId)).toEqual(["owner-1"]);
+    expect(sms.map((s) => s.userId)).toEqual(["owner-1"]);
     expect(slack[0].text).toContain("Dana");
     expect(slack[0].text).not.toContain("Oak St");
     expect(slack[0].text).toContain("https://app.example.com/leads/prop-1");
-    expect(t.store.rows.filter((r) => r.channel === "slack").every((r) => r.status === "sent" && r.stage === "first")).toBe(true);
+    expect(t.store.rows.every((r) => r.status === "sent" && r.stage === "first")).toBe(true);
+    expect(t.sent.some((s) => s.userId === "acq-1")).toBe(false);
     expect(summary).toMatchObject({ holds: 1, sent: 2, failed: 0 });
+  });
+
+  it("a non-hot hold sends nothing per hold", async () => {
+    const t = baseMakeDeps({ holds: [hold({ hot: false })] });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows).toEqual([]);
+    expect(summary).toMatchObject({ holds: 1, sent: 0 });
+  });
+
+  it("goes to every owner when no hot owner is configured, and still never to non-owners", async () => {
+    const second = { userId: "owner-2", role: "owner" as const };
+    const t = makeDeps({ hotOwner: null, recipients: [OWNER, second, ACQ] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack").map((s) => s.userId).sort()).toEqual(["owner-1", "owner-2"]);
+    expect(t.sent.some((s) => s.userId === "acq-1")).toBe(false);
   });
 
   it("records no_token and pref_disabled as visible skipped rows, not silence", async () => {
     const t = makeDeps();
     t.results.slack = { status: "skipped", reason: "no_token" };
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([
-      ["skipped", "no_token"],
-      ["skipped", "no_token"],
-    ]);
-    t.results.slack = { status: "skipped", reason: "pref_disabled" };
+    expect(t.store.rows.filter((r) => r.channel === "slack").map((r) => [r.status, r.lastError])).toEqual([["skipped", "no_token"]]);
     const t2 = makeDeps();
     t2.results.slack = { status: "skipped", reason: "pref_disabled" };
     await runHoldAlertsForOrg(t2.deps, ORG);
-    expect(t2.store.rows.every((r) => r.status === "skipped" && r.lastError === "pref_disabled")).toBe(true);
-  });
-});
-
-describe("nudge_1h", () => {
-  it("is not sent before the hold is 1h old, then sent once", async () => {
-    const t = makeDeps();
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
-
-    t.setNow("2026-10-08T11:05:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    const nudges = t.store.rows.filter((r) => r.stage === "nudge_1h");
-    expect(nudges).toHaveLength(2);
-    expect(nudges.every((r) => r.status === "sent")).toBe(true);
-
-    const before = t.sent.length;
-    t.setNow("2026-10-08T13:00:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.length).toBe(before);
-  });
-
-  it("does not blast a nudge on first deploy for an old hold: it waits an hour after the first DM was SENT", async () => {
-    const old = hold({ since: "2026-10-01T10:00:00.000Z" });
-    const t = makeDeps({ holds: [old], nowIso: "2026-10-08T10:00:00.000Z" });
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
-    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
-
-    t.setNow("2026-10-08T10:59:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
-
-    t.setNow("2026-10-08T11:01:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.filter((r) => r.stage === "nudge_1h" && r.status === "sent")).toHaveLength(2);
-  });
-
-  it("never nudges a recipient whose first DM was skipped or never sent", async () => {
-    const t = makeDeps({ nowIso: "2026-10-08T10:00:00.000Z" });
-    t.results.slack = { status: "skipped", reason: "no_token" };
-    await runHoldAlertsForOrg(t.deps, ORG);
-    t.setNow("2026-10-08T13:00:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
+    expect(t2.store.rows.filter((r) => r.channel === "slack").every((r) => r.status === "skipped" && r.lastError === "pref_disabled")).toBe(true);
   });
 });
 
@@ -114,82 +88,82 @@ describe("hot-hold SMS", () => {
 
 describe("caps", () => {
   it("skips a DM past 20 per recipient per rolling hour with a visible reason", async () => {
-    const t = makeDeps({ recipients: [ACQ] });
+    const t = makeDeps({ recipients: [OWNER] });
     for (let i = 0; i < 20; i++) {
       t.store.rows.push({
         id: `old${i}`,
         orgId: ORG,
         propertyId: `p${i}`,
         holdKey: `p${i}:x`,
-        recipientUserId: ACQ.userId,
+        recipientUserId: OWNER.userId,
         channel: "slack",
         stage: "first",
         status: "sent",
         attempts: 1,
         lastError: null,
-        createdAt: "2026-10-08T09:50:00.000Z",
-        sentAt: "2026-10-08T09:50:00.000Z",
+        createdAt: "2026-10-15T09:50:00.000Z",
+        sentAt: "2026-10-15T09:50:00.000Z",
       });
     }
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(0);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(0);
     expect(summary.deferred).toBe(1);
     // Over the cap is "not yet", not "never": the row stays pending with no attempt spent.
-    const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1"))!;
+    const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1") && r.channel === "slack")!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 
   it("counts in-flight (sending) deliveries toward the DM cap", async () => {
-    const t = makeDeps({ recipients: [ACQ] });
+    const t = makeDeps({ recipients: [OWNER] });
     for (let i = 0; i < 20; i++) {
       t.store.rows.push({
-        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: ACQ.userId,
+        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: OWNER.userId,
         channel: "slack", stage: "first", status: "sending", attempts: 1, lastError: null,
-        createdAt: "2026-10-08T10:01:30.000Z", sentAt: null, sendingAt: "2026-10-08T10:01:30.000Z",
+        createdAt: "2026-10-15T10:01:30.000Z", sentAt: null, sendingAt: "2026-10-15T10:01:30.000Z",
       });
     }
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(0);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(0);
     expect(summary.deferred).toBe(1);
   });
 
   it("delivers a capped row on a later run once the hour has rolled", async () => {
-    const t = makeDeps({ recipients: [ACQ] });
+    const t = makeDeps({ recipients: [OWNER] });
     for (let i = 0; i < 20; i++) {
       t.store.rows.push({
-        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: ACQ.userId,
+        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: OWNER.userId,
         channel: "slack", stage: "first", status: "sent", attempts: 1, lastError: null,
-        createdAt: "2026-10-08T09:50:00.000Z", sentAt: "2026-10-08T09:50:00.000Z",
+        createdAt: "2026-10-15T09:50:00.000Z", sentAt: "2026-10-15T09:50:00.000Z",
       });
     }
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(0);
-    t.setNow("2026-10-08T10:55:00.000Z");
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(0);
+    t.setNow("2026-10-15T10:55:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
     expect(t.store.rows.find((r) => r.holdKey.startsWith("prop-1") && r.stage === "first")!.status).toBe("sent");
   });
 
   it("counts only the last hour toward the DM cap", async () => {
-    const t = makeDeps({ recipients: [ACQ] });
+    const t = makeDeps({ recipients: [OWNER] });
     for (let i = 0; i < 20; i++) {
       t.store.rows.push({
         id: `old${i}`,
         orgId: ORG,
         propertyId: `p${i}`,
         holdKey: `p${i}:x`,
-        recipientUserId: ACQ.userId,
+        recipientUserId: OWNER.userId,
         channel: "slack",
         stage: "first",
         status: "sent",
         attempts: 1,
         lastError: null,
-        createdAt: "2026-10-08T07:00:00.000Z",
-        sentAt: "2026-10-08T07:00:00.000Z",
+        createdAt: "2026-10-15T07:00:00.000Z",
+        sentAt: "2026-10-15T07:00:00.000Z",
       });
     }
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
   });
 
   it("skips SMS past 10 per hour for the org", async () => {
@@ -206,8 +180,8 @@ describe("caps", () => {
         status: "sent",
         attempts: 1,
         lastError: null,
-        createdAt: "2026-10-08T09:55:00.000Z",
-        sentAt: "2026-10-08T09:55:00.000Z",
+        createdAt: "2026-10-15T09:55:00.000Z",
+        sentAt: "2026-10-15T09:55:00.000Z",
       });
     }
     await runHoldAlertsForOrg(t.deps, ORG);
@@ -218,18 +192,19 @@ describe("caps", () => {
 });
 
 describe("authorization re-check at delivery time", () => {
-  it("skips a recipient who is no longer owner or acquisitions, without sending", async () => {
-    const t = makeDeps({ isRecipientAuthorized: async (_org, userId) => userId !== "acq-1" });
+  it("skips a recipient who is no longer an owner, without sending", async () => {
+    const t = makeDeps({ isRecipientAuthorized: async (_org, userId) => userId !== "owner-1" });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.map((s) => s.userId)).toEqual(["owner-1"]);
-    const row = t.store.rows.find((r) => r.recipientUserId === "acq-1")!;
-    expect([row.status, row.lastError]).toEqual(["skipped", "recipient_not_authorized"]);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
+      ["slack", "skipped", "recipient_not_owner"],
+      ["sms", "skipped", "recipient_not_owner"],
+    ]);
   });
 
-  it("re-confirms role = owner at send time for the SMS only", async () => {
+  it("re-confirms role = owner at send time for both the Slack DM and the SMS", async () => {
     const asked: Array<{ user: string; requireOwner: boolean | undefined }> = [];
     const t = makeDeps({
-      holds: [hold({ hot: true })],
       recipients: [OWNER],
       isRecipientAuthorized: async (_org, user, opts) => {
         asked.push({ user, requireOwner: opts?.requireOwner });
@@ -238,12 +213,14 @@ describe("authorization re-check at delivery time", () => {
     });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(asked).toEqual([
-      { user: "owner-1", requireOwner: undefined },
+      { user: "owner-1", requireOwner: true },
       { user: "owner-1", requireOwner: true },
     ]);
-    expect(t.sent.some((s) => s.channel === "sms")).toBe(false);
-    const row = t.store.rows.find((r) => r.channel === "sms")!;
-    expect([row.status, row.lastError]).toEqual(["skipped", "recipient_not_owner"]);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
+      ["slack", "skipped", "recipient_not_owner"],
+      ["sms", "skipped", "recipient_not_owner"],
+    ]);
   });
 
   it("re-checks immediately before each send, not once per run", async () => {
@@ -276,10 +253,10 @@ describe("email digest", () => {
     expect(mail[0].text).not.toContain("Oak St");
     expect(mail[0].text).toContain("https://app.example.com/leads/prop-1");
     const keys = t.store.rows.filter((r) => r.channel === "email").map((r) => r.holdKey);
-    expect(new Set(keys)).toEqual(new Set([`digest:${ORG}:2026-10-08T10`]));
+    expect(new Set(keys)).toEqual(new Set([`digest:${ORG}:2026-10-15T10`]));
     expect(t.store.rows.find((r) => r.channel === "email")!.propertyId).toBeNull();
 
-    t.setNow("2026-10-08T11:01:00.000Z");
+    t.setNow("2026-10-15T11:01:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "email")).toHaveLength(4);
   });
@@ -326,7 +303,7 @@ describe("durability and idempotency", () => {
     const t = makeDeps({ recipients: [OWNER] });
     t.results.slack = { status: "failed", error: "slack_down" };
     for (let i = 0; i < 5; i++) await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(3);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(3);
     const row = t.store.rows[0];
     expect([row.status, row.attempts, row.lastError]).toEqual(["failed", 3, "slack_down"]);
   });
@@ -338,7 +315,7 @@ describe("durability and idempotency", () => {
     t.results.slack = { status: "sent" };
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(2);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
     expect(t.store.rows[0].status).toBe("sent");
   });
 
@@ -347,7 +324,7 @@ describe("durability and idempotency", () => {
     t.results.slack = { status: "failed", error: "timeout_ambiguous", terminal: true };
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
   });
 
   it("a row is already `sending` when the provider is called (before, not after)", async () => {
@@ -362,7 +339,7 @@ describe("durability and idempotency", () => {
   });
 
   it("a crash mid-send is swept to failed:interrupted after the route's max duration and never resent", async () => {
-    const t = makeDeps({ recipients: [OWNER], nowIso: "2026-10-08T10:00:00.000Z" });
+    const t = baseMakeDeps({ recipients: [OWNER], nowIso: "2026-10-15T10:00:00.000Z" });
     t.deps.sendSlack = async () => {
       throw new Error("process died"); // stands in for a crash: the row is left claimed
     };
@@ -372,13 +349,13 @@ describe("durability and idempotency", () => {
     expect(t.store.rows[0]).toMatchObject({ status: "sending", attempts: 1 });
 
     // Within the route's duration the row belongs to a live run: untouched, not resent.
-    t.setNow("2026-10-08T10:00:30.000Z");
+    t.setNow("2026-10-15T10:00:30.000Z");
     const early = await runHoldAlertsForOrg(t.deps, ORG);
     expect(early.interrupted).toBe(0);
     expect(t.store.rows[0]!.status).toBe("sending");
 
     // Past it, the row is terminal and is never sent again by any later run.
-    t.setNow("2026-10-08T10:01:30.000Z");
+    t.setNow("2026-10-15T10:01:30.000Z");
     const late = await runHoldAlertsForOrg(t.deps, ORG);
     expect(late.interrupted).toBe(1);
     expect(t.store.rows[0]).toMatchObject({ status: "failed", lastError: "interrupted", attempts: 3 });
@@ -436,7 +413,7 @@ describe("durability and idempotency", () => {
   });
 
   it("stops at the time budget and leaves the rest for the next run", async () => {
-    const t = makeDeps({ holds: [hold(), hold({ holdKey: "prop-2:x", propertyId: "prop-2" })] });
+    const t = makeDeps({ holds: [hold({ hot: true }), hold({ hot: true, holdKey: "prop-2:x", propertyId: "prop-2" })] });
     let calls = 0;
     const base = t.deps.now;
     t.deps.now = () => new Date(base().getTime() + calls++ * HOUR);
@@ -479,24 +456,24 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
   });
 
   it("a hold that clears and re-opens gets a fresh first alert", async () => {
-    const t = makeDeps({ nowIso: "2026-10-08T10:02:00.000Z" });
+    const t = makeDeps({ nowIso: "2026-10-15T10:02:00.000Z" });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
 
     // The hold clears: the next pass sees no open holds and archives its rows.
     const open = t.deps.loadHolds;
     t.deps.loadHolds = async () => ({ holds: [], complete: true });
-    t.setNow("2026-10-08T10:10:00.000Z");
+    t.setNow("2026-10-15T10:10:00.000Z");
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     expect(summary.archived).toBe(2);
     expect(t.store.rows.every((r) => r.holdKey.includes(":closed:"))).toBe(true);
 
     // It re-opens (same property, same reason): new keys, new alerts.
     t.deps.loadHolds = open;
-    t.setNow("2026-10-08T10:20:00.000Z");
+    t.setNow("2026-10-15T10:20:00.000Z");
     const before = t.sent.length;
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.slice(before).filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.sent.slice(before).filter((s) => s.channel === "slack")).toHaveLength(1);
     expect(t.store.rows.filter((r) => !r.holdKey.includes(":closed:") && r.status === "sent")).toHaveLength(2);
   });
 

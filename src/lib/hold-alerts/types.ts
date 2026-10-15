@@ -19,11 +19,21 @@ export type HoldInfo = {
   name: string;
   /** Short human reason for the hold ("price talk"); never message text. */
   reasonLabel: string;
-  /** One of the hold's reasons is in the configured hot list (HOLD_ALERT_HOT_REASONS, exact match). */
+  /** Hot seller (lib/hot-sellers/hot.ts) or an extra HOLD_ALERT_HOT_REASONS match. Only hot holds ping. */
   hot: boolean;
 };
 
 export type Recipient = { userId: string; role: "owner" | "member" };
+
+/** A hot seller handed to Jarrad on My Leads (lead_events 'assigned', source hot_seller_handoff). */
+export type HotPromotion = {
+  propertyId: string;
+  /** Who the lead was assigned to: the one recipient of this promotion's alerts. */
+  assigneeUserId: string;
+  /** First name (or "Unknown sender"); never message text or address. */
+  name: string;
+  assignedAt: string;
+};
 
 export type DeliveryRow = {
   id: string;
@@ -127,6 +137,13 @@ export interface HoldAlertDeps {
    * nothing may be treated as closed.
    */
   loadHeldPropertyIds(orgId: string, propertyIds: readonly string[]): Promise<Set<string> | null>;
+  /**
+   * Hot promotions (lead handed to Jarrad) at/after `alertsSince`. `complete`
+   * false when the lookup failed or was capped.
+   */
+  loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then every owner gets hot alerts). */
+  loadHotOwner(orgId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

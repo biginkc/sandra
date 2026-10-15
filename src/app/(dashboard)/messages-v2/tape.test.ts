@@ -85,6 +85,22 @@ describe("deriveTape", () => {
     expect(v).toMatchObject({ kind: "decided", tag: { label: "Wants an offer" }, did: "Marked as a lead" });
   });
 
+  it("a hot seller handed to Jarrad reads 'Handed to Jarrad · now on My Leads', with the alert time once both went out", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied")];
+    expect(deriveTape(run({ steps }), "Sue")).toMatchObject({ did: "Handed to Jarrad · now on My Leads" });
+    expect(deriveTape(run({ steps, hotAlertSentAt: "2026-10-15T19:05:00Z" }), "Sue")).toMatchObject({
+      did: "Handed to Jarrad · now on My Leads · Slack and text sent 2:05 PM",
+    });
+  });
+
+  it("a failed hand-off says so", () => {
+    const v = deriveTape(
+      run({ status: "escalated", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "error")] }),
+      "Sue",
+    );
+    expect(v.kind === "decided" && v.did).toContain("Couldn't hand this to Jarrad");
+  });
+
   it("a drip shows its label and first-text date", () => {
     const v = deriveTape(
       run({ steps: [step(1, "jev", "classify", "pass", { outcome: "nurture" }), step(2, "reply", "template_reply", "sent"), step(3, "action", "drip_enrolled", "applied", { route: "maybe_later", firstSendNotBefore: "2026-11-06T15:00:00Z" })] }),

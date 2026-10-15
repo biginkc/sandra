@@ -1,3 +1,4 @@
+import { attachHotAlertTimes } from "./hot-alert-times";
 import { fetchAllKeyset } from "./paged";
 import type {
   DeadLetterInfo,
@@ -1064,7 +1065,7 @@ export async function loadMessagesV2Data(
 
   const configRow = (configRes.error ? [] : (configRes.data ?? []))[0] ?? null;
   return {
-    runs: windowRuns.map(withSteps),
+    runs: await attachHotAlertTimes(supabase, orgId, windowRuns.map(withSteps)),
     holds: enriched.holds.map((h) => ({ ...h, run: h.run ? withSteps(h.run) : null })),
     holdsMeta,
     feedError,

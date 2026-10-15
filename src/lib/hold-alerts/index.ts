@@ -11,7 +11,8 @@ import { createChannelSenders } from "./channels";
 import { runHoldAlertsForOrg } from "./core";
 import { parseHotHoldReasons, toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
-import type { HoldAlertDeps, HoldInfo, OrgAlertSummary, Recipient } from "./types";
+import type { HoldAlertDeps, HoldInfo, HotPromotion, OrgAlertSummary, Recipient } from "./types";
+import { HOT_HANDOFF_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
 
 export { HOT_HOLD_REASONS, parseHotHoldReasons } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
@@ -66,6 +67,52 @@ async function loadAlertHolds(
   return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
 }
 
+const HOT_PROMOTION_CAP = 200;
+
+/**
+ * Hot promotions since the watermark: the checked lead_events 'assigned' row the
+ * hand-off writes (source hot_seller_handoff). First name from the homeowner
+ * contact; never message text or address.
+ */
+export async function loadHotPromotions(
+  db: LooseSupabase,
+  orgId: string,
+  alertsSince: string,
+): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
+  const { data, error } = await db
+    .from("lead_events")
+    .select("property_id, payload, created_at")
+    .eq("org_id", orgId)
+    .eq("event_type", "assigned")
+    .eq("source_type", HOT_HANDOFF_SOURCE_TYPE)
+    .gte("created_at", alertsSince)
+    .order("created_at", { ascending: true })
+    .limit(HOT_PROMOTION_CAP);
+  if (error) return { promotions: [], complete: false };
+  const rows = (data ?? []) as Array<{ property_id: string; payload: { to?: unknown } | null; created_at: string }>;
+  const ids = rows.map((r) => r.property_id);
+  const names = new Map<string, string>();
+  let complete = rows.length < HOT_PROMOTION_CAP;
+  if (ids.length > 0) {
+    const { data: props, error: propError } = await db
+      .from("properties")
+      .select("id, contacts:homeowner_contact_id(first_name)")
+      .in("id", ids);
+    if (propError) complete = false;
+    for (const p of (props ?? []) as Array<{ id: string; contacts: { first_name: string | null } | null }>) {
+      const first = p.contacts?.first_name?.trim();
+      if (first) names.set(p.id, first);
+    }
+  }
+  const promotions: HotPromotion[] = [];
+  for (const r of rows) {
+    const to = typeof r.payload?.to === "string" ? r.payload.to : null;
+    if (!to) continue;
+    promotions.push({ propertyId: r.property_id, assigneeUserId: to, name: names.get(r.property_id) ?? "Unknown sender", assignedAt: r.created_at });
+  }
+  return { promotions, complete };
+}
+
 export function createHoldAlertDeps(
   admin: SupabaseClient<Database>,
   env: Record<string, string | undefined> = process.env,
@@ -81,6 +128,8 @@ export function createHoldAlertDeps(
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
     loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
+    loadHotPromotions: (orgId, alertsSince) => loadHotPromotions(db, orgId, alertsSince),
+    loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);

@@ -123,23 +123,19 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     };
   };
 
-  it("the full alert pass makes exactly the parent's (84ddabdd6) delivery decisions", async () => {
+  it("the full alert pass makes exactly the parent loader's holds, under the PR 2 delivery rules (not hot: no alerts)", async () => {
     expect(await decisions("cron")).toEqual(FROZEN_PARENT_DECISIONS);
     expect(await decisions("page")).not.toEqual(FROZEN_PARENT_DECISIONS);
   });
 });
 
-// FROZEN_PARENT_* below are the parent (84ddabdd6) behaviour for this fixture. They never move: a change to them
-// is an alert-behaviour change and needs its own review, not a test update.
+// FROZEN_PARENT_* below: the frozen parent loader (84ddabdd6) still returns the same holds for this fixture (hold
+// reason model:unclear); the DELIVERY rules were intentionally changed in PR 2 (only hot holds alert, to the hot owner).
+// Under the new rules the parent's hold (not hot) sends nothing, whereas the page loader (#874) resolves the draft's
+// newer run (model:hot_lead -> hot) and would alert the owner. That difference is the fixture's point.
 const P1 = "00000000-0000-4000-8000-000000000001";
-/** Captured from the full pass over the parent's loader (see the comment on `decisions`): Slack only, no SMS. */
 const FROZEN_PARENT_DECISIONS = {
-  deliveries: [
-    { channel: "slack", property: P1, recipient: "owner-1", stage: "first", status: "sent" },
-    { channel: "slack", property: P1, recipient: "acq-1", stage: "first", status: "sent" },
-  ],
-  sent: [
-    { channel: "slack", userId: "owner-1" },
-    { channel: "slack", userId: "acq-1" },
-  ],
+  deliveries: [] as Array<{ property: string; recipient: string; channel: string; stage: string; status: string }>,
+  sent: [] as Array<{ channel: string; userId: string }>,
 };
+void P1;

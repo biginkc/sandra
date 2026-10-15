@@ -47,6 +47,13 @@ vi.mock("@/lib/events", () => ({
   recordLeadEvent,
 }));
 
+const hotAssign = vi.hoisted(() => ({ assign: vi.fn() }));
+vi.mock("@/lib/hot-sellers/assign", () => ({ assignHotLeadToOwner: hotAssign.assign }));
+beforeEach(() => {
+  hotAssign.assign.mockReset();
+  hotAssign.assign.mockResolvedValue({ status: "assigned", assigneeUserId: "owner-jarrad" });
+});
+
 const afterTasks = vi.hoisted(() => ({ capture: false, fns: [] as Array<() => Promise<void>> }));
 
 vi.mock("next/server", () => ({
@@ -2291,6 +2298,57 @@ describe("dispatchAiResponse debounce", () => {
           args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.95, p_threshold_version: 4 }),
         }),
       ]);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("hot seller: a promoted new lead is handed to Jarrad, once, with no reply", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-hot-handoff", body: "Make me an offer" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "price_or_offer" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "Make me an offer",
+        inboundMessageId: "inbound-hot-handoff", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(hotAssign.assign).toHaveBeenCalledTimes(1);
+      expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID);
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("hot seller: a failed hand-off fails CLOSED (held, escalated, hot reason, no reply)", async () => {
+    hotAssign.assign.mockResolvedValue({ status: "failed", reason: "no_hot_owner" });
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-hot-fail", body: "Make me an offer" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "price_or_offer" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "Make me an offer",
+        inboundMessageId: "inbound-hot-fail", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toBe("hot_lead_assign_failed");
+      expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
