@@ -30,8 +30,8 @@ describe("placement table 1.1", () => {
   it("row 1: under contract, nothing due is Neither", () => expect(where(lead({ stage: "under_contract" }))).toBe("neither/under_contract/1"));
   it("row 1: an overdue/near callback pulls it out (row 4)", () =>
     expect(where(lead({ stage: "under_contract", appointments: [{ ref: "a", due: NOW + 10 * MIN, status: "open" }] }))).toBe("your_move/due/4"));
-  it("row 1 (SQ1): only a FUTURE callback keeps it Neither, per the literal text", () =>
-    expect(where(lead({ stage: "under_contract", appointments: [{ ref: "a", due: NOW + DAY, status: "open" }] }))).toBe("neither/under_contract/1"));
+  it("row 1 (v9 SQ1): any active appointment, even a future one, takes it out of Neither", () =>
+    expect(where(lead({ stage: "under_contract", appointments: [{ ref: "a", due: NOW + DAY, status: "open" }] }))).toBe("their_move/callback_booked/11"));
   it("row 2: pin without expiry, cleared by a later attempt", () => {
     const pin = { pinnedAt: NOW - 2 * HOUR, until: null };
     expect(where(lead({ pin }))).toBe("your_move/call_today/2");
@@ -198,10 +198,10 @@ describe("Broken inventory and supersession (2.1)", () => {
     expect(place(ob("claimed", NOW - MIN), NOW).brokenActions).toEqual(["check_status"]);
     expect(where(ob("claimed", NOW + 5 * MIN))).toBe("your_move/nothing_planned/15");
   });
-  it("AI dead letter and Norma review are Broken; a pending AI draft is Broken per the literal text (SQ3)", () => {
+  it("AI dead letter and Norma review are Broken; a pending AI draft is a label only (v9 SQ3)", () => {
     expect(where(lead({ aiDeadLetter: NOW - HOUR }))).toBe("your_move/broken/6");
     expect(where(lead({ normaNeedsReview: true }))).toBe("your_move/broken/6");
-    expect(where(lead({ aiDraftPending: true }))).toBe("your_move/broken/6");
+    expect(where(lead({ aiDraftPending: true }))).toBe("your_move/nothing_planned/15");
     expect(where(lead({ aiDraftPending: true, messages: [inb("i", 3 * HOUR)] }))).toBe("your_move/new_reply/5");
   });
   it("badge counts Due, New reply and Broken once per lead", () => {
@@ -209,5 +209,20 @@ describe("Broken inventory and supersession (2.1)", () => {
     const b = place(lead({ aiDeadLetter: NOW }), NOW);
     const c = place(lead(), NOW);
     expect(expectedViews(new Map([["a", a], ["b", b], ["c", c]])).badge).toBe(2);
+  });
+});
+
+describe("v9 corrections", () => {
+  it("SQ2: an unknown obligation is in flight for 15 minutes", () => {
+    const ob = (ago: number) => lead({ obligations: [{ ref: "o", state: "unknown", updatedAt: NOW - ago }] });
+    expect(where(ob(5 * MIN))).toBe("your_move/nothing_planned/15");
+    expect(place(ob(20 * MIN), NOW).brokenActions).toEqual(["check_status"]);
+  });
+  it("SQ4: a no-answer attempt and its log_acquisition_attempt workflow event do not clear New reply", () =>
+    expect(where(lead({ messages: [inb("i", 3 * HOUR)], attempts: [{ at: NOW - HOUR, outcome: "no_answer" }],
+      events: [{ type: "my_leads_workflow", at: NOW - HOUR, actor: "user", operation: "log_acquisition_attempt" }] }))).toBe("your_move/new_reply/5"));
+  it("SQ5: contact-only inbound counts only when the contact is homeowner on one queue lead", () => {
+    expect(where(lead({ messages: [inb("i", HOUR, { contactOnly: true })] }))).toBe("your_move/new_reply/5");
+    expect(where(lead({ contactShared: true, messages: [inb("i", HOUR, { contactOnly: true })] }))).toBe("your_move/nothing_planned/15");
   });
 });

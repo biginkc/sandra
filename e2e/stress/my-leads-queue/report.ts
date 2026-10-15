@@ -1,4 +1,4 @@
-import { SPEC_QUESTIONS } from "./oracle";
+import { EXPECTED_UNTIL, SPEC_QUESTIONS } from "./oracle";
 import type { FamilyRun, Mismatch, MismatchKind, Timing } from "./runner";
 
 export const P95_BUDGET_MS = 1500;
@@ -40,6 +40,8 @@ export type FamilyReport = {
   failureRate: number;
   byKind: Partial<Record<MismatchKind, number>>;
   bySpecQuestion: Record<string, number>;
+  /** Mismatches in worlds whose only lead-level disagreements are spec questions with a fix in flight (EXPECTED_UNTIL); not gating. */
+  expected: number;
   variantFailureRates: Record<string, { leads: number; failing: number; rate: number }>;
   errors: string[];
   ms: number;
@@ -61,7 +63,7 @@ export type Report = {
   families: FamilyReport[];
   lanes: LaneResult[];
   scale: ScaleSize[];
-  specQuestions: Record<string, { text: string; mismatches: number }>;
+  specQuestions: Record<string, { text: string; mismatches: number; expectedUntil?: string }>;
   criteria: Criterion[];
   verdict: "PASS" | "FAIL";
   failReasons: string[];
@@ -103,7 +105,7 @@ export function summarizeFamily(run: FamilyRun, samplesPerKind = 3): FamilyRepor
   return {
     family: run.family, title: run.title, worlds: run.worlds, leads: run.leads, checks: run.checks, failingLeads,
     failureRate: run.leads ? failingLeads / run.leads : 0, byKind, bySpecQuestion, variantFailureRates, errors: run.errors, ms: Math.round(run.ms),
-    timings: statTimings(run.timings), samples,
+    timings: statTimings(run.timings), samples, expected: 0,
   };
 }
 
@@ -111,7 +113,21 @@ export function buildReport(input: {
   mode: "full" | "smoke"; seed: number; repeats: number; sha: string; database: string; startedAt: string;
   runs: FamilyRun[]; lanes: LaneResult[]; scale: ScaleSize[];
 }): Report {
-  const families = input.runs.map((r) => summarizeFamily(r));
+  // A world whose lead-level mismatches are all spec questions with a fix in flight elsewhere: its downstream count/badge mismatches
+  // are the same disagreement, so the whole world's mismatches move to "expected" (reported, not gating).
+  const families = input.runs.map((r) => {
+    const groups = new Map<number, Mismatch[]>();
+    for (const m of r.mismatches) (groups.get(m.repeat) ?? groups.set(m.repeat, []).get(m.repeat)!).push(m);
+    const expected = new Set<Mismatch>();
+    for (const ms of groups.values()) {
+      const leadLevel = ms.filter((m) => m.lead !== "-");
+      if (leadLevel.length > 0 && leadLevel.every((m) => m.question && EXPECTED_UNTIL[m.question])) for (const m of ms) expected.add(m);
+    }
+    const summary = summarizeFamily({ ...r, mismatches: r.mismatches.filter((m) => !expected.has(m)) });
+    for (const m of expected) if (m.question) summary.bySpecQuestion[m.question] = (summary.bySpecQuestion[m.question] ?? 0) + 1;
+    summary.expected = expected.size;
+    return summary;
+  });
   const total = (kind: MismatchKind) => families.reduce((a, f) => a + (f.byKind[kind] ?? 0), 0);
   const criteria: Criterion[] = GATED_KINDS.map(([kind, label]) => ({ id: kind, label, value: total(kind), limit: 0, pass: total(kind) === 0, evaluated: families.length > 0 }));
   const raceLanes = input.lanes.filter((l) => l.id.startsWith("race:") || l.id.startsWith("refresh:"));
@@ -119,8 +135,13 @@ export function buildReport(input: {
   const raceRan = raceLanes.filter((l) => !l.skipped);
   criteria.push({ id: "race", label: "race lanes: newer replies marked handled / placement wrong at refresh", value: raceFailures, limit: 0, pass: raceFailures === 0 && (input.mode === "smoke" || raceRan.length === raceLanes.length && raceLanes.length > 0), evaluated: raceRan.length > 0,
     note: raceLanes.some((l) => l.skipped) ? `skipped: ${raceLanes.filter((l) => l.skipped).map((l) => `${l.id} (${l.skipped})`).join("; ")}` : undefined });
-  const worst = input.scale.reduce((a, s) => Math.max(a, s.worstP95Ms), 0);
-  criteria.push({ id: "p95", label: `scale p95 within ${P95_BUDGET_MS} ms at ${input.scale.map((s) => s.leads).join(" and ") || "400 and 2,000"} leads`, value: input.scale.length ? worst : null, limit: P95_BUDGET_MS, pass: input.scale.length > 0 ? worst < P95_BUDGET_MS : input.mode === "smoke", evaluated: input.scale.length > 0 });
+  // Gate (Fable, design v9 17): flag-on needs the 400-lead budget; larger queues are reported as WARN (MLQ-D2 before a second rep).
+  const at400 = input.scale.filter((x) => x.leads <= 400);
+  const larger = input.scale.filter((x) => x.leads > 400);
+  const worst400 = at400.reduce((a, x) => Math.max(a, x.worstP95Ms), 0);
+  criteria.push({ id: "p95", label: `scale p95 within ${P95_BUDGET_MS} ms at 400 leads (hard gate)`, value: at400.length ? worst400 : null, limit: P95_BUDGET_MS, pass: at400.length > 0 ? worst400 < P95_BUDGET_MS : input.mode === "smoke", evaluated: at400.length > 0 });
+  for (const x of larger) criteria.push({ id: `p95_${x.leads}`, label: `scale p95 at ${x.leads} leads (reported, not gating: MLQ-D2)`, value: x.worstP95Ms, limit: P95_BUDGET_MS, pass: true, evaluated: true,
+    note: x.worstP95Ms < P95_BUDGET_MS ? undefined : `WARN ${x.worstP95Ms} ms over budget` });
   const errors = families.reduce((a, f) => a + f.errors.length, 0);
   criteria.push({ id: "errors", label: "worlds that failed to run (setup or SQL errors)", value: errors, limit: 0, pass: errors === 0, evaluated: true });
   const fullRunNeeds: string[] = [];
@@ -130,7 +151,7 @@ export function buildReport(input: {
     if (raceRan.length === 0) fullRunNeeds.push("no race lane ran");
     if (!raceRan.some((l) => l.id.startsWith("race:dispatch_"))) fullRunNeeds.push("the dispatchRepSms race lanes did not run (npm run stress:my-leads-queue:dispatch writes dispatch-lanes.json into --out first)");
   }
-  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0) }]));
+  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0), expectedUntil: EXPECTED_UNTIL[id] }]));
   const failReasons = [...criteria.filter((c) => !c.pass).map((c) => `${c.label}: ${c.value ?? "not measured"}`), ...fullRunNeeds];
   return {
     schema: "my-leads-queue-stress/v1", mode: input.mode, startedAt: input.startedAt, finishedAt: new Date().toISOString(), seed: input.seed, repeats: input.repeats,
@@ -147,7 +168,7 @@ export function renderMarkdown(r: Report): string {
   L.push(`**Verdict: ${r.verdict}** (${r.mode} run, seed ${r.seed}, ${r.repeats} repeat${r.repeats === 1 ? "" : "s"}, ${r.sha}, ${r.database})`, "");
   if (r.failReasons.length) { L.push("Blocking:"); for (const f of r.failReasons) L.push(`- ${f}`); L.push(""); }
   L.push("## Exit criteria", "", "| Criterion | Value | Limit | Result |", "|---|---:|---:|---|");
-  for (const c of r.criteria) L.push(`| ${c.label}${c.note ? ` — ${c.note}` : ""} | ${c.value ?? "n/a"} | ${c.id === "p95" ? `< ${c.limit} ms` : c.limit} | ${!c.evaluated ? "not evaluated" : c.pass ? "pass" : "FAIL"} |`);
+  for (const c of r.criteria) L.push(`| ${c.label}${c.note ? ` — ${c.note}` : ""} | ${c.value ?? "n/a"} | ${c.id === "p95" ? `< ${c.limit} ms` : c.limit} | ${!c.evaluated ? "not evaluated" : !c.pass ? "FAIL" : c.note?.startsWith("WARN") ? "WARN" : "pass"} |`);
   L.push("", "## Per-family failure rates (leads with any mismatch / leads checked)", "", "| Family | Worlds | Leads | Checks | Failing | Rate | Mismatch kinds | p95 All-tab page (ms) |", "|---|---:|---:|---:|---:|---:|---|---:|");
   for (const f of r.families) {
     const kinds = Object.entries(f.byKind).map(([k, n]) => `${k}:${n}`).join(", ") || "-";
@@ -155,7 +176,9 @@ export function renderMarkdown(r: Report): string {
   }
   const sq = Object.entries(r.specQuestions);
   L.push("", "## Spec questions (design text and SQL disagree; the oracle follows the text)", "");
-  for (const [id, q] of sq) L.push(`- **${id}** (${q.mismatches} mismatching lead${q.mismatches === 1 ? "" : "s"}): ${q.text}`);
+  const expectedTotal = r.families.reduce((a, f) => a + f.expected, 0);
+  if (expectedTotal) L.push(`${expectedTotal} mismatches are expected until their SQL fix lands and do not fail the run.`, "");
+  for (const [id, q] of sq) L.push(`- **${id}**${q.expectedUntil ? ` (expected_until: ${q.expectedUntil})` : ""} (${q.mismatches} mismatch${q.mismatches === 1 ? "" : "es"}): ${q.text}`);
   L.push("", "## Race and refresh lanes", "");
   if (r.lanes.length === 0) L.push("(not run)");
   for (const l of r.lanes) L.push(`- **${l.id}** ${l.title}: ${l.skipped ? `SKIPPED — ${l.skipped}` : `${l.runs} runs, ${l.failures} failure${l.failures === 1 ? "" : "s"}`}${l.notes?.length ? ` (${l.notes.join("; ")})` : ""}`);

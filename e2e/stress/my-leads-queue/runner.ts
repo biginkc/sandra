@@ -67,6 +67,14 @@ export class Reader {
     return { rows, ids: rows.map((r) => r.propertyId), first, pages };
   }
 
+  async facts(ids: string[]): Promise<Json> {
+    const t0 = process.hrtime.bigint();
+    const r = await asAuthenticated(this.db, this.sub, async () =>
+      (await this.db.query("select public.fn_my_leads_work_facts($1,$2,$3,$4) as r", [this.ctx.org, this.member, ids, this.at.toISOString()])).rows[0].r);
+    this.record("facts", MS(t0));
+    return r;
+  }
+
   async badge(): Promise<number> {
     const t0 = process.hrtime.bigint();
     const r = await asAuthenticated(this.db, this.sub, async () => (await this.db.query("select public.fn_my_leads_badge_v2($1) as r", [this.at.toISOString()])).rows[0].r as number);
@@ -96,7 +104,10 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
   // 1. Per lead, from the All tab (every queue lead appears there with its place, reason and row).
   const all = await reader.view("all", null);
   const byKey = new Map<string, Json>();
-  for (const row of all.rows) byKey.set(keyOf.get(row.propertyId) ?? row.propertyId, row);
+  for (const row of all.rows) {
+    if (!keyOf.has(row.propertyId)) { add("scope", null, "only the member's own queue", { leaked: row.propertyId, decoy: mat.decoyIds.includes(row.propertyId) }); continue; }
+    byKey.set(keyOf.get(row.propertyId)!, row);
+  }
   for (const lead of world.leads) {
     const p = placements.get(lead.key)!;
     const row = byKey.get(lead.key);
@@ -148,6 +159,15 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
         if (Number(n) !== e) add("count_row", null, `chipCounts.${reason}: ${e}`, n);
       }
     }
+    // within-chip order (design 2 / 3): consecutive rows whose oracle key is known must be non-decreasing
+    if (chip !== null && chip !== "under_contract") {
+      checks += 1;
+      const keys = read.rows.map((r) => placements.get(keyOf.get(r.propertyId) ?? "")?.sortAt);
+      for (let i = 1; i < keys.length; i += 1) {
+        const a = keys[i - 1], b = keys[i];
+        if (a !== undefined && b !== undefined && b < a) { add("order", null, `${tab}/${chip}: ordered by the design's key`, read.rows.slice(Math.max(0, i - 1), i + 1).map((r) => keyOf.get(r.propertyId))); break; }
+      }
+    }
     // sort order: Needs attention follows the chip order (New lead, Call today, Due, New reply, Broken, Offer, Gone quiet, Nothing planned)
     if (tab === "needs_attention" && chip === null) {
       const ranks = read.rows.map((r) => NEEDS_ATTENTION_CHIPS.indexOf(r.reason));
@@ -156,7 +176,38 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     }
   }
 
-  // 3. Sidebar badge.
+  // 3. Stage filter and stageCounts, search, and fn_my_leads_work_facts.
+  const byStage = new Map<string, number>();
+  for (const l of world.leads) byStage.set(l.stage, (byStage.get(l.stage) ?? 0) + 1);
+  const sc = all.first.stageCounts as Record<string, number>;
+  checks += 1;
+  for (const [stage, n] of byStage) if (Number(sc[stage] ?? 0) !== n) add("count_row", null, `stageCounts.${stage}: ${n}`, sc[stage] ?? 0);
+  for (const stage of byStage.keys()) {
+    const page = await reader.page("all", null, 1, 50, stage);
+    checks += 1;
+    if (page.total !== byStage.get(stage)) add("count_row", null, `all tab filtered to stage ${stage}: ${byStage.get(stage)}`, page.total);
+  }
+  for (const lead of world.leads.slice(0, 3)) {
+    const hit = await reader.page("all", null, 1, 50, null, `${lead.key} Stress`);
+    checks += 1;
+    if (!hit.ids.includes(mat.ids.get(lead.key))) add("view_membership", lead, `search for its address finds it`, hit.ids.length);
+  }
+  const miss = await reader.page("all", null, 1, 50, null, "zzqx no such lead");
+  checks += 1;
+  if (miss.total !== 0) add("view_membership", null, "search for a nonexistent string finds nothing", miss.total);
+  const sample = world.leads.slice(0, 48);
+  const extra = [...mat.decoyIds.slice(0, 1), "00000000-0000-4000-8000-000000000000"];
+  const facts = await reader.facts([...sample.map((l) => mat.ids.get(l.key)!), ...extra]);
+  checks += 1;
+  const factRows = new Map<string, Json>((facts.rows as Json[]).map((r) => [r.propertyId, r]));
+  for (const lead of sample) {
+    const r = factRows.get(mat.ids.get(lead.key)!), p = placements.get(lead.key)!;
+    if (!r) add("hidden_lead", lead, "returned by fn_my_leads_work_facts", "missing");
+    else if (r.place !== p.place || r.reason !== p.reason) add("wrong_chip", lead, { via: "work_facts", place: p.place, reason: p.reason }, { place: r.place, reason: r.reason });
+  }
+  for (const id of extra) if (!(facts.missing as string[]).includes(id)) add("scope", null, "work_facts reports a decoy / unknown id as missing", id);
+
+  // 4. Sidebar badge.
   checks += 1;
   const sqlBadge = await reader.badge();
   if (sqlBadge !== badge) add("badge", null, badge, sqlBadge);
@@ -275,7 +326,7 @@ export async function evaluateInRolledBackTx(db: Client, family: FamilyDef, worl
   await db.query("savepoint s1_world");
   try {
     const ctx = await setupOrg(db);
-    const mat = await materializeWorld(db, ctx, world);
+    const mat = await materializeWorld(db, ctx, world, { decoys: true });
     await db.query("analyze");
     const at = new Date(world.now);
     const reader = new Reader(db, ctx, ctx.rep, at, ctx.rep);

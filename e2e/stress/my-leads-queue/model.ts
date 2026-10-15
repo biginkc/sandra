@@ -116,6 +116,9 @@ export type Lead = {
   obligations: Obligation[];
   pin?: { pinnedAt: number; until: number | null };
   aiDraftPending?: boolean;
+  /** The homeowner contact is shared with another lead in the same queue (`contactGroup` names the shared contact). */
+  contactShared?: boolean;
+  contactGroup?: string;
   aiDeadLetter?: number;
   normaNeedsReview?: boolean;
   normaCalling?: boolean;

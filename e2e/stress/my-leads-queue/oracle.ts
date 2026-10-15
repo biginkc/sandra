@@ -23,16 +23,18 @@ export type Placement = {
   headline: Record<string, string | number | boolean>;
   /** Distinct Broken fix actions that are unresolved on the lead (design 2.1), sorted. */
   brokenActions: BrokenAction[];
+  /** Within-chip order key from design 2 / 3 (ascending), where the design names one: pins newest first, due by time, replies newest
+   * first, Waiting by next event. Undefined where the design's key needs facts this model does not hold (last touch, failure time). */
+  sortAt?: number;
 };
 
 /** Places where the design text and the A1 SQL disagree. Registered so the report can group mismatches. */
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
-  SQ1: "1.1 row 1 reads 'no active appointment with effective time <= now + 15 min' (so an under-contract lead with only a FUTURE callback is Neither); the SQL treats any active appointment as 'something due' and places that lead in Waiting · Callback booked.",
-  SQ2: "2.1 lists ledger 'unknown, reserved, sending older than 15 min' as Check status; read literally an 'unknown' receipt younger than 15 min is not Broken yet. The SQL treats every 'unknown' ledger receipt as Broken immediately.",
-  SQ4: "5 says user my_leads_workflow events with operation 'in the existing allowlist' clear New reply; the existing allowlist (migration 20260930035000) includes log_acquisition_attempt, but v7 says a no-answer call must not clear it. Both the oracle and the SQL drop log_acquisition_attempt. Needs a decision; not seeded as a mismatch.",
-  SQ5: "1.1 row 15 puts 'contact-only or ambiguous inbound attribution' in Nothing planned (label check texts), while 5 attributes inbounds by homeowner contact when property_id is null. Both the oracle and the SQL follow 5 (New reply). Needs a decision; not seeded as a mismatch.",
-  SQ3: "2.1 lists a pending AI reply draft as Broken · 'AI reply needs your OK' (and 1.1 row 6 sends any unresolved Broken condition to Broken once no unhandled inbound exists). The SQL treats a pending draft as a label only, never Broken.",
+  SQ2: "v9 17: ledger/obligation 'unknown' younger than 15 min is in flight, not Broken (oracle follows this). The A1 SQL still marks it Broken; fix routed to PR #876 migration 20261015020200.",
 };
+
+/** Spec questions whose SQL fix is in flight elsewhere: their mismatches are reported but do not fail the run until that PR lands. */
+export const EXPECTED_UNTIL: Readonly<Record<string, string>> = { SQ2: "#876" };
 
 // ---------- America/Chicago wall-clock arithmetic (business days, "7 Chicago days") ----------
 const chicagoFmt = new Intl.DateTimeFormat("en-US", {
@@ -104,7 +106,8 @@ type Inbound = { at: number; ref: string | null; kind: "text" | "call" };
 
 function latestInbound(lead: Lead): Inbound | null {
   const items: Inbound[] = [];
-  for (const m of lead.messages) if (m.dir === "inbound") items.push({ at: m.at, ref: m.ref, kind: "text" });
+  // v9 17 (SQ5): a contact-only inbound counts only when its contact is homeowner on exactly one queue property
+  for (const m of lead.messages) if (m.dir === "inbound" && !(m.contactOnly && lead.contactShared)) items.push({ at: m.at, ref: m.ref, kind: "text" });
   for (const c of lead.missedCalls) items.push({ at: c, ref: null, kind: "call" });
   if (items.length === 0) return null;
   // newest by time; a text beats a call at the same instant (ties never occur in generated worlds)
@@ -164,7 +167,9 @@ function brokenItems(lead: Lead, now: number): BrokenItem[] {
   }
   for (const o of lead.obligations) {
     const stale = (o.state === "claimed" || o.state === "sending") && (o.leaseExpiresAt ?? o.updatedAt) < now;
-    if (!(["required", "draft", "failed_not_dispatched", "delivery_failed", "blocked", "unknown"].includes(o.state) || stale)) continue;
+    // v9 17 (SQ2): an 'unknown' obligation gets the same 15-minute in-flight grace as reserved/sending
+    const unknownStale = o.state === "unknown" && o.updatedAt < now - 15 * MIN;
+    if (!(["required", "draft", "failed_not_dispatched", "delivery_failed", "blocked"].includes(o.state) || unknownStale || stale)) continue;
     const action: BrokenAction = o.state === "delivery_failed" ? "resend" : o.state === "blocked" ? "review" : o.state === "unknown" || stale ? "check_status" : "send_text";
     out.push({ kind: `obligation_${o.state}`, action, at: o.updatedAt, ref: o.ref, failure: ["failed_not_dispatched", "delivery_failed", "blocked"].includes(o.state) });
   }
@@ -194,7 +199,7 @@ function brokenItems(lead: Lead, now: number): BrokenItem[] {
       out.push({ kind: "scheduled_text_overdue", action: "open_campaign", at: m.scheduledFor, ref: m.ref, failure: false });
   }
   if (lead.aiDeadLetter !== undefined) out.push({ kind: "ai_reply_failed", action: "review", at: lead.aiDeadLetter, ref: "deadletter", failure: false });
-  if (lead.aiDraftPending) out.push({ kind: "ai_reply_needs_ok", action: "review", at: now, ref: "draft", failure: false }); // SQ3
+  // v9 17 (SQ3): a pending AI draft is a label ("AI draft waiting for your OK"), never Broken; only a dead letter is.
   if (lead.normaNeedsReview) out.push({ kind: "norma_needs_review", action: "review", at: now, ref: "norma", failure: false });
   return out;
 }
@@ -249,28 +254,30 @@ export function place(lead: Lead, now: number): Placement {
   const loDeadline = lo ? addBusinessDays(sendTime(lo), 3) : null;
   const loFinal = !!lo && lo.source === "drip" && !!lo.dripFinal && lead.enrollment?.status === "completed" && !inboundAfterLo;
 
-  const mk = (row: string, placeOf: Place, reason: Reason, headline: Placement["headline"] = {}): Placement =>
-    ({ row, place: placeOf, reason, inBadge: ["4", "9", "5", "6"].includes(row), headline, brokenActions });
+  const mk = (row: string, placeOf: Place, reason: Reason, headline: Placement["headline"] = {}, sortAt?: number): Placement =>
+    ({ row, place: placeOf, reason, inBadge: ["4", "9", "5", "6"].includes(row), headline, brokenActions, sortAt });
+  const onlyDrip = dripHealthy(lead, now) && !campHealthy && lead.enrollment?.status === "active" ? lead.enrollment.nextRunAt ?? undefined : undefined;
 
-  if (lead.stage === "under_contract" && !appts.some((a) => effTime(a) <= now + SOON)) return mk("1", "neither", "under_contract");
-  if (pinned) return mk("2", "your_move", "call_today");
+  // v9 17 (SQ1): Neither only with no active appointment at all; any active one flows through Due / Callback booked.
+  if (lead.stage === "under_contract" && appts.length === 0) return mk("1", "neither", "under_contract");
+  if (pinned) return mk("2", "your_move", "call_today", {}, -lead.pin!.pinnedAt);
   if (lead.stage === "not_contacted" && lead.attempts.length === 0) return mk("3", "your_move", "new_lead");
-  if (dueAt !== null) return mk("4", "your_move", "due", { soon: dueAt > now });
-  if (unhandled) return mk("5", "your_move", "new_reply", { kind: inbound!.kind });
+  if (dueAt !== null) return mk("4", "your_move", "due", { soon: dueAt > now }, dueAt);
+  if (unhandled) return mk("5", "your_move", "new_reply", { kind: inbound!.kind }, -inbound!.at);
   if (broken.length > 0) return mk("6", "your_move", "broken");
   if (manualQueued) return mk("6a", "your_move", "nothing_planned", { variant: "text_waiting" });
   if (lead.stage === "needs_offer" && !offerPending) return mk("7", "your_move", "offer", { kind: "ready" });
   if (lead.stage === "offer_sent" && offerPending && ((offer!.hasChain && chainEff === null) || (offerEff !== null && offerEff <= now + SOON)))
     return mk("8", "your_move", "offer", { kind: offer!.hasChain && chainEff === null ? "follow_up_missing" : "follow_up_due" });
-  if (missedAt !== null) return mk("9", "your_move", "due", { overdueDays: Math.floor((now - missedAt) / DAY) });
-  if (automationOk) return mk("10", "their_move", "in_drip");
+  if (missedAt !== null) return mk("9", "your_move", "due", { overdueDays: Math.floor((now - missedAt) / DAY) }, missedAt);
+  if (automationOk) return mk("10", "their_move", "in_drip", {}, onlyDrip);
   if (futureAt !== null) {
     // 3.1: a lead with both a callback and an offer follow-up shows the earlier of the two; chip = the earlier one's kind
     const offerEarlier = offerEff !== null && offerEff > now + SOON && offerEff < futureAt;
-    return mk("11", "their_move", offerEarlier ? "offer_out" : "callback_booked");
+    return mk("11", "their_move", offerEarlier ? "offer_out" : "callback_booked", {}, offerEarlier ? offerEff! : futureAt);
   }
-  if (offerEff !== null && offerEff > now + SOON) return mk("12", "their_move", "offer_out");
-  if (textedOk && loDeadline !== null && now < loDeadline) return mk("13", "their_move", "texted_last", { by: lo!.source === "campaign" ? "campaign" : AI_CLASS.has(lo!.source!) ? "ai" : "human" });
+  if (offerEff !== null && offerEff > now + SOON) return mk("12", "their_move", "offer_out", {}, offerEff);
+  if (textedOk && loDeadline !== null && now < loDeadline) return mk("13", "their_move", "texted_last", { by: lo!.source === "campaign" ? "campaign" : AI_CLASS.has(lo!.source!) ? "ai" : "human" }, loDeadline);
   if ((textedOk && loDeadline !== null && now >= loDeadline) || loFinal) return mk("14", "your_move", "gone_quiet", { kind: textedOk ? "texted_silent" : "drip_finished" });
   return mk("15", "your_move", "nothing_planned");
 }

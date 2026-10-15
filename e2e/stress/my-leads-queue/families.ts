@@ -48,6 +48,8 @@ export type FamilyDef = {
 
 /** Sends whose 3-business-day deadline the boundary family straddles: Fri 4 PM CDT, Fri 4 PM CDT before fall-back, Fri 4 PM CST before spring-forward, a plain Wednesday. */
 const BD_SENDS = [Date.UTC(2026, 9, 16, 21), Date.UTC(2026, 9, 30, 21), Date.UTC(2027, 2, 12, 22), Date.UTC(2026, 9, 14, 17)];
+/** One millisecond before, exactly at, one millisecond after a threshold. */
+const EXACT = [-1, 0, 1] as const;
 const WED_NOON_UTC = Date.UTC(2026, 9, 14, 17, 0, 0);
 const defaultNow = (rng: Rng) => WED_NOON_UTC + rng.int(0, 60) * DAY;
 
@@ -89,7 +91,9 @@ export const FAMILIES: readonly FamilyDef[] = [
     ];
   } },
   { id: "callback_boundary", title: "callback due -16/-15/-1/0/+1 min", build: (k) =>
-    [-16, -15, -1, 0, 1].map((d) => k.lead(`d${d}`, { appointments: [k.appt("a", k.j(k.now + (15 + d) * MIN, 5 * SEC))] })) },
+    [...[-16, -15, -1, 0, 1].map((d) => k.lead(`d${d}`, { appointments: [k.appt("a", k.j(k.now + (15 + d) * MIN, 5 * SEC))] })),
+      // exactly at the threshold and one millisecond either side (design 16.3)
+      ...EXACT.map((e) => k.lead(`exact${e}`, { appointments: [k.appt("a", k.now + 15 * MIN + e)] }))] },
   { id: "callback_snoozed", title: "callback snoozed", build: (k) => [
     k.lead("snooze_future", { appointments: [k.appt("a", k.now - HOUR, { status: "snoozed", snoozedUntil: k.j(k.now + DAY) })] }),
     k.lead("snooze_just_passed", { appointments: [k.appt("a", k.now - DAY, { status: "snoozed", snoozedUntil: k.j(k.now - 10 * MIN, 5 * MIN) })], enrollment: k.drip() }),
@@ -108,6 +112,11 @@ export const FAMILIES: readonly FamilyDef[] = [
     });
     const legacy = k.j(k.now + 15 * MIN, 5 * MIN);
     leads.push(k.lead("legacy", { stage: "offer_sent", offer: offer(false, legacy) }));
+    for (const e of EXACT) {
+      const due = k.now + 15 * MIN + e;
+      leads.push(k.lead(`chain_exact${e}`, { stage: "offer_sent", offer: offer(true, due), appointments: [k.appt("c", due, { offerChain: true })] }));
+      leads.push(k.lead(`legacy_exact${e}`, { stage: "offer_sent", offer: offer(false, due) }));
+    }
     return leads;
   } },
   { id: "offer_chain_no_successor", title: "offer chain task completed without successor", build: (k) => {
@@ -132,6 +141,11 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("paused_reply", { messages: [dripText("d", 5 * HOUR), k.inb("i", at)], enrollment: k.drip({ status: "paused", pause: "inbound_reply", nextRunAt: null }) }),
       k.lead("none", { messages: [k.inb("i", at)] }),
       k.lead("contact_only", { messages: [k.inb("i", at, { contactOnly: true })] }),
+      // v9 17 (SQ5): the same contact is homeowner on two queue leads -> ambiguous, never New reply
+      ...(() => { const g = `shared${k.rng.int(0, 1e9)}`; return [
+        k.lead("contact_shared", { contactShared: true, contactGroup: g, messages: [k.inb("i", at, { contactOnly: true })] }),
+        k.lead("contact_shared_sibling", { contactShared: true, contactGroup: g }),
+      ]; })(),
       k.lead("missed_call", { missedCalls: [at] }),
     ];
   } },
@@ -157,8 +171,10 @@ export const FAMILIES: readonly FamilyDef[] = [
       base("log_offer_event", { events: [{ type: "my_leads_workflow", at: after(HOUR), actor: "user", operation: "log_acquisition_offer" }] }),
       base("campaign_text", { messages: [k.inb("i", i), k.out("o", sendAt, { source: "campaign" })] }),
       base("queued_text", { messages: [k.inb("i", i), k.out("o", sendAt, { outcome: "queued" })] }),
-      base("ai_hold_draft", { aiDraftPending: true, question: "SQ3" }),
-      base("handled_then_draft", { attempts: [k.attempt(after(HOUR), "reached")], aiDraftPending: true, question: "SQ3" }),
+      base("ai_hold_draft", { aiDraftPending: true }),
+      // v9 17 (SQ4): a no-answer attempt plus its log_acquisition_attempt workflow event must NOT clear the reply
+      base("no_answer_plus_log_event", { attempts: [k.attempt(after(HOUR), "no_answer")], events: [{ type: "my_leads_workflow", at: after(HOUR), actor: "user", operation: "log_acquisition_attempt" }] }),
+      base("handled_then_draft", { attempts: [k.attempt(after(HOUR), "reached")], aiDraftPending: true }),
     ];
   } },
   { id: "stamped_x_then_y", title: "stamped reply X then Y", build: (k) => {
@@ -220,6 +236,9 @@ export const FAMILIES: readonly FamilyDef[] = [
     return states.flatMap((s) => [-5, 0, 5, 40].map((d) => {
       const updatedAt = k.j(k.now - (15 + d) * MIN, 20 * SEC);
       return k.lead(`${s}_${d}`, { ledgers: [{ ref: "l", state: s, updatedAt }], ...(s === "unknown" && updatedAt > k.now - 15 * MIN ? { question: "SQ2" } : {}) });
+    })).concat((["sending", "reserved"] as const).flatMap((st) => EXACT.map((e) => k.lead(`${st}_exact${e}`, { ledgers: [{ ref: "l", state: st, updatedAt: k.now - 15 * MIN + e }] })))).concat([-5, 5].map((d) => {
+      const updatedAt = k.j(k.now - (15 + d) * MIN, 20 * SEC);
+      return k.lead(`obligation_unknown_${d}`, { obligations: [{ ref: "o", state: "unknown", updatedAt }], ...(updatedAt > k.now - 15 * MIN ? { question: "SQ2" } : {}) });
     }));
   } },
   { id: "obligation", title: "obligation required/blocked/stale lease", build: (k) => {
@@ -239,6 +258,7 @@ export const FAMILIES: readonly FamilyDef[] = [
       camp("recent", { scheduledFor: k.now - 10 * MIN }),
       camp("boundary", { scheduledFor: k.j(k.now - 30 * MIN) }),
       camp("overdue", { scheduledFor: k.now - 45 * MIN }),
+      ...EXACT.map((e) => camp(`exact${e}`, { scheduledFor: k.now - 30 * MIN + e })),
       k.lead("future_with_reply", { messages: [k.inb("i", k.now - HOUR), k.out("c", k.now - 2 * DAY, { source: "campaign", outcome: "queued", scheduledFor: k.now + DAY })] }),
       k.lead("sent", { messages: [k.out("c", k.now - 2 * DAY, { source: "campaign", sentAt: k.now - 2 * HOUR })] }),
       k.lead("sent_long_ago", { messages: [k.out("c", k.now - 9 * DAY, { source: "campaign", sentAt: k.now - 6 * DAY })] }),
@@ -253,11 +273,14 @@ export const FAMILIES: readonly FamilyDef[] = [
     k.lead("claim_edge", { enrollment: k.drip({ claimAt: k.j(k.now - 15 * MIN) }) }),
     k.lead("claim_fresh", { enrollment: k.drip({ claimAt: k.now - 5 * MIN }) }),
     k.lead("no_next_run", { enrollment: k.drip({ nextRunAt: null }) }),
+    ...EXACT.map((e) => k.lead(`overdue_exact${e}`, { enrollment: k.drip({ nextRunAt: k.now - 60 * MIN + e }) })),
+    ...EXACT.map((e) => k.lead(`claim_exact${e}`, { enrollment: k.drip({ claimAt: k.now - 15 * MIN + e }) })),
   ] },
   { id: "call_in_progress", title: "call_in_progress fresh vs stale", build: (k) => [
     k.lead("fresh", { enrollment: k.drip({ status: "paused", pause: "call_in_progress", nextRunAt: null, updatedAt: k.now - 5 * MIN }) }),
     k.lead("edge", { enrollment: k.drip({ status: "paused", pause: "call_in_progress", nextRunAt: null, updatedAt: k.j(k.now - 30 * MIN) }) }),
     k.lead("stale", { enrollment: k.drip({ status: "paused", pause: "call_in_progress", nextRunAt: null, updatedAt: k.now - 45 * MIN }) }),
+    ...EXACT.map((e) => k.lead(`exact${e}`, { enrollment: k.drip({ status: "paused", pause: "call_in_progress", nextRunAt: null, updatedAt: k.now - 30 * MIN + e }) })),
     k.lead("fresh_with_callback", { enrollment: k.drip({ status: "paused", pause: "call_in_progress", nextRunAt: null, updatedAt: k.now - 5 * MIN }), appointments: [k.appt("a", k.now + 3 * HOUR)] }),
   ] },
   { id: "drip_pause_reasons", title: "norma_call / manual / provider_failed pauses", build: (k) => {
@@ -297,6 +320,7 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("minus_1s", { messages: [k.out("o", s0 + SEC, { source: src() })] }),
       k.lead("plus_1m", { messages: [k.out("o", s0 - MIN - k.rng.int(1, 20) * SEC, { source: src() })] }),
       k.lead("minus_1m", { messages: [k.out("o", s0 + MIN + k.rng.int(1, 20) * SEC, { source: src() })] }),
+      ...EXACT.map((e) => k.lead(`exact${e}`, { messages: [k.out("o", s0 - e, { source: src() })] })),
     ];
   } },
   { id: "manual_queued_text", title: "manual queued text with future callback", build: (k) => {
@@ -314,9 +338,9 @@ export const FAMILIES: readonly FamilyDef[] = [
     const uc = (key: string, over: Partial<Lead>) => k.lead(key, { stage: "under_contract", ...over });
     return [
       uc("nothing", {}),
-      uc("future_callback", { appointments: [k.appt("a", k.now + DAY)], question: "SQ1" }),
-      uc("snoozed_future", { appointments: [k.appt("a", k.now - HOUR, { status: "snoozed", snoozedUntil: k.now + 2 * DAY })], question: "SQ1" }),
-      (() => { const due = k.j(k.now + 15 * MIN, 5 * SEC); return uc("callback_boundary", { appointments: [k.appt("a", due)], ...(due > k.now + 15 * MIN ? { question: "SQ1" } : {}) }); })(),
+      uc("future_callback", { appointments: [k.appt("a", k.now + DAY)] }),
+      uc("snoozed_future", { appointments: [k.appt("a", k.now - HOUR, { status: "snoozed", snoozedUntil: k.now + 2 * DAY })] }),
+      (() => { const due = k.j(k.now + 15 * MIN, 5 * SEC); return uc("callback_boundary", { appointments: [k.appt("a", due)], }); })(),
       uc("callback_overdue", { appointments: [k.appt("a", k.now - 2 * DAY)] }),
       uc("callback_missed", { appointments: [k.appt("a", k.now - 9 * DAY)] }),
       uc("with_reply", { messages: [k.inb("i", k.now - HOUR)] }),

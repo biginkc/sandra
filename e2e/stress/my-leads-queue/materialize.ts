@@ -18,6 +18,8 @@ export type Materialized = {
   ids: Map<string, string>;
   /** lead key -> message ref -> message id */
   messageIds: Map<string, Map<string, string>>;
+  /** Decoy leads owned by another rep in the org and by another org: they must never appear in the rep's queue, counts or badge. */
+  decoyIds: string[];
 };
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -74,24 +76,40 @@ function statusOf(m: Msg): string {
   }
 }
 
-export async function materializeWorld(db: Client, ctx: OrgCtx, world: World, opts: { member?: string } = {}): Promise<Materialized> {
+export async function materializeWorld(db: Client, ctx: OrgCtx, world: World, opts: { member?: string; decoys?: boolean } = {}): Promise<Materialized> {
   const member = opts.member ?? ctx.rep;
   const ids = new Map<string, string>();
   const messageIds = new Map<string, Map<string, string>>();
+  const contacts = new Map<string, string>();
   let phoneSeq = 0;
+  const nextPhone = () => (phoneSeq += 1);
   for (const lead of world.leads) {
     const id = randomUUID();
     ids.set(lead.key, id);
-    await insertLead(db, ctx, member, world.now, lead, id, () => (phoneSeq += 1), messageIds);
+    await insertLead(db, ctx, member, world.now, lead, id, nextPhone, messageIds, contacts);
   }
-  return { ctx, ids, messageIds };
+  const decoyIds: string[] = [];
+  if (opts.decoys) {
+    // Shapes that would land in Needs attention and the badge if the member or org filter leaked.
+    const decoy = (key: string) => ({ ...world.leads[0]!, key, question: undefined, contactShared: false, contactGroup: undefined, pin: undefined,
+      messages: [{ ref: "i", dir: "inbound" as const, at: world.now - HOUR, body: "decoy" }], appointments: [{ ref: "a", due: world.now - HOUR, status: "open" as const }],
+      enrollment: undefined, offer: undefined, ledgers: [], obligations: [], events: [], missedCalls: [], stage: "contacted" as const });
+    for (const [n, [c, who]] of ([[ctx, ctx.otherRep], [ctx, ctx.otherRep], [{ ...ctx, org: ctx.org2 }, ctx.outsider]] as const).entries()) {
+      const id = randomUUID();
+      decoyIds.push(id);
+      await insertLead(db, c, who, world.now, decoy(`decoy${n}_${id.slice(0, 8)}`), id, nextPhone, new Map(), new Map());
+    }
+  }
+  return { ctx, ids, messageIds, decoyIds };
 }
 
-async function insertLead(db: Client, ctx: OrgCtx, member: string, now: number, lead: Lead, id: string, nextPhone: () => number, messageIds: Map<string, Map<string, string>>) {
+async function insertLead(db: Client, ctx: OrgCtx, member: string, now: number, lead: Lead, id: string, nextPhone: () => number, messageIds: Map<string, Map<string, string>>, contacts: Map<string, string>) {
   const { org } = ctx;
-  const contact = randomUUID();
+  const shared = lead.contactGroup ? contacts.get(lead.contactGroup) : undefined;
+  const contact = shared ?? randomUUID();
+  if (lead.contactGroup) contacts.set(lead.contactGroup, contact);
   const phone = lead.hasPhone ? `+181655${String(nextPhone() + 10000).padStart(5, "0")}` : null;
-  await db.query("insert into public.contacts(id,org_id,first_name,last_name,phone_1,phone_1_type) values ($1,$2,$3,$4,$5,$6)",
+  if (!shared) await db.query("insert into public.contacts(id,org_id,first_name,last_name,phone_1,phone_1_type) values ($1,$2,$3,$4,$5,$6)",
     [contact, org, lead.key, "Lead", phone, phone ? "mobile" : "unknown"]);
   await db.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id,homeowner_contact_id) values ($1,$2,$3,'MO','new_lead',$4,$5)",
     [id, org, `${lead.key} Stress`, member, contact]);
