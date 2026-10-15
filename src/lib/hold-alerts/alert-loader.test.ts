@@ -8,7 +8,9 @@ import { fakePostgrest } from "@/app/(dashboard)/messages-v2/fake-postgrest.test
 import { loadMessagesV2Data as pageLoader } from "@/app/(dashboard)/messages-v2/queries";
 
 import { loadMessagesV2Data as alertLoader } from "./alert-loader";
+import { runHoldAlertsForOrg } from "./core";
 import { createHoldAlertDeps } from "./index";
+import { makeDeps } from "./test-support";
 
 /** sha256 of src/app/(dashboard)/messages-v2/queries.ts at 84ddabdd6 (the parent of PR #874). */
 const PARENT_QUERIES_SHA256 = "020352518e8be736faebd8de7c719e1afa061bbf3c78fb9eacec2e339c924375";
@@ -93,4 +95,46 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     expect(res.complete).toBe(true);
     expect(res.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: false }]);
   });
+
+  /**
+   * The FULL alert pass (runHoldAlertsForOrg) with fake channels/store/recipients and the cron's real hold loading
+   * (createHoldAlertDeps -> alert-loader.ts). FROZEN_PARENT_DECISIONS was produced by running this pass with
+   * alert-loader.ts, which the first test pins to the sha256 of queries.ts at 84ddabdd6 (pre-#874): i.e. it IS the
+   * parent's decision output for this fixture. The page loader (#874 semantics) is run too, to show the fixture
+   * actually distinguishes them (it would add an SMS).
+   */
+  const decisions = async (loader: "cron" | "page") => {
+    const real = createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:hot_lead" });
+    const { deps, store, sent } = makeDeps({ nowIso: new Date(NOW).toISOString() });
+    store.watermarks.set("org", at(7 * 24 * 60));
+    deps.loadHolds = loader === "cron" ? real.loadHolds : async (orgId, since) => {
+      const { toAlertHolds } = await import("./holds");
+      const data = await pageLoader(db(fixture()), orgId, NOW, { alertsSince: since });
+      return { holds: toAlertHolds(data.holds, new Map(), ["model:hot_lead"]), complete: true };
+    };
+    deps.loadHeldPropertyIds = real.loadHeldPropertyIds;
+    await runHoldAlertsForOrg(deps, "org");
+    return {
+      deliveries: store.rows.map((r) => ({ property: r.propertyId, recipient: r.recipientUserId, channel: r.channel, stage: r.stage, status: r.status })),
+      sent: sent.map((x) => ({ channel: x.channel, userId: x.userId })),
+    };
+  };
+
+  it("the full alert pass makes exactly the parent's (84ddabdd6) delivery decisions", async () => {
+    expect(await decisions("cron")).toEqual(FROZEN_PARENT_DECISIONS);
+    expect(await decisions("page")).not.toEqual(FROZEN_PARENT_DECISIONS);
+  });
 });
+
+const P1 = "00000000-0000-4000-8000-000000000001";
+/** Captured from the full pass over the parent's loader (see the comment on `decisions`): Slack only, no SMS. */
+const FROZEN_PARENT_DECISIONS = {
+  deliveries: [
+    { channel: "slack", property: P1, recipient: "owner-1", stage: "first", status: "sent" },
+    { channel: "slack", property: P1, recipient: "acq-1", stage: "first", status: "sent" },
+  ],
+  sent: [
+    { channel: "slack", userId: "owner-1" },
+    { channel: "slack", userId: "acq-1" },
+  ],
+};

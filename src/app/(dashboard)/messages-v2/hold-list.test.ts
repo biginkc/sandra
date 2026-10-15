@@ -914,16 +914,16 @@ describe("Astra: revalidation and Show older cost follows the requested ids, not
   };
   const tableRequests = (requests: Map<string, number>) => [...requests.values()].reduce((a, b) => a + b, 0);
 
-  it("one-card re-check and a one-card Show older: the same request count at 150 and at 10,000 holds", async () => {
+  it("one-card re-check and a one-card Show older: the same request count (tables + RPCs) at 150 and at 10,000 holds", async () => {
     const counts: Record<string, number[]> = { live: [], older: [] };
     for (const n of [150, 10_000]) {
       const tables = world(n);
       const live = db(tables);
       expect((await liveStateOf(live.client, "org", [u(7)]))![0].eligible).toBe(true);
-      counts.live.push(tableRequests(live.requests));
+      counts.live.push(tableRequests(live.requests) + live.rpcLog.length);
       const older = db(tables);
       expect((await loadHoldsByIds(older.client, "org", [u(7)]))!.holds).toHaveLength(1);
-      counts.older.push(tableRequests(older.requests));
+      counts.older.push(tableRequests(older.requests) + older.rpcLog.length);
     }
     expect(counts.live[0]).toBe(counts.live[1]);
     expect(counts.older[0]).toBe(counts.older[1]);
