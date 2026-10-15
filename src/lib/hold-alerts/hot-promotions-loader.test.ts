@@ -18,7 +18,7 @@ type EventRow = {
   created_at: string;
   payload: { to?: string; reason?: string; inbound?: string; covered_by_hold?: boolean; flag_at?: string | null };
 };
-type DeliveryRow = { hold_key: string; channel: string; status: string; attempts: number };
+type DeliveryRow = { hold_key: string; channel: string; status: string; attempts: number; recipient_user_id?: string };
 
 const NOW = "2026-10-15T12:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -204,6 +204,23 @@ describe("loadHotPromotions keyset paging", () => {
     const { promotions, complete } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
     expect(complete).toBe(true);
     expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-1", "prop-3", "prop-5", "prop-6", "prop-7"]);
+  });
+
+  it("finished means finished for the CURRENT owner: another recipient's terminal rows do not drop the event; a null owner lets any recipient's rows drop it", async () => {
+    const d = (key: string, recipient: string, channel: string, status = "sent", attempts = 1): DeliveryRow => ({ hold_key: key, channel, status, attempts, recipient_user_id: recipient });
+    const deliveries: DeliveryRow[] = [
+      d("hot_handoff:in-0", "user-A", "slack"), d("hot_handoff:in-0", "user-A", "sms", "skipped"), // A finished, B owner -> kept
+      d("hot_handoff:in-1", "user-B", "slack"), d("hot_handoff:in-1", "user-B", "sms", "failed", 3), // B finished -> dropped
+      d("hot_handoff:in-2", "user-A", "slack"), d("hot_handoff:in-2", "user-B", "sms"), // split across recipients -> kept
+    ];
+    const keep = async (owner: string | null) => {
+      const { db } = fakeDb(events(3), { deliveries: () => deliveries });
+      return (await loadHotPromotions(db, ORG, MARK, NOW_MS, owner)).promotions.map((p) => p.propertyId).sort();
+    };
+    expect(await keep("user-B")).toEqual(["prop-0", "prop-2"]);
+    expect(await keep("user-A")).toEqual(["prop-1", "prop-2"]);
+    // Unresolved owner: any recipient's rows count (A+B split on in-2 still fills both channels).
+    expect(await keep(null)).toEqual([]);
   });
 
   it("a failed deliveries lookup keeps everything (nothing dropped) and marks the load incomplete", async () => {

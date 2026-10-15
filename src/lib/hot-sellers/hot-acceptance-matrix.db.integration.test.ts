@@ -1808,7 +1808,78 @@ const ROWS: Row[] = [
       expect(await h.deliveryKeys()).toEqual([]);
     },
   },
+  {
+    id: "73",
+    name: "round 20: an UNASSIGNED hot_failed hand-off event, owner A's rows end skipped (A is replaced at send time), then B becomes the single owner: B gets exactly one Slack + one SMS, a further pass nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound();
+      const unblock = await h.blockAssignment();
+      try {
+        expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
+      } finally {
+        await unblock();
+      }
+      const fk = await h.flagKey();
+      expect(await hotFailedEvents(h)).toBe(1);
+      await ownerSkippedThenReplaced(h, fk);
+    },
+  },
+  {
+    id: "73b",
+    name: "round 20: a held-lead hot_text event, owner A's rows end skipped, then B becomes the single owner: B gets exactly one Slack + one SMS, a further pass nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      await pg.query("update public.properties set outreach_dispo = 'nurture' where id = $1", [h.propertyId]);
+      const a = await h.newInbound("yes, what would you pay?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+      await ownerSkippedThenReplaced(h, `hot_text:${a}`);
+    },
+  },
 ];
+
+async function hotFailedEvents(h: Harness): Promise<number> {
+  const { rows } = await pg.query("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [h.propertyId, HOT_FAILED_SOURCE_TYPE]);
+  return rows[0].n;
+}
+
+/**
+ * Shared tail of rows 73/73b. Pass 1: A is the owner when the pass selects the alert, but the send-time re-check
+ * sees a different owner, so both of A's rows end "skipped" and nothing is sent. Then A loses the owner role and B
+ * becomes the single active owner: the finished-check must look at B's rows only, so B is alerted exactly once.
+ */
+async function ownerSkippedThenReplaced(h: Harness, key: string): Promise<void> {
+  const real = h.baseDeps.loadHotOwner;
+  let calls = 0;
+  const first = await h.alertPass({
+    loadHotOwner: async (org) => {
+      calls += 1;
+      return calls === 1 ? real(org) : "00000000-0000-0000-0000-00000000dead";
+    },
+  });
+  expect(first.sent).toBe(0);
+  expect(h.sent).toEqual([]);
+  expect(await h.deliveryRows(key)).toEqual([["slack", "skipped"], ["sms", "skipped"]]);
+  const { rows: before } = await pg.query("select recipient_user_id from public.hold_alert_deliveries where org_id = $1 and hold_key = $2", [h.orgId, key]);
+  expect(before.every((r) => r.recipient_user_id === h.owner)).toBe(true);
+
+  const b = await createMember(h.orgId, "owner");
+  await pg.query("update public.memberships set role = 'member' where org_id = $1 and user_id = $2", [h.orgId, h.owner]);
+  h.extra.recipient = b;
+  expect((await h.alertPass()).sent).toBe(2);
+  expect(h.slack()).toBe(1);
+  expect(h.sms()).toBe(1);
+  expect(h.sent.every((x) => x.userId === b)).toBe(true);
+  const { rows: forB } = await pg.query(
+    "select channel, status from public.hold_alert_deliveries where org_id = $1 and hold_key = $2 and recipient_user_id = $3 order by channel",
+    [h.orgId, key, b],
+  );
+  expect(forB.map((r) => [r.channel, r.status])).toEqual([["slack", "sent"], ["sms", "sent"]]);
+  expect((await h.alertPass()).sent).toBe(0);
+  expect(h.sent).toHaveLength(2);
+}
 
 /** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */
 async function setKeywords(h: Harness, phrases: string[]): Promise<void> {
