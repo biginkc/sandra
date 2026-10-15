@@ -72,7 +72,17 @@ import { listDripProgress } from "@/lib/sequences/drip-progress";
 import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import type { CallActivityRollupRow } from "./lead-call-summary";
-import { LeadAppointmentsSection } from "./lead-appointments-section";
+import {
+  LeadAppointmentsSection,
+  type LeadAppointmentRow,
+} from "./lead-appointments-section";
+import { loadLeadAppointmentHistory } from "./lead-appointments-actions";
+import { AssignmentEpisodeHistory } from "./assignment-episode-history";
+import { getAcquisitionDetail } from "@/lib/my-leads/queries";
+import {
+  LEAD_APPOINTMENT_COLUMNS,
+  isLeadOrgOwner,
+} from "@/lib/leads/lead-appointments";
 import { deriveLeadSmsPresentation } from "./lead-detail-state";
 import { LeadIdentityActions } from "./lead-identity-actions";
 import { LeadLoadFailure } from "./lead-load-failure";
@@ -297,6 +307,29 @@ export default async function LeadDetailPage({
     .eq("related_property_id", lead.id)
     .eq("status", "open")
     .order("due_at", { ascending: true });
+
+  // Every appointment and callback for the lead, across statuses. Open and
+  // snoozed work is small and shown in full; finished work is paged.
+  const liveAppointmentsPromise = supabase
+    .from("tasks")
+    .select(LEAD_APPOINTMENT_COLUMNS)
+    .eq("related_property_id", lead.id)
+    .in("type", ["appointment", "callback", "follow_up"])
+    .in("status", ["open", "snoozed"])
+    .order("due_at", { ascending: true });
+  const appointmentHistoryPromise = loadLeadAppointmentHistory(lead.id);
+  // Assignment episodes are only reachable through the My Leads detail RPC,
+  // which rejects unassigned leads, non-owner viewers of other reps' leads,
+  // DNC-locked leads and orgs without My Leads. Any failure just hides the list.
+  const assignmentEpisodesPromise = lead.assigned_user_id
+    ? getAcquisitionDetail({
+        memberId: lead.assigned_user_id,
+        propertyId: lead.id,
+        group: "history",
+      })
+        .then((detail) => detail.groups.history?.rows ?? null)
+        .catch(() => null)
+    : Promise.resolve(null);
 
   const { prevId, nextId } = await getPropertyNeighbors(
     id,
@@ -586,9 +619,12 @@ export default async function LeadDetailPage({
     assignee_id: string;
     type: string;
   }>;
-  const initialAppointments = openWork.filter(
-    (task) => task.type === "appointment",
-  );
+  const { data: liveAppointmentsRaw, error: liveAppointmentsError } =
+    await liveAppointmentsPromise;
+  const liveAppointments = (liveAppointmentsRaw ??
+    []) as unknown as LeadAppointmentRow[];
+  const appointmentHistory = await appointmentHistoryPromise;
+  const assignmentEpisodes = await assignmentEpisodesPromise;
   // The database result is already due-date ordered. Appointments and plain
   // tasks compete in one timeline; filtering first could show a 3 PM callback
   // while hiding the real 9 AM appointment.
@@ -732,6 +768,13 @@ export default async function LeadDetailPage({
     .replace(/^./, (character) => character.toUpperCase());
 
   // Cheap server-side decision: a rep logs only their own lead; an owner logs for the assignee.
+  // Lifecycle controls follow the My Leads panel rule: owner of THIS lead's
+  // org (memberships.org_id = lead org), not owner of any org.
+  const viewerIsLeadOrgOwner = isLeadOrgOwner(
+    callerMemberships,
+    sessionUser?.id,
+    lead.org_id,
+  );
   const viewerIsOwner = callerMemberships.some((m) => m.user_id === sessionUser?.id && m.role === "owner");
   const logFollowUpDisabledReason = !lead.assigned_user_id
     ? MY_LEAD_ROW_REASON_COPY.unassigned
@@ -1123,7 +1166,7 @@ export default async function LeadDetailPage({
                 /></fieldset>
               </div>
               <div id="lead-appointments" className="border-b border-border/60">
-                {openWorkError ? (
+                {liveAppointmentsError || !appointmentHistory.ok ? (
                   <div className="p-3">
                     <LeadLoadFailure
                       title="Appointments did not load"
@@ -1133,12 +1176,24 @@ export default async function LeadDetailPage({
                   </div>
                 ) : (
                   <LeadAppointmentsSection
-                    appointments={initialAppointments}
+                    propertyId={lead.id}
+                    appointments={liveAppointments}
+                    history={{
+                      rows: appointmentHistory.rows,
+                      hasMore: appointmentHistory.hasMore,
+                      cursor: appointmentHistory.cursor,
+                    }}
+                    viewerId={sessionUser?.id ?? null}
+                    viewerIsOwner={viewerIsLeadOrgOwner}
                     timezone={viewerTimezone}
                     nowMs={requestNowMs}
                   />
                 )}
               </div>
+              <AssignmentEpisodeHistory
+                rows={assignmentEpisodes}
+                labels={authorEmails}
+              />
               <fieldset disabled={training} inert={training || undefined} className="contents"><LeadTaskWidget
                 propertyId={lead.id}
                 address={lead.address}
