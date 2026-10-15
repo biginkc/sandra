@@ -172,3 +172,15 @@ describe("maskText covers 7-digit, international and emails", () => {
     expect(m.maskNumber(1234567)).toBe(1234567);
   });
 });
+
+import { maskAddresses } from "./mask";
+describe("maskAddresses", () => {
+  it("masks street addresses", () => {
+    expect(maskAddresses("it's 1234 N Main St, thanks")).toBe("it's [address], thanks");
+    expect(maskAddresses("I live at 88 Oak Hollow Dr. Apt 4")).toBe("I live at [address]");
+    expect(maskAddresses("415 West 12th Street")).toBe("[address]");
+  });
+  it("leaves prices and plain text alone", () => {
+    expect(maskAddresses("I want 150000 for it, 3 beds")).toBe("I want 150000 for it, 3 beds");
+  });
+});

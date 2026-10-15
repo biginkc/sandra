@@ -202,3 +202,16 @@ export function assertNoRealPhones(
   };
   walk(value, "");
 }
+
+const STREET_SUFFIX =
+  "(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pass|cv|cove|sq|square)";
+// "1234 N Main St", "415 West 12th Street Apt 4", "88 Oak Hollow Dr."
+const ADDRESS_IN_TEXT = new RegExp(
+  `\\b\\d{1,6}\\s+(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\\.?\\s+)?(?:[A-Za-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?(?:\\s+(?:apt|unit|suite|ste|#)\\s*#?\\w+)?`,
+  "gi",
+);
+
+/** Replace street addresses in free text with [address]. Best-effort; numbers-only amounts are untouched. */
+export function maskAddresses(text: string): string {
+  return text.replace(ADDRESS_IN_TEXT, "[address]");
+}
