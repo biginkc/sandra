@@ -5,7 +5,6 @@ import { hotPromotionKey, isHotReason, isHotSeller } from "./hot";
 describe("isHotReason", () => {
   it.each([
     "new_lead",
-    "model:new_lead_promoted",
     "hot_lead",
     "model:hot_lead",
     "model:call_request",
@@ -14,11 +13,12 @@ describe("isHotReason", () => {
     "jev_below_threshold:new_lead",
     "jev_new_lead_promotion_failed",
     "hot_lead_assign_failed",
+    "hot_lead_event_failed",
   ])("%s is hot", (reason) => {
     expect(isHotReason(reason)).toBe(true);
   });
 
-  it.each(["draft_held", "model:nurture", "keyword:dnc", "price_quoted", "jev_below_threshold:nurture", null, undefined, ""])(
+  it.each(["draft_held", "model:new_lead_promoted", "model:nurture", "keyword:dnc", "price_quoted", "jev_below_threshold:nurture", null, undefined, ""])(
     "%s is not hot",
     (reason) => {
       expect(isHotReason(reason as string | null | undefined)).toBe(false);

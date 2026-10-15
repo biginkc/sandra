@@ -105,6 +105,8 @@ export interface DeliveryStore {
    * be used to decide anything closed.
    */
   deliveredPropertyIds(orgId: string): Promise<{ ids: string[]; complete: boolean }>;
+  /** Undo a claim that went over a cap: 'sending' → 'pending', attempts - 1. */
+  release(id: string): Promise<void>;
   markSent(id: string): Promise<void>;
   markSkipped(id: string, reason: string): Promise<void>;
   /** attempts was already incremented by claim(); `terminal` pins attempts at the max. */
@@ -142,7 +144,7 @@ export interface HoldAlertDeps {
    * false when the lookup failed or was capped.
    */
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
-  /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then every owner gets hot alerts). */
+  /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
@@ -171,6 +173,8 @@ export type OrgAlertSummary = {
   archived: number;
   /** Ran out of the time budget; remaining rows are picked up next run. */
   budgetExhausted: boolean;
+  /** Hot holds existed but Jarrad could not be identified: none were sent (fail closed). */
+  hotOwnerUnknown: boolean;
 };
 
 /**

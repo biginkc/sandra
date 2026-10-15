@@ -104,6 +104,13 @@ export class FakeStore implements DeliveryStore {
     r.status = "sent";
     r.sentAt = this.clock().toISOString();
   }
+  async release(id: string) {
+    const r = this.rows.find((x) => x.id === id);
+    if (!r || r.status !== "sending") return;
+    r.status = "pending";
+    r.attempts = Math.max(0, r.attempts - 1);
+    r.sendingAt = null;
+  }
   async markSkipped(id: string, reason: string) {
     const r = this.rows.find((x) => x.id === id)!;
     r.status = "skipped";

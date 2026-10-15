@@ -33,9 +33,10 @@ describe("hot decisions (frozen fixture)", () => {
     const t = setup({ holds: [hotHold] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
-    expect(t.store.rows.map((r) => [r.channel, r.stage, r.status, r.holdKey])).toEqual([
-      ["slack", "first", "sent", "prop-1:hot_lead"],
-      ["sms", "first", "sent", "prop-1:hot_lead"],
+    // One alert key per hot seller, no property id (never archived).
+    expect(t.store.rows.map((r) => [r.channel, r.stage, r.status, r.holdKey, r.propertyId])).toEqual([
+      ["slack", "first", "sent", "hot_promotion:prop-1", null],
+      ["sms", "first", "sent", "hot_promotion:prop-1", null],
     ]);
   });
 
@@ -118,11 +119,12 @@ describe("hot decisions (frozen fixture)", () => {
     const promoRows = () => t.store.rows.filter((r) => r.holdKey === "hot_promotion:prop-9");
     expect(promoRows()).toHaveLength(2);
 
-    // The hot hold clears: its rows are archived, the promotion rows are not.
+    // The hot hold clears: hot rows carry no property id, so nothing is archived (promotion or hold).
     t.deps.loadHolds = async () => ({ holds: [], complete: true });
     t.setNow("2026-10-15T12:30:00.000Z");
     const s = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(s.archived).toBe(2);
+    expect(s.archived).toBe(0);
+    expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
     expect(promoRows()).toHaveLength(2);
     expect(promoRows().every((r) => !r.holdKey.includes(":closed:") && r.status === "sent")).toBe(true);
 
@@ -134,16 +136,78 @@ describe("hot decisions (frozen fixture)", () => {
     expect(t.sent.length).toBe(before);
   });
 
-  it("(7) messages carry only the first name and a link: no seller text or address", async () => {
-    const t = setup({ holds: [hotHold], promotions: [promotion], emailEnabled: false });
+  it("(7) messages carry only the first name and a link: no seller text or address, even when the data passed in contains them", async () => {
+    const ADDRESS = "12 Oak St";
+    // Seller text and address sit on fields adjacent to the ones alerts may read (as a loader that over-fetches would hand them over).
+    const dirtyHold = { ...hotHold, body: SECRET, lastInboundText: SECRET, address: ADDRESS, propertyAddress: ADDRESS } as typeof hotHold;
+    const dirtyPromotion = { ...promotion, body: SECRET, lastInboundText: SECRET, address: ADDRESS } as HotPromotion;
+    const t = setup({ holds: [dirtyHold], promotions: [dirtyPromotion], emailEnabled: true });
+    // Guard: the fixture handed to the deps really does contain the strings that must not leak.
+    const fed = JSON.stringify([(await t.deps.loadHolds(ORG, MARK)).holds, (await t.deps.loadHotPromotions(ORG, MARK)).promotions]);
+    expect(fed).toContain(SECRET);
+    expect(fed).toContain(ADDRESS);
+
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toHaveLength(4);
+    expect(t.sent.filter((s) => s.channel !== "email")).toHaveLength(4);
+    expect(t.sent.some((s) => s.channel === "email")).toBe(true);
     for (const s of t.sent) {
       expect(s.text).not.toContain(SECRET);
+      expect(s.text).not.toContain("call me about");
       expect(s.text).not.toContain("Oak St");
-      expect(s.text.match(/https?:\/\//g)).toHaveLength(1);
       expect(s.text).toMatch(/https:\/\/app\.example\.com\/leads\/prop-(1|9)/);
-      expect(s.text).toMatch(/Dana|Pat/);
+      if (s.channel !== "email") {
+        expect(s.text.match(/https?:\/\//g)).toHaveLength(1);
+        expect(s.text).toMatch(/Dana|Pat/);
+      }
     }
+  });
+
+  it("(8) a hot hold and a promotion for the same property send one Slack and one SMS in total", async () => {
+    const t = setup({ holds: [hotHold], promotions: [{ ...promotion, propertyId: "prop-1" }] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(by(t, "slack")).toHaveLength(1);
+    expect(by(t, "sms")).toHaveLength(1);
+  });
+
+  it("(9) two overlapping passes never push SMS past 10 in the hour", async () => {
+    const holds = [0, 1, 2].map((i) => hold({ hot: true, holdKey: `c${i}:hot_lead`, propertyId: `c${i}`, startedAt: "2026-10-15T11:00:00.000Z" }));
+    const t = setup({ holds });
+    seedSent(t, "sms", 9, OWNER.userId, "2026-10-15T11:45:00.000Z");
+    let released = 0;
+    const realRelease = t.store.release.bind(t.store);
+    t.store.release = async (id: string) => {
+      released += 1;
+      await realRelease(id);
+    };
+    // Force the race: both passes finish their under-cap check before either claims, and they claim different rows.
+    const realClaim = t.store.claim.bind(t.store);
+    let waiting = 0;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    t.store.claim = async (row) => {
+      if (row.channel === "sms" && waiting < 2) {
+        waiting += 1;
+        if (waiting === 2) open();
+        await gate;
+      }
+      return realClaim(row);
+    };
+    const reversed = { ...t.deps, loadHolds: async () => ({ holds: [...holds].reverse(), complete: true }) };
+    await Promise.all([runHoldAlertsForOrg(t.deps, ORG), runHoldAlertsForOrg(reversed, ORG)]);
+    expect(released).toBeGreaterThan(0); // the post-claim re-check really fired
+    const inHour = t.store.rows.filter((r) => r.channel === "sms" && (r.status === "sent" || r.status === "sending"));
+    expect(inHour.length).toBeLessThanOrEqual(MAX_SMS_PER_HOUR);
+    expect(by(t, "sms").length).toBeLessThanOrEqual(1);
+    // The over-cap rows were given back, not lost: next hour they go out, once each.
+    t.setNow("2026-10-15T13:30:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(by(t, "sms")).toHaveLength(3);
+  });
+
+  it("(10) the first pass for a brand-new org (no watermark) alerts a post-cutoff hot hold", async () => {
+    const t = setup({ holds: [hotHold], noWatermark: true });
+    t.store.watermarks.delete(ORG);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
   });
 });

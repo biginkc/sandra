@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isNewHold, runHoldAlertsForOrg } from "./core";
+import { HOT_ALERTS_START_ISO, isNewHold, runHoldAlertsForOrg } from "./core";
 import { hold as baseHold, makeDeps, ORG } from "./test-support";
 
 const hold = (over: Parameters<typeof baseHold>[0] = {}) => baseHold({ hot: true, ...over });
@@ -29,13 +29,21 @@ describe("alerts only for holds that start after alerts were enabled", () => {
   const unknown = hold({ holdKey: "unk:x", propertyId: "unk", startedAt: null });
   const fresh = hold({ holdKey: "new:x", propertyId: "new", startedAt: "2026-10-15T11:00:00.000Z" });
 
-  it("first run for an org records the watermark and sends nothing", async () => {
+  it("first run for an org (no watermark yet) initialises it at the 2026-10-15 cutoff and still alerts a post-cutoff hot hold; backlog stays silent", async () => {
     const t = makeDeps({ holds: [old, unknown, fresh], noWatermark: true, nowIso: "2026-10-15T12:00:00.000Z", emailEnabled: true });
+    expect(t.store.watermarks.has(ORG)).toBe(false);
     const s = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toEqual([]);
-    expect(t.store.rows).toEqual([]);
-    expect(s.holds).toBe(0);
-    expect(t.store.watermarks.get(ORG)).toBe("2026-10-15T12:00:00.000Z");
+    expect(t.store.watermarks.get(ORG)).toBe(HOT_ALERTS_START_ISO);
+    expect(t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
+    expect(t.sent.filter((x) => x.channel === "sms")).toHaveLength(1);
+    expect(t.store.rows.filter((r) => r.channel !== "email").every((r) => r.holdKey === "hot_promotion:new")).toBe(true);
+    expect(s.holds).toBe(1);
+  });
+
+  it("a first run before the cutoff initialises the watermark at now", async () => {
+    const t = makeDeps({ holds: [], noWatermark: true, nowIso: "2026-10-14T12:00:00.000Z" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.watermarks.get(ORG)).toBe("2026-10-14T12:00:00.000Z");
   });
 
   it("the watermark is set once: the second run does not move it", async () => {
@@ -43,7 +51,7 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     t.setNow("2026-10-15T13:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.store.watermarks.get(ORG)).toBe("2026-10-15T12:00:00.000Z");
+    expect(t.store.watermarks.get(ORG)).toBe(HOT_ALERTS_START_ISO);
   });
 
   it("a 2,504-hold backlog never alerts", async () => {
@@ -68,7 +76,7 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     const slack = t.sent.filter((s) => s.channel === "slack");
     expect(slack).toHaveLength(1); // the hot owner only, for the new hold only
-    expect(t.store.rows.every((r) => r.holdKey === "new:x")).toBe(true);
+    expect(t.store.rows.every((r) => r.holdKey === "hot_promotion:new")).toBe(true);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
   });
@@ -91,6 +99,13 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     const t = makeDeps({ holds: [fresh], nowIso: "2026-10-15T12:00:00.000Z" });
     t.store.watermarks.set(ORG, MARK);
     await runHoldAlertsForOrg(t.deps, ORG);
+    // Hot rows carry no property id (never archived); a property-tied row from before still closes.
+    for (const channel of ["slack", "sms"] as const) {
+      t.store.rows.push({
+        id: `legacy-${channel}`, orgId: ORG, propertyId: "new", holdKey: "new:x", recipientUserId: "owner-1", channel, stage: "first",
+        status: "sent", attempts: 1, lastError: null, createdAt: "2026-10-15T11:00:00.000Z", sentAt: "2026-10-15T11:00:00.000Z",
+      });
+    }
     // The hold closes; a backlog hold elsewhere stays open and silent.
     const t2 = {
       ...t.deps,
@@ -112,7 +127,7 @@ describe("seller activity after the watermark on a lead flagged before it", () =
     const t = makeDeps({ holds: [reflagged, stale, flagNewDraftOld], nowIso: "2026-10-15T12:00:00.000Z" });
     t.store.watermarks.set(ORG, MARK);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["a:x", "c:x"]));
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_promotion:a", "hot_promotion:c"]));
     const before = t.sent.length;
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.length).toBe(before);

@@ -26,6 +26,10 @@ export const HOT_HANDOFF_SOURCE_TYPE = "hot_seller_handoff";
 
 export type HotAssignResult =
   | { status: "assigned" | "already_assigned"; assigneeUserId: string }
+  /** Jarrad already owned the lead before Sandra saw it hot: no event, no "now on My Leads" alert. */
+  | { status: "already_owned"; assigneeUserId: string }
+  /** The lead IS on My Leads under Jarrad, but the 'assigned' event could not be saved. */
+  | { status: "assigned_unrecorded"; assigneeUserId: string; detail: string }
   | { status: "failed"; reason: "no_hot_owner" | "owned_by_someone_else" | "not_found" | "dnc_locked" | "db_error"; detail?: string };
 
 type MembershipRow = {
@@ -81,7 +85,14 @@ export async function assignHotLeadToOwner(
 
     let status: "assigned" | "already_assigned" = "already_assigned";
     const previous = property.assigned_user_id;
-    if (previous !== owner) {
+    if (previous === owner) {
+      // Already his. A hand-off event exists only if Sandra made the assignment
+      // (a replay); otherwise a person did, and there is nothing to announce.
+      const prior = await findHandoffEvent(db, propertyId);
+      if (prior === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
+      return prior ? { status: "already_assigned", assigneeUserId: owner } : { status: "already_owned", assigneeUserId: owner };
+    }
+    {
       if (previous !== null) return { status: "failed", reason: "owned_by_someone_else" };
       const { data: saved, error } = await db
         .from("properties")
@@ -109,7 +120,7 @@ export async function assignHotLeadToOwner(
     // recordLeadEvent is best-effort, so the row is read back; its source
     // identity (unique in the ledger) makes a retry a no-op.
     const existing = await findHandoffEvent(db, propertyId);
-    if (existing === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
+    if (existing === "error") return { status: "assigned_unrecorded", assigneeUserId: owner, detail: "handoff event lookup" };
     if (!existing) {
       await recordLeadEvent({
         propertyId,
@@ -120,7 +131,7 @@ export async function assignHotLeadToOwner(
         sourceId: propertyId,
       });
       const written = await findHandoffEvent(db, propertyId);
-      if (written !== true) return { status: "failed", reason: "db_error", detail: "handoff event not recorded" };
+      if (written !== true) return { status: "assigned_unrecorded", assigneeUserId: owner, detail: "handoff event not recorded" };
     }
     return { status, assigneeUserId: owner };
   } catch (error) {

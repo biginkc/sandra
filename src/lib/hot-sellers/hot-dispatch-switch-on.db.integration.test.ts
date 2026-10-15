@@ -147,7 +147,7 @@ async function createMember(orgId: string, role: "owner" | "member"): Promise<st
   return data.user.id;
 }
 
-async function seedScenario() {
+async function seedScenario(opts: { watermark?: boolean } = {}) {
   const orgId = randomUUID();
   const { error: orgError } = await admin.from("organizations").insert({ id: orgId, name: `hot-switch-on ${orgId}` });
   if (orgError) throw new Error(`org insert failed: ${orgError.message}`);
@@ -231,11 +231,14 @@ async function seedScenario() {
     .single();
   if (inboundError || !inbound?.conversation_id) throw new Error(`inbound insert failed: ${inboundError?.message}`);
 
-  // Alerts were enabled before the promotion (the first pass only records the watermark).
-  const { error: seedError } = await admin
-    .from("hold_alert_settings" as never)
-    .insert({ org_id: orgId, alerts_since: new Date(Date.now() - 60 * 60 * 1000).toISOString() } as never);
-  if (seedError) throw new Error(`hold_alert_settings seed failed: ${seedError.message}`);
+  // By default alerts were enabled before the promotion. `watermark: false` leaves the org brand new:
+  // no hold_alert_settings row, so the first alert pass itself initialises it.
+  if (opts.watermark !== false) {
+    const { error: seedError } = await admin
+      .from("hold_alert_settings" as never)
+      .insert({ org_id: orgId, alerts_since: new Date(Date.now() - 60 * 60 * 1000).toISOString() } as never);
+    if (seedError) throw new Error(`hold_alert_settings seed failed: ${seedError.message}`);
+  }
 
   return {
     orgId,
@@ -361,5 +364,62 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     const second = await snapshot();
     expect(second).toEqual(first);
     expect(sent).toHaveLength(2);
+  }, 120_000);
+  it("first alert pass for a brand-new org (no hold_alert_settings row before dispatch) still sends one Slack and one SMS, and a second pass sends nothing", async () => {
+    resetMockState();
+    installFakeJev();
+    const s = await seedScenario({ watermark: false });
+    expect(await count("select count(*)::int as n from public.hold_alert_settings where org_id = $1", [s.orgId])).toBe(0);
+
+    const sent: Array<{ channel: "slack" | "sms"; userId: string; text: string }> = [];
+    const real = createHoldAlertDeps(admin, { HOLD_ALERTS_ENABLED: "1" });
+    const deps: HoldAlertDeps = {
+      ...real,
+      async sendSlack(userId, text) {
+        sent.push({ channel: "slack", userId, text });
+        return { status: "sent" };
+      },
+      async sendSms(userId, text) {
+        sent.push({ channel: "sms", userId, text });
+        return { status: "sent" };
+      },
+    };
+
+    const outcome = await dispatchAiResponse(
+      admin,
+      {
+        propertyId: s.propertyId,
+        contactId: s.contactId,
+        conversationId: s.conversationId,
+        inboundMessageId: s.inboundMessageId,
+        inboundFromPhone: s.phone,
+        inboundBody: s.body,
+      },
+      { anthropic: forbiddenAnthropic },
+    );
+    expect(outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+    // Dispatch itself does not create the watermark: this really is the org's first alert pass.
+    expect(await count("select count(*)::int as n from public.hold_alert_settings where org_id = $1", [s.orgId])).toBe(0);
+
+    const first = await runHoldAlertsForOrg(deps, s.orgId);
+    expect(first.sent).toBe(2);
+    expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
+    expect(sent.every((x) => x.userId === s.owner)).toBe(true);
+    // The pass created the watermark (no later than the 2026-10-15 cutoff).
+    const { rows: marks } = await pg.query("select alerts_since from public.hold_alert_settings where org_id = $1", [s.orgId]);
+    expect(marks).toHaveLength(1);
+    expect(new Date(marks[0].alerts_since).getTime()).toBeLessThanOrEqual(Date.parse("2026-10-15T00:00:00.000Z"));
+    const { rows: deliveries } = await pg.query(
+      "select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel",
+      [s.orgId],
+    );
+    expect(deliveries.map((d) => [d.channel, d.status, d.hold_key])).toEqual([
+      ["slack", "sent", `hot_promotion:${s.propertyId}`],
+      ["sms", "sent", `hot_promotion:${s.propertyId}`],
+    ]);
+
+    sent.length = 0;
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
+    expect(sent).toHaveLength(0);
   }, 120_000);
 });

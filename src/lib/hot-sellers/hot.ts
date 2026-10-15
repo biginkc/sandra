@@ -16,11 +16,12 @@ export const HOT_KEYWORD_TIER = "price_offer";
 export const HOT_HANDOFF_FAILED_REASONS: readonly string[] = [
   "jev_new_lead_promotion_failed",
   "hot_lead_assign_failed",
+  "hot_lead_event_failed",
 ];
 
 /**
  * One engine word or reason string, as the engine writes it: a bare outcome
- * (`new_lead`), a model reason (`model:hot_lead`, `model:new_lead_promoted`),
+ * (`new_lead`), a model reason (`model:hot_lead`),
  * a keyword gate (`keyword:price_offer`), or a below-threshold Jev decision
  * (`jev_below_threshold:new_lead`). Exact, never substring: `price_quoted` is not hot.
  */
@@ -31,7 +32,9 @@ export function isHotReason(reason: string | null | undefined): boolean {
   if (value === `keyword:${HOT_KEYWORD_TIER}`) return true;
   if (value === `jev_below_threshold:${HOT_JEV_OUTCOME}`) return true;
   const word = value.startsWith("model:") ? value.slice("model:".length) : value;
-  return word === HOT_JEV_OUTCOME || word === "new_lead_promoted" || HOT_ESCALATION_REASONS.includes(word);
+  // `model:new_lead_promoted` is NOT hot here: a promoted seller is alerted by
+  // the promotion itself, never a second time through a leftover hold.
+  return word === HOT_JEV_OUTCOME || HOT_ESCALATION_REASONS.includes(word);
 }
 
 /** Hot when Jev's outcome is new_lead or any reason the decision carries is hot. */
@@ -43,5 +46,9 @@ export function isHotSeller(input: {
   return (input.reasons ?? []).some(isHotReason);
 }
 
-/** The alert key for one hot promotion: once per property, ever. */
+/**
+ * The ONE alert key for a hot seller, shared by hot holds and hot promotions:
+ * one Slack + one SMS per property, ever (a hold and a promotion for the same
+ * seller can never both ping).
+ */
 export const hotPromotionKey = (propertyId: string): string => `hot_promotion:${propertyId}`;

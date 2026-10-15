@@ -180,6 +180,19 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return { ids: [...ids], complete: false };
     },
 
+    async release(id) {
+      const { data, error: readError } = await table().select("attempts").eq("id", id).eq("status", "sending").maybeSingle();
+      if (readError) fail("release read", readError);
+      if (!data) return;
+      const attempts = (data as { attempts: number }).attempts;
+      const { error } = await table()
+        .update({ status: "pending", sending_at: null, attempts: Math.max(0, attempts - 1) })
+        .eq("id", id)
+        .eq("status", "sending")
+        .eq("attempts", attempts);
+      if (error) fail("release", error);
+    },
+
     async markSent(id) {
       const { error } = await table()
         .update({ status: "sent", sent_at: new Date().toISOString(), last_error: null })

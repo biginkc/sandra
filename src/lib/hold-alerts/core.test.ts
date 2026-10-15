@@ -36,12 +36,56 @@ describe("first stage alerts (hot hold, owner only)", () => {
     expect(summary).toMatchObject({ holds: 1, sent: 0 });
   });
 
-  it("goes to every owner when no hot owner is configured, and still never to non-owners", async () => {
+  it("with two owners and no way to tell which is the hot owner, sends NO hot deliveries, says so, and still sends the digest", async () => {
+    vi.mocked(reportError).mockClear();
     const second = { userId: "owner-2", role: "owner" as const };
-    const t = makeDeps({ hotOwner: null, recipients: [OWNER, second, ACQ] });
+    const t = makeDeps({ hotOwner: null, recipients: [OWNER, second, ACQ], emailEnabled: true });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack" || s.channel === "sms")).toEqual([]);
+    expect(t.store.rows.filter((r) => r.channel !== "email")).toEqual([]);
+    expect(summary.hotOwnerUnknown).toBe(true);
+    expect(reportError).toHaveBeenCalled();
+    expect(t.sent.some((s) => s.channel === "email")).toBe(true);
+  });
+
+  it("a hot-owner lookup that throws is treated the same: no hot deliveries, flagged, reported, no crash, digest still sent", async () => {
+    vi.mocked(reportError).mockClear();
+    const t = makeDeps({
+      recipients: [OWNER, ACQ],
+      emailEnabled: true,
+      loadHotOwner: async () => {
+        throw new Error("owner lookup down");
+      },
+    });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack" || s.channel === "sms")).toEqual([]);
+    expect(summary.hotOwnerUnknown).toBe(true);
+    expect(reportError).toHaveBeenCalled();
+    expect(t.sent.some((s) => s.channel === "email")).toBe(true);
+  });
+
+  it("an unknown hot owner does not stop a promotion from reaching its own assignee", async () => {
+    const t = makeDeps({
+      hotOwner: null,
+      holds: [],
+      promotions: [{ propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T09:30:00.000Z" }],
+    });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
+    expect(summary.hotOwnerUnknown).toBe(false);
+  });
+
+  it("a hot hold and a promotion for the same property in one pass send exactly one Slack and one SMS", async () => {
+    const t = makeDeps({
+      holds: [hold({ hot: true })],
+      promotions: [{ propertyId: "prop-1", assigneeUserId: OWNER.userId, name: "Dana", assignedAt: "2026-10-15T09:30:00.000Z" }],
+    });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack").map((s) => s.userId).sort()).toEqual(["owner-1", "owner-2"]);
-    expect(t.sent.some((s) => s.userId === "acq-1")).toBe(false);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_promotion:prop-1"]));
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
   });
 
   it("records no_token and pref_disabled as visible skipped rows, not silence", async () => {
@@ -109,7 +153,7 @@ describe("caps", () => {
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(0);
     expect(summary.deferred).toBe(1);
     // Over the cap is "not yet", not "never": the row stays pending with no attempt spent.
-    const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1") && r.channel === "slack")!;
+    const row = t.store.rows.find((r) => r.holdKey === "hot_promotion:prop-1" && r.channel === "slack")!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 
@@ -141,7 +185,7 @@ describe("caps", () => {
     t.setNow("2026-10-15T10:55:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.store.rows.find((r) => r.holdKey.startsWith("prop-1") && r.stage === "first")!.status).toBe("sent");
+    expect(t.store.rows.find((r) => r.holdKey === "hot_promotion:prop-1" && r.stage === "first")!.status).toBe("sent");
   });
 
   it("counts only the last hour toward the DM cap", async () => {
@@ -186,7 +230,7 @@ describe("caps", () => {
     }
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.some((s) => s.channel === "sms")).toBe(false);
-    const row = t.store.rows.find((r) => r.channel === "sms" && r.holdKey.startsWith("prop-1"))!;
+    const row = t.store.rows.find((r) => r.channel === "sms" && r.holdKey === "hot_promotion:prop-1")!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 });
@@ -437,10 +481,44 @@ describe("incomplete alert load", () => {
   });
 });
 
-describe("archive-on-clear (a re-opened hold alerts again)", () => {
-  it("archives only properties this run saw as delivered: a row ensured by an overlapping run is left alone", async () => {
+/** Rows as they existed before one-key-per-hot-seller: tied to a property, so archive-on-clear can still close them. */
+function seedPropertyRows(t: ReturnType<typeof makeDeps>, propertyId = "prop-1") {
+  for (const channel of ["slack", "sms"] as const) {
+    t.store.rows.push({
+      id: `legacy-${propertyId}-${channel}`, orgId: ORG, propertyId, holdKey: `${propertyId}:hot_lead`, recipientUserId: OWNER.userId,
+      channel, stage: "first", status: "sent", attempts: 1, lastError: null,
+      createdAt: "2026-10-15T09:00:00.000Z", sentAt: "2026-10-15T09:00:00.000Z",
+    });
+  }
+}
+
+describe("archive-on-clear (property-tied rows close when the hold clears)", () => {
+  it("hot-seller rows have no property id and are never archived: a cleared hold does not re-arm the alert", async () => {
     const t = makeDeps();
     await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_promotion:prop-1")).toBe(true);
+    const cleared = makeDeps({ store: t.store, holds: [] });
+    expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(0);
+    expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
+  });
+
+  it("a hot hold that clears and re-opens does NOT alert again (one Slack + one SMS per seller, ever)", async () => {
+    const t = makeDeps({ nowIso: "2026-10-15T10:02:00.000Z" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+    const open = t.deps.loadHolds;
+    t.deps.loadHolds = async () => ({ holds: [], complete: true });
+    t.setNow("2026-10-15T10:10:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    t.deps.loadHolds = open;
+    t.setNow("2026-10-15T10:20:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+  });
+
+  it("archives only properties this run saw as delivered: a row ensured by an overlapping run is left alone", async () => {
+    const t = makeDeps();
+    seedPropertyRows(t);
     const cleared = makeDeps({ store: t.store, holds: [] });
     const realListing = t.store.deliveredPropertyIds.bind(t.store);
     cleared.store.deliveredPropertyIds = async (org: string) => {
@@ -455,30 +533,9 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
     expect(fresh.holdKey.includes(":closed:")).toBe(false);
   });
 
-  it("a hold that clears and re-opens gets a fresh first alert", async () => {
-    const t = makeDeps({ nowIso: "2026-10-15T10:02:00.000Z" });
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-
-    // The hold clears: the next pass sees no open holds and archives its rows.
-    const open = t.deps.loadHolds;
-    t.deps.loadHolds = async () => ({ holds: [], complete: true });
-    t.setNow("2026-10-15T10:10:00.000Z");
-    const summary = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(summary.archived).toBe(2);
-    expect(t.store.rows.every((r) => r.holdKey.includes(":closed:"))).toBe(true);
-
-    // It re-opens (same property, same reason): new keys, new alerts.
-    t.deps.loadHolds = open;
-    t.setNow("2026-10-15T10:20:00.000Z");
-    const before = t.sent.length;
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.slice(before).filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.store.rows.filter((r) => !r.holdKey.includes(":closed:") && r.status === "sent")).toHaveLength(2);
-  });
-
   it("does not archive a hold that is still open, a digest row, or another org's row", async () => {
     const t = makeDeps({ emailEnabled: true });
+    seedPropertyRows(t);
     await runHoldAlertsForOrg(t.deps, ORG);
     const digest = t.store.rows.filter((r) => r.channel === "email");
     expect(digest.length).toBeGreaterThan(0);
@@ -490,7 +547,7 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
 
   it("a failed held-lookup, or an incomplete delivered-property list, archives nothing", async () => {
     const t = makeDeps();
-    await runHoldAlertsForOrg(t.deps, ORG);
+    seedPropertyRows(t);
     const failed = makeDeps({ store: t.store, holds: [], loadHeldPropertyIds: async () => null });
     expect((await runHoldAlertsForOrg(failed.deps, ORG)).archived).toBe(0);
     const incomplete = makeDeps({ store: t.store, holds: [] });
@@ -501,14 +558,14 @@ describe("archive-on-clear (a re-opened hold alerts again)", () => {
 
   it("archives a closed hold even when the alert load is incomplete or the backlog is huge", async () => {
     const t = makeDeps();
-    await runHoldAlertsForOrg(t.deps, ORG);
+    seedPropertyRows(t);
     const closed = makeDeps({ store: t.store, holds: [], holdsComplete: false });
     expect((await runHoldAlertsForOrg(closed.deps, ORG)).archived).toBe(2);
   });
 
   it("archiving is idempotent: a repeat pass after a crash archives nothing more", async () => {
     const t = makeDeps();
-    await runHoldAlertsForOrg(t.deps, ORG);
+    seedPropertyRows(t);
     const cleared = makeDeps({ store: t.store, holds: [] });
     expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(2);
     expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(0);

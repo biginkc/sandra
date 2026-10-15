@@ -51,6 +51,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "jev_unexpected_send_route",
   "jev_new_lead_promotion_failed",
   "hot_lead_assign_failed",
+  "hot_lead_event_failed",
   "jev_unclear_no_action",
   // Model judgments about opt-out / DNC / phone-wide wrong number never act
   // on their own (Jarrad 2026-10-07); a human confirms each one.

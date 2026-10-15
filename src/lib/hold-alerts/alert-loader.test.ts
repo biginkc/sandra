@@ -123,19 +123,44 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     };
   };
 
-  it("the full alert pass makes exactly the parent loader's holds, under the PR 2 delivery rules (not hot: no alerts)", async () => {
-    expect(await decisions("cron")).toEqual(FROZEN_PARENT_DECISIONS);
-    expect(await decisions("page")).not.toEqual(FROZEN_PARENT_DECISIONS);
+  it("the full alert pass under the PR 2 rules (only hot holds alert): the parent loader's hold is not hot, so nothing goes out; the page loader's would", async () => {
+    expect(await decisions("cron")).toEqual(PR2_HOT_ALERT_DECISIONS);
+    expect(await decisions("page")).toEqual(PR2_PAGE_LOADER_DECISIONS);
+    // The old behaviour is kept below as a record, and PR 2 deliberately differs from it.
+    expect(await decisions("cron")).not.toEqual(FROZEN_PARENT_DECISIONS);
   });
 });
 
-// FROZEN_PARENT_* below: the frozen parent loader (84ddabdd6) still returns the same holds for this fixture (hold
-// reason model:unclear); the DELIVERY rules were intentionally changed in PR 2 (only hot holds alert, to the hot owner).
-// Under the new rules the parent's hold (not hot) sends nothing, whereas the page loader (#874) resolves the draft's
-// newer run (model:hot_lead -> hot) and would alert the owner. That difference is the fixture's point.
+// FROZEN_PARENT_DECISIONS: the parent (84ddabdd6) delivery decisions for this fixture (Slack to owner and acquisitions
+// member, no SMS), when every open hold alerted every recipient. They never move: a change to them is an alert-behaviour
+// change and needs its own review, not a test update. PR 2 (only hot holds ping, only the hot owner) intentionally no
+// longer produces them; its output is pinned separately below.
 const P1 = "00000000-0000-4000-8000-000000000001";
 const FROZEN_PARENT_DECISIONS = {
-  deliveries: [] as Array<{ property: string; recipient: string; channel: string; stage: string; status: string }>,
+  deliveries: [
+    { channel: "slack", property: P1, recipient: "owner-1", stage: "first", status: "sent" },
+    { channel: "slack", property: P1, recipient: "acq-1", stage: "first", status: "sent" },
+  ],
+  sent: [
+    { channel: "slack", userId: "owner-1" },
+    { channel: "slack", userId: "acq-1" },
+  ],
+};
+
+/** What the current core does with the same frozen holds: the hold is model:unclear (not hot), so it sends nothing. */
+const PR2_HOT_ALERT_DECISIONS = {
+  deliveries: [] as Array<{ property: string | null; recipient: string; channel: string; stage: string; status: string }>,
   sent: [] as Array<{ channel: string; userId: string }>,
 };
-void P1;
+
+/** The page loader resolves the draft's newer run (model:hot_lead): hot, so one Slack + one SMS to the hot owner, one key, no property id. */
+const PR2_PAGE_LOADER_DECISIONS = {
+  deliveries: [
+    { channel: "slack", property: null, recipient: "owner-1", stage: "first", status: "sent" },
+    { channel: "sms", property: null, recipient: "owner-1", stage: "first", status: "sent" },
+  ],
+  sent: [
+    { channel: "slack", userId: "owner-1" },
+    { channel: "sms", userId: "owner-1" },
+  ],
+};

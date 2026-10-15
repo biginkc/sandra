@@ -311,7 +311,21 @@ describe("assignHotLeadToOwner (real database)", () => {
     expect(await handoffEvents(propertyId)).toHaveLength(0);
   });
 
-  it("fails (and recovers on retry) when the hand-off event cannot be recorded", async () => {
+  it("a lead already assigned to the hot owner by a person (no hand-off event) is already_owned: no event written, so no promotion alert", async () => {
+    const { orgId, owner } = await oneOwnerOrg("already-owned");
+    const propertyId = await createProperty(orgId, { assignedTo: owner });
+
+    const result = await assignHotLeadToOwner(admin, propertyId, {});
+
+    expect(result).toEqual({ status: "already_owned", assigneeUserId: owner });
+    expect(await assignedColumn(propertyId)).toBe(owner);
+    expect(await handoffEvents(propertyId)).toHaveLength(0);
+    // A replay stays quiet too.
+    expect((await assignHotLeadToOwner(admin, propertyId, {})).status).toBe("already_owned");
+    expect(await handoffEvents(propertyId)).toHaveLength(0);
+  });
+
+  it("the hand-off event cannot be recorded: assigned_unrecorded (the lead IS his), no event", async () => {
     const { orgId, owner } = await oneOwnerOrg("event-fail");
     const propertyId = await createProperty(orgId);
     // A trigger scoped to this one property makes its ledger insert fail; every other row is unaffected.
@@ -324,16 +338,18 @@ describe("assignHotLeadToOwner (real database)", () => {
     );
     try {
       const result = await assignHotLeadToOwner(admin, propertyId, {});
-      expect(result.status).toBe("failed");
+      expect(result).toMatchObject({ status: "assigned_unrecorded", assigneeUserId: owner });
+      expect(await assignedColumn(propertyId)).toBe(owner);
       expect(await handoffEvents(propertyId)).toHaveLength(0);
     } finally {
       await pg.query(`drop trigger if exists ${fn} on public.lead_events`);
       await pg.query(`drop function if exists public.${fn}()`);
     }
-    // The column was written but the event was not: a retry completes the hand-off.
+    // Characterisation: the column was written but the event was not, and a retry cannot tell that apart
+    // from "a person assigned it" -> already_owned, still no event. The dispatch hold (hot_lead_event_failed) is what alerts.
     const retry = await assignHotLeadToOwner(admin, propertyId, {});
-    expect(retry).toEqual({ status: "already_assigned", assigneeUserId: owner });
-    expect(await handoffEvents(propertyId)).toHaveLength(1);
+    expect(retry).toEqual({ status: "already_owned", assigneeUserId: owner });
+    expect(await handoffEvents(propertyId)).toHaveLength(0);
   });
 
   it("refuses a DNC-locked property", async () => {
