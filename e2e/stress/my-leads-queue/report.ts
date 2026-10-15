@@ -132,7 +132,8 @@ export function buildReport(input: {
   criteria.push({ id: "race", label: "race lanes: newer replies marked handled / placement wrong at refresh", value: raceFailures, limit: 0, pass: raceFailures === 0 && (input.mode === "smoke" || raceRan.length === raceLanes.length && raceLanes.length > 0), evaluated: raceRan.length > 0,
     note: raceLanes.some((l) => l.skipped) ? `skipped: ${raceLanes.filter((l) => l.skipped).map((l) => `${l.id} (${l.skipped})`).join("; ")}` : undefined });
   // Gate (master acceptance 2.19, kept by the root coordinator): p95 < 1.5 s at BOTH 400 and 2,000 leads.
-  for (const size of [400, 2000]) {
+  // Every measured size is gated too (e.g. --scale-sizes 1000), not just the two required ones.
+  for (const size of [...new Set([400, 2000, ...input.scale.map((y) => y.leads)])].sort((a, b) => a - b)) {
     const x = input.scale.find((y) => y.leads === size);
     criteria.push({ id: `p95_${size}`, label: `scale p95 within ${P95_BUDGET_MS} ms at ${size} leads`, value: x ? x.worstP95Ms : null, limit: P95_BUDGET_MS,
       pass: x ? x.worstP95Ms < P95_BUDGET_MS : input.mode === "smoke", evaluated: !!x });
