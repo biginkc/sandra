@@ -43,6 +43,12 @@ Goal: "wants an offer" and "talked price" become a lead on My Leads under Jarrad
 - [ ] Playwright + prod canary: one canary hot text → lead appears on My Leads assigned to Jarrad, Slack + SMS delivery rows `sent`.
 - [ ] Depends on: PR 1.
 
+PR 2 coordination notes (from root / My Leads owner, 2026-10-15):
+- Contract: `messages.metadata.inbound_message_id` must reference a same-org, same-property inbound message UUID; `inbound_stamp_unresolved: true` means "no handled reply". Preserve stamp arguments in any composer touched.
+- Collision surfaces owned by My Leads (do not edit without coordinating): `messages/inbox-detail.tsx`; `leads/[id]/inline-reply.tsx`, `leads/[id]/page.tsx`; `leads/send-sms-stamped.ts`; `lib/messaging/rep-sms.ts`, `lib/messaging/inbound-stamp.ts`; `my-leads/sms-actions.ts`, `my-leads/rep-sms-composer.tsx`. `leads/actions.ts` is CI-frozen.
+- PR 2 scope stays in `src/lib/ai-responder/dispatch.ts` (promotion + assignment), `src/lib/hold-alerts/*` (hot reasons, non-hot DM stop), prod env `HOLD_ALERT_HOT_REASONS`, and the tape line. None of the surfaces above.
+- My Leads merges: PR #872 merged at 3ea463e3; PR #873 (8617227f) holds the next reserved slot. PR 2 requests its slot after those gates.
+
 ## PR 3 — Jarrad's nine questions replace the eight answers
 
 Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, and starts Jarrad's six drips.
