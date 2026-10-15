@@ -133,7 +133,7 @@ async function world(db: Client) {
   const drip = async (property: string, o: { status?: string; pause?: string | null; next?: string | null; updated?: string; steps?: number; idx?: number; by?: string; enrolledAt?: string; completedAt?: string } = {}) => {
     const seq = randomUUID(), enr = randomUUID();
     const total = o.steps ?? 4;
-    await raw('insert into public.sequences(id,org_id,name) values ($1,$2,$3)', [seq, org, `Warm check-in ${seq.slice(0, 4)}`]);
+    await raw('insert into public.sequences(id,org_id,name) values ($1,$2,$3)', [seq, org, `Warm check-in ${seq}`]);
     const steps: string[] = [];
     for (let i = 0; i < total; i += 1) {
       const id = randomUUID();
