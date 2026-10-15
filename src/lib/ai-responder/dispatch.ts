@@ -631,7 +631,28 @@ async function dispatchAiResponseCore(
       detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
     }, deps.runContext);
   }
-  const keywordEscalation = deferPriceKeyword
+  // PR 2: the consent / suppression / takeover / responder-off gates run
+  // BEFORE any keyword hold is written. When they block (e.g. a person turned
+  // the responder off for this property), no Sandra hold and no alert,
+  // whatever the phrase; a failed lookup also writes nothing here (the normal
+  // gates below still fail closed for a person).
+  const keywordHit =
+    !deferPriceKeyword &&
+    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config?.escalation_keywords ?? undefined }) !== null;
+  let keywordGated = false;
+  if (keywordHit) {
+    const silent = await loadSilentExit(supabase, input, property);
+    keywordGated = !silent.ok || !!silent.reason;
+    if (keywordGated) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "escalation_keyword",
+        result: "skipped",
+        detail: { why: silent.ok ? silent.reason : "gate_lookup_failed" },
+      }, deps.runContext);
+    }
+  }
+  const keywordEscalation = deferPriceKeyword || keywordGated
     ? ({ escalated: false } as const)
     : await applyKeywordEscalation(supabase, {
         propertyId: input.propertyId,

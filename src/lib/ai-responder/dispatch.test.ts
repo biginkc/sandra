@@ -7993,6 +7993,47 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(hotAssign.recordHeld).not.toHaveBeenCalled();
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
+          describe("round 18: the silent-exit gates run BEFORE any keyword hold", () => {
+            const BOTH = "How much? My lawyer is involved";
+            const expectNoHold = (state: MockState, r: { result: unknown; steps: Array<{ name: string; result?: string; detail?: Record<string, unknown> }> }) => {
+              expect((r.result as { outcome: string }).outcome).not.toBe("escalated");
+              expect(state.property.needs_human_attention).not.toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBeUndefined();
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+              expect(r.steps.find((x) => x.name === "escalation_keyword")?.result).toBe("skipped");
+            };
+            it("disabled property + price AND lawyer text: no hold, no flag, no alert, no send", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r18-disabled-both", { outcome: "unclear", propertyDisabled: true, body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              expectNoHold(state, r);
+            });
+            it("disabled property + a non-price keyword only (lawyer): no hold", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r18-disabled-lawyer", { outcome: "unclear", propertyDisabled: true, body: "my lawyer is involved", keywords: ["lawyer"] });
+              expectNoHold(state, r);
+            });
+            it("opted-out contact + price AND lawyer text: no keyword hold", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "no_consent" });
+              const r = await normalRun(state, "inbound-r18-optout-both", { outcome: "unclear", body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              expectNoHold(state, r);
+            });
+            it("enabled property + price AND lawyer text: main's up-front keyword hold (keyword:price_offer)", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r18-enabled-both", { outcome: "unclear", body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+              expect(state.property.needs_human_attention).toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+          });
           it("round 17: allow-list WITHOUT price phrases + '$150k' (Jev unclear): held keyword:numeric_amount (a person sees it), not hot", async () => {
             const state = createMockState();
             const r = await normalRun(state, "inbound-r17-num-unlisted", { outcome: "unclear", keywords: ["lawyer", "callback"], body: "I'd take $150k" });

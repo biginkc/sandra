@@ -1711,6 +1711,43 @@ const ROWS: Row[] = [
       expect((await h.alertPass(later)).sent).toBe(0);
     },
   },
+  {
+    id: "67",
+    name: "round 18: property with ai_responder_disabled + \"How much? My lawyer is involved\" (real dispatch): the responder-off gate runs before the keyword hold - skipped, no hold, no flag, no hot_wins, 0 Slack, 0 SMS, nothing sent",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      await pg.query("update public.properties set ai_responder_disabled = true where id = $1", [h.propertyId]);
+      const a = await h.newInbound("How much? My lawyer is involved");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).toMatchObject({ outcome: "skipped" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop?.needs_human_attention).toBe(false);
+      expect(prop?.last_ai_escalation_reason).toBeNull();
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "68",
+    name: "round 18: ENABLED property + \"How much? My lawyer is involved\" (real dispatch): held up front as main (keyword:price_offer), a person sees it (the keyword hold IS hot-flagged: exactly one Slack + one SMS alert), no hot_wins step, nothing sent to the seller",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      const a = await h.newInbound("How much? My lawyer is involved");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:price_offer" });
+      expect(await hotWinsCount(a)).toBe(0);
+      const pass = await h.alertPass();
+      expect(pass).toMatchObject({ holds: 1, sent: 2 });
+      expect(await h.deliveryKeys()).toEqual([await h.flagKey()]);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
 ];
 
 /** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */
