@@ -1015,6 +1015,7 @@ export type Database = {
         Row: {
           active: boolean
           business_hours_only: boolean
+          classifier_engine: string
           classifier_fallback_max_consecutive: number
           classifier_mode: string
           classifier_provider: string
@@ -1041,6 +1042,7 @@ export type Database = {
         Insert: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_engine?: string
           classifier_fallback_max_consecutive?: number
           classifier_mode?: string
           classifier_provider?: string
@@ -1067,6 +1069,7 @@ export type Database = {
         Update: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_engine?: string
           classifier_fallback_max_consecutive?: number
           classifier_mode?: string
           classifier_provider?: string

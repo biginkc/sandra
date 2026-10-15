@@ -56,6 +56,12 @@ export async function enrollLead(
     /** Which auto-route created this enrolment (immutable identity used by takeover pauses). */
     /** Hot-lead fence: the triggering inbound. Born paused if a person took over / the seller replied again after it (DB trigger reads its time at full precision). */
     hotFenceMessageId?: string;
+    /**
+     * Start at the second text: the first step is treated as already done (its
+     * message went out by another route, e.g. the identity reply). Refused with
+     * `no_steps` when the drip has no second step (nothing would ever be sent).
+     */
+    skipFirstStep?: boolean;
     autoRoute?: "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
   },
 ): Promise<EnrollmentOutcome> {
@@ -87,6 +93,18 @@ export async function enrollLead(
     .maybeSingle();
   if (stepErr) return { status: "failed", message: stepErr.message };
   if (!step0) return { status: "no_steps" };
+  let startStep = { index: 0, delayMinutes: step0.delay_after_previous_minutes };
+  if (params.skipFirstStep) {
+    const { data: step1, error: step1Err } = await client
+      .from("sequence_steps")
+      .select("delay_after_previous_minutes")
+      .eq("sequence_id", params.sequenceId)
+      .eq("step_index", 1)
+      .maybeSingle();
+    if (step1Err) return { status: "failed", message: step1Err.message };
+    if (!step1) return { status: "no_steps" };
+    startStep = { index: 1, delayMinutes: step1.delay_after_previous_minutes };
+  }
 
   // Load property + its homeowner contact + phone in one round-trip.
   const { data: prop, error: propErr } = await client
@@ -214,7 +232,7 @@ export async function enrollLead(
   }
 
   // Calculate first fire time — delay of step 0 from enrollment moment.
-  const stepRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
+  const stepRunAt = delayToDate(startStep.delayMinutes, new Date());
   const nextRunAt =
     params.firstSendNotBefore && params.firstSendNotBefore.getTime() > stepRunAt.getTime()
       ? params.firstSendNotBefore
@@ -230,7 +248,7 @@ export async function enrollLead(
       property_id: params.propertyId,
       contact_id: homeowner.id,
       status: "active",
-      current_step_index: 0,
+      current_step_index: startStep.index,
       next_run_at: nextRunAt.toISOString(),
       enrolled_by_user_id: params.enrolledByUserId ?? null,
       ...(params.autoRoute ? { auto_enrolled_route: params.autoRoute } : {}),
