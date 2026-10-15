@@ -19,6 +19,11 @@ describe("readClassifierEngine", () => {
     expect(await readClassifierEngine(client({ data: { classifier_engine: "nine_questions" }, error: null }), "o")).toBe("nine_questions");
     expect(await readClassifierEngine(client({ data: { classifier_engine: "outcome_v1" }, error: null }), "o")).toBe("outcome_v1");
   });
+  it("a null, empty or unknown engine value is unreadable", async () => {
+    for (const v of [null, "", "bogus"]) {
+      expect(await readClassifierEngine(client({ data: { classifier_engine: v }, error: null }), "o")).toBe("unreadable");
+    }
+  });
   it("an empty result is unreadable, never outcome_v1 (the caller already found an active config)", async () => {
     expect(await readClassifierEngine(client({ data: null, error: null }), "o")).toBe("unreadable");
   });

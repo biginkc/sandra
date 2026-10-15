@@ -58,7 +58,8 @@ export async function readClassifierEngine(
   if (error) return isMissingEngineColumnError(error) ? "outcome_v1" : "unreadable";
   // Callers only ask after finding an active config, so no row means the switch state is unknown.
   if (!data) return "unreadable";
-  return data.classifier_engine === "nine_questions" ? "nine_questions" : "outcome_v1";
+  const engine: unknown = data.classifier_engine;
+  return engine === "nine_questions" || engine === "outcome_v1" ? engine : "unreadable";
 }
 
 /** What the tape / audit rows carry so the UI can tell the engines apart. */

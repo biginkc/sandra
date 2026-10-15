@@ -791,7 +791,7 @@ function createMockSupabase(state: MockState) {
           return Promise.resolve({ data: null, error: null });
         }
         return Promise.resolve({
-          data: state.config,
+          data: { classifier_engine: "outcome_v1", ...state.config }, // the column is NOT NULL default outcome_v1
           error: null,
         });
       },
