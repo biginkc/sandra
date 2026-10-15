@@ -88,9 +88,10 @@ export function AllTexts({ facts, state, onRetry, onLoadDetailPage, replyToPhone
     onRetry();
   }, [stale, newerId, onRetry]);
   // A composer that is already on screen keeps its own captured stamp (it never re-stamps mid-draft); a composer that
-  // has not opened yet waits for a thread that is loaded and current.
+  // has not opened yet waits for a thread that is loaded and current. A thread that failed to load never mounts one:
+  // with nothing displayed there is no stamp, and an unstamped send could mark an unseen reply handled.
   const [composerShown, setComposerShown] = useState(false);
-  const showComposer = canCompose && (state.status === "error" || (ready && !stale) || composerShown);
+  const showComposer = canCompose && ((ready && !stale) || composerShown);
   if (showComposer && !composerShown) setComposerShown(true);
   return (
     <div ref={container} data-testid={`all-texts-${facts.propertyId}`} className="min-w-0 space-y-3">

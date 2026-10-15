@@ -39,6 +39,17 @@ async function compose(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("<AllTexts /> reply-to stamp with the real composer", () => {
+  it("a thread that failed to load never mounts the composer, so nothing can send unstamped", async () => {
+    const onRetry = vi.fn();
+    const view = render(<AllTexts facts={latest("Y", "2026-10-14T15:00:00Z")} state={{ status: "error", message: "Connection unavailable" }} onRetry={onRetry} defaultOpen />);
+    expect(screen.queryByTestId("rep-sms-composer")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Editable message remainder")).not.toBeInTheDocument();
+    // Once the thread loads and displays Y, the composer opens and stamps it.
+    view.rerender(<AllTexts facts={latest("Y", "2026-10-14T15:00:00Z")} state={thread(["Y", "2026-10-14T15:00:00Z"])} onRetry={onRetry} defaultOpen />);
+    await screen.findByLabelText("Editable message remainder");
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
   it("a reply Y that arrives after X was displayed blocks Reply until the thread shows Y, then stamps Y", async () => {
     const user = userEvent.setup();
     const onRetry = vi.fn();
