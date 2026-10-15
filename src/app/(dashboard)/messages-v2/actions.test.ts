@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const m = vi.hoisted(() => ({
+  draftStillOn: vi.fn(),
   getUser: vi.fn(),
   memberships: vi.fn(),
   revalidatePath: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("../leads/actions", () => ({
   updateLeadAssignee: vi.fn(),
   listPropertyOrgUsers: m.listPropertyOrgUsers,
 }));
+vi.mock("./hold-list", () => ({ draftStillOn: m.draftStillOn }));
 vi.mock("./hold-actions", () => ({
   sendHeldDraft: m.sendHeldDraft,
   editAndSendHeldDraft: m.editAndSendHeldDraft,
@@ -57,15 +59,34 @@ beforeEach(() => {
   for (const fn of [m.sendHeldDraft, m.editAndSendHeldDraft, m.takeOverHold, m.dismissHold, m.assignHold]) {
     fn.mockResolvedValue({ ok: true, data: null });
   }
+  m.draftStillOn.mockReset();
+  m.draftStillOn.mockResolvedValue("ok");
+});
+
+describe("Send / Edit require the property the clicker saw", () => {
+  it.each([undefined, "", "not-a-uuid"])("propertyId %s -> HOLD_STALE, nothing sent", async (propertyId) => {
+    const send = await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId } as never);
+    const edit = await editAndSendHeldDraftAction({ draftId: "d1", body: "x", seen: SEEN_DRAFT, propertyId } as never);
+    expect(send).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(edit).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(m.sendHeldDraft).not.toHaveBeenCalled();
+    expect(m.editAndSendHeldDraft).not.toHaveBeenCalled();
+  });
+
+  it("the early check refusing (draft moved) -> HOLD_STALE, nothing sent", async () => {
+    m.draftStillOn.mockResolvedValue("stale");
+    expect(await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" })).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(m.sendHeldDraft).not.toHaveBeenCalled();
+  });
 });
 
 describe("messages-v2 hold server actions", () => {
   it("run for an owner, with the user and org the server resolved (never client-supplied)", async () => {
-    const result = await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT });
+    const result = await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" });
     expect(result).toEqual({ ok: true, data: null });
     expect(m.sendHeldDraft).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1", userId: "u1" }),
-      { draftId: "d1", seen: SEEN_DRAFT },
+      { draftId: "d1", seen: SEEN_DRAFT, expectedPropertyId: "00000000-0000-4000-8000-000000000001" },
     );
     expect(m.revalidatePath).toHaveBeenCalledWith("/messages-v2");
   });
@@ -81,8 +102,8 @@ describe("messages-v2 hold server actions", () => {
     m.getUser.mockResolvedValue({ data: { user: { id: "u3" } } });
     m.memberships.mockResolvedValue([plainMembership]);
     for (const run of [
-      () => sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT }),
-      () => editAndSendHeldDraftAction({ draftId: "d1", body: "x", seen: SEEN_DRAFT }),
+      () => sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" }),
+      () => editAndSendHeldDraftAction({ draftId: "d1", body: "x", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" }),
       () => takeOverHoldAction({ propertyId: "p1", seen: SEEN_HOLD }),
       () => assignHoldAction({ propertyId: "p1", assigneeId: "u9" }),
       () => dismissHoldAction({ propertyId: "p1", reason: "r", seen: SEEN_HOLD }),
@@ -91,10 +112,10 @@ describe("messages-v2 hold server actions", () => {
       expect(await run()).toMatchObject({ ok: false, error: { code: "UNAUTHORIZED" } });
     }
     m.getUser.mockResolvedValue({ data: { user: null } });
-    expect(await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT })).toMatchObject({ ok: false, error: { code: "UNAUTHENTICATED" } });
+    expect(await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" })).toMatchObject({ ok: false, error: { code: "UNAUTHENTICATED" } });
     m.getUser.mockResolvedValue({ data: { user: { id: "u1" } } });
     m.memberships.mockRejectedValue(new Error("db"));
-    expect(await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT })).toMatchObject({ ok: false, error: { code: "UNAUTHORIZED" } });
+    expect(await sendHeldDraftAction({ draftId: "d1", seen: SEEN_DRAFT, propertyId: "00000000-0000-4000-8000-000000000001" })).toMatchObject({ ok: false, error: { code: "UNAUTHORIZED" } });
     for (const fn of [m.sendHeldDraft, m.editAndSendHeldDraft, m.takeOverHold, m.dismissHold, m.assignHold]) {
       expect(fn).not.toHaveBeenCalled();
     }

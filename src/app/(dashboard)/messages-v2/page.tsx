@@ -18,14 +18,12 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
-import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
-
-import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
-import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
-import { loadMessagesV2Split, type LooseSupabase } from "./queries";
+import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
+import { fetchAllKeyset } from "./paged";
+import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
-import { loadBacklogHoldsAction } from "./backlog-actions";
+import { loadOlderHoldsAction, revalidateHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
 import {
   fetchScorecardRows,
@@ -33,10 +31,14 @@ import {
   type ScorecardRow,
 } from "./scorecard";
 import { loadReplayBatchId } from "./replay-batch";
+import { loadTapeDayAction } from "./tape-actions";
+import { loadRunThreads } from "./tape-data";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
-import type { PipelineCoverage } from "./types";
+import type { WaitingSnapshot } from "./hold-list";
+import type { OpenHold, PipelineCoverage, RunWithSteps } from "./types";
 
 export const dynamic = "force-dynamic";
+
 
 export const metadata = {
   title: "Messages v2 · Sandra CRM",
@@ -79,13 +81,9 @@ async function loadNurtureAutoDrip(
         .select("id, nurture_auto_drip, nurture_drip_maybe_later_sequence_id, nurture_drip_check_in_60_sequence_id, nurture_drip_listed_not_selling_sequence_id, nurture_drip_hot_book_appointment_sequence_id")
         .eq("org_id", orgId)
         .maybeSingle(),
-      supabase
-        .from("sequences")
-        .select("id, name")
-        .eq("org_id", orgId)
-        .eq("active", true)
-        .is("archived_at", null)
-        .order("name"),
+      fetchAllKeyset<{ id: string; name: string }>(() =>
+        supabase.from("sequences").select("id, name").eq("org_id", orgId).eq("active", true).is("archived_at", null),
+      ),
     ]);
     const row = cfg.data as {
       id: string;
@@ -105,7 +103,7 @@ async function loadNurtureAutoDrip(
         listedNotSelling: row.nurture_drip_listed_not_selling_sequence_id,
         hotBookAppointment: row.nurture_drip_hot_book_appointment_sequence_id,
       },
-      sequences: (seqs.data ?? []) as Array<{ id: string; name: string }>,
+      sequences: [...seqs.rows].sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : 1)),
     };
   } catch {
     return null;
@@ -201,35 +199,43 @@ export default async function MessagesV2Page({
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
-  const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const focusDeadLetter = await resolveFocusDeadLetter(supabase, orgId, (await searchParams)?.deadLetter);
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
   const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip] = await Promise.all([
-    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
+    loadMessagesV2Page(supabase, orgId),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
   ]);
-  // The hold queries are windowed; the version each card sends back is read
-  // fresh per displayed property so a hold past the window can still be dismissed.
-  const data = { ...loaded, holds: await withFreshSeen(supabase, orgId, loaded.holds) };
+  const data = loaded;
+  // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.
+  const focusPid = focusDeadLetter?.propertyId ?? null;
+  let focusHold: OpenHold<RunWithSteps> | null | undefined;
+  let focusHoldErrors: string[] = [];
+  let focusSnapshot: WaitingSnapshot | undefined;
+  if (focusPid && !loaded.error && !data.holds.some((h) => h.property_id === focusPid)) {
+    const byId = await loadHoldsByIds(supabase, orgId, [focusPid]);
+    focusHold = byId ? (byId.holds.find((h) => h.property_id === focusPid) ?? null) : undefined;
+    focusHoldErrors = byId?.contextErrors ?? [];
+    focusSnapshot = byId?.snapshot;
+  }
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
-  const holdLabelInputs = data.holds.map((h) => ({
+  const holdLabelInputs = [...data.holds, ...(focusHold ? [focusHold] : [])].map((h) => ({
     id: h.id,
     contact_id: h.run?.contact_id ?? null,
     property_id: h.property_id,
     inbound_message_id: h.run?.inbound_message_id ?? "",
   }));
-  const labels = await loadRunLabels(supabase, [
-    ...data.runs,
-    ...holdLabelInputs,
+  const [labels, thread] = await Promise.all([
+    loadRunLabels(supabase, [...data.runs, ...holdLabelInputs]),
+    loadRunThreads(supabase, data.runs),
   ]);
 
   return (
@@ -246,8 +252,13 @@ export default async function MessagesV2Page({
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
-        holdsSplit={data.split}
-        loadBacklog={loadBacklogHoldsAction}
+        holdsSnapshot={loaded.snapshot}
+        holdsMissing={loaded.missing}
+        revalidateHolds={revalidateHoldsAction}
+        holdsError={loaded.error}
+        holdsUnverified={loaded.unverified}
+        flagReasons={loaded.flagReasons}
+        loadOlderHolds={loadOlderHoldsAction}
         runs={data.runs}
         holds={data.holds}
         feedError={data.feedError}
@@ -256,9 +267,14 @@ export default async function MessagesV2Page({
         badges={data.badges}
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
+        threads={[...thread.threads.entries()]}
+        threadFailedRunIds={thread.failedRunIds}
+        loadTapeDay={loadTapeDayAction}
         nowMs={data.nowMs}
-        lunaEnabled={lunaEnabled}
         focusDeadLetter={focusDeadLetter}
+        focusHold={focusHold}
+        focusHoldErrors={focusHoldErrors}
+        focusSnapshot={focusSnapshot}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,
@@ -268,12 +284,6 @@ export default async function MessagesV2Page({
           retrySuppression: retrySuppressionHoldAction,
           confirmDoNotContact: confirmDoNotContactAction,
           listAssignees: listHoldAssigneesAction,
-          ...(lunaEnabled
-            ? {
-                lunaApply: applyLunaSuggestionAction,
-                lunaReject: rejectLunaSuggestionAction,
-              }
-            : {}),
         }}
       />
     </div>

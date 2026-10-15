@@ -15,6 +15,7 @@ import {
 import type { Result } from "@/lib/errors/result";
 import { cn } from "@/lib/utils";
 
+import { pageText } from "./page-text";
 import type { ReplyGeneration, ReplyGenerationSetting } from "./reply-generation";
 
 export type SetReplyGenerationAction = (input: {
@@ -74,7 +75,7 @@ export function ReplyGenerationToggle({
         setCurrent(result.data.replyGeneration);
         setOpen(false);
       } else {
-        setError(result.error.message);
+        setError(pageText(result.error.message));
       }
     } catch {
       setError("Could not change AI drafts. Nothing was changed.");
@@ -104,7 +105,7 @@ export function ReplyGenerationToggle({
             <DialogTitle>{on ? "Turn AI drafts off?" : "Turn AI drafts on?"}</DialogTitle>
             <DialogDescription>
               {on
-                ? "The AI will stop writing replies. If the classifier is in automatic mode, Jev keeps classifying and applying outcomes, and every seller message that needs an answer is held for a human as 'Seller replied — needs a human reply'. If the classifier is in shadow or legacy mode, every inbound message is held as 'needs a human reply' and Jev applies nothing. The fixed 'who is this?' identity reply still sends automatically (it is pre-approved canned text, not written by the AI)."
+                ? "The AI will stop writing replies. If the classifier is in automatic mode, Sandra keeps classifying and applying outcomes, and every seller message that needs an answer is held for a human as 'Seller replied — needs a human reply'. If the classifier is in shadow or legacy mode, every inbound message is held as 'needs a human reply' and Sandra applies nothing. The fixed 'who is this?' identity reply still sends automatically (it is pre-approved canned text, not written by the AI)."
                 : "The AI responder may draft replies again, under the current send and hold rules."}
             </DialogDescription>
           </DialogHeader>
