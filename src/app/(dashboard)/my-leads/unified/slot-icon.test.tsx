@@ -41,6 +41,11 @@ describe("slotIconFor contact-only inbound", () => {
     expect(slotIconFor(workFacts("new_lead", "3", {}, { latestInbound: contactOnly, stage: "not_contacted", drip: healthy }))).toBe("no_drip");
     expect(slotIconFor(workFacts("in_drip", "10", {}, { latestInbound: contactOnly, drip: healthy }))).toBe("no_drip");
   });
+  it("a handled contact-only inbound no longer forces not-in-a-drip", () => {
+    const handled = { ...contactOnly, handled: true };
+    expect(slotIconFor(workFacts("in_drip", "10", {}, { latestInbound: handled, drip: healthy }))).toBe("in_drip");
+    expect(slotIconFor(workFacts("new_lead", "3", {}, { latestInbound: handled, stage: "not_contacted", drip: null }))).toBe("new_lead");
+  });
   it("broken still wins", () => {
     expect(slotIconFor(workFacts("broken", "6", {}, { latestInbound: contactOnly, broken }))).toBe("broken");
   });
