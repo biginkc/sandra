@@ -59,8 +59,8 @@ export type MessagesV2ViewProps = {
   holdsMeta?: HoldsMeta;
   /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
   holdsTotal?: number;
-  /** More holds than could be sorted together: the list says so. */
-  holdsCapped?: boolean;
+  /** All holds when more exist than the sort ceiling (only the newest are shown); null otherwise. */
+  holdsCutFrom?: number | null;
   /** The hold lookup failed (reason): say so, never "nothing is waiting". */
   holdsError?: string | null;
   /** "Show older": the next slice of the same latest-activity order. */
@@ -495,7 +495,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             labels={labels}
             meta={meta}
             total={props.holdsTotal ?? holds.length}
-            capped={props.holdsCapped}
+            cutFrom={props.holdsCutFrom}
             error={props.holdsError}
             loadOlder={props.loadOlderHolds}
             refreshKey={props.holds}

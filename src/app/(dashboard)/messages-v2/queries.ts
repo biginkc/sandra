@@ -249,6 +249,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
+      last_activity:
+        [...a.times, ...a.alertTimes].sort((x, y) => compareInstants(y, x))[0] ?? null,
       alert_since: alertSince,
       ...(a.flagReason ? { flag_reason: a.flagReason } : {}),
       reason:
@@ -495,6 +497,16 @@ export type LoadOptions = {
    * with activity at/after it, found directly rather than through HOLD_LIMIT.
    */
   alertsSince?: string;
+  /**
+   * The complete set of open hold source rows, already loaded (and paged to exhaustion) by the caller.
+   * Used by the waiting list, which must see every hold; replaces the scoped / windowed source queries.
+   */
+  preloaded?: {
+    properties: HoldPropertyRow[];
+    decisions: HoldDecisionRow[];
+    reviews: HoldReviewRow[];
+    drafts: HoldDraftRow[];
+  };
   /** Attach Luna's pending suggestion to jev/disposition holds. Off = zero extra queries. */
   includeLuna?: boolean;
 };
@@ -526,11 +538,11 @@ const ALERT_ROW_CAP = 1000;
  * than this drops out of the lookback and is not nudged.
  */
 export const ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const PROPERTY_COLUMNS =
+export const PROPERTY_COLUMNS =
   "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since";
-const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
-const REVIEW_COLUMNS = "property_id, conversation_id, source_inbound_message_id, disposition, created_at";
-const draftColumns = (includeBody: boolean) =>
+export const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
+export const REVIEW_COLUMNS = "property_id, conversation_id, source_inbound_message_id, disposition, created_at";
+export const draftColumns = (includeBody: boolean) =>
   includeBody
     ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
     : "id, property_id, conversation_id, inbound_message_id, run_id, created_at";
@@ -865,21 +877,22 @@ export async function loadMessagesV2Data(
     ? await loadAlertSources(supabase, orgId, opts.alertsSince, !!opts.includeDraftBody, nowMs)
     : null;
   // A failed query is reported as failed, never silently as "no holds".
+  const preSources = alertSources ?? opts.preloaded ?? null;
   const properties = (
-    alertSources
-      ? alertSources.properties
+    preSources
+      ? preSources.properties
       : flaggedRes.error
         ? []
         : (flaggedRes.data ?? [])
   ) as HoldPropertyRow[];
   const decisions = (
-    alertSources ? alertSources.decisions : decisionRes.error ? [] : (decisionRes.data ?? [])
+    preSources ? preSources.decisions : decisionRes.error ? [] : (decisionRes.data ?? [])
   ) as HoldDecisionRow[];
   const reviews = (
-    alertSources ? alertSources.reviews : reviewRes.error ? [] : (reviewRes.data ?? [])
+    preSources ? preSources.reviews : reviewRes.error ? [] : (reviewRes.data ?? [])
   ) as HoldReviewRow[];
   const drafts = (
-    alertSources ? alertSources.drafts : draftRes.error ? [] : (draftRes.data ?? [])
+    preSources ? preSources.drafts : draftRes.error ? [] : (draftRes.data ?? [])
   ) as HoldDraftRow[];
 
   // Runs for the hold cards: by property and by source inbound message, so a

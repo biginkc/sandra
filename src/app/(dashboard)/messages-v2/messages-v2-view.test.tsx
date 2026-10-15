@@ -286,6 +286,11 @@ describe("MessagesV2View", () => {
     expect(texts).toHaveLength(2);
   });
 
+  it("says 'Showing the newest 5,000 of N' when waiting texts were cut, never silently", async () => {
+    await mount({ ...props([], [openHold("a")]), holdsCutFrom: 5321 });
+    expect(screen.getByTestId("holds-capped")).toHaveTextContent("Showing the newest 5,000 of 5,321 waiting texts.");
+  });
+
   it("shows a failed alert and load warnings as short plain lines", async () => {
     const held = { ...openHold("p1"), alert: { status: "failed" as const, reason: "x" } };
     await mount({

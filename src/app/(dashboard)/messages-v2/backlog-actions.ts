@@ -122,5 +122,5 @@ export async function loadOlderHoldsAction(input: {
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  return { ok: true, data: { holds, labels: [...labels.entries()], total: slice.total } };
+  return { ok: true, data: { holds, labels: [...labels.entries()], total: slice.total, cutFrom: slice.cutFrom } };
 }

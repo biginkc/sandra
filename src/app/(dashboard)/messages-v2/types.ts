@@ -171,6 +171,12 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
    * flagged before start times were tracked): such a hold never alerts.
    */
   alert_since?: string | null;
+  /**
+   * The newest instant anything happened on the hold's own sources: its flag, or the newest pending
+   * decision / review / draft. `since` is the OLDEST of these, so ordering by "what moved most recently"
+   * must use this. null = nothing reliable known.
+   */
+  last_activity?: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;

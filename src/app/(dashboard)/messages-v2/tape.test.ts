@@ -126,6 +126,14 @@ describe("deriveTape", () => {
     expect(v.kind === "decided" && v.sentence).not.toMatch(/replied/);
   });
 
+  it("the waiting card and the tape read the same reason: the run's, even when the property flag says something else", () => {
+    const r = run({ status: "held", reason: "jev_below_threshold:not_interested", steps: [step(1, "jev", "classify", "pass", { outcome: "not_interested" })] });
+    const card = holdReasonSentence(r, r.reason ?? "model:unclear", "Martha"); // what WaitingCard passes: run.reason first, flag second
+    expect(deriveTape(r, "Martha").kind === "decided" && (deriveTape(r, "Martha") as { sentence: string }).sentence).toBe(card);
+    // a flag-only fallback still works when the run has no reason
+    expect(holdReasonSentence(run({ reason: null }), "model:opt_out" , "Dee")).toBe("Dee asked to stop. Nothing sent.");
+  });
+
   it("a held not_interested says what Sandra thought and why it waited", () => {
     const v = deriveTape(run({ status: "held", reason: "jev_below_threshold:not_interested", steps: [step(1, "jev", "classify", "pass", { outcome: "not_interested" })] }), "Martha");
     expect(v.kind === "decided" && v.sentence).toBe("Martha may have said no. Not sure enough to close it.");

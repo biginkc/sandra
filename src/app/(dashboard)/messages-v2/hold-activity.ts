@@ -1,7 +1,7 @@
 import type { OpenHold, RunWithSteps } from "./types";
 
 /** Most holds the server sorts together; above this the column says so. */
-export const HOLD_SORT_CAP = 1500;
+export const HOLD_SORT_CAP = 5000;
 
 /**
  * When anything last happened on this hold: the newest of its start, its latest
@@ -11,6 +11,7 @@ export const HOLD_SORT_CAP = 1500;
 export function holdActivityMs(hold: OpenHold<RunWithSteps>): number | null {
   const stamps = [
     hold.since,
+    hold.last_activity,
     hold.run?.started_at,
     hold.run?.completed_at,
     ...(hold.run?.steps ?? []).map((st) => st.created_at),

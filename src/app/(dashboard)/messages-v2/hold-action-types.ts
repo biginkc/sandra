@@ -47,6 +47,8 @@ export type OlderHoldsPage = {
   labels: Array<[string, RunLabel]>;
   /** All waiting holds, so the column can say how many are still to load. */
   total: number;
+  /** All holds when more than the sort ceiling exist; null otherwise. */
+  cutFrom?: number | null;
 };
 
 /** Server action behind "Show older": the next slice after `offset` already-loaded holds. */

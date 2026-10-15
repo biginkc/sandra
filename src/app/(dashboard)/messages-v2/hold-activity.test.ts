@@ -34,6 +34,13 @@ describe("holdActivityMs / sortNewestFirst", () => {
     expect(sorted.slice(0, 301).some((h) => h.id === "buried")).toBe(true); // lands on page 1, not behind "Show older"
   });
 
+  it("a hold with an OLD flag but a NEW pending decision sorts to the top (since is the oldest source time)", () => {
+    const oldFlagNewDecision = base("old-flag-new-decision", iso(1_000), { last_activity: iso(90_000) });
+    const recentFlagOnly = base("recent-flag", iso(50_000), { last_activity: iso(50_000) });
+    expect(sortNewestFirst([recentFlagOnly, oldFlagNewDecision]).map((h) => h.id)).toEqual(["old-flag-new-decision", "recent-flag"]);
+    expect(holdActivityMs(oldFlagNewDecision)).toBe(90_000);
+  });
+
   it("falls back to since, and sorts a hold with no time at all last", () => {
     const unknown = base("unknown", null);
     expect(sortNewestFirst([unknown, base("a", iso(3_000)), base("b", iso(4_000))]).map((h) => h.id)).toEqual(["b", "a", "unknown"]);
@@ -42,5 +49,21 @@ describe("holdActivityMs / sortNewestFirst", () => {
 
   it("breaks ties deterministically by id", () => {
     expect(sortNewestFirst([base("b", iso(1_000)), base("a", iso(1_000))]).map((h) => h.id)).toEqual(["a", "b"]);
+  });
+});
+
+import { deriveOpenHolds } from "./queries";
+
+describe("deriveOpenHolds last_activity", () => {
+  it("is the newest of the flag and every pending decision / review / draft, while since stays the oldest", () => {
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: "2026-01-01T00:00:00Z", last_ai_escalation_reason: "model:unclear", updated_at: null, needs_human_attention_since: "2026-01-01T00:00:00Z" }],
+      decisions: [{ property_id: "p1", conversation_id: "c", source_inbound_message_id: "m", created_at: "2026-10-14T12:00:00Z" }],
+      reviews: [],
+      drafts: [{ id: "d", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: "2026-10-10T00:00:00Z" }],
+      runs: [],
+    });
+    expect(holds[0].since).toBe("2026-01-01T00:00:00Z");
+    expect(holds[0].last_activity).toBe("2026-10-14T12:00:00Z");
   });
 });

@@ -76,7 +76,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {holdReasonSentence(run, hold.flag_reason, who)}
+        <b>Sandra:</b> {holdReasonSentence(run, run?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">
@@ -139,7 +139,7 @@ export function WaitingColumn({
   labels,
   meta,
   total,
-  capped,
+  cutFrom,
   error,
   loadOlder,
   refreshKey,
@@ -151,7 +151,8 @@ export function WaitingColumn({
   meta?: HoldsMeta;
   /** All waiting holds on the server. */
   total: number;
-  capped?: boolean;
+  /** All holds when more exist than the sort ceiling. */
+  cutFrom?: number | null;
   error?: string | null;
   loadOlder?: LoadOlderHolds;
   /** Changes when the server data refreshes (drops stale older slices). */
@@ -220,9 +221,9 @@ export function WaitingColumn({
           Waiting texts unavailable — {error}
         </p>
       )}
-      {capped && (
+      {cutFrom != null && (
         <p data-testid="holds-capped" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          So many texts are waiting that only the first {HOLD_SORT_CAP.toLocaleString("en-US")} could be sorted.
+          Showing the newest {HOLD_SORT_CAP.toLocaleString("en-US")} of {cutFrom.toLocaleString("en-US")} waiting texts.
         </p>
       )}
       {failures.length > 0 && (
