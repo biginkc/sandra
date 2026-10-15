@@ -228,7 +228,7 @@ describe("<LeadActivityTimeline /> with lead events", () => {
     const history = {
       ok: true as const,
       page: {
-        rows: [{ kind: "offer" as const, id: "offer-old", at: "2026-08-25T16:00:00Z", actorId: null, amountCents: "10000", method: "verbal" as const, followUpAt: null, outcome: "pending" as const, outcomeAt: null }],
+        rows: [{ kind: "offer" as const, id: "offer-old", at: "2026-08-25T16:00:00Z", actorId: null, amountCents: "10000", method: "verbal" as const, followUpAt: "2026-08-26T16:00:00Z", outcome: "pending" as const, outcomeAt: null }],
         hasMore: true, cursor: null,
       },
     };
