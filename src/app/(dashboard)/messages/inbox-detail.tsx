@@ -511,6 +511,7 @@ export function InboxDetail({
                 </h2>
                 <MultiHouseBadge
                   houses={homeownerHouses}
+                  contactId={housesFor}
                   ownerName={data.contactName}
                   currentPropertyId={data.propertyId ?? undefined}
                   className="shrink-0"

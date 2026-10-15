@@ -290,12 +290,41 @@ describe("homeowner houses on queue rows", () => {
     expect(result.rows[0].homeownerHouses?.count).toBe(2);
   });
 
-  it("skips the read when the classifier already says every homeowner has one house", async () => {
+  it("keeps the classifier's homeownerPropertyCount through getWorkPage and skips the read below 2", async () => {
     const from = housesClient([]);
-    const { withHomeownerHouses } = await import("./work-queue");
-    const rows = [{ ...withContact(A, C1), homeownerPropertyCount: 1 }] as never;
-    await withHomeownerHouses(rows, { client: { from } as never, orgId: "org-1", userId: A });
+    mocks.rpc.mockResolvedValue({
+      data: { ...pagePayload([A]), rows: [withContact(A, C1, { homeownerPropertyCount: 1 })] },
+      error: null,
+    });
+    const page = await getWorkPage({ memberId: A, query: QUERY });
+    expect(page.rows[0].homeownerPropertyCount).toBe(1);
     expect(from).not.toHaveBeenCalled();
+  });
+
+  it("keeps the classifier's count through getWorkFacts and still reads houses at 2+", async () => {
+    const from = housesClient([house("h1", C1, A), house("h2", C1, B), house("h3", C1, A)]);
+    mocks.rpc.mockResolvedValue({
+      data: { rows: [withContact(A, C1, { homeownerPropertyCount: 3 })], missing: [], snapshotAt: NOW },
+      error: null,
+    });
+    const result = await getWorkFacts(A, [A]);
+    expect(result.rows[0].homeownerPropertyCount).toBe(3);
+    expect(result.rows[0].homeownerHouses?.count).toBe(3);
+    expect(from).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a malformed classifier count instead of failing the row, and reads houses", async () => {
+    const from = housesClient([house("h1", C1, A), house("h2", C1, A)]);
+    for (const bad of [-1, 2.5, "3", null]) {
+      mocks.rpc.mockResolvedValue({
+        data: { ...pagePayload([A]), rows: [withContact(A, C1, { homeownerPropertyCount: bad })] },
+        error: null,
+      });
+      const page = await getWorkPage({ memberId: A, query: QUERY });
+      expect(page.rows[0]).not.toHaveProperty("homeownerPropertyCount");
+      expect(page.rows[0].homeownerHouses?.count).toBe(2);
+    }
+    expect(from).toHaveBeenCalledTimes(4);
   });
 
   it("still shows the queue when the houses read fails", async () => {

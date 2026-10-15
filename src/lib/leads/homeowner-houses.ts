@@ -35,6 +35,7 @@ type HousesQuery = {
   is(column: string, value: null): HousesQuery;
   order(column: string, options: { ascending: boolean }): HousesQuery;
   limit(count: number): PromiseLike<HousesResult>;
+  range(from: number, to: number): PromiseLike<HousesResult>;
 };
 
 export type HousesClient = {
@@ -83,6 +84,7 @@ export async function loadHomeownerHouses(
   const { data, error } = await base()
     .in("homeowner_contact_id", ids)
     .order("address", { ascending: true })
+    .order("id", { ascending: true })
     .limit(MAX_PAGE_ROWS);
   if (error) throw readFailed(error);
   const rows = data ?? [];
@@ -105,6 +107,7 @@ export async function loadHomeownerHouses(
       const owner = await base({ count: "exact" })
         .eq("homeowner_contact_id", contactId)
         .order("address", { ascending: true })
+        .order("id", { ascending: true })
         .limit(MAX_LISTED_HOUSES);
       if (owner.error) throw readFailed(owner.error);
       const houses = (owner.data ?? []).map((row) => toHouse(row, input.viewerId));
@@ -113,4 +116,35 @@ export async function loadHomeownerHouses(
   );
   for (const [contactId, entry] of perOwner) if (entry.count > 0) result[contactId] = entry;
   return result;
+}
+
+/** Largest offset a "Show more" page may ask for. */
+export const MAX_HOUSES_OFFSET = 100_000;
+
+export type HomeownerHousesPage = { houses: HomeownerHouse[]; count: number; nextOffset: number | null };
+
+/**
+ * The next MAX_LISTED_HOUSES houses of one homeowner, in the same order as the first paint (address, then id),
+ * so "Show more" from offset N continues exactly where the list stopped.
+ */
+export async function loadHomeownerHousesPage(
+  client: HousesClient,
+  input: { orgId: string; viewerId: string; contactId: string; offset: number },
+): Promise<HomeownerHousesPage> {
+  if (!UUID.test(input.contactId)) throw new Error("Invalid homeowner");
+  if (!Number.isInteger(input.offset) || input.offset < 0 || input.offset > MAX_HOUSES_OFFSET) throw new Error("Invalid offset");
+  const { data, error, count } = await client
+    .from("properties")
+    .select(COLUMNS, { count: "exact" })
+    .eq("org_id", input.orgId)
+    .is("deleted_at", null)
+    .eq("homeowner_contact_id", input.contactId)
+    .order("address", { ascending: true })
+    .order("id", { ascending: true })
+    .range(input.offset, input.offset + MAX_LISTED_HOUSES - 1);
+  if (error) throw readFailed(error);
+  const houses = (data ?? []).map((row) => toHouse(row, input.viewerId));
+  const total = Math.max(count ?? 0, input.offset + houses.length);
+  const next = input.offset + houses.length;
+  return { houses, count: total, nextOffset: houses.length > 0 && next < total ? next : null };
 }

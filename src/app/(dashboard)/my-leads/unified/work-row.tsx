@@ -111,8 +111,7 @@ export function fullAddress(row: WorkFacts["row"], zip: string | null = null): s
 
 /** The read's houses, counted as the larger of the read and the classifier's homeownerPropertyCount. */
 export function rowHouses(facts: WorkFacts): HomeownerHouses | null {
-  const fact = (facts as { homeownerPropertyCount?: unknown }).homeownerPropertyCount;
-  const factCount = typeof fact === "number" && Number.isFinite(fact) ? fact : 0;
+  const factCount = facts.homeownerPropertyCount ?? 0;
   const read = facts.homeownerHouses;
   const count = Math.max(factCount, read?.count ?? 0);
   if (count === 0) return null;
@@ -214,6 +213,7 @@ export function WorkRow({
             <span className="break-words text-[14.5px] font-bold">{name}</span>
             <MultiHouseBadge
               houses={rowHouses(facts)}
+              contactId={facts.row.contactId}
               ownerName={facts.row.homeownerName}
               currentPropertyId={id}
               className="self-center"

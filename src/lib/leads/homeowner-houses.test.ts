@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   houseAddress,
   loadHomeownerHouses,
+  loadHomeownerHousesPage,
   MAX_LISTED_HOUSES,
   MAX_PAGE_ROWS,
   type HousesClient,
@@ -32,13 +33,24 @@ function fakeClient(table: Row[], error: { message: string } | null = null) {
       calls.from += 1;
       let rows = [...table];
       let counted = false;
+      const sorts: string[] = [];
+      const sorted = () =>
+        [...rows].sort((a, b) => {
+          for (const key of sorts) {
+            const d = String(a[key as keyof Row]).localeCompare(String(b[key as keyof Row]));
+            if (d) return d;
+          }
+          return 0;
+        });
       const query = {
         eq(column: string, value: string) { calls.filters.push(["eq", column, value]); rows = rows.filter((r) => r[column as keyof Row] === value); return query; },
         in(column: string, values: string[]) { calls.filters.push(["in", column, values]); rows = rows.filter((r) => values.includes(r[column as keyof Row] as string)); return query; },
         is(column: string, value: null) { calls.filters.push(["is", column, value]); rows = rows.filter((r) => r[column as keyof Row] === value); return query; },
-        order(column: string) { rows.sort((a, b) => String(a[column as keyof Row]).localeCompare(String(b[column as keyof Row]))); return query; },
+        order(column: string) { sorts.push(column); return query; },
         limit: async (count: number) =>
-          error ? { data: null, error } : { data: rows.slice(0, count), error: null, count: counted ? rows.length : null },
+          error ? { data: null, error } : { data: sorted().slice(0, count), error: null, count: counted ? rows.length : null },
+        range: async (from: number, to: number) =>
+          error ? { data: null, error } : { data: sorted().slice(from, to + 1), error: null, count: counted ? rows.length : null },
       };
       return {
         select: (_columns: string, options?: { count: "exact" }) => {
@@ -130,5 +142,53 @@ describe("loadHomeownerHouses", () => {
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
     expect(calls.from).toBe(1);
     expect(result[C1].count).toBe(MAX_PAGE_ROWS - 1);
+  });
+});
+
+describe("loadHomeownerHousesPage (Show more)", () => {
+  it("continues an owner with 60 houses from house 51 to 60, in the first paint's order", async () => {
+    const table = many(C1, 60, "a");
+    const first = await loadHomeownerHouses(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
+    const page = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: C1, offset: first[C1].houses.length });
+    expect(page.count).toBe(60);
+    expect(page.nextOffset).toBeNull();
+    expect([...first[C1].houses, ...page.houses].map((h) => h.propertyId)).toEqual(table.map((r) => r.id));
+  });
+
+  it("pages an owner past 1,000 houses to the end", async () => {
+    const table = many(C1, 1100, "a");
+    const { client } = fakeClient(table);
+    const ids: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset });
+      ids.push(...page.houses.map((h) => h.propertyId));
+      offset = page.nextOffset;
+    }
+    expect(ids).toHaveLength(1100);
+    expect(new Set(ids).size).toBe(1100);
+  });
+
+  it("orders ties on the address by id so pages never repeat or skip", async () => {
+    const table = Array.from({ length: 70 }, (_, i) => row(`t${String(69 - i).padStart(3, "0")}`, C1, { address: "Same St" }));
+    const { client } = fakeClient(table);
+    const a = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset: 0 });
+    const b = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset: a.nextOffset! });
+    expect(new Set([...a.houses, ...b.houses].map((h) => h.propertyId)).size).toBe(70);
+  });
+
+  it("stays in the org and skips deleted houses", async () => {
+    const { client, calls } = fakeClient([row("p1", C1), row("p2", C1, { org_id: "org-2" }), row("p3", C1, { deleted_at: "x" })]);
+    const page = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset: 0 });
+    expect(calls.filters).toEqual(expect.arrayContaining([["eq", "org_id", ORG], ["is", "deleted_at", null]]));
+    expect(page).toMatchObject({ count: 1, nextOffset: null, houses: [{ propertyId: "p1" }] });
+  });
+
+  it("rejects a bad cursor or homeowner without reading", async () => {
+    const { client, calls } = fakeClient([]);
+    for (const offset of [-1, 1.5, Number.NaN, 100_001])
+      await expect(loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset })).rejects.toThrow(/offset/);
+    await expect(loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: "nope", offset: 0 })).rejects.toThrow(/homeowner/);
+    expect(calls.from).toBe(0);
   });
 });

@@ -158,6 +158,8 @@ export function parseWorkFacts(value: unknown): WorkFacts | null {
     contractSignedAt: (value.contractSignedAt as string | null | undefined) ?? null,
     lastTouch,
     row: value.row,
+    // Optional classifier fact; a missing or malformed value is left out rather than failing the row.
+    ...(isCount(value.homeownerPropertyCount) ? { homeownerPropertyCount: value.homeownerPropertyCount } : {}),
   };
 }
 
@@ -284,10 +286,7 @@ export async function withHomeownerHouses(
   viewer: Pick<MyLeadsViewer, "client" | "orgId" | "userId">,
 ): Promise<WorkFacts[]> {
   const wanted = rows
-    .filter((facts) => {
-      const count = (facts as { homeownerPropertyCount?: unknown }).homeownerPropertyCount;
-      return typeof count !== "number" || count >= 2;
-    })
+    .filter((facts) => facts.homeownerPropertyCount === undefined || facts.homeownerPropertyCount >= 2)
     .map((facts) => facts.row.contactId);
   if (!wanted.some(Boolean)) return rows;
   try {

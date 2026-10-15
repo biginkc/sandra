@@ -90,6 +90,8 @@ export type WorkFacts = {
   lastTouch: { kind: LastTouchKind; at: string } | null;
   /** The existing queue row; feeds the existing dialogs/workflows unchanged. */
   row: QueueRow;
+  /** The classifier's count of non-deleted houses this homeowner owns in the org; absent on older classifiers. */
+  homeownerPropertyCount?: number;
   /** Every house this homeowner owns in the org (the "Owns N houses" badge); absent when unknown. */
   homeownerHouses?: HomeownerHouses;
 };

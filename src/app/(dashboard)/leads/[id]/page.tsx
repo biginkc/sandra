@@ -793,7 +793,7 @@ export default async function LeadDetailPage({
 
   const homeownerHouses = await homeownerHousesPromise;
   const ownerBadge = (
-    <MultiHouseBadge houses={homeownerHouses} ownerName={homeownerName} currentPropertyId={lead.id} testId="lead-houses" />
+    <MultiHouseBadge houses={homeownerHouses} contactId={lead.homeowner?.id ?? null} ownerName={homeownerName} currentPropertyId={lead.id} testId="lead-houses" />
   );
 
   const heroActions = (
