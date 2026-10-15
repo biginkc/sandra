@@ -92,7 +92,7 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
-import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, priceSignalAllowed } from "./keywords";
+import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
   NUMBER_SOURCE_AWAITING_ANSWER_REASON,
@@ -360,11 +360,41 @@ export async function applyKeywordEscalation(
     inboundBody: string;
     escalationKeywords?: ReadonlyArray<string> | null;
     runContext?: MaybeRunContext;
+    /**
+     * Jev automatic: a price signal never writes a HOT hold up front (before
+     * consent checks and classification). A price-only text writes nothing
+     * here (the shared hot decision handles it after the gates); a mixed text
+     * keeps a person-review hold under its NON-price reason, which can only be
+     * alerted by the later classify-only check if stop / DNC / wrong / bad
+     * number does not win.
+     */
+    jevAutomatic?: boolean;
   },
 ): Promise<{ escalated: true; reason: string } | { escalated: false }> {
   const keywordMatch = matchEscalationKeyword(args.inboundBody, {
     allowedPhrases: args.escalationKeywords ?? undefined,
   });
+  if (args.jevAutomatic && keywordMatch && hasAllowedPriceSignal(args.inboundBody, args.escalationKeywords ?? null)) {
+    const otherTier = nonPriceTier(args.inboundBody, args.escalationKeywords ?? null);
+    if (!otherTier) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "escalation_keyword",
+        result: "pass",
+        detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
+      }, args.runContext);
+      return { escalated: false };
+    }
+    const mixedReason = `keyword:${otherTier}`;
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "block",
+      detail: { tier: otherTier, alsoPrice: true },
+    }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.propertyId, mixedReason, args.runContext);
+    return { escalated: true, reason: mixedReason };
+  }
   if (!keywordMatch) {
     await trace(
       supabase,
@@ -656,6 +686,7 @@ async function dispatchAiResponseCore(
         inboundBody: input.inboundBody,
         escalationKeywords: config?.escalation_keywords ?? null,
         runContext: deps.runContext,
+        jevAutomatic: !!config && config.active === true && isJevAutomatic(config),
       });
 
   if (keywordEscalation.escalated) {
@@ -663,18 +694,7 @@ async function dispatchAiResponseCore(
     // If the text ALSO carries an allowed price signal, the lead is now held:
     // run the held-lead classify-only check, which alerts Jarrad once only if
     // stop / DNC / wrong / bad number does not win (and its own gates pass).
-    if (
-      !keywordEscalation.reason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) &&
-      input.inboundMessageId &&
-      isPriceKeyword(input.inboundBody, config?.escalation_keywords ?? null)
-    ) {
-      await classifyOnlyForHotText(
-        supabase,
-        input,
-        { ...property, needs_human_attention: true, last_ai_escalation_reason: keywordEscalation.reason },
-        deps.runContext,
-      );
-    }
+    await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
     return { outcome: "escalated", reason: keywordEscalation.reason };
   }
 
@@ -3115,6 +3135,41 @@ async function classifyOnlyForHotText(
   } catch (error) {
     reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
   }
+}
+
+/**
+ * After a person-review keyword hold whose reason is NOT the hot price
+ * reason: if the text also carries an allowed price signal, run the held-lead
+ * classify-only check (its own gates, atomic claim, one classification,
+ * stop / DNC / wrong / bad number precedence). Used by the normal dispatch and
+ * the delayed-reply inbound path.
+ */
+export async function checkHotTextAfterKeywordHold(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  holdReason: string,
+  escalationKeywords: ReadonlyArray<string> | null,
+  runCtx: MaybeRunContext,
+  knownProperty?: GateProperty & { last_ai_escalation_reason?: string | null },
+): Promise<void> {
+  if (holdReason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) || !input.inboundMessageId) return;
+  if (!isPriceKeyword(input.inboundBody, escalationKeywords)) return;
+  let property = knownProperty ?? null;
+  if (!property) {
+    const { data } = await supabase
+      .from("properties")
+      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention, last_ai_escalation_reason")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (!data) return;
+    property = data as GateProperty & { last_ai_escalation_reason?: string | null };
+  }
+  await classifyOnlyForHotText(
+    supabase,
+    input,
+    { ...property, needs_human_attention: true, last_ai_escalation_reason: holdReason },
+    runCtx,
+  );
 }
 
 /** The classify-only work, under its claim. Returns the claim outcome. */

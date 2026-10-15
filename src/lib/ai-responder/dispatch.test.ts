@@ -7972,17 +7972,17 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(state.property.last_ai_escalation_reason).not.toBe("keyword:price_offer");
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
-          it("round 15: 'He died, what's your price' + Jev wrong_number: held as main does (up-front distress keyword)", async () => {
+          it("round 15: 'He died, what's your price' + Jev wrong_number: held for a person under the NON-price reason, classify-only runs, wrong number wins so no hot alert", async () => {
             const state = createMockState();
             const r = await normalRun(state, "inbound-r15-died", { outcome: "wrong_number", body: "He died, what's your price", keywords: ["died", "price"] });
-            // matchEscalationKeyword reports the price tier when both are present; what matters is the UP-FRONT hold (no deferral, no classifier call).
-            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
-            expect(r.classifierCalls).toBe(0);
-            expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.deferred).toBeUndefined();
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:distressed_seller" });
+            expect(r.classifierCalls).toBe(1);
             expect(state.property.needs_human_attention).toBe(true);
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:distressed_seller");
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
-          it("round 15 (pins current behaviour): property ai_responder_disabled + price text on the normal path: skipped, no Sandra hold, no flag, no reply", async () => {
+it("round 15 (pins current behaviour): property ai_responder_disabled + price text on the normal path: skipped, no Sandra hold, no flag, no reply", async () => {
             const state = createMockState();
             state.property.needs_human_attention = false;
             vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
@@ -8054,12 +8054,20 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
               expect(hotAssign.recordHeld).not.toHaveBeenCalled();
               expect(sendSmsToContact).not.toHaveBeenCalled();
             });
-            it("enabled property + price AND lawyer text: main's up-front keyword hold (keyword:price_offer)", async () => {
+            it("enabled property + price AND lawyer text (Jev unclear): held under the NON-price reason keyword:legal_contract, exactly one hot alert", async () => {
               const state = createMockState();
               const r = await normalRun(state, "inbound-r18-enabled-both", { outcome: "unclear", body: BOTH, keywords: ["price", "how much", "lawyer"] });
-              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
               expect(state.property.needs_human_attention).toBe(true);
-              expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("enabled property + price AND lawyer text (Jev opted_out): held keyword:legal_contract, no hot alert", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r18-enabled-both-oo", { outcome: "opted_out", body: "Stop asking how much. My lawyer is involved.", keywords: ["price", "how much", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
               expect(sendSmsToContact).not.toHaveBeenCalled();
             });
           });

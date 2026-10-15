@@ -184,3 +184,15 @@ export function hasAllowedPriceSignal(body: string, allowedPhrases?: ReadonlyArr
   const numeric = DOLLAR_AMOUNT_REGEX.test(body) || NUMBER_WITH_SCALE_REGEX.test(body);
   return numeric && (!allowed || pricePhrases.length > 0);
 }
+
+/** The tier of the longest NON-price escalation phrase in the body (honouring the allow-list), or null. */
+export function nonPriceTier(body: string, allowedPhrases?: ReadonlyArray<string> | null): EscalationTier | null {
+  if (!body) return null;
+  const lower = body.toLowerCase();
+  const allowed = allowedPhrases ? new Set(allowedPhrases.map((p) => p.toLowerCase())) : null;
+  const phrases = [...PHRASE_TO_TIER.entries()]
+    .filter(([p, t]) => t !== "price_offer" && (!allowed || allowed.has(p)))
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [p, t] of phrases) if (lower.includes(p)) return t;
+  return null;
+}
