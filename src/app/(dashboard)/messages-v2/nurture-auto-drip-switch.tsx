@@ -127,7 +127,7 @@ export function NurtureAutoDripSwitch({ state, trigger = "badge" }: { state: Nur
           <DialogHeader>
             <DialogTitle>What Sandra does when she decides a seller might sell later, but not right now</DialogTitle>
             <DialogDescription>
-              When Sandra applies nurture on her own, send the approved nurture reply first, then start the drip for what the seller said.
+              When Sandra applies &ldquo;maybe later&rdquo; on her own, send the approved nurture reply first, then start the drip for what the seller said.
               If the reply cannot go out, nothing is enrolled and a person is asked to reply and start the drip.
             </DialogDescription>
           </DialogHeader>

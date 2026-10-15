@@ -1061,3 +1061,26 @@ describe("Sol r3: decisions and reviews pass the same in-org reference check as 
     }
   }
 });
+
+describe("Fable: conversation references are read narrowly", () => {
+  it("one limit-1 existence read per conversation, plus a property read that skips messages without a property", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [plainProp(3)],
+      ai_reply_drafts: [draft(1, { property_id: u(3), conversation_id: u(60, 2) }), draft(2, { property_id: u(3), conversation_id: u(61, 2) })],
+      messages: [
+        message(60, { conversation_id: u(60, 2), property_id: u(3) }),
+        ...Array.from({ length: 30 }, (_, i) => message(100 + i, { conversation_id: u(61, 2), property_id: null })),
+      ],
+    };
+    const { client, log } = db(tables);
+    const list = await loadEligibleHolds(client, "org");
+    expect(list.ok && list.holds.map((h) => h.id)).toEqual([u(3)]);
+    const convReads = log.filter((l) => l.table === "messages" && l.ops.some((o) => "col" in o && o.col === "conversation_id"));
+    const exists = convReads.filter((l) => l.select === "conversation_id");
+    expect(exists).toHaveLength(2); // one per referenced conversation
+    for (const l of exists) expect(l.ops).toContainEqual(expect.objectContaining({ k: "eq", col: "conversation_id" }));
+    const props = convReads.filter((l) => l.select !== "conversation_id");
+    expect(props.length).toBeGreaterThan(0);
+    for (const l of props) expect(l.ops).toContainEqual({ k: "isnull", col: "property_id", not: true });
+  });
+});

@@ -172,6 +172,8 @@ export async function readMessageReferences(
 ): Promise<MessageReferences | null> {
   const msgProperty = new Map<string, string | null>();
   const convProperties = new Map<string, Set<string>>();
+  const convPropertySets = new Map<string, Set<string>>();
+  const readableConvs = new Set<string>();
   let failed = false;
   await Promise.all([
     // (A referenced run or message with no row in this org is UNRESOLVED, not "no property": see below.)
@@ -182,24 +184,45 @@ export async function readMessageReferences(
       if (res.error) failed = true;
       else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
     }),
+    // Properties on each conversation: only messages that carry one (as before #874).
     ...chunks(convIds).map(async (ids) => {
-      // Every message (not only those with a property): a conversation with NO message in this org is an
-      // unreadable reference (absent or another org's), not "a conversation with no property".
-      // (This reads every message in each referenced conversation; a narrower existence read is a later optimisation.)
-      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string | null; created_at: string }>(() =>
-        supabase.from("messages").select("id, conversation_id, property_id, created_at").eq("org_id", orgId).in("conversation_id", ids),
+      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string; created_at: string }>(() =>
+        supabase
+          .from("messages")
+          .select("id, conversation_id, property_id, created_at")
+          .eq("org_id", orgId)
+          .in("conversation_id", ids)
+          .not("property_id", "is", null),
       );
       if (res.error) failed = true;
-      else
-        for (const m of res.rows) {
-          const set = convProperties.get(m.conversation_id) ?? new Set<string>();
-          if (m.property_id) set.add(m.property_id);
-          convProperties.set(m.conversation_id, set);
-        }
+      else for (const m of res.rows) convPropertySets.set(m.conversation_id, (convPropertySets.get(m.conversation_id) ?? new Set<string>()).add(m.property_id));
     }),
+    // Readability: does the conversation have at least one message in THIS org? One row per conversation
+    // (limit 1), a few at a time. None = unresolved (absent or another org's), never "no property".
+    (async () => {
+      const ids = uniq(convIds);
+      for (let i = 0; i < ids.length; i += EXISTS_PARALLEL) {
+        const results = await Promise.all(
+          ids.slice(i, i + EXISTS_PARALLEL).map(async (id) => {
+            const res = await supabase.from("messages").select("conversation_id").eq("org_id", orgId).eq("conversation_id", id).limit(1);
+            return { id, res: res as { data: unknown; error: unknown } };
+          }),
+        );
+        for (const { id, res } of results) {
+          if (res.error) failed = true;
+          else if (Array.isArray(res.data) && res.data.length > 0) readableConvs.add(id);
+        }
+        if (failed) return;
+      }
+    })(),
   ]);
-  return failed ? null : { msgProperty, convProperties };
+  if (failed) return null;
+  for (const id of readableConvs) convProperties.set(id, convPropertySets.get(id) ?? new Set<string>());
+  return { msgProperty, convProperties };
 }
+
+/** Conversation existence reads in flight at once. */
+const EXISTS_PARALLEL = 10;
 
 /** Every non-null message / conversation reference resolved in this org (see readMessageReferences). */
 export const referencesReadable = (refs: MessageReferences, messageId: string | null | undefined, conversationId: string | null | undefined): boolean =>

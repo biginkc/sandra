@@ -129,6 +129,8 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
   });
 });
 
+// FROZEN_PARENT_* below are the parent (84ddabdd6) behaviour for this fixture. They never move: a change to them
+// is an alert-behaviour change and needs its own review, not a test update.
 const P1 = "00000000-0000-4000-8000-000000000001";
 /** Captured from the full pass over the parent's loader (see the comment on `decisions`): Slack only, no SMS. */
 const FROZEN_PARENT_DECISIONS = {
