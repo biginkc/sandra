@@ -851,6 +851,18 @@ it('next_change_at covers drip late-window, call-in-progress, ledger and campaig
   });
 });
 
+it('next_change_at includes the instant a Call today pin lapses', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('pin'); await w.pin(id, w.at(-HOUR), w.at(3 * HOUR));
+    const r = await w.page(w.sam, { tab: 'needs_attention' });
+    expect(r.rows[0].reason).toBe('call_today');
+    expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(3 * HOUR));
+    const lapsed = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
+    expect(lapsed.rows[0].reason).toBe('nothing_planned');
+  });
+});
+
 it('search is bounded, stacks with chips and stage, and matches name, address and phone', async () => {
   await withDb(async (db) => {
     const w = await world(db);

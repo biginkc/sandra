@@ -93,9 +93,9 @@ language sql stable security definer set search_path = '' as $$
       select mx.*, mx.metadata ->> 'inbound_message_id' as stamp, mx.metadata ->> 'generated_by' as gen,
         mx.metadata ->> 'reply_source' as reply_source,
         (mx.metadata ->> 'approved_by_user_id') is not null as approved,
-        exists (select 1 from public.sequence_step_runs r where r.message_id = mx.id) as is_drip,
-        (select l.state from public.rep_sms_delivery_ledger l where l.org_id = p_org and l.message_id = mx.id
-         order by l.updated_at desc limit 1) as ledger_state
+        mx.direction = 'outbound' and exists (select 1 from public.sequence_step_runs r where r.message_id = mx.id) as is_drip,
+        case when mx.direction = 'outbound' then (select l.state from public.rep_sms_delivery_ledger l where l.org_id = p_org and l.message_id = mx.id
+         order by l.updated_at desc limit 1) end as ledger_state
       from mx) x),
   -- User events used by the handled-reply rule and by failure supersession. An attempt logged
   -- through the workflow (log_acquisition_attempt) is deliberately NOT here: attempts count only
@@ -276,6 +276,8 @@ language sql stable security definer set search_path = '' as $$
   tm as (
     select lead_id, t from (
       select b.property_id as lead_id, b.next_warning_at as t from base b
+      union all select ov.property_id, ov.pinned_until from public.my_leads_strip_overrides ov
+        where ov.org_id = p_org and ov.member_id = p_member and ov.pinned_at is not null
       union all select lead_id, next_boundary from apx
       union all select lead_id, next_missed from apx
       union all select lead_id, follow_up_at - interval '15 minutes' from po where pending and chain is null
@@ -372,6 +374,14 @@ language sql stable security definer set search_path = '' as $$
     from pl),
   fin as (
     select cl.*,
+      array_remove(array[
+        case when cl.norma_calling then 'norma_calling' end,
+        case when cl.norma_task then 'norma_task' end,
+        case when cl.dnc then 'do_not_contact' end,
+        case when cl.manual_at is not null then 'text_waiting' end,
+        case when cl.in_contact_only and cl.in_ts is not null then 'check_texts' end,
+        case when cl.broken_n > 0 and cl.row_no <> '6' then 'broken' end
+      ], null) || case when cardinality(cl.phones) = 0 then array['no_phone'] else array[]::text[] end as labels,
       case cl.place when 'your_move' then 0 when 'their_move' then 1 else 2 end::smallint as place_rank,
       case when cl.place <> 'your_move' then 0
         else case cl.reason when 'new_lead' then 1 when 'call_today' then 2 when 'due' then 3 when 'new_reply' then 4
@@ -381,7 +391,8 @@ language sql stable security definer set search_path = '' as $$
         when '5' then cl.in_ts when '6' then cl.broken_at when '6a' then cl.manual_at
         when '7' then cl.stage_entered_at
         when '8' then coalesce(cl.offer_eff, cl.offer_sent_at, cl.stage_entered_at)
-        when '10' then coalesce(cl.next_run_at, cl.camp_healthy_at, cl.first_send_not_before)
+        when '10' then coalesce(cl.next_run_at, cl.camp_healthy_at,
+          case when cl.pause_reason = 'call_in_progress' then cl.enr_updated_at + interval '30 minutes' end, cl.first_send_not_before)
         when '11' then case when cl.reason = 'offer_out' then cl.offer_eff else cl.future_min end
         when '12' then cl.offer_eff when '13' then cl.lo_ts
         when '14' then coalesce(cl.lof_completed_at, cl.lo_ts) end as reason_at
@@ -399,15 +410,7 @@ language sql stable security definer set search_path = '' as $$
     end::double precision as sort_key,
     coalesce(extract(epoch from f.last_touch_at), -1e12)::double precision as last_touch_epoch,
     f.last_touch_at, f.attempts_count, f.assigned_at,
-    array_remove(array[
-      case when f.norma_calling then 'norma_calling' end,
-      case when f.norma_task then 'norma_task' end,
-      case when cardinality(f.phones) = 0 then 'no_phone' end,
-      case when f.dnc then 'do_not_contact' end,
-      case when f.manual_at is not null then 'text_waiting' end,
-      case when f.in_contact_only and f.in_ts is not null then 'check_texts' end,
-      case when f.broken_n > 0 and f.row_no <> '6' then 'broken' end
-    ], null) as labels,
+    f.labels,
     cardinality(f.phones) > 0 as has_phone, f.dnc as contact_dnc,
     (f.row_no in ('4', '9', '5', '6')) as in_badge,
     jsonb_build_object(
@@ -444,12 +447,7 @@ language sql stable security definer set search_path = '' as $$
         'at', f.in_ts, 'kind', f.in_kind, 'messageId', f.in_mid, 'handled', f.in_handled, 'contactOnly', f.in_contact_only) end,
       'hasPhone', cardinality(f.phones) > 0, 'contactDnc', f.dnc,
       'broken', coalesce(f.broken_items, '[]'::jsonb),
-      'labels', to_jsonb(array_remove(array[
-        case when f.norma_calling then 'norma_calling' end, case when f.norma_task then 'norma_task' end,
-        case when cardinality(f.phones) = 0 then 'no_phone' end, case when f.dnc then 'do_not_contact' end,
-        case when f.manual_at is not null then 'text_waiting' end,
-        case when f.in_contact_only and f.in_ts is not null then 'check_texts' end,
-        case when f.broken_n > 0 and f.row_no <> '6' then 'broken' end], null)),
+      'labels', to_jsonb(f.labels),
       'row', f.row_data) as facts,
     f.search_text, f.next_at
   from fin f;
