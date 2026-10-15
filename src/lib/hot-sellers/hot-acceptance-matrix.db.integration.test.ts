@@ -1151,6 +1151,89 @@ const ROWS: Row[] = [
       await h.expectOneAlertTotal();
     },
   },
+  {
+    id: "35",
+    name: "held lead whose contact opted out (sms_opted_out flag, then a consent opt_out) + hot text through real dispatch: classify-only is silent - classifier never called, no hot_seller_text event, no alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      await pg.query("update public.contacts set sms_opted_out = true where id = (select homeowner_contact_id from public.properties where id = $1)", [h.propertyId]);
+      const a = await h.newInbound("yes I would sell, what could you pay");
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(0);
+      await pg.query("update public.contacts set sms_opted_out = false where id = (select homeowner_contact_id from public.properties where id = $1)", [h.propertyId]);
+      await pg.query(
+        "insert into public.consent_events (contact_id, channel, event_type, source) select homeowner_contact_id, 'sms', 'opt_out', 'hot-matrix-test' from public.properties where id = $1",
+        [h.propertyId],
+      );
+      const b = await h.newInbound("actually yes make me an offer");
+      expect(await h.dispatch(b, "nurture", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(0);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "36",
+    name: "held lead under human takeover (ai_responder_disabled) + hot text through real dispatch: classify-only is silent - classifier never called, no hot_seller_text event, no alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      await pg.query("update public.properties set ai_responder_disabled = true where id = $1", [h.propertyId]);
+      const a = await h.newInbound("what number are you thinking, I will sell");
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(0);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "37",
+    name: "replay of a held-lead inbound that already has an ai_response_claims row but no classification run: not classified again - classifier never called, no hot_seller_text event, no alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("sure I will sell, what can you pay");
+      await pg.query(
+        "insert into public.ai_response_claims (org_id, inbound_message_id, property_id, status) values ($1, $2, $3, 'completed')",
+        [h.orgId, a, h.propertyId],
+      );
+      expect(await count("select count(*)::int as n from public.sms_classification_runs where source_inbound_message_id = $1", [a])).toBe(0);
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(0);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
+  {
+    id: "38",
+    name: "identity question + below-threshold new_lead + escalation not_applicable through real dispatch: NO identity reply, held hot (escalate route), exactly one Slack + SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await pg.query("update public.jev_outcome_thresholds set min_confidence = 0.99 where org_id = $1 and outcome = 'new_lead'", [h.orgId]);
+      const a = await h.newInbound("Who is this? I might sell.");
+      const result = await h.dispatch(a, "new_lead", "not_applicable");
+      expect(result.outcome).toBe("escalated");
+      expect(jevCalls).toBeGreaterThanOrEqual(1);
+      const { data: prop } = await admin.from("properties").select("outreach_dispo, needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ outreach_dispo: null, needs_human_attention: true });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  ...(["opted_out", "dnc"] as const).map((outcome, i): Row => ({
+    id: `39${"ab"[i]}`,
+    name: `held lead + new text classified ${outcome} with a hot escalation through real dispatch: stop/DNC wins - no hot_seller_text event, no alert`,
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("stop texting me, but what would you pay");
+      await h.dispatch(a, outcome, HOT_ESC);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  })),
 ];
 
 /** The classification kind the hot-wins step recorded for this inbound's run. */

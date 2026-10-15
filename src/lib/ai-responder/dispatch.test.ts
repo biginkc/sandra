@@ -233,6 +233,9 @@ type MockState = {
   ensureConversationError?: boolean;
   /** The next N ai_response_claims updates fail. */
   claimUpdateFailures?: number;
+  /** The classify-only `.limit()` lookups of ai_response_claims / sms_classification_runs fail. */
+  claimLimitLookupError?: boolean;
+  runLimitLookupError?: boolean;
   /** fn_auto_apply_jev_lead_decision throws (simulates the function dying after the template send). */
   crashOnApply?: boolean;
   /** Throw on the post-send message metadata update (a crash right after provider acceptance). */
@@ -897,6 +900,11 @@ function createMockSupabase(state: MockState) {
       maybeSingle() {
         return Promise.resolve(execute());
       },
+      // classify-only already-handled guard: rows for this inbound.
+      limit() {
+        if (state.claimLimitLookupError) return Promise.resolve({ data: null, error: { message: "claim lookup boom" } });
+        return Promise.resolve({ data: state.aiClaims.filter(matches), error: null });
+      },
       select() {
         return query;
       },
@@ -983,6 +991,7 @@ function createMockSupabase(state: MockState) {
       },
       // classify-only replay guard: has this inbound already been classified?
       limit() {
+        if (state.runLimitLookupError) return Promise.resolve({ data: null, error: { message: "run lookup boom" } });
         return Promise.resolve({
           data: state.smsClassificationRuns.filter((r) => sourceFilter === null || (r as { source_inbound_message_id?: unknown }).source_inbound_message_id === sourceFilter),
           error: null,
@@ -2376,6 +2385,31 @@ describe("dispatchAiResponse debounce", () => {
       } finally { vi.stubGlobal("fetch", originalFetch); }
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(state.property.last_ai_escalation_reason).toBe("model:call_request");
+    });
+
+    it("identity question + below-threshold new_lead + escalation not_applicable: NO identity reply, held as a hot escalate route", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-id-nl-below", body: ID_BODY });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.5 }, escalation_reason: { choice: "not_applicable" } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: ID_BODY,
+          inboundMessageId: "inbound-id-nl-below", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(result).toEqual({ outcome: "escalated", reason: "model:hot_lead" });
+        expect(state.property.last_ai_escalation_reason).toBe("model:hot_lead");
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.needs_human_attention).toBe(true);
     });
 
     it("Jev says nurture (not hot): the identity reply still goes out, no hand-off", async () => {
@@ -7446,12 +7480,13 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(state.jevLeadDecisionCalls).toEqual([]);
       });
 
-      it("below-threshold not_interested (needs_decision) + call_request: hot hold model:call_request, no send", async () => {
+      it("not_interested below its cutoff + call_request: hot wins - hold model:call_request, no send, no disposition, no lead-decision proposal", async () => {
         const state = createMockState();
         const { result } = await runJev(state, "inbound-hotwins-nd-ni", "not_interested", "call_request", { confidence: 0.5 });
         expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
         expect(sendSmsToContact).not.toHaveBeenCalled();
         expect(state.property.outreach_dispo).toBeNull();
+        expect(state.jevLeadDecisionCalls).toEqual([]);
       });
 
       it("no-action outcome (unclear) + price_or_offer: hot wins - hot_wins hold model:price_or_offer, no send", async () => {
@@ -7589,6 +7624,74 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(sendSmsToContact).not.toHaveBeenCalled();
       });
     });
+
+      describe("PR 2 round 10: classify-only runs the same gates as a send", () => {
+        const heldRun = async (state: MockState, id: string, opts: { outcome?: string; noConversation?: boolean } = {}) => {
+          state.property.needs_human_attention = true;
+          state.config.classifier_provider = "jev";
+          state.config.classifier_mode = "automatic";
+          state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+          const supabase = createMockSupabase(state);
+          installSendMock(state);
+          seedInboundMessage(state, { id, body: "text body" });
+          const originalFetch = globalThis.fetch;
+          const fetchMock = vi.fn(async () => ({
+            ok: true, status: 200,
+            json: async () => ({ answers: { outcome: { choice: opts.outcome ?? "nurture", confidence: 0.97 }, escalation_reason: { choice: "price_or_offer" }, ...nurtureAnswers } }),
+          }));
+          vi.stubGlobal("fetch", fetchMock);
+          try {
+            const result = await dispatchAiResponse(supabase as never, {
+              contactId: CONTACT_ID, conversationId: opts.noConversation ? (undefined as never) : CONVERSATION_ID, inboundBody: "text body",
+              inboundMessageId: id, propertyId: PROPERTY_ID,
+            }, { anthropic: {} as never });
+            return { result, classifierCalls: fetchMock.mock.calls.length };
+          } finally { vi.stubGlobal("fetch", originalFetch); }
+        };
+
+        it("sanity: an ungated held lead is still classified and recorded", async () => {
+          const state = createMockState();
+          const r = await heldRun(state, "inbound-gate-ok");
+          expect(r.classifierCalls).toBe(1);
+          expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+        });
+
+        it("no conversation id: classifier not called, nothing recorded", async () => {
+          const state = createMockState();
+          const r = await heldRun(state, "inbound-gate-noconv", { noConversation: true });
+          expect(r.classifierCalls).toBe(0);
+          expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+        });
+
+        it.each(["opted_out", "dnc"])("held lead + new text classified %s with a hot escalation: nothing recorded (stop/DNC wins)", async (outcome) => {
+          const state = createMockState();
+          const r = await heldRun(state, `inbound-gate-${outcome}`, { outcome });
+          expect(r.classifierCalls).toBe(1);
+          expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+        });
+
+        it.each([
+          ["opted-out contact (sms_opted_out)", (st: MockState) => { st.contact.sms_opted_out = true; }],
+          ["do_not_contact contact", (st: MockState) => { st.contact.do_not_contact = true; }],
+          ["ai_responder_disabled property", (st: MockState) => { st.property.ai_responder_disabled = true; }],
+          ["rep_sms_human_takeover flag", (st: MockState) => { st.property.last_ai_escalation_reason = "rep_sms_human_takeover"; }],
+          ["existing ai_response_claims row for the inbound", (st: MockState) => {
+            st.aiClaims.push({ id: "claim-x", inbound_message_id: "inbound-gate", lease_expires_at: new Date().toISOString(), response_kind: "reply", status: "completed" } as never);
+          }],
+          ["claim lookup error", (st: MockState) => { st.claimLimitLookupError = true; }],
+          ["classification-run lookup error", (st: MockState) => { st.runLimitLookupError = true; }],
+        ])("%s: classifier not called, nothing recorded, no send", async (_label, setup) => {
+          const state = createMockState();
+          setup(state);
+          const r = await heldRun(state, "inbound-gate");
+          expect(r.result).toEqual({ outcome: "skipped", reason: "already_terminal" });
+          expect(r.classifierCalls).toBe(0);
+          expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+        });
+      });
 
     it("records template_reply (sent) THEN drip_enrolled (applied) as pipeline steps, in that order", async () => {
       const state = createMockState();

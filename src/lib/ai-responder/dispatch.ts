@@ -454,7 +454,7 @@ export async function checkAiResponderDispatchPreGates(
     // disposition, no assignment change; non-hot exits exactly as before.
     // DNC-locked leads are never classified.
     if (property.needs_human_attention && !property.is_dnc_locked && input.inboundMessageId) {
-      await classifyOnlyForHotText(supabase, input, property.org_id, runCtx);
+      await classifyOnlyForHotText(supabase, input, property, runCtx);
     }
     await blocked("already_terminal");
     return {
@@ -2927,10 +2927,30 @@ export async function runApprovedTemplateStep(
 async function classifyOnlyForHotText(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  orgId: string,
+  property: GateProperty & { last_ai_escalation_reason?: string | null },
   runCtx: MaybeRunContext,
 ): Promise<void> {
+  const orgId = property.org_id;
   try {
+    // A person took over the thread: Sandra stays out.
+    if (property.last_ai_escalation_reason === "rep_sms_human_takeover") return;
+    // The same rule-0 gates as any send (org off, consent / opt-out, DNC,
+    // phone suppression, responder disabled = human takeover), evaluated as
+    // if the lead were not held. Any failed lookup or any gate → nothing.
+    const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false });
+    if (!silent.ok || silent.reason) return;
+    // Already handled: a response claim or a classification run for this
+    // inbound means it went through before. Never classify a replay; a failed
+    // lookup fails closed.
+    const inboundId = input.inboundMessageId as string;
+    // No conversation: nothing reliable to classify against.
+    if (!input.conversationId) return;
+    const { data: claim, error: claimError } = await supabase
+      .from("ai_response_claims")
+      .select("id")
+      .eq("inbound_message_id", inboundId)
+      .limit(1);
+    if (claimError || (claim ?? []).length > 0) return;
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode")
@@ -2941,12 +2961,12 @@ async function classifyOnlyForHotText(
     // A replay of an inbound that was already classified (full path or an
     // earlier classify-only look) is never classified again: no paid call,
     // no second event for one text.
-    const { data: seen } = await supabase
+    const { data: seen, error: seenError } = await supabase
       .from("sms_classification_runs")
       .select("id")
-      .eq("source_inbound_message_id", input.inboundMessageId as string)
+      .eq("source_inbound_message_id", inboundId)
       .limit(1);
-    if ((seen ?? []).length > 0) return;
+    if (seenError || (seen ?? []).length > 0) return;
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
     if (!(await isHotRouting(supabase, orgId, c))) return;
     const escalation = "escalationReason" in c ? c.escalationReason : null;
@@ -3024,8 +3044,9 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
 function isHotClassification(c: ClassificationBridgeResult): boolean {
   if (c.kind === "jev_promote_new_lead") return true;
   if (c.kind === "jev_needs_decision" && c.outcome === "new_lead") return true;
-  // A hot escalation route (new_lead below its cutoff, call request, price).
-  if (c.kind === "jev_route" && c.route.kind === "escalate") return isHotSeller({ reasons: [c.escalationReason] });
+  // The escalate route only comes from outcome new_lead (below its cutoff):
+  // hot whatever the escalation reason.
+  if (c.kind === "jev_route" && c.route.kind === "escalate") return true;
   return hotWinsOver(c);
 }
 
