@@ -1,6 +1,6 @@
 import { encodeSnapshot, type CompactSnapshot } from "./snapshot-codec";
 import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
-import { compareInstants, loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
+import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldSeen, HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
 export { HOLDS_LOAD_ERROR };
@@ -31,20 +31,28 @@ const meta = (shown: number, total: number, contextErrors: string[], deadLetterU
   ...(deadLetterUnavailable ? { deadLetterUnavailable: true } : {}),
 });
 
-/** Applies the final check: holds no longer open -> missing; a displayed draft that no longer validates is removed. */
+/**
+ * Applies the final check: holds no longer open -> missing; a displayed draft that is no longer current is removed;
+ * the CURRENT version always replaces the built one (never carried forward); any difference -> recheck_changed.
+ */
 function finalCards(
   holds: OpenHold<RunWithSteps>[],
-  still: { open: Set<string>; badDraft: Set<string>; version?: Map<string, HoldSeen> },
+  still: { open: Set<string>; badDraft: Set<string>; version: Map<string, HoldSeen>; changed: Set<string>; unsendable: Set<string> },
 ): { holds: OpenHold<RunWithSteps>[]; missing: string[] } {
   const kept = holds
     .filter((h) => still.open.has(h.id))
-    .map((h) => (still.badDraft.has(h.id) ? { ...h, draft: undefined, draft_held: false } : h))
-    // The final check's version: the card renders it, so any difference from the snapshot marks it Updated.
     .map((h) => {
-      const v = still.version?.get(h.id);
-      if (!v) return h;
-      const through = h.seen?.through && (!v.through || compareInstants(h.seen.through, v.through) > 0) ? h.seen.through : v.through;
-      return { ...h, seen: { through, flagReason: v.flagReason, flagAt: v.flagAt } };
+      const base = still.badDraft.has(h.id)
+        ? { ...h, draft: undefined, draft_held: false }
+        : still.unsendable.has(h.id) && h.draft
+          ? { ...h, draft: { ...h.draft, sendable: false } }
+          : h;
+      const v = still.version.get(h.id);
+      return {
+        ...base,
+        ...(v ? { seen: v } : {}),
+        ...(still.changed.has(h.id) ? { recheck_changed: true } : {}),
+      };
     });
   return { holds: kept, missing: holds.filter((h) => !still.open.has(h.id)).map((h) => h.id) };
 }

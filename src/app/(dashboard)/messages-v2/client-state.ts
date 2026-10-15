@@ -140,6 +140,8 @@ export type LiveView = {
   seenThrough: string | null | undefined;
   activityAt: string | null;
   runId: string | null;
+  /** The server's final check found the card changed while the page was built. */
+  serverChanged?: boolean;
 };
 
 /**
@@ -149,6 +151,7 @@ export type LiveView = {
  *  - pinned run null vs a live run is a difference; pinned draft null vs a live draft is a difference.
  */
 export function liveDiffers(rec: Pinned, live: LiveView): boolean {
+  if (live.serverChanged) return true;
   if (live.draftId !== rec.pinnedDraft) return true;
   if (rec.pinnedDraft !== null && live.draftSendable !== rec.pinnedDraftSendable) return true;
   if (live.flagReason !== rec.pinnedReason) return true;

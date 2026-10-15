@@ -509,6 +509,7 @@ export function WaitingColumn({
     seenThrough: h.seen?.through ?? null,
     activityAt: holdActivityAt(h),
     runId: h.run?.id ?? null,
+    serverChanged: h.recheck_changed === true,
   });
   /** updated / paused for a card, from its record and live view only (actionsEnabled is the single rule). */
   const cardState = (id: string, h: OpenHold<RunWithSteps>) => {

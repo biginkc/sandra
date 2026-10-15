@@ -536,6 +536,60 @@ describe("final check re-resolves drafts", () => {
   });
 });
 
+describe("final check contract: recompute from current data, compare to pins, never carry forward", () => {
+  const during = (tables: Record<string, Row[]>, change: () => void) => {
+    const client = db(tables).client;
+    let moved = false;
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !moved) {
+        moved = true;
+        change();
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    return client;
+  };
+
+  it("a pending decision resolves during build while the flag keeps the hold open: card changed, version is the CURRENT one", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(1), t(5))] };
+    const client = during(tables, () => {
+      tables.jev_lead_decisions = tables.jev_lead_decisions.map((d) => ({ ...d, status: "applied" }));
+    });
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.holds.map((h) => h.id)).toEqual([u(1)]);
+    expect(page.holds[0].recheck_changed).toBe(true);
+    expect(page.holds[0].seen?.through).toBeNull(); // never the older pending-row time carried forward
+  });
+
+  it("a new run-linked draft arrives during build while the flag keeps the hold open: card changed", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))], pipeline_runs: [runRow(2, { property_id: u(1) })], ai_reply_drafts: [] };
+    const client = during(tables, () => {
+      tables.ai_reply_drafts = [draft(7, { run_id: u(2, 5), created_at: t(30) })];
+    });
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.holds.map((h) => h.id)).toEqual([u(1)]);
+    expect(page.holds[0].recheck_changed).toBe(true);
+  });
+
+  it("nothing changed during build: not marked, version equals the built one", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(1), t(5))] };
+    const page = await loadMessagesV2Page(db(tables).client, "org");
+    expect(page.holds[0].recheck_changed).toBeUndefined();
+    expect(page.holds[0].seen?.through).toBe(t(5));
+  });
+
+  it("locked during build -> missing; lookup failure -> fail closed", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };
+    const client = during(tables, () => {
+      tables.properties = tables.properties.map((p) => ({ ...p, is_dnc_locked: true }));
+    });
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.missing).toEqual([u(1)]);
+    const list = await eligible({ properties: [flagged(1, t(1))] });
+    expect(await recheckOpen(db({ properties: [flagged(1, t(1))] }, { fail: () => true }).client, "org", list.holds)).toBeNull();
+  });
+});
+
 describe("fresh version check", () => {
   it("a failed fresh-seen lookup is reported (column pauses actions), never silently kept", async () => {
     const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };

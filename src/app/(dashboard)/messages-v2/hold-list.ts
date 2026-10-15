@@ -491,132 +491,66 @@ export async function enrichPage(
 }
 
 /**
- * Final eligibility check for cards about to render (after enrichment): the property is not DNC-locked and the
- * hold still has an open source (flag on, or a pending decision / review / draft). Returns the ids that pass, or
- * null when any lookup fails (fail closed).
+ * THE final check (one function, one contract), run on cards about to render:
+ *
+ *   For every returned hold, recompute (eligible, locked, resolved property, displayed draft id + property, all
+ *   current draft links, flag reason, flag time, run id, pending-row version) from CURRENT data via the same
+ *   resolvers the snapshot uses (loadEligibleHolds: every draft link path, org-verified, DNC lock filter), and
+ *   compare each to the hold as it was built. Any difference -> `changed` (the card renders Updated, actions
+ *   disabled). Not eligible / locked / unresolvable -> not in `open` (missing). The version returned is always the
+ *   CURRENT one: an older value is never carried forward in place of a current one.
+ *
+ * `badDraft` = the displayed draft is no longer the hold's current draft: it is dropped from the card so Send/Edit
+ * cannot act on it. `unsendable` = still the current draft but no longer sendable from the card: kept, Send disabled. Returns null when any lookup fails (fail closed).
  */
 export async function recheckOpen(
   supabase: LooseSupabase,
   orgId: string,
   holds: readonly OpenHold<RunWithSteps>[],
-): Promise<{ open: Set<string>; badDraft: Set<string>; version: Map<string, HoldSeen> } | null> {
-  const ids = holds.map((h) => h.id);
-  if (!ids.length) return { open: new Set(), badDraft: new Set(), version: new Map() };
-  // The hold's version as of this check (flag reason/time and newest pending row), so the column can compare it
-  // with the snapshot and mark the card Updated on any difference.
-  const flagNow = new Map<string, { reason: string | null; at: string | null }>();
-  const throughNow = new Map<string, string>();
-  const bump = (id: string, at: string | null | undefined) => {
-    if (!at) return;
-    const cur = throughNow.get(id);
-    if (!cur || compareInstants(at, cur) > 0) throughNow.set(id, at);
-  };
-  const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
+): Promise<{
+  open: Set<string>;
+  badDraft: Set<string>;
+  version: Map<string, HoldSeen>;
+  changed: Set<string>;
+  /** Same draft, but it can no longer be sent from the card: kept with Send disabled. */
+  unsendable: Set<string>;
+} | null> {
+  const unsendable = new Set<string>();
   const open = new Set<string>();
-  const locked = new Set<string>();
-  const draftOk = new Set<string>();
-  /** Draft ids that still resolve to exactly their hold's unlocked property. */
-  const validDraftIds = new Set<string>();
-  let failed = false;
-  await Promise.all([
-    ...chunks(ids).map(async (c) => {
-      const res = await fetchAllKeyset<{
-        id: string;
-        needs_human_attention: boolean;
-        is_dnc_locked: boolean;
-        last_ai_escalation_reason: string | null;
-        last_ai_escalation_at: string | null;
-      }>(() =>
-        supabase
-          .from("properties")
-          .select("id, needs_human_attention, is_dnc_locked, last_ai_escalation_reason, last_ai_escalation_at")
-          .eq("org_id", orgId)
-          .in("id", c),
-      );
-      if (res.error) failed = true;
-      else
-        for (const p of res.rows) {
-          const flagged = p.needs_human_attention === true;
-          flagNow.set(p.id, { reason: flagged ? (p.last_ai_escalation_reason ?? null) : null, at: flagged ? (p.last_ai_escalation_at ?? null) : null });
-          if (p.is_dnc_locked) locked.add(p.id);
-          else if (p.needs_human_attention) open.add(p.id);
-        }
-    }),
-    ...(["jev_lead_decisions", "ai_disposition_reviews"] as const).flatMap((table) =>
-      chunks(ids).map(async (c) => {
-        const res = await fetchAllKeyset<{ property_id: string | null; created_at: string | null }>(() =>
-          supabase.from(table).select("id, property_id, created_at").eq("org_id", orgId).eq("status", "pending").in("property_id", c),
-        );
-        if (res.error) failed = true;
-        else
-          for (const r of res.rows)
-            if (r.property_id) {
-              open.add(r.property_id);
-              bump(r.property_id, r.created_at);
-            }
-      }),
-    ),
-    // A draft counts only if it is still pending AND still resolves to exactly this hold's property, unlocked:
-    // its links (property_id, run, message, conversation) are re-read and re-resolved, never assumed.
-    (async () => {
-      const byId = new Map<string, HoldDraftRow>();
-      const reads = [
-        ...chunks(draftIds).map((c) => ["id", c] as const),
-        ...chunks(ids).map((c) => ["property_id", c] as const),
-      ];
-      for (const [col, c] of reads) {
-        const res = await fetchAllKeyset<HoldDraftRow>(() =>
-          supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending").in(col, c),
-        );
-        if (res.error) {
-          failed = true;
-          return;
-        }
-        for (const r of res.rows) byId.set(r.id, r);
-      }
-      const rows = [...byId.values()];
-      if (!rows.length) return;
-      const candidates = await resolveDraftProperties(supabase, orgId, rows);
-      if (!candidates) {
-        failed = true;
-        return;
-      }
-      const all = uniq([...candidates.values()].flatMap((set) => [...set]));
-      const lockedNow = all.length ? await lockedPropertyIds(supabase, orgId, all) : new Set<string>();
-      if (!lockedNow) {
-        failed = true;
-        return;
-      }
-      const idSet = new Set(ids);
-      for (const d of rows) {
-        const c = [...(candidates.get(d.id) ?? [])];
-        // Counts for a hold only if it resolves to exactly that one property today, and that property is unlocked.
-        if (c.length === 1 && idSet.has(c[0]) && !lockedNow.has(c[0])) {
-          draftOk.add(c[0]);
-          validDraftIds.add(`${d.id}|${c[0]}`);
-          bump(c[0], d.created_at);
-        }
-      }
-    })(),
-  ]);
-  if (failed) return null;
-  for (const id of draftOk) open.add(id);
-  // Not confirmed open by the direct reads: before declaring it missing, re-run the FULL eligibility path
-  // (every draft link: own property, run, inbound message, conversation; org-verified, unlocked).
-  const unconfirmed = ids.filter((id) => !open.has(id) && !locked.has(id));
-  if (unconfirmed.length) {
-    const list = await loadEligibleHolds(supabase, orgId);
-    if (!list.ok) return null;
-    const eligible = new Set(list.holds.map((h) => h.id));
-    for (const id of unconfirmed) if (eligible.has(id)) open.add(id);
+  const badDraft = new Set<string>();
+  const version = new Map<string, HoldSeen>();
+  const changed = new Set<string>();
+  if (!holds.length) return { open, badDraft, version, changed, unsendable };
+  const list = await loadEligibleHolds(supabase, orgId);
+  if (!list.ok) return null;
+  const current = new Map(list.holds.map((h) => [h.id, h]));
+  const pinsOf = (h: OpenHold<RunWithSteps>) => {
+    const snap = buildSnapshot([h]);
+    const e = snap.entries[0];
+    return { ...e, reason: e.r >= 0 ? snap.reasons[e.r] : null, seenReason: h.seen?.flagReason ?? null };
+  };
+  for (const h of holds) {
+    const cur = current.get(h.id);
+    if (!cur) continue; // not eligible, DNC-locked or unresolvable now -> missing
+    open.add(h.id);
+    version.set(h.id, { through: cur.seen?.through ?? null, flagReason: cur.seen?.flagReason ?? null, flagAt: cur.seen?.flagAt ?? null });
+    const was = pinsOf(h);
+    const now = pinsOf(cur);
+    const draftSame = (h.draft?.id ?? null) === (cur.draft?.id ?? null) && (h.draft?.sendable === true) === (cur.draft?.sendable === true);
+    if (h.draft && (h.draft.id !== (cur.draft?.id ?? null))) badDraft.add(h.id);
+    else if (h.draft && !draftSame && cur.draft?.sendable !== true) unsendable.add(h.id);
+    if (
+      !draftSame ||
+      was.at !== now.at ||
+      was.reason !== now.reason ||
+      was.run !== now.run ||
+      was.fa !== now.fa ||
+      was.th !== now.th ||
+      was.seenReason !== now.seenReason
+    )
+      changed.add(h.id);
   }
-  // A displayed draft that no longer belongs to this hold's property (moved, locked, gone) is dropped from the card,
-  // so Send/Edit cannot act on it; if nothing else keeps the hold open it is missing.
-  const badDraft = new Set(holds.filter((h) => h.draft && !validDraftIds.has(`${h.draft.id}|${h.id}`)).map((h) => h.id));
-  const version = new Map<string, HoldSeen>(
-    ids.map((id) => [id, { through: throughNow.get(id) ?? null, flagReason: flagNow.get(id)?.reason ?? null, flagAt: flagNow.get(id)?.at ?? null }]),
-  );
-  return { open: new Set(ids.filter((id) => open.has(id) && !locked.has(id))), badDraft, version };
+  return { open, badDraft, version, changed, unsendable };
 }
 
 /** What a rendered card is checked against while the page stays open (no migration: properties is not in realtime). */

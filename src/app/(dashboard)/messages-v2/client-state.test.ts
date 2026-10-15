@@ -131,6 +131,9 @@ describe("live view vs pins: explicit null cases", () => {
     const r = loadedCard("K", { ...PINS, pinnedDraft: "d1", pinnedDraftSendable: true }, true);
     expect(liveDiffers(r, { ...LIVE_SAME, draftId: "d2", draftSendable: true })).toBe(true);
   });
+  it("server final check found a change during build -> differs (Updated, disabled)", () => {
+    expect(actionsEnabled(rec, { ...LIVE_SAME, serverChanged: true })).toBe(false);
+  });
   it("identical -> actions enabled", () => {
     expect(actionsEnabled(rec, LIVE_SAME)).toBe(true);
   });
