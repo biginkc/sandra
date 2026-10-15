@@ -27,20 +27,31 @@ const row = (id: string, contact: string, extra: Partial<Row> = {}): Row => ({
 
 /** A properties table that applies the filters the way PostgREST would, and records every call. */
 function fakeClient(table: Row[], error: { message: string } | null = null) {
-  const calls: { from: number; filters: unknown[][]; counted: number } = { from: 0, filters: [], counted: 0 };
+  const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][] } = {
+    from: 0, filters: [], counted: 0, orders: [],
+  };
   const client = {
     from: vi.fn(() => {
       calls.from += 1;
       let rows = [...table];
       let counted = false;
       const sorts: string[] = [];
+      calls.orders.push(sorts);
+      // Like Postgres, rows the requested order leaves tied come back in no fixed order: here a different
+      // order on every query, so a page query without a full tie-break repeats or skips rows.
+      const call = calls.from;
+      const tie = (id: string) => {
+        let h = Math.imul(call + 1, 0x9e3779b1);
+        for (const c of id) h = Math.imul(h ^ c.charCodeAt(0), 0x85ebca6b) ^ (h >>> 13);
+        return (h ^ (h >>> 16)) >>> 0;
+      };
       const sorted = () =>
         [...rows].sort((a, b) => {
           for (const key of sorts) {
             const d = String(a[key as keyof Row]).localeCompare(String(b[key as keyof Row]));
             if (d) return d;
           }
-          return 0;
+          return tie(a.id) - tie(b.id);
         });
       const query = {
         eq(column: string, value: string) { calls.filters.push(["eq", column, value]); rows = rows.filter((r) => r[column as keyof Row] === value); return query; },
@@ -170,11 +181,20 @@ describe("loadHomeownerHousesPage (Show more)", () => {
   });
 
   it("orders ties on the address by id so pages never repeat or skip", async () => {
-    const table = Array.from({ length: 70 }, (_, i) => row(`t${String(69 - i).padStart(3, "0")}`, C1, { address: "Same St" }));
-    const { client } = fakeClient(table);
+    const table = Array.from({ length: 70 }, (_, i) => row(`t${String(i).padStart(3, "0")}`, C1, { address: "Same St" }));
+    const { client, calls } = fakeClient(table);
     const a = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset: 0 });
     const b = await loadHomeownerHousesPage(client, { orgId: ORG, viewerId: ME, contactId: C1, offset: a.nextOffset! });
-    expect(new Set([...a.houses, ...b.houses].map((h) => h.propertyId)).size).toBe(70);
+    expect(calls.orders).toEqual([["address", "id"], ["address", "id"]]);
+    const ids = [...a.houses, ...b.houses].map((h) => h.propertyId);
+    expect(new Set(ids).size).toBe(70);
+    expect(ids).toEqual(table.map((r) => r.id));
+  });
+
+  it("orders the first paint by address then id, so Show more continues it", async () => {
+    const { client, calls } = fakeClient([row("p1", C1), row("p2", C1)]);
+    await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
+    expect(calls.orders).toEqual([["address", "id"]]);
   });
 
   it("stays in the org and skips deleted houses", async () => {

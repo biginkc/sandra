@@ -115,4 +115,15 @@ describe("MultiHouseBadge", () => {
     render(<MultiHouseBadge houses={houses} />);
     expect(screen.getByRole("button", { name: /Owns 3 houses/ })).toHaveClass("min-h-6");
   });
+
+  it("starts a fresh list when the homeowner changes", async () => {
+    loadMore.mockResolvedValue({ ok: true, houses: range(51, 60), count: 60, nextOffset: null });
+    const { rerender } = render(<MultiHouseBadge houses={{ count: 60, houses: range(1, 50) }} contactId={C1} />);
+    await userEvent.click(screen.getByRole("button", { name: /Owns 60 houses/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Show more" }));
+    await waitFor(() => expect(within(screen.getByRole("list")).getAllByRole("link")).toHaveLength(60));
+    const other = "22222222-2222-4222-8222-222222222222";
+    rerender(<MultiHouseBadge houses={{ count: 2, houses: range(901, 902) }} contactId={other} />);
+    await waitFor(() => expect(within(screen.getByRole("list")).getAllByRole("link")).toHaveLength(2));
+  });
 });

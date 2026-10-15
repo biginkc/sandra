@@ -66,7 +66,7 @@ export function MultiHouseBadge({
         <PopoverTitle className="text-[13px] font-bold">
           {who} owns {houses.count} houses
         </PopoverTitle>
-        <HouseList houses={houses} contactId={contactId ?? null} who={who} currentPropertyId={currentPropertyId} testId={testId} />
+        <HouseList key={contactId ?? "none"} houses={houses} contactId={contactId ?? null} who={who} currentPropertyId={currentPropertyId} testId={testId} />
       </PopoverContent>
     </Popover>
   );
