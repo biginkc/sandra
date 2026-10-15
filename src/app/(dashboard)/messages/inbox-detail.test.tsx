@@ -2436,6 +2436,8 @@ describe("InboxDetail Owns N houses badge", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Owns 2 houses/ }));
     await screen.findByTestId("inbox-detail-houses-list");
     await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("inbox-detail-houses-list")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /Owns 2 houses/ })).toHaveAttribute("aria-expanded", "false");
     expect(replaceCalls).not.toContain("/messages");
   });
 

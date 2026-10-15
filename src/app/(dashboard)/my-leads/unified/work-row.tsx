@@ -12,6 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
 import { cn } from "@/lib/utils";
 import { useCoachCall } from "../_components/coach-call-context";
 import { MY_LEAD_STAGE_LABELS, type MyLeadAction, type MyLeadStage } from "../_components/types";
@@ -108,6 +109,16 @@ export function fullAddress(row: WorkFacts["row"], zip: string | null = null): s
   return [row.address, row.city, stateZip].filter((part) => part && part.trim()).join(", ");
 }
 
+/** The read's houses, counted as the larger of the read and the classifier's homeownerPropertyCount. */
+export function rowHouses(facts: WorkFacts): HomeownerHouses | null {
+  const fact = (facts as { homeownerPropertyCount?: unknown }).homeownerPropertyCount;
+  const factCount = typeof fact === "number" && Number.isFinite(fact) ? fact : 0;
+  const read = facts.homeownerHouses;
+  const count = Math.max(factCount, read?.count ?? 0);
+  if (count === 0) return null;
+  return { count, houses: read?.houses ?? [] };
+}
+
 export function WorkRow({
   facts,
   now,
@@ -202,7 +213,7 @@ export function WorkRow({
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="break-words text-[14.5px] font-bold">{name}</span>
             <MultiHouseBadge
-              houses={facts.homeownerHouses}
+              houses={rowHouses(facts)}
               ownerName={facts.row.homeownerName}
               currentPropertyId={id}
               className="self-center"

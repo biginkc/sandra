@@ -110,7 +110,7 @@ import {
 } from "@/lib/norma/view";
 import { SendForSignature } from "./send-for-signature";
 import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
-import { loadHomeownerHouses, type HomeownerHouses, type HousesClient } from "@/lib/leads/homeowner-houses";
+import { loadLeadOwnerHouses } from "./lead-owner-houses";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
 import { LeadCalculationsSection } from "./lead-calculations-section";
@@ -343,22 +343,12 @@ export default async function LeadDetailPage({
     data: { user: sessionUser },
   } = await supabase.auth.getUser();
 
-  // "Owns N houses": every house this homeowner owns in the org. A failed read shows no badge.
-  let homeownerHouses: HomeownerHouses | null = null;
-  if (lead.homeowner?.id) {
-    try {
-      homeownerHouses =
-        (await loadHomeownerHouses(supabase as unknown as HousesClient, {
-          orgId: lead.org_id,
-          viewerId: sessionUser?.id ?? "",
-          contactIds: [lead.homeowner.id],
-        }))[lead.homeowner.id] ?? null;
-    } catch (error) {
-      console.error("[leads] homeowner houses read failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  // "Owns N houses": started now, awaited where the header is built, so it runs alongside the reads below.
+  const homeownerHousesPromise = loadLeadOwnerHouses(supabase, {
+    orgId: lead.org_id,
+    viewerId: sessionUser?.id ?? null,
+    contactId: lead.homeowner?.id ?? null,
+  });
 
   // Outcome bar: hidden for Acquisitions members (no Messages access) and
   // contacts flagged do-not-contact. A failed drip read is "unknown", never "none".
@@ -801,6 +791,7 @@ export default async function LeadDetailPage({
       ? null
       : MY_LEAD_ROW_REASON_COPY.other_rep;
 
+  const homeownerHouses = await homeownerHousesPromise;
   const ownerBadge = (
     <MultiHouseBadge houses={homeownerHouses} ownerName={homeownerName} currentPropertyId={lead.id} testId="lead-houses" />
   );

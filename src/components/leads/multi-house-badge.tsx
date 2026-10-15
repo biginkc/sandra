@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 // Same shape as the My Leads stage pill (the boldest badge on the row), in the brand indigo.
 const BADGE_CLASSES =
-  "h-auto cursor-pointer rounded-md border border-indigo-300 bg-indigo-100 px-2 py-[3px] text-[11px] font-extrabold tracking-wide text-indigo-900 uppercase hover:bg-indigo-200 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-200 dark:hover:bg-indigo-900";
+  "h-auto min-h-6 cursor-pointer rounded-md border border-indigo-300 bg-indigo-100 px-2 py-[3px] text-[11px] font-extrabold tracking-wide text-indigo-900 uppercase hover:bg-indigo-200 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-200 dark:hover:bg-indigo-900";
 
 /**
  * "Owns N houses" next to a homeowner's name. Hidden unless the homeowner owns 2+ houses in the org.

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CoachCallContext } from "../_components/coach-call-context";
 import type { WorkFacts } from "./contract";
 import { NOW, workFacts } from "./test-support";
-import { WorkRow, type WorkRowProps } from "./work-row";
+import { rowHouses, WorkRow, type WorkRowProps } from "./work-row";
 
 const handlers = () => ({
   onToggle: vi.fn(), onAction: vi.fn(), onOpenText: vi.fn(), onCallToday: vi.fn(), onUndoCallToday: vi.fn(),
@@ -275,5 +275,15 @@ describe("Owns N houses badge", () => {
   it("is absent for a one-house homeowner", () => {
     renderRow({ ...dueFacts(), homeownerHouses: { count: 1, houses: houses.houses.slice(0, 1) } });
     expect(screen.queryByTestId("work-row-houses-lead-1")).not.toBeInTheDocument();
+  });
+
+  it("counts the larger of the classifier's count and the read", () => {
+    const withFact = (count: number) => ({ ...dueFacts(), homeownerHouses: houses, homeownerPropertyCount: count }) as WorkFacts;
+    expect(rowHouses(withFact(5))).toEqual({ count: 5, houses: houses.houses });
+    expect(rowHouses(withFact(1))).toEqual(houses);
+    expect(rowHouses({ ...dueFacts(), homeownerPropertyCount: 3 } as WorkFacts)).toEqual({ count: 3, houses: [] });
+    expect(rowHouses(dueFacts())).toBeNull();
+    renderRow(withFact(5));
+    expect(screen.getByTestId("work-row-houses-lead-1")).toHaveTextContent("Owns 5 houses");
   });
 });

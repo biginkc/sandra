@@ -1,5 +1,6 @@
 "use server";
 
+import { reportError } from "@/lib/errors/report";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 
@@ -24,8 +25,9 @@ export async function loadHomeownerHousesAction(contactIds: string[]): Promise<R
       contactIds,
     });
   } catch (error) {
-    console.error("[leads] homeowner houses action failed", {
-      message: error instanceof Error ? error.message : String(error),
+    reportError(error instanceof Error ? error : new Error("homeowner houses action failed"), {
+      errorClass: "database",
+      tags: { surface: "database", operation: "homeowner_houses_action" },
     });
     return {};
   }

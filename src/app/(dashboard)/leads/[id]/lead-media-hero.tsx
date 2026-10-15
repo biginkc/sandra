@@ -98,12 +98,11 @@ export function LeadMediaHero({
             <h1 className="text-2xl leading-tight font-bold tracking-[-0.02em] break-words">
               {address}
             </h1>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-              <p className="text-muted-foreground text-[13px] break-words">
-                {description || "—"} · Street View unavailable
-              </p>
-              {ownerBadge}
-            </div>
+            <p className="text-muted-foreground mt-1 text-[13px] break-words">
+              {description || "—"}
+              {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
+              {" "}· Street View unavailable
+            </p>
           </div>
           <div
             className={`flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_:is(button,a)]:min-h-9 ${actionFocusClasses}`}
@@ -218,12 +217,10 @@ export function LeadMediaHero({
           <h1 className="text-2xl leading-tight font-black tracking-[-0.03em] break-words text-white sm:text-3xl">
             {address}
           </h1>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-            <p className="text-sm break-words text-white/80">
-              {description || "—"}
-            </p>
-            {ownerBadge}
-          </div>
+          <p className="mt-1 text-sm break-words text-white/80">
+            {description || "—"}
+            {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
+          </p>
         </div>
         <div
           className={`flex min-w-0 flex-wrap items-center gap-2 [&_:is(button,a)]:min-h-9 [&_:is(button,a)]:border-white/80 [&_:is(button,a)]:bg-white/95 [&_:is(button,a)]:dark:bg-white/95 [&_:is(button,a)]:text-slate-950 [&_:is(button,a)]:hover:text-slate-950 [&_:is(button,a)]:aria-expanded:text-slate-950 [&_:is(button,a)]:aria-expanded:bg-white [&_:is(button,a)]:shadow-sm [&_:is(button,a)]:hover:bg-white [&_:is(button,a)]:dark:hover:bg-white ${actionFocusClasses}`}

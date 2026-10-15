@@ -49,4 +49,15 @@ describe("MultiHouseBadge", () => {
     await userEvent.keyboard("{Enter}");
     expect(await screen.findByRole("list", { name: "This homeowner's houses" })).toBeInTheDocument();
   });
+
+  it("says how many are listed when the list is capped", async () => {
+    render(<MultiHouseBadge houses={{ count: 60, houses: houses.houses }} />);
+    await userEvent.click(screen.getByRole("button", { name: /Owns 60 houses/ }));
+    expect(await screen.findByText("Showing 3 of 60.")).toBeInTheDocument();
+  });
+
+  it("is at least 24px tall to tap on a phone", () => {
+    render(<MultiHouseBadge houses={houses} />);
+    expect(screen.getByRole("button", { name: /Owns 3 houses/ })).toHaveClass("min-h-6");
+  });
 });

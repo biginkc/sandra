@@ -475,12 +475,16 @@ describe("<LeadMediaHero />", () => {
     const { unmount } = render(
       <LeadMediaHero {...shared} ownerBadge={badge} media={{ kind: "flat", reason: "missing-location" }} />,
     );
-    expect(screen.getByRole("button", { name: "Owns 2 houses. Show Jamie Seller's houses" })).toBeVisible();
+    const flatBadge = screen.getByRole("button", { name: "Owns 2 houses. Show Jamie Seller's houses" });
+    expect(flatBadge).toBeVisible();
+    // Right after the owner's name, before the Street View note.
+    const line = flatBadge.closest("p")!;
+    expect(line.textContent).toMatch(/Jamie Seller\s*Owns 2 houses\s*· Street View unavailable$/);
     expect(within(screen.getByTestId("lead-media-actions")).queryByTestId("lead-houses")).toBeNull();
     unmount();
     render(
       <LeadMediaHero {...shared} ownerBadge={badge} media={{ kind: "streetView", images: streetImages, aerialImages, aerialResolvedBy: "address", heading: 173, panoramaId: "pano-1" }} />,
     );
-    expect(screen.getByTestId("lead-houses")).toHaveTextContent("Owns 2 houses");
+    expect(screen.getByTestId("lead-houses").closest("p")!.textContent).toMatch(/Jamie Seller\s*Owns 2 houses$/);
   });
 });
