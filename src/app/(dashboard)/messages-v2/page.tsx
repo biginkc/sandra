@@ -195,8 +195,8 @@ async function resolveFocusDeadLetter(
 export default async function MessagesV2Page({
   searchParams,
 }: {
-  searchParams?: Promise<{ deadLetter?: string | string[] }>;
-} = {}) {
+  searchParams: Promise<{ deadLetter?: string | string[] }>;
+}) {
   const access = messagesV2Context(await getCallerMembershipsOrThrow());
   if (!access) notFound();
   const { orgId, isOwner } = access;

@@ -25,8 +25,8 @@ type LooseQuery = PromiseLike<{ data: unknown; count?: number | null }> & {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default async function NormaQueuePage({ searchParams }: { searchParams?: Promise<{ request?: string | string[]; property?: string | string[] }> } = {}) {
-  const params = (await searchParams) ?? {};
+export default async function NormaQueuePage({ searchParams }: { searchParams: Promise<{ request?: string | string[]; property?: string | string[] }> }) {
+  const params = await searchParams;
   const requestId = typeof params.request === "string" && UUID.test(params.request) ? params.request : null;
   const reviewPropertyId = typeof params.property === "string" && UUID.test(params.property) ? params.property : null;
   const client = await createClient();
