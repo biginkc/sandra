@@ -129,8 +129,19 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("cancelled", { stage: "offer_sent", offer, appointments: [k.appt("c", k.now - DAY, { offerChain: true, status: "cancelled" })] }),
       k.lead("with_callback", { stage: "offer_sent", offer, appointments: [k.appt("c", k.now - DAY, { offerChain: true, status: "completed" }), k.appt("cb", k.now + 2 * DAY)] }),
       k.lead("offer_declined", { stage: "offer_sent", offer: { ...offer, outcome: "declined" } }),
-      // snoozed chain task: rows 8/12 use its due_at, not the snooze (due now-1h snoozed to tomorrow = Offer follow-up due)
+      // Approved rule (2026-10-15): "An offer follow-up that the rep snoozed is due at its snooze time, not its original time. Until the
+      // snooze time passes, the lead stays in Waiting on them · Offer out." Due an hour ago, snoozed to tomorrow: Waiting · Offer out.
       k.lead("chain_snoozed", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - HOUR }, appointments: [k.appt("c", k.now - HOUR, { offerChain: true, status: "snoozed", snoozedUntil: k.now + DAY })] }),
+      // the snooze has passed (due two days ago, snoozed to an hour ago): Needs attention · Offer
+      k.lead("chain_snooze_passed", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.j(k.now - HOUR) })] }),
+      // Ruling (Jarrad, 2026-10-15): no 15-minute early window for a snoozed chain task. 1 ms before / at / after the snooze end, and
+      // 10 minutes before it (Waiting: the early window does not apply); an unsnoozed chain task at due - 15 min still shows early.
+      ...EXACT.map((e) => k.lead(`chain_snooze_end${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
+      // the snooze time wins whether it is earlier than or equal to the original due time (later is chain_snooze_end above)
+      ...EXACT.map((e) => k.lead(`chain_snooze_before_due${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
+      ...EXACT.map((e) => k.lead(`chain_snooze_at_due${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - e }, appointments: [k.appt("c", k.now - e, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
+      k.lead("chain_snooze_10min_left", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 10 * MIN })] }),
+      k.lead("chain_unsnoozed_early", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 15 * MIN }, appointments: [k.appt("c", k.now + 15 * MIN, { offerChain: true })] }),
       k.lead("chain_snoozed_future", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 3 * DAY })] }),
     ];
   } },
@@ -147,11 +158,32 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("paused_reply", { messages: [dripText("d", 5 * HOUR), k.inb("i", at)], enrollment: k.drip({ status: "paused", pause: "inbound_reply", nextRunAt: null }) }),
       k.lead("none", { messages: [k.inb("i", at)] }),
       k.lead("contact_only", { messages: [k.inb("i", at, { contactOnly: true })] }),
-      // v9 17 (SQ5): the same contact is homeowner on two queue leads -> ambiguous, never New reply
-      ...(() => { const g = `shared${k.rng.int(0, 1e9)}`; return [
-        k.lead("contact_shared", { question: "SQ5", contactShared: true, contactGroup: g, messages: [k.inb("i", at, { contactOnly: true })] }),
-        k.lead("contact_shared_sibling", { question: "SQ5", contactShared: true, contactGroup: g }),
-      ]; })(),
+      // Approved rule (2026-10-15): "A text Sandra can tie to one lead goes to that lead. A text Sandra cannot tie to one lead shows on
+      // every lead where that person is the homeowner, each with a note that they own more than one house. Answering it on any of those
+      // leads counts as answered on all of them." Each group below is one homeowner on two queue leads (owner listed first: a stamp on
+      // the sibling names the owner's message).
+      ...(() => {
+        const shared = (name: string, owner: Partial<Lead>, sibling: (o: Lead) => Partial<Lead>) => {
+          const g = `${name}${k.rng.int(0, 1e9)}`;
+          const o = k.lead(`${name}`, { question: "SQ5", contactShared: true, contactGroup: g, ...owner });
+          return [o, k.lead(`${name}_sibling`, { question: "SQ5", contactShared: true, contactGroup: g, ...sibling(o) })];
+        };
+        const reply = k.j(at + HOUR, 5 * MIN);
+        return [
+          // shows on both
+          ...shared("contact_shared", { messages: [k.inb("i", at, { contactOnly: true })] }, () => ({})),
+          // answered on the sibling (stamped reply to that text) clears both
+          ...shared("contact_answered_stamped", { messages: [k.inb("i", at, { contactOnly: true })] },
+            (o) => ({ messages: [k.out("o", reply, { stamp: { kind: "inbound", ref: "i", lead: o.key } })] })),
+          // answered on the owner by an unstamped text clears the sibling too
+          ...shared("contact_answered_owner", { messages: [k.inb("i", at, { contactOnly: true }), k.out("o", reply)] }, () => ({})),
+          // answered by a reached call on the sibling clears both
+          ...shared("contact_answered_call", { messages: [k.inb("i", at, { contactOnly: true })] }, () => ({ attempts: [k.attempt(reply, "reached")] })),
+          // a newer contact-only text after the answer reopens both
+          ...shared("contact_reopened", { messages: [k.inb("i", at, { contactOnly: true }), k.inb("j", k.j(at + 2 * HOUR, 5 * MIN), { contactOnly: true })] },
+            (o) => ({ messages: [k.out("o", reply, { stamp: { kind: "inbound", ref: "i", lead: o.key } })] })),
+        ];
+      })(),
       k.lead("missed_call", { missedCalls: [at] }),
     ];
   } },

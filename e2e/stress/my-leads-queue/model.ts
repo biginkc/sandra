@@ -27,8 +27,9 @@ export type SendOutcome = "sent" | "delivered" | "accepted_then_failed" | "faile
 
 export type LedgerState = "reserved" | "sending" | "accepted" | "delivered" | "delivery_failed" | "failed_not_dispatched" | "blocked" | "unknown";
 
-/** Reply-to stamp on a human/AI text. `inbound` references another message of the same lead; `foreign` a message of another lead (dropped). */
-export type Stamp = { kind: "inbound"; ref: string } | { kind: "foreign" } | { kind: "unresolved" };
+/** Reply-to stamp on a human/AI text. `inbound` references a message of the same lead, or (with `lead`, the other lead's key) a
+ * contact-only text of the same homeowner; `foreign` a message of another lead (dropped). */
+export type Stamp = { kind: "inbound"; ref: string; lead?: string } | { kind: "foreign" } | { kind: "unresolved" };
 
 export type Msg = {
   /** Unique within the lead; also the deterministic tie-break order. */

@@ -4,7 +4,7 @@ import { FAMILIES, VARIANTS, buildFamilyWorld, type FamilyDef, type Variant } fr
 import { materializeWorld, setupOrg, type Materialized, type OrgCtx } from "./materialize";
 import { loadClassifierMigration, sq2FixLanded } from "./migration";
 import type { Lead, World } from "./model";
-import { EXPECTED_UNTIL, NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place, tabOf, type Placement } from "./oracle";
+import { EXPECTED_UNTIL, NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, placeWorld, tabOf, type Placement } from "./oracle";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
@@ -99,14 +99,14 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
   let checks = 0;
   const keyOf = new Map([...mat.ids].map(([k, id]) => [id, k]));
   const leadOf = new Map(world.leads.map((l) => [l.key, l]));
-  const placements = new Map<string, Placement>(world.leads.map((l) => [l.key, place(l, world.now)]));
+  const placements = placeWorld(world.leads, world.now);
   const add = (kind: MismatchKind, lead: Lead | null, expected: unknown, actual: unknown, expectedUntil?: string) =>
     mismatches.push({ kind, family: c.family, repeat: c.repeat, lead: lead?.key ?? "-", tags: lead?.tags ?? [], question: lead?.question, expected, actual, ...(expectedUntil ? { expectedUntil } : {}) });
   // The known SQ2 disagreement (fix routed to #876): the SQL's pre-v9 reading, computed precisely. A mismatch is excused only when the
   // SQL output equals this reading exactly and differs from v9 only because of it.
   // Self-retiring: once the fix migration is in the checkout, SQ2 mismatches are never excused again.
   const sq2 = sq2FixLanded() ? undefined : EXPECTED_UNTIL.SQ2;
-  const legacy = new Map<string, Placement>(world.leads.map((l) => [l.key, place(l, world.now, { preV9Unknown: true })]));
+  const legacy = placeWorld(world.leads, world.now, { preV9Unknown: true });
   const rowMatches = (row: Json, p: Placement) => row.place === p.place && row.reason === p.reason && row.rowNo === p.row
     && sameSet(brokenActionsOf(row), p.brokenActions) && Object.entries(p.headline).every(([k, v]) => String(row.headline?.[k]) === String(v));
 
@@ -136,6 +136,9 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     for (const [k, v] of Object.entries(p.headline)) {
       if (String(row.headline?.[k]) !== String(v)) add("headline", lead, { row: p.row, [k]: v }, { row: row.rowNo, [k]: row.headline?.[k] });
     }
+    // Approved rule 2 badge fact: present exactly when the latest inbound is a contact-only text, = leads of that homeowner.
+    if (row.homeownerPropertyCount !== p.homeownerPropertyCount)
+      add("headline", lead, { row: p.row, homeownerPropertyCount: p.homeownerPropertyCount ?? null }, { row: row.rowNo, homeownerPropertyCount: row.homeownerPropertyCount ?? null });
     const actions = brokenActionsOf(row);
     if (!sameSet(actions, p.brokenActions)) add("broken_actions", lead, p.brokenActions, actions);
   }

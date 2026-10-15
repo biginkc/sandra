@@ -35,6 +35,13 @@ describe("prod-shaped generator", () => {
     const rows = new Set(w.leads.map((l) => place(l, w.now).row));
     expect(rows.size).toBeGreaterThan(3);
   });
+  it("puts ~4% of leads in 2-3 house homeowner groups with a contact-only text", () => {
+    const w = prodShapedWorld(scaleCounts(PROD_SHAPE_2026_10_14, 2000), createRng(4), 1_760_000_000_000);
+    const grouped = w.leads.filter((l) => l.contactGroup);
+    expect(grouped.length).toBeGreaterThanOrEqual(70);
+    expect(grouped.length).toBeLessThanOrEqual(90);
+    expect(w.leads.filter((l) => l.messages.some((m) => m.contactOnly)).length).toBeGreaterThan(25);
+  });
   it("never puts two messages of a lead at the same instant", () => {
     for (const seed of [1, 2, 3, 4, 5]) {
       const w = prodShapedWorld(scaleCounts(PROD_SHAPE_2026_10_14, 400), createRng(seed), 1_760_000_000_000);

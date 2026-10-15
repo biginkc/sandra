@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DAY, HOUR, MIN, SEC, emptyLead, type Lead, type Msg } from "./model";
-import { addBusinessDays, expectedViews, fromChicagoLocal, isHandled, minusChicagoDays, place } from "./oracle";
+import { addBusinessDays, expectedViews, fromChicagoLocal, isHandled, minusChicagoDays, place, placeWorld } from "./oracle";
 
 const NOW = Date.UTC(2026, 9, 14, 17, 0, 0); // Wed 2026-10-14 12:00 CDT
 const lead = (over: Partial<Lead> = {}) => emptyLead("t", NOW, over);
@@ -221,8 +221,33 @@ describe("v9 corrections", () => {
   it("SQ4: a no-answer attempt and its log_acquisition_attempt workflow event do not clear New reply", () =>
     expect(where(lead({ messages: [inb("i", 3 * HOUR)], attempts: [{ at: NOW - HOUR, outcome: "no_answer" }],
       events: [{ type: "my_leads_workflow", at: NOW - HOUR, actor: "user", operation: "log_acquisition_attempt" }] }))).toBe("your_move/new_reply/5"));
-  it("SQ5: contact-only inbound counts only when the contact is homeowner on one queue lead", () => {
-    expect(where(lead({ messages: [inb("i", HOUR, { contactOnly: true })] }))).toBe("your_move/new_reply/5");
-    expect(where(lead({ contactShared: true, messages: [inb("i", HOUR, { contactOnly: true })] }))).toBe("your_move/nothing_planned/15");
+  it("SQ5 (approved rule): a contact-only text shows on every lead of that homeowner; answering it on one answers all", () => {
+    expect(place(lead({ messages: [inb("i", HOUR, { contactOnly: true })] }), NOW)).toMatchObject({ row: "5", homeownerPropertyCount: 1 });
+    const a = emptyLead("a", NOW, { contactGroup: "g", messages: [inb("i", 3 * HOUR, { contactOnly: true })] });
+    const b = emptyLead("b", NOW, { contactGroup: "g" });
+    const both = (x: Lead, y: Lead) => placeWorld([x, y], NOW);
+    expect([...both(a, b).values()].map((p) => [p.row, p.homeownerPropertyCount])).toEqual([["5", 2], ["5", 2]]);
+    const stamped = { ...b, messages: [out("o", HOUR, { stamp: { kind: "inbound" as const, ref: "i", lead: "a" } })] };
+    expect([...both(a, stamped).values()].map((p) => p.row)).not.toContain("5");
+    expect([...both(a, { ...b, attempts: [{ at: NOW - HOUR, outcome: "reached" }] }).values()].map((p) => p.row)).not.toContain("5");
+    const reopened = { ...a, messages: [...a.messages, inb("j", 30 * MIN, { contactOnly: true })] };
+    expect([...both(reopened, stamped).values()].map((p) => p.row)).toEqual(["5", "5"]);
+    // a text tied to one lead stays on that lead
+    expect([...both({ ...a, messages: [inb("i", HOUR)] }, b).values()].map((p) => p.row)).toEqual(["5", "15"]);
+  });
+  it("snoozed offer follow-up (approved rule): due at its snooze time; Waiting · Offer out until then", () => {
+    const off = { sentAt: NOW - 3 * DAY, followUpAt: NOW - HOUR, outcome: "pending" as const, hasChain: true };
+    const chain = (snoozedUntil: number) => lead({ stage: "offer_sent", offer: off, appointments: [{ ref: "c", due: NOW - HOUR, status: "snoozed", snoozedUntil, offerChain: true }] });
+    expect(where(chain(NOW + DAY))).toBe("their_move/offer_out/12");
+    expect(where(chain(NOW - MIN))).toBe("your_move/offer/8");
+    expect(where(chain(NOW + 1))).toBe("their_move/offer_out/12");
+    expect(where(chain(NOW))).toBe("your_move/offer/8");
+    expect(where(chain(NOW + 10 * MIN))).toBe("their_move/offer_out/12");
+    // the snooze time wins even when it is earlier than the original due time
+    const early = (snoozedUntil: number) => lead({ stage: "offer_sent", offer: off, appointments: [{ ref: "c", due: NOW + 2 * DAY, status: "snoozed", snoozedUntil, offerChain: true }] });
+    expect(where(early(NOW + 1))).toBe("their_move/offer_out/12");
+    expect(where(early(NOW))).toBe("your_move/offer/8");
+    const open = lead({ stage: "offer_sent", offer: { ...off, followUpAt: NOW + 15 * MIN }, appointments: [{ ref: "c", due: NOW + 15 * MIN, status: "open", offerChain: true }] });
+    expect(where(open)).toBe("your_move/offer/8");
   });
 });
