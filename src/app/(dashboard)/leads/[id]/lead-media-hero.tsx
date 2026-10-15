@@ -13,6 +13,7 @@ export function LeadMediaHero({
   address,
   locationLine,
   homeownerName,
+  ownerBadge,
   collectionHref = "/leads",
   collectionLabel = "Leads",
   actions,
@@ -21,6 +22,8 @@ export function LeadMediaHero({
   address: string;
   locationLine: string;
   homeownerName: string | null;
+  /** The "Owns N houses" badge, shown after the homeowner's name. */
+  ownerBadge?: React.ReactNode;
   collectionHref?: "/leads" | "/properties" | "/my-leads";
   collectionLabel?: "Leads" | "Search" | "My Leads";
   actions: React.ReactNode;
@@ -96,7 +99,9 @@ export function LeadMediaHero({
               {address}
             </h1>
             <p className="text-muted-foreground mt-1 text-[13px] break-words">
-              {description || "—"} · Street View unavailable
+              {description || "—"}
+              {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
+              {" "}· Street View unavailable
             </p>
           </div>
           <div
@@ -214,6 +219,7 @@ export function LeadMediaHero({
           </h1>
           <p className="mt-1 text-sm break-words text-white/80">
             {description || "—"}
+            {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
           </p>
         </div>
         <div

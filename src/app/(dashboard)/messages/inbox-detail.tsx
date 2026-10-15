@@ -36,6 +36,9 @@ import { deriveLeadSmsPresentation } from "../leads/[id]/lead-detail-state";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { DISPO_LABELS, OutcomeBar } from "@/components/leads/outcome-bar";
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
+import { loadHomeownerHousesAction } from "@/lib/leads/homeowner-houses-action";
 
 import { AssignDropdown } from "./assign-dropdown";
 import { QueueNormaAction } from "./queue-norma-action";
@@ -246,6 +249,19 @@ export function InboxDetail({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [closeDetail, data]);
+
+  // "Owns N houses" for the homeowner in this conversation; one read per homeowner, no badge on failure.
+  const housesFor = data && data.contactId && data.contactId === data.homeownerContactId ? data.contactId : null;
+  const [houses, setHouses] = useState<{ contactId: string; houses: HomeownerHouses | null } | null>(null);
+  useEffect(() => {
+    if (!housesFor) return;
+    let live = true;
+    loadHomeownerHousesAction([housesFor])
+      .then((byContact) => { if (live) setHouses({ contactId: housesFor, houses: byContact[housesFor] ?? null }); })
+      .catch(() => { if (live) setHouses({ contactId: housesFor, houses: null }); });
+    return () => { live = false; };
+  }, [housesFor]);
+  const homeownerHouses = houses && houses.contactId === housesFor ? houses.houses : null;
 
   if (isLoading) {
     return <InboxDetailSkeleton onBackToList={closeDetail} />;
@@ -472,8 +488,8 @@ export function InboxDetail({
       className="bg-white border border-border rounded-xl flex h-full flex-col overflow-hidden"
       data-testid="inbox-detail-panel"
     >
-      <header className="border-b border-border bg-white flex flex-col items-stretch justify-between gap-3 px-4 py-4 sm:flex-row sm:items-center sm:px-6">
-        <div className="flex min-w-0 flex-col gap-2">
+      <header className="border-b border-border bg-white flex flex-col items-stretch justify-between gap-3 px-4 py-4 sm:flex-row sm:flex-wrap sm:items-center sm:px-6">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-1 sm:basis-64">
           <button
             type="button"
             onClick={closeDetail}
@@ -489,10 +505,18 @@ export function InboxDetail({
               {initialsOfName(data.contactName)}
             </div>
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-2">
-                <h2 className="truncate text-[18px] font-bold leading-tight text-[#1c1917]">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <h2 className="min-w-0 max-w-full truncate text-[18px] font-bold leading-tight text-[#1c1917]">
                   {data.contactName ?? formatPhoneDisplay(data.contactPhone) ?? "Unknown contact"}
                 </h2>
+                <MultiHouseBadge
+                  houses={homeownerHouses}
+                  contactId={housesFor}
+                  ownerName={data.contactName}
+                  currentPropertyId={data.propertyId ?? undefined}
+                  className="shrink-0"
+                  testId="inbox-detail-houses"
+                />
                 <MessageStageChip
                   status={data.propertyStatus}
                   historical={isPermanentlyLocked}

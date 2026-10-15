@@ -15,6 +15,10 @@ test.beforeAll(async () => {
     // The queue's server-bound neighbours are replaced so this proof cannot reach a server action.
     "rep-sms-composer": "export function RepSmsComposer() { return null }",
     "drip-picker": "export function AfterAttemptDripPicker() { return null }",
+    // The "Owns N houses" list reads through a server action; the first page arrives with the row facts.
+    "homeowner-houses-action":
+      "export async function loadHomeownerHousesAction() { return {} }\n" +
+      "export async function loadMoreHomeownerHousesAction() { return { ok: false, message: 'Not in the harness.' } }",
     "next-link": "import React from 'react'; export default function Link({ href, children, ...rest }) { return React.createElement('a', { href, ...rest }, children) }",
   }
   const bundle = await esbuild.build({
@@ -25,6 +29,7 @@ test.beforeAll(async () => {
       build.onResolve({ filter: /rep-sms-composer$/ }, () => ({ path: "rep-sms-composer", namespace: "unified-fixture" }))
       build.onResolve({ filter: /after-attempt-drip-picker$/ }, () => ({ path: "drip-picker", namespace: "unified-fixture" }))
       build.onResolve({ filter: /^next\/link$/ }, () => ({ path: "next-link", namespace: "unified-fixture" }))
+      build.onResolve({ filter: /homeowner-houses-action$/ }, () => ({ path: "homeowner-houses-action", namespace: "unified-fixture" }))
       build.onLoad({ filter: /.*/, namespace: "unified-fixture" }, ({ path: key }) => ({ contents: stubs[key], loader: "jsx", resolveDir: path.resolve("node_modules") }))
     } }],
   })
@@ -51,6 +56,13 @@ test("every tab shows its count and the matching rows", async ({ page }) => {
   expect(await countOf(page, "work-tab-count-waiting")).toBe(12)
   expect(await countOf(page, "work-tab-count-all")).toBe(74)
   expect(await rowIds(page)).toHaveLength(25)
+  // A homeowner with several houses carries the "Owns N houses" badge beside the name; others do not.
+  await expect(page.getByTestId("work-row-houses-nl1")).toHaveText(/Owns 3 houses/i)
+  await expect(page.getByTestId("work-row-houses-nl2")).toHaveCount(0)
+  await page.getByTestId("work-row-houses-nl1").click()
+  await expect(page.getByTestId("work-row-houses-nl1-list")).toContainText("another rep's lead")
+  await expect(page.locator("[data-lead-id='nl1']")).toHaveAttribute("data-expanded", "false")
+  await page.keyboard.press("Escape")
   await shot(page, "needs-attention")
   await page.getByTestId("work-tab-waiting").click()
   await expect(page.getByTestId("work-tab-waiting")).toHaveAttribute("aria-selected", "true")
