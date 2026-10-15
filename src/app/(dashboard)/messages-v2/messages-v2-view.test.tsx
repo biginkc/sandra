@@ -1220,7 +1220,7 @@ describe("MessagesV2View", () => {
     await mount({ ...props([], [openHold("p1")]), actions });
     const link = screen.getByRole("link", { name: "Open thread" });
     expect(link).toHaveAttribute("href", "/leads/p1");
-    expect(screen.getByRole("button", { name: "Take over" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Take over: open the thread and stop Sandra on this lead" })).toBeInTheDocument();
   });
 
   it("continues the same Chicago day from the oldest run returned when a day comes back full", async () => {
@@ -1400,7 +1400,7 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("2");
     expect(screen.getAllByRole("link", { name: "Open thread" })).toHaveLength(2);
     expect(actions.takeOver).not.toHaveBeenCalled();
-    expect(screen.getAllByRole("button", { name: "Take over" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Take over: open the thread and stop Sandra on this lead" })).toHaveLength(2);
   });
 
   it("stays quiet while coverage is healthy and highlights a gap", async () => {
