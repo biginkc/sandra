@@ -72,6 +72,18 @@ Goal: the engine decides with the nine approved yes/no questions, 60% cutoff, an
 - [ ] Retire the app's 8-answer labels from the UI entirely.
 - [ ] Depends on: PR 3.
 
+## Stage 5 — Stress test (after PR 4, before the release-candidate review)
+
+Rule: volume, not a handful of checks. Every item reports a failure rate, not a pass/fail. Fable designs the runs; Codex executes them autonomously; results go in `.planning/messages-v2/STRESS-RESULTS.md`. Nothing goes to the Fable + Astra release-candidate review until this stage is green.
+
+- [ ] **Decision accuracy replay.** Run the last 30 days of real inbound texts (≈900) through the nine-question engine with the 60% cutoff via `scripts/messages-v2/replay` (sends impossible). Compare each decision to the human disposition. Report agreement per question and the full list of disagreements for Jarrad to spot-check. Gate: no question below the not_interested baseline (94%) without Jarrad's sign-off.
+- [ ] **Wording variants.** 30 seller scenarios (one per plain-English situation, including the tie-breaker cases) × 10 wordings each (slang, typos, lowercase, long, hostile-but-not-stop, price-with-refusal, "Anytime"/"noon is best", "yes" to a still-own opener, "yes" to an offer opener) × 3 repeat runs. Report flip rate per scenario (same text, different answer) and wrong-bucket rate. Gate: flip rate under 2%, wrong-bucket under 5% per scenario.
+- [ ] **Burst.** Seed 300 inbound texts in 10 minutes to canary properties (canary org/number only, tagged, cleaned up after). Measure: every text gets exactly one pipeline run; no duplicate replies; reply delay stays within 2–6 min; tape shows every card within 5 s via realtime; "Waiting for a person" count matches the DB; no 5xx; no hydration errors. Repeat 3 times.
+- [ ] **UI load.** With 5,000 open holds and 2,000 runs in one day (seeded on the canary org): first paint under 3 s; "Show older" and "Show yesterday's tape" page correctly to the end with no gaps or duplicates (compare against DB counts); memory stable over 30 min with realtime on.
+- [ ] **Alert fan-out.** 50 hot sellers in 5 min: exactly one Slack DM + one SMS to Jarrad each, caps respected (20 DMs/hr, 10 SMS/hr), nothing for non-hot holds, zero duplicate sends on retry.
+- [ ] **Kill switches.** With the burst running: flip each rule off mid-burst and confirm holds appear instead of actions within one text; set outbound_mode=hold and confirm zero sends; restore and confirm resumption with no double-sends.
+- [ ] **Cleanup proof.** All canary data removed; counts of real (non-canary) properties, messages, drips and leads unchanged before vs after.
+
 ## Already done (2026-10-14)
 
 - [x] 2,400 old "needs attention" flags cleared with an audit row each. 63 remain only because those properties are DNC-locked.
