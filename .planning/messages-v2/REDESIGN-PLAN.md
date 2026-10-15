@@ -84,6 +84,12 @@ Rule: volume, not a handful of checks. Every item reports a failure rate, not a 
 - [ ] **Kill switches.** With the burst running: flip each rule off mid-burst and confirm holds appear instead of actions within one text; set outbound_mode=hold and confirm zero sends; restore and confirm resumption with no double-sends.
 - [ ] **Cleanup proof.** All canary data removed; counts of real (non-canary) properties, messages, drips and leads unchanged before vs after.
 
+## PR 1 status (2026-10-15)
+
+- [x] PR #874 "new page face" merged a36565ae0 (merged before the Fable+Astra gate by mistake; both reviewed post-merge: Fable YES w/ should-fixes, Astra NO w/ 3 blockers). Left live per Jarrad.
+- [x] PR #880 "post-merge review fixes" merged a294f985d with Opus, Sol, Fable and Astra approvals at exact head fc45da729, 8/8 CI, preview 8/8. Fixes: alert cron isolated on the pre-#874 loader (hash-pinned, decisions-equivalence tested); one shared in-org reference verifier for drafts/decisions/reviews; positive property verification everywhere; bounded scoped builds with request-count tests at 150/10k; org filter on message queries; five owner-facing strings replaced with Jarrad-approved text (verbatim, 2026-10-15).
+- Rule reaffirmed: every merge needs Fable then Astra approval at the exact tested head, after Opus and Sol.
+
 ## Already done (2026-10-14)
 
 - [x] 2,400 old "needs attention" flags cleared with an audit row each. 63 remain only because those properties are DNC-locked.
