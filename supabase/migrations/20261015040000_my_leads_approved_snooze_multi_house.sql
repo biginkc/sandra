@@ -143,33 +143,41 @@ language sql stable security definer set search_path = '' as $$
   hpc as (select lead_id, count(*)::integer as n from cs group by lead_id),
   -- "Answering it on any of those leads counts as answered on all of them": the design 5 handled-reply rules (the same as hdt
   -- and hd below), read on each such property.
-  chd as (
-    select distinct cs.lead_id
+  -- Candidate answering texts: outbound texts of those properties after the inbound, not campaign / drip / Norma pre-call, written by
+  -- a human or Sandra's AI, with no unresolved reply-to stamp. Their ledger receipts are read once below (as lg does), not per text.
+  cm as materialized (
+    select cs.lead_id, cs.ts, cs.mid, cs.contact_id, cs.sib_id, m.id, m.status, m.sent_at, m.metadata
     from cs
-    where exists (
-        select 1 from public.messages m
-        left join lateral (
-          select l.state from public.rep_sms_delivery_ledger l
-          where l.org_id = p_org and l.message_id = m.id order by l.updated_at desc limit 1) lg on true
-        where m.org_id = p_org and m.channel = 'sms' and m.direction = 'outbound' and m.created_at <= p_at
-          and (m.property_id = cs.sib_id or (m.property_id is null and m.contact_id = cs.contact_id))
-          and m.campaign_id is null
-          and not exists (select 1 from public.sequence_step_runs r where r.message_id = m.id)
-          and (m.metadata ->> 'generated_by') is distinct from 'norma_precall'
-          and ((m.metadata ->> 'approved_by_user_id') is not null or m.metadata ->> 'generated_by' = 'ai_responder_v1'
-            or m.metadata ->> 'reply_source' = 'approved_template' or (m.metadata ->> 'generated_by') is null)
-          and (m.status in ('sent', 'delivered') or lg.state in ('accepted', 'delivered', 'delivery_failed') or m.sent_at is not null)
-          and (coalesce(m.sent_at, m.delivered_at, m.created_at), m.id) > (cs.ts, cs.mid)
-          and coalesce(m.metadata ->> 'inbound_stamp_unresolved', '') <> 'true'
-          -- a text stamped as replying to an inbound older than this one does not answer it
-          and not exists (
-            select 1 from public.messages sm
-            where m.metadata ->> 'inbound_message_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-              and sm.id = (m.metadata ->> 'inbound_message_id')::uuid and sm.org_id = p_org and sm.channel = 'sms'
-              and sm.direction = 'inbound' and sm.created_at <= p_at
-              and (sm.property_id = cs.sib_id or (sm.property_id is null and sm.contact_id = cs.contact_id))
-              and (sm.created_at, sm.id) < (cs.ts, cs.mid)))
-      or exists (select 1 from public.acquisition_attempts a
+    join public.messages m on m.org_id = p_org and m.channel = 'sms' and m.direction = 'outbound' and m.created_at <= p_at
+      and (m.property_id = cs.sib_id or (m.property_id is null and m.contact_id = cs.contact_id))
+    where m.campaign_id is null
+      and not exists (select 1 from public.sequence_step_runs r where r.message_id = m.id)
+      and (m.metadata ->> 'generated_by') is distinct from 'norma_precall'
+      and ((m.metadata ->> 'approved_by_user_id') is not null or m.metadata ->> 'generated_by' = 'ai_responder_v1'
+        or m.metadata ->> 'reply_source' = 'approved_template' or (m.metadata ->> 'generated_by') is null)
+      and (coalesce(m.sent_at, m.delivered_at, m.created_at), m.id) > (cs.ts, cs.mid)
+      and coalesce(m.metadata ->> 'inbound_stamp_unresolved', '') <> 'true'),
+  clg as (
+    select distinct on (l.message_id) l.message_id, l.state
+    from public.rep_sms_delivery_ledger l
+    where l.org_id = p_org and l.message_id in (select id from cm)
+    order by l.message_id, l.updated_at desc),
+  chd as (
+    select cm.lead_id
+    from cm left join clg on clg.message_id = cm.id
+    where (cm.status in ('sent', 'delivered') or clg.state in ('accepted', 'delivered', 'delivery_failed') or cm.sent_at is not null)
+      -- a text stamped as replying to an inbound older than this one does not answer it
+      and not exists (
+        select 1 from public.messages sm
+        where cm.metadata ->> 'inbound_message_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          and sm.id = (cm.metadata ->> 'inbound_message_id')::uuid and sm.org_id = p_org and sm.channel = 'sms'
+          and sm.direction = 'inbound' and sm.created_at <= p_at
+          and (sm.property_id = cm.sib_id or (sm.property_id is null and sm.contact_id = cm.contact_id))
+          and (sm.created_at, sm.id) < (cm.ts, cm.mid))
+    union
+    select cs.lead_id
+    from cs
+    where exists (select 1 from public.acquisition_attempts a
                  where a.org_id = p_org and a.property_id = cs.sib_id and a.outcome in ('reached', 'voicemail') and a.recorded_at > cs.ts)
       or exists (select 1 from public.lead_events e
                  where e.org_id = p_org and e.actor_type = 'user' and e.property_id = cs.sib_id and e.created_at > cs.ts
