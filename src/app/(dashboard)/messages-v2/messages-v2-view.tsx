@@ -136,6 +136,10 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [threads, setThreads] = useState(() => new Map(props.threads ?? []));
   // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
   const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
+  const earlierRef = useRef<RunWithSteps[]>([]);
+  useEffect(() => {
+    earlierRef.current = earlier;
+  }, [earlier]);
   const [cursor, setCursor] = useState<{ day: string; before: RunCursor | null } | null>(null);
   const [earlierBusy, setEarlierBusy] = useState(false);
   const [earlierNote, setEarlierNote] = useState<string | null>(null);
@@ -238,9 +242,14 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       setThreadFailures(ids.length);
       if (ids.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
     };
+    // Versioned: each result is committed only if the run is still at the version it was fetched for (an older fetch
+    // resolving late can never overwrite a newer sent reply).
+    const versionAtRequest = new Map(missing.map((r) => [r.id, threadKey(r)]));
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
       .then(({ threads: fetched, failedRunIds }) => {
-        setThreads((curr) => new Map([...curr, ...fetched]));
+        const current = new Map([...runsRef.current, ...earlierRef.current].map((r) => [r.id, threadKey(r)]));
+        const fresh = [...fetched].filter(([id]) => current.get(id) === versionAtRequest.get(id));
+        setThreads((curr) => new Map([...curr, ...fresh]));
         retryLater(failedRunIds);
       })
       .catch(() => retryLater(missing.map((r) => r.id)));

@@ -180,6 +180,17 @@ export function withEffectiveReason<T extends { reason: string | null }>(run: T,
 export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null, pinned = false): TapeView {
   // `pinned`: the reason is the waiting-list snapshot's, and it wins over the run's own reason and outcome.
   const run = pinned ? { ...rawRun, reason: flagReason ?? null } : withEffectiveReason(rawRun, flagReason);
+  // A snapshot run reads like its card whatever the run's own status: pinned tag + sentence, and the run's
+  // skipped / errored status as the separate "what she did" line.
+  if (pinned && (run.status === "skipped" || run.status === "error")) {
+    return {
+      kind: "decided",
+      tag: pinnedTag(flagReason),
+      stage: "waiting",
+      sentence: holdReasonSentence(run, run.reason, who, true),
+      did: run.status === "skipped" ? quietSkip(run) : "Something went wrong reading this one",
+    };
+  }
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 

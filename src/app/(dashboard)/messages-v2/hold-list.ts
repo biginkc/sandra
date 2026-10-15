@@ -446,6 +446,7 @@ export async function recheckOpen(
   const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
   const open = new Set<string>();
   const locked = new Set<string>();
+  const draftOk = new Set<string>();
   let failed = false;
   await Promise.all([
     ...chunks(ids).map(async (c) => {
@@ -459,7 +460,7 @@ export async function recheckOpen(
           else if (p.needs_human_attention) open.add(p.id);
         }
     }),
-    ...(["jev_lead_decisions", "ai_disposition_reviews", "ai_reply_drafts"] as const).flatMap((table) =>
+    ...(["jev_lead_decisions", "ai_disposition_reviews"] as const).flatMap((table) =>
       chunks(ids).map(async (c) => {
         const res = await fetchAllKeyset<{ property_id: string | null }>(() =>
           supabase.from(table).select("id, property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", c),
@@ -468,19 +469,47 @@ export async function recheckOpen(
         else for (const r of res.rows) if (r.property_id) open.add(r.property_id);
       }),
     ),
-    // A draft resolved to its property through a run or message has no property_id of its own: check it by id.
-    ...chunks(draftIds).map(async (c) => {
-      const res = await fetchAllKeyset<{ id: string }>(() =>
-        supabase.from("ai_reply_drafts").select("id").eq("org_id", orgId).eq("status", "pending").in("id", c),
-      );
-      if (res.error) failed = true;
-      else {
-        const pending = new Set(res.rows.map((r) => r.id));
-        for (const h of holds) if (h.draft && pending.has(h.draft.id)) open.add(h.id);
+    // A draft counts only if it is still pending AND still resolves to exactly this hold's property, unlocked:
+    // its links (property_id, run, message, conversation) are re-read and re-resolved, never assumed.
+    (async () => {
+      const byId = new Map<string, HoldDraftRow>();
+      const reads = [
+        ...chunks(draftIds).map((c) => ["id", c] as const),
+        ...chunks(ids).map((c) => ["property_id", c] as const),
+      ];
+      for (const [col, c] of reads) {
+        const res = await fetchAllKeyset<HoldDraftRow>(() =>
+          supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending").in(col, c),
+        );
+        if (res.error) {
+          failed = true;
+          return;
+        }
+        for (const r of res.rows) byId.set(r.id, r);
       }
-    }),
+      const rows = [...byId.values()];
+      if (!rows.length) return;
+      const candidates = await resolveDraftProperties(supabase, orgId, rows);
+      if (!candidates) {
+        failed = true;
+        return;
+      }
+      const all = uniq([...candidates.values()].flatMap((set) => [...set]));
+      const lockedNow = all.length ? await lockedPropertyIds(supabase, orgId, all) : new Set<string>();
+      if (!lockedNow) {
+        failed = true;
+        return;
+      }
+      const idSet = new Set(ids);
+      for (const d of rows) {
+        const c = [...(candidates.get(d.id) ?? [])];
+        // Counts for a hold only if it resolves to exactly that one property today, and that property is unlocked.
+        if (c.length === 1 && idSet.has(c[0]) && !lockedNow.has(c[0])) draftOk.add(c[0]);
+      }
+    })(),
   ]);
   if (failed) return null;
+  for (const id of draftOk) open.add(id);
   return new Set(ids.filter((id) => open.has(id) && !locked.has(id)));
 }
 

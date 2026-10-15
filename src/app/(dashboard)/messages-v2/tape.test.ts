@@ -206,3 +206,15 @@ describe("pinned snapshot reasons are the only source (null / unmapped -> neutra
     expect(tape.kind === "decided" && tape.sentence).toBe(holdReasonSentence({ ...r, reason: null }, null, "Dee", true));
   });
 });
+
+describe("pinned reasons apply whatever the run's status", () => {
+  it.each(["error", "skipped"] as const)("a snapshot hold whose latest run is %s: tag/sentence match the card, status line kept", (status) => {
+    const r = run({ status, reason: null, steps: [] });
+    const tape = deriveTape(r, "Dee", "model:opt_out", true);
+    expect(tape.kind).toBe("decided");
+    if (tape.kind !== "decided") return;
+    expect(tape.tag?.label).toBe("Asked to stop");
+    expect(tape.sentence).toBe(holdReasonSentence({ ...r, reason: "model:opt_out" }, "model:opt_out", "Dee", true));
+    expect(tape.did).toBeTruthy();
+  });
+});

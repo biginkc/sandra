@@ -492,3 +492,26 @@ describe("final checks and live re-check", () => {
     expect(states.find((s) => s.id === u(2))).toMatchObject({ eligible: true, flagReason: "hostile_needs_confirm", flagAt: t(900) });
   });
 });
+
+describe("final check re-resolves drafts", () => {
+  it("a draft reassigned to a locked property between snapshot and enrichment lands in missing", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [lockedProp(9)],
+      ai_reply_drafts: [draft(1, { run_id: u(1, 5) })],
+      pipeline_runs: [runRow(1, { property_id: u(3) })],
+    };
+    const client = db(tables).client;
+    let moved = false;
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !moved) {
+        moved = true; // during enrichment: the run (and so the draft) now points at locked property 9
+        tables.pipeline_runs = tables.pipeline_runs.map((r) => ({ ...r, property_id: u(9) }));
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.snapshot.entries.map((e) => e.id)).toEqual([u(3)]);
+    expect(page.holds).toHaveLength(0);
+    expect(page.missing).toEqual([u(3)]);
+  });
+});

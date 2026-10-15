@@ -46,7 +46,7 @@ const mocks = vi.hoisted(() => {
     rpc: vi.fn(async () => ({ data: [], error: null })),
     from: vi.fn(() => {
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "in", "eq", "order", "limit"]) q[m] = () => q;
+      for (const m of ["select", "in", "eq", "order", "limit", "lt", "gt", "is", "not"]) q[m] = () => q;
       q.then = (resolve: (v: { data: never[] }) => unknown) => resolve({ data: [] });
       return q;
     }),
@@ -414,6 +414,39 @@ describe("MessagesV2View", () => {
       expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("thread text: an older fetch resolving after a newer one never overwrites the newer sent reply", async () => {
+    const realFrom = mocks.client.from.getMockImplementation()!;
+    let releaseOld: () => void = () => {};
+    const oldGate = new Promise<void>((r) => (releaseOld = r));
+    let phase: "old" | "new" = "old";
+    mocks.client.from.mockImplementation(((table: string) => {
+      const q = (realFrom as (t: string) => Record<string, unknown>)(table);
+      if (table !== "messages") return q;
+      const tag = phase;
+      const then = q.then as (res: (v: unknown) => unknown) => unknown;
+      q.then = (resolve: (v: unknown) => unknown) => {
+        const data = tag === "new" ? [{ id: "o1", body: "Thanks, take care.", created_at: "2026-10-14T12:00:00Z" }] : [];
+        const finish = () => resolve({ data, error: null });
+        return tag === "old" ? oldGate.then(finish) : (void then, finish());
+      };
+      return q;
+    }) as never);
+    try {
+      const r = run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: null, status: "running" });
+      await mount({ ...props([r]), threads: [] });
+      phase = "new";
+      await fire("UPDATE", "pipeline_runs", run("v", { conversation_id: "c1", inbound_message_id: "", outbound_message_id: "o1", status: "replied", completed_at: new Date().toISOString() }));
+      await waitFor(() => expect(screen.getByTestId("tape-reply")).toHaveTextContent("Thanks, take care."));
+      await act(async () => {
+        releaseOld();
+        await oldGate;
+      });
+      expect(screen.getByTestId("tape-reply")).toHaveTextContent("Thanks, take care.");
+    } finally {
+      mocks.client.from.mockImplementation(realFrom as never);
     }
   });
 
