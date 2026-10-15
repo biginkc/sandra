@@ -191,6 +191,7 @@ export async function resolveDraftProperties(
     ...chunks(convIds).map(async (ids) => {
       // Every message (not only those with a property): a conversation with NO message in this org is an
       // unreadable reference (absent or another org's), not "a conversation with no property".
+      // (This reads every message in each referenced conversation; a narrower existence read is a later optimisation.)
       const res = await fetchAllKeyset<{ conversation_id: string; property_id: string | null; created_at: string }>(() =>
         supabase.from("messages").select("id, conversation_id, property_id, created_at").eq("org_id", orgId).in("conversation_id", ids),
       );
@@ -431,7 +432,10 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, 
   return fail;
 }
 
-/** Rounds of scope growth before a scoped build gives up (fails closed). */
+/**
+ * Rounds of scope growth before a scoped build gives up (fails closed). A chain is one hold per round sharing a
+ * run with the next (e.g. several properties texting from one shared conversation); real chains are 1-2 deep.
+ */
 const MAX_SCOPE_ROUNDS = 5;
 
 /**
