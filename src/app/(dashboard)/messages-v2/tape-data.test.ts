@@ -167,6 +167,15 @@ describe("I5 tape: thread errors and the window cut", () => {
   });
 });
 
+describe("tape cursor at microsecond precision", () => {
+  it("two runs in the same millisecond on either side of the cursor are told apart", () => {
+    const c = { at: "2026-10-14T12:00:00.123500Z", id: "00000000-0000-4000-8000-000000000005" };
+    expect(isOlderThanCursor({ started_at: "2026-10-14T12:00:00.123400+00:00", id: "00000000-0000-4000-8000-000000000009" }, c)).toBe(true);
+    expect(isOlderThanCursor({ started_at: "2026-10-14T12:00:00.123600+00:00", id: "00000000-0000-4000-8000-000000000001" }, c)).toBe(false);
+    expect(isOlderThanCursor({ started_at: "2026-10-14T12:00:00.123500+00:00", id: "00000000-0000-4000-8000-000000000004" }, c)).toBe(true);
+  });
+});
+
 describe("I7 Chicago times do not depend on the machine's zone", () => {
   it("renders the same under TZ=UTC and TZ=Asia/Tokyo", async () => {
     const { chicagoClock, chicagoDateClock } = await import("./chicago-time");

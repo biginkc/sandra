@@ -1,6 +1,6 @@
 import { CHICAGO_TZ } from "./chicago-time";
 import { fetchAllKeyset } from "./paged";
-import { groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
+import { compareInstants, groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const CHUNK = 50;
@@ -108,9 +108,8 @@ export function olderThanCursorFilter(c: RunCursor): string {
 
 /** Same rule in code, for tests and for sanity checks. */
 export function isOlderThanCursor(run: { started_at: string; id: string }, c: RunCursor): boolean {
-  const a = Date.parse(run.started_at);
-  const b = Date.parse(c.at);
-  return a < b || (a === b && run.id < c.id);
+  const cmp = compareInstants(run.started_at, c.at);
+  return cmp < 0 || (cmp === 0 && run.id < c.id);
 }
 
 /** Runs that started in [fromIso, toIso), newest first, with their steps. Same shape as the page's feed query. */

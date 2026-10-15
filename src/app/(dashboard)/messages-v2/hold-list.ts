@@ -164,6 +164,14 @@ export async function loadHoldActivity(
   };
 
   await Promise.all([
+    // EVERY run on each hold's property (not just the latest): an older run can carry a newer step.
+    ...chunks(propertyIds).map(async (ids) => {
+      const res = await fetchAllKeyset<PipelineRun>(() =>
+        supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("property_id", ids),
+      );
+      if (res.error) failed = true;
+      else take(res.rows);
+    }),
     ...chunks(propertyIds, LATEST_RUN_CHUNK).map(async (ids) => {
       const res = await supabase.rpc("pipeline_runs_latest_for_properties", { p_org_id: orgId, p_property_ids: ids });
       if (res.error) failed = true;
@@ -193,27 +201,24 @@ export async function loadHoldActivity(
   if (failed) return null;
 
   const all = [...runs.values()];
-  const related = new Map<string, PipelineRun[]>();
-  const chosen = new Map<string, PipelineRun>();
+  const ownRelated = new Map<string, PipelineRun[]>(); // everything except property-less conversation runs
+  const convCandidates = new Map<string, string[]>(); // property-less run id -> holds whose conversations contain it
   for (const h of holds) {
     const msgs = new Set(h.message_ids ?? []);
     const draftRuns = links.draftRunsByProperty.get(h.id) ?? new Set<string>();
     const convs = links.convsByProperty.get(h.id) ?? new Set<string>();
-    const mine = all.filter(
-      (r) =>
-        r.property_id === h.id ||
-        msgs.has(r.inbound_message_id) ||
-        draftRuns.has(r.id) ||
-        (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id)),
-    );
-    related.set(h.id, mine);
-    let best: PipelineRun | null = null;
-    for (const r of mine) best = newerRun(best, r);
-    if (best) chosen.set(h.id, best);
+    const own: PipelineRun[] = [];
+    for (const r of all) {
+      if (r.property_id === h.id || msgs.has(r.inbound_message_id) || draftRuns.has(r.id)) own.push(r);
+      else if (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id)) {
+        convCandidates.set(r.id, [...(convCandidates.get(r.id) ?? []), h.id]);
+      }
+    }
+    ownRelated.set(h.id, own);
   }
 
-  // Steps for EVERY related run, not only the one shown: a later step on an older related run is still activity.
-  const stepRunIds = uniq([...related.values()].flatMap((rs) => rs.map((r) => r.id)));
+  // Steps for EVERY related run (own and conversation candidates): a later step on an older run is still activity.
+  const stepRunIds = uniq([...[...ownRelated.values()].flatMap((rs) => rs.map((r) => r.id)), ...convCandidates.keys()]);
   const steps = new Map<string, PipelineRunStep[]>();
   const stepResults = await Promise.all(
     chunks(stepRunIds).map((ids) =>
@@ -228,15 +233,38 @@ export async function loadHoldActivity(
   }
   for (const list of steps.values()) list.sort((a, b) => a.seq - b.seq);
 
-  const newest = (vals: string[]): string | null =>
-    vals.reduce<string | null>((m, v) => (m === null || compareInstants(v, m) > 0 ? v : m), null);
+  const newest = (vals: Array<string | null | undefined>): string | null =>
+    vals.reduce<string | null>((m, v) => (!v ? m : m === null || compareInstants(v, m) > 0 ? v : m), null);
+  const runActivity = (r: PipelineRun) => newest([r.started_at, ...(steps.get(r.id) ?? []).map((st) => st.created_at)]);
+  const baseActivity = new Map(
+    holds.map((h) => [h.id, newest([h.since, h.last_activity, ...(ownRelated.get(h.id) ?? []).map(runActivity)])] as const),
+  );
+
+  // A property-less conversation run belongs to AT MOST ONE hold: the one in that conversation with the newest
+  // activity (tie: lowest hold id). Other holds never use it for context, reason or activity, so tape and card agree.
+  const related = new Map<string, PipelineRun[]>([...ownRelated].map(([k, v]) => [k, [...v]]));
+  for (const [runId, holdIds] of convCandidates) {
+    const winner = [...holdIds].sort((x, y) => {
+      const ax = baseActivity.get(x) ?? null;
+      const ay = baseActivity.get(y) ?? null;
+      if (ax !== ay) {
+        if (ax === null) return 1;
+        if (ay === null) return -1;
+        const c = compareInstants(ay, ax);
+        if (c) return c;
+      }
+      return x < y ? -1 : x > y ? 1 : 0;
+    })[0];
+    related.get(winner)!.push(runs.get(runId)!);
+  }
+
   return holds.map((h) => {
-    const run = chosen.get(h.id);
+    const mine = related.get(h.id) ?? [];
+    let run: PipelineRun | null = null;
+    for (const r of mine) run = newerRun(run, r);
     return {
       ...h,
-      related_activity: newest(
-        (related.get(h.id) ?? []).flatMap((r) => [r.started_at, ...(steps.get(r.id) ?? []).map((st) => st.created_at)]),
-      ),
+      related_activity: newest(mine.map(runActivity)),
       run: run ? { ...run, steps: steps.get(run.id) ?? [] } : null,
     };
   });

@@ -307,17 +307,34 @@ describe("Codex round 9", () => {
     expect(page.holds).toHaveLength(0);
   });
 
-  it("one property-less run shown by two holds with DIFFERENT flag reasons claims no reason on the tape", async () => {
+  it("a property-less run in a shared conversation is shown by ONE hold only, so tape and card agree", async () => {
     const tables = {
       properties: [flagged(1, t(1), { last_ai_escalation_reason: "model:opt_out" }), flagged(2, t(2), { last_ai_escalation_reason: "model:price_or_offer" })],
       jev_lead_decisions: [decision(1, u(1), t(1), { conversation_id: u(5, 2) }), decision(2, u(2), t(2), { conversation_id: u(5, 2) })],
       pipeline_runs: [runRow(1, { property_id: null, conversation_id: u(5, 2), started_at: t(900), reason: null })],
     };
     const list = await eligible(tables);
-    expect(list.holds.every((h) => h.run?.id === u(1, 5))).toBe(true); // the same run on both cards
-    expect(effectiveFlagReasons(list.holds)).toEqual([]);
-    const tape = deriveTape(list.holds[0].run!, "Dee", new Map(effectiveFlagReasons(list.holds)).get(u(1, 5)));
-    expect(tape.kind === "decided" && tape.sentence).toBe("Needs a person to look at it. Nothing sent.");
+    const shown = list.holds.filter((h) => h.run?.id === u(1, 5));
+    expect(shown.map((h) => h.id)).toEqual([u(2)]); // property 2 had the newer activity before the run
+    const other = list.holds.find((h) => h.id === u(1))!;
+    expect(other.run).toBeNull(); // the second hold does not display the shared run
+    const reasons = new Map(effectiveFlagReasons(list.holds));
+    expect(reasons.get(u(1, 5))).toBe("model:price_or_offer");
+    const owner = shown[0];
+    const eff = withEffectiveReason(owner.run!, owner.flag_reason);
+    const card = holdReasonSentence(eff, eff.reason ?? owner.flag_reason, "Dee");
+    const tape = deriveTape(owner.run!, "Dee", reasons.get(u(1, 5)));
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+  });
+
+  it("an older run linked only by property_id with a newer step lifts the hold", async () => {
+    const list = await eligible({
+      properties: [flagged(1, t(100)), flagged(2, t(800))],
+      pipeline_runs: [runRow(1, { property_id: u(1), started_at: t(200) }), runRow(2, { property_id: u(1), started_at: t(500) })],
+      pipeline_run_steps: [{ id: u(1, 8), org_id: "org", run_id: u(1, 5), seq: 1, kind: "gate", name: "g", result: "pass", detail: {}, created_at: t(900) }],
+    });
+    expect(list.holds[0].id).toBe(u(1));
+    expect(list.holds[0].run?.id).toBe(u(2, 5)); // display run stays the newest
   });
 
   it("when the sharing holds agree, the tape claims that reason", async () => {
