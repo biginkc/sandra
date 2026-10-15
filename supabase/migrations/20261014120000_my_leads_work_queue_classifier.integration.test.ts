@@ -902,7 +902,8 @@ it('a fresh unknown step claim (not yet 15 minutes old) schedules the stuck boun
     const r = await w.page(w.sam, { tab: 'waiting' });
     expect(r.ids).toEqual([id]);
     expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(10 * MIN));
-    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
+    // 'older than 15 min' is strict, so look one second past the boundary
+    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(new Date(r.nextChangeAt).getTime() + 1000) });
     expect(later.rows[0]).toMatchObject({ reason: 'broken' });
   });
 });
