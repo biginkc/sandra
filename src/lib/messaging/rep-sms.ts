@@ -12,6 +12,7 @@ import { getMessagingProvider } from "./registry";
 import { sendSmsToContact, type RepSmsDeliveryReceiptAuthority, type SendSmsOutcome } from "./send";
 import { sendilloFromEnvWithOptions } from "./providers/sendillo";
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
+import { resolveInboundStamp } from "./inbound-stamp";
 import type { DialpadFromOption, MessagingProvider, ProviderSenderNumber } from "./types";
 import {
   composeRepSms,
@@ -606,6 +607,12 @@ export type DispatchRepSmsInput = {
   initialRemainder?: string | null;
   remainder?: string | null;
   initialBody?: string | null;
+  /**
+   * Newest inbound message the composer showed when it opened. Validated
+   * server-side and stamped as `metadata.inbound_message_id`; dropped if it
+   * does not belong to this org and property.
+   */
+  inboundMessageId?: string | null;
   /** Present only when resuming a claimed durable obligation. */
   obligationFence?: RepSmsObligationFence;
 };
@@ -673,7 +680,14 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
       deliveryAuthority = claim.authority;
     }
   }
+  const inboundStamp = input.inboundMessageId
+    ? await resolveInboundStamp(createAdminClient(), input.inboundMessageId, {
+        orgId: context.orgId,
+        propertyId: input.propertyId,
+      })
+    : null;
   const metadata = {
+    ...(inboundStamp ? { inbound_message_id: inboundStamp } : {}),
     repSms: {
       workflow: composition.acquisitionsManager === REP_SMS_ASSISTANT ? "maria-through-mel" : "manager-through-mel",
       policyVersion: composition.policyVersion,

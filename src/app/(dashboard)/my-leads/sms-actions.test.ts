@@ -385,3 +385,37 @@ describe("resumed rep SMS obligations", () => {
     expect(result.ok && result.data.outcome.status).not.toBe("sent")
   })
 })
+
+describe("rep SMS inbound reply stamp threading", () => {
+  const INBOUND = "33333333-3333-4333-8333-333333333333"
+  const baseInput = { propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "key-1", composition }
+
+  it("passes the stamp through a generic send and ignores forged internal fields", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms({ ...baseInput, inboundMessageId: INBOUND, obligationFence: { forged: true } } as never)
+    const sent = mocks.dispatch.mock.calls[0][0]
+    expect(sent.inboundMessageId).toBe(INBOUND)
+    expect(sent).not.toHaveProperty("obligationFence")
+  })
+
+  it("leaves the stamp undefined when the browser sends none", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms(baseInput)
+    expect(mocks.dispatch.mock.calls[0][0].inboundMessageId).toBeUndefined()
+  })
+
+  it("keeps the original stamp when resuming a saved obligation", async () => {
+    mocks.readContext.mockResolvedValue(baseContext("required"))
+    mocks.adminRpc.mockImplementation(async (name: string) =>
+      name === "fn_claim_authorize_rep_sms_obligation"
+        ? { data: { ok: true, state: "sending", claimToken: "t", claimGeneration: 2, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null }
+        : { data: { ok: true, state: "accepted" }, error: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms({ ...baseInput, obligationId: "obligation-1", inboundMessageId: INBOUND })
+    const sent = mocks.dispatch.mock.calls[0][0]
+    expect(sent.obligationFence.claimGeneration).toBe(2)
+    expect(sent.inboundMessageId).toBe(INBOUND)
+  })
+})

@@ -64,6 +64,7 @@ import { SkipTraceButton } from "./skip-trace-button";
 import { CassWidget } from "./cass-widget";
 import { DeleteLeadButton } from "./delete-lead-button";
 import { InlineReply } from "./inline-reply";
+import { latestInboundMessageId } from "@/lib/messaging/inbound-stamp";
 import { LeadAssigneeWidget } from "./assignee-widget";
 import { LeadDripCard, LeadOutcomeProvider, LeadOutcomeSection } from "./lead-outcome-section";
 import { NO_ACTIVE_DRIP, toOutcomeBarDrip } from "./lead-outcome-drip";
@@ -426,6 +427,9 @@ export default async function LeadDetailPage({
         latestHomeownerSmsRoute.customerPhone,
       )
     : null;
+  const newestInboundMessageId = latestInboundMessageId(
+    initialMessages.filter((message) => message.property_id === lead.id),
+  );
   const inlineReplyPhone = latestHomeownerSmsRoute
     ? inlineRoutePhoneChoice?.lineType === "landline"
       ? null
@@ -744,7 +748,7 @@ export default async function LeadDetailPage({
         restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}
         restrictionDetail={isAcquisitionMember ? acquisitionSmsPresentation.consentDetail : smsPresentation.consentDetail}
       >
-        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} placement="action" /> : <SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} inboundMessageId={newestInboundMessageId} placement="action" /> : <SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}
@@ -1029,6 +1033,7 @@ export default async function LeadDetailPage({
                   homeownerPhone={inlineReplyPhone}
                   replyToPhone={inlineReplyPhone}
                   preferredFromNumber={inlineReplyFromNumber}
+                  inboundMessageId={newestInboundMessageId}
                   phoneUnavailableMessage={inlineReplyPhoneUnavailableMessage}
                   footerAction={
                     !inlineSmsPresentation.smsRestricted &&

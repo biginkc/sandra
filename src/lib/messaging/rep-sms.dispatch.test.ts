@@ -2,13 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   adminRpc: vi.fn(),
+  stampRow: vi.fn(),
   createClient: vi.fn(),
   provider: vi.fn(),
   sendSmsToContact: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
-vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ rpc: mocks.adminRpc }) }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({
+    rpc: mocks.adminRpc,
+    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => mocks.stampRow() }) }) }),
+  }),
+}));
 vi.mock("./providers/sendillo", () => ({ sendilloFromEnvWithOptions: mocks.provider }));
 vi.mock("./send", () => ({ sendSmsToContact: mocks.sendSmsToContact }));
 
@@ -251,5 +256,59 @@ describe("dispatchRepSms durable generic reservation", () => {
     })).rejects.toThrow("Sendillo texting organization scope is not configured.");
     expect(mocks.adminRpc).not.toHaveBeenCalled();
     expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
+  });
+});
+
+describe("dispatchRepSms inbound reply stamp", () => {
+  const INBOUND = "33333333-3333-4333-8333-333333333333";
+  const key = "11111111-1111-4111-8111-111111111111";
+  const claim = () => mocks.adminRpc
+    .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "claim-1", claimGeneration: 1 }, error: null })
+    .mockResolvedValueOnce({ data: { ok: true, state: "accepted", providerMessageId: "provider-1" }, error: null });
+  const base = { propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: key, composition };
+
+  it("stamps a valid inbound id as top-level metadata.inbound_message_id", async () => {
+    claim();
+    mocks.stampRow.mockResolvedValue({
+      data: { direction: "inbound", org_id: "org-1", property_id: "property-1", conversation_id: null },
+      error: null,
+    });
+    await dispatchRepSms({ ...base, inboundMessageId: INBOUND });
+    const send = mocks.sendSmsToContact.mock.calls[0][1];
+    expect(send.metadata.inbound_message_id).toBe(INBOUND);
+    expect(send.metadata.repSms).toBeDefined();
+  });
+
+  it("drops the stamp for a cross-property inbound id and still sends", async () => {
+    claim();
+    mocks.stampRow.mockResolvedValue({
+      data: { direction: "inbound", org_id: "org-1", property_id: "other-property", conversation_id: null },
+      error: null,
+    });
+    const outcome = await dispatchRepSms({ ...base, inboundMessageId: INBOUND });
+    expect(outcome.status).toBe("sent");
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata).not.toHaveProperty("inbound_message_id");
+  });
+
+  it("drops the stamp for an outbound message or another org", async () => {
+    for (const row of [
+      { direction: "outbound", org_id: "org-1", property_id: "property-1", conversation_id: null },
+      { direction: "inbound", org_id: "org-2", property_id: "property-1", conversation_id: null },
+    ]) {
+      mocks.sendSmsToContact.mockClear();
+      mocks.adminRpc.mockReset();
+      claim();
+      mocks.stampRow.mockResolvedValue({ data: row, error: null });
+      await dispatchRepSms({ ...base, inboundMessageId: INBOUND });
+      expect(mocks.sendSmsToContact.mock.calls[0][1].metadata).not.toHaveProperty("inbound_message_id");
+    }
+  });
+
+  it("without an id the metadata has only repSms and no lookup happens", async () => {
+    claim();
+    await dispatchRepSms(base);
+    const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
+    expect(Object.keys(metadata)).toEqual(["repSms"]);
+    expect(mocks.stampRow).not.toHaveBeenCalled();
   });
 });

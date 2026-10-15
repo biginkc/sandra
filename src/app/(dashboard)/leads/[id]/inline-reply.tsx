@@ -2,7 +2,7 @@
 
 import { SendIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { callAction } from "@/lib/errors/call-action";
@@ -31,7 +31,9 @@ type Props = {
   footerAction?: React.ReactNode;
   onSent?: (messageId: string) => void;
   onPendingChange?: (pending: boolean) => void;
-  sendAction?: (body: string, to: string | null) => ReturnType<typeof sendSmsFromLead>;
+  /** Newest inbound message currently shown in the thread; frozen while a draft is open. */
+  inboundMessageId?: string | null;
+  sendAction?: (body: string, to: string | null, inboundMessageId?: string | null) => ReturnType<typeof sendSmsFromLead>;
 };
 
 /**
@@ -52,6 +54,7 @@ export function InlineReply({
   suspended = false,
   footerAction,
   onSent,
+  inboundMessageId = null,
   sendAction,
   onPendingChange,
 }: Props) {
@@ -68,6 +71,13 @@ export function InlineReply({
   // disabled state, so this lives at the top of the component body.
   const templateRequestToken = useRef(0);
   const sendInFlight = useRef(false);
+  // The reply stamp is the newest inbound shown when this draft was started.
+  // Follow the prop only while there is no draft and nothing in flight, so a
+  // reply arriving mid-composition stays unhandled instead of being claimed.
+  const stampedInbound = useRef<string | null>(inboundMessageId);
+  useEffect(() => {
+    if (body.length === 0 && !pending) stampedInbound.current = inboundMessageId;
+  }, [body, pending, inboundMessageId]);
   const fromNumber = preferredFromNumber;
 
   const disabled = !homeownerContactId || !homeownerPhone;
@@ -94,15 +104,17 @@ export function InlineReply({
     sendInFlight.current = true;
     onPendingChange?.(true);
     const submittedBody = body;
+    const submittedInbound = stampedInbound.current;
     startTransition(async () => {
       try {
       const result = await callAction(
-        sendAction ? sendAction(submittedBody, effectiveToPhone) : sendSmsFromLead(
+        sendAction ? sendAction(submittedBody, effectiveToPhone, submittedInbound) : sendSmsFromLead(
           propertyId,
           submittedBody,
           fromNumber,
           false,
           effectiveToPhone,
+          submittedInbound,
         ),
         {
           fallbackMessage: "Send not confirmed",

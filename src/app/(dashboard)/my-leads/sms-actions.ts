@@ -50,6 +50,7 @@ function safeDispatchInput(input: PublicSendRepSmsInput): DispatchRepSmsInput {
     initialRemainder: input.initialRemainder,
     remainder: input.remainder,
     initialBody: input.initialBody,
+    inboundMessageId: input.inboundMessageId,
   };
 }
 
@@ -240,6 +241,7 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
       },
       idempotencyKey: obligation.id,
       composition,
+      inboundMessageId: input.inboundMessageId,
     });
   } catch (error) {
     // Once authorization is durable, an exception may occur on either side of
