@@ -53,6 +53,19 @@ function installFakeJev() {
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     const body = JSON.parse(String(init?.body)) as JevCall;
     jevCalls.push(body);
+    if (!("asked_stop" in body.questions)) {
+      // The eight-answer request: a calm, non-hot read ("unclear") so the old path behaves as today.
+      return new Response(
+        JSON.stringify({
+          model: "jev-test",
+          answers: {
+            outcome: { choice: "unclear", confidence: 0.5, probabilities: { unclear: 0.5 } },
+            escalation_reason: { choice: "not_applicable", probabilities: { not_applicable: 0.9 } },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     const answers = Object.fromEntries(
       NINE_QUESTION_IDS.map((id) => [id, { choice: "noul", noul: jevProbabilities[id] ?? 0.02 }]),
     );
@@ -571,7 +584,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
       { anthropic: NO_ANTHROPIC },
     );
     expect(await outboundBodies(lead.propertyId)).toEqual([IDENTITY_REPLY_BODY]);
-    expect(jevCalls).toHaveLength(0);
+    expect(jevCalls.filter((c) => "asked_stop" in c.questions)).toHaveLength(0); // the nine questions are never asked
     expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
   });
 
