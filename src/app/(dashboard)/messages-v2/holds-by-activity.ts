@@ -1,5 +1,5 @@
 import { encodeSnapshot, type CompactSnapshot } from "./snapshot-codec";
-import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
+import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
 import { compareInstants, loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldSeen, HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
@@ -94,7 +94,14 @@ export async function loadHoldsByIds(
   supabase: LooseSupabase,
   orgId: string,
   ids: readonly string[],
-): Promise<{ holds: OpenHold<RunWithSteps>[]; missing: string[]; unverified: number; contextErrors: string[] } | null> {
+): Promise<{
+  holds: OpenHold<RunWithSteps>[];
+  missing: string[];
+  unverified: number;
+  contextErrors: string[];
+  /** The requested holds' pins as of this load (same source and shape as the page snapshot). */
+  snapshot: WaitingSnapshot;
+} | null> {
   const list = await loadEligibleHolds(supabase, orgId);
   if (!list.ok) return null;
   const byId = new Map(list.holds.map((h) => [h.id, h]));
@@ -109,5 +116,6 @@ export async function loadHoldsByIds(
     missing: [...missing, ...keep.missing],
     unverified: list.unverified,
     contextErrors: enriched.contextErrors,
+    snapshot: buildSnapshot(found),
   };
 }

@@ -34,6 +34,7 @@ import { loadReplayBatchId } from "./replay-batch";
 import { loadTapeDayAction } from "./tape-actions";
 import { loadRunThreads } from "./tape-data";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
+import type { WaitingSnapshot } from "./hold-list";
 import type { OpenHold, PipelineCoverage, RunWithSteps } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -216,10 +217,12 @@ export default async function MessagesV2Page({
   const focusPid = focusDeadLetter?.propertyId ?? null;
   let focusHold: OpenHold<RunWithSteps> | null | undefined;
   let focusHoldErrors: string[] = [];
+  let focusSnapshot: WaitingSnapshot | undefined;
   if (focusPid && !loaded.error && !data.holds.some((h) => h.property_id === focusPid)) {
     const byId = await loadHoldsByIds(supabase, orgId, [focusPid]);
     focusHold = byId ? (byId.holds.find((h) => h.property_id === focusPid) ?? null) : undefined;
     focusHoldErrors = byId?.contextErrors ?? [];
+    focusSnapshot = byId?.snapshot;
   }
 
   // Hold cards are labelled by property id; synthesize label inputs from the
@@ -271,6 +274,7 @@ export default async function MessagesV2Page({
         focusDeadLetter={focusDeadLetter}
         focusHold={focusHold}
         focusHoldErrors={focusHoldErrors}
+        focusSnapshot={focusSnapshot}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,

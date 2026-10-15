@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 import { pageText } from "./page-text";
-import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, SnapshotEntry, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
 import {
   actionsEnabled,
@@ -217,7 +217,10 @@ export function WaitingColumn({
   focus,
   focusHold,
   focusHoldErrors,
+  focusSnapshot,
 }: {
+  /** The pinned card's pins from its own load. */
+  focusSnapshot?: WaitingSnapshot;
   /** contextErrors from loading the pinned card (a failed version check pauses actions). */
   focusHoldErrors?: readonly string[];
   /** Opened with ?deadLetter=<id>: that failed reply's lead; its card is selected. */
@@ -271,7 +274,9 @@ export function WaitingColumn({
   });
   const [visible, setVisible] = useState(PAGE);
   const [stored, setOlder] = useState<OlderState>(fresh);
-  const [busy, setBusy] = useState(false);
+  // Busy belongs to the snapshot it was started in (a refresh mid-load leaves the new snapshot not busy).
+  const [busyFor, setBusyFor] = useState<{ key: unknown } | null>(null);
+  const busy = busyFor !== null && busyFor.key === refreshKey;
   const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
 
   const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
@@ -282,18 +287,28 @@ export function WaitingColumn({
   /** One counter for every check that can set a card's status (slice loads and live re-checks), in request order. */
   const cardCheckSeq = useRef(0);
   const entryById = new Map(entries.map((e) => [e.id, e] as const));
-  const pinsOf = (id: string, h?: OpenHold<RunWithSteps>): Pinned | undefined => {
+  /** A card's pinned snapshot entry and reason: the page snapshot, else the pinned My Leads card's own load. */
+  const pinEntry = (id: string): { e: SnapshotEntry; reason: string | null } | undefined => {
     const e = snapshot ? entryById.get(id) : undefined;
-    if (e)
+    if (e) return { e, reason: reasonOf(e.r) };
+    const f = focusSnapshot?.entries.find((x) => x.id === id);
+    if (f) return { e: f, reason: f.r >= 0 ? (focusSnapshot!.reasons[f.r] ?? null) : null };
+    return undefined;
+  };
+  const pinsOf = (id: string, h?: OpenHold<RunWithSteps>): Pinned | undefined => {
+    const pe = pinEntry(id);
+    if (pe) {
+      const e = pe.e;
       return {
         pinnedDraft: e.d ?? null,
         pinnedDraftSendable: e.d ? e.ds === true : false,
-        pinnedReason: reasonOf(e.r),
+        pinnedReason: pe.reason,
         pinnedFa: e.fa,
         pinnedRun: e.run,
         pinnedAt: e.at,
         seenVersion: e.th ?? null,
       };
+    }
     if (!h) return undefined;
     // No snapshot entry (tests without a snapshot, or a pinned card outside it): pinned to the card as it loaded.
     return {
@@ -340,7 +355,8 @@ export function WaitingColumn({
     }
     if (!loadOlder || busy || !canLoadMore) return;
     const ids = entries.slice(older.nextPos, older.nextPos + OLDER_PAGE).map((e) => e.id);
-    setBusy(true);
+    const startedKey = refreshKey;
+    setBusyFor({ key: startedKey });
     try {
       const requestedFrom = older.nextPos;
       const requestKey = refreshKey;
@@ -374,7 +390,7 @@ export function WaitingColumn({
             (id) => pinsOf(id, byId.get(id)),
           ),
         );
-        if (isCurrent(stamp, nowState())) setVisible((v) => v + PAGE);
+        commitIfCurrent<number>(stamp, nowState, setVisible, (v) => v + PAGE);
       } else {
         // Position kept: the same ids are asked for again on retry.
         const message = res.error.message;
@@ -386,7 +402,7 @@ export function WaitingColumn({
         error: "Older texts could not be loaded.",
       }));
     } finally {
-      setBusy(false);
+      commitIfCurrent<{ key: unknown } | null>({ snapshotKey: startedKey }, nowState, setBusyFor, () => null);
     }
   };
 
@@ -394,14 +410,14 @@ export function WaitingColumn({
   // 60 seconds and on tab focus the rendered ids are checked against the CURRENT list. No longer eligible ->
   // missing (removed); any snapshot field differs -> Updated (actions locked).
   const shownIdsRef = useRef<string[]>([]);
-  const entriesRef = useRef(entries);
+  const tableRef = useRef<CardTable>({ snapshotKey: refreshKey, cards: new Map() });
   const olderRef = useRef(older);
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
     liveRef.current = live;
     // The pinned My Leads card is always re-checked too, whether or not it is in the snapshot.
     shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])];
-    entriesRef.current = entries;
+    tableRef.current = table;
     olderRef.current = older;
     refreshKeyRef.current = refreshKey;
   });
@@ -413,7 +429,6 @@ export function WaitingColumn({
       const stamp: Stamp = { snapshotKey: key, seq: ++cardCheckSeq.current };
       const ids = shownIdsRef.current;
       if (!ids.length) return;
-      const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
       const results: Array<readonly [string, CheckResult]> = [];
       const fail = () => {
         if (alive) commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, ids.map((id) => [id, "failed"] as const)));
@@ -436,16 +451,22 @@ export function WaitingColumn({
             results.push([st.id, "gone"]);
             continue;
           }
-          const e = byId.get(st.id);
-          if (!e) {
-            results.push([st.id, "ok"]); // a pinned card outside the snapshot: eligibility only
+          // Compared against the card's PINS (snapshot entry, or the pinned card's own load), for every card alike.
+          const pins = tableRef.current.cards.get(st.id);
+          if (!pins) {
+            results.push([st.id, "failed"]); // nothing pinned to compare against: never treated as ok
             continue;
           }
-          // Compared against the SNAPSHOT's draft (id, property, sendable), never the already-updated card.
-          const snapDraft = e.d ?? null;
-          const draftMoved = st.draftId !== snapDraft || (snapDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== (e.ds === true)));
+          const draftMoved =
+            st.draftId !== pins.pinnedDraft ||
+            (pins.pinnedDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== pins.pinnedDraftSendable));
           const changed =
-            draftMoved || st.through !== (e.th ?? null) || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at;
+            draftMoved ||
+            st.through !== pins.seenVersion ||
+            st.flagAt !== pins.pinnedFa ||
+            st.flagReason !== pins.pinnedReason ||
+            st.runId !== pins.pinnedRun ||
+            st.activityAt !== pins.pinnedAt;
           results.push([st.id, changed ? "updated" : "ok"]);
         }
       }
@@ -468,8 +489,9 @@ export function WaitingColumn({
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
   const asSnapshot = (e: (typeof entries)[number], h: OpenHold<RunWithSteps> = live.get(e.id)!): OpenHold<RunWithSteps> => {
-    if (!snapshot) return h;
-    const reason = reasonOf(e.r);
+    const pe = pinEntry(e.id);
+    if (!pe) return h;
+    const reason = pe.reason;
     return {
       ...h,
       ...(reason ? { flag_reason: reason } : { flag_reason: null }),
@@ -534,18 +556,18 @@ export function WaitingColumn({
         <div data-testid="focus-pinned" className="flex flex-col gap-1.5">
           <p className="text-xs font-medium text-sky-700">Opened from My Leads</p>
           {(() => {
-            const e = entries.find((x) => x.id === focusPinned.id);
+            const e = pinEntry(focusPinned.id)?.e;
             const hold = e ? asSnapshot(e, focusPinned) : focusPinned;
             const st = cardState(focusPinned.id, focusPinned);
             return (
               <WaitingCard
                 hold={hold}
-                at={snapshot && e ? e.at : undefined}
+                at={e ? e.at : undefined}
                 label={labelFor(focusPinned.id)}
                 actions={actions}
                 onReload={onReload}
                 updated={st.updated}
-                pinned={!!snapshot && !!e}
+                pinned={!!e}
                 paused={st.paused}
                 selected
               />

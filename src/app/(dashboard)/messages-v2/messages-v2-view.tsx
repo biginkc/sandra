@@ -100,6 +100,8 @@ export type MessagesV2ViewProps = {
   /** That lead's hold when it is beyond the first page (null = no longer eligible). */
   focusHold?: OpenHold<RunWithSteps> | null;
   focusHoldErrors?: string[];
+  /** The pinned card's pins from its load (same shape as the page snapshot). */
+  focusSnapshot?: WaitingSnapshot;
 };
 
 /** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
@@ -157,7 +159,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     earlierRef.current = earlier;
   }, [earlier]);
   const [cursor, setCursor] = useState<{ day: string; before: RunCursor | null } | null>(null);
-  const [earlierBusy, setEarlierBusy] = useState(false);
+  // Busy belongs to the snapshot it was started in: a refresh mid-load leaves the new snapshot not busy.
+  const [earlierBusyFor, setEarlierBusyFor] = useState<unknown>(null);
+  const earlierBusy = earlierBusyFor !== null && earlierBusyFor === threadTable.snapshotKey;
   const [earlierNote, setEarlierNote] = useState<string | null>(null);
   const { undoJevAction, findJevUndo } = props;
   const undoControls = useMemo<UndoControls | undefined>(
@@ -234,9 +238,14 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     const missing = runs.filter((r) => !requested.current.has(r.id));
     if (missing.length === 0) return;
     for (const r of missing) requested.current.add(r.id);
-    // Not cancelled when `runs` changes again: the results are keyed by run id, so a late answer is still right.
+    // Keyed by run id and committed through the helper under the snapshot it was requested in; a result from before
+    // a refresh is dropped and those ids may be asked for again.
+    const stamp: Stamp = { snapshotKey: threadEpoch.current };
     loadRunLabels(createClient() as unknown as LooseSupabase, missing)
-      .then((fetched) => setLabels((curr) => new Map([...curr, ...fetched])))
+      .then((fetched) => {
+        const applied = commitIfCurrent<Map<string, RunLabel>>(stamp, () => ({ snapshotKey: threadEpoch.current }), setLabels, (curr) => new Map([...curr, ...fetched]));
+        if (!applied) for (const r of missing) requested.current.delete(r.id);
+      })
       .catch(() => {
         for (const r of missing) requested.current.delete(r.id);
       });
@@ -289,7 +298,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       const failedNow = failedIds.filter((id) => isCurrent(stamp, n, id));
       for (const r of missing) if (failedNow.includes(r.id)) requestedThreads.current.delete(threadKey(r));
       commitIfCurrent<ThreadTable>(stamp, now, setThreadTable, (t) => applyThreads(t, stamp, now(), fetched, loadedOk, failedIds));
-      if (failedNow.length) window.setTimeout(() => setThreadRetry((k) => k + 1), 10_000);
+      if (failedNow.length) window.setTimeout(() => commitIfCurrent<number>(stamp, now, setThreadRetry, (k) => k + 1), 10_000);
     };
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
       .then(({ threads: fetched, failedRunIds }) =>
@@ -420,24 +429,30 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       (oldestRun
         ? { day: chicagoDayKey(Date.parse(oldestRun.started_at)), before: { at: oldestRun.started_at, id: oldestRun.id } }
         : { day: chicagoDayKey(nowMs), before: null });
-    setEarlierBusy(true);
-    setEarlierNote(null);
     const dayEpoch = threadEpoch.current;
     const daySeq = ++threadSeq.current;
+    // The WHOLE response commits through the helper under the snapshot it was requested in; stale → discarded.
+    const dayKey: Stamp = { snapshotKey: dayEpoch };
+    const snapNow = (): Now => ({ snapshotKey: threadEpoch.current });
+    const commitDay = <S,>(set: (fn: (prev: S) => S) => void, updater: (prev: S) => S) => commitIfCurrent<S>(dayKey, snapNow, set, updater);
+    setEarlierBusyFor(dayEpoch);
+    setEarlierNote(null);
     try {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const res = await props.loadTapeDay(next);
+        if (!isCurrent(dayKey, snapNow())) return; // refreshed meanwhile: nothing from this response is applied
         if (!res.ok) {
-          setEarlierNote(pageText(res.error.message));
-          setCursor(next);
+          const message = pageText(res.error.message);
+          const at = next;
+          commitDay<string | null>(setEarlierNote, () => message);
+          commitDay<typeof cursor>(setCursor, () => at);
           return;
         }
         const got = res.data.runs;
-        setEarlier((curr) => [...curr, ...got]);
-        setLabels((curr) => new Map([...curr, ...res.data.labels]));
-        setDayFlagReasons((curr) => [...curr, ...(res.data.flagReasons ?? [])]);
-        // Same commit path as the browser fetch, keyed to (snapshot, run id, version): a day response from before a
-        // refresh, or for a run that has a newer version meanwhile, changes nothing.
+        commitDay<RunWithSteps[]>(setEarlier, (curr) => [...curr, ...got]);
+        commitDay<Map<string, RunLabel>>(setLabels, (curr) => new Map([...curr, ...res.data.labels]));
+        commitDay<Array<[string, string]>>(setDayFlagReasons, (curr) => [...curr, ...(res.data.flagReasons ?? [])]);
+        // Thread text: also keyed to run id + version + seq (a run with a newer version meanwhile is not changed).
         const dayVersion = new Map(got.map((r) => [r.id, threadKey(r)]));
         const dayStamp: Stamp = { snapshotKey: dayEpoch, seq: daySeq, versions: dayVersion };
         const dayNow = (): Now => {
@@ -458,16 +473,18 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             ? { day: next.day, before: { at: last.started_at, id: last.id } }
             : { day: previousDayKey(next.day), before: null };
         if (got.length > 0) {
-          setCursor(next);
+          const at = next;
+          commitDay<typeof cursor>(setCursor, () => at);
           return;
         }
       }
-      setCursor(next);
-      setEarlierNote("No texts came in during the week before that.");
+      const at = next;
+      commitDay<typeof cursor>(setCursor, () => at);
+      commitDay<string | null>(setEarlierNote, () => "No texts came in during the week before that.");
     } catch {
-      setEarlierNote("The earlier tape could not be loaded.");
+      commitDay<string | null>(setEarlierNote, () => "The earlier tape could not be loaded.");
     } finally {
-      setEarlierBusy(false);
+      commitDay<unknown>(setEarlierBusyFor, () => null);
     }
   };
 
@@ -641,6 +658,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             focus={props.focusDeadLetter ?? null}
             focusHold={props.focusHold}
             focusHoldErrors={props.focusHoldErrors}
+            focusSnapshot={props.focusSnapshot}
           />
         </div>
       </div>

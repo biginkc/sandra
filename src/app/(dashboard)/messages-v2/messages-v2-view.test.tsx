@@ -835,6 +835,64 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("refresh during an earlier-day request: nothing from the old response is applied", async () => {
+    const yesterdayRun = run("y1", { started_at: new Date(NOW - 20 * 3600_000).toISOString(), status: "closed" });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const loadTapeDay = vi.fn(async () => {
+      await gate;
+      return {
+        ok: true as const,
+        data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey Old", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], flagReasons: [["y1", "model:unclear"]] as Array<[string, string]> },
+      };
+    });
+    const p1 = { ...props([run("today")]), loadTapeDay };
+    const { rerender } = render(<MessagesV2View {...p1} />);
+    await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+    await act(async () => {
+      screen.getByTestId("show-earlier").click();
+    });
+    rerender(<MessagesV2View {...p1} runs={[run("today")]} />); // router refresh: a new snapshot
+    await act(async () => {
+      release();
+      await gate;
+    });
+    expect(screen.getAllByTestId("tape-card")).toHaveLength(1);
+    expect(screen.queryByText("Casey Old")).toBeNull();
+    expect(screen.getByTestId("show-earlier")).toHaveTextContent("Show yesterday's tape");
+    expect(screen.getByTestId("show-earlier")).toBeEnabled();
+  });
+
+  it("a pinned My Leads card outside the snapshot whose reason changed (still eligible) is Updated and disabled", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = Array.from({ length: 3 }, (_, i) => ({ ...openHold(`h${i}`), ...at(i + 1) }));
+      const snapshot = buildSnapshot(all);
+      const pinnedHold = { ...openHold("px"), ...at(9), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+      const focusSnapshot = buildSnapshot([pinnedHold]);
+      const pe = focusSnapshot.entries[0];
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) => {
+          if (id === "px")
+            return { id, eligible: true, flagAt: pe.fa, flagReason: "hostile_needs_confirm", runId: pe.run, activityAt: pe.at, through: pe.th, draftId: null, draftProperty: null, draftSendable: false };
+          const e = snapshot.entries.find((x) => x.id === id)!;
+          return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+        }),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], all), holdsSnapshot: snapshot, revalidateHolds, actions, focusDeadLetter: { deadLetterId: "dl-1", propertyId: "px" }, focusHold: pinnedHold, focusSnapshot });
+      expect(within(screen.getByTestId("focus-pinned")).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(within(screen.getByTestId("focus-pinned")).getByTestId("hold-updated")).toBeInTheDocument());
+      expect(within(screen.getByTestId("focus-pinned")).getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
