@@ -45,4 +45,5 @@ export type BacklogPage = {
 export type LoadBacklog = (input: {
   offset: number;
   limit?: number;
+  bucket?: "new" | "backlog";
 }) => Promise<Result<BacklogPage>>;

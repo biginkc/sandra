@@ -1383,21 +1383,24 @@ export async function loadBacklogHolds(
   offset: number,
   limit: number,
   nowMs: number = Date.now(),
-  opts: Pick<LoadOptions, "includeLuna"> = {},
+  opts: Pick<LoadOptions, "includeLuna"> & { bucket?: HoldBucket } = {},
 ): Promise<{
   holds: OpenHold<RunWithSteps>[];
+  /** Total for the requested bucket (Backlog by default). */
   backlogTotal: number;
   hasMore: boolean;
   /** offset + property ids consumed; the next page starts here even if some ids rendered no card. */
   nextOffset: number;
   failed: boolean;
 } | null> {
-  const buckets = await loadHoldBuckets(supabase, orgId, "backlog", limit, offset);
+  const bucket = opts.bucket ?? "backlog";
+  const buckets = await loadHoldBuckets(supabase, orgId, bucket, limit, offset);
   if (!buckets) return null;
+  const bucketTotal = bucket === "new" ? buckets.newTotal : buckets.backlogTotal;
   if (buckets.propertyIds.length === 0) {
     return {
       holds: [],
-      backlogTotal: buckets.backlogTotal,
+      backlogTotal: bucketTotal,
       hasMore: false,
       nextOffset: offset,
       failed: false,
@@ -1411,8 +1414,8 @@ export async function loadBacklogHolds(
   });
   return {
     holds: data.holds,
-    backlogTotal: buckets.backlogTotal,
-    hasMore: offset + buckets.propertyIds.length < buckets.backlogTotal,
+    backlogTotal: bucketTotal,
+    hasMore: offset + buckets.propertyIds.length < bucketTotal,
     nextOffset: offset + buckets.propertyIds.length,
     failed: data.holdsMeta.failed.length > 0,
   };

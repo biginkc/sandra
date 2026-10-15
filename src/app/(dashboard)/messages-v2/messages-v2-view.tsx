@@ -348,7 +348,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const on = sandraIsOn(badges);
   const statusText = props.badgesError
     ? "Sandra's status couldn't be checked"
-    : on
+    : badges.length === 0
+      ? "Rules not loaded"
+      : on
       ? "Sandra is on"
       : "Sandra is watching, not acting yet";
 
@@ -384,7 +386,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             <span
               aria-hidden
               title={live ? "Live" : "Connecting"}
-              className={cn("size-2 rounded-full", live && on && !props.badgesError ? "bg-emerald-600" : "bg-muted-foreground")}
+              className={cn("size-2 rounded-full", live && on && badges.length > 0 && !props.badgesError ? "bg-emerald-600" : "bg-muted-foreground")}
             />
             <span className="font-medium">{statusText}</span>
             {week && (

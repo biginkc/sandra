@@ -248,6 +248,48 @@ describe("MessagesV2View", () => {
     expect(text).not.toContain("right");
   });
 
+  it("treats an empty rules list as unknown, not as 'Sandra is on'", async () => {
+    await mount({ ...props(), badges: [] });
+    const text = screen.getByTestId("header-status").textContent ?? "";
+    expect(text).toContain("Rules not loaded");
+    expect(text).not.toContain("Sandra is on");
+  });
+
+  it("'Show older' pages the New holds the page did not load before the backlog, and says how many remain", async () => {
+    const holds = Array.from({ length: 3 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
+    const page = (id: string, hasMore: boolean, nextOffset: number) => ({
+      ok: true as const,
+      data: { holds: [{ ...openHold(id), since: new Date(NOW - 50 * 86_400_000).toISOString() }], labels: [], backlogTotal: 0, hasMore, nextOffset },
+    });
+    const loadBacklog = vi.fn(async (input: { offset: number; limit?: number; bucket?: "new" | "backlog" }) =>
+      input.bucket === "new" ? page("new-extra", false, 301) : page("backlog-one", false, 1),
+    );
+    await mount({
+      ...props([], holds),
+      holdsSplit: { backlogBefore: "2026-10-08T00:00:00Z", newTotal: 301, newShown: 300, backlogTotal: 1 },
+      loadBacklog,
+    });
+    expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
+    expect(loadBacklog).toHaveBeenLastCalledWith({ offset: 300, limit: 50, bucket: "new" });
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
+    expect(loadBacklog).toHaveBeenLastCalledWith({ offset: 0, limit: 50, bucket: "backlog" });
+    expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("shows a failed alert and load warnings as short plain lines", async () => {
+    const held = { ...openHold("p1"), alert: { status: "failed" as const, reason: "x" } };
+    await mount({
+      ...props([], [held]),
+      holdsMeta: { total: 1, shown: 1, truncated: false, totalState: "exact", failed: [], contextErrors: ["step lookup"], deadLetterUnavailable: true },
+    });
+    expect(screen.getByTestId("hold-alert")).toHaveTextContent("Alert failed");
+    expect(screen.getByTestId("holds-context-errors")).toHaveTextContent("Some details could not be loaded");
+    expect(screen.getByTestId("dead-letter-unavailable")).toBeInTheDocument();
+  });
+
   it("does not claim Sandra is on when the rule status could not be loaded", async () => {
     await mount({ ...props(), badgesError: "Mode badges unavailable — x" });
     const text = screen.getByTestId("header-status").textContent ?? "";
@@ -478,7 +520,7 @@ describe("MessagesV2View", () => {
     expect(loadBacklog).not.toHaveBeenCalled();
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(23));
-    expect(loadBacklog).toHaveBeenCalledWith({ offset: 0, limit: 50 });
+    expect(loadBacklog).toHaveBeenCalledWith({ offset: 0, limit: 50, bucket: "backlog" });
     expect(screen.queryByText(/backlog/i)).toBeNull();
   });
 
