@@ -14,7 +14,6 @@ import {
   applyResults,
   cardFlags,
   commitIfCurrent,
-  isCurrent,
   loadedCard,
   type CardRecord,
   type CardTable,

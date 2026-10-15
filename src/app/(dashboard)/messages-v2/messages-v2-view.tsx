@@ -150,6 +150,13 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     text: new Map(props.threads ?? []),
     failed: new Set(props.threadFailedRunIds ?? []),
   }));
+  /** The current thread snapshot key, for async writers (mirrors threadTable.snapshotKey). */
+  const threadEpoch = useRef<unknown>(0);
+  /** Request order for every thread writer (live fetches and earlier-day loads). */
+  const threadSeq = useRef(0);
+  useEffect(() => {
+    threadEpoch.current = threadTable.snapshotKey;
+  }, [threadTable.snapshotKey]);
   const threads = threadTable.text;
   const threadFailed = threadTable.failed;
   // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
@@ -264,13 +271,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [threadRetry, setThreadRetry] = useState(0);
   // Thread results are keyed to (snapshot, run id, version): on a new snapshot, in-flight results from the previous
   // one are dropped and the request bookkeeping restarts from the server's threads.
-  const threadEpoch = useRef<unknown>(0);
-  /** Request order for every thread writer (live fetches and earlier-day loads). */
-  const threadSeq = useRef(0);
   const epochFor = useRef<unknown>(lastInitial);
-  useEffect(() => {
-    threadEpoch.current = threadTable.snapshotKey;
-  }, [threadTable.snapshotKey]);
   useEffect(() => {
     if (epochFor.current === lastInitial) return;
     epochFor.current = lastInitial;
