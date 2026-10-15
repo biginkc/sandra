@@ -642,7 +642,7 @@ async function resolveRepSmsInboundStamp(args: {
   // failure may hide a stored original: send unstamped instead of claiming a
   // newer reply was handled.
   const missing = lastError?.code === "42883" || lastError?.code === "PGRST202" ||
-    /could not find the function|does not exist/i.test(lastError?.message ?? "");
+    /could not find the function|function .* does not exist/i.test(lastError?.message ?? "");
   return missing ? supplied : null;
 }
 
