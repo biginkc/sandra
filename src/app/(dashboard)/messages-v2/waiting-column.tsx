@@ -79,7 +79,8 @@ function WaitingCard({
   const run = hold.run;
   const who = sellerWho(label);
   // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
-  const effectiveRun = run ? (pinned ? { ...run, reason: hold.flag_reason ?? null } : withEffectiveReason(run, hold.flag_reason)) : null;
+  // The ONE effective reason, as on the tape: the run's own reason, else the (snapshot) flag reason.
+  const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
   const cardRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (selected) cardRef.current?.scrollIntoView?.({ block: "center" });
@@ -120,7 +121,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
+        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">

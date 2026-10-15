@@ -37,31 +37,50 @@ export function tapeTagForWord(word: string | null | undefined): TapeTag | null 
     case "nurture":
       return TAGS.later;
     case "not_interested":
+    case "not_selling":
       return TAGS.no;
     case "wrong_number":
+    case "wrong_number_keyword":
       return TAGS.wrong;
     case "opted_out":
     case "opt_out":
     case "dnc":
     case "threat_dnc":
+    case "optout_phrase_needs_confirm":
+    case "stop_keyword":
+    case "dnc_keyword":
       return TAGS.stop;
     case "hostile_needs_confirm":
+    case "hostile":
       return TAGS.hostile;
     case "unclear":
     case "bad_number":
     case "needs_review":
+    case "jev_unclear_no_action":
+    case "low_confidence":
       return TAGS.unclear;
     default:
       return null;
   }
 }
 
-/** "model:price_or_offer", "keyword:price_offer", "jev_below_threshold:nurture", "hostile_needs_confirm:<id>" -> the word that matters. */
+/** Reason formats whose SECOND part is the word that matters (`<prefix>:<outcome or kind>`). */
+const WORD_AFTER_PREFIX = new Set(["model", "keyword", "jev_below_threshold", "automation_disabled", "human_only_outcome", "not_applicable"]);
+
+/**
+ * The word that matters in an engine reason, for every format the engine writes:
+ * "model:price_or_offer", "keyword:price_offer", "jev_below_threshold:nurture", "automation_disabled:<outcome>",
+ * "human_only_outcome:<outcome>", "not_applicable:<outcome>" -> the second part; "hostile_needs_confirm:<id>",
+ * "optout_phrase_needs_confirm:<id>", "low_confidence:0.82" -> the first part. A free-text model reason that starts
+ * with "hostile" ("model:hostile sentiment, ...") reads as "hostile".
+ */
 export function reasonWord(reason: string | null | undefined): string | null {
   if (!reason) return null;
   const parts = reason.split(":");
-  if (parts[0] === "model" || parts[0] === "keyword" || parts[0] === "jev_below_threshold") {
-    return parts[1] ?? null;
+  if (WORD_AFTER_PREFIX.has(parts[0])) {
+    const word = (parts[1] ?? "").trim();
+    if (/^hostile\b/i.test(word)) return "hostile";
+    return word || null;
   }
   return parts[0] || null;
 }
@@ -178,14 +197,15 @@ export function withEffectiveReason<T extends { reason: string | null }>(run: T,
 
 /** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". `flagReason` is the hold's flag reason when this run is the hold's current run. */
 export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null, pinned = false): TapeView {
-  // `pinned`: the reason is the waiting-list snapshot's, and it wins over the run's own reason and outcome.
-  const run = pinned ? { ...rawRun, reason: flagReason ?? null } : withEffectiveReason(rawRun, flagReason);
+  // `pinned`: the hold's run and flag reason are the waiting-list snapshot's. The ONE effective reason is the pinned
+  // run's own reason, else the pinned flag reason (I6), exactly as on the card; never a live or later reason.
+  const run = withEffectiveReason(rawRun, flagReason);
   // A snapshot run reads like its card whatever the run's own status: pinned tag + sentence, and the run's
   // skipped / errored status as the separate "what she did" line.
   if (pinned && (run.status === "skipped" || run.status === "error")) {
     return {
       kind: "decided",
-      tag: pinnedTag(flagReason),
+      tag: pinnedTag(run.reason),
       stage: "waiting",
       sentence: holdReasonSentence(run, run.reason, who, true),
       did: run.status === "skipped" ? quietSkip(run) : "Something went wrong reading this one",
@@ -194,9 +214,9 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 
-  // Pinned: the snapshot reason is the ONLY source of the tag. Null or unmapped -> the neutral tag, never the run's
-  // old reason or classifier outcome (so the tape cannot say more than the card).
-  const tag = pinned ? pinnedTag(flagReason) : tapeTagForRun(run);
+  // Pinned: the effective reason (pinned run's reason, else pinned flag reason) is the ONLY source of the tag. Null or
+  // unmapped -> the neutral tag, never the classifier outcome (so the tape cannot say more than the card).
+  const tag = pinned ? pinnedTag(run.reason) : tapeTagForRun(run);
   const terminal = TERMINAL.has(run.status);
   const delayed = hasStep(run.steps, "reply_delay_scheduled", "applied");
   const replySent = run.status === "replied" || run.steps.some((s) => s.kind === "reply" && s.result === "sent");
