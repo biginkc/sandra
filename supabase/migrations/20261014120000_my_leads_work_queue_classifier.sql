@@ -64,19 +64,21 @@ language sql stable security definer set search_path = '' as $$
   -- homeowner contact (the attribution rule of the touch facts and the SMS history read).
   mx as materialized (
     select b.property_id as lead_id, m.id, m.created_at, m.direction, m.status, m.campaign_id, m.scheduled_for,
-      m.metadata, m.sent_at, m.failed_at, (m.property_id is null) as contact_only
+      m.metadata, m.sent_at, m.delivered_at, m.failed_at, (m.property_id is null) as contact_only
     from base b
     join public.messages m on m.org_id = p_org and m.channel = 'sms' and m.property_id = b.property_id and m.created_at <= p_at
     union all
     select b.property_id, m.id, m.created_at, m.direction, m.status, m.campaign_id, m.scheduled_for,
-      m.metadata, m.sent_at, m.failed_at, true
+      m.metadata, m.sent_at, m.delivered_at, m.failed_at, true
     from base b
     join public.messages m on m.org_id = p_org and m.channel = 'sms' and m.property_id is null
       and m.contact_id = b.contact_id and b.contact_id is not null and m.created_at <= p_at),
   -- The org's ledger receipts for queue leads, read once (matched to messages by message_id below).
   lg as materialized (
-    select l.message_id, l.state, l.updated_at from public.rep_sms_delivery_ledger l
-    where l.org_id = p_org and l.message_id is not null and l.property_id in (select property_id from base)),
+    select distinct on (l.message_id) l.message_id, l.state, l.updated_at
+    from public.rep_sms_delivery_ledger l
+    where l.org_id = p_org and l.message_id is not null and l.property_id in (select property_id from base)
+    order by l.message_id, l.updated_at desc),
   mf as materialized (
     select x.*,
       case when x.stamp ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then x.stamp::uuid end as stamp_id,
@@ -92,14 +94,19 @@ language sql stable security definer set search_path = '' as $$
       end as cls,
       -- accepted: provider accepted (sent/delivered, or the ledger says accepted/delivered, or it
       -- was accepted and later failed delivery). Nothing queued/pending/reserved/sending counts.
-      (x.status in ('sent', 'delivered') or x.ledger_state in ('accepted', 'delivered', 'delivery_failed')) as acc
+      (x.status in ('sent', 'delivered') or x.ledger_state in ('accepted', 'delivered', 'delivery_failed')) as acc,
+      -- effective send time of an outbound text: when it actually went out (sent_at, then delivered_at, then the ledger
+      -- receipt's accepted/delivered timestamp), falling back to created_at only for legacy rows that never recorded one.
+      -- A scheduled/campaign text created days before it was sent is measured from the send.
+      case when x.direction = 'outbound' then coalesce(x.sent_at, x.delivered_at,
+        case when x.ledger_state in ('accepted', 'delivered', 'delivery_failed') then x.ledger_at end, x.created_at) else x.created_at end as eff_at
     from (
       select mx.*, mx.metadata ->> 'inbound_message_id' as stamp, mx.metadata ->> 'generated_by' as gen,
         mx.metadata ->> 'reply_source' as reply_source,
         (mx.metadata ->> 'approved_by_user_id') is not null as approved,
         mx.direction = 'outbound' and exists (select 1 from public.sequence_step_runs r where r.message_id = mx.id) as is_drip,
-        case when mx.direction = 'outbound' then (select l.state from lg l where l.message_id = mx.id order by l.updated_at desc limit 1) end as ledger_state
-      from mx) x),
+        lg.state as ledger_state, lg.updated_at as ledger_at
+      from mx left join lg on lg.message_id = mx.id and mx.direction = 'outbound') x),
   -- User events used by the handled-reply rule and by failure supersession. An attempt logged
   -- through the workflow (log_acquisition_attempt) is deliberately NOT here: attempts count only
   -- through acquisition_attempts.outcome (reached / voicemail), so a no-answer call never clears.
@@ -132,7 +139,9 @@ language sql stable security definer set search_path = '' as $$
       exists (select 1 from mf r
               where r.lead_id = i.lead_id and r.direction = 'outbound' and r.campaign_id is null and not r.is_drip
                 and r.cls in ('human', 'ai') and r.acc
-                and (r.created_at, r.id) > (i.ts, coalesce(i.mid, '00000000-0000-0000-0000-000000000000'::uuid))
+                and (r.eff_at, r.id) > (i.ts, coalesce(i.mid, '00000000-0000-0000-0000-000000000000'::uuid))
+                -- a text whose reply-to stamp was captured but could not be established handles nothing (PR #872)
+                and coalesce(r.metadata ->> 'inbound_stamp_unresolved', '') <> 'true'
                 -- reply-to stamp: a text stamped with an inbound older than this one does not answer it
                 and (i.kind = 'call' or not exists (
                   select 1 from mf s where s.lead_id = r.lead_id and s.id = r.stamp_id and s.direction = 'inbound'
@@ -146,8 +155,8 @@ language sql stable security definer set search_path = '' as $$
     from inb i),
   -- Last seller-facing outbound that the provider accepted.
   lo as (
-    select distinct on (lead_id) lead_id, created_at as ts, id, cls
-    from mf where direction = 'outbound' and acc order by lead_id, created_at desc, id desc),
+    select distinct on (lead_id) lead_id, eff_at as ts, id, cls
+    from mf where direction = 'outbound' and acc order by lead_id, eff_at desc, id desc),
   lo_final as (
     select lo.lead_id, e2.completed_at
     from lo
@@ -190,8 +199,9 @@ language sql stable security definer set search_path = '' as $$
       min(eff) filter (where not is_offer and eff > p_at + interval '15 minutes') as future_min,
       min(eff) filter (where is_offer) as chain_eff,
       min(eff - interval '15 minutes') filter (where eff - interval '15 minutes' > p_at) as next_boundary,
-      min(((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago')
-        filter (where not is_offer and ((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' > p_at) as next_missed
+      -- a callback is a missed callback once it is MORE than 7 Chicago days old, so the change lands 1 ms after the cutoff
+      min(((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' + interval '1 millisecond')
+        filter (where not is_offer and ((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' + interval '1 millisecond' > p_at) as next_missed
     from ap group by lead_id),
   nt as (
     select distinct t.related_property_id as lead_id
@@ -268,7 +278,7 @@ language sql stable security definer set search_path = '' as $$
     select b0.* from bk0 b0
     where not exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.event_type = 'rep_sms_failure_dismissed' and ev.source_id = b0.ref_id)
       and (not b0.failure or not (
-        exists (select 1 from mf r where r.lead_id = b0.lead_id and r.direction = 'outbound' and r.cls = 'human' and r.acc and r.created_at > b0.at)
+        exists (select 1 from mf r where r.lead_id = b0.lead_id and r.direction = 'outbound' and r.cls = 'human' and r.acc and r.eff_at > b0.at)
         or exists (select 1 from ev where ev.lead_id = b0.lead_id and ev.handles and ev.created_at > b0.at)
         or exists (select 1 from public.sequence_enrollments se
                    where se.org_id = p_org and se.property_id = b0.lead_id and se.enrolled_by_user_id is not null and se.enrolled_at > b0.at)))),
@@ -298,7 +308,7 @@ language sql stable security definer set search_path = '' as $$
       union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status = 'failed' and m.cls = 'human'
       union all select b.property_id, l.updated_at + interval '15 minutes 1 millisecond' from base b
         join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id and l.state in ('reserved', 'sending')
-      union all select b.property_id, o.lease_expires_at from base b
+      union all select b.property_id, o.lease_expires_at + interval '1 millisecond' from base b
         join public.rep_sms_obligations o on o.org_id = p_org and o.property_id = b.property_id and o.state in ('claimed', 'sending')
     ) x where t > p_at),
   tmn as (select lead_id, min(t) as next_at from tm group by lead_id),

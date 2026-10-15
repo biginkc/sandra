@@ -63,7 +63,7 @@ export function oldPlacement(callNext, inDrip, topTen) {
 }
 
 export async function compare(client, { org, member, at }) {
-  await client.query('begin read only');
+  await client.query('begin isolation level repeatable read read only');
   try {
     const when = at ? new Date(at).toISOString() : (await client.query('select statement_timestamp() as t')).rows[0].t.toISOString();
     const callNext = (await client.query('select * from public.my_leads_call_next_rows($1,$2,$3)', [org, member, when])).rows;

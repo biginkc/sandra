@@ -93,13 +93,13 @@ async function world(db: Client) {
     "insert into public.acquisition_attempts(org_id,property_id,actor_user_id,attempt_kind,source,occurred_at,recorded_at,idempotency_key,outcome) values ($1,$2,$3,'outreach','manual',$4,$4,$5,$6)",
     [org, property, sam, when, randomUUID(), outcome]);
   const text = async (property: string, direction: 'inbound' | 'outbound', when: string,
-    o: { status?: string; contactOnly?: boolean; meta?: Json; campaign?: boolean; scheduledFor?: string; id?: string } = {}) => {
+    o: { status?: string; contactOnly?: boolean; meta?: Json; campaign?: boolean; scheduledFor?: string; id?: string; sentAt?: string } = {}) => {
     const contact = (await db.query('select homeowner_contact_id as c from public.properties where id=$1', [property])).rows[0].c;
     const id = o.id ?? randomUUID();
-    await raw(`insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata,campaign_id,scheduled_for)
-               values ($1,$2,'sms',$3,'hi',$4,$5,$6,$7,$8,$9,$10)`,
+    await raw(`insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata,campaign_id,scheduled_for,sent_at)
+               values ($1,$2,'sms',$3,'hi',$4,$5,$6,$7,$8,$9,$10,$11)`,
       [id, org, direction, o.status ?? (direction === 'inbound' ? 'received' : 'sent'), o.contactOnly ? null : property, contact, when,
-       JSON.stringify(o.meta ?? {}), o.campaign ? randomUUID() : null, o.scheduledFor ?? null]);
+       JSON.stringify(o.meta ?? {}), o.campaign ? randomUUID() : null, o.scheduledFor ?? null, o.sentAt ?? null]);
     return id;
   };
   const note = (property: string, when: string) => raw('insert into public.lead_notes(org_id,property_id,author_user_id,body,created_at) values ($1,$2,$3,$4,$5)', [org, property, sam, 'note', when]);
@@ -628,6 +628,34 @@ fixture('S Ledger unknown dismissed (Check status can terminate it)', async (w) 
 fixture('S Obligation unknown dismissed', async (w) => {
   const id = await w.lead('s'); const o = await w.obligation(id, 'unknown', w.at(-20 * MIN)); await w.event(id, 'rep_sms_failure_dismissed', w.at(-MIN), { sourceId: o }); return id;
 }, { place: NA, reason: 'nothing_planned', row: '15' });
+// Effective send time (sent_at), not created_at
+fixture('S Campaign text created 9 days ago but sent 2 hours ago is Texted last, not Gone quiet', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'outbound', w.at(-9 * DAY), { campaign: true, sentAt: w.at(-2 * HOUR) }); return id;
+}, { place: WT, reason: 'texted_last', row: '13', headline: { by: 'campaign' } });
+fixture('S Last outbound is ordered by send time: created earlier but sent later wins', async (w) => {
+  const id = await w.lead('s');
+  await w.text(id, 'outbound', w.at(-5 * HOUR), { campaign: true, sentAt: w.at(-HOUR) });
+  await w.text(id, 'outbound', w.at(-2 * HOUR), { sentAt: w.at(-3 * HOUR) }); return id;
+}, { place: WT, reason: 'texted_last', row: '13', headline: { by: 'campaign' } });
+fixture('S Silence is measured from the send: sent 6 days ago, created 7 days ago', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'outbound', w.at(-7 * DAY), { sentAt: w.at(-6 * DAY) }); return id;
+}, { place: NA, reason: 'gone_quiet', row: '14', headline: { kind: 'texted_silent' } });
+fixture('S A reply created before the inbound but sent after it handles the inbound', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR));
+  await w.text(id, 'outbound', w.at(-4 * HOUR), { sentAt: w.at(-HOUR) }); return id;
+}, { place: WT, reason: 'texted_last', row: '13' });
+fixture('S A reply created after the inbound but sent before it does not handle it', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR));
+  await w.text(id, 'outbound', w.at(-2 * HOUR), { sentAt: w.at(-4 * HOUR) }); return id;
+}, { place: NA, reason: 'new_reply', row: '5' });
+fixture('S Outbound with an unresolved reply-to stamp handles no reply but still counts as Texted last once the reply is handled', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR));
+  await w.text(id, 'outbound', w.at(-HOUR), { meta: { inbound_stamp_unresolved: true } }); return id;
+}, { place: NA, reason: 'new_reply', row: '5' });
+fixture('S Unresolved-stamp text after a reached call: reply handled by the call, text is Texted last', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR)); await w.attempt(id, w.at(-2 * HOUR), 'reached');
+  await w.text(id, 'outbound', w.at(-HOUR), { meta: { inbound_stamp_unresolved: true } }); return id;
+}, { place: WT, reason: 'texted_last', row: '13' });
 fixture('S Ledger sending 5 min is not Broken yet', async (w) => {
   const id = await w.lead('s'); await w.ledger(id, 'sending', w.at(-5 * MIN)); return id;
 }, { place: NA, reason: 'nothing_planned', row: '15' });
@@ -909,6 +937,31 @@ it('a fresh unknown step claim (not yet 15 minutes old) schedules the stuck boun
   });
 });
 
+it('an expiring claimed obligation: the reported boundary is the first instant it is Broken', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('s'); await w.obligation(id, 'claimed', w.at(-5 * MIN), { lease: w.at(10 * MIN) });
+    const r = await w.page(w.sam, { tab: 'all' });
+    expect(r.rows[0].reason).toBe('nothing_planned');
+    expect(new Date(r.nextChangeAt).toISOString()).toBe(plus1ms(w.at(10 * MIN)));
+    const later = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
+    expect(later.rows[0]).toMatchObject({ reason: 'broken', headline: { kind: 'followup_text_status_unknown' } });
+  });
+});
+
+it('a callback crossing 7 Chicago days with an unanswered reply present: next_change_at lands where the reply takes over', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const now = iso('2026-10-20T15:00:00Z');
+    const id = await w.lead('s'); await w.appt(id, '2026-10-13T16:00:00Z'); await w.text(id, 'inbound', '2026-10-19T12:00:00Z');
+    const before = await w.page(w.sam, { tab: 'needs_attention', when: now });
+    expect(before.rows[0]).toMatchObject({ reason: 'due', rowNo: '4' });
+    expect(new Date(before.nextChangeAt).toISOString()).toBe('2026-10-20T16:00:00.001Z');
+    const after = await w.page(w.sam, { tab: 'needs_attention', when: new Date(before.nextChangeAt) });
+    expect(after.rows[0]).toMatchObject({ reason: 'new_reply', rowNo: '5' });
+  });
+});
+
 it('search is bounded, stacks with chips and stage, and matches name, address and phone', async () => {
   await withDb(async (db) => {
     const w = await world(db);
@@ -1022,6 +1075,7 @@ it('classifies a 400-lead queue within the timing bound, rows and counts from on
       else if (i % 4 === 2) await w.drip(id, { next: w.at((i % 30 + 1) * HOUR) });
       if (i % 7 === 0) await w.appt(id, w.at((i % 5 - 2) * DAY));
       if (i % 13 === 0) await w.ledger(id, 'delivery_failed', w.at(-HOUR));
+      for (let k = 0; k < 4; k += 1) await w.text(id, k % 2 ? 'inbound' : 'outbound', w.at(-(20 + k) * DAY));   // older message history
     }
     await db.query('analyze');
     const t0 = Date.now();
