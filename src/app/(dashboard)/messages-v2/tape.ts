@@ -194,7 +194,11 @@ export function deriveTape(run: RunWithSteps, who: string): TapeView {
     kind: "decided",
     tag,
     stage,
-    sentence: sentenceFor(tag, who, { replySent, closed, waiting: waiting && !handed, handed }),
+    // A held run reads exactly like its card in "Waiting for a person": what Sandra thought and why it waited.
+    sentence:
+      waiting && !handed
+        ? holdReasonSentence(run, run.reason, who)
+        : sentenceFor(tag, who, { replySent, closed, waiting: false, handed }),
     did: didLine(run, stage, replySent),
   };
 }

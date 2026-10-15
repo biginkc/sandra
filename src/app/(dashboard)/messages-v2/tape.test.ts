@@ -112,6 +112,25 @@ describe("deriveTape", () => {
     expect(v).toMatchObject({ kind: "decided", stage: "waiting", tag: { label: "Hostile" } });
   });
 
+  it.each([
+    ["not_interested", "model:not_interested"],
+    ["nurture", "jev_below_threshold:nurture"],
+    ["wrong_number", "jev_below_threshold:wrong_number"],
+    ["new_lead", "model:price_or_offer"],
+    ["unclear", "model:needs_review"],
+    ["opted_out", "model:opt_out"],
+  ])("a held %s run reads the same on the tape as on its waiting card", (outcome, reason) => {
+    const r = run({ status: "held", reason, steps: [step(1, "jev", "classify", "pass", { outcome })] });
+    const v = deriveTape(r, "Martha");
+    expect(v.kind === "decided" && v.sentence).toBe(holdReasonSentence(r, reason, "Martha"));
+    expect(v.kind === "decided" && v.sentence).not.toMatch(/replied/);
+  });
+
+  it("a held not_interested says what Sandra thought and why it waited", () => {
+    const v = deriveTape(run({ status: "held", reason: "jev_below_threshold:not_interested", steps: [step(1, "jev", "classify", "pass", { outcome: "not_interested" })] }), "Martha");
+    expect(v.kind === "decided" && v.sentence).toBe("Martha may have said no. Not sure enough to close it.");
+  });
+
   it("never leaks engine step names into the sentence or the did line", () => {
     const names = ["claim", "resolve_threshold", "needs_attention", "luna_suggest"];
     const v = deriveTape(run({ status: "held", reason: "model:price_or_offer", steps: names.map((n, i) => step(i + 1, "action", n, "applied")) }), "Sue");
