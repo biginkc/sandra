@@ -136,6 +136,12 @@ describe("toAlertHolds", () => {
       startedAt: "2026-10-08T10:00:00.000Z",
       name: "Dana",
       hot: false,
+      reasonKey: "jev_decision",
+      flagHot: false,
+      runHot: false,
+      runInbound: "msg-1",
+      runReason: null,
+      runStartedAt: "2026-10-08T10:00:00.000Z",
     });
   });
 
@@ -152,7 +158,8 @@ describe("toAlertHolds", () => {
 
 describe("payloads never carry seller message text", () => {
   it("no channel's text contains the run's inbound_preview", async () => {
-    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer", since: "2026-10-15T10:00:00.000Z", alert_since: "2026-10-15T10:00:00.000Z" })], labels);
+    // The loader adds the flag time for hot holds; stand in for it here.
+    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer", since: "2026-10-15T10:00:00.000Z", alert_since: "2026-10-15T10:00:00.000Z" })], labels).map((h) => ({ ...h, flagAt: "2026-10-15T10:00:00.000Z" }));
     expect(JSON.stringify(holds)).not.toContain("SELLER SAID");
     const t = makeDeps({ holds, emailEnabled: true });
     t.setNow("2026-10-15T12:00:00.000Z");

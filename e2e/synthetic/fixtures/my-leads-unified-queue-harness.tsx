@@ -53,6 +53,22 @@ add(3, "tl", (id, i) => def(id, "texted_last", "13", { at: ago(60 * 6 * i), by: 
 add(2, "oo", (id, i) => def(id, "offer_out", "11", { kind: "offer_out", at: ahead(60 * 24 * i) }, { place: "their_move", stage: "offer_sent" }))
 add(2, "cb", (id, i) => def(id, "callback_booked", "11", { kind: "callback_booked", at: ahead(60 * 5 * i) }, { place: "their_move" }))
 add(2, "uc", (id, i) => def(id, "under_contract", "1", { signedAt: ago(60 * 24 * i) }, { place: "neither", stage: "under_contract" }))
+// One homeowner owns three houses (one another rep's): the row shows "Owns 3 houses".
+{
+  const i = defs.findIndex((d) => d.propertyId === "nl1")
+  defs[i] = {
+    ...defs[i],
+    homeownerPropertyCount: 3,
+    homeownerHouses: {
+      count: 3,
+      houses: [
+        { propertyId: "nl1", address: `${defs[i].row.address}, Kansas City, MO`, assignedUserId: "me", isMine: true },
+        { propertyId: "nl1-b", address: "18 Second Home Rd, Olathe, KS", assignedUserId: "me", isMine: true },
+        { propertyId: "nl1-c", address: "905 Elm Ct, Lenexa, KS", assignedUserId: "rep-2", isMine: false },
+      ],
+    },
+  }
+}
 for (const d of defs) original.set(d.propertyId, d)
 
 const matches = (d: WorkFacts, search: string) =>

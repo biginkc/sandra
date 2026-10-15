@@ -190,6 +190,12 @@ export function toAlertHolds(
       name: label?.name ?? "Unknown sender",
       reasonLabel: holdReasonLabel(holdReasonKey(hold)),
       hot: isHotHold(hold),
+      reasonKey: holdReasonKey(hold),
+      flagHot: isHotReason(hold.flag_reason),
+      runHot: [hold.run?.final_outcome, hold.run?.reason].some((v) => typeof v === "string" && isHotReason(v)),
+      runInbound: hold.run?.inbound_message_id ?? null,
+      runReason: hold.run?.reason ?? null,
+      runStartedAt: hold.run?.started_at ?? null,
     });
   }
   return out;

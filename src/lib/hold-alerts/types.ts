@@ -21,6 +21,18 @@ export type HoldInfo = {
   reasonLabel: string;
   /** Hot seller (lib/hot-sellers/hot.ts), nothing else. Only hot holds ping. */
   hot: boolean;
+  /** The flag reason itself is hot. */
+  flagHot?: boolean;
+  /** The hold's run (latest) is hot by its own outcome/reason. */
+  runHot?: boolean;
+  runInbound?: string | null;
+  /** The hold's run reason (to recognise a failed hand-off whose flag write no-oped). */
+  runReason?: string | null;
+  runStartedAt?: string | null;
+  /** The hold's reason key (its flag reason, else its sources). */
+  reasonKey?: string;
+  /** When the hold's flag was set (properties.last_ai_escalation_at): the hot hold's alert key and cutoff time. */
+  flagAt?: string | null;
 };
 
 export type Recipient = { userId: string; role: "owner" | "member" };
@@ -32,11 +44,18 @@ export type HotPromotion = {
   assigneeUserId: string;
   /** First name (or "Unknown sender"); never message text or address. */
   name: string;
+  /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text";
-  /** Delivery key; defaults to hotPromotionKey(propertyId). */
-  key?: string;
+  kind?: "handoff" | "hot_text" | "hot_failed";
+  /** hot_text on a lead that already needs a person: may be unassigned. */
+  heldLead?: boolean;
+  /** hot_failed: the hold reason it carries (for the existing hold alert copy). */
+  reason?: string;
+  /** Property address (record data, never seller text); used by the hot_text alert. */
+  address?: string | null;
+  /** Delivery key: hot_handoff:<inbound> or hot_text:<inbound>. */
+  key: string;
 };
 
 export type DeliveryRow = {
@@ -150,8 +169,8 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
-  /** Send-time check: the property is still assigned to this user. */
-  isPropertyAssignedTo(orgId: string, propertyId: string, userId: string): Promise<boolean>;
+  /** Send-time check: who the property is assigned to right now (null = nobody). */
+  loadPropertyAssignee(orgId: string, propertyId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

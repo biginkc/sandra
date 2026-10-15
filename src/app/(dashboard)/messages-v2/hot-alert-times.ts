@@ -1,4 +1,4 @@
-import { hotPromotionKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import type { LooseSupabase } from "./queries";
 import type { RunWithSteps } from "./types";
@@ -42,8 +42,10 @@ export function hotAlertKeyForRun(run: RunWithSteps): string | null {
   const step = run.steps.find((s) => s.name === "assign_hot_lead" && s.result === "applied");
   if (!step) return null;
   const status = (step.detail as { status?: string } | null)?.status;
-  if (status === "already_owned") return run.inbound_message_id ? hotTextKey(run.inbound_message_id) : null;
-  return hotPromotionKey(run.property_id);
+  if (status === "owned_by_someone_else") return null;
+  if (!run.inbound_message_id) return null;
+  // The alert this run's own text produced: its hand-off, or its hot text.
+  return status === "already_owned" ? hotTextKey(run.inbound_message_id) : hotHandoffKey(run.inbound_message_id);
 }
 
 /** Runs that handed a hot seller to Jarrad get `hotAlertSentAt` when both alerts are out. */

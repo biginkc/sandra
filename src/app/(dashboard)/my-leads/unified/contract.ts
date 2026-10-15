@@ -4,6 +4,7 @@
  * (supabase/migrations/20261015010000_my_leads_work_queue_classifier.sql). Do not change a field
  * here without changing the SQL contract; keep this file free of server-only imports.
  */
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
 import type { QueueRow } from "@/lib/my-leads/queries";
 
 export const WORK_TABS = ["needs_attention", "waiting", "all"] as const;
@@ -89,6 +90,10 @@ export type WorkFacts = {
   lastTouch: { kind: LastTouchKind; at: string } | null;
   /** The existing queue row; feeds the existing dialogs/workflows unchanged. */
   row: QueueRow;
+  /** The classifier's count of non-deleted houses this homeowner owns in the org; absent on older classifiers. */
+  homeownerPropertyCount?: number;
+  /** Every house this homeowner owns in the org (the "Owns N houses" badge); absent when unknown. */
+  homeownerHouses?: HomeownerHouses;
 };
 
 export type WorkPage = {

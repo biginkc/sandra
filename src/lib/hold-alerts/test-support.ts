@@ -139,6 +139,11 @@ export const OWNER: Recipient = { userId: "owner-1", role: "owner" };
 export const ACQ: Recipient = { userId: "acq-1", role: "member" };
 
 export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
+  // A hot hold defaults to the common shape: the flag reason itself is hot, flagged at its start.
+  const hotDefaults: Partial<HoldInfo> =
+    over.hot && over.flagHot === undefined && over.runHot === undefined
+      ? { flagHot: true, ...("flagAt" in over ? {} : { flagAt: over.startedAt ?? "2026-10-15T10:00:00.000Z" }) }
+      : {};
   return {
     holdKey: "prop-1:draft_held",
     propertyId: "prop-1",
@@ -147,6 +152,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
     name: "Dana",
     reasonLabel: "price talk",
     hot: false,
+    ...hotDefaults,
     ...over,
   };
 }
@@ -179,7 +185,7 @@ export function makeDeps(
       return new Set(ids.filter((id) => held.has(id)));
     },
     loadHotPromotions: async () => ({ promotions: over.promotions ?? [], complete: true }),
-    isPropertyAssignedTo: async () => true,
+    loadPropertyAssignee: async () => OWNER.userId,
     loadHotOwner: async () => (over.hotOwner === undefined ? OWNER.userId : over.hotOwner),
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,

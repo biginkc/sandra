@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { hotPromotionKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -18,13 +18,7 @@ const HOUR_MS = 60 * 60 * 1000;
 export const MAX_DMS_PER_RECIPIENT_PER_HOUR = 20;
 export const MAX_SMS_PER_HOUR = 10;
 export const DEFAULT_BUDGET_MS = 50_000;
-/**
- * Hot alerts (Slack + SMS to Jarrad) start with PR 2. Hot holds that began
- * before this stay silent, so switching the hot definition on does not text
- * Jarrad about weeks-old holds (about 38 were open on 2026-10-15). Today's
- * hot sellers still alert.
- */
-export const HOT_ALERTS_START_ISO = "2026-10-15T00:00:00.000Z";
+export { HOT_ALERTS_START_ISO };
 
 type Task = {
   input: EnsureInput;
@@ -40,14 +34,40 @@ export function isNewHold(hold: Pick<HoldInfo, "startedAt">, alertsSinceMs: numb
   return Number.isFinite(startedMs) && startedMs >= alertsSinceMs;
 }
 
+/**
+ * Immediately before a hot provider call: re-resolve Jarrad and require the
+ * same person this pass selected. Changed or ambiguous → skip; a failed lookup
+ * → retryable failure (nothing was sent).
+ */
+async function hotOwnerStillIs(
+  deps: HoldAlertDeps,
+  orgId: string,
+  owner: string,
+): Promise<ChannelResult | null> {
+  let current: string | null;
+  try {
+    current = await deps.loadHotOwner(orgId);
+  } catch (error) {
+    return { status: "failed", error: `hot owner re-check failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (current !== owner) {
+    reportError(new Error("hold alerts: hot owner changed or ambiguous at send time; not sent"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+    return { status: "skipped", reason: current === null ? "hot_owner_ambiguous" : "hot_owner_changed" };
+  }
+  return null;
+}
+
 /** "Couldn't tell who to alert" is reported once per org per hour (per instance), not every pass. */
-const ownerUnknownReported = new Map<string, number>();
-function shouldReportOwnerUnknown(orgId: string, nowMs: number): boolean {
+const reportedThisHour = new Map<string, number>();
+function shouldReportOnce(key: string, nowMs: number): boolean {
   const hour = Math.floor(nowMs / HOUR_MS);
-  if (ownerUnknownReported.get(orgId) === hour) return false;
-  ownerUnknownReported.set(orgId, hour);
+  if (reportedThisHour.get(key) === hour) return false;
+  reportedThisHour.set(key, hour);
   return true;
 }
+const shouldReportOwnerUnknown = (orgId: string, nowMs: number) => shouldReportOnce(orgId, nowMs);
 
 const emptySummary = (): OrgAlertSummary => ({
   holds: 0,
@@ -89,9 +109,10 @@ export async function runHoldAlertsForOrg(
   // watermark starts no later than HOT_ALERTS_START_ISO, so a hot seller that
   // arrived before the first pass still alerts on it; older backlog stays silent.
   const nowIso = deps.now().toISOString();
-  // max(cutoff, now - 24h), never later than now: a future new org does not alert its whole backlog.
-  const initMs = Math.min(Date.parse(nowIso), Math.max(Date.parse(HOT_ALERTS_START_ISO), Date.parse(nowIso) - 24 * HOUR_MS));
-  const initIso = new Date(initMs).toISOString();
+  // The cutoff is authoritative: a new org's watermark is HOT_ALERTS_START_ISO
+  // (or now, if the clock is somehow before it), so every post-cutoff hot hold
+  // is covered; delivery keys keep each one to a single alert.
+  const initIso = Date.parse(nowIso) > Date.parse(HOT_ALERTS_START_ISO) ? HOT_ALERTS_START_ISO : nowIso;
   const mark = await deps.store.getOrInitAlertsSince(orgId, initIso);
   const alertsSinceMs = Date.parse(mark.alertsSince);
 
@@ -129,7 +150,38 @@ export async function runHoldAlertsForOrg(
   );
   summary.holds = holds.length;
   const hotStartMs = Date.parse(HOT_ALERTS_START_ISO);
-  const hotHolds = holds.filter((h) => h.hot && isNewHold(h, hotStartMs));
+  // A hot hold's own moment is its flag time (falls back to its start): the
+  // cutoff and the alert key use it, never later activity on the lead.
+  // Design B: a hot hold alerts on its own verified hot moment.
+  //  - flag reason itself hot → hot_flag:<property>:<flagAt>, cutoff on flagAt;
+  //  - else the hold's run is hot → hot_text:<run inbound>, cutoff on the run's start;
+  //  - no verifiable hot time → fail closed (not alerted, reported).
+  // A failed hand-off hold is alerted by its own event instead.
+  type HotHoldAlert = { hold: HoldInfo; key: string; at: string };
+  // A failed hand-off whose FLAG is the failure is a normal hot flag hold:
+  // hot_flag:<property>:<flagAt>, stable while open (later texts never re-key
+  // it), and its own event carries the same key. Only when the flag write
+  // no-oped (a non-hot flag was already open) is it keyed by its run,
+  // hot_failed:<run inbound>, again matching its event. Either way the hold
+  // alerts even if the event could not be written, and they dedupe.
+  const isFailedReason = (v: string | null | undefined) => HOT_HANDOFF_FAILED_REASONS.includes(v ?? "");
+  const hotCandidates = holds.filter((h) => h.hot);
+  const hotAlerts: HotHoldAlert[] = [];
+  let unverified = 0;
+  for (const h of hotCandidates) {
+    const failedByRunOnly = !h.flagHot && isFailedReason(h.runReason);
+    if (failedByRunOnly && h.runInbound && h.runStartedAt) hotAlerts.push({ hold: h, key: hotFailedKey(h.runInbound), at: h.runStartedAt });
+    else if (h.flagHot && h.flagAt) hotAlerts.push({ hold: h, key: hotFlagKey(h.propertyId, h.flagAt), at: h.flagAt });
+    else if (!h.flagHot && h.runHot && h.runInbound && h.runStartedAt) hotAlerts.push({ hold: h, key: hotTextKey(h.runInbound), at: h.runStartedAt });
+    else unverified += 1;
+  }
+  if (unverified > 0 && shouldReportOnce(`unverified:${orgId}`, startMs)) {
+    reportError(new Error("hold alerts: hot hold without a verified hot time; not alerted"), {
+      tags: { surface: "hold_alerts", orgId },
+      extra: { count: unverified },
+    });
+  }
+  const hotHolds = hotAlerts.filter((a) => isNewHold({ startedAt: a.at }, hotStartMs));
   if (hotHolds.length === 0 && promotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
@@ -158,27 +210,37 @@ export async function runHoldAlertsForOrg(
     });
   }
   const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
-  // ONE alert key per hot seller (hotPromotionKey), shared by holds and
-  // promotions, property_id null so archive-on-clear never re-fires it: a seller
-  // whose promotion also left a hold gets one Slack + one SMS, not two.
+  // One alert per hot EVENT (see "Alert and hand-off model" in PR #882):
+  // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
+  // property_id null so archive-on-clear never re-fires a key.
   for (const p of promotions) {
     // Same fail-closed rule as holds: only to the resolved hot owner, who must be
     // the promotion's assignee AND still own the property when the send happens.
-    if (hotOwner === null || p.assigneeUserId !== hotOwner) continue;
+    if (hotOwner === null) continue;
+    // A failed hand-off has no assignee: it goes to the resolved hot owner.
+    // A failed hand-off, or a hot text on a lead that already needs a person,
+    // may be unassigned: it goes to the resolved hot owner.
+    const failedHandoff = p.kind === "hot_failed" || p.heldLead === true;
+    if (!failedHandoff && p.assigneeUserId !== hotOwner) continue;
     if (!hotRecipients.some((r) => r.userId === hotOwner)) continue;
     const owner = hotOwner;
     for (const channel of ["slack", "sms"] as const) {
       tasks.push({
-        input: { ...base, propertyId: null, holdKey: p.key ?? hotPromotionKey(p.propertyId), recipientUserId: owner, channel, stage: "first" },
+        input: { ...base, propertyId: null, holdKey: p.key, recipientUserId: owner, channel, stage: "first" },
         send: async () => {
           // Before any provider call, so a failed check is cleanly retryable.
-          let stillAssigned: boolean;
+          const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
+          if (ownerCheck) return ownerCheck;
+          let assignee: string | null;
           try {
-            stillAssigned = await deps.isPropertyAssignedTo(orgId, p.propertyId, owner);
+            assignee = await deps.loadPropertyAssignee(orgId, p.propertyId);
           } catch (error) {
             return { status: "failed", error: error instanceof Error ? error.message : String(error) };
           }
-          if (!stillAssigned) return { status: "skipped", reason: "no_longer_assigned" };
+          // A rep has it now: final, no alert to Jarrad.
+          if (assignee !== null && assignee !== owner) return { status: "skipped", reason: "owned_by_someone_else" };
+          // Unassigned since: nothing to tell him (final). A failed hand-off is unassigned by design.
+          if (assignee === null && !failedHandoff) return { status: "skipped", reason: "not_assigned" };
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
@@ -187,13 +249,24 @@ export async function runHoldAlertsForOrg(
       });
     }
   }
-  for (const hold of hotHolds) {
+  for (const { hold, key } of hotHolds) {
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
         tasks.push({
-          input: { ...base, propertyId: null, holdKey: hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
-          send: () =>
-            channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link)),
+          input: { ...base, propertyId: null, holdKey: key, recipientUserId: r.userId, channel, stage: "first" },
+          send: async () => {
+            const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
+            if (ownerCheck) return ownerCheck;
+            // A lead a rep owns never pings Jarrad, for any hot kind.
+            let assignee: string | null;
+            try {
+              assignee = await deps.loadPropertyAssignee(orgId, hold.propertyId);
+            } catch (error) {
+              return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+            }
+            if (assignee !== null && assignee !== r.userId) return { status: "skipped", reason: "owned_by_someone_else" };
+            return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
+          },
           requireOwner: true,
         });
       }

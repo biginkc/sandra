@@ -4,6 +4,7 @@ import { type MouseEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Ellipsis, Phone, Undo2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -11,6 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
 import { cn } from "@/lib/utils";
 import { useCoachCall } from "../_components/coach-call-context";
 import { MY_LEAD_STAGE_LABELS, type MyLeadAction, type MyLeadStage } from "../_components/types";
@@ -107,6 +109,15 @@ export function fullAddress(row: WorkFacts["row"], zip: string | null = null): s
   return [row.address, row.city, stateZip].filter((part) => part && part.trim()).join(", ");
 }
 
+/** The read's houses, counted as the larger of the read and the classifier's homeownerPropertyCount. */
+export function rowHouses(facts: WorkFacts): HomeownerHouses | null {
+  const factCount = facts.homeownerPropertyCount ?? 0;
+  const read = facts.homeownerHouses;
+  const count = Math.max(factCount, read?.count ?? 0);
+  if (count === 0) return null;
+  return { count, houses: read?.houses ?? [] };
+}
+
 export function WorkRow({
   facts,
   now,
@@ -200,6 +211,14 @@ export function WorkRow({
         <div className="min-w-0 flex-1 basis-60 space-y-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="break-words text-[14.5px] font-bold">{name}</span>
+            <MultiHouseBadge
+              houses={rowHouses(facts)}
+              contactId={facts.row.contactId}
+              ownerName={facts.row.homeownerName}
+              currentPropertyId={id}
+              className="self-center"
+              testId={`work-row-houses-${id}`}
+            />
             <Badge
               variant="secondary"
               data-testid={`work-row-stage-${id}`}

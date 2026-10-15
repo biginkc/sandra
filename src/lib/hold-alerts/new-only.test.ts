@@ -36,7 +36,7 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     expect(t.store.watermarks.get(ORG)).toBe(HOT_ALERTS_START_ISO);
     expect(t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
     expect(t.sent.filter((x) => x.channel === "sms")).toHaveLength(1);
-    expect(t.store.rows.filter((r) => r.channel !== "email").every((r) => r.holdKey === "hot_promotion:new")).toBe(true);
+    expect(t.store.rows.filter((r) => r.channel !== "email").every((r) => r.holdKey === "hot_flag:new:2026-10-15T11:00:00.000Z")).toBe(true);
     expect(s.holds).toBe(1);
   });
 
@@ -76,7 +76,7 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     const slack = t.sent.filter((s) => s.channel === "slack");
     expect(slack).toHaveLength(1); // the hot owner only, for the new hold only
-    expect(t.store.rows.every((r) => r.holdKey === "hot_promotion:new")).toBe(true);
+    expect(t.store.rows.every((r) => r.holdKey === "hot_flag:new:2026-10-15T11:00:00.000Z")).toBe(true);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
   });
@@ -127,7 +127,7 @@ describe("seller activity after the watermark on a lead flagged before it", () =
     const t = makeDeps({ holds: [reflagged, stale, flagNewDraftOld], nowIso: "2026-10-15T12:00:00.000Z" });
     t.store.watermarks.set(ORG, MARK);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_promotion:a", "hot_promotion:c"]));
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_flag:a:2026-10-15T11:30:00.000Z", "hot_flag:c:2026-10-15T11:00:00.000Z"]));
     const before = t.sent.length;
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.length).toBe(before);

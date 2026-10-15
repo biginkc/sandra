@@ -11,7 +11,7 @@ const SECRET = "SELLER SAID: call me about 12 Oak St";
 
 const hotHold = hold({ hot: true, holdKey: "prop-1:hot_lead", propertyId: "prop-1", startedAt: "2026-10-15T11:00:00.000Z", reasonLabel: "hot lead" });
 const coldHold = hold({ hot: false, holdKey: "prop-2:draft_held", propertyId: "prop-2", startedAt: "2026-10-15T11:00:00.000Z", reasonLabel: "draft held for review" });
-const promotion: HotPromotion = { propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T11:30:00.000Z" };
+const promotion: HotPromotion = { propertyId: "prop-9", assigneeUserId: OWNER.userId, name: "Pat", assignedAt: "2026-10-15T11:30:00.000Z", key: "hot_handoff:in-9" };
 
 function setup(over: Parameters<typeof makeDeps>[0] = {}) {
   const t = makeDeps({ nowIso: NOW, recipients: [OWNER, ACQ], ...over });
@@ -33,10 +33,10 @@ describe("hot decisions (frozen fixture)", () => {
     const t = setup({ holds: [hotHold] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
-    // One alert key per hot seller, no property id (never archived).
+    // One alert key per hot event (the flag time), no property id (never archived).
     expect(t.store.rows.map((r) => [r.channel, r.stage, r.status, r.holdKey, r.propertyId])).toEqual([
-      ["slack", "first", "sent", "hot_promotion:prop-1", null],
-      ["sms", "first", "sent", "hot_promotion:prop-1", null],
+      ["slack", "first", "sent", "hot_flag:prop-1:2026-10-15T11:00:00.000Z", null],
+      ["sms", "first", "sent", "hot_flag:prop-1:2026-10-15T11:00:00.000Z", null],
     ]);
   });
 
@@ -58,7 +58,7 @@ describe("hot decisions (frozen fixture)", () => {
     const t = setup({ holds: [], promotions: [promotion] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
-    expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_promotion:prop-9")).toBe(true);
+    expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_handoff:in-9")).toBe(true);
   });
 
   it("(3b) a promotion whose assignee is not an owner recipient sends nothing", async () => {
@@ -116,7 +116,7 @@ describe("hot decisions (frozen fixture)", () => {
   it("(6) promotion rows survive archive-on-clear: a changed hold set never re-sends them", async () => {
     const t = setup({ holds: [hotHold], promotions: [promotion] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    const promoRows = () => t.store.rows.filter((r) => r.holdKey === "hot_promotion:prop-9");
+    const promoRows = () => t.store.rows.filter((r) => r.holdKey === "hot_handoff:in-9");
     expect(promoRows()).toHaveLength(2);
 
     // The hot hold clears: hot rows carry no property id, so nothing is archived (promotion or hold).
@@ -162,11 +162,12 @@ describe("hot decisions (frozen fixture)", () => {
     }
   });
 
-  it("(8) a hot hold and a promotion for the same property send one Slack and one SMS in total", async () => {
+  it("(8) a hot hold and a hand-off are separate events: each its own key, one Slack and one SMS each", async () => {
     const t = setup({ holds: [hotHold], promotions: [{ ...promotion, propertyId: "prop-1" }] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(by(t, "slack")).toHaveLength(1);
-    expect(by(t, "sms")).toHaveLength(1);
+    expect(by(t, "slack")).toHaveLength(2);
+    expect(by(t, "sms")).toHaveLength(2);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_handoff:in-9", "hot_flag:prop-1:2026-10-15T11:00:00.000Z"]));
   });
 
   it("(9) two overlapping passes never push SMS past 10 in the hour", async () => {

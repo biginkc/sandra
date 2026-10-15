@@ -277,6 +277,18 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     ),
   );
   const [threadRetry, setThreadRetry] = useState(0);
+  // Pending thread-retry timers, cleared on unmount so none fires after the component (or the test DOM) is gone.
+  const threadRetryTimers = useRef(new Set<number>());
+  const threadsMounted = useRef(true);
+  useEffect(() => {
+    threadsMounted.current = true;
+    const timers = threadRetryTimers.current;
+    return () => {
+      threadsMounted.current = false;
+      for (const id of timers) window.clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
   // Thread results are keyed to (snapshot, run id, version): on a new snapshot, in-flight results from the previous
   // one are dropped and the request bookkeeping restarts from the server's threads.
   const epochFor = useRef<unknown>(lastInitial);
@@ -302,12 +314,19 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       return { snapshotKey: threadEpoch.current, versionOf: (id) => current.get(id) };
     };
     const commit = (fetched: ReadonlyArray<readonly [string, RunThread]>, loadedOk: readonly string[], failedIds: readonly string[]) => {
+      if (!threadsMounted.current) return;
       const n = now();
       // Retry only runs still current: a stale failure neither shows a warning nor schedules a retry.
       const failedNow = failedIds.filter((id) => isCurrent(stamp, n, id));
       for (const r of missing) if (failedNow.includes(r.id)) requestedThreads.current.delete(threadKey(r));
       commitIfCurrent<ThreadTable>(stamp, now, setThreadTable, (t) => applyThreads(t, stamp, now(), fetched, loadedOk, failedIds));
-      if (failedNow.length) window.setTimeout(() => commitIfCurrent<number>(stamp, now, setThreadRetry, (k) => k + 1), 10_000);
+      if (failedNow.length) {
+        const id = window.setTimeout(() => {
+          threadRetryTimers.current.delete(id);
+          commitIfCurrent<number>(stamp, now, setThreadRetry, (k) => k + 1);
+        }, 10_000);
+        threadRetryTimers.current.add(id);
+      }
     };
     loadRunThreads(createClient() as unknown as LooseSupabase, orgId, missing)
       .then(({ threads: fetched, failedRunIds }) =>

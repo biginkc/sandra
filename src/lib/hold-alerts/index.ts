@@ -18,8 +18,8 @@ import type {
   OrgAlertSummary,
   Recipient,
 } from "./types";
-import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotPromotionKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
+import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
 
 export { runHoldAlertsForOrg } from "./core";
@@ -75,22 +75,39 @@ async function loadAlertHolds(
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  const complete = data.holdsMeta.failed.length === 0;
-  return { holds: toAlertHolds(data.holds, labels), complete };
+  let complete = data.holdsMeta.failed.length === 0;
+  const holds = toAlertHolds(data.holds, labels);
+  // The hot hold's own moment (flag time) for its alert key and cutoff, read
+  // here so the frozen loader stays untouched.
+  const hotIds = [...new Set(holds.filter((h) => h.hot).map((h) => h.propertyId))];
+  const flagAt = new Map<string, string | null>();
+  for (let i = 0; i < hotIds.length; i += 200) {
+    const res = await db
+      .from("properties")
+      .select("id, last_ai_escalation_at")
+      .eq("org_id", orgId)
+      .in("id", hotIds.slice(i, i + 200));
+    if (res.error) {
+      complete = false;
+      continue;
+    }
+    for (const p of (res.data ?? []) as Array<{ id: string; last_ai_escalation_at: string | null }>) flagAt.set(p.id, p.last_ai_escalation_at);
+  }
+  return { holds: holds.map((h) => (h.hot ? { ...h, flagAt: flagAt.get(h.propertyId) ?? null } : h)), complete };
 }
 
 const HOT_PROMOTION_PAGE = 200;
 
-/** Hot alerts older than this are stale; the pass never looks further back. */
-export const HOT_ALERT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
+/** Same 7-day window as the frozen hold loader (and never before HOT_ALERTS_START_ISO via the watermark). */
+export const HOT_ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Hot sellers to alert: Sandra's hand-off ('assigned', source hot_seller_handoff)
  * and hot texts on a lead Jarrad already owned ('ai_escalated', source
- * hot_seller_text), since max(watermark, now - 48h), NEWEST first, keyset-paged
+ * hot_seller_text), since max(watermark, now - 7 days), NEWEST first, keyset-paged
  * to exhaustion, minus keys whose deliveries are already finished (one bulk
  * query). So history never grows a pass and the newest seller is never starved.
- * First name from the homeowner contact; never message text or address.
+ * First name from the homeowner contact (+ address for hot texts); never message text.
  */
 export async function loadHotPromotions(
   db: LooseSupabase,
@@ -103,7 +120,7 @@ export async function loadHotPromotions(
     property_id: string;
     source_type: string;
     source_id: string;
-    payload: { to?: unknown } | null;
+    payload: { to?: unknown; inbound?: unknown; covered_by_hold?: unknown; held_lead?: unknown; escalation?: unknown } | null;
     created_at: string;
   };
   const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
@@ -116,7 +133,7 @@ export async function loadHotPromotions(
       .from("lead_events")
       .select("id, property_id, source_type, source_id, payload, created_at")
       .eq("org_id", orgId)
-      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE])
+      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, HOT_FAILED_SOURCE_TYPE])
       .gte("created_at", since);
     if (before) q = q.or(`created_at.lt.${before.at},and(created_at.eq.${before.at},id.lt.${before.id})`);
     const { data, error } = await q
@@ -130,7 +147,14 @@ export async function loadHotPromotions(
     const last = page[page.length - 1]!;
     before = { at: last.created_at, id: last.id };
   }
-  const keyOf = (r: Row) => (r.source_type === HOT_TEXT_SOURCE_TYPE ? hotTextKey(r.source_id) : hotPromotionKey(r.property_id));
+  const keyOf = (r: Row) =>
+    r.source_type === HOT_TEXT_SOURCE_TYPE
+      ? hotTextKey(r.source_id)
+      : r.source_type === HOT_FAILED_SOURCE_TYPE
+        ? typeof (r.payload as { flag_at?: unknown } | null)?.flag_at === "string"
+          ? hotFlagKey(r.property_id, (r.payload as { flag_at: string }).flag_at)
+          : hotFailedKey(r.source_id)
+        : hotHandoffKey(r.source_id);
   // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
   const done = new Set<string>();
   const keys = [...new Set(rows.map(keyOf))];
@@ -154,30 +178,64 @@ export async function loadHotPromotions(
     }
     for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
   }
-  const todo = rows.filter((r) => !done.has(keyOf(r)));
+  const todo0 = rows.filter((r) => !done.has(keyOf(r)));
+  // A hot event's moment is its INBOUND text's arrival, never when the event
+  // row was written (a pre-cutoff text retried later must not page). Every
+  // event's source_id is that inbound; no verifiable time → dropped (fail closed).
+  const inboundAt = new Map<string, string>();
+  const inboundIds = [...new Set(todo0.map((r) => r.source_id))];
+  for (let i = 0; i < inboundIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("messages")
+      .select("id, created_at")
+      .eq("org_id", orgId)
+      .in("id", inboundIds.slice(i, i + HOT_PROMOTION_PAGE));
+    if (error) {
+      complete = false;
+      continue;
+    }
+    for (const m of (data ?? []) as Array<{ id: string; created_at: string | null }>) if (m.created_at) inboundAt.set(m.id, m.created_at);
+  }
+  const todo = todo0.filter((r) => inboundAt.has(r.source_id));
+  if (todo.length < todo0.length) complete = false;
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
+  const addresses = new Map<string, string>();
+  const assignees = new Map<string, string | null>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
       .from("properties")
-      .select("id, contacts:homeowner_contact_id(first_name)")
+      .select("id, address, city, assigned_user_id, contacts:homeowner_contact_id(first_name)")
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
-    for (const p of (props ?? []) as Array<{ id: string; contacts: { first_name: string | null } | null }>) {
+    for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; assigned_user_id: string | null; contacts: { first_name: string | null } | null }>) {
+      assignees.set(p.id, p.assigned_user_id);
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
+      const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
+      if (addr) addresses.set(p.id, addr);
     }
   }
   const promotions: HotPromotion[] = [];
   for (const r of todo) {
+    const failed = r.source_type === HOT_FAILED_SOURCE_TYPE;
     const to = typeof r.payload?.to === "string" ? r.payload.to : null;
-    if (!to) continue;
+    if (!to && !failed) continue;
+    // An open hot hold already pinged Jarrad about this lead.
+    if (r.payload?.covered_by_hold === true) continue;
+    // A hand-off counts only while the lead really is assigned to that person.
+    if (r.source_type === HOT_HANDOFF_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
     promotions.push({
       propertyId: r.property_id,
-      assigneeUserId: to,
+      assigneeUserId: to ?? "",
       name: names.get(r.property_id) ?? "Unknown sender",
-      assignedAt: r.created_at,
-      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : "handoff",
+      assignedAt: inboundAt.get(r.source_id) as string,
+      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : failed ? "hot_failed" : "handoff",
+      ...(r.payload?.held_lead === true ? { heldLead: true } : {}),
+      ...(failed && typeof (r.payload as { reason?: unknown } | null)?.reason === "string"
+        ? { reason: (r.payload as { reason: string }).reason }
+        : {}),
+      address: r.source_type === HOT_TEXT_SOURCE_TYPE ? (addresses.get(r.property_id) ?? null) : null,
       key: keyOf(r),
     });
   }
@@ -202,7 +260,7 @@ export function createHoldAlertDeps(
     loadHotPromotions: (orgId, alertsSince) =>
       loadHotPromotions(db, orgId, alertsSince),
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
-    async isPropertyAssignedTo(orgId, propertyId, userId) {
+    async loadPropertyAssignee(orgId, propertyId) {
       const { data, error } = await db
         .from("properties")
         .select("assigned_user_id")
@@ -210,7 +268,7 @@ export function createHoldAlertDeps(
         .eq("id", propertyId)
         .maybeSingle();
       if (error) throw new Error(`assignment re-check failed: ${error.message}`);
-      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id === userId;
+      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id ?? null;
     },
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db

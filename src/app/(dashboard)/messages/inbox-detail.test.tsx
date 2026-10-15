@@ -108,6 +108,11 @@ vi.mock("../templates/actions", () => ({
 
 // MessagesThread + InboxThreadList both subscribe to Supabase Realtime on
 // mount. Stub the browser client so the channel pipeline is a no-op.
+const loadHousesMock = vi.hoisted(() => vi.fn<(ids: string[]) => Promise<Record<string, unknown>>>(async () => ({})));
+vi.mock("@/lib/leads/homeowner-houses-action", () => ({
+  loadHomeownerHousesAction: (ids: string[]) => loadHousesMock(ids),
+}));
+
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => supabaseMock.client,
 }));
@@ -2395,5 +2400,57 @@ describe("InboxDetail Call routing", () => {
     expect(startCall).toHaveBeenCalledWith(
       expect.objectContaining({ propertyId: "prop-call", contactId: "contact-call", phoneSlot: 2, onFallback: expect.any(Function) }),
     );
+  });
+});
+
+describe("InboxDetail Owns N houses badge", () => {
+  const twoHouses = {
+    count: 2,
+    houses: [
+      { propertyId: "prop-1", address: "1 Oak St, Kansas City, MO", assignedUserId: "user-1", isMine: true },
+      { propertyId: "prop-9", address: "9 Elm St, Olathe, KS", assignedUserId: "rep-2", isMine: false },
+    ],
+  };
+  beforeEach(() => {
+    loadHousesMock.mockReset();
+    replaceCalls.length = 0;
+  });
+
+  it("shows next to the homeowner's name, from one read, and lists another rep's lead", async () => {
+    loadHousesMock.mockResolvedValue({ "contact-h": twoHouses });
+    const data = makeData({ contactId: "contact-h", homeownerContactId: "contact-h", contactName: "Pat Lee" });
+    render(<InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />);
+    const badge = await screen.findByRole("button", { name: "Owns 2 houses. Show Pat Lee's houses" });
+    expect(loadHousesMock).toHaveBeenCalledTimes(1);
+    expect(loadHousesMock).toHaveBeenCalledWith(["contact-h"]);
+    expect(screen.getByRole("heading", { name: "Pat Lee" }).parentElement).toContainElement(badge);
+    await userEvent.click(badge);
+    expect(await screen.findByTestId("inbox-detail-houses-house-prop-9")).toHaveTextContent("another rep's lead");
+    expect(screen.getByTestId("inbox-detail-houses-house-prop-1")).toHaveTextContent("This lead");
+  });
+
+  it("Escape closes the list without closing the conversation", async () => {
+    loadHousesMock.mockResolvedValue({ "contact-h": twoHouses });
+    const data = makeData({ contactId: "contact-h", homeownerContactId: "contact-h", contactName: "Pat Lee" });
+    render(<InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />);
+    await userEvent.click(await screen.findByRole("button", { name: /Owns 2 houses/ }));
+    await screen.findByTestId("inbox-detail-houses-list");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("inbox-detail-houses-list")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /Owns 2 houses/ })).toHaveAttribute("aria-expanded", "false");
+    expect(replaceCalls).not.toContain("/messages");
+  });
+
+  it("is hidden when the homeowner owns one house", async () => {
+    loadHousesMock.mockResolvedValue({ "contact-h": { count: 1, houses: twoHouses.houses.slice(0, 1) } });
+    render(<InboxDetail data={makeData({ contactId: "contact-h", homeownerContactId: "contact-h" })} assigneeEmails={{}} currentUserId="user-1" />);
+    await waitFor(() => expect(loadHousesMock).toHaveBeenCalled());
+    expect(screen.queryByTestId("inbox-detail-houses")).not.toBeInTheDocument();
+  });
+
+  it("does not read or show it when the conversation is not with the homeowner", () => {
+    render(<InboxDetail data={makeData({ contactId: "contact-x", homeownerContactId: "contact-h" })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(loadHousesMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("inbox-detail-houses")).not.toBeInTheDocument();
   });
 });

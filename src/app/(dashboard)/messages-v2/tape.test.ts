@@ -108,11 +108,26 @@ describe("deriveTape", () => {
     expect(v.kind === "decided" && v.did).not.toContain("Slack and text sent");
   });
 
+  it("a lead a rep owns reads 'Already a lead, left for the person who owns it' and never claims an alert", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "owned_by_someone_else", owner_user_id: "rep" })];
+    const v = deriveTape(run({ steps, hotAlertSentAt: "2026-10-15T19:05:00Z" }), "Sue");
+    expect(v.kind === "decided" && v.did).toContain("Already a lead, left for the person who owns it");
+    expect(v.kind === "decided" && v.did).not.toContain("Handed to Jarrad");
+    expect(v.kind === "decided" && v.did).not.toContain("Slack and text sent");
+  });
+
   it("assigned but the note did not save reads plainly, and is not shown as a clean hand-off", () => {
     const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "assigned_unrecorded", assignee_user_id: "u" })];
     const v = deriveTape(run({ status: "escalated", steps }), "Sue");
     expect(v.kind === "decided" && v.did).toContain("On My Leads under Jarrad, but the note about it couldn't be saved");
     expect(v.kind === "decided" && v.did).not.toContain("Handed to Jarrad");
+  });
+
+  it("assigned_unrecorded for a hot text (already his) says 'Already on My Leads', not the hand-off sentence", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "assigned_unrecorded", assignee_user_id: "u", note: "hot text event not recorded" })];
+    const v = deriveTape(run({ status: "escalated", steps }), "Sue");
+    expect(v.kind === "decided" && v.did).toContain("Already on My Leads under Jarrad, but the note about it couldn't be saved");
+    expect(v.kind === "decided" && v.did).not.toContain("On My Leads under Jarrad, but");
   });
 
   it("a failed hand-off says so", () => {
