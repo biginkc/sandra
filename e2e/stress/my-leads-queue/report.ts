@@ -1,4 +1,5 @@
 import { classifierMigrationFiles, sq2FixLanded } from "./migration";
+import { FULL_FLOORS } from "./reps";
 import { EXPECTED_UNTIL, FIX_PENDING, SPEC_QUESTIONS } from "./oracle";
 import type { FamilyRun, Mismatch, MismatchKind, Timing } from "./runner";
 
@@ -64,6 +65,8 @@ export type Report = {
   repeats: number;
   sha: string;
   database: string;
+  raceReps: number | null;
+  scaleSamples: number | null;
   /** Classifier migration files every rolled-back lane applied, in order. */
   migrations: string[];
   families: FamilyReport[];
@@ -122,7 +125,7 @@ function measured(x: ScaleSize): boolean {
 }
 
 export function buildReport(input: {
-  mode: "full" | "smoke"; seed: number; repeats: number; sha: string; database: string; startedAt: string;
+  mode: "full" | "smoke"; seed: number; repeats: number; sha: string; database: string; startedAt: string; raceReps?: number; scaleSamples?: number;
   runs: FamilyRun[]; lanes: LaneResult[]; scale: ScaleSize[];
 }): Report {
   // Mismatches the runner proved are exactly a routed SQL fix's disagreement (expectedUntil) are reported, not gating.
@@ -155,6 +158,16 @@ export function buildReport(input: {
   for (const f of families) if (f.worlds === 0 || f.checks === 0) fullRunNeeds.push(`family ${f.family} executed ${f.worlds} worlds / ${f.checks} checks`);
   for (const l of input.lanes) if (!l.skipped && l.runs === 0) fullRunNeeds.push(`lane ${l.id} executed 0 runs`);
   if (input.mode === "full") {
+    // Volume floors: a full run below the design's volume is not the gate.
+    if (input.repeats < FULL_FLOORS.repeats) fullRunNeeds.push(`repeats ${input.repeats} < ${FULL_FLOORS.repeats}`);
+    for (const l of input.lanes) {
+      if (l.skipped) continue;
+      const floor = /bind/.test(l.id) ? FULL_FLOORS.bindReps : /stamped_send_vs_inbound/.test(l.id) ? FULL_FLOORS.raceReps : 0;
+      if (floor && l.runs < floor) fullRunNeeds.push(`lane ${l.id} ran ${l.runs} < ${floor}`);
+    }
+    for (const x of input.scale) for (const [k, v] of Object.entries(x.timings)) if (v.n < FULL_FLOORS.scaleSamples) fullRunNeeds.push(`scale ${x.leads} ${k}: ${v.n} samples < ${FULL_FLOORS.scaleSamples}`);
+  }
+  if (input.mode === "full") {
     if (families.length < 31) fullRunNeeds.push(`only ${families.length} of 31 families ran`);
     if (input.scale.length < 2) fullRunNeeds.push("the scale lane did not run at both 400 and 2,000 leads");
     if (raceRan.length === 0) fullRunNeeds.push("no race lane ran");
@@ -164,7 +177,7 @@ export function buildReport(input: {
   const failReasons = [...criteria.filter((c) => !c.pass).map((c) => `${c.label}: ${c.value ?? "not measured"}`), ...fullRunNeeds];
   return {
     schema: "my-leads-queue-stress/v1", mode: input.mode, startedAt: input.startedAt, finishedAt: new Date().toISOString(), seed: input.seed, repeats: input.repeats,
-    sha: input.sha, database: input.database, migrations: classifierMigrationFiles(), families, lanes: input.lanes, scale: input.scale, specQuestions, criteria,
+    sha: input.sha, database: input.database, migrations: classifierMigrationFiles(), raceReps: input.raceReps ?? null, scaleSamples: input.scaleSamples ?? null, families, lanes: input.lanes, scale: input.scale, specQuestions, criteria,
     verdict: failReasons.length === 0 ? "PASS" : "FAIL", failReasons,
   };
 }
@@ -175,6 +188,7 @@ export function renderMarkdown(r: Report): string {
   const L: string[] = [];
   L.push(`# My Leads unified queue stress report`, "");
   L.push(`**Verdict: ${r.verdict}** (${r.mode} run, seed ${r.seed}, ${r.repeats} repeat${r.repeats === 1 ? "" : "s"}, ${r.sha}, ${r.database})`, "");
+  L.push(`Volume: ${r.repeats} repeats, race reps ${r.raceReps ?? "n/a"}, scale samples ${r.scaleSamples ?? "n/a"}`, "");
   L.push(`Classifier SQL applied (in order): ${r.migrations.map((m) => `\`${m}\``).join(", ")}`, "");
   if (r.failReasons.length) { L.push("Blocking:"); for (const f of r.failReasons) L.push(`- ${f}`); L.push(""); }
   L.push("## Exit criteria", "", "| Criterion | Value | Limit | Result |", "|---|---:|---:|---|");

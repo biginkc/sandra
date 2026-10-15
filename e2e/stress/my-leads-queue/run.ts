@@ -86,7 +86,7 @@ export async function runStress(opts: StressOptions, env: Record<string, string 
     scale = result.sizes;
     if (result.mismatches.length) runs.push({ family: "scale_counts", title: "scale lane counts and badge vs oracle", worlds: scale.length, leads: 0, checks: result.mismatches.length, mismatches: result.mismatches, errors: [], timings: {}, ms: 0, variantLeads: {}, variantFailures: {} });
   }
-  const report = buildReport({ mode: opts.mode, seed: opts.seed, repeats: opts.repeats, sha: git("rev-parse", "--short", "HEAD"), database: `${u.hostname}:${u.port || "5432"}`, startedAt, runs, lanes, scale });
+  const report = buildReport({ mode: opts.mode, seed: opts.seed, repeats: opts.repeats, raceReps: opts.raceReps, scaleSamples: opts.scaleSamples, sha: git("rev-parse", "--short", "HEAD"), database: `${u.hostname}:${u.port || "5432"}`, startedAt, runs, lanes, scale });
   if (opts.outDir) {
     mkdirSync(opts.outDir, { recursive: true });
     writeFileSync(path.join(opts.outDir, "report.json"), JSON.stringify(report, null, 2));

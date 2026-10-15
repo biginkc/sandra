@@ -36,6 +36,16 @@ export function lastClassifierMigration(root = defaultRoot()): { file: string; s
   return { file, sql: unwrap(readFileSync(path.join(migrationsDir(root), file), "utf8"), file) };
 }
 
+/** The newest classifier file that defines `fn` (a smoke mutation must edit the live definition of the function it targets). */
+export function lastMigrationDefining(fn: string, root = defaultRoot()): { file: string; sql: string } {
+  const dir = migrationsDir(root);
+  const re = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\b`, "i");
+  const files = classifierMigrationFiles(root).filter((f) => re.test(readFileSync(path.join(dir, f), "utf8")));
+  const file = files[files.length - 1];
+  if (!file) throw new Error(`no classifier migration defines ${fn}`);
+  return { file, sql: unwrap(readFileSync(path.join(dir, file), "utf8"), file) };
+}
+
 /** Every classifier migration, in order, as one script without transaction wrappers. */
 export function loadClassifierMigration(root = defaultRoot()): string {
   const dir = migrationsDir(root);

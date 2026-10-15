@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import { assertEnvLooksLocal, resolveDbUrl } from "./guards";
-import { lastClassifierMigration, loadClassifierMigration } from "./migration";
-import { preflightCommitLanes, laneStampedSendVsInbound, unstampedSendDriver } from "./races";
+import { lastMigrationDefining, loadClassifierMigration } from "./migration";
+import { preflightCommitLanes, laneStampedSendVsInbound, sqlSendDriver, unstampedSendDriver } from "./races";
 import { FAMILIES } from "./families";
 import { SMOKE_DEFAULTS, runStress } from "./run";
 import { runFamilies } from "./runner";
@@ -27,7 +27,7 @@ describe("my-leads queue stress harness smoke", () => {
   it("notices a broken classifier: widening the Due window from 15 to 16 minutes is caught by the callback-boundary family", async () => {
     // Mutate the LAST classifier file (a later fix would overwrite a mutation of an earlier one), then apply all of them in order.
     const sql = loadClassifierMigration();
-    const last = lastClassifierMigration();
+    const last = lastMigrationDefining("my_leads_work_classified");
     const mutatedLast = last.sql.replace("eff <= p_at + interval '15 minutes' and eff >= ((p_at", "eff <= p_at + interval '16 minutes' and eff >= ((p_at");
     expect(mutatedLast).not.toBe(last.sql);
     const mutated = `${sql}\n;\n${mutatedLast}`;
@@ -49,9 +49,19 @@ describe("my-leads queue stress harness smoke", () => {
 
   afterAll(() => undefined);
 
+  it("the positive stamped race (SQL protocol) binds the stamp and keeps the newer reply unhandled (2 reps, CI)", async () => {
+    const skip = await preflightCommitLanes(url).catch((error: Error) => error.message);
+    if (skip && process.env.MYLEADS_STRESS_DISPOSABLE_DB === "1") throw new Error(`positive race lane cannot run: ${skip}`);
+    if (skip) { console.warn(`positive race lane skipped: ${skip}`); return; }
+    const lane = await laneStampedSendVsInbound(url, 2, 5, sqlSendDriver, { latencyMs: [600, 800], yDelayMs: [50, 100] });
+    expect(lane.runs).toBe(2);
+    expect(lane.samples).toEqual([]);
+    expect(lane.failures).toBe(0);
+  }, 120_000);
+
   it("notices a dropped chip count: removing Due from chipCounts is caught (the full count map is compared, not the returned keys)", async () => {
     const sql = loadClassifierMigration();
-    const last = lastClassifierMigration();
+    const last = lastMigrationDefining("fn_my_leads_work_page");
     const needle = "(select t.reason, count(*) as n from t group by t.reason)";
     expect(last.sql).toContain(needle);
     const mutatedLast = last.sql.replace(needle, "(select t.reason, count(*) as n from t where t.reason <> 'due' group by t.reason)");

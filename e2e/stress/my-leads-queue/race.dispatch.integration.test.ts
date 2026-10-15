@@ -12,6 +12,7 @@ import { HARNESS_ADDRESS_PREFIX } from "./guards";
 import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { HOUR, emptyLead, SEC } from "./model";
 import { preflightCommitLanes } from "./races";
+import { parsePositiveInt } from "./reps";
 import type { LaneResult } from "./report";
 import { createRng } from "../prng";
 
@@ -39,7 +40,9 @@ import { dispatchRepSms } from "@/lib/messaging/rep-sms";
 
 const env = { ...process.env, MYLEADS_STRESS_DB_URL: process.env.MYLEADS_STRESS_DB_URL ?? process.env.TEST_SUPABASE_DB_URL };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const REPS = Number(process.env.MYLEADS_STRESS_DISPATCH_REPS ?? 6);
+// Validated before any database access: 0 / -1 / NaN must fail the suite, never execute zero reps and pass.
+const REPS = parsePositiveInt(process.env.MYLEADS_STRESS_DISPATCH_REPS, 6, "MYLEADS_STRESS_DISPATCH_REPS");
+const BIND_REPS = Math.min(REPS, 20);
 const OUT = process.env.MYLEADS_STRESS_OUT_DIR ?? path.resolve("test-results/my-leads-queue-stress");
 const JWT_SECRET = process.env.LOCAL_SUPABASE_JWT_SECRET ?? "super-secret-jwt-token-with-at-least-32-characters-long";
 const API = process.env.LOCAL_SUPABASE_URL ?? "http://127.0.0.1:54331";
@@ -175,6 +178,7 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
     // The stamp only matters when Y lands before the send time (same minimum as the SQL twin).
     if (REPS >= 10 && yBefore < Math.ceil(REPS / 4)) { lane.failures += 1; lane.samples.push({ why: `only ${yBefore} of ${REPS} runs had Y before sent_at` }); }
     lanes.push(lane);
+    expect(lane.runs).toBe(REPS);
     expect(lane.failures).toBe(0);
   }, 600_000);
 
@@ -187,7 +191,7 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
     const leftover = await admin.query("select to_regprocedure('public.fn_bind_rep_sms_inbound_stamp_s1_off(text,uuid,uuid,uuid)') as f");
     if (leftover.rows[0].f) await admin.query("alter function public.fn_bind_rep_sms_inbound_stamp_s1_off(text,uuid,uuid,uuid) rename to fn_bind_rep_sms_inbound_stamp");
     try {
-      for (let n = 0; n < Math.min(REPS, 20); n += 1) {
+      for (let n = 0; n < BIND_REPS; n += 1) {
         const w = await committedLead(admin, 1000 + n);
         useFakeProvider(url, w.ctx, 50, w.ctx.rep);
         await admin.query(`alter function ${FN} rename to fn_bind_rep_sms_inbound_stamp_s1_off`);
@@ -214,6 +218,7 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
       await admin.end();
     }
     lanes.push(lane);
+    expect(lane.runs).toBe(BIND_REPS);
     expect(lane.failures).toBe(0);
   }, 600_000);
 
