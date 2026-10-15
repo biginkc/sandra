@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fakePostgrest } from "./fake-postgrest.test-util";
 import { parseSnapshotIds } from "./hold-activity";
 import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
-import { buildSnapshot, effectiveFlagReasons, loadEligibleHolds, snapshotFlagReasons } from "./hold-list";
+import { buildSnapshot, effectiveFlagReasons, liveStateOf, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
 import { deriveTape, holdReasonSentence, withEffectiveReason } from "./tape";
 import type { OpenHold, RunWithSteps } from "./types";
 
@@ -440,5 +440,55 @@ describe("spec 2: client-held snapshot", () => {
     const snap = buildSnapshot(holds);
     expect(JSON.stringify(snap).length).toBeLessThan(2_000_000);
     expect(snapshotFlagReasons(snap)).toHaveLength(10_000);
+  });
+});
+
+describe("final checks and live re-check", () => {
+  it("a hold locked between snapshot build and enrichment is dropped from the cards and reported missing", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1)), flagged(2, t(2))] };
+    const client = db(tables).client;
+    // Lock property 2 the moment the enrichment step reads draft text (after the snapshot is built).
+    const orig = (client as unknown as { from: (t: string) => Record<string, unknown> }).from;
+    let locked = false;
+    (client as unknown as { from: (t: string) => unknown }).from = (tb: string) => {
+      if (tb === "hold_alert_latest_status" || tb === "ai_reply_dead_letters") {
+        if (!locked) {
+          locked = true;
+          tables.properties = tables.properties.map((p) => (p.id === u(2) ? { ...p, is_dnc_locked: true } : p));
+        }
+      }
+      return orig(tb);
+    };
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !locked) {
+        locked = true;
+        tables.properties = tables.properties.map((p) => (p.id === u(2) ? { ...p, is_dnc_locked: true } : p));
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.snapshot.entries.map((e) => e.id)).toContain(u(2));
+    expect(page.holds.map((h) => h.id)).toEqual([u(1)]);
+    expect(page.missing).toEqual([u(2)]);
+  });
+
+  it("recheckOpen keeps a draft-only hold whose draft is still pending, and fails closed on an error", async () => {
+    const tables = { properties: [], ai_reply_drafts: [draft(1, { property_id: null, run_id: u(1, 5) })], pipeline_runs: [runRow(1, { property_id: u(3) })] };
+    const list = await eligible(tables);
+    expect(list.holds.map((h) => h.id)).toEqual([u(3)]);
+    expect([...(await recheckOpen(db(tables).client, "org", list.holds))!]).toEqual([u(3)]);
+    expect(await recheckOpen(db(tables, { fail: () => true }).client, "org", list.holds)).toBeNull();
+  });
+
+  it("liveStateOf reports locked/resolved as not eligible and re-stamped flags with the new values", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1)), flagged(2, t(2)), flagged(3, t(3))] };
+    tables.properties = tables.properties.map((p) =>
+      p.id === u(1) ? { ...p, is_dnc_locked: true } : p.id === u(2) ? { ...p, last_ai_escalation_at: t(900), last_ai_escalation_reason: "hostile_needs_confirm" } : p,
+    );
+    tables.properties = tables.properties.filter((p) => p.id !== u(3));
+    const states = (await liveStateOf(db(tables).client, "org", [u(1), u(2), u(3)]))!;
+    expect(states.find((s) => s.id === u(1))!.eligible).toBe(false);
+    expect(states.find((s) => s.id === u(3))!.eligible).toBe(false);
+    expect(states.find((s) => s.id === u(2))).toMatchObject({ eligible: true, flagReason: "hostile_needs_confirm", flagAt: t(900) });
   });
 });

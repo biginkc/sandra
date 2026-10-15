@@ -388,6 +388,35 @@ describe("MessagesV2View", () => {
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
   });
 
+  it("within one poll, a locked hold is removed and a re-stamped hold is marked Updated with actions locked", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+      const b = { ...openHold("bbbb"), ...at(2), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+      const snapshot = buildSnapshot([a, b]);
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) =>
+          id === "aaaa"
+            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null }
+            : { id, eligible: true, flagAt: "2026-10-09T00:00:00.000000Z", flagReason: "hostile_needs_confirm", runId: null, activityAt: snapshot.entries[1].at },
+        ),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], [a, b]), holdsSnapshot: snapshot, revalidateHolds, actions });
+      expect(screen.getAllByTestId("waiting-card")).toHaveLength(2);
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(1));
+      expect(screen.getByTestId("holds-missing")).toBeInTheDocument();
+      expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders the snapshot time, not the live time", async () => {
     const snapHold = { ...openHold("p1"), since: "2026-10-01T10:00:00.000Z" };
     const snapshot = buildSnapshot([snapHold]);

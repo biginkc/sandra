@@ -206,11 +206,20 @@ describe("our last text is cut off at the seller's inbound message, not the run 
     expect(out.threads.get("r1")?.lastOutbound).toBe("Still own the place?");
   });
 
-  it("falls back to the run start when the inbound timestamp is unavailable", async () => {
+  it("an inbound id whose row is missing is a failed (retried) lookup, never a fall-back to the run start", async () => {
     const { client } = fakePostgrest({
       messages: [{ id: "out-1", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
     });
     const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "gone", started_at: "2026-10-14T12:00:00.000Z" }]);
+    expect(out.failedRunIds).toEqual(["r1"]);
+    expect(out.threads.has("r1")).toBe(false);
+  });
+
+  it("a run with no inbound id at all uses the run start", async () => {
+    const { client } = fakePostgrest({
+      messages: [{ id: "out-1", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
+    });
+    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-14T12:00:00.000Z" }]);
     expect(out.threads.get("r1")?.lastOutbound).toBe("x");
   });
 });

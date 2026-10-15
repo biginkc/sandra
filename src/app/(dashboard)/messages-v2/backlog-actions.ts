@@ -10,6 +10,7 @@ import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { BACKLOG_PAGE, loadBacklogHolds, type LooseSupabase } from "./queries";
 import { parseSnapshotIds } from "./hold-activity";
+import { liveStateOf, type HoldLiveState } from "./hold-list";
 import { loadHoldsByIds } from "./holds-by-activity";
 import type { BacklogPage, OlderHoldsPage } from "./hold-action-types";
 
@@ -135,4 +136,31 @@ export async function loadOlderHoldsAction(input: { ids: string[] }): Promise<Re
       contextErrors: slice.contextErrors,
     },
   };
+}
+
+/**
+ * Re-check rendered waiting cards while the page stays open (properties is not in the realtime publication and
+ * PR 1 adds no migration). Same auth path; at most 100 uuids; org-scoped by building this caller's current list.
+ */
+export async function revalidateHoldsAction(input: { ids: string[] }): Promise<Result<HoldLiveState[]>> {
+  let orgId: string | null = null;
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user?.id) {
+      const memberships = (await getCallerMembershipsOrThrow()).filter((m) => m.user_id === user.id);
+      orgId = messagesV2OrgId(memberships);
+    }
+  } catch {
+    orgId = null;
+  }
+  if (!orgId) return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
+  const ids = parseSnapshotIds(input?.ids);
+  if (!ids) return err({ code: "VALIDATION", message: "Bad ids." });
+  const supabase = (await createClient()) as unknown as LooseSupabase;
+  const states = await liveStateOf(supabase, orgId, ids);
+  if (!states) return err({ code: "REVALIDATE_UNAVAILABLE", message: "Waiting list could not be checked." });
+  return { ok: true, data: states };
 }

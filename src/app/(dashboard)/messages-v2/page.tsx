@@ -23,7 +23,7 @@ import { loadMessagesV2Page } from "./holds-by-activity";
 import { fetchAllKeyset } from "./paged";
 import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
-import { loadOlderHoldsAction } from "./backlog-actions";
+import { loadOlderHoldsAction, revalidateHoldsAction } from "./backlog-actions";
 import { MessagesV2View } from "./messages-v2-view";
 import {
   fetchScorecardRows,
@@ -207,6 +207,8 @@ export default async function MessagesV2Page() {
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
         holdsSnapshot={loaded.snapshot}
+        holdsMissing={loaded.missing}
+        revalidateHolds={revalidateHoldsAction}
         holdsError={loaded.error}
         holdsUnverified={loaded.unverified}
         flagReasons={loaded.flagReasons}

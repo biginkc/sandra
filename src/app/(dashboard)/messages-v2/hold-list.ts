@@ -430,3 +430,79 @@ export async function enrichPage(
     deadLetterUnavailable: enriched.deadLetterUnavailable,
   };
 }
+
+/**
+ * Final eligibility check for cards about to render (after enrichment): the property is not DNC-locked and the
+ * hold still has an open source (flag on, or a pending decision / review / draft). Returns the ids that pass, or
+ * null when any lookup fails (fail closed).
+ */
+export async function recheckOpen(
+  supabase: LooseSupabase,
+  orgId: string,
+  holds: readonly OpenHold<RunWithSteps>[],
+): Promise<Set<string> | null> {
+  const ids = holds.map((h) => h.id);
+  if (!ids.length) return new Set();
+  const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
+  const open = new Set<string>();
+  const locked = new Set<string>();
+  let failed = false;
+  await Promise.all([
+    ...chunks(ids).map(async (c) => {
+      const res = await fetchAllKeyset<{ id: string; needs_human_attention: boolean; is_dnc_locked: boolean }>(() =>
+        supabase.from("properties").select("id, needs_human_attention, is_dnc_locked").eq("org_id", orgId).in("id", c),
+      );
+      if (res.error) failed = true;
+      else
+        for (const p of res.rows) {
+          if (p.is_dnc_locked) locked.add(p.id);
+          else if (p.needs_human_attention) open.add(p.id);
+        }
+    }),
+    ...(["jev_lead_decisions", "ai_disposition_reviews", "ai_reply_drafts"] as const).flatMap((table) =>
+      chunks(ids).map(async (c) => {
+        const res = await fetchAllKeyset<{ property_id: string | null }>(() =>
+          supabase.from(table).select("id, property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", c),
+        );
+        if (res.error) failed = true;
+        else for (const r of res.rows) if (r.property_id) open.add(r.property_id);
+      }),
+    ),
+    // A draft resolved to its property through a run or message has no property_id of its own: check it by id.
+    ...chunks(draftIds).map(async (c) => {
+      const res = await fetchAllKeyset<{ id: string }>(() =>
+        supabase.from("ai_reply_drafts").select("id").eq("org_id", orgId).eq("status", "pending").in("id", c),
+      );
+      if (res.error) failed = true;
+      else {
+        const pending = new Set(res.rows.map((r) => r.id));
+        for (const h of holds) if (h.draft && pending.has(h.draft.id)) open.add(h.id);
+      }
+    }),
+  ]);
+  if (failed) return null;
+  return new Set(ids.filter((id) => open.has(id) && !locked.has(id)));
+}
+
+/** What a rendered card is checked against while the page stays open (no migration: properties is not in realtime). */
+export type HoldLiveState = {
+  id: string;
+  eligible: boolean;
+  flagAt: string | null;
+  flagReason: string | null;
+  runId: string | null;
+  activityAt: string | null;
+};
+
+/** Current state of some ids, from the CURRENT eligible list (locked / resolved / unverifiable -> eligible false). */
+export async function liveStateOf(supabase: LooseSupabase, orgId: string, ids: readonly string[]): Promise<HoldLiveState[] | null> {
+  const list = await loadEligibleHolds(supabase, orgId);
+  if (!list.ok) return null;
+  const byId = new Map(list.holds.map((h) => [h.id, h]));
+  return ids.map((id) => {
+    const h = byId.get(id);
+    return h
+      ? { id, eligible: true, flagAt: h.seen?.flagAt ?? null, flagReason: h.flag_reason ?? null, runId: h.run?.id ?? null, activityAt: holdActivityAt(h) }
+      : { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null };
+  });
+}

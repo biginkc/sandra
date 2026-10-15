@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
-import type { HoldActionsApi, LoadOlderHolds, WaitingSnapshot } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
 import { holdActivityAt } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
@@ -176,10 +176,16 @@ export function WaitingColumn({
   loadOlder,
   refreshKey,
   updatedIds,
+  initialMissing,
+  revalidate,
   actions,
   onReload,
 }: {
   holds: readonly OpenHold<RunWithSteps>[];
+  /** First-page snapshot ids the server dropped in its final check. */
+  initialMissing?: readonly string[];
+  /** Re-checks rendered cards every 60 seconds and on tab focus. */
+  revalidate?: RevalidateHolds;
   labels: ReadonlyMap<string, RunLabel>;
   meta?: HoldsMeta;
   /** The frozen order. Holds not in it (for example in tests) are shown after it, in the order given. */
@@ -201,8 +207,8 @@ export function WaitingColumn({
     forKey: refreshKey,
     cards: new Map(),
     labels: new Map(),
-    missing: new Set(),
-    nextPos: holds.length,
+    missing: new Set(initialMissing ?? []),
+    nextPos: holds.length + (initialMissing?.length ?? 0),
     unverified: null,
     error: null,
   });
@@ -253,6 +259,59 @@ export function WaitingColumn({
       setBusy(false);
     }
   };
+
+  // Live re-check of rendered cards: properties (flag, DNC lock) is not in the realtime publication, so every
+  // 60 seconds and on tab focus the rendered ids are checked against the CURRENT list. No longer eligible ->
+  // missing (removed); any snapshot field differs -> Updated (actions locked).
+  const [stale, setStale] = useState<{ forKey: unknown; ids: Set<string> }>({ forKey: refreshKey, ids: new Set() });
+  const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
+  const shownIdsRef = useRef<string[]>([]);
+  const entriesRef = useRef(entries);
+  const olderRef = useRef(older);
+  useEffect(() => {
+    shownIdsRef.current = shown.map((e) => e.id);
+    entriesRef.current = entries;
+    olderRef.current = older;
+  });
+  useEffect(() => {
+    if (!revalidate || !snapshot) return;
+    let alive = true;
+    const check = async () => {
+      const ids = shownIdsRef.current;
+      if (!ids.length) return;
+      const byId = new Map(entriesRef.current.map((e) => [e.id, e]));
+      const gone: string[] = [];
+      const changedIds: string[] = [];
+      for (let i = 0; i < ids.length; i += 100) {
+        let res;
+        try {
+          res = await revalidate({ ids: ids.slice(i, i + 100) });
+        } catch {
+          return;
+        }
+        if (!alive || !res.ok) return;
+        for (const st of res.data) {
+          const e = byId.get(st.id);
+          if (!e) continue;
+          if (!st.eligible) gone.push(st.id);
+          else if (st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
+        }
+      }
+      if (!alive) return;
+      if (gone.length) setOlder({ ...olderRef.current, forKey: refreshKey, missing: new Set([...olderRef.current.missing, ...gone]) });
+      setStale({ forKey: refreshKey, ids: new Set(changedIds) });
+    };
+    const id = window.setInterval(check, 60_000);
+    const onFocus = () => void check();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+    };
+    // reasonOf reads the snapshot, which changes only with refreshKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revalidate, snapshot, refreshKey]);
 
   /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
   const asSnapshot = (e: (typeof entries)[number]): { hold: OpenHold<RunWithSteps>; changed: boolean } => {
@@ -342,7 +401,7 @@ export function WaitingColumn({
               label={labelFor(e.id)}
               actions={actions}
               onReload={onReload}
-              updated={changed || updatedIds?.has(e.id)}
+              updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
               pinned={!!snapshot}
             />
           );

@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
-import type { HoldActionsApi, LoadOlderHolds, WaitingSnapshot } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
 import { compareInstants, describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
@@ -60,6 +60,10 @@ export type MessagesV2ViewProps = {
   /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
   /** The frozen waiting-list order the column pages through (see hold-list.ts buildSnapshot). */
   holdsSnapshot?: WaitingSnapshot;
+  /** First-page snapshot ids the server dropped in its final check. */
+  holdsMissing?: string[];
+  /** 60-second / tab-focus re-check of rendered cards (properties is not in realtime). */
+  revalidateHolds?: RevalidateHolds;
   /** [runId, reason] from the snapshot (the reason each card shows), for the tape. */
   flagReasons?: Array<[string, string | null]>;
   /** Runs whose thread text failed to load on the server: fetched again in the browser. */
@@ -555,6 +559,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             labels={labels}
             meta={meta}
             snapshot={props.holdsSnapshot}
+            initialMissing={props.holdsMissing}
+            revalidate={props.revalidateHolds}
             error={props.holdsError}
             unverified={props.holdsUnverified}
             loadOlder={props.loadOlderHolds}

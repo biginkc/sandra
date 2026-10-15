@@ -1,4 +1,4 @@
-import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
+import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
 import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
@@ -12,6 +12,8 @@ export type WaitingList = {
   snapshot: WaitingSnapshot;
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
+  /** First-page snapshot ids dropped by the final check (locked or resolved while the page was built). */
+  missing: string[];
   /** [runId, reason] from the snapshot, for the tape. */
   flagReasons: Array<[string, string | null]>;
   error: string | null;
@@ -41,16 +43,22 @@ export async function loadMessagesV2Page(
   void _h;
   void _m;
   if (!list.ok) {
-    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, flagReasons: [], error: HOLDS_LOAD_ERROR };
+    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
   }
   const snapshot = buildSnapshot(list.holds);
   const enriched = await enrichPage(supabase, orgId, list.holds.slice(0, FIRST_PAGE));
+  // Final check after enrichment: a hold locked or resolved meanwhile is dropped (the column counts it as missing).
+  const still = await recheckOpen(supabase, orgId, enriched.holds);
+  if (!still) {
+    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
+  }
   return {
     ...rest,
-    holds: enriched.holds,
+    holds: enriched.holds.filter((x) => still.has(x.id)),
     holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
     snapshot,
     unverified: list.unverified,
+    missing: enriched.holds.filter((x) => !still.has(x.id)).map((x) => x.id),
     flagReasons: snapshotFlagReasons(snapshot),
     error: null,
   };
@@ -72,5 +80,12 @@ export async function loadHoldsByIds(
   const found = ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
   const missing = ids.filter((id) => !byId.has(id));
   const enriched = await enrichPage(supabase, orgId, found);
-  return { holds: enriched.holds, missing, unverified: list.unverified, contextErrors: enriched.contextErrors };
+  const still = await recheckOpen(supabase, orgId, enriched.holds);
+  if (!still) return null;
+  return {
+    holds: enriched.holds.filter((x) => still.has(x.id)),
+    missing: [...missing, ...enriched.holds.filter((x) => !still.has(x.id)).map((x) => x.id)],
+    unverified: list.unverified,
+    contextErrors: enriched.contextErrors,
+  };
 }

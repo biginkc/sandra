@@ -56,7 +56,10 @@ export type OlderHoldsPage = {
 /** Server action behind "Show older": the next snapshot ids (at most 100). */
 export type LoadOlderHolds = (input: { ids: string[] }) => Promise<Result<OlderHoldsPage>>;
 
-export type { WaitingSnapshot, SnapshotEntry } from "./hold-list";
+export type { WaitingSnapshot, SnapshotEntry, HoldLiveState } from "./hold-list";
+
+/** Server action behind the waiting column's 60-second / tab-focus re-check (at most 100 ids per call). */
+export type RevalidateHolds = (input: { ids: string[] }) => Promise<Result<import("./hold-list").HoldLiveState[]>>;
 
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
 export type LoadBacklog = (input: {

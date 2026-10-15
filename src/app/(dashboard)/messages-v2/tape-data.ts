@@ -54,6 +54,10 @@ export async function loadRunThreads(
     }
     for (const m of res.rows) inboundAt.set(m.id, m.created_at);
   }
+  // An inbound id with no row is a failed lookup (retried), never a silent fall-back to the run start.
+  for (const r of runs) {
+    if (r.inbound_message_id && !inboundAt.has(r.inbound_message_id)) failed.add(r.id);
+  }
 
   await Promise.all([
     inBatches(chunk(replyIds), async (ids) => {
@@ -69,7 +73,8 @@ export async function loadRunThreads(
     inBatches(
       runs.filter((r) => r.conversation_id && !failed.has(r.id)),
       async (run) => {
-        const cutoff = (run.inbound_message_id && inboundAt.get(run.inbound_message_id)) || run.started_at;
+        // The run start is used only when the run has no inbound message id at all.
+        const cutoff = run.inbound_message_id ? inboundAt.get(run.inbound_message_id)! : run.started_at;
         const res = await supabase
           .from("messages")
           .select("id, body")
