@@ -121,6 +121,7 @@ export default defineConfig({
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
+      "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
