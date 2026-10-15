@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeInstant } from "./chicago-time";
-import { buildSnapshot } from "./hold-list";
+import { buildSnapshot, snapshotFlagReasons } from "./hold-list";
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
   OpenHold,
@@ -357,8 +357,7 @@ describe("MessagesV2View", () => {
   });
 
   it("a pinned NULL snapshot reason is not overridden by a live reason from a loaded earlier day", async () => {
-    // The run has no reason of its own, so the pinned NULL flag reason decides (neutral) and no later day may change it.
-    const held = run("r-null", { status: "held", reason: null, started_at: new Date(NOW - 60_000).toISOString() });
+    const held = run("r-null", { status: "held", reason: "model:price_or_offer", started_at: new Date(NOW - 60_000).toISOString() });
     const loadTapeDay = vi.fn(async () => ({
       ok: true as const,
       data: { runs: [], labels: [], threads: [], failedRunIds: [], flagReasons: [["r-null", "model:opt_out"]] as Array<[string, string]> },
@@ -372,15 +371,34 @@ describe("MessagesV2View", () => {
     expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
   });
 
-  it("Martha regression: unflagged hold (NULL flag reason) whose run says model:not_interested reads Not interested on card and tape", async () => {
+  it("card: a pinned NULL display reason stays neutral even when the run later carries a reason, same as the tape", async () => {
+    const snapRun = run("rr", { property_id: "p7", status: "held", reason: null });
+    const hold = { ...openHold("p7", snapRun), ...at(5), flag_reason: null };
+    const snapshot = buildSnapshot([hold]); // nothing to show at snapshot time -> pinned null
+    const later = { ...snapRun, reason: "model:price_or_offer" };
+    await mount({ ...props([later], [{ ...hold, run: later }]), holdsSnapshot: snapshot, flagReasons: snapshotFlagReasons(snapshot) });
+    expect(screen.getByTestId("waiting-reason")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
+    expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
+  });
+
+  it("Martha regression: an unflagged hold's display reason is frozen from its run at snapshot time -> Not interested on card and tape", async () => {
     const r = run("rr", { property_id: "p7", status: "held", reason: "model:not_interested" });
     const hold = { ...openHold("p7", r), ...at(5), flag_reason: null };
-    await mount({ ...props([r], [hold]), holdsSnapshot: buildSnapshot([hold]), flagReasons: [["rr", null]] });
-    const card = screen.getByTestId("waiting-reason").textContent ?? "";
-    expect(card).toMatch(/may have said no\. Not sure enough to close it\./);
+    const snapshot = buildSnapshot([hold]);
+    await mount({ ...props([r], [hold]), holdsSnapshot: snapshot, flagReasons: snapshotFlagReasons(snapshot) });
+    expect(screen.getByTestId("waiting-reason").textContent).toMatch(/may have said no\. Not sure enough to close it\./);
     expect(within(screen.getByTestId("tape-card")).getByTestId("tape-tag")).toHaveTextContent("Not interested");
-    // Same sentence on the tape (the seller's name comes from each card's own label in this fixture).
     expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence").textContent).toMatch(/may have said no\. Not sure enough to close it\./);
+  });
+
+  it("a later run-reason rewrite does not change the frozen display reason", async () => {
+    const snapRun = run("rw", { property_id: "p8", status: "held", reason: "model:not_interested" });
+    const hold = { ...openHold("p8", snapRun), ...at(5), flag_reason: null };
+    const snapshot = buildSnapshot([hold]);
+    const rewritten = { ...snapRun, reason: "model:hot_lead" };
+    await mount({ ...props([rewritten], [{ ...hold, run: rewritten }]), holdsSnapshot: snapshot, flagReasons: snapshotFlagReasons(snapshot) });
+    expect(within(screen.getByTestId("tape-card")).getByTestId("tape-tag")).toHaveTextContent("Not interested");
+    expect(screen.getByTestId("waiting-reason").textContent).toMatch(/may have said no/);
   });
 
   it("same reason but a new flag time after the snapshot: marked Updated and actions locked", async () => {

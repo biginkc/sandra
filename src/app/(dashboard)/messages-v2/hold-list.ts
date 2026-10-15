@@ -383,22 +383,31 @@ export type SnapshotEntry = {
   th: string | null;
   d?: string | null;
   ds?: boolean;
+  /**
+   * The frozen DISPLAY reason (index into reasons) when it differs from the flag reason `r`: the flag reason, else
+   * the hold's run reason, computed once here. Tape and card show it; stale checks keep comparing `r`.
+   */
+  x?: number;
 };
 export type WaitingSnapshot = { reasons: string[]; entries: SnapshotEntry[] };
 
 export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): WaitingSnapshot {
   const reasons: string[] = [];
   const index = new Map<string, number>();
-  const entries = sorted.map((h): SnapshotEntry => {
-    const reason = h.flag_reason ?? null;
-    let r = -1;
-    if (reason) {
-      r = index.get(reason) ?? reasons.length;
-      if (r === reasons.length) {
-        reasons.push(reason);
-        index.set(reason, r);
-      }
+  const indexOf = (reason: string | null): number => {
+    if (!reason) return -1;
+    let k = index.get(reason);
+    if (k === undefined) {
+      k = reasons.length;
+      reasons.push(reason);
+      index.set(reason, k);
     }
+    return k;
+  };
+  const entries = sorted.map((h): SnapshotEntry => {
+    const r = indexOf(h.flag_reason ?? null);
+    // Display reason, frozen now: the flag reason, else the run's own reason (an unflagged hold still reads right).
+    const x = h.flag_reason ? r : indexOf(h.run?.reason ?? null);
     return {
       id: h.id,
       at: holdActivityAt(h),
@@ -408,6 +417,7 @@ export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): Waitin
       th: h.seen?.through ?? null,
       // Omitted when there is no draft, to keep the list small.
       ...(h.draft ? { d: h.draft.id, ds: h.draft.sendable === true } : {}),
+      ...(x !== r ? { x } : {}),
     };
   });
   return { reasons, entries };
@@ -418,7 +428,10 @@ export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): Waitin
  * authoritative, so no later (live) reason may replace it. Each run has exactly one owning hold.
  */
 export function snapshotFlagReasons(s: WaitingSnapshot): Array<[string, string | null]> {
-  return s.entries.flatMap((e) => (e.run ? [[e.run, e.r >= 0 ? s.reasons[e.r] : null] as [string, string | null]] : []));
+  return s.entries.flatMap((e) => {
+    const k = e.x ?? e.r;
+    return e.run ? [[e.run, k >= 0 ? s.reasons[k] : null] as [string, string | null]] : [];
+  });
 }
 
 /**

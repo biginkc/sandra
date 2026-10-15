@@ -449,6 +449,48 @@ describe("spec 2: client-held snapshot", () => {
     expect(snapshotFlagReasons(snap)).toHaveLength(10_000);
   });
 
+  it("display reason is frozen at snapshot time: flag reason, else run reason; flag reason `r` is unchanged", () => {
+    const base = { conversation_id: null, sources: ["pending_draft"], since: t(1) };
+    const unflagged = { ...base, id: u(1), property_id: u(1), flag_reason: undefined, run: { ...runRow(1, { reason: "model:not_interested" }), steps: [] } };
+    const flaggedHold = { ...base, id: u(2), property_id: u(2), flag_reason: "model:hot_lead", run: { ...runRow(2, { reason: "model:not_interested" }), steps: [] } };
+    const neither = { ...base, id: u(3), property_id: u(3), flag_reason: undefined, run: { ...runRow(3, { reason: null }), steps: [] } };
+    const snap = buildSnapshot([unflagged, flaggedHold, neither] as unknown as OpenHold<RunWithSteps>[]);
+    const [a, b, c] = snap.entries;
+    expect(a.r).toBe(-1);
+    expect(snap.reasons[a.x!]).toBe("model:not_interested");
+    expect(snap.reasons[b.r]).toBe("model:hot_lead");
+    expect(b.x).toBeUndefined();
+    expect(c.r).toBe(-1);
+    expect(c.x).toBeUndefined();
+    const reasons = new Map(snapshotFlagReasons(snap));
+    expect(reasons.get(u(1, 5))).toBe("model:not_interested");
+    expect(reasons.get(u(2, 5))).toBe("model:hot_lead");
+    expect(reasons.get(u(3, 5))).toBeNull();
+    expect(decodeSnapshot(JSON.parse(JSON.stringify(encodeSnapshot(snap))))).toEqual(snap);
+  });
+
+  it("production rows (2026-10-15): Martha -> Not interested; Sue, William, Justin -> Wants an offer, on tape and card", () => {
+    const rows = [
+      { who: "Martha", flag: undefined, run: "model:not_interested", status: "held", tag: "Not interested", sentence: "Martha may have said no. Not sure enough to close it." },
+      { who: "Sue", flag: "model:call_request", run: "model:call_request", status: "escalated", tag: "Wants an offer", sentence: "Sue may want an offer. Nothing sent." },
+      { who: "William", flag: "model:call_request", run: "model:call_request", status: "escalated", tag: "Wants an offer", sentence: "William may want an offer. Nothing sent." },
+      { who: "Justin", flag: "model:call_request", run: "model:call_request", status: "escalated", tag: "Wants an offer", sentence: "Justin may want an offer. Nothing sent." },
+    ];
+    const holds = rows.map((r, i) => ({
+      id: u(i + 1), property_id: u(i + 1), conversation_id: null, sources: ["needs_attention"], since: t(i), flag_reason: r.flag,
+      run: { ...runRow(i + 1, { reason: r.run, status: r.status }), steps: [] },
+    })) as unknown as OpenHold<RunWithSteps>[];
+    const reasons = new Map(snapshotFlagReasons(buildSnapshot(holds)));
+    rows.forEach((r, i) => {
+      const run = holds[i].run!;
+      const pinned = reasons.get(run.id) ?? null;
+      const tape = deriveTape(run, r.who, pinned, true);
+      expect(tape.kind === "decided" && tape.tag?.label).toBe(r.tag);
+      expect(tape.kind === "decided" && tape.sentence).toBe(r.sentence);
+      expect(holdReasonSentence({ ...run, reason: pinned }, pinned, r.who, true)).toBe(r.sentence);
+    });
+  });
+
   it("snapshot encode/decode round-trips every pinned field, including odd instants and missing values", () => {
     const snap = {
       reasons: ["model:unclear"],

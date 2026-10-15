@@ -18,6 +18,8 @@ export type CompactEntry = {
   t?: number | string;
   d?: string;
   s?: 1;
+  /** Display reason index, only when it differs from `r`. */
+  x?: number;
 };
 export type CompactSnapshot = { v: 1; reasons: string[]; rows: CompactEntry[] };
 
@@ -55,6 +57,7 @@ export function encodeSnapshot(s: WaitingSnapshot): CompactSnapshot {
       row.d = packId(e.d);
       if (e.ds) row.s = 1;
     }
+    if (e.x !== undefined) row.x = e.x;
     return row;
   });
   return { v: 1, reasons: s.reasons, rows };
@@ -75,6 +78,7 @@ export function decodeSnapshot(c: CompactSnapshot): WaitingSnapshot {
       entry.d = unpackId(row.d);
       entry.ds = row.s === 1;
     }
+    if (row.x !== undefined) entry.x = row.x;
     return entry;
   });
   return { reasons: c.reasons, entries };

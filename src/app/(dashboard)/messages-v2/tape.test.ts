@@ -172,40 +172,50 @@ describe("holdReasonSentence", () => {
   });
 });
 
-describe("pinned: ONE effective reason (pinned run's own reason, else pinned flag reason), same on tape and card", () => {
-  it("the pinned run's own reason wins over the flag reason (I6), on tape and card", () => {
+describe("snapshot reason wins (pinned)", () => {
+  it("a run whose own reason and outcome say price shows the snapshot's Hostile on tape and card", () => {
     const r = run({ status: "held", reason: "model:price_or_offer", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" })] });
     const tape = deriveTape(r, "Dee", "hostile_needs_confirm", true);
-    expect(tape.kind === "decided" && tape.tag?.label).toBe("Talked price");
-    const card = holdReasonSentence(r, r.reason, "Dee", true);
-    expect(tape.kind === "decided" && tape.sentence).toBe(card);
-  });
-
-  it("Martha: unflagged hold (null flag reason), run reason model:not_interested -> Not interested on tape and card", () => {
-    const r = run({ status: "held", reason: "model:not_interested", steps: [] });
-    const tape = deriveTape(r, "Martha", null, true);
-    expect(tape.kind === "decided" && tape.tag?.label).toBe("Not interested");
-    expect(tape.kind === "decided" && tape.sentence).toBe("Martha may have said no. Not sure enough to close it.");
-    expect(holdReasonSentence(r, r.reason, "Martha", true)).toBe("Martha may have said no. Not sure enough to close it.");
-  });
-
-  it("run without a reason: the pinned flag reason is used", () => {
-    const r = run({ status: "held", reason: null, steps: [] });
-    const tape = deriveTape(r, "Dee", "hostile_needs_confirm:abc", true);
     expect(tape.kind === "decided" && tape.tag?.label).toBe("Hostile");
+    const cardRun = { ...r, reason: "hostile_needs_confirm" };
+    const card = holdReasonSentence(cardRun, "hostile_needs_confirm", "Dee", true);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Hostile text. Nothing sent.");
   });
 
-  it("no run reason and an unmapped pinned reason: neutral, never the classifier outcome", () => {
-    const r = run({ status: "held", reason: null, steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" })] });
+  it("without a snapshot hold the run's own reason still applies", () => {
+    const r = run({ status: "held", reason: "model:price_or_offer", steps: [] });
+    expect(deriveTape(r, "Dee", "hostile_needs_confirm", false).kind === "decided" && (deriveTape(r, "Dee", "hostile_needs_confirm", false) as { tag: { label: string } }).tag.label).toBe("Talked price");
+  });
+});
+
+describe("pinned snapshot reasons are the only source (null / unmapped -> neutral)", () => {
+  it("an unmapped pinned reason with a conflicting classifier outcome shows the neutral tag and sentence on tape and card", () => {
+    const r = run({ status: "held", reason: "model:hot_lead", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" })] });
     const tape = deriveTape(r, "Dee", "suppression_incomplete:abc", true);
     expect(tape.kind === "decided" && tape.tag?.label).toBe("Waits for a person");
-    expect(tape.kind === "decided" && tape.sentence).toBe("Needs a person to look at it. Nothing sent.");
+    const card = holdReasonSentence({ ...r, reason: "suppression_incomplete:abc" }, "suppression_incomplete:abc", "Dee", true);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Needs a person to look at it. Nothing sent.");
   });
 
-  it("no run reason and a NULL pinned reason: neutral (no later or live reason is used)", () => {
-    const r = run({ status: "held", reason: null, steps: [step(1, "jev", "classify", "pass", { outcome: "not_interested" })] });
+  it("a pinned NULL reason is authoritative: the run's own reason is not used", () => {
+    const r = run({ status: "held", reason: "model:price_or_offer", steps: [] });
     const tape = deriveTape(r, "Dee", null, true);
     expect(tape.kind === "decided" && tape.tag?.label).toBe("Waits for a person");
+    expect(tape.kind === "decided" && tape.sentence).toBe(holdReasonSentence({ ...r, reason: null }, null, "Dee", true));
+  });
+});
+
+describe("Martha: an unflagged hold's frozen display reason comes from its run at snapshot time", () => {
+  it("pinned display reason model:not_interested -> Not interested + the held sentence on tape and card", () => {
+    const r = run({ status: "held", reason: "model:not_interested", steps: [] });
+    const tape = deriveTape(r, "Martha", "model:not_interested", true);
+    expect(tape.kind === "decided" && tape.tag?.label).toBe("Not interested");
+    expect(tape.kind === "decided" && tape.sentence).toBe("Martha may have said no. Not sure enough to close it.");
+    expect(holdReasonSentence({ ...r, reason: "model:not_interested" }, "model:not_interested", "Martha", true)).toBe(
+      "Martha may have said no. Not sure enough to close it.",
+    );
   });
 });
 
@@ -252,14 +262,15 @@ describe("every real reason -> tag + held sentence (tape and card identical)", (
     ["model:seller requesting removal from contact list", ...NEUTRAL],
   ];
   it.each(table)("%s -> %s", (reason, tag, sentence) => {
-    const r = run({ status: "held", reason, steps: [] });
-    const tape = deriveTape(r, "Pat", null, true);
+    // As a pinned (snapshot) reason, on a run whose own reason conflicts: the pinned reason decides.
+    const r = run({ status: "held", reason: "model:hot_lead", steps: [] });
+    const tape = deriveTape(r, "Pat", reason, true);
     expect(tape.kind === "decided" && tape.tag?.label).toBe(tag);
     expect(tape.kind === "decided" && tape.sentence).toBe(sentence);
-    expect(holdReasonSentence(r, reason, "Pat", true)).toBe(sentence);
-    // The same reason arriving as the (pinned) flag reason on a run without its own reason reads the same.
-    const viaFlag = deriveTape(run({ status: "held", reason: null, steps: [] }), "Pat", reason, true);
-    expect(viaFlag.kind === "decided" && viaFlag.tag?.label).toBe(tag);
+    expect(holdReasonSentence({ ...r, reason }, reason, "Pat", true)).toBe(sentence);
+    // As a run's own reason with no snapshot hold: the same tag.
+    const unpinned = deriveTape(run({ status: "held", reason, steps: [] }), "Pat", null, false);
+    if (tag !== NEUTRAL[0]) expect(unpinned.kind === "decided" && unpinned.tag?.label).toBe(tag);
   });
 });
 

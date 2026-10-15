@@ -197,15 +197,15 @@ export function withEffectiveReason<T extends { reason: string | null }>(run: T,
 
 /** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". `flagReason` is the hold's flag reason when this run is the hold's current run. */
 export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null, pinned = false): TapeView {
-  // `pinned`: the hold's run and flag reason are the waiting-list snapshot's. The ONE effective reason is the pinned
-  // run's own reason, else the pinned flag reason (I6), exactly as on the card; never a live or later reason.
-  const run = withEffectiveReason(rawRun, flagReason);
+  // `pinned`: the reason is the waiting-list snapshot's frozen display reason, and it wins over the run's own reason
+  // and outcome (a pinned null stays neutral).
+  const run = pinned ? { ...rawRun, reason: flagReason ?? null } : withEffectiveReason(rawRun, flagReason);
   // A snapshot run reads like its card whatever the run's own status: pinned tag + sentence, and the run's
   // skipped / errored status as the separate "what she did" line.
   if (pinned && (run.status === "skipped" || run.status === "error")) {
     return {
       kind: "decided",
-      tag: pinnedTag(run.reason),
+      tag: pinnedTag(flagReason),
       stage: "waiting",
       sentence: holdReasonSentence(run, run.reason, who, true),
       did: run.status === "skipped" ? quietSkip(run) : "Something went wrong reading this one",
@@ -214,9 +214,9 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 
-  // Pinned: the effective reason (pinned run's reason, else pinned flag reason) is the ONLY source of the tag. Null or
-  // unmapped -> the neutral tag, never the classifier outcome (so the tape cannot say more than the card).
-  const tag = pinned ? pinnedTag(run.reason) : tapeTagForRun(run);
+  // Pinned: the snapshot reason is the ONLY source of the tag. Null or unmapped -> the neutral tag, never the run's
+  // old reason or classifier outcome (so the tape cannot say more than the card).
+  const tag = pinned ? pinnedTag(flagReason) : tapeTagForRun(run);
   const terminal = TERMINAL.has(run.status);
   const delayed = hasStep(run.steps, "reply_delay_scheduled", "applied");
   const replySent = run.status === "replied" || run.steps.some((s) => s.kind === "reply" && s.result === "sent");

@@ -79,8 +79,8 @@ function WaitingCard({
   const run = hold.run;
   const who = sellerWho(label);
   // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
-  // The ONE effective reason, as on the tape: the run's own reason, else the (snapshot) flag reason.
-  const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
+  // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
+  const effectiveRun = run ? (pinned ? { ...run, reason: hold.flag_reason ?? null } : withEffectiveReason(run, hold.flag_reason)) : null;
   const cardRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (selected) cardRef.current?.scrollIntoView?.({ block: "center" });
@@ -121,7 +121,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
+        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">
@@ -250,7 +250,7 @@ export function WaitingColumn({
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
-  const entries =
+  const entries: readonly SnapshotEntry[] =
     snapshot?.entries ??
     holds.map((h) => ({
       id: h.id,
@@ -288,11 +288,13 @@ export function WaitingColumn({
   const cardCheckSeq = useRef(0);
   const entryById = new Map(entries.map((e) => [e.id, e] as const));
   /** A card's pinned snapshot entry and reason: the page snapshot, else the pinned My Leads card's own load. */
-  const pinEntry = (id: string): { e: SnapshotEntry; reason: string | null } | undefined => {
+  /** `reason` = the pinned FLAG reason (stale checks); `display` = the frozen display reason (tape and card). */
+  const pinEntry = (id: string): { e: SnapshotEntry; reason: string | null; display: string | null } | undefined => {
     const e = snapshot ? entryById.get(id) : undefined;
-    if (e) return { e, reason: reasonOf(e.r) };
+    if (e) return { e, reason: reasonOf(e.r), display: reasonOf(e.x ?? e.r) };
     const f = focusSnapshot?.entries.find((x) => x.id === id);
-    if (f) return { e: f, reason: f.r >= 0 ? (focusSnapshot!.reasons[f.r] ?? null) : null };
+    const at = (k: number) => (k >= 0 ? (focusSnapshot!.reasons[k] ?? null) : null);
+    if (f) return { e: f, reason: at(f.r), display: at(f.x ?? f.r) };
     return undefined;
   };
   const pinsOf = (id: string, h?: OpenHold<RunWithSteps>): Pinned | undefined => {
@@ -494,7 +496,8 @@ export function WaitingColumn({
     const reason = pe.reason;
     return {
       ...h,
-      ...(reason ? { flag_reason: reason } : { flag_reason: null }),
+      // The card shows the frozen display reason (flag reason, else the run reason at snapshot time).
+      flag_reason: pe.display,
       // Always the SNAPSHOT versions (reason, flag time, pending-row version), never the live ones: the server
       // compares them and refuses a changed hold.
       seen: { through: e.th ?? null, flagReason: reason, flagAt: e.fa },
