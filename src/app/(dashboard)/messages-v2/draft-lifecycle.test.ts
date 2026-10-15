@@ -174,7 +174,7 @@ export function expected(link: Link, change: Change, check: string, flagged: boo
       return flagged ? "Updated + actions disabled" : "missing (removed)";
     case "Send / Edit":
       // The card only enables Send/Edit for a draft tied directly to its property and seller text.
-      if (link !== "own property_id") return "disabled on the card; action refuses, nothing sent";
+      if (link !== "own property_id") return "disabled (Can't send from here yet, open the thread); action refuses, nothing sent";
       // Sends only while the draft is still tied DIRECTLY to P (its own property_id) and resolves to P alone.
       return stillP && change !== "property_id -> null" ? "ok (sent)" : "refused (HOLD_STALE / not sendable / not pending / not found), nothing sent";
   }

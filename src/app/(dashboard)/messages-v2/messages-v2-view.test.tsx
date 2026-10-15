@@ -540,6 +540,7 @@ describe("MessagesV2View", () => {
     await mount({ ...props([], [h]), holdsSnapshot: buildSnapshot([h]), actions });
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
+    expect(screen.getByTestId("draft-not-sendable")).toHaveTextContent("Can't send from here yet, open the thread.");
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
   });
 

@@ -17,7 +17,7 @@ type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
 
 /** Matches the server: only drafts tied directly to a property can be sent from a hold card. */
-const NOT_SENDABLE_HERE = "This draft is not tied directly to this lead and its seller text; open the thread to reply.";
+const NOT_SENDABLE_HERE = "Can't send from here yet, open the thread.";
 
 const ACTIONS = ["Send", "Edit", "Open thread", "Take over (Sandra stops)", "Assign", "Dismiss"] as const;
 
@@ -388,6 +388,11 @@ export function HoldActionControls({
         </div>
       )}
 
+      {draft?.sendable === false && (
+        <p data-testid="draft-not-sendable" className="text-xs text-muted-foreground">
+          {NOT_SENDABLE_HERE}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
