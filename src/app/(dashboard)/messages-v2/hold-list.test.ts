@@ -860,10 +860,15 @@ describe("Astra: an unresolved reference makes a draft unverifiable everywhere (
     ["a run_id with no row", draft(1, { property_id: u(3), run_id: u(77, 5) }), []],
     ["a run_id on ANOTHER org's run", draft(1, { property_id: u(3), run_id: u(77, 5) }), [runRow(77, { org_id: "other", property_id: u(3) })]],
     ["an inbound_message_id with no row", draft(1, { property_id: u(3), inbound_message_id: u(77, 7) }), []],
+    ["an inbound_message_id on ANOTHER org's message", draft(1, { property_id: u(3), inbound_message_id: u(77, 7) }), []],
+    ["a conversation_id with no message in the org", draft(1, { property_id: u(3), conversation_id: u(77, 2) }), []],
+    ["a conversation_id that is another org's", draft(1, { property_id: u(3), conversation_id: u(77, 2) }), []],
   ];
+  // Rows that exist, but in another org (the cross-org cases above read them through the org filter).
+  const otherOrg: Row[] = [message(77, { org_id: "other", property_id: u(3), conversation_id: u(77, 2) })];
   for (const [name, d, runs] of cases) {
     it(`${name}: hidden + counted, missing on paging, not eligible on re-check, Send refused`, async () => {
-      const tables: Record<string, Row[]> = { properties: [plainProp(3)], ai_reply_drafts: [d], pipeline_runs: runs };
+      const tables: Record<string, Row[]> = { properties: [plainProp(3)], ai_reply_drafts: [d], pipeline_runs: runs, messages: name.includes("ANOTHER") || name.includes("another org") ? otherOrg : [] };
       const list = await eligible(tables);
       expect(list.holds).toHaveLength(0);
       expect(list.unverified).toBe(1);
@@ -977,5 +982,24 @@ describe("Sol: a scoped re-check decides shared-run ownership exactly as the who
     const whole = older.log.filter((x) => x.table === "pipeline_runs" && x.select === "*");
     expect(new Set(whole.flatMap((l) => l.ops.flatMap((o) => (o.k === "in" ? (o.v as string[]) : []))))).toEqual(new Set([u(9, 5)]));
     expect(slice.holds[0].run).toMatchObject({ id: u(9, 5), status: "held", inbound_preview: "x" });
+  });
+});
+
+describe("Opus: Show older of a hold that lost a shared run on the whole list renders it as the whole list does", () => {
+  it("B (newer) owns the shared run on page 1's build; Show older of A alone gives A the same run, not Updated", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [plainProp(1), plainProp(2)],
+      jev_lead_decisions: [
+        decision(1, u(1), t(5), { conversation_id: u(50, 2), source_inbound_message_id: u(1, 3) }),
+        decision(2, u(2), t(30), { conversation_id: u(50, 2), source_inbound_message_id: u(2, 3) }),
+      ],
+      pipeline_runs: [runRow(9, { property_id: null, conversation_id: u(50, 2), started_at: t(40) })],
+    };
+    const page = await loadMessagesV2Page(db(tables).client, "org");
+    const pinned = decodeSnapshot(page.snapshot).entries.find((e) => e.id === u(1))!;
+    const slice = (await loadHoldsByIds(db(tables).client, "org", [u(1)]))!;
+    expect(slice.holds[0].run?.id ?? null).toBe(pinned.run);
+    expect(slice.holds[0].recheck_changed).toBeUndefined();
+    expect(slice.snapshot.entries[0].run).toBe(pinned.run);
   });
 });

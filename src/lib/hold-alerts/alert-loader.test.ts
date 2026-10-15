@@ -8,6 +8,7 @@ import { fakePostgrest } from "@/app/(dashboard)/messages-v2/fake-postgrest.test
 import { loadMessagesV2Data as pageLoader } from "@/app/(dashboard)/messages-v2/queries";
 
 import { loadMessagesV2Data as alertLoader } from "./alert-loader";
+import { createHoldAlertDeps } from "./index";
 
 /** sha256 of src/app/(dashboard)/messages-v2/queries.ts at 84ddabdd6 (the parent of PR #874). */
 const PARENT_QUERIES_SHA256 = "020352518e8be736faebd8de7c719e1afa061bbf3c78fb9eacec2e339c924375";
@@ -83,5 +84,13 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     const page = await pageLoader(db(fixture()), "org", NOW, { alertsSince: at(7 * 24 * 60) });
     // The page's own loader resolves the draft's run; it no longer feeds the cron, so this cannot change an alert.
     expect(page.holds.find((h) => h.id === u(1))?.run?.reason).toBe("model:hot_lead");
+  });
+
+  it("end to end through the cron's own deps (createHoldAlertDeps -> toAlertHolds -> isHotHold): the hold is NOT hot", async () => {
+    const env = { HOLD_ALERT_HOT_REASONS: "model:hot_lead" };
+    const deps = createHoldAlertDeps(db(fixture()) as never, env);
+    const res = await deps.loadHolds("org", at(7 * 24 * 60));
+    expect(res.complete).toBe(true);
+    expect(res.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: false }]);
   });
 });

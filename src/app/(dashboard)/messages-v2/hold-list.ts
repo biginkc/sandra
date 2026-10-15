@@ -189,19 +189,16 @@ export async function resolveDraftProperties(
       else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
     }),
     ...chunks(convIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string; created_at: string }>(() =>
-        supabase
-          .from("messages")
-          .select("id, conversation_id, property_id, created_at")
-          .eq("org_id", orgId)
-          .in("conversation_id", ids)
-          .not("property_id", "is", null),
+      // Every message (not only those with a property): a conversation with NO message in this org is an
+      // unreadable reference (absent or another org's), not "a conversation with no property".
+      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string | null; created_at: string }>(() =>
+        supabase.from("messages").select("id, conversation_id, property_id, created_at").eq("org_id", orgId).in("conversation_id", ids),
       );
       if (res.error) failed = true;
       else
         for (const m of res.rows) {
           const set = convProperties.get(m.conversation_id) ?? new Set<string>();
-          set.add(m.property_id);
+          if (m.property_id) set.add(m.property_id);
           convProperties.set(m.conversation_id, set);
         }
     }),
@@ -226,7 +223,11 @@ export async function resolveDraftProperties(
   for (const d of drafts) {
     // A reference that could not be read (absent, another org's, or hidden) might point anywhere: the draft is
     // unverifiable even if another link names a readable property.
-    if ((d.run_id && !runProperty.has(d.run_id)) || (d.inbound_message_id && !msgProperty.has(d.inbound_message_id))) {
+    if (
+      (d.run_id && !runProperty.has(d.run_id)) ||
+      (d.inbound_message_id && !msgProperty.has(d.inbound_message_id)) ||
+      (d.conversation_id && !convProperties.has(d.conversation_id))
+    ) {
       out.set(d.id, new Set());
       continue;
     }
@@ -438,7 +439,7 @@ const MAX_SCOPE_ROUNDS = 5;
  * pending decisions / reviews / drafts linked by the run's source message, by the run itself (drafts), or, for a
  * property-less run, by its conversation. Drafts are resolved in full. Null when any lookup fails.
  */
-async function competingProperties(supabase: LooseSupabase, orgId: string, runs: readonly PipelineRun[]): Promise<Set<string> | null> {
+export async function competingProperties(supabase: LooseSupabase, orgId: string, runs: readonly PipelineRun[]): Promise<Set<string> | null> {
   const out = new Set<string>();
   for (const r of runs) if (r.property_id) out.add(r.property_id);
   const inbound = uniq(runs.flatMap((r) => (r.inbound_message_id ? [r.inbound_message_id] : [])));
