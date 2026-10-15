@@ -74,7 +74,7 @@ let orgId = "";
 let phoneCounter = 0;
 const DRIPS = ["Maybe later", "Asked who is texting", "Not interested", "Confirmed owner"] as const;
 
-async function seedOrg(opts: { engine?: string; provider?: string; mode?: string; thresholds?: boolean; drips?: readonly string[]; templates?: boolean; newLeadAuto?: boolean } = {}) {
+async function seedOrg(opts: { engine?: string; provider?: string; mode?: string; thresholds?: boolean; drips?: readonly string[]; templates?: boolean; newLeadAuto?: boolean; nurtureDrip?: boolean; templateText?: Partial<Record<"nurture" | "not_interested" | "wrong_number", string>>; outboundMode?: string } = {}) {
   await supabase.from("ai_responder_configs").delete().eq("org_id", orgId);
   const { error } = await supabase.from("ai_responder_configs").insert({
     org_id: orgId,
@@ -83,6 +83,7 @@ async function seedOrg(opts: { engine?: string; provider?: string; mode?: string
     classifier_provider: opts.provider ?? "jev",
     classifier_mode: opts.mode ?? "automatic",
     classifier_engine: opts.engine ?? "nine_questions",
+    ...(opts.outboundMode ? { outbound_mode: opts.outboundMode } : {}),
   });
   expect(error).toBeNull();
 
@@ -96,9 +97,11 @@ async function seedOrg(opts: { engine?: string; provider?: string; mode?: string
     }
   }
 
+  const seqIds: string[] = [];
   for (const name of opts.drips ?? DRIPS) {
     const { data: seq, error: seqError } = await supabase.from("sequences").insert({ org_id: orgId, name, active: true }).select("id").single();
     expect(seqError).toBeNull();
+    seqIds.push(seq!.id);
     const { error: stepError } = await supabase.from("sequence_steps").insert([
       { sequence_id: seq!.id, step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms", template_body: `${name} one` },
       { sequence_id: seq!.id, step_index: 1, delay_after_previous_minutes: 1440, action_type: "send_sms", template_body: `${name} two` },
@@ -106,11 +109,19 @@ async function seedOrg(opts: { engine?: string; provider?: string; mode?: string
     expect(stepError).toBeNull();
   }
 
+  // The nurture auto-drip switch ("Maybe later" enrolment); its four drip ids are required when on.
+  if (opts.nurtureDrip !== false && seqIds[0]) {
+    await pg.query(
+      "update public.ai_responder_configs set nurture_auto_drip = true, nurture_drip_maybe_later_sequence_id = $2, nurture_drip_check_in_60_sequence_id = $2, nurture_drip_listed_not_selling_sequence_id = $2, nurture_drip_hot_book_appointment_sequence_id = $2 where org_id = $1",
+      [orgId, seqIds[0]],
+    );
+  }
+
   if (opts.templates !== false) {
     for (const [outcome, content] of [
-      ["nurture", APPROVED_REPLY_TEXTS.nurture],
-      ["not_interested", APPROVED_REPLY_TEXTS.not_interested],
-      ["wrong_number", APPROVED_REPLY_TEXTS.wrong_number],
+      ["nurture", opts.templateText?.nurture ?? APPROVED_REPLY_TEXTS.nurture],
+      ["not_interested", opts.templateText?.not_interested ?? APPROVED_REPLY_TEXTS.not_interested],
+      ["wrong_number", opts.templateText?.wrong_number ?? APPROVED_REPLY_TEXTS.wrong_number],
     ] as const) {
       // Approval flags are RPC-only in the product; the fixture sets them the way the RPC does.
       await pg.query("begin");
@@ -123,6 +134,25 @@ async function seedOrg(opts: { engine?: string; provider?: string; mode?: string
       await pg.query("commit");
     }
   }
+}
+
+/** The org's one active owner, written straight to the database (a throwaway stack has no auth service). */
+async function seedOwner(): Promise<string> {
+  const id = crypto.randomUUID();
+  await pg.query("insert into auth.users (id, email, aud, role, instance_id) values ($1, $2, 'authenticated', 'authenticated', '00000000-0000-0000-0000-000000000000')", [id, `nine-owner-${id}@test.local`]);
+  await pg.query("insert into public.memberships (user_id, org_id, role) values ($1, $2, 'owner')", [id, orgId]);
+  // My Leads on and the owner designated (the designation guard wants its transaction-local marker).
+  await pg.query("insert into public.acquisition_org_settings (org_id, my_leads_enabled) values ($1, true) on conflict (org_id) do update set my_leads_enabled = true", [orgId]);
+  await pg.query("begin");
+  try {
+    await pg.query("select set_config('my_leads.designation_update', $1, true)", [`:${orgId}:${id}`]);
+    await pg.query("update public.memberships set acquisitions_enabled = true where org_id = $1 and user_id = $2", [orgId, id]);
+    await pg.query("commit");
+  } catch (error) {
+    await pg.query("rollback");
+    throw error;
+  }
+  return id;
 }
 
 async function seedLead() {
@@ -214,6 +244,12 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
   beforeEach(async () => {
     // Disposable stack only (guarded in beforeAll). Straight to the SQL reset: the Storage
     // API cleanup in resetTenantTables needs the full stack, which this suite does not.
+    // The final-owner guard would block the reset: drop last test's owner first (throwaway DB only).
+    await pg.query("begin");
+    await pg.query("set local session_replication_role = replica");
+    await pg.query("delete from public.memberships where org_id = $1", [BMH_ORG_ID]);
+    await pg.query("delete from auth.users where email like 'nine-owner-%'");
+    await pg.query("commit");
     const { error: resetError } = await supabase.rpc("reset_tenant_tables");
     expect(resetError).toBeNull();
     resetMockState();
@@ -316,9 +352,12 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
   ] as Array<[NineAnswer, Partial<Record<NineQuestionId, number>>]>) {
     it(`${answer}: today's new_lead promotion (switch on), no automatic text`, async () => {
       await seedOrg();
+      const owner = await seedOwner();
       const { lead } = await run(probs, "yes I would sell");
       expect(await outboundBodies(lead.propertyId)).toEqual([]);
       expect((await propertyRow(lead.propertyId)).status).toBe("new_lead");
+      const { data: assigned } = await supabase.from("properties").select("assigned_user_id").eq("id", lead.propertyId).single();
+      expect(assigned!.assigned_user_id).toBe(owner); // PR 2's hand-off to Jarrad
       const { data: decisions } = await supabase.from("jev_lead_decisions").select("proposed_outcome, status, classification_run_id").eq("property_id", lead.propertyId);
       expect(decisions).toHaveLength(1);
       expect(decisions![0]!.proposed_outcome).toBe("new_lead");
@@ -388,6 +427,72 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("drip_enroll_failed:no_steps");
   });
 
+  it("hot with no owner to hand to: held as hot_lead_assign_failed (still hot), never auto-closed", async () => {
+    await seedOrg();
+    const { lead, outcome } = await run({ open_to_selling: 0.9 }, "yes I would sell");
+    expect(outcome).toMatchObject({ outcome: "escalated", reason: "hot_lead_assign_failed" });
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("hot_lead_assign_failed");
+  });
+
+  const EDITED: Array<[string, string]> = [
+    ["edited text", "Fantastic! We will keep in touch!!"],
+    ["a variable", "Hi {first_name}, Fantastic! We will keep in touch."],
+  ];
+  it.each(EDITED)("maybe_later with a template that has %s: nothing sent, no drip, held as reply_text_not_approved", async (_n, text) => {
+    await seedOrg({ templateText: { nurture: text } });
+    const { lead } = await run({ maybe_later: 0.8 });
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("reply_text_not_approved");
+  });
+
+  it("not_interested with an edited template: nothing sent, held as reply_text_not_approved", async () => {
+    await seedOrg({ templateText: { not_interested: "Sounds good." } });
+    const { lead } = await run({ not_interested: 0.85 });
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("reply_text_not_approved");
+  });
+
+  it.each(EDITED)("wrong_person with a template that has %s: nothing sent and the property is NOT closed", async (_n, text) => {
+    await seedOrg({ templateText: { wrong_number: text.replace("Fantastic! We will keep in touch", "Sorry about that") } });
+    const { lead } = await run({ wrong_person: 0.9 }, "wrong number");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).toBeNull();
+    expect(row.last_ai_escalation_reason).toBe("reply_text_not_approved");
+  });
+
+  it("wrong_person with no approved template mapped: held, NOT closed", async () => {
+    await seedOrg({ templates: false });
+    const { lead } = await run({ wrong_person: 0.9 }, "wrong number");
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).toBeNull();
+    expect(row.last_ai_escalation_reason).toMatch(/^nine_reply_not_sent:/);
+  });
+
+  it("wrong_person with sending blocked (outbound hold mode): held, NOT closed", async () => {
+    await seedOrg({ outboundMode: "hold" });
+    const { lead } = await run({ wrong_person: 0.9 }, "wrong number");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).toBeNull();
+    expect(row.needs_human_attention).toBe(true);
+  });
+
+  it("nurture auto-drip switch OFF: the Maybe later reply still goes out, nobody is enrolled, no hold", async () => {
+    await seedOrg({ nurtureDrip: false });
+    const { lead } = await run({ maybe_later: 0.8 });
+    expect(await outboundBodies(lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.nurture]);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
+  });
+
+  it("nurture auto-drip switch OFF does not govern the other drips (not_interested still enrols)", async () => {
+    await seedOrg({ nurtureDrip: false });
+    const { lead } = await run({ not_interested: 0.85 }, "no thanks");
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
+  });
+
   it("reply cannot go out (no approved template mapped): nothing sent, no drip, held for a person", async () => {
     await seedOrg({ templates: false });
     const { lead } = await run({ maybe_later: 0.8 });
@@ -453,6 +558,88 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { data: runs } = await supabase.from("sms_classification_runs").select("id").eq("property_id", lead.propertyId);
     expect(runs).toEqual([]);
     expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+  });
+
+  it("production shape (jev + automatic + outcome_v1) with 'who is this': the identity shortcut fires, the nine questions are never asked", async () => {
+    await seedOrg({ engine: "outcome_v1" });
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, "Who is this?");
+    await dispatchAiResponse(
+      supabase,
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "Who is this?", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect(await outboundBodies(lead.propertyId)).toEqual([IDENTITY_REPLY_BODY]);
+    expect(jevCalls).toHaveLength(0);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+  });
+
+  it("nine engine in shadow with 'who is this': the shortcut fires exactly as today and nothing is recorded as nine", async () => {
+    await seedOrg({ mode: "shadow" });
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, "Who is this?");
+    await dispatchAiResponse(
+      supabase,
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "Who is this?", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect(await outboundBodies(lead.propertyId)).toEqual([IDENTITY_REPLY_BODY]);
+    expect(jevCalls).toHaveLength(0);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+  });
+
+  it("shadow records under shadow_engine only (the tape key `engine` is absent) and writes no failure row when Jev fails", async () => {
+    await seedOrg({ mode: "shadow" });
+    const lead = await seedLead();
+    jevProbabilities = { maybe_later: 0.9 };
+    const inbound = await seedThread(lead, "maybe later");
+    const input = { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "maybe later", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY };
+    const keep = globalThis.fetch;
+    globalThis.fetch = (async (i: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof i === "string" ? i : i instanceof URL ? i.toString() : i.url;
+      if (url.includes("api.typesafe.ai")) return new Response("nope", { status: 401 });
+      return realFetch(i, init);
+    }) as typeof fetch;
+    try {
+      await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+    } finally {
+      globalThis.fetch = keep;
+    }
+    const { data: runs } = await supabase.from("sms_classification_runs").select("schema_version, fallback_reason").eq("property_id", lead.propertyId);
+    expect((runs ?? []).filter((r) => r.schema_version === "nine_questions_v1")).toEqual([]);
+
+    const ok = await seedLead();
+    const inbound2 = await seedThread(ok, "maybe later");
+    await dispatchAiResponse(supabase, { ...input, propertyId: ok.propertyId, contactId: ok.contactId, conversationId: inbound2.conversationId, inboundMessageId: inbound2.id, inboundFromPhone: ok.phone }, { anthropic: NO_ANTHROPIC });
+    const { data: okRuns } = await supabase.from("sms_classification_runs").select("decision, schema_version, resolved_outcome").eq("property_id", ok.propertyId).eq("schema_version", "nine_questions_v1");
+    expect(okRuns).toHaveLength(1);
+    expect(okRuns![0]!.decision).toMatchObject({ shadow_engine: "nine_questions", answer: "maybe_later" });
+    expect(okRuns![0]!.decision).not.toHaveProperty("engine");
+    expect(okRuns![0]!.resolved_outcome).toBeNull();
+    // and the eight-answer queue view never sees a nine row
+    const { data: queue } = await supabase.from("jev_needs_decision_classifier_events").select("id").eq("property_id", ok.propertyId).eq("schema_version", "nine_questions_v1");
+    expect(queue).toEqual([]);
+  });
+
+  it("a live nine failure row is not in the eight-answer Needs-a-decision view", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, "hello");
+    const keep = globalThis.fetch;
+    globalThis.fetch = (async (i: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof i === "string" ? i : i instanceof URL ? i.toString() : i.url;
+      if (url.includes("api.typesafe.ai")) return new Response("nope", { status: 401 });
+      return realFetch(i, init);
+    }) as typeof fetch;
+    try {
+      await dispatchAiResponse(supabase, { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "hello", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY }, { anthropic: NO_ANTHROPIC });
+    } finally {
+      globalThis.fetch = keep;
+    }
+    const { data: rows } = await supabase.from("sms_classification_runs").select("id").eq("property_id", lead.propertyId).eq("schema_version", "nine_questions_v1");
+    expect(rows).toHaveLength(1);
+    const { data: queue } = await supabase.from("jev_needs_decision_classifier_events").select("id").eq("property_id", lead.propertyId);
+    expect(queue).toEqual([]);
   });
 
   it("nine engine in shadow mode: decision recorded, today's path still acts", async () => {

@@ -24,6 +24,8 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   // Flags set by the responder, Jev and the sequences engine.
   "nine_asked_stop",
   "nine_needs_person",
+  "reply_text_not_approved",
+  "drip_switch_off", // tape step only (nurture auto-drip switch off); never a hold
   "hot_lead",
   "price_or_offer",
   "distress",
