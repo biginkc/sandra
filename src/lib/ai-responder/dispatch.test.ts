@@ -2492,7 +2492,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_assign_failed");
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-fail", "hot_lead_assign_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-fail", "hot_lead_assign_failed", expect.any(String));
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -2519,7 +2519,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_event_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_event_failed");
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-unrecorded", "hot_lead_event_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-unrecorded", "hot_lead_event_failed", expect.any(String));
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -3327,7 +3327,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "jev_new_lead_promotion_failed" });
       expect(state.property.status).not.toBe("new_lead");
       expect(state.property.needs_human_attention).toBe(true);
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-new-lead-dnc-locked", "jev_new_lead_promotion_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-new-lead-dnc-locked", "jev_new_lead_promotion_failed", expect.any(String));
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -7652,6 +7652,17 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           } finally { vi.stubGlobal("fetch", originalFetch); }
         };
 
+        it("round 17: held lead, allow-list WITHOUT price phrases + '$150k' (Jev nurture/no escalation): not price-hot, nothing recorded", async () => {
+          const state = createMockState();
+          await heldRun(state, "inbound-r17-held-unlisted", { outcome: "unclear", reason: "not_applicable", body: "I'd take $150k", keywords: ["lawyer"] });
+          expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+        });
+        it("round 17: held lead, allow-list WITH 'price' + '$150k' (Jev unclear/no escalation): price-hot, recorded", async () => {
+          const state = createMockState();
+          await heldRun(state, "inbound-r17-held-listed", { outcome: "unclear", reason: "not_applicable", body: "I'd take $150k", keywords: ["price"] });
+          expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+        });
+
         it("sanity: an ungated held lead is still classified and recorded", async () => {
           const state = createMockState();
           const r = await heldRun(state, "inbound-gate-ok");
@@ -7980,6 +7991,23 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(state.property.needs_human_attention).toBe(false);
             expect(state.property.last_ai_escalation_reason).toBeUndefined();
             expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("round 17: allow-list WITHOUT price phrases + '$150k' (Jev unclear): held keyword:numeric_amount (a person sees it), not hot", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r17-num-unlisted", { outcome: "unclear", keywords: ["lawyer", "callback"], body: "I'd take $150k" });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:numeric_amount" });
+            expect(state.property.needs_human_attention).toBe(true);
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:numeric_amount");
+            expect(r.steps.some((x) => x.name === "hot_wins")).toBe(false);
+            expect(r.classifierCalls).toBe(0);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("round 17: allow-list WITH 'price' + '$150k' (Jev unclear): hot, held keyword:price_offer", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r17-num-listed", { outcome: "unclear", keywords: ["price"], body: "I'd take $150k" });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
           it("legacy (non-Jev) config keeps the up-front keyword gate", async () => {

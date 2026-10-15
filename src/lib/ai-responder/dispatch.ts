@@ -92,7 +92,7 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
-import { hasNonPriceEscalationPhrase, matchEscalationKeyword } from "./keywords";
+import { hasNonPriceEscalationPhrase, matchEscalationKeyword, priceSignalAllowed } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
   NUMBER_SOURCE_AWAITING_ANSWER_REASON,
@@ -374,7 +374,11 @@ export async function applyKeywordEscalation(
     return { escalated: false };
   }
 
-  const reason = `keyword:${keywordMatch.tier}`;
+  // A numeric amount the org's allow-list does not cover is still held (as on
+  // main) but under a non-hot reason: it never drives a hot alert.
+  const unlistedNumeric =
+    keywordMatch.tier === "price_offer" && !priceSignalAllowed(keywordMatch, args.escalationKeywords ?? null);
+  const reason = unlistedNumeric ? "keyword:numeric_amount" : `keyword:${keywordMatch.tier}`;
   await trace(
     supabase,
     {
@@ -1596,9 +1600,12 @@ async function classifyAndHandleNonRouteOutcomes(
         // assigned_unrecorded: the lead IS on My Leads, but its note did not
         // save; the hold keeps a person in the loop and still alerts (hot).
         const assignReason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
-        const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx);
-        // After the flag, so the event shares the hold's alert key when the flag is ours.
-        await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, assignReason);
+        let ourFlagAt: string | null = null;
+        const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx, NO_GUARD, (at) => {
+          ourFlagAt = at;
+        });
+        // Shares the hold's alert key only when THIS call set the flag; otherwise its own key.
+        await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, assignReason, ourFlagAt);
         await completeClaim(supabase, input.propertyId, {
           claimId: responseClaim.claimId,
           outcome: "escalated",
@@ -1630,8 +1637,11 @@ async function classifyAndHandleNonRouteOutcomes(
       result: "error",
       detail: { status: applyResult.status },
     }, runCtx);
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
+    let ourFlagAt: string | null = null;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx, NO_GUARD, (at) => {
+      ourFlagAt = at;
+    });
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason, ourFlagAt);
     await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -3161,7 +3171,7 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
 
 /** The price_offer keyword, matched against the ORG's configured phrases on every path. */
 function isPriceKeyword(body: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
-  return matchEscalationKeyword(body, { allowedPhrases: escalationKeywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+  return priceSignalAllowed(matchEscalationKeyword(body, { allowedPhrases: escalationKeywords ?? undefined }), escalationKeywords);
 }
 
 /** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */
@@ -7081,6 +7091,8 @@ export async function markPropertyNeedsAttention(
    * awaits, so the attempt can expire in between). Not an attempt = no guard.
    */
   guard: Guard = NO_GUARD,
+  /** Called with the flag time only when THIS call set the flag (not when it was already set). */
+  onSet?: (flagAt: string) => void,
 ): Promise<boolean> {
   // Evidence first: the hold is recorded whether or not the flag write wins.
   guard();
@@ -7128,6 +7140,7 @@ export async function markPropertyNeedsAttention(
     }
     return exists;
   }
+  onSet?.(now);
   // Reconciliation of a SUCCESSFUL flag: the lead-event ledger entry is
   // evidence about a flag that already exists. A failure here must never turn
   // a persisted flag into a failed one (nor propagate), so it is reported and

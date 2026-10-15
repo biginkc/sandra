@@ -155,3 +155,15 @@ export function hasNonPriceEscalationPhrase(
   }
   return false;
 }
+
+/**
+ * A numeric price signal ("$150k", "200k") counts as a price phrase only when
+ * the org's allow-list includes a price-tier phrase (or there is no allow-list).
+ * Otherwise it is "unlisted": still a reason to hold, never a hot alert.
+ */
+export function priceSignalAllowed(match: KeywordMatch | null, allowedPhrases?: ReadonlyArray<string> | null): boolean {
+  if (!match || match.tier !== "price_offer") return false;
+  if (match.phrase !== "numeric-amount" || !allowedPhrases) return true;
+  const allowed = new Set(allowedPhrases.map((p) => p.toLowerCase()));
+  return TIER_KEYWORDS.price_offer.some((p) => allowed.has(p.toLowerCase()));
+}

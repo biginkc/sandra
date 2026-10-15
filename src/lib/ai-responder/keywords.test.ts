@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { matchEscalationKeyword } from "./keywords";
+import { matchEscalationKeyword, priceSignalAllowed } from "./keywords";
 
 describe("matchEscalationKeyword — tier A (handoff request)", () => {
   it("matches 'can I talk to a human?'", () => {
@@ -161,5 +161,32 @@ describe("matchEscalationKeyword — allowedPhrases override", () => {
         allowedPhrases: ["hello"], // dollar regex still wins
       }),
     ).toMatchObject({ tier: "price_offer", phrase: "numeric-amount" });
+  });
+});
+
+describe("priceSignalAllowed", () => {
+  const numeric = () => matchEscalationKeyword("I want $150k");
+  const word = () => matchEscalationKeyword("what's your price?");
+
+  it("null and non-price tiers are never a price signal", () => {
+    expect(priceSignalAllowed(null)).toBe(false);
+    expect(priceSignalAllowed(matchEscalationKeyword("my lawyer said"))).toBe(false);
+  });
+  it("a numeric amount with no allow-list (null / undefined) counts", () => {
+    expect(priceSignalAllowed(numeric())).toBe(true);
+    expect(priceSignalAllowed(numeric(), null)).toBe(true);
+  });
+  it("a numeric amount counts when the allow-list includes a price-tier phrase (case-insensitive)", () => {
+    expect(priceSignalAllowed(numeric(), ["price"])).toBe(true);
+    expect(priceSignalAllowed(numeric(), ["How Much"])).toBe(true);
+  });
+  it("a numeric amount does NOT count when the allow-list has no price-tier phrase (including an empty list)", () => {
+    expect(priceSignalAllowed(numeric(), ["hello"])).toBe(false);
+    expect(priceSignalAllowed(numeric(), ["lawyer", "callback"])).toBe(false);
+    expect(priceSignalAllowed(numeric(), [])).toBe(false);
+  });
+  it("a phrase-based price match counts (it already passed the allow-list inside matchEscalationKeyword)", () => {
+    expect(priceSignalAllowed(word(), ["price"])).toBe(true);
+    expect(priceSignalAllowed(word())).toBe(true);
   });
 });

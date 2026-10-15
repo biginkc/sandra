@@ -1647,6 +1647,70 @@ const ROWS: Row[] = [
       await h.expectOneAlertTotal();
     },
   },
+  {
+    id: "64",
+    name: "round 17: UNFLAGGED lead, org allow-list WITHOUT price phrases, \"$150k\" and Jev non-hot (normal path): held keyword:numeric_amount (a person sees it), NOT hot - 0 Slack, 0 SMS, no hot_wins",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["lawyer", "callback"]);
+      const a = await h.newInbound("I'd take $150k");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:numeric_amount" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "keyword:numeric_amount" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason, assigned_user_id").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:numeric_amount", assigned_user_id: null });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "65",
+    name: "round 17: HELD lead, org allow-list WITHOUT price phrases, \"$150k\" and Jev non-hot, through real dispatch: not price-hot - no hot_text event, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["lawyer", "callback"]);
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("I'd take $150k");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "66",
+    name: "round 17: TWO CONCURRENT failed hand-offs (two hot inbounds, one unassigned property, assignment blocked) with the caps full: only the call that set the flag shares the hold's hot_flag key; the other failure event has no flag_at (own event, deemed covered because the hold is guaranteed to alert); after the cap clears the hold alert goes out exactly once (1 Slack + 1 SMS) and nothing is re-sent",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.useUpCaps();
+      const a = await h.newInbound("yes I might sell, what could you pay for it?");
+      const b = await h.newInbound("call me, I want to sell");
+      const unblock = await h.blockAssignment();
+      let results;
+      try {
+        results = await Promise.all([h.dispatch(a, "new_lead", HOT_ESC), h.dispatch(b, "new_lead", HOT_ESC)]);
+      } finally {
+        await unblock();
+      }
+      expect(results.every((r) => r.outcome === "escalated")).toBe(true);
+      const fk = await h.flagKey();
+      const { rows: failures } = await pg.query(
+        "select source_id, payload from public.lead_events where property_id = $1 and source_type = 'hot_seller_failed'",
+        [h.propertyId],
+      );
+      // Both failures are recorded; exactly one (the call that set the flag) carries the flag time.
+      expect(failures.map((f) => f.source_id).sort()).toEqual([a, b].sort());
+      const withFlag = failures.filter((f) => f.payload.flag_at !== null);
+      expect(withFlag).toHaveLength(1);
+      expect(`hot_flag:${h.propertyId}:${withFlag[0].payload.flag_at}`).toBe(fk);
+      // Caps full: nothing goes out yet.
+      expect((await h.alertPass()).sent).toBe(0);
+      const later = { now: () => new Date(Date.now() + 61 * 60 * 1000) };
+      expect((await h.alertPass(later)).sent).toBe(2);
+      expect(await h.deliveryRows(fk)).toEqual([["slack", "sent"], ["sms", "sent"]]);
+      expect((await h.alertPass(later)).sent).toBe(0);
+    },
+  },
 ];
 
 /** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */

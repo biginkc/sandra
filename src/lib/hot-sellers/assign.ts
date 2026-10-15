@@ -220,6 +220,8 @@ export async function recordHotFailure(
   propertyId: string,
   inboundMessageId: string | null | undefined,
   reason: string,
+  /** The flag time THIS hand-off failure set (null = the flag was already set by something else). */
+  ourFlagAt: string | null = null,
 ): Promise<boolean> {
   if (!inboundMessageId) return false;
   const { data: property } = await db
@@ -231,7 +233,16 @@ export async function recordHotFailure(
   // carries its flag time so the hold and the event share hot_flag:<property>:<flagAt>
   // (stable; later texts never re-key it). An earlier hot hold that already
   // alerted covers it.
-  const flagIsOurs = property?.needs_human_attention === true && property.last_ai_escalation_reason === reason;
+  // Share the hold's hot_flag key ONLY when this failure set the flag itself
+  // (its stored time, as PostgREST returns it); a flag set by another inbound
+  // (even with the same reason) never lends its key: this failure gets its own
+  // hot_failed:<inbound> key unless that hold's alert covers it.
+  const flagIsOurs =
+    ourFlagAt !== null &&
+    property?.needs_human_attention === true &&
+    property.last_ai_escalation_reason === reason &&
+    !!property.last_ai_escalation_at &&
+    Date.parse(property.last_ai_escalation_at) === Date.parse(ourFlagAt);
   const flagAt = flagIsOurs ? property?.last_ai_escalation_at ?? null : null;
   const owner = property && !flagIsOurs ? await resolveHotOwner(db, property.org_id).catch(() => null) : null;
   const coveredByHold = property && !flagIsOurs ? await isCoveredByHotHold(db, property, owner) : false;
