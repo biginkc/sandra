@@ -398,8 +398,8 @@ describe("MessagesV2View", () => {
         ok: true as const,
         data: input.ids.map((id) =>
           id === "aaaa"
-            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, draftId: null, draftProperty: null }
-            : { id, eligible: true, flagAt: "2026-10-09T00:00:00.000000Z", flagReason: "hostile_needs_confirm", runId: null, activityAt: snapshot.entries[1].at, draftId: null, draftProperty: null },
+            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, through: null, draftId: null, draftProperty: null, draftSendable: false }
+            : { id, eligible: true, flagAt: "2026-10-09T00:00:00.000000Z", flagReason: "hostile_needs_confirm", runId: null, activityAt: snapshot.entries[1].at, through: null, draftId: null, draftProperty: null, draftSendable: false },
         ),
       }));
       const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
@@ -459,7 +459,7 @@ describe("MessagesV2View", () => {
       const revalidateHolds = vi.fn(async (input: { ids: string[] }) =>
         fail
           ? { ok: false as const, error: { code: "X", message: "x" } }
-          : { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, draftId: null, draftProperty: null })) },
+          : { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, through: null, draftId: null, draftProperty: null, draftSendable: false })) },
       );
       const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
       await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
@@ -488,7 +488,7 @@ describe("MessagesV2View", () => {
       const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
         ok: true as const,
         // Still eligible (an independent flag keeps it open) but the shown draft now belongs elsewhere.
-        data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, draftId: null, draftProperty: null })),
+        data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, through: null, draftId: null, draftProperty: null, draftSendable: false })),
       }));
       const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
       await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
@@ -501,6 +501,46 @@ describe("MessagesV2View", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a flagged hold with a reason but no flag time: Dismiss sends the snapshot reason (and a null time), not null", async () => {
+    const h = { ...openHold("p5"), ...at(3), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: null } };
+    const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss, listAssignees: vi.fn() };
+    await mount({ ...props([], [h]), holdsSnapshot: buildSnapshot([h]), actions });
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await userEvent.type(screen.getByLabelText("Reason for dismissing"), "done");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm dismiss" }));
+    expect(dismiss).toHaveBeenCalledWith(expect.objectContaining({ seen: { through: null, flagReason: "model:unclear", flagAt: null } }));
+  });
+
+  it("a pending row that arrived after the snapshot (newer seen.through): card Updated, actions disabled; never sends the newer version", async () => {
+    const snapHold = { ...openHold("p6"), ...at(3), seen: { through: "2026-10-01T00:00:00Z", flagReason: null, flagAt: null } };
+    const enriched = { ...snapHold, seen: { through: "2026-10-02T00:00:00Z", flagReason: null, flagAt: null } };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [enriched]), holdsSnapshot: buildSnapshot([snapHold]), actions });
+    expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+  });
+
+  it("an unchanged card sends the snapshot's pending-row version with Dismiss", async () => {
+    const h = { ...openHold("p7"), ...at(3), seen: { through: "2026-10-01T00:00:00Z", flagReason: null, flagAt: null } };
+    const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss, listAssignees: vi.fn() };
+    await mount({ ...props([], [h]), holdsSnapshot: buildSnapshot([h]), actions });
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await userEvent.type(screen.getByLabelText("Reason for dismissing"), "done");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm dismiss" }));
+    expect(dismiss).toHaveBeenCalledWith(expect.objectContaining({ seen: expect.objectContaining({ through: "2026-10-01T00:00:00Z" }) }));
+  });
+
+  it("a draft not tied directly to the lead and its seller text: Send and Edit disabled on the card", async () => {
+    const h = { ...openHold("p8"), ...at(3), draft: { id: "d8", inbound_message_id: null, body: "hi", sendable: false }, draft_held: true };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [h]), holdsSnapshot: buildSnapshot([h]), actions });
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
   });
 
   it("renders the snapshot time, not the live time", async () => {

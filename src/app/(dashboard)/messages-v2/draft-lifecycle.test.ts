@@ -13,10 +13,11 @@
  *   Send / Edit         -> ok | STALE
  * Every rendered snapshot card also asserts tape sentence === card sentence (pinned reason).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { fakePostgrest } from "./fake-postgrest.test-util";
 import { draftStillOn, liveStateOf } from "./hold-list";
+import { editAndSendHeldDraft, sendHeldDraft, type HoldActionDeps } from "./hold-actions";
 import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
 import { deriveTape, holdReasonSentence } from "./tape";
 import type { RunWithSteps } from "./types";
@@ -60,14 +61,19 @@ function base(link: Link, flagged: boolean): Record<string, Row[]> {
   const draft: Row = { id: DRAFT, org_id: "org", status: "pending", property_id: null, conversation_id: null, inbound_message_id: null, run_id: null, created_at: at(10), body: "Draft text" };
   const runs: Row[] = [];
   const messages: Row[] = [];
-  if (link === "own property_id") draft.property_id = P;
+  if (link === "own property_id") {
+    // A draft answers a seller text: tied directly to P and to that text (the only kind the hold Send path sends).
+    draft.property_id = P;
+    draft.inbound_message_id = MSG;
+    messages.push({ id: MSG, org_id: "org", conversation_id: null, property_id: P, contact_id: u(1, 8), from_address: "+18165550001", direction: "inbound", body: "b", created_at: at(4) });
+  }
   if (link === "run_id only") {
     draft.run_id = RUN;
     runs.push({ id: RUN, org_id: "org", inbound_message_id: u(9, 6), property_id: P, conversation_id: null, status: "held", mode: "automatic", reason: null, inbound_preview: "x", started_at: at(5), completed_at: null });
   }
   if (link === "inbound_message_id only") {
     draft.inbound_message_id = MSG;
-    messages.push({ id: MSG, org_id: "org", conversation_id: null, property_id: P, direction: "inbound", body: "b", created_at: at(4) });
+    messages.push({ id: MSG, org_id: "org", conversation_id: null, property_id: P, contact_id: u(1, 8), from_address: "+18165550001", direction: "inbound", body: "b", created_at: at(4) });
   }
   if (link === "conversation_id only") {
     draft.conversation_id = CONV;
@@ -123,9 +129,15 @@ function resolveAfter(link: Link, change: Change): Resolved {
   return { kind: "property", id: [...c][0] };
 }
 
-const db = (tables: Record<string, Row[]>, onAlertStatus?: () => void) =>
+const db = (tables: Record<string, Row[]>, onAlertStatus?: () => void, lease = false) =>
   fakePostgrest(tables, {
     rpc: {
+      ...(lease
+        ? {
+            fn_reserve_ai_send: () => ({ data: true, error: null }),
+            fn_release_ai_send: () => ({ data: true, error: null }),
+          }
+        : {}),
       pipeline_runs_latest_for_properties: (args) => {
         const ids = args.p_property_ids as string[];
         return { data: tables.pipeline_runs.filter((r) => ids.includes(r.property_id as string)), error: null };
@@ -161,7 +173,10 @@ export function expected(link: Link, change: Change, check: string, flagged: boo
       if (atSnapshot.kind !== "property") return "unchanged (card never showed the draft)";
       return flagged ? "Updated + actions disabled" : "missing (removed)";
     case "Send / Edit":
-      return stillP && atSnapshot.kind === "property" ? "ok" : "STALE";
+      // The card only enables Send/Edit for a draft tied directly to its property and seller text.
+      if (link !== "own property_id") return "disabled on the card; action refuses, nothing sent";
+      // Sends only while the draft is still tied DIRECTLY to P (its own property_id) and resolves to P alone.
+      return stillP && change !== "property_id -> null" ? "ok (sent)" : "refused (HOLD_STALE / not sendable / not pending / not found), nothing sent";
   }
   return "?";
 }
@@ -264,12 +279,45 @@ describe.each([false, true])("draft lifecycle (property also flagged: %s)", (fla
         }
       }
 
-      // C5 Send / Edit with the property the clicker saw (P)
-      {
+      // C5 the REAL Send and Edit actions, with the property the clicker saw (P)
+      for (const kind of ["send", "edit"] as const) {
         const tables = base(link, flagged);
+        const page = await loadMessagesV2Page(db(tables), "org");
+        const card = page.holds.find((h) => h.id === P);
+        if (card?.draft) expect(card.draft.sendable).toBe(link === "own property_id");
         applyChange(tables, change);
-        const verdict = await draftStillOn(db(tables), "org", DRAFT, P);
-        expect(verdict === "ok" ? "ok" : "STALE").toBe(expected(link, change, "Send / Edit", flagged));
+        const client = db(tables, undefined, true);
+        const sendHumanDraft = vi.fn().mockResolvedValue({ status: "sent", messageId: "out-1" });
+        const d: HoldActionDeps = {
+          admin: client as never,
+          orgId: "org",
+          userId: "user-1",
+          sendHumanDraft,
+          recordLeadEvent: vi.fn().mockResolvedValue(undefined),
+          resumeRun: vi.fn().mockResolvedValue(null),
+          recordStep: vi.fn().mockResolvedValue(undefined),
+          updateLeadAssignee: vi.fn(),
+          suppressNumber: vi.fn(),
+          resolveHostileReply: vi.fn(),
+          reportError: vi.fn(),
+          draftOwner: (draftId, propertyId) => draftStillOn(client, "org", draftId, propertyId),
+        };
+        const seen = { body: "Draft text", editedAt: null };
+        const result =
+          kind === "send"
+            ? await sendHeldDraft(d, { draftId: DRAFT, seen, expectedPropertyId: P })
+            : await editAndSendHeldDraft(d, { draftId: DRAFT, body: "Edited", seen, expectedPropertyId: P });
+        const want = expected(link, change, "Send / Edit", flagged);
+        if (want.startsWith("ok")) {
+          expect(result.ok).toBe(true);
+          expect(sendHumanDraft).toHaveBeenCalledTimes(1);
+          expect(sendHumanDraft.mock.calls[0][1].propertyId).toBe(P);
+        } else {
+          expect(result.ok).toBe(false);
+          expect(sendHumanDraft).not.toHaveBeenCalled();
+          const code = result.ok ? "" : result.error.code;
+          expect(["HOLD_STALE", "DRAFT_NOT_SENDABLE", "DRAFT_NOT_FOUND", "DRAFT_NOT_PENDING"]).toContain(code);
+        }
       }
     });
   });

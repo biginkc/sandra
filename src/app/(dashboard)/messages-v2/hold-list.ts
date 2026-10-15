@@ -351,7 +351,14 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
     add(draftRunsByProperty, d.property_id!, d.run_id);
   }
 
-  const base = deriveOpenHolds({ properties, decisions, reviews, drafts, runs: [] });
+  // The hold Send/Edit path only sends a draft tied DIRECTLY to the property and to the seller text it answers
+  // (hold-actions.ts performSend). Anything else is shown, but its Send/Edit are disabled on the card.
+  const original = new Map(sources.drafts.map((d) => [d.id, d] as const));
+  const base = deriveOpenHolds({ properties, decisions, reviews, drafts, runs: [] }).map((h) => {
+    if (!h.draft) return h;
+    const row = original.get(h.draft.id);
+    return { ...h, draft: { ...h.draft, sendable: row?.property_id === h.id && !!row?.inbound_message_id } };
+  });
   const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty });
   if (!withRuns) return fail;
   return { ok: true, holds: sortNewestFirst(withRuns), unverified };
@@ -364,7 +371,8 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
  * builds a new snapshot. (A server "as of" recompute is impossible: several production writes overwrite the
  * ordering columns with no history, so the past cannot be reconstructed.)
  */
-export type SnapshotEntry = { id: string; at: string | null; r: number; run: string | null; fa: string | null };
+/** `th` = the newest pending decision / review / draft the order was built from (the hold's "seen through"). */
+export type SnapshotEntry = { id: string; at: string | null; r: number; run: string | null; fa: string | null; th: string | null };
 export type WaitingSnapshot = { reasons: string[]; entries: SnapshotEntry[] };
 
 export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): WaitingSnapshot {
@@ -380,7 +388,7 @@ export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): Waitin
         index.set(reason, r);
       }
     }
-    return { id: h.id, at: holdActivityAt(h), r, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null };
+    return { id: h.id, at: holdActivityAt(h), r, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null, th: h.seen?.through ?? null };
   });
   return { reasons, entries };
 }
@@ -544,9 +552,13 @@ export type HoldLiveState = {
   flagReason: string | null;
   runId: string | null;
   activityAt: string | null;
+  /** The newest pending decision / review / draft now (compared with the snapshot's `th`). */
+  through: string | null;
   /** The newest pending draft the hold would show now, and the property it resolves to (null = none). */
   draftId: string | null;
   draftProperty: string | null;
+  /** Whether that draft can be sent from the card now (tied directly to the property and its seller text). */
+  draftSendable: boolean;
 };
 
 /** Current state of some ids, from the CURRENT eligible list (locked / resolved / unverifiable -> eligible false). */
@@ -564,11 +576,13 @@ export async function liveStateOf(supabase: LooseSupabase, orgId: string, ids: r
           flagReason: h.flag_reason ?? null,
           runId: h.run?.id ?? null,
           activityAt: holdActivityAt(h),
+          through: h.seen?.through ?? null,
           draftId: h.draft?.id ?? null,
           // Every draft in the eligible list resolved to exactly this hold's property.
           draftProperty: h.draft ? h.id : null,
+          draftSendable: h.draft?.sendable === true,
         }
-      : { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, draftId: null, draftProperty: null };
+      : { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, through: null, draftId: null, draftProperty: null, draftSendable: false };
   });
 }
 

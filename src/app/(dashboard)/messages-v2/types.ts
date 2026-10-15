@@ -193,6 +193,11 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
     inbound_message_id: string | null;
     /** The run this draft was written for; lets a propertyless draft resolve (and DNC-verify) its property. */
     run_id?: string | null;
+    /**
+     * False when the draft row has no property_id of its own (it was tied to the property through its run, message or
+     * conversation). The hold Send/Edit path only sends drafts tied directly to a property, so the card disables them.
+     */
+    sendable?: boolean;
     body?: string;
     edited_body?: string | null;
     /** Version of the human edit (null = never edited). Sent back with Send / Edit so a changed draft is refused. */

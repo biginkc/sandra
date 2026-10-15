@@ -16,6 +16,9 @@ import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./typ
 type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
 
+/** Matches the server: only drafts tied directly to a property can be sent from a hold card. */
+const NOT_SENDABLE_HERE = "This draft is not tied directly to this lead and its seller text; open the thread to reply.";
+
 const ACTIONS = ["Send", "Edit", "Open thread", "Take over (Sandra stops)", "Assign", "Dismiss"] as const;
 
 /** Disabled stand-ins, used when the page supplies no handlers. */
@@ -386,20 +389,27 @@ export function HoldActionControls({
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button type="button" size="xs" variant="outline" disabled={!draft || !seenDraft || sendLocked} onClick={sendDraft} title={draft ? undefined : "No reply draft to send"}>
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          disabled={!draft || !seenDraft || sendLocked || draft.sendable === false}
+          onClick={sendDraft}
+          title={!draft ? "No reply draft to send" : draft.sendable === false ? NOT_SENDABLE_HERE : undefined}
+        >
           Send
         </Button>
         <Button
           type="button"
           size="xs"
           variant="outline"
-          disabled={!draft || !seenDraft || sendLocked}
+          disabled={!draft || !seenDraft || sendLocked || draft.sendable === false}
           onClick={() => {
             setEditText(effectiveDraftBody(hold) ?? "");
             setMode("editing");
             setError(null);
           }}
-          title={draft ? undefined : "No reply draft to edit"}
+          title={!draft ? "No reply draft to edit" : draft.sendable === false ? NOT_SENDABLE_HERE : undefined}
         >
           Edit
         </Button>

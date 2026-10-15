@@ -207,7 +207,7 @@ export function WaitingColumn({
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
-  const entries = snapshot?.entries ?? holds.map((h) => ({ id: h.id, at: holdActivityAt(h), r: -1, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null }));
+  const entries = snapshot?.entries ?? holds.map((h) => ({ id: h.id, at: holdActivityAt(h), r: -1, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null, th: h.seen?.through ?? null }));
   const reasonOf = (r: number) => (snapshot && r >= 0 ? snapshot.reasons[r] : null);
   const fresh = (): OlderState => ({
     forKey: refreshKey,
@@ -311,8 +311,10 @@ export function WaitingColumn({
           if (!st.eligible) gone.push(st.id);
           else {
             const shownDraft = liveRef.current.get(st.id)?.draft?.id ?? null;
-            const draftMoved = st.draftId !== shownDraft || (shownDraft !== null && st.draftProperty !== st.id);
-            if (draftMoved || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
+            const shownSendable = liveRef.current.get(st.id)?.draft?.sendable === true;
+            const draftMoved =
+              st.draftId !== shownDraft || (shownDraft !== null && (st.draftProperty !== st.id || st.draftSendable !== shownSendable));
+            if (draftMoved || st.through !== (e.th ?? null) || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
           }
         }
       }
@@ -341,6 +343,7 @@ export function WaitingColumn({
     // Updated = ANY snapshot field differs from live: reason, flag time, activity time or the shown run.
     const changed =
       (h.flag_reason ?? null) !== reason ||
+      (h.seen?.through ?? null) !== (e.th ?? null) ||
       (h.seen?.flagAt ?? null) !== e.fa ||
       holdActivityAt(h) !== e.at ||
       (h.run?.id ?? null) !== e.run;
@@ -349,7 +352,9 @@ export function WaitingColumn({
         ...h,
         ...(reason ? { flag_reason: reason } : { flag_reason: null }),
         // Always the SNAPSHOT flag version, never the live one (the server compares it and refuses a changed hold).
-        seen: { through: h.seen?.through ?? null, flagReason: e.fa ? reason : null, flagAt: e.fa },
+        // The snapshot's versions, all three: the reason even when the flag time is unknown, and the pending-row
+        // version the card was built from (never a newer one fetched during enrichment).
+        seen: { through: e.th ?? null, flagReason: reason, flagAt: e.fa },
       },
       changed,
     };

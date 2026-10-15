@@ -28,6 +28,8 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
     const orders: Array<{ col: string; asc: boolean }> = [];
     let limit = Infinity;
     let range: [number, number] | null = null;
+    let single = false;
+    let patch: Row | null = null;
     const q: Record<string, unknown> = {};
     q.select = () => q;
     q.eq = (col: string, v: unknown) => (ops.push({ k: "eq", col, v }), q);
@@ -40,7 +42,8 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
     q.order = (col: string, o: { ascending: boolean } = { ascending: true }) => (orders.push({ col, asc: o.ascending }), q);
     q.limit = (n: number) => ((limit = n), q);
     q.range = (a: number, b: number) => ((range = [a, b]), q);
-    q.maybeSingle = () => q;
+    q.maybeSingle = () => ((single = true), q);
+    q.update = (vals: Row) => ((patch = vals), q);
     // Only the tape's (started_at, id) keyset filter is supported: started_at.lt."X",and(started_at.eq."X",id.lt.Y)
     q.or = (f: string) => {
       const m = /^started_at\.lt\."([^"]+)",and\(started_at\.eq\."([^"]+)",id\.lt\.([^)]+)\)$/.exec(f);
@@ -88,7 +91,12 @@ export function fakePostgrest(tables: Record<string, Row[]>, opts: FakeOptions =
       if (range) rows = rows.slice(range[0], range[1] + 1);
       if (Number.isFinite(limit)) rows = rows.slice(0, limit);
       if (opts.cap) rows = rows.slice(0, opts.cap);
-      return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
+      if (patch) {
+        const p = patch;
+        tables[table] = (tables[table] ?? []).map((r) => (rows.includes(r) ? { ...r, ...p } : r));
+        rows = rows.map((r) => ({ ...r, ...p }));
+      }
+      return Promise.resolve({ data: single ? (rows[0] ?? null) : rows, error: null }).then(resolve, reject);
     };
     return q;
   };
