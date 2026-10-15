@@ -35,6 +35,8 @@ export type HotPromotion = {
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
   kind?: "handoff" | "hot_text";
+  /** Property address (record data, never seller text); used by the hot_text alert. */
+  address?: string | null;
   /** Delivery key; defaults to hotPromotionKey(propertyId). */
   key?: string;
 };

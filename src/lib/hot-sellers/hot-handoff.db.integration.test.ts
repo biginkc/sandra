@@ -4,7 +4,6 @@ import { createClient } from "@supabase/supabase-js";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { createHoldAlertDeps } from "@/lib/hold-alerts";
 import { runHoldAlertsForOrg } from "@/lib/hold-alerts/core";
 import type { HoldAlertDeps } from "@/lib/hold-alerts/types";
@@ -33,7 +32,6 @@ const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const admin = createClient<Database>(process.env.TEST_SUPABASE_URL!, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
-const loose = admin as unknown as LooseSupabase;
 
 const created = { orgs: [] as string[], users: [] as string[] };
 let createdDeliveries = false;
@@ -306,7 +304,7 @@ describe("assignHotLeadToOwner (real database)", () => {
 
     const result = await assignHotLeadToOwner(admin, propertyId, {});
 
-    expect(result).toEqual({ status: "failed", reason: "owned_by_someone_else" });
+    expect(result).toEqual({ status: "owned_by_someone_else", ownerUserId: member });
     expect(await assignedColumn(propertyId)).toBe(member);
     expect(await handoffEvents(propertyId)).toHaveLength(0);
   });
@@ -331,22 +329,91 @@ describe("assignHotLeadToOwner (real database)", () => {
     if (error) throw new Error(`seed assigned event failed: ${error.message}`);
   }
 
-  it("interrupted hand-off (owner set, no events at all): back-fills the hand-off event and reports assigned", async () => {
+  async function insertInbound(orgId: string, propertyId: string): Promise<string> {
+    const { data: prop } = await admin.from("properties").select("homeowner_contact_id").eq("id", propertyId).single();
+    const { data, error } = await admin
+      .from("messages")
+      .insert({
+        org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: propertyId,
+        contact_id: prop!.homeowner_contact_id, from_address: "+18165550177", to_address: "+18165550100", body: "make me an offer",
+      })
+      .select("id")
+      .single();
+    if (error || !data) throw new Error(`inbound insert failed: ${error?.message}`);
+    return data.id;
+  }
+  const allEventTypes = async (propertyId: string) => {
+    const { data } = await admin.from("lead_events").select("event_type, source_type").eq("property_id", propertyId);
+    return data ?? [];
+  };
+
+  it("interrupted hand-off (event written, column still null): the retry assigns, with no second event", async () => {
     const { orgId, owner } = await oneOwnerOrg("interrupted");
-    const propertyId = await createProperty(orgId, { assignedTo: owner });
-    expect(await handoffEvents(propertyId)).toHaveLength(0);
+    const propertyId = await createProperty(orgId);
+    const inbound = await insertInbound(orgId, propertyId);
+    // What a run that died between the event and the update leaves behind.
+    const { error } = await admin.from("lead_events").insert({
+      org_id: orgId, property_id: propertyId, actor_type: "ai", event_type: "assigned",
+      payload: { from: null, to: owner, reason: "hot_seller", inbound },
+      source_type: HOT_HANDOFF_SOURCE_TYPE, source_id: propertyId,
+    } as never);
+    expect(error).toBeNull();
+    expect(await assignedColumn(propertyId)).toBeNull();
 
-    const inbound = randomUUID();
-    const result = await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound });
-
-    expect(result).toEqual({ status: "assigned", assigneeUserId: owner });
-    const events = await handoffEvents(propertyId);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ source_type: HOT_HANDOFF_SOURCE_TYPE, source_id: propertyId });
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "assigned", assigneeUserId: owner });
+    expect(await assignedColumn(propertyId)).toBe(owner);
+    expect(await handoffEvents(propertyId)).toHaveLength(1);
     expect(await hotTextEvents(propertyId)).toHaveLength(0);
-    // A replay is now a plain already_assigned.
     expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "already_assigned", assigneeUserId: owner });
     expect(await handoffEvents(propertyId)).toHaveLength(1);
+  });
+
+  it("a lead Jarrad created himself (assigned at insert, only a lead_created event): already_owned, no 'assigned' event, one hot_text event", async () => {
+    const { orgId, owner } = await oneOwnerOrg("self-created");
+    const propertyId = await createProperty(orgId, { assignedTo: owner });
+    const inbound = await insertInbound(orgId, propertyId);
+    const types = (await allEventTypes(propertyId)).map((e) => e.event_type);
+    expect(types).not.toContain("assigned");
+
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "already_owned", assigneeUserId: owner });
+    expect(await handoffEvents(propertyId)).toHaveLength(0);
+    expect(await hotTextEvents(propertyId)).toHaveLength(1);
+  });
+
+  it("housekeeping-style reassign BEFORE the inbound (direct column update, no lead_events): already_owned, never mistaken for an interrupted hand-off", async () => {
+    const { orgId, owner } = await oneOwnerOrg("housekeeping");
+    const other = await createMember(orgId, "member");
+    const propertyId = await createProperty(orgId, { assignedTo: other });
+    const { error } = await admin.from("properties").update({ assigned_user_id: owner }).eq("id", propertyId);
+    expect(error).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    const inbound = await insertInbound(orgId, propertyId);
+
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "already_owned", assigneeUserId: owner });
+    expect(await handoffEvents(propertyId)).toHaveLength(0);
+    expect(await hotTextEvents(propertyId)).toHaveLength(1);
+  });
+
+  it("completed hand-off with inbound A, then hot inbound B: already_owned + one hot_seller_text; B again: nothing new; A again: already_assigned", async () => {
+    const { orgId, owner } = await oneOwnerOrg("second-inbound");
+    const propertyId = await createProperty(orgId);
+    const a = await insertInbound(orgId, propertyId);
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: a })).toEqual({ status: "assigned", assigneeUserId: owner });
+    const b = await insertInbound(orgId, propertyId);
+
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: b })).toEqual({ status: "already_owned", assigneeUserId: owner });
+    let texts = await hotTextEvents(propertyId);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatchObject({ source_id: b, event_type: "ai_escalated" });
+
+    expect((await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: b })).status).toBe("already_owned");
+    expect(await hotTextEvents(propertyId)).toHaveLength(1);
+
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: a })).toEqual({ status: "already_assigned", assigneeUserId: owner });
+    texts = await hotTextEvents(propertyId);
+    expect(texts).toHaveLength(1);
+    expect(await handoffEvents(propertyId)).toHaveLength(1);
+    expect(await assignedColumn(propertyId)).toBe(owner);
   });
 
   it("a person already assigned him the lead: already_owned, one hot_seller_text event per inbound, no reassignment, no new 'assigned' event", async () => {
@@ -387,9 +454,10 @@ describe("assignHotLeadToOwner (real database)", () => {
     expect(await hotTextEvents(propertyId)).toHaveLength(0);
   });
 
-  it("the hand-off event cannot be recorded: assigned_unrecorded (the lead IS his), no event", async () => {
+  it("the hand-off event cannot be recorded: failed and nothing assigned (fail closed)", async () => {
     const { orgId, owner } = await oneOwnerOrg("event-fail");
     const propertyId = await createProperty(orgId);
+    const inbound = await insertInbound(orgId, propertyId);
     // A trigger scoped to this one property makes its ledger insert fail; every other row is unaffected.
     const fn = `hot_handoff_block_${propertyId.replace(/-/g, "")}`;
     await pg.query(
@@ -399,17 +467,17 @@ describe("assignHotLeadToOwner (real database)", () => {
       `create trigger ${fn} before insert on public.lead_events for each row when (new.property_id = '${propertyId}') execute function public.${fn}()`,
     );
     try {
-      const result = await assignHotLeadToOwner(admin, propertyId, {});
-      expect(result).toMatchObject({ status: "assigned_unrecorded", assigneeUserId: owner });
-      expect(await assignedColumn(propertyId)).toBe(owner);
+      const result = await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound });
+      expect(result).toMatchObject({ status: "failed", reason: "db_error" });
+      // Fail closed: the column was never touched, nothing was assigned.
+      expect(await assignedColumn(propertyId)).toBeNull();
       expect(await handoffEvents(propertyId)).toHaveLength(0);
     } finally {
       await pg.query(`drop trigger if exists ${fn} on public.lead_events`);
       await pg.query(`drop function if exists public.${fn}()`);
     }
-    // The column was written but the event was not. With no 'assigned' event naming him, a retry reads
-    // that as Sandra's interrupted hand-off and finishes it (back-fill), instead of treating it as his already.
-    const retry = await assignHotLeadToOwner(admin, propertyId, {});
+    // With the block gone, a retry does the whole hand-off.
+    const retry = await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound });
     expect(retry).toEqual({ status: "assigned", assigneeUserId: owner });
     expect(await handoffEvents(propertyId)).toHaveLength(1);
   });

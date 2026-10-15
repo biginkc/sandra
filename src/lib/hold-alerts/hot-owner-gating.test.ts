@@ -116,6 +116,64 @@ describe("promotions need the resolved hot owner, like holds", () => {
   });
 });
 
+describe("hot owner re-resolved immediately before each provider call", () => {
+  // Call 1 is the pass's own selection; later calls are the pre-send re-checks.
+  const afterFirst = (later: () => Promise<string | null>) => {
+    let n = 0;
+    return async () => (++n === 1 ? OWNER.userId : later());
+  };
+
+  it("owner changed between selection and send: nothing sent, rows skipped hot_owner_changed", async () => {
+    const t = setup({ promotions: [promotion], loadHotOwner: afterFirst(async () => "owner-2") });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(summary.skipped).toBe(2);
+    expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
+      ["slack", "skipped", "hot_owner_changed"],
+      ["sms", "skipped", "hot_owner_changed"],
+    ]);
+  });
+
+  it("owner ambiguous at send time: nothing sent, rows skipped hot_owner_ambiguous", async () => {
+    const t = setup({ promotions: [promotion], loadHotOwner: afterFirst(async () => null) });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
+      ["slack", "skipped", "hot_owner_ambiguous"],
+      ["sms", "skipped", "hot_owner_ambiguous"],
+    ]);
+  });
+
+  it("the same guard covers hot holds (not just promotions)", async () => {
+    const t = setup({ holds: [hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z" })], loadHotOwner: afterFirst(async () => "owner-2") });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(t.store.rows.every((r) => r.status === "skipped" && r.lastError === "hot_owner_changed")).toBe(true);
+  });
+
+  it("re-check throws: retryable failed with nothing sent, then sent on the next pass", async () => {
+    let broken = true;
+    let n = 0;
+    const t = setup({
+      promotions: [promotion],
+      loadHotOwner: async () => {
+        n += 1;
+        if (broken && n > 1) throw new Error("owner recheck down");
+        return OWNER.userId;
+      },
+    });
+    const first = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toEqual([]);
+    expect(first.failed).toBe(2);
+    expect(t.store.rows.every((r) => r.status === "failed" && r.attempts === 1)).toBe(true);
+    broken = false;
+    t.setNow("2026-10-15T12:05:00.000Z");
+    const second = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(second.sent).toBe(2);
+    expect(t.sent.map((s) => s.channel)).toEqual(["slack", "sms"]);
+  });
+});
+
 describe("cap re-check that throws", () => {
   it("puts the row back to pending (never left 'sending'), counts it deferred, and delivers it on a later pass", async () => {
     const t = setup({ holds: [hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z" })] });

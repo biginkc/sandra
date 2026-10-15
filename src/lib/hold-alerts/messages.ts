@@ -2,7 +2,10 @@ import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
 import type { EmailMessage, HoldInfo, HotPromotion } from "./types";
 
-/** Alert copy carries ids, first name, age and a link only: never seller message text or the property address. */
+/**
+ * Alert copy carries ids, first name, age and a link: never seller message text.
+ * The hot-text alert also carries the property address (record data, allowed).
+ */
 
 const escapeSlack = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -53,13 +56,21 @@ export function smsText(hold: HoldInfo, baseUrl: string): string {
   return `Hot hold: ${where(hold)} (${hold.reasonLabel}). ${leadLink(baseUrl, hold.propertyId)}`;
 }
 
+/**
+ * PLACEHOLDER copy awaiting Jarrad's approval (listed in PR #882). Carries the
+ * property address (record data); never seller message text.
+ */
+export function hotTextHeadline(p: HotPromotion): string {
+  return p.address ? `Hot text on your lead: ${p.name}, ${p.address}` : `Hot text on your lead: ${p.name}`;
+}
+
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
-  if (p.kind === "hot_text") return `Hot text on your lead: ${escapeSlack(p.name)}. ${leadLink(baseUrl, p.propertyId)}`;
+  if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
-  if (p.kind === "hot_text") return `Hot text on your lead: ${p.name}. ${leadLink(baseUrl, p.propertyId)}`;
+  if (p.kind === "hot_text") return `${hotTextHeadline(p)}. ${leadLink(baseUrl, p.propertyId)}`;
   return `Hot seller: ${p.name} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 

@@ -37,7 +37,9 @@ export type HotAssignResult =
   | { status: "already_owned"; assigneeUserId: string }
   /** The lead IS on My Leads under Jarrad, but the 'assigned' event could not be saved. */
   | { status: "assigned_unrecorded"; assigneeUserId: string; detail: string }
-  | { status: "failed"; reason: "no_hot_owner" | "owned_by_someone_else" | "not_found" | "dnc_locked" | "db_error"; detail?: string };
+  /** A rep already owns the lead: left with them, no hold, no alert to Jarrad. */
+  | { status: "owned_by_someone_else"; ownerUserId: string }
+  | { status: "failed"; reason: "no_hot_owner" | "not_found" | "dnc_locked" | "db_error"; detail?: string };
 
 type MembershipRow = {
   user_id: string;
@@ -91,99 +93,98 @@ export async function assignHotLeadToOwner(
     const validation = await validateActiveAssigneeForProperties(db, [propertyId], owner);
     if (!validation.ok) return { status: "failed", reason: "db_error", detail: validation.code };
 
-    let status: "assigned" | "already_assigned" = "already_assigned";
     const previous = property.assigned_user_id;
     if (previous === owner) {
       const prior = await findHandoffEvent(db, propertyId);
       if (prior === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
-      // A replay of Sandra's own hand-off.
-      if (prior) return { status: "already_assigned", assigneeUserId: owner };
-      // His already, with no hand-off event. If no 'assigned' event names him
-      // either, Sandra's own hand-off was interrupted between the update and
-      // the event: finish it (back-fill + alert) below.
-      const byPerson = await findAssignedEventTo(db, propertyId, owner);
-      if (byPerson === "error") return { status: "failed", reason: "db_error", detail: "assignment history lookup" };
-      if (byPerson) {
-        // A person gave him this lead: no reassignment, one alert for this hot text.
-        const recorded = await recordHotText(db, propertyId, owner, opts.inboundMessageId ?? null);
+      if (prior) {
+        // A replay of the inbound that made the hand-off: nothing new.
+        const inbound = opts.inboundMessageId ?? null;
+        if (!inbound || prior.inbound === inbound) return { status: "already_assigned", assigneeUserId: owner };
+        // A NEW hot text after Sandra's hand-off: no reassignment, one alert for it.
+        const recorded = await recordHotText(db, propertyId, owner, inbound);
         return recorded
           ? { status: "already_owned", assigneeUserId: owner }
           : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
       }
-      status = "assigned";
-    } else {
-      if (previous !== null) return { status: "failed", reason: "owned_by_someone_else" };
-      const { data: saved, error } = await db
-        .from("properties")
-        .update({ assigned_user_id: owner, updated_at: new Date().toISOString() })
-        .eq("id", propertyId)
-        .is("assigned_user_id", null)
-        .select("id, assigned_user_id")
-        .maybeSingle();
-      if (error) return { status: "failed", reason: "db_error", detail: error.message };
-      if (!saved) {
-        // Lost a race: fine only if the winner made the same assignment.
-        const { data: now, error: recheckError } = await db
-          .from("properties")
-          .select("assigned_user_id")
-          .eq("id", propertyId)
-          .maybeSingle();
-        if (recheckError) return { status: "failed", reason: "db_error", detail: recheckError.message };
-        if (now?.assigned_user_id !== owner) return { status: "failed", reason: "owned_by_someone_else" };
-      } else {
-        status = "assigned";
-      }
+      // His already, with no hand-off event. Sandra writes her hand-off event
+      // BEFORE she assigns (below), so this can never be her own unfinished
+      // hand-off: a person gave it to him (self-created, assigned, housekeeping
+      // reassign). No reassignment; one alert for this hot text.
+      const recorded = await recordHotText(db, propertyId, owner, opts.inboundMessageId ?? null);
+      return recorded
+        ? { status: "already_owned", assigneeUserId: owner }
+        : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
     }
+    // A rep owns it: leave it with them. Not a failure, no hold, no alert to Jarrad.
+    if (previous !== null) return { status: "owned_by_someone_else", ownerUserId: previous };
 
-    // The 'assigned' event is part of the hand-off (the alert cron reads it).
+    // Intent first: the hand-off event is written (and read back) BEFORE the
+    // assignment, so a run that dies after the update is still recognisable as
+    // Sandra's hand-off on retry. If the assignment then never happens, the
+    // alert's send-time check (property still assigned to him) skips it.
     // recordLeadEvent is best-effort, so the row is read back; its source
     // identity (unique in the ledger) makes a retry a no-op.
     const existing = await findHandoffEvent(db, propertyId);
-    if (existing === "error") return { status: "assigned_unrecorded", assigneeUserId: owner, detail: "handoff event lookup" };
+    if (existing === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
     if (!existing) {
       await recordLeadEvent({
         propertyId,
         actorType: "ai",
         eventType: LEAD_EVENT_TYPES.ASSIGNED,
-        payload: { from: previous, to: owner, reason: "hot_seller" },
+        payload: { from: previous, to: owner, reason: "hot_seller", inbound: opts.inboundMessageId ?? null },
         sourceType: HOT_HANDOFF_SOURCE_TYPE,
         sourceId: propertyId,
       });
       const written = await findHandoffEvent(db, propertyId);
-      if (written !== true) return { status: "assigned_unrecorded", assigneeUserId: owner, detail: "handoff event not recorded" };
+      if (!written || written === "error") return { status: "failed", reason: "db_error", detail: "handoff event not recorded" };
     }
-    return { status, assigneeUserId: owner };
+
+    const { data: saved, error } = await db
+      .from("properties")
+      .update({ assigned_user_id: owner, updated_at: new Date().toISOString() })
+      .eq("id", propertyId)
+      .is("assigned_user_id", null)
+      .select("id, assigned_user_id")
+      .maybeSingle();
+    if (error) return { status: "failed", reason: "db_error", detail: error.message };
+    if (!saved) {
+      // Lost a race: fine only if the winner made the same assignment.
+      const { data: now, error: recheckError } = await db
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (recheckError) return { status: "failed", reason: "db_error", detail: recheckError.message };
+      if (now?.assigned_user_id !== owner) {
+        return now?.assigned_user_id
+          ? { status: "owned_by_someone_else", ownerUserId: now.assigned_user_id }
+          : { status: "failed", reason: "db_error", detail: "assignment lost" };
+      }
+      return { status: "already_assigned", assigneeUserId: owner };
+    }
+    return { status: "assigned", assigneeUserId: owner };
   } catch (error) {
     return { status: "failed", reason: "db_error", detail: error instanceof Error ? error.message : String(error) };
   }
 }
 
-async function findHandoffEvent(db: SupabaseClient<Database>, propertyId: string): Promise<boolean | "error"> {
+async function findHandoffEvent(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<{ inbound: string | null } | false | "error"> {
   const { data, error } = await db
     .from("lead_events")
-    .select("id")
+    .select("id, payload")
     .eq("source_type", HOT_HANDOFF_SOURCE_TYPE)
     .eq("source_id", propertyId)
     .limit(1);
   if (error) return "error";
-  return (data ?? []).length > 0;
+  const row = (data ?? [])[0] as { payload: { inbound?: unknown } | null } | undefined;
+  if (!row) return false;
+  return { inbound: typeof row.payload?.inbound === "string" ? row.payload.inbound : null };
 }
 
-async function findAssignedEventTo(
-  db: SupabaseClient<Database>,
-  propertyId: string,
-  userId: string,
-): Promise<boolean | "error"> {
-  const { data, error } = await db
-    .from("lead_events")
-    .select("id")
-    .eq("property_id", propertyId)
-    .eq("event_type", LEAD_EVENT_TYPES.ASSIGNED)
-    .eq("payload->>to", userId)
-    .limit(1);
-  if (error) return "error";
-  return (data ?? []).length > 0;
-}
 
 /** One `ai_escalated` hot-text event per inbound message, read back. False = not recorded. */
 async function recordHotText(

@@ -150,7 +150,9 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
   if (drip) parts.push(`Drip started: ${drip}`);
   const handoff = run.steps.find((s) => s.name === "assign_hot_lead" && s.result === "applied");
   const handoffStatus = (handoff?.detail as { status?: string } | null | undefined)?.status;
-  if (handoffStatus === "already_owned") {
+  if (handoffStatus === "owned_by_someone_else") {
+    parts.push("Already a lead, left for the person who owns it");
+  } else if (handoffStatus === "already_owned") {
     parts.push(
       run.hotAlertSentAt
         ? `Already on My Leads under Jarrad · Slack and text sent ${chicagoClock(run.hotAlertSentAt)}`

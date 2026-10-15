@@ -2301,6 +2301,48 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
+  describe("identity question + Jev automatic (PR 2 hot check)", () => {
+    const ID_BODY = "Who is this? I might sell.";
+    const runIdentity = async (outcome: string, id: string) => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [
+        { outcome: "new_lead", min_confidence: 0.9, version: 4 },
+        { outcome: "nurture", min_confidence: 0.95 },
+      ];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id, body: ID_BODY });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: outcome, confidence: 0.97 }, escalation_reason: { choice: "not_applicable" } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: ID_BODY,
+          inboundMessageId: id, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        return { result, supabase };
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    };
+
+    it("Jev says new_lead above threshold: NO identity reply, hot hand-off runs", async () => {
+      const { supabase } = await runIdentity("new_lead", "inbound-id-hot");
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(hotAssign.assign).toHaveBeenCalledTimes(1);
+      expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID, { inboundMessageId: "inbound-id-hot" });
+    });
+
+    it("Jev says nurture (not hot): the identity reply still goes out, no hand-off", async () => {
+      await runIdentity("nurture", "inbound-id-cold");
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
+      expect(hotAssign.assign).not.toHaveBeenCalled();
+    });
+  });
+
   it("hot seller: a promoted new lead is handed to Jarrad, once, with no reply", async () => {
     const state = createMockState();
     state.config.classifier_provider = "jev";
@@ -2401,6 +2443,36 @@ describe("dispatchAiResponse debounce", () => {
       expect(hotAssign.assign).toHaveBeenCalledTimes(1);
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(state.property.last_ai_escalation_reason).not.toBe("hot_lead_event_failed");
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("hot seller: a lead a rep owns (owned_by_someone_else) is left with them -> auto_closed, no reply, NO hold, traced applied", async () => {
+    hotAssign.assign.mockResolvedValue({ status: "owned_by_someone_else", ownerUserId: "rep-1" });
+    pipelineSteps.recordStep.mockClear();
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-hot-rep", body: "Make me an offer" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "price_or_offer" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "Make me an offer",
+        inboundMessageId: "inbound-hot-rep", propertyId: PROPERTY_ID,
+        runContext: { runId: "run-rep", orgId: "org-1", seq: 0 },
+      } as never, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.last_ai_escalation_reason).not.toBe("hot_lead_assign_failed");
+      expect(state.property.needs_human_attention).toBe(false);
+      const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; result: string; detail: Record<string, unknown> });
+      expect(steps.find((x) => x.name === "assign_hot_lead")).toMatchObject({ result: "applied", detail: { status: "owned_by_someone_else", owner_user_id: "rep-1" } });
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -7119,7 +7191,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         return runNurture(state, id, 0.97, "not_applicable", {}, extra);
       };
 
-      it("no nurture reply, no nurture, no nurture drip: a hot_lead hold, new_lead proposed, Book appointment drip started", async () => {
+      it("no nurture reply, no nurture, no nurture drip: a hot_lead hold, new_lead proposed, no drip enrolment", async () => {
         const state = createMockState();
         nurtureDrip.loadConfig.mockResolvedValue(ON);
         hotEnroll.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "enr-hot", sequenceLabel: "Book appointment" });
@@ -7142,30 +7214,26 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             args: expect.objectContaining({ p_outcome: "new_lead" }),
           }),
         ]);
-        // Book appointment drip: the drip's own schedule, no extra offset, no human actor.
-        expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
-        expect(hotEnroll.enrollLead).toHaveBeenCalledWith(expect.anything(), {
-          propertyId: PROPERTY_ID,
-          sequenceId: "seq-hot",
-          enrolledByUserId: null,
-          autoRoute: "hot_book_appointment",
-          // Fenced at the triggering inbound's arrival: a takeover / newer reply since makes it be born paused.
-          hotFenceMessageId: "inbound-hot",
-        });
+        // PR 2: a hot seller is held for Jarrad; Sandra never enrols a drip for them.
+        expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
       });
 
-      it("an enrolment problem never undoes the hold: still hot_lead, error recorded", async () => {
+      it("hot_lead nurture route: held hot_lead, no drip enrolment, no send, drip_enrolled traced as skipped", async () => {
         const state = createMockState();
         nurtureDrip.loadConfig.mockResolvedValue(ON);
-        hotEnroll.enrollLead.mockResolvedValue({ status: "no_consent", message: "m" });
+        hotEnroll.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "enr-hot", sequenceLabel: "Book appointment" });
         pipelineSteps.recordStep.mockClear();
 
-        const result = await hot(state, "inbound-hot-fail", { runContext: { runId: "run-h", orgId: "org-1", seq: 0 } });
+        const result = await hot(state, "inbound-hot-nodrip", { runContext: { runId: "run-h", orgId: "org-1", seq: 0 } });
 
         expect(result).toEqual({ outcome: "escalated", reason: "hot_lead" });
         expect(state.property.last_ai_escalation_reason).toBe("hot_lead");
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
+        expect(nurtureDrip.enroll).not.toHaveBeenCalled();
         const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; result: string; detail: Record<string, unknown> });
-        expect(steps.find((x) => x.name === "drip_enrolled")).toMatchObject({ result: "error", detail: { why: "no_consent", route: "hot_book_appointment" } });
+        expect(steps.find((x) => x.name === "drip_enrolled")).toMatchObject({ result: "skipped", detail: { why: "hot_seller_no_drip" } });
       });
 
       it("a listed seller who is ready within 30 days is still a hot lead (hot beats listed)", async () => {
@@ -7179,7 +7247,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(result).toEqual({ outcome: "escalated", reason: "hot_lead" });
         expect(sendSmsToContact).not.toHaveBeenCalled();
         expect(nurtureDrip.enroll).not.toHaveBeenCalled();
-        expect(hotEnroll.enrollLead).toHaveBeenCalledTimes(1);
+        expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
       });
 
       it("J1 within_30_days alone cannot trigger the hot path: a below-threshold nurture call stays a normal needs-a-decision hold", async () => {
@@ -8541,15 +8609,14 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       expect(state.property.needs_human_attention).toBe(false);
     });
 
-    // KNOWN EDGE (pinned, not a bug): with no sendable number_source template we
-    // do not spend a classifier call on a "who is this" message, so a seller who
-    // also asked how we got the number gets the identity reply and NO hold. Only
-    // when a template is mapped can we know they asked.
-    it("no approved number_source template: no extra classifier call at all, identity reply as today, no hold", async () => {
+    // PR 2: with Jev automatic the question is classified FIRST (to spot a hot
+    // seller), so a classifier call now happens even with no number_source
+    // template. A non-hot seller still gets the identity reply and no hold.
+    it("no approved number_source template: classified first (hot check), identity reply as today, no hold", async () => {
       const state = createMockState();
       installSendMock(state);
       const { fetchMock } = await run(state, "inbound-id-notpl", WHO_AND_NUMBER, answers("nurture", "yes"));
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalled();
       expect(sentBodies()).toEqual([IDENTITY_REPLY_BODY]);
       expect(state.property.needs_human_attention).toBe(false);
     });

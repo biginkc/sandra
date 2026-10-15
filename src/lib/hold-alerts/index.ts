@@ -90,7 +90,7 @@ export const HOT_ALERT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
  * hot_seller_text), since max(watermark, now - 48h), NEWEST first, keyset-paged
  * to exhaustion, minus keys whose deliveries are already finished (one bulk
  * query). So history never grows a pass and the newest seller is never starved.
- * First name from the homeowner contact; never message text or address.
+ * First name from the homeowner contact (+ address for hot texts); never message text.
  */
 export async function loadHotPromotions(
   db: LooseSupabase,
@@ -157,15 +157,18 @@ export async function loadHotPromotions(
   const todo = rows.filter((r) => !done.has(keyOf(r)));
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
+  const addresses = new Map<string, string>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
       .from("properties")
-      .select("id, contacts:homeowner_contact_id(first_name)")
+      .select("id, address, city, contacts:homeowner_contact_id(first_name)")
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
-    for (const p of (props ?? []) as Array<{ id: string; contacts: { first_name: string | null } | null }>) {
+    for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; contacts: { first_name: string | null } | null }>) {
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
+      const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
+      if (addr) addresses.set(p.id, addr);
     }
   }
   const promotions: HotPromotion[] = [];
@@ -178,6 +181,7 @@ export async function loadHotPromotions(
       name: names.get(r.property_id) ?? "Unknown sender",
       assignedAt: r.created_at,
       kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : "handoff",
+      address: r.source_type === HOT_TEXT_SOURCE_TYPE ? (addresses.get(r.property_id) ?? null) : null,
       key: keyOf(r),
     });
   }

@@ -22,11 +22,12 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
-import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { assignHotLeadToOwner } from "@/lib/hot-sellers/assign";
+import { isHotSeller } from "@/lib/hot-sellers/hot";
 
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
@@ -812,7 +813,24 @@ async function dispatchAiResponseCore(
   // an automated "who is this" answer can never go to a hostile seller.
   const hostileInbound = isHostileInbound(input.inboundBody);
 
-  if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
+  // PR 2: a hot seller never gets an automatic text. "Who is this? I might
+  // sell." would otherwise be answered by the identity shortcut before Jev
+  // runs; with Jev in automatic mode, classify first and let a hot decision
+  // take the hand-off path below (no reply) instead.
+  const identityQuestion = !hostileInbound && isIdentityQuestion(input.inboundBody);
+  const identityHot = identityQuestion && config
+    ? await isHotClassificationForIdentity(supabase, { input, orgId: property.org_id, config, runCtx: deps.runContext })
+    : false;
+  if (identityHot) {
+    await trace(supabase, {
+      kind: "action",
+      name: "identity_reply",
+      result: "skipped",
+      detail: { why: "hot_seller" },
+    }, deps.runContext);
+  }
+
+  if (identityQuestion && !identityHot) {
     // "Who is this?" that is ALSO "how did you get my number?": send only the
     // approved number-source template (it identifies the context) and skip the
     // identity reply, so the seller gets ONE message. Needs the classifier, so
@@ -1249,12 +1267,14 @@ async function classifyAndHandleNonRouteOutcomes(
           detail: { why: "number_source_asked", route: "hot_book_appointment" },
         }, runCtx);
       } else {
-        await enrollHotLeadInBookAppointment(supabase, {
-          propertyId: input.propertyId,
-          sequenceId: dripCfg.enabled ? dripCfg.sequences.hot_book_appointment : null,
-          inboundMessageId: input.inboundMessageId ?? null,
-          runCtx,
-        });
+        // PR 2: a hot seller is handed to Jarrad (hot hold → one Slack + one
+        // text); Sandra never starts a seller-facing drip for them.
+        await trace(supabase, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "skipped",
+          detail: { why: "hot_seller_no_drip", route: "hot_book_appointment" },
+        }, runCtx);
       }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
@@ -1469,7 +1489,9 @@ async function classifyAndHandleNonRouteOutcomes(
         result: handoff.status === "failed" ? "error" : "applied",
         detail: handoff.status === "failed"
           ? { status: handoff.status, reason: handoff.reason }
-          : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
+          : handoff.status === "owned_by_someone_else"
+            ? { status: handoff.status, owner_user_id: handoff.ownerUserId }
+            : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
       }, runCtx);
       if (handoff.status === "failed" || handoff.status === "assigned_unrecorded") {
         // assigned_unrecorded: the lead IS on My Leads, but its note did not
@@ -2859,6 +2881,41 @@ export async function runApprovedTemplateStep(
  * number-source template could go out, so the caller holds for a person.
  * Hostile inbounds never reach this (the identity shortcut is skipped).
  */
+/**
+ * Identity questions only: with Jev automatic, classify BEFORE any identity
+ * reply and report whether the seller is hot (lib/hot-sellers/hot.ts). Any
+ * other mode, or a classifier failure, is "not hot" (today's behaviour).
+ */
+async function isHotClassificationForIdentity(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    orgId: string;
+    config: { classifier_provider?: string | null; classifier_mode?: string | null };
+    runCtx?: MaybeRunContext;
+  },
+): Promise<boolean> {
+  if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return false;
+  const { input } = a;
+  const c = await classifyForDispatch(
+    supabase,
+    {
+      orgId: a.orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { classifierProvider: "jev", classifierMode: "automatic" },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
+  );
+  if (c.kind === "jev_promote_new_lead") return true;
+  if (c.kind === "jev_needs_decision") return isHotSeller({ jevOutcome: c.outcome });
+  if (c.kind === "jev_route" || c.kind === "jev_nurture") return isHotSeller({ reasons: [c.escalationReason] });
+  return false;
+}
+
 async function resolveNumberSourceForIdentity(
   supabase: SupabaseClient<Database>,
   a: {
@@ -2951,56 +3008,6 @@ async function resolveNumberSourceForIdentity(
  */
 /** Tail of the `drip_enroll_failed:` hold when enrolment threw. */
 const ENROLL_THREW = "enroll_threw";
-
-async function enrollHotLeadInBookAppointment(
-  supabase: SupabaseClient<Database>,
-  a: { propertyId: string; sequenceId: string | null; inboundMessageId: string | null; runCtx?: MaybeRunContext },
-): Promise<void> {
-  let detail: Record<string, unknown>;
-  let result: "applied" | "error";
-  try {
-    if (!a.sequenceId) {
-      result = "error";
-      detail = { why: "no_drip_configured", route: "hot_book_appointment" };
-    } else {
-      // Fence = the triggering inbound (its time is read in SQL at full precision): a person
-      // taking over or the seller replying again since makes the enrolment be born paused.
-      const outcome = await enrollLead(supabase, {
-        propertyId: a.propertyId,
-        sequenceId: a.sequenceId,
-        enrolledByUserId: null,
-        autoRoute: "hot_book_appointment",
-        ...(a.inboundMessageId ? { hotFenceMessageId: a.inboundMessageId } : {}),
-      });
-      if (outcome.status === "enrolled" || outcome.status === "duplicate_active") {
-        result = "applied";
-        detail = {
-          status: outcome.status === "enrolled" ? "enrolled" : "already_enrolled",
-          route: "hot_book_appointment",
-          sequenceId: a.sequenceId,
-          ...(outcome.status === "enrolled" ? { enrollmentId: outcome.enrollmentId } : {}),
-        };
-        if (outcome.status === "enrolled") {
-          // The fence may have created it paused (a takeover / newer seller reply happened first).
-          const { data: row } = await supabase
-            .from("sequence_enrollments")
-            .select("status, pause_reason")
-            .eq("id", outcome.enrollmentId)
-            .maybeSingle();
-          if (row && row.status !== "active") detail = { ...detail, status: "enrolled_paused", pausedBecause: row.pause_reason };
-        }
-      } else {
-        result = "error";
-        detail = { why: outcome.status === "failed" ? "enroll_failed" : outcome.status, route: "hot_book_appointment" };
-      }
-    }
-  } catch (error) {
-    reportError(error, { tags: { surface: "nurture_auto_drip_hot" }, extra: { propertyId: a.propertyId } });
-    result = "error";
-    detail = { why: "enroll_failed", route: "hot_book_appointment" };
-  }
-  await trace(supabase, { kind: "action", name: "drip_enrolled", result, detail }, a.runCtx);
-}
 
 async function runNurtureAutoDripStep(
   supabase: SupabaseClient<Database>,

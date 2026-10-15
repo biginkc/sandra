@@ -438,6 +438,57 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
     expect(sent).toHaveLength(0);
   }, 120_000);
+  it("a second hot inbound after a completed hand-off: exactly one more Slack + one more SMS 'Hot text on your lead: <name>, <address>', no reassignment", async () => {
+    resetMockState();
+    installFakeJev();
+    const s = await seedScenario();
+    const sent: Array<{ channel: "slack" | "sms"; userId: string; text: string }> = [];
+    const real = createHoldAlertDeps(admin, { HOLD_ALERTS_ENABLED: "1" });
+    const deps: HoldAlertDeps = {
+      ...real,
+      async sendSlack(userId, text) { sent.push({ channel: "slack", userId, text }); return { status: "sent" }; },
+      async sendSms(userId, text) { sent.push({ channel: "sms", userId, text }); return { status: "sent" }; },
+    };
+    const dispatchFor = (inboundMessageId: string, body: string) =>
+      dispatchAiResponse(
+        admin,
+        { propertyId: s.propertyId, contactId: s.contactId, conversationId: s.conversationId, inboundMessageId, inboundFromPhone: s.phone, inboundBody: body },
+        { anthropic: forbiddenAnthropic },
+      );
+    expect(await dispatchFor(s.inboundMessageId, s.body)).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(2);
+    expect(sent.every((x) => x.text.startsWith("Hot seller:"))).toBe(true);
+
+    const body2 = "actually please call me, I want to sell this week";
+    const { data: second, error } = await admin
+      .from("messages")
+      .insert({
+        org_id: s.orgId, channel: "sms", direction: "inbound", status: "received", property_id: s.propertyId,
+        contact_id: s.contactId, from_address: s.phone, to_address: "+18165550100", body: body2,
+      })
+      .select("id")
+      .single();
+    if (error || !second) throw new Error(`second inbound insert failed: ${error?.message}`);
+
+    await dispatchFor(second.id, body2);
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(2);
+    const texts = sent.slice(2);
+    expect(texts.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
+    expect(texts.every((x) => x.userId === s.owner && x.text.startsWith("Hot text on your lead: Hannah, 12 Switch On Ln."))).toBe(true);
+    expect(texts.every((x) => !x.text.includes("call me"))).toBe(true);
+
+    // No reassignment: still one hand-off event, one episode, one owner.
+    expect(await count("select count(*)::int as n from public.lead_events where property_id = $1 and event_type = 'assigned'", [s.propertyId])).toBe(1);
+    expect(await count("select count(*)::int as n from public.acquisition_assignment_episodes where property_id = $1", [s.propertyId])).toBe(1);
+    expect(await count("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [s.propertyId, HOT_TEXT_SOURCE_TYPE])).toBe(1);
+    expect(await count("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [s.propertyId])).toBe(0);
+
+    // Replays add nothing.
+    await dispatchFor(second.id, body2);
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
+    expect(sent).toHaveLength(4);
+  }, 120_000);
+
   it("a lead a person already assigned to the owner: one Slack + one SMS 'Hot text on your lead', no reassignment, no new 'assigned' event; same inbound again sends nothing more", async () => {
     resetMockState();
     installFakeJev();
@@ -498,7 +549,7 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     expect(alerts.sent).toBe(2);
     expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
     expect(sent.every((x) => x.userId === s.owner)).toBe(true);
-    expect(sent.every((x) => x.text.startsWith("Hot text on your lead: Hannah."))).toBe(true);
+    expect(sent.every((x) => x.text.startsWith("Hot text on your lead: Hannah, 12 Switch On Ln."))).toBe(true);
     expect(sent.every((x) => !x.text.includes("what could you pay"))).toBe(true);
     const { rows: deliveries } = await pg.query(
       "select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel",

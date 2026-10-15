@@ -67,7 +67,7 @@ function fakeDb(
             const ids = inn.find(([c]) => c === "id")![1] as string[];
             calls.propertyBatches.push(ids.length);
             if (opts.failPropertiesAt === calls.propertyBatches.length) return resolve({ data: null, error: { message: "boom" } });
-            return resolve({ data: ids.map((id) => ({ id, contacts: { first_name: `N-${id}` } })), error: null });
+            return resolve({ data: ids.map((id) => ({ id, address: `${id} Main St`, city: "Kansas City", contacts: { first_name: `N-${id}` } })), error: null });
           }
           if (table === "hold_alert_deliveries") {
             const keys = new Set(inn.find(([c]) => c === "hold_key")![1] as string[]);
@@ -166,6 +166,8 @@ describe("loadHotPromotions keyset paging", () => {
     const text2: EventRow = { ...text, id: "t2", source_id: "inbound-2", created_at: "2026-10-15T03:00:00.000Z" };
     const { db } = fakeDb([handoff, text, text2]);
     const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    // Address is loaded for hot texts only, never for hand-offs.
+    expect(promotions.map((p) => [p.kind, !!p.address])).toEqual([["hot_text", true], ["hot_text", true], ["handoff", false]]);
     expect(promotions.map((p) => [p.kind, p.key, p.propertyId])).toEqual([
       ["hot_text", "hot_text:inbound-2", "prop-0"],
       ["hot_text", "hot_text:inbound-1", "prop-0"],
@@ -357,8 +359,8 @@ describe("hot promotions through the alert pass", () => {
     t.deps.loadHotPromotions = (org, since) => loadHotPromotions(db, org, since, NOW_MS);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.map((s) => [s.channel, s.text])).toEqual([
-      ["slack", "Hot text on your lead: N-prop-0. https://app.example.com/leads/prop-0"],
-      ["sms", "Hot text on your lead: N-prop-0. https://app.example.com/leads/prop-0"],
+      ["slack", "Hot text on your lead: N-prop-0, prop-0 Main St, Kansas City. https://app.example.com/leads/prop-0"],
+      ["sms", "Hot text on your lead: N-prop-0, prop-0 Main St, Kansas City. https://app.example.com/leads/prop-0"],
     ]);
     expect(t.store.rows.map((r) => r.holdKey)).toEqual(["hot_text:inbound-1", "hot_text:inbound-1"]);
     await runHoldAlertsForOrg(t.deps, ORG);

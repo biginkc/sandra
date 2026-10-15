@@ -37,7 +37,7 @@ Goal: "wants an offer" and "talked price" become a lead on My Leads under Jarrad
 
 - [x] On a hot decision: set the property to a lead and assign it to Jarrad's user (today promotion sets status only; add the assignment).
 - [x] Tape line reads "Handed to Jarrad · now on My Leads · Slack and text sent".
-- [x] (code; real text still to prove after switch-on) Fix the hot-hold text alert: it has never fired. Done in code: hot = lib/hot-sellers/hot.ts, env list is now an optional extra. Align `HOLD_ALERT_HOT_REASONS` (prod env) with the reasons Sandra actually writes (`model:hot_lead`, `model:call_request`, `keyword:price_offer`), or make the match prefix-based in code. Prove one real text to Jarrad's phone.
+- [x] (code; real text still to prove after switch-on) Fix the hot-hold text alert: it has never fired. Done in code: hot = lib/hot-sellers/hot.ts; HOLD_ALERT_HOT_REASONS removed. Align `HOLD_ALERT_HOT_REASONS` (prod env) with the reasons Sandra actually writes (`model:hot_lead`, `model:call_request`, `keyword:price_offer`), or make the match prefix-based in code. Prove one real text to Jarrad's phone.
 - [x] Stop the per-hold Slack DM and 1-hour nudge for non-hot holds (263 DMs last week). Keep Slack DM for hot only.
 - [ ] Switch `new_lead` automation on in `jev_outcome_thresholds` once PR 2 is live (owner action, logged).
 - [x] (written, disabled by default) Playwright + prod canary: one canary hot text → lead appears on My Leads assigned to Jarrad, Slack + SMS delivery rows `sent`.

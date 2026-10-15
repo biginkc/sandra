@@ -40,6 +40,31 @@ export function isNewHold(hold: Pick<HoldInfo, "startedAt">, alertsSinceMs: numb
   return Number.isFinite(startedMs) && startedMs >= alertsSinceMs;
 }
 
+/**
+ * Immediately before a hot provider call: re-resolve Jarrad and require the
+ * same person this pass selected. Changed or ambiguous → skip; a failed lookup
+ * → retryable failure (nothing was sent).
+ */
+async function hotOwnerStillIs(
+  deps: HoldAlertDeps,
+  orgId: string,
+  owner: string,
+): Promise<ChannelResult | null> {
+  let current: string | null;
+  try {
+    current = await deps.loadHotOwner(orgId);
+  } catch (error) {
+    return { status: "failed", error: `hot owner re-check failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (current !== owner) {
+    reportError(new Error("hold alerts: hot owner changed or ambiguous at send time; not sent"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+    return { status: "skipped", reason: current === null ? "hot_owner_ambiguous" : "hot_owner_changed" };
+  }
+  return null;
+}
+
 /** "Couldn't tell who to alert" is reported once per org per hour (per instance), not every pass. */
 const ownerUnknownReported = new Map<string, number>();
 function shouldReportOwnerUnknown(orgId: string, nowMs: number): boolean {
@@ -172,6 +197,8 @@ export async function runHoldAlertsForOrg(
         input: { ...base, propertyId: null, holdKey: p.key ?? hotPromotionKey(p.propertyId), recipientUserId: owner, channel, stage: "first" },
         send: async () => {
           // Before any provider call, so a failed check is cleanly retryable.
+          const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
+          if (ownerCheck) return ownerCheck;
           let stillAssigned: boolean;
           try {
             stillAssigned = await deps.isPropertyAssignedTo(orgId, p.propertyId, owner);
@@ -192,8 +219,11 @@ export async function runHoldAlertsForOrg(
       for (const channel of ["slack", "sms"] as const) {
         tasks.push({
           input: { ...base, propertyId: null, holdKey: hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
-          send: () =>
-            channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link)),
+          send: async () => {
+            const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
+            if (ownerCheck) return ownerCheck;
+            return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
+          },
           requireOwner: true,
         });
       }
