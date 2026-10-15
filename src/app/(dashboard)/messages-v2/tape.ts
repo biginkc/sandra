@@ -6,6 +6,7 @@
  * decides anything and never surfaces step names such as `claim` or
  * `resolve_threshold`.
  */
+import { nineTapeTag } from "./nine-tape";
 import { dripEnrollmentSummary } from "./run-card";
 import type { PipelineRunStep, RunWithSteps } from "./types";
 
@@ -99,6 +100,9 @@ export function tapeTagForRun(run: Pick<RunWithSteps, "reason" | "steps">, pinne
   // A reason frozen by the waiting-list snapshot beats anything the run itself says (old reason or old outcome).
   const pinned = pinnedReason ? tapeTagForWord(reasonWord(pinnedReason)) : null;
   if (pinned) return pinned;
+  // Nine-question engine: its answer is the tag (old-engine runs fall through to the mapping below).
+  const nine = nineTapeTag(run.steps);
+  if (nine) return nine;
   const word = reasonWord(run.reason);
   if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm") {
     return tapeTagForWord(word);
