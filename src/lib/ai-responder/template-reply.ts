@@ -181,6 +181,13 @@ export async function resolveApprovedTemplateReply(
      */
     escalationReason: JevEscalationReason | null;
     replyIntent?: JevReplyIntent | null;
+    /**
+     * Messages v2 PR 3: the answer was decided by Jarrad's nine questions (60%
+     * cutoff already applied, no escalation-reason question exists). The label's
+     * own automation switch is still honoured (fail closed); the old eight-answer
+     * cutoff and escalation-reason checks do not apply.
+     */
+    decidedBy?: "nine_questions";
     /** Test seam: defaults to the live per-org thresholds. */
     thresholds?: ThresholdMap;
   },
@@ -203,7 +210,13 @@ export async function resolveApprovedTemplateReply(
   // Hostile is decided by wording in code, not by Jev: no follow-up answer,
   // confidence or label switch applies. Everything else (approved text, active
   // mapping, send gates) is identical.
-  if (!hostile) {
+  if (!hostile && args.decidedBy === "nine_questions") {
+    const thresholds = args.thresholds ?? (await loadOrgThresholdMap(supabase, args.orgId));
+    const configured = thresholds[args.outcome as keyof ThresholdMap];
+    if (!configured || configured.automationEnabled !== true) {
+      return { kind: "none", reason: "automation_disabled" };
+    }
+  } else if (!hostile) {
     if (args.escalationReason !== "not_applicable") {
       return { kind: "none", reason: "human_follow_up" };
     }

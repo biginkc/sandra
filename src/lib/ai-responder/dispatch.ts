@@ -91,6 +91,14 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
+import {
+  enrollNineDrip,
+  readClassifierEngine,
+  runNineClassification,
+  type NineDripResult,
+} from "./nine-questions-engine";
+import { actionForNineAnswer, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
 import { matchEscalationKeyword } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
@@ -811,8 +819,14 @@ async function dispatchAiResponseCore(
   // the existing opt-out path untouched. The identity shortcut is skipped so
   // an automated "who is this" answer can never go to a hostile seller.
   const hostileInbound = isHostileInbound(input.inboundBody);
+  // Messages v2 PR 3: with the nine questions on, "who is this" is one of Jev's nine
+  // answers (and ranks BELOW stop / wrong person / price in the approved order), so
+  // the wording shortcut must not answer first. Any read failure = the old engine.
+  const nineEngineOn =
+    config?.classifier_provider === "jev" &&
+    (await readClassifierEngine(supabase, property.org_id)) === "nine_questions";
 
-  if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
+  if (!hostileInbound && !nineEngineOn && isIdentityQuestion(input.inboundBody)) {
     // "Who is this?" that is ALSO "how did you get my number?": send only the
     // approved number-source template (it identifies the context) and skip the
     // identity reply, so the seller gets ONE message. Needs the classifier, so
@@ -1146,6 +1160,39 @@ async function classifyAndHandleNonRouteOutcomes(
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
+  // Messages v2 PR 3: per-org engine switch (default outcome_v1 = today's path).
+  if (
+    config?.classifier_provider === "jev" &&
+    (await readClassifierEngine(supabase, property.org_id)) === "nine_questions"
+  ) {
+    if (config.classifier_mode === "automatic") {
+      return {
+        handled: true,
+        outcome: await runNineQuestionsStep(supabase, { input, property, claim: responseClaim, runCtx, templateCtx }),
+      };
+    }
+    // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
+    const shadow = await runNineClassification(
+      supabase,
+      {
+        orgId: property.org_id,
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+        inboundBody: input.inboundBody,
+      },
+      { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+    );
+    if (shadow.kind === "ok") {
+      await trace(supabase, {
+        kind: "shadow",
+        name: "would_apply",
+        result: "would_apply",
+        detail: { engine: "nine_questions", answer: shadow.result.answer },
+      }, runCtx);
+    }
+  }
   const classification = await classifyForDispatch(
     supabase,
     {
@@ -2653,6 +2700,8 @@ export async function runApprovedTemplateStep(
      * changes.
      */
     askedHowNumberObtained?: boolean;
+    /** Messages v2 PR 3: decided by the nine questions (see resolveApprovedTemplateReply). */
+    decidedBy?: "nine_questions";
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
@@ -2669,6 +2718,7 @@ export async function runApprovedTemplateStep(
       // The responder does not ask Jev for a reply intent yet, so only
       // any-intent mappings match until it does.
       replyIntent: null,
+      ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
     });
   const asked = a.askedHowNumberObtained === true;
   const notSent = (reason: string) => (asked ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}${reason}` : null);
@@ -7011,4 +7061,341 @@ async function notifyAdminsOfProviderFailure(
       extra: { orgId: args.orgId, failure: args.failure },
     });
   }
+}
+
+
+// ----------------------------------------------------------------------------
+// Messages v2 PR 3 — Jarrad's nine questions (per-org switch
+// `ai_responder_configs.classifier_engine = 'nine_questions'`, automatic mode).
+// Replies are only approved library texts; every send goes through the existing
+// gates (send gate, suppression, quiet hours, outbound mode). Nothing here
+// suppresses a number or sets a terminal disposition except wrong_person, which
+// closes THIS property exactly as the eight-answer wrong-number route does.
+// ----------------------------------------------------------------------------
+
+type NineStepArgs = {
+  input: AiDispatchInput;
+  property: AiDispatchPropertyGateRow;
+  claim: { claimId: string | null };
+  runCtx?: MaybeRunContext;
+  /** Absent on the reply-ineligible (decoupled) path: no reply can be sent. */
+  templateCtx?: TemplateStepContext;
+};
+
+async function nineHoldAndComplete(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  reason: string,
+  outboundMessageId?: string | null,
+): Promise<AiDispatchOutcome> {
+  const flagOk = await holdWithRetry(supabase, a.input.propertyId, reason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "escalated",
+    flagOk,
+    ...(outboundMessageId ? { outboundMessageId } : {}),
+  });
+  return { outcome: "escalated", reason };
+}
+
+/** Same refusal record the nurture auto-drip writes: a trace step plus a flag a person sees. */
+async function nineRecordDrip(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  dripName: string,
+  result: NineDripResult,
+): Promise<boolean> {
+  if (result.status === "refused") {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: result.reason, route: dripName, engine: "nine_questions" },
+    }, a.runCtx);
+    return markPropertyNeedsAttention(
+      supabase,
+      a.input.propertyId,
+      result.reason === "drip_paused" ? "drip_paused" : `drip_enroll_failed:${result.reason}`,
+      a.runCtx,
+    );
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "drip_enrolled",
+    result: "applied",
+    detail: {
+      status: result.status,
+      route: dripName,
+      engine: "nine_questions",
+      sequenceId: result.sequenceId,
+      ...(result.status === "enrolled" ? { enrollmentId: result.enrollmentId } : {}),
+    },
+  }, a.runCtx);
+  return true;
+}
+
+/**
+ * Hot answers (open_to_selling, talked_price) reuse TODAY's new_lead path unchanged:
+ * promote atomically when the org's new_lead automation switch is on, otherwise
+ * record the proposal and hold for a person. Messages v2 PR 2 replaces this one
+ * function; nothing else here knows how a hot lead is handled.
+ */
+async function routeNineHot(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
+): Promise<AiDispatchOutcome> {
+  const { input } = a;
+  const chosen = r.result.chosen!;
+  const thresholds = await loadOrgThresholdMap(supabase, a.property.org_id);
+  const newLead = thresholds.new_lead;
+  const args = {
+    propertyId: input.propertyId,
+    conversationId: input.conversationId,
+    inboundMessageId: input.inboundMessageId,
+    classificationRunId: r.classificationRunId,
+    outcome: "new_lead" as const,
+    nativeConfidence: chosen.probability,
+    thresholdAtDecision: r.result.cutoff,
+    thresholdVersion: newLead?.version ?? null,
+    expectedRevision: r.evaluationRevision,
+  };
+  if (newLead?.automationEnabled === true) {
+    const applyResult = await applyJevLeadDecisionAtomically(supabase, args);
+    if (applyResult.status === "applied" || applyResult.status === "already_qualified" || applyResult.status === "replayed") {
+      await trace(supabase, { kind: "action", name: "promote_new_lead", result: "applied", detail: { status: applyResult.status, engine: "nine_questions" } }, a.runCtx);
+      if (applyResult.status === "applied") {
+        await recordLeadEvent({
+          propertyId: input.propertyId,
+          actorType: "system",
+          eventType: LEAD_EVENT_TYPES.QUALIFIED,
+          payload: { from: "prospect", to: "new_lead" },
+        });
+      }
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
+      return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+    }
+    const reason = "jev_new_lead_promotion_failed";
+    await trace(supabase, { kind: "action", name: "promote_new_lead", result: "error", detail: { status: applyResult.status, engine: "nine_questions" } }, a.runCtx);
+    const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, reason, a.runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: applyResult.status, flagOk });
+    return { outcome: "escalated", reason };
+  }
+  // Switch off: a person decides (the proposal row is the "needs a decision" record).
+  await proposeJevLeadDecision(supabase, args);
+  await trace(supabase, { kind: "hold", name: "nine_hot_lead", result: "held", detail: { reason: "hot_lead", answer: r.result.answer } }, a.runCtx);
+  return nineHoldAndComplete(supabase, a, "hot_lead");
+}
+
+export async function runNineQuestionsStep(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  const cls = await runNineClassification(
+    supabase,
+    {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+  );
+  if (cls.kind === "failed") {
+    // Never falls back to the other engine: no trusted decision, so a person looks.
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${cls.reason}`);
+  }
+  const { result } = cls;
+  const action = actionForNineAnswer(result.answer);
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_questions_route",
+    result: "applied",
+    detail: { engine: "nine_questions", answer: result.answer, action: action.kind },
+  }, runCtx);
+
+  // Hostile wording or a hostile answer: never an automatic reply, never an automatic DNC.
+  if (isHostileInbound(input.inboundBody) || result.answer === "hostile") {
+    return holdHostileForConfirm(supabase, input, claim, runCtx);
+  }
+
+  if (action.kind === "hot") {
+    return routeNineHot(supabase, a, { classificationRunId: cls.classificationRunId, evaluationRevision: cls.evaluationRevision, result });
+  }
+
+  if (action.kind === "wait_for_person") {
+    return nineHoldAndComplete(supabase, a, `nine_${action.reason}`);
+  }
+
+  if (action.kind === "drip_only") {
+    const dripResult = await enrollNineDrip(supabase, {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      dripName: action.drip,
+      skipFirstStep: false,
+    });
+    const flagOk = await nineRecordDrip(supabase, a, action.drip, dripResult);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: claim.claimId,
+      outcome: dripResult.status === "refused" ? "escalated" : "auto_closed",
+      ...(dripResult.status === "refused" ? { flagOk } : {}),
+    });
+    return dripResult.status === "refused"
+      ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
+      : { outcome: "auto_closed", reason: "nine_questions:confirmed_owner" };
+  }
+
+  const chosenProbability = result.chosen?.probability ?? null;
+
+  if (action.kind === "reply_and_close_wrong_person") {
+    // Same gates as the eight-answer wrong-number route: the label's automation switch
+    // decides whether Sandra may act at all; otherwise a person closes it.
+    const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+    if (thresholds.wrong_number?.automationEnabled !== true) {
+      return nineHoldAndComplete(supabase, a, "nine_automation_disabled:wrong_number");
+    }
+    let messageId: string | null = null;
+    if (templateCtx) {
+      const step = await runApprovedTemplateStep(supabase, {
+        input,
+        property,
+        ctx: templateCtx,
+        claim,
+        outcome: "wrong_number",
+        nativeConfidence: chosenProbability,
+        escalationReason: "not_applicable",
+        decidedBy: "nine_questions",
+        runCtx,
+      });
+      if (step.kind === "stop") return step.outcome;
+      messageId = step.outboundMessageId;
+    }
+    // Our own reply is an outbound message, which moves decision_context_revision. The
+    // revision guard is for someone ELSE changing the lead while Jev was reading, so
+    // after a send, re-baseline on the revision our own reply produced.
+    let closeRevision = cls.evaluationRevision;
+    if (messageId) {
+      const { data: current } = await supabase
+        .from("properties")
+        .select("decision_context_revision")
+        .eq("id", input.propertyId)
+        .maybeSingle();
+      if (!current) return nineHoldAndComplete(supabase, a, "nine_close_wrong_person_unreadable", messageId);
+      closeRevision = current.decision_context_revision;
+    }
+    const closed = await applyWrongNumber(supabase, {
+      runContext: runCtx,
+      propertyId: input.propertyId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      // This property only: phone-wide suppression is a person's call.
+      scope: "this_property",
+      reason: "nine_questions:wrong_person",
+      expectedRevision: closeRevision,
+    });
+    await traceDisposition(supabase, "wrong_number", closed, false, runCtx);
+    // As the eight-answer route does for an applied wrong_number (this property only):
+    // link the review to the run that decided it. A failure leaves it pending for a person.
+    if (closed.updated && input.inboundMessageId) {
+      await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, cls.classificationRunId);
+    }
+    const closedOutcome = closeOutcome(closed, "nine_questions:wrong_person");
+    await completeClaim(supabase, input.propertyId, {
+      claimId: claim.claimId,
+      outcome: claimOutcomeOf(closedOutcome),
+      errorMessage: dispositionClaimError(closed),
+      ...(messageId ? { outboundMessageId: messageId } : {}),
+    });
+    return closedOutcome;
+  }
+
+  // reply_and_drip: the drip only starts after the reply was accepted by the provider.
+  const noReply = async (why: string): Promise<AiDispatchOutcome> => {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "reply_not_sent", detail: why, route: action.drip, engine: "nine_questions" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, `nine_reply_not_sent:${why}`);
+  };
+  if (!templateCtx) return noReply("reply_ineligible");
+
+  let messageId: string | null = null;
+  if (action.reply === "identity") {
+    if (input.replyDelayBypassed) return noReply(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
+    const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
+    if (!safety.ok) return noReply(`safety:${safety.reason}`);
+    const sent = await sendResponderMessage(supabase, {
+      runContext: runCtx,
+      input,
+      body: IDENTITY_REPLY_BODY,
+      model: templateCtx.model,
+      confidence: 1,
+      sentiment: "neutral",
+      turn: templateCtx.currentTurn + 1,
+      // As the wording shortcut does: a fixed approved text, not classed as a library template.
+      source: "llm",
+      orgId: property.org_id,
+      claimStartedAt: templateCtx.claimStartedAt,
+      outboundMode: templateCtx.outboundMode,
+      replyKind: "identity",
+    });
+    if (sent.outcome === "retry") {
+      return settleClaimForSendOutcome(supabase, claim.claimId, { ...sent, reply: undefined }, {
+        orgId: property.org_id,
+        input,
+        body: IDENTITY_REPLY_BODY,
+        runContext: runCtx,
+      });
+    }
+    if (sent.outcome !== "sent") {
+      await settleClaimForSendOutcome(supabase, claim.claimId, sent, { orgId: property.org_id, input, body: IDENTITY_REPLY_BODY, runContext: runCtx });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_enrolled",
+        result: "skipped",
+        detail: { why: "reply_not_sent", detail: sent.outcome, route: action.drip, engine: "nine_questions" },
+      }, runCtx);
+      await holdWithRetry(supabase, input.propertyId, `nine_reply_not_sent:send_${sent.outcome}`, runCtx);
+      return { outcome: "escalated", reason: `nine_reply_not_sent:send_${sent.outcome}` };
+    }
+    messageId = sent.messageId;
+  } else {
+    const label = action.reply === "nurture" ? "nurture" : "not_interested";
+    const step = await runApprovedTemplateStep(supabase, {
+      input,
+      property,
+      ctx: templateCtx,
+      claim,
+      outcome: label,
+      nativeConfidence: chosenProbability,
+      escalationReason: "not_applicable",
+      decidedBy: "nine_questions",
+      runCtx,
+    });
+    if (step.kind === "stop") return step.outcome;
+    if (!step.outboundMessageId || step.replyKey !== label) return noReply(step.notSentReason ?? "not_sent");
+    messageId = step.outboundMessageId;
+  }
+
+  const dripResult = await enrollNineDrip(supabase, {
+    orgId: property.org_id,
+    propertyId: input.propertyId,
+    dripName: action.drip,
+    skipFirstStep: action.skipFirstStep,
+  });
+  const flagOk = await nineRecordDrip(supabase, a, action.drip, dripResult);
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: dripResult.status === "refused" ? "escalated" : "auto_closed",
+    ...(dripResult.status === "refused" ? { flagOk } : {}),
+    outboundMessageId: messageId,
+  });
+  return dripResult.status === "refused"
+    ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
+    : { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
 }
