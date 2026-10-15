@@ -31,7 +31,7 @@ import {
   requestPlan,
   sampleIndices,
   scoreRow,
-  scrubNames,
+  sanitizeText,
   summarizeScores,
   type DisagreementRow,
   type NineSample,
@@ -113,7 +113,7 @@ async function main() {
   const masker = new PhoneMasker(loadMaskSalt(), [], true);
   const samples: NineSample[] = rows.map((r, idx) => {
     const names = [r.first_name as string | null, r.last_name as string | null];
-    const clean = (t: string) => scrubNames(masker.maskText(t), names);
+    const clean = (t: string) => sanitizeText(masker, t, names);
     return {
       idx,
       reply: clean(String(r.body ?? "")),
@@ -192,6 +192,14 @@ async function main() {
   mkdirSync(path.dirname(out), { recursive: true });
   writeFileSync(out, md);
   mkdirSync(REPLAY_DIR, { recursive: true });
+  // Per-text probabilities (masked texts) go to gitignored tmp/, never committed.
+  const probsFile = path.join(REPLAY_DIR, "nine-probabilities.json");
+  writeFileSync(
+    probsFile,
+    JSON.stringify(scored.map((x) => ({ idx: x.s.idx, reply: x.s.reply, ourLastText: x.s.ourLastText, human: x.row.group, answer: x.r.answer, probabilities: x.r.probabilities })), null, 1),
+    { mode: 0o600 },
+  );
+  console.log(`nine: probabilities ${probsFile}`);
   console.log(`nine: wrote ${out}; requests ${guard.count()}; agreement ${stats.agree}/${stats.labeled}; flip ${flip.flipped}/${flip.samples}`);
 }
 

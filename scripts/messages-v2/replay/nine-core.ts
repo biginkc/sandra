@@ -1,3 +1,4 @@
+import { maskAddresses, type PhoneMasker } from "./mask";
 import type { NineAnswer } from "../../../src/lib/sms-classification/nine-questions";
 
 /**
@@ -256,4 +257,9 @@ export function scrubNames(text: string, names: readonly (string | null | undefi
     out = out.replace(new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), "[name]");
   }
   return out;
+}
+
+/** Phones, emails, street addresses and contact names out; used BEFORE classification and for all output. */
+export function sanitizeText(masker: PhoneMasker, text: string, names: readonly (string | null | undefined)[]): string {
+  return scrubNames(maskAddresses(masker.maskText(text)), names);
 }

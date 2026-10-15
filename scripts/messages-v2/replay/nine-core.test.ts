@@ -112,3 +112,14 @@ describe("scrubNames", () => {
     expect(scrubNames("Hi John Smith, it's jo", ["John", "Smith", "Jo", null])).toBe("Hi [name] [name], it's jo");
   });
 });
+
+import { PhoneMasker } from "./mask";
+import { sanitizeText } from "./nine-core";
+describe("sanitizeText", () => {
+  it("leaves no address, phone or name", () => {
+    const m = new PhoneMasker("salt-for-test", [], true);
+    const out = sanitizeText(m, "Hi Dana, I'm at 1234 N Main St Apt 4, call (913) 222-3344", ["Dana"]);
+    expect(out).not.toMatch(/Main St|Dana|222-3344/);
+    expect(out).toContain("[address]");
+  });
+});
