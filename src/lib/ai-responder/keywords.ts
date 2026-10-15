@@ -167,3 +167,20 @@ export function priceSignalAllowed(match: KeywordMatch | null, allowedPhrases?: 
   const allowed = new Set(allowedPhrases.map((p) => p.toLowerCase()));
   return TIER_KEYWORDS.price_offer.some((p) => allowed.has(p.toLowerCase()));
 }
+
+/**
+ * Any price signal the org allows, independent of which tier
+ * matchEscalationKeyword picks (it returns only the longest phrase, so
+ * "My lawyer is involved. What's your price?" selects "lawyer"). Price-tier
+ * phrases honour the allow-list; a numeric amount counts only when the
+ * allow-list includes a price phrase (or there is none).
+ */
+export function hasAllowedPriceSignal(body: string, allowedPhrases?: ReadonlyArray<string> | null): boolean {
+  if (!body) return false;
+  const lower = body.toLowerCase();
+  const allowed = allowedPhrases ? new Set(allowedPhrases.map((p) => p.toLowerCase())) : null;
+  const pricePhrases = TIER_KEYWORDS.price_offer.filter((p) => !allowed || allowed.has(p.toLowerCase()));
+  if (pricePhrases.some((p) => lower.includes(p.toLowerCase()))) return true;
+  const numeric = DOLLAR_AMOUNT_REGEX.test(body) || NUMBER_WITH_SCALE_REGEX.test(body);
+  return numeric && (!allowed || pricePhrases.length > 0);
+}

@@ -92,7 +92,7 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
-import { hasNonPriceEscalationPhrase, matchEscalationKeyword, priceSignalAllowed } from "./keywords";
+import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, priceSignalAllowed } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
   NUMBER_SOURCE_AWAITING_ANSWER_REASON,
@@ -631,26 +631,23 @@ async function dispatchAiResponseCore(
       detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
     }, deps.runContext);
   }
-  // PR 2: the consent / suppression / takeover / responder-off gates run
-  // BEFORE any keyword hold is written. When they block (e.g. a person turned
-  // the responder off for this property), no Sandra hold and no alert,
-  // whatever the phrase; a failed lookup also writes nothing here (the normal
-  // gates below still fail closed for a person).
+  // PR 2: a person turned the responder OFF for this property (their
+  // takeover switch): Sandra writes no keyword hold and sends no alert,
+  // whatever the phrase. Everything else (opted-out / DNC contacts, phone
+  // suppression, no active config) keeps main's behaviour: a keyword still
+  // writes its hold so a person sees it. Nothing is ever texted either way.
+  // (Held / human-takeover properties never reach this point.)
   const keywordHit =
     !deferPriceKeyword &&
     matchEscalationKeyword(input.inboundBody, { allowedPhrases: config?.escalation_keywords ?? undefined }) !== null;
-  let keywordGated = false;
-  if (keywordHit) {
-    const silent = await loadSilentExit(supabase, input, property);
-    keywordGated = !silent.ok || !!silent.reason;
-    if (keywordGated) {
-      await trace(supabase, {
-        kind: "gate",
-        name: "escalation_keyword",
-        result: "skipped",
-        detail: { why: silent.ok ? silent.reason : "gate_lookup_failed" },
-      }, deps.runContext);
-    }
+  const keywordGated = keywordHit && property.ai_responder_disabled === true;
+  if (keywordGated) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "skipped",
+      detail: { why: "disabled_per_property" },
+    }, deps.runContext);
   }
   const keywordEscalation = deferPriceKeyword || keywordGated
     ? ({ escalated: false } as const)
@@ -662,6 +659,22 @@ async function dispatchAiResponseCore(
       });
 
   if (keywordEscalation.escalated) {
+    // The up-front hold keeps main's (non-price) reason so a person sees it.
+    // If the text ALSO carries an allowed price signal, the lead is now held:
+    // run the held-lead classify-only check, which alerts Jarrad once only if
+    // stop / DNC / wrong / bad number does not win (and its own gates pass).
+    if (
+      !keywordEscalation.reason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) &&
+      input.inboundMessageId &&
+      isPriceKeyword(input.inboundBody, config?.escalation_keywords ?? null)
+    ) {
+      await classifyOnlyForHotText(
+        supabase,
+        input,
+        { ...property, needs_human_attention: true, last_ai_escalation_reason: keywordEscalation.reason },
+        deps.runContext,
+      );
+    }
     return { outcome: "escalated", reason: keywordEscalation.reason };
   }
 
@@ -3192,7 +3205,7 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
 
 /** The price_offer keyword, matched against the ORG's configured phrases on every path. */
 function isPriceKeyword(body: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
-  return priceSignalAllowed(matchEscalationKeyword(body, { allowedPhrases: escalationKeywords ?? undefined }), escalationKeywords);
+  return hasAllowedPriceSignal(body, escalationKeywords);
 }
 
 /** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */

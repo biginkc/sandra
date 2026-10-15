@@ -7993,7 +7993,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(hotAssign.recordHeld).not.toHaveBeenCalled();
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
-          describe("round 18: the silent-exit gates run BEFORE any keyword hold", () => {
+          describe("round 18/19: only a responder-off property blocks a keyword hold", () => {
             const BOTH = "How much? My lawyer is involved";
             const expectNoHold = (state: MockState, r: { result: unknown; steps: Array<{ name: string; result?: string; detail?: Record<string, unknown> }> }) => {
               expect((r.result as { outcome: string }).outcome).not.toBe("escalated");
@@ -8017,13 +8017,42 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
               const r = await normalRun(state, "inbound-r18-disabled-lawyer", { outcome: "unclear", propertyDisabled: true, body: "my lawyer is involved", keywords: ["lawyer"] });
               expectNoHold(state, r);
             });
-            it("opted-out contact + price AND lawyer text: no keyword hold", async () => {
+            it("opted-out contact + 'my lawyer is involved' (round 19): keyword hold written as on main, nothing sent", async () => {
               const state = createMockState();
               state.property.needs_human_attention = false;
               vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
               vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "no_consent" });
-              const r = await normalRun(state, "inbound-r18-optout-both", { outcome: "unclear", body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              const r = await normalRun(state, "inbound-r19-optout-lawyer", { outcome: "unclear", body: "my lawyer is involved", keywords: ["lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.needs_human_attention).toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("responder-off property + 'my lawyer is involved' (round 19): no hold", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r19-off-lawyer", { outcome: "unclear", propertyDisabled: true, body: "my lawyer is involved", keywords: ["lawyer"] });
               expectNoHold(state, r);
+              expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.why).toBe("disabled_per_property");
+            });
+            it("mixed lawyer + price text, Jev unclear (round 19): legal_contract hold AND one hot_text recorded", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r19-mixed", { outcome: "unclear", body: "My lawyer is involved. What's your price?", keywords: ["price", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+              expect(hotAssign.recordHeld).toHaveBeenCalledWith(expect.anything(), PROPERTY_ID, "inbound-r19-mixed", expect.anything());
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("mixed lawyer + price text, Jev opted_out (round 19): legal_contract hold, no hot_text", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r19-mixed-oo", { outcome: "opted_out", body: "My lawyer is involved. What's your price?", keywords: ["price", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
             });
             it("enabled property + price AND lawyer text: main's up-front keyword hold (keyword:price_offer)", async () => {
               const state = createMockState();
