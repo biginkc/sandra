@@ -252,13 +252,14 @@ language sql stable security definer set search_path = '' as $$
     union all
     select c.lead_id, 'scheduled_text_overdue', 'open_campaign', c.overdue_at, null::uuid, false from camp c where c.overdue_at is not null
     union all
-    select b.property_id, 'ai_reply_needs_ok', 'review', d.created_at, d.id, false
-    from base b join public.ai_reply_drafts d on d.org_id = p_org and d.property_id = b.property_id and d.status = 'pending'
-    union all
     select b.property_id, 'ai_reply_failed', 'review', dl.created_at, dl.id, false
     from base b join public.ai_reply_dead_letters dl on dl.org_id = p_org and dl.property_id = b.property_id and dl.resolved_at is null
     union all
     select n.lead_id, 'norma_needs_review', 'review', n.review_at, null::uuid, false from nr n where n.review_at is not null),
+  -- A pending AI draft is a label only (never Broken): stale once its reply is handled another way.
+  dr as (
+    select distinct d.property_id as lead_id from public.ai_reply_drafts d
+    where d.org_id = p_org and d.status = 'pending' and d.property_id in (select property_id from base)),
   bko as (
     select b0.* from bk0 b0
     where not b0.failure or not (
@@ -268,7 +269,7 @@ language sql stable security definer set search_path = '' as $$
       or exists (select 1 from public.sequence_enrollments se
                  where se.org_id = p_org and se.property_id = b0.lead_id and se.enrolled_by_user_id is not null and se.enrolled_at > b0.at))),
   bka as (
-    select lead_id, count(*)::integer as n, (count(*) filter (where kind = 'ai_reply_needs_ok'))::integer as draft_n,
+    select lead_id, count(*)::integer as n,
       (array_agg(kind order by at, kind))[1] as first_kind, (array_agg(action order by at, kind))[1] as first_action,
       min(at) as first_at,
       jsonb_agg(jsonb_build_object('kind', kind, 'action', action, 'at', at, 'refId', ref_id) order by at, kind) as items
@@ -312,7 +313,7 @@ language sql stable security definer set search_path = '' as $$
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
       apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
-      coalesce(bka.n, 0) as broken_n, coalesce(bka.draft_n, 0) as draft_n, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
+      coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
       coalesce(nr.calling, false) as norma_calling, (nt.lead_id is not null) as norma_task,
       tmn.next_at
     from base b
@@ -326,6 +327,7 @@ language sql stable security definer set search_path = '' as $$
     left join apx on apx.lead_id = b.property_id
     left join camp on camp.lead_id = b.property_id
     left join bka on bka.lead_id = b.property_id
+    left join dr on dr.lead_id = b.property_id
     left join nr on nr.lead_id = b.property_id
     left join nt on nt.lead_id = b.property_id
     left join tmn on tmn.lead_id = b.property_id),
@@ -381,8 +383,8 @@ language sql stable security definer set search_path = '' as $$
         case when cl.dnc then 'do_not_contact' end,
         case when cl.manual_at is not null then 'text_waiting' end,
         case when cl.in_contact_only and cl.in_ts is not null then 'check_texts' end,
-        case when cl.broken_n - cl.draft_n > 0 and cl.row_no <> '6' then 'broken' end,
-        case when cl.draft_n > 0 and cl.row_no <> '6' then 'ai_draft_waiting' end
+        case when cl.broken_n > 0 and cl.row_no <> '6' then 'broken' end,
+        case when cl.draft_waiting then 'ai_draft_waiting' end
       ], null) || case when cardinality(cl.phones) = 0 then array['no_phone'] else array[]::text[] end as labels,
       case cl.place when 'your_move' then 0 when 'their_move' then 1 else 2 end::smallint as place_rank,
       case when cl.place <> 'your_move' then 0

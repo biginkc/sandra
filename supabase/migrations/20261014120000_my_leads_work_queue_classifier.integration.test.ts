@@ -348,10 +348,13 @@ fixture('S AI-written reply goes out', async (w) => {
 }, { place: WT, reason: 'texted_last', row: '13', headline: { by: 'ai' } });
 fixture('S AI holds the reply for your OK: New reply with the AI-draft-waiting label', async (w) => {
   const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR)); await w.aiDraft(id, w.at(-2 * HOUR)); return id;
-}, { place: NA, reason: 'new_reply', row: '5', labels: ['ai_draft_waiting'], brokenKinds: ['ai_reply_needs_ok'] });
-fixture('S AI hold with no inbound left is Broken · AI reply needs your OK', async (w) => {
+}, { place: NA, reason: 'new_reply', row: '5', labels: ['ai_draft_waiting'], brokenKinds: [] });
+fixture('S Pending AI draft with the reply handled by a reached call: not Broken, label only', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR)); await w.aiDraft(id, w.at(-2 * HOUR)); await w.attempt(id, w.at(-HOUR), 'reached'); return id;
+}, { place: NA, reason: 'nothing_planned', row: '15', labels: ['ai_draft_waiting'], brokenKinds: [] });
+fixture('S Pending AI draft alone is never Broken', async (w) => {
   const id = await w.lead('s'); await w.aiDraft(id, w.at(-2 * HOUR)); return id;
-}, { place: NA, reason: 'broken', row: '6', headline: { kind: 'ai_reply_needs_ok' } });
+}, { place: NA, reason: 'nothing_planned', row: '15', labels: ['ai_draft_waiting'], brokenKinds: [] });
 fixture('S AI dead letter is Broken · AI reply failed', async (w) => {
   const id = await w.lead('s'); await w.deadLetter(id, w.at(-2 * HOUR)); return id;
 }, { place: NA, reason: 'broken', row: '6', headline: { kind: 'ai_reply_failed' } });
