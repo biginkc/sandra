@@ -32,6 +32,37 @@ export async function lockedPropertyIds(
 }
 
 /**
+ * Positive verification: which of these properties exist IN THIS ORG and are readably unlocked
+ * (`is_dnc_locked === false`), and which are locked. An id in neither set is unverifiable (absent, another org's,
+ * or an unreadable lock state). Null when any lookup fails: callers must fail closed.
+ */
+export async function verifyProperties(
+  supabase: LooseSupabase,
+  orgId: string,
+  propertyIds: readonly string[],
+): Promise<{ unlocked: Set<string>; locked: Set<string> } | null> {
+  const ids = [...new Set(propertyIds)];
+  const unlocked = new Set<string>();
+  const locked = new Set<string>();
+  try {
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const slice = ids.slice(i, i + CHUNK);
+      const res = await fetchAllKeyset<{ id: string; is_dnc_locked: unknown }>(() =>
+        supabase.from("properties").select("id, is_dnc_locked").eq("org_id", orgId).in("id", slice),
+      );
+      if (res.error) return null;
+      for (const row of res.rows) {
+        if (row.is_dnc_locked === true) locked.add(row.id);
+        else if (row.is_dnc_locked === false) unlocked.add(row.id);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return { unlocked, locked };
+}
+
+/**
  * Drops holds whose property is permanently do-not-contact locked
  * (`properties.is_dnc_locked`): nobody can act on them, so they must not sit in
  * "Waiting for a person". FAILS CLOSED: if the lock lookup fails this returns

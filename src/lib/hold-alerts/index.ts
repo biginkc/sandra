@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { loadHeldPropertyIds, loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadHeldPropertyIds, loadMessagesV2Data } from "./alert-loader";
 import { loadRunLabels } from "@/app/(dashboard)/messages-v2/labels";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
@@ -38,9 +39,11 @@ export function resolveAppBaseUrl(env: Record<string, string | undefined> = proc
 }
 
 /**
- * Open holds from the SAME derivation as the page. The run window the page
- * loader selects includes inbound_preview; it is dropped here (hold -> HoldInfo
- * keeps ids and first name only) and never reaches an alert payload.
+ * Open holds from the FROZEN pre-#874 loader (alert-loader.ts, pinned by hash to
+ * queries.ts at 84ddabdd6), deliberately isolated from the page's own queries so
+ * a page change can never change alert decisions. The run window it selects
+ * includes inbound_preview; it is dropped here (hold -> HoldInfo keeps ids and
+ * first name only) and never reaches an alert payload.
  */
 async function loadAlertHolds(
   db: LooseSupabase,

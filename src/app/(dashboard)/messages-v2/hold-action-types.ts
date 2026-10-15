@@ -49,7 +49,7 @@ export type OlderHoldsPage = {
   /** Requested ids no longer waiting (resolved, locked or unverifiable since the snapshot). */
   missing: string[];
   /** Hidden because they could not be tied to exactly one property. */
-  unverified: number;
+  unverified: number | null;
   /** Card annotations that failed for this page (amber note). */
   contextErrors: string[];
 };

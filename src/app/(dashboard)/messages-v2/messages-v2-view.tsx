@@ -16,7 +16,7 @@ import { asWaitingSnapshot, type CompactSnapshot } from "./snapshot-codec";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
-import { compareInstants, describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
+import { compareInstants, describeCoverage, type LooseSupabase } from "./queries";
 import type { ReplyGeneration } from "./reply-generation";
 import type { SetReplyGenerationAction } from "./reply-generation-toggle";
 import { RulesPanel } from "./rules-panel";
@@ -307,7 +307,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       commitIfCurrent<ThreadTable>(stamp, now, setThreadTable, (t) => applyThreads(t, stamp, now(), fetched, loadedOk, failedIds));
       if (failedNow.length) window.setTimeout(() => commitIfCurrent<number>(stamp, now, setThreadRetry, (k) => k + 1), 10_000);
     };
-    loadRunThreads(createClient() as unknown as LooseSupabase, missing)
+    loadRunThreads(createClient() as unknown as LooseSupabase, orgId, missing)
       .then(({ threads: fetched, failedRunIds }) =>
         commit(
           [...fetched],
@@ -317,7 +317,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       )
       .catch(() => commit([], [], missing.map((r) => r.id)));
     // threadRetry re-runs this after a failure.
-  }, [runs, earlier, threadRetry]);
+  }, [runs, earlier, threadRetry, orgId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -476,7 +476,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
         const last = got[got.length - 1];
         next =
-          got.length >= MAX_RUNS && last
+          res.data.hasMore && last
             ? { day: next.day, before: { at: last.started_at, id: last.id } }
             : { day: previousDayKey(next.day), before: null };
         if (got.length > 0) {
@@ -623,7 +623,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   thread={threads.get(item.run.id)}
                   flagReason={flagByRun.get(item.run.id)}
                   flagPinned={snapshotRuns.has(item.run.id)}
-                  undoControls={undoControls}
+                  // Undo is offered on today's texts only; an earlier day is history.
+                  undoControls={dayKey(Date.parse(item.run.started_at)) === dayKey(nowMs) ? undoControls : undefined}
                 />
               ),
             )

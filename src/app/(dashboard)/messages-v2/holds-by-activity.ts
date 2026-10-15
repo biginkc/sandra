@@ -76,8 +76,8 @@ export async function loadMessagesV2Page(
   const snapshot = buildSnapshot(list.holds);
   const enriched = await enrichPage(supabase, orgId, list.holds.slice(0, FIRST_PAGE));
   // Final check after enrichment: a hold locked or resolved meanwhile is dropped (the column counts it as missing).
-  const still = await recheckOpen(supabase, orgId, enriched.holds);
-  if (!still) {
+  const still = enriched ? await recheckOpen(supabase, orgId, enriched.holds) : null;
+  if (!enriched || !still) {
     return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: encodeSnapshot({ reasons: [], entries: [] }), unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
   }
   const keep = finalCards(enriched.holds, still);
@@ -86,7 +86,7 @@ export async function loadMessagesV2Page(
     holds: keep.holds,
     holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
     snapshot: encodeSnapshot(snapshot),
-    unverified: list.unverified,
+    unverified: list.unverified ?? 0,
     missing: keep.missing,
     flagReasons: snapshotFlagReasons(snapshot),
     error: null,
@@ -105,17 +105,20 @@ export async function loadHoldsByIds(
 ): Promise<{
   holds: OpenHold<RunWithSteps>[];
   missing: string[];
-  unverified: number;
+  unverified: number | null;
   contextErrors: string[];
   /** The requested holds' pins as of this load (same source and shape as the page snapshot). */
   snapshot: WaitingSnapshot;
 } | null> {
-  const list = await loadEligibleHolds(supabase, orgId);
+  if (!ids.length) return { holds: [], missing: [], unverified: 0, contextErrors: [], snapshot: buildSnapshot([]) };
+  // Built for the requested ids only (`unverified` is still the whole-org count; see HoldScope).
+  const list = await loadEligibleHolds(supabase, orgId, { propertyIds: ids });
   if (!list.ok) return null;
   const byId = new Map(list.holds.map((h) => [h.id, h]));
   const found = ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
   const missing = ids.filter((id) => !byId.has(id));
   const enriched = await enrichPage(supabase, orgId, found);
+  if (!enriched) return null;
   const still = await recheckOpen(supabase, orgId, enriched.holds);
   if (!still) return null;
   const keep = finalCards(enriched.holds, still);

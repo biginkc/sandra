@@ -60,7 +60,7 @@ describe("hold action controls", () => {
   it("shows the pending draft and enables all five actions", () => {
     renderRail();
     expect(screen.getByTestId("draft-text")).toHaveTextContent("Draft text for the seller");
-    for (const name of ["Send", "Edit", "Take over \\(Sandra stops\\)", "Assign", "Dismiss"]) {
+    for (const name of ["Send", "Edit", "Take over: open the thread and stop Sandra on this lead", "Assign", "Dismiss"]) {
       expect(button(new RegExp(`^${name}`))).toBeEnabled();
     }
   });
@@ -74,7 +74,7 @@ describe("hold action controls", () => {
     renderRail(hold({ draft: undefined, draft_held: false, sources: ["needs_attention"] }));
     expect(button(/^Send/)).toBeDisabled();
     expect(button(/^Edit/)).toBeDisabled();
-    expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
+    expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     expect(button(/^Assign/)).toBeEnabled();
     expect(button(/^Dismiss/)).toBeEnabled();
   });
@@ -160,7 +160,7 @@ describe("hold action controls", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(message);
       expect(button(/^Send/)).toBeDisabled();
       expect(button(/^Edit/)).toBeDisabled();
-      expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
+      expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     });
   });
 
@@ -202,10 +202,10 @@ describe("hold action controls", () => {
     });
   });
 
-  describe("Take over (Sandra stops)", () => {
+  describe("Take over", () => {
     it("marks the lead human-owned and offers the lead link", async () => {
       const actions = renderRail();
-      await userEvent.click(button(/^Take over \(Sandra stops\)/));
+      await userEvent.click(button(/^Take over: open the thread and stop Sandra on this lead$/));
       expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1", seen: SEEN_HOLD });
       const link = await screen.findByRole("link", { name: /open lead/i });
       expect(link).toHaveAttribute("href", "/leads/p1");
@@ -214,9 +214,9 @@ describe("hold action controls", () => {
 
     it("rolls back on failure", async () => {
       renderRail(hold(), api({ takeOver: vi.fn().mockResolvedValue(fail("HOLD_RESOLVE_FAILED", "Could not update that hold.")) }));
-      await userEvent.click(button(/^Take over \(Sandra stops\)/));
+      await userEvent.click(button(/^Take over: open the thread and stop Sandra on this lead$/));
       expect(await screen.findByRole("alert")).toHaveTextContent(/could not update/i);
-      expect(button(/^Take over \(Sandra stops\)/)).toBeEnabled();
+      expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     });
   });
 
@@ -442,3 +442,15 @@ describe("hostile hold: Stop texting them", () => {
   });
 });
 
+
+describe("Send edit follows the draft's sendable flag", () => {
+  it("a draft that stops being sendable while the editor is open disables Send edit", async () => {
+    const actions = api();
+    const { rerender } = render(<HoldsRail holds={[hold()]} labels={new Map()} nowMs={NOW} actions={actions} />);
+    await userEvent.click(button(/^Edit/));
+    expect(button("Send edit")).toBeEnabled();
+    const unsendable = hold({ draft: { id: "d1", inbound_message_id: "m1", body: "Draft text for the seller", edited_at: null, sendable: false } });
+    rerender(<HoldsRail holds={[unsendable]} labels={new Map()} nowMs={NOW} actions={actions} />);
+    expect(button("Send edit")).toBeDisabled();
+  });
+});

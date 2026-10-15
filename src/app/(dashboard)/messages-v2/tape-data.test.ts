@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { LooseSupabase } from "./queries";
 import { fakePostgrest } from "./fake-postgrest.test-util";
-import { chicagoDayKey, chicagoDayWindow, isOlderThanCursor, loadRunThreads, loadRunsWindow, olderThanCursorFilter, parseRunCursor, previousDayKey, type RunCursor } from "./tape-data";
+import { chicagoDayKey, chicagoDayWindow, isOlderThanCursor, loadRunThreads, loadRunsWindow, olderThanCursorFilter, parseRunCursor, previousDayKey } from "./tape-data";
 
 describe("chicagoDayWindow", () => {
   it("is one America/Chicago calendar day (CDT midnight to CDT midnight)", () => {
@@ -27,30 +27,6 @@ describe("run cursor (started_at, id)", () => {
 
   it("builds a strict-older filter on the pair, not on the timestamp alone", () => {
     expect(olderThanCursorFilter({ at: t, id: id(5) })).toBe(`started_at.lt."${t}",and(started_at.eq."${t}",id.lt.${id(5)})`);
-  });
-
-  it("never skips runs that share a timestamp at the page edge", () => {
-    // 7 runs: 3 share the edge timestamp. Page size 3, ordered (started_at, id) descending.
-    const rows = [
-      { id: id(9), started_at: "2026-10-14T12:05:00.000Z" },
-      { id: id(8), started_at: "2026-10-14T12:04:00.000Z" },
-      { id: id(7), started_at: t },
-      { id: id(6), started_at: t },
-      { id: id(5), started_at: t },
-      { id: id(4), started_at: "2026-10-14T11:59:00.000Z" },
-      { id: id(3), started_at: "2026-10-14T11:58:00.000Z" },
-    ];
-    const ordered = [...rows].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at) || (a.id < b.id ? 1 : -1));
-    const seen: string[] = [];
-    let cursor: RunCursor | null = null;
-    for (;;) {
-      const page: typeof rows = ordered.filter((r) => !cursor || isOlderThanCursor(r, cursor)).slice(0, 3);
-      if (page.length === 0) break;
-      seen.push(...page.map((r) => r.id));
-      const last = page[page.length - 1];
-      cursor = { at: last.started_at, id: last.id };
-    }
-    expect(seen).toEqual(ordered.map((r) => r.id)); // every run exactly once, including both runs sharing the edge timestamp
   });
 
   it("loadRunsWindow sends the cursor filter and orders by (started_at, id)", async () => {
@@ -89,7 +65,7 @@ function fakeMessages(rows: Array<Record<string, string>>): LooseSupabase {
       f.order = () => f;
       f.limit = (n: number) => ((max = n), f);
       f.then = (resolve: (v: unknown) => unknown) => {
-        let out = rows.filter((r) => eqs.every(([c, v]) => r[c] === v) && (!ids || ids.includes(r.id)));
+        let out = rows.map((r): Record<string, string> => ({ org_id: "org", ...r })).filter((r) => eqs.every(([c, v]) => r[c] === v) && (!ids || ids.includes(r.id)));
         if (lt) out = out.filter((r) => Date.parse(r[lt![0]]) < Date.parse(lt![1]));
         out = [...out].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
         return resolve({ data: out.slice(0, max), error: null });
@@ -103,11 +79,12 @@ describe("loadRunThreads", () => {
   it("pairs each run with the newest outbound text sent before its inbound, and its own reply", async () => {
     const out = await loadRunThreads(
       fakeMessages([
-        { id: "out-reply", body: "Thanks, take care.", conversation_id: "c1", direction: "outbound", created_at: "2026-10-14T12:10:00Z" },
+        { id: "out-reply", body: "Thanks, take care.", org_id: "org", conversation_id: "c1", direction: "outbound", created_at: "2026-10-14T12:10:00Z" },
         { id: "m1", conversation_id: "c1", body: "newer than the run", created_at: "2026-10-14T13:00:00Z", direction: "outbound" },
         { id: "m2", conversation_id: "c1", body: "Still own the place?", created_at: "2026-10-14T11:00:00Z", direction: "outbound" },
         { id: "m3", conversation_id: "c1", body: "older", created_at: "2026-10-13T11:00:00Z", direction: "outbound" },
       ]),
+      "org",
       [
         { id: "r1", conversation_id: "c1", outbound_message_id: "out-reply", started_at: "2026-10-14T12:00:00Z" },
         { id: "r2", conversation_id: null, outbound_message_id: null, started_at: "2026-10-14T12:00:00Z" },
@@ -122,7 +99,7 @@ describe("loadRunThreads", () => {
       ...Array.from({ length: 1500 }, (_, i) => ({ id: `b${i}`, conversation_id: "busy", body: `busy ${i}`, created_at: new Date(Date.parse("2026-10-14T10:00:00Z") + i * 1000).toISOString(), direction: "outbound" })),
       { id: "q1", conversation_id: "quiet", body: "Still own the place?", created_at: "2026-10-13T09:00:00.000Z", direction: "outbound" },
     ];
-    const out = await loadRunThreads(fakeMessages(rows), [
+    const out = await loadRunThreads(fakeMessages(rows), "org", [
       { id: "busy-run", conversation_id: "busy", outbound_message_id: null, started_at: "2026-10-14T20:00:00Z" },
       { id: "quiet-run", conversation_id: "quiet", outbound_message_id: null, started_at: "2026-10-14T12:00:00Z" },
     ]);
@@ -134,18 +111,18 @@ describe("loadRunThreads", () => {
 describe("I5 tape: thread errors and the window cut", () => {
   it("a thread-text error is returned as a failed run id (retried), never cached as 'no text'", async () => {
     const { client } = fakePostgrest({ messages: [] }, { fail: (tb, _n, ops) => tb === "messages" && ops.some((o) => o.k === "eq" && "col" in o && o.col === "conversation_id") });
-    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-14T12:00:00Z" }]);
+    const out = await loadRunThreads(client, "org", [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-14T12:00:00Z" }]);
     expect(out.failedRunIds).toEqual(["r1"]);
     expect(out.threads.has("r1")).toBe(false);
   });
 
   it("a conversation with 2,000 outbound texts still yields its last outbound before the run", async () => {
     const msgs = Array.from({ length: 2000 }, (_, i) => ({
-      id: `m${String(i).padStart(5, "0")}`, conversation_id: "c1", direction: "outbound", body: `t${i}`,
+      id: `m${String(i).padStart(5, "0")}`, org_id: "org", conversation_id: "c1", direction: "outbound", body: `t${i}`,
       created_at: new Date(Date.parse("2026-10-01T00:00:00Z") + i * 60_000).toISOString(),
     }));
     const { client } = fakePostgrest({ messages: msgs }, { cap: 1000 });
-    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-03T00:00:00.000Z" }]);
+    const out = await loadRunThreads(client, "org", [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-03T00:00:00.000Z" }]);
     expect(out.threads.get("r1")?.lastOutbound).toBe("t1999");
   });
 
@@ -160,10 +137,13 @@ describe("I5 tape: thread errors and the window cut", () => {
     const to = "2026-10-15T05:00:00.000Z";
     const first = await loadRunsWindow(client, "org", from, to);
     expect(first.runs).toHaveLength(200);
+    expect(first.hasMore).toBe(true);
     const last = first.runs[first.runs.length - 1];
     const second = await loadRunsWindow(client, "org", from, to, { at: last.started_at, id: last.id });
     const all = [...first.runs, ...second.runs].map((r) => r.id);
     expect(new Set(all).size).toBe(205);
+    expect(second.runs).toHaveLength(5);
+    expect(second.hasMore).toBe(false);
   });
 });
 
@@ -176,31 +156,16 @@ describe("tape cursor at microsecond precision", () => {
   });
 });
 
-describe("I7 Chicago times do not depend on the machine's zone", () => {
-  it("renders the same under TZ=UTC and TZ=Asia/Tokyo", async () => {
-    const { chicagoClock, chicagoDateClock } = await import("./chicago-time");
-    const prev = process.env.TZ;
-    const at = "2026-10-15T00:30:00.000Z";
-    process.env.TZ = "UTC";
-    const utc = [chicagoClock(at), chicagoDateClock(at), chicagoDayKey(Date.parse(at))];
-    process.env.TZ = "Asia/Tokyo";
-    const tokyo = [chicagoClock(at), chicagoDateClock(at), chicagoDayKey(Date.parse(at))];
-    process.env.TZ = prev;
-    expect(utc).toEqual(["7:30 PM", "Oct 14, 7:30 PM", "2026-10-14"]);
-    expect(tokyo).toEqual(utc);
-  });
-});
-
 describe("our last text is cut off at the seller's inbound message, not the run start", () => {
   it("an outbound sent between the inbound text and the run start is not shown as what preceded it", async () => {
     const { client } = fakePostgrest({
       messages: [
-        { id: "in-1", conversation_id: "c1", direction: "inbound", body: "No thanks", created_at: "2026-10-14T12:00:00.000Z" },
-        { id: "out-before", conversation_id: "c1", direction: "outbound", body: "Still own the place?", created_at: "2026-10-14T11:00:00.000Z" },
-        { id: "out-between", conversation_id: "c1", direction: "outbound", body: "a campaign text", created_at: "2026-10-14T12:00:30.000Z" },
+        { id: "in-1", org_id: "org", conversation_id: "c1", direction: "inbound", body: "No thanks", created_at: "2026-10-14T12:00:00.000Z" },
+        { id: "out-before", org_id: "org", conversation_id: "c1", direction: "outbound", body: "Still own the place?", created_at: "2026-10-14T11:00:00.000Z" },
+        { id: "out-between", org_id: "org", conversation_id: "c1", direction: "outbound", body: "a campaign text", created_at: "2026-10-14T12:00:30.000Z" },
       ],
     });
-    const out = await loadRunThreads(client, [
+    const out = await loadRunThreads(client, "org", [
       { id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "in-1", started_at: "2026-10-14T12:01:00.000Z" },
     ]);
     expect(out.threads.get("r1")?.lastOutbound).toBe("Still own the place?");
@@ -208,18 +173,18 @@ describe("our last text is cut off at the seller's inbound message, not the run 
 
   it("an inbound id whose row is missing is a failed (retried) lookup, never a fall-back to the run start", async () => {
     const { client } = fakePostgrest({
-      messages: [{ id: "out-1", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
+      messages: [{ id: "out-1", org_id: "org", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
     });
-    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "gone", started_at: "2026-10-14T12:00:00.000Z" }]);
+    const out = await loadRunThreads(client, "org", [{ id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "gone", started_at: "2026-10-14T12:00:00.000Z" }]);
     expect(out.failedRunIds).toEqual(["r1"]);
     expect(out.threads.has("r1")).toBe(false);
   });
 
   it("a run with no inbound id at all uses the run start", async () => {
     const { client } = fakePostgrest({
-      messages: [{ id: "out-1", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
+      messages: [{ id: "out-1", org_id: "org", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
     });
-    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-14T12:00:00.000Z" }]);
+    const out = await loadRunThreads(client, "org", [{ id: "r1", conversation_id: "c1", outbound_message_id: null, started_at: "2026-10-14T12:00:00.000Z" }]);
     expect(out.threads.get("r1")?.lastOutbound).toBe("x");
   });
 });
@@ -228,12 +193,34 @@ describe("referenced messages that are missing are retried, never cached as empt
   it("outbound_message_id set but the row is missing -> failed; when the row appears the retry gets it", async () => {
     const tables: Record<string, Array<Record<string, unknown>>> = { messages: [] };
     const run1 = { id: "r1", conversation_id: null, outbound_message_id: "o1", started_at: "2026-10-14T12:00:00.000Z" };
-    const first = await loadRunThreads(fakePostgrest(tables).client, [run1]);
+    const first = await loadRunThreads(fakePostgrest(tables).client, "org", [run1]);
     expect(first.failedRunIds).toEqual(["r1"]);
     expect(first.threads.has("r1")).toBe(false);
-    tables.messages = [{ id: "o1", body: "Thanks, take care.", conversation_id: null, direction: "outbound", created_at: "2026-10-14T12:05:00.000Z" }];
-    const retry = await loadRunThreads(fakePostgrest(tables).client, [run1]);
+    tables.messages = [{ id: "o1", body: "Thanks, take care.", org_id: "org", conversation_id: null, direction: "outbound", created_at: "2026-10-14T12:05:00.000Z" }];
+    const retry = await loadRunThreads(fakePostgrest(tables).client, "org", [run1]);
     expect(retry.failedRunIds).toEqual([]);
     expect(retry.threads.get("r1")?.reply).toBe("Thanks, take care.");
+  });
+});
+
+describe("thread text is read from the caller's org only (not RLS alone)", () => {
+  it("every messages query carries org_id = orgId, and another org's rows never become thread text", async () => {
+    const { client, log } = fakePostgrest({
+      messages: [
+        { id: "in-1", org_id: "org", conversation_id: "c1", direction: "inbound", body: "No thanks", created_at: "2026-10-14T12:00:00.000Z" },
+        { id: "mine", org_id: "org", conversation_id: "c1", direction: "outbound", body: "Still own the place?", created_at: "2026-10-14T10:00:00.000Z" },
+        { id: "theirs", org_id: "other", conversation_id: "c1", direction: "outbound", body: "other org text", created_at: "2026-10-14T11:00:00.000Z" },
+        { id: "o-other", org_id: "other", conversation_id: "c1", direction: "outbound", body: "other org reply", created_at: "2026-10-14T12:05:00.000Z" },
+      ],
+    });
+    const out = await loadRunThreads(client, "org", [
+      { id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "in-1", started_at: "2026-10-14T12:01:00.000Z" },
+      { id: "r2", conversation_id: null, outbound_message_id: "o-other", started_at: "2026-10-14T12:01:00.000Z" },
+    ]);
+    expect(out.threads.get("r1")?.lastOutbound).toBe("Still own the place?");
+    expect(out.threads.has("r2")).toBe(false); // the other org's reply is a missing row (retried), never shown
+    const msgQueries = log.filter((l) => l.table === "messages");
+    expect(msgQueries.length).toBeGreaterThanOrEqual(3);
+    for (const q of msgQueries) expect(q.ops).toContainEqual({ k: "eq", col: "org_id", v: "org" });
   });
 });

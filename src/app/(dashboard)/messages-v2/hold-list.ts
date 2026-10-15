@@ -13,7 +13,7 @@
  * Any failed or possibly-truncated lookup in 1-4 fails the whole list closed: an error and zero cards, because
  * a partial list could show a locked property or a wrong order. Card annotations (step 6, page only) are amber notes.
  */
-import { lockedPropertyIds } from "./dnc-locked";
+import { verifyProperties } from "./dnc-locked";
 import { holdActivityAt, sortNewestFirst } from "./hold-activity";
 import { loadFreshSeen, mergeSeen } from "./hold-seen";
 import { SEEN_CHECK_FAILED } from "./snapshot-codec";
@@ -49,6 +49,22 @@ const chunks = <T,>(items: readonly T[], size = CHUNK): T[][] => {
 };
 const uniq = <T,>(items: Iterable<T>): T[] => [...new Set(items)];
 
+/**
+ * Optional narrowing of a build to some held properties (the final check, Show older, live re-check, the tape).
+ * Every pending draft is still resolved and verified (a draft's property is only known after resolution); only
+ * drafts resolving to a scoped property are built into holds. `unverified` is null (not a whole-org count).
+ */
+export type HoldScope = { propertyIds: readonly string[] };
+
+/**
+ * Columns a list build reads from pipeline_runs: linking, ordering and the frozen display reason. The latest-run RPC
+ * returns whole rows (one per property); enrichPage reads whole rows only for the runs a page shows.
+ */
+export const ACTIVITY_RUN_COLUMNS = "id, property_id, inbound_message_id, conversation_id, started_at, reason";
+
+/** Columns a list build reads from pipeline_run_steps: enough for activity, never `detail`. */
+export const ACTIVITY_STEP_COLUMNS = "id, run_id, seq, created_at";
+
 export type HoldSources = {
   properties: HoldPropertyRow[];
   decisions: Array<HoldDecisionRow & { id: string }>;
@@ -57,29 +73,160 @@ export type HoldSources = {
 };
 
 /** Step 1. Null when any source fails. */
-export async function loadHoldSources(supabase: LooseSupabase, orgId: string): Promise<HoldSources | null> {
+export async function loadHoldSources(supabase: LooseSupabase, orgId: string, scope?: HoldScope): Promise<HoldSources | null> {
+  // Unscoped: one keyset read. Scoped: one keyset read per chunk of property ids, merged; any failure fails all.
+  const read = async <T,>(make: (ids: string[] | null) => unknown): Promise<{ rows: T[]; error: unknown }> => {
+    if (!scope) return fetchAllKeyset<T>(() => make(null));
+    const parts = await Promise.all(chunks(uniq(scope.propertyIds)).map((ids) => fetchAllKeyset<T>(() => make(ids))));
+    const bad = parts.find((r) => r.error);
+    return bad ? { rows: [], error: bad.error } : { rows: parts.flatMap((r) => r.rows), error: null };
+  };
+  type Q = { in(col: string, v: string[]): unknown };
+  const narrow = (q: unknown, col: string, ids: string[] | null) => (ids ? (q as Q).in(col, ids) : q);
   const [properties, decisions, reviews, drafts] = await Promise.all([
-    fetchAllKeyset<HoldPropertyRow>(() =>
-      supabase
-        .from("properties")
-        .select(PROPERTY_COLUMNS)
-        .eq("org_id", orgId)
-        .eq("needs_human_attention", true)
-        .eq("is_dnc_locked", false),
+    read<HoldPropertyRow>((ids) =>
+      narrow(
+        supabase
+          .from("properties")
+          .select(PROPERTY_COLUMNS)
+          .eq("org_id", orgId)
+          .eq("needs_human_attention", true)
+          .eq("is_dnc_locked", false),
+        "id",
+        ids,
+      ),
     ),
-    fetchAllKeyset<HoldDecisionRow & { id: string }>(() =>
-      supabase.from("jev_lead_decisions").select(`id, ${DECISION_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"),
+    read<HoldDecisionRow & { id: string }>((ids) =>
+      narrow(supabase.from("jev_lead_decisions").select(`id, ${DECISION_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"), "property_id", ids),
     ),
-    fetchAllKeyset<HoldReviewRow & { id: string }>(() =>
-      supabase.from("ai_disposition_reviews").select(`id, ${REVIEW_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"),
+    read<HoldReviewRow & { id: string }>((ids) =>
+      narrow(supabase.from("ai_disposition_reviews").select(`id, ${REVIEW_COLUMNS}`).eq("org_id", orgId).eq("status", "pending"), "property_id", ids),
     ),
-    fetchAllKeyset<HoldDraftRow>(() =>
-      supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending"),
-    ),
+    scope
+      ? scopedDrafts(supabase, orgId, uniq(scope.propertyIds))
+      : fetchAllKeyset<HoldDraftRow>(() =>
+          supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending"),
+        ),
   ]);
   if (properties.error || decisions.error || reviews.error || drafts.error) return null;
   return { properties: properties.rows, decisions: decisions.rows, reviews: reviews.rows, drafts: drafts.rows };
 }
+
+/**
+ * The pending drafts that COULD resolve to one of these properties: a draft resolves to P only through its own
+ * property_id, a run on P, an inbound message on P, or a conversation holding a message on P, so those four lookups
+ * find every one of them (each is then resolved in full, so a second link elsewhere still makes it ambiguous).
+ * Reads are bounded by the requested properties, not the org's backlog. Any failure fails the read.
+ */
+async function scopedDrafts(supabase: LooseSupabase, orgId: string, propertyIds: string[]): Promise<{ rows: HoldDraftRow[]; error: unknown }> {
+  const fail = (error: unknown) => ({ rows: [] as HoldDraftRow[], error });
+  const linkRuns: string[] = [];
+  const linkMsgs: string[] = [];
+  const linkConvs = new Set<string>();
+  for (const ids of chunks(propertyIds)) {
+    const [runs, msgs] = await Promise.all([
+      fetchAllKeyset<{ id: string }>(() => supabase.from("pipeline_runs").select("id").eq("org_id", orgId).in("property_id", ids)),
+      fetchAllKeyset<{ id: string; conversation_id: string | null }>(() =>
+        supabase.from("messages").select("id, conversation_id").eq("org_id", orgId).in("property_id", ids),
+      ),
+    ]);
+    if (runs.error) return fail(runs.error);
+    if (msgs.error) return fail(msgs.error);
+    linkRuns.push(...runs.rows.map((r) => r.id));
+    for (const m of msgs.rows) {
+      linkMsgs.push(m.id);
+      if (m.conversation_id) linkConvs.add(m.conversation_id);
+    }
+  }
+  const byId = new Map<string, HoldDraftRow>();
+  const lookups: Array<[string, string[]]> = [
+    ["property_id", propertyIds],
+    ["run_id", uniq(linkRuns)],
+    ["inbound_message_id", uniq(linkMsgs)],
+    ["conversation_id", [...linkConvs]],
+  ];
+  for (const [col, all] of lookups) {
+    for (const ids of chunks(all)) {
+      const res = await fetchAllKeyset<HoldDraftRow>(() =>
+        supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending").in(col, ids),
+      );
+      if (res.error) return fail(res.error);
+      for (const d of res.rows) byId.set(d.id, d);
+    }
+  }
+  return { rows: [...byId.values()], error: null };
+}
+
+/**
+ * THE shared in-org reference check for every pending source (drafts, decisions, reviews): which referenced
+ * messages exist in this org (and their property), and which conversations have at least one message in this org
+ * (and the properties on them). A reference with no row here is UNRESOLVED (absent or another org's), never
+ * "no property". Null when any lookup fails.
+ */
+export type MessageReferences = { msgProperty: Map<string, string | null>; convProperties: Map<string, Set<string>> };
+export async function readMessageReferences(
+  supabase: LooseSupabase,
+  orgId: string,
+  msgIds: readonly string[],
+  convIds: readonly string[],
+): Promise<MessageReferences | null> {
+  const msgProperty = new Map<string, string | null>();
+  const convProperties = new Map<string, Set<string>>();
+  const convPropertySets = new Map<string, Set<string>>();
+  const readableConvs = new Set<string>();
+  let failed = false;
+  await Promise.all([
+    // (A referenced run or message with no row in this org is UNRESOLVED, not "no property": see below.)
+    ...chunks(msgIds).map(async (ids) => {
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null; created_at: string }>(() =>
+        supabase.from("messages").select("id, property_id, created_at").eq("org_id", orgId).in("id", ids),
+      );
+      if (res.error) failed = true;
+      else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
+    }),
+    // Properties on each conversation: only messages that carry one (as before #874).
+    ...chunks(convIds).map(async (ids) => {
+      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string; created_at: string }>(() =>
+        supabase
+          .from("messages")
+          .select("id, conversation_id, property_id, created_at")
+          .eq("org_id", orgId)
+          .in("conversation_id", ids)
+          .not("property_id", "is", null),
+      );
+      if (res.error) failed = true;
+      else for (const m of res.rows) convPropertySets.set(m.conversation_id, (convPropertySets.get(m.conversation_id) ?? new Set<string>()).add(m.property_id));
+    }),
+    // Readability: does the conversation have at least one message in THIS org? One row per conversation
+    // (limit 1), a few at a time. None = unresolved (absent or another org's), never "no property".
+    (async () => {
+      const ids = uniq(convIds);
+      for (let i = 0; i < ids.length; i += EXISTS_PARALLEL) {
+        const results = await Promise.all(
+          ids.slice(i, i + EXISTS_PARALLEL).map(async (id) => {
+            const res = await supabase.from("messages").select("conversation_id").eq("org_id", orgId).eq("conversation_id", id).limit(1);
+            return { id, res: res as { data: unknown; error: unknown } };
+          }),
+        );
+        for (const { id, res } of results) {
+          if (res.error) failed = true;
+          else if (Array.isArray(res.data) && res.data.length > 0) readableConvs.add(id);
+        }
+        if (failed) return;
+      }
+    })(),
+  ]);
+  if (failed) return null;
+  for (const id of readableConvs) convProperties.set(id, convPropertySets.get(id) ?? new Set<string>());
+  return { msgProperty, convProperties };
+}
+
+/** Conversation existence reads in flight at once. */
+const EXISTS_PARALLEL = 10;
+
+/** Every non-null message / conversation reference resolved in this org (see readMessageReferences). */
+export const referencesReadable = (refs: MessageReferences, messageId: string | null | undefined, conversationId: string | null | undefined): boolean =>
+  (!messageId || refs.msgProperty.has(messageId)) && (!conversationId || refs.convProperties.has(conversationId));
 
 /** Step 2. Every property each draft could belong to. Null when any lookup fails. */
 export async function resolveDraftProperties(
@@ -92,11 +239,10 @@ export async function resolveDraftProperties(
   const convIds = uniq(drafts.flatMap((d) => (d.conversation_id ? [d.conversation_id] : [])));
 
   const runProperty = new Map<string, string | null>();
-  const msgProperty = new Map<string, string | null>();
-  const convProperties = new Map<string, Set<string>>();
   let failed = false;
 
-  await Promise.all([
+  const [refs] = await Promise.all([
+    readMessageReferences(supabase, orgId, msgIds, convIds),
     ...chunks(runIds).map(async (ids) => {
       const res = await fetchAllKeyset<{ id: string; property_id: string | null; started_at: string }>(() =>
         supabase.from("pipeline_runs").select("id, property_id, started_at").eq("org_id", orgId).in("id", ids),
@@ -104,32 +250,9 @@ export async function resolveDraftProperties(
       if (res.error) failed = true;
       else for (const r of res.rows) runProperty.set(r.id, r.property_id);
     }),
-    ...chunks(msgIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ id: string; property_id: string | null; created_at: string }>(() =>
-        supabase.from("messages").select("id, property_id, created_at").eq("org_id", orgId).in("id", ids),
-      );
-      if (res.error) failed = true;
-      else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
-    }),
-    ...chunks(convIds).map(async (ids) => {
-      const res = await fetchAllKeyset<{ conversation_id: string; property_id: string; created_at: string }>(() =>
-        supabase
-          .from("messages")
-          .select("id, conversation_id, property_id, created_at")
-          .eq("org_id", orgId)
-          .in("conversation_id", ids)
-          .not("property_id", "is", null),
-      );
-      if (res.error) failed = true;
-      else
-        for (const m of res.rows) {
-          const set = convProperties.get(m.conversation_id) ?? new Set<string>();
-          set.add(m.property_id);
-          convProperties.set(m.conversation_id, set);
-        }
-    }),
   ]);
-  if (failed) return null;
+  if (failed || !refs) return null;
+  const { msgProperty, convProperties } = refs;
 
   // Every candidate property, from any path, must exist in THIS org; otherwise the draft is unverifiable (an
   // org-scoped lock check could not see it). Keyset-paged, fail closed.
@@ -147,6 +270,12 @@ export async function resolveDraftProperties(
 
   const out = new Map<string, Set<string>>();
   for (const d of drafts) {
+    // A reference that could not be read (absent, another org's, or hidden) might point anywhere: the draft is
+    // unverifiable even if another link names a readable property.
+    if ((d.run_id && !runProperty.has(d.run_id)) || !referencesReadable(refs, d.inbound_message_id, d.conversation_id)) {
+      out.set(d.id, new Set());
+      continue;
+    }
     const c = new Set<string>();
     if (d.property_id) c.add(d.property_id);
     const viaRun = d.run_id ? runProperty.get(d.run_id) : null;
@@ -164,12 +293,18 @@ export async function resolveDraftProperties(
 const newerRun = <R extends PipelineRun>(a: R | null, b: R): R =>
   !a || compareInstants(b.started_at, a.started_at) > 0 || (compareInstants(b.started_at, a.started_at) === 0 && b.id > a.id) ? b : a;
 
-/** Step 4. Attaches each hold's newest related run (with ALL its steps). Null when any lookup fails. */
+/**
+ * Step 4. Attaches each hold's newest related run. Its `steps` carry only ACTIVITY_STEP_COLUMNS (id, run_id, seq,
+ * created_at): enough to order, never rendered. enrichPage swaps in full steps for the runs a page shows. Null when
+ * any lookup fails.
+ */
 export async function loadHoldActivity(
   supabase: LooseSupabase,
   orgId: string,
   holds: OpenHold<PipelineRun>[],
   links: { convsByProperty: Map<string, Set<string>>; draftRunsByProperty: Map<string, Set<string>> },
+  /** Receives every run considered (so a scoped build can find holds competing for them). */
+  out?: { runs: PipelineRun[] },
 ): Promise<OpenHold<RunWithSteps>[] | null> {
   const propertyIds = holds.map((h) => h.id);
   const msgIds = uniq(holds.flatMap((h) => h.message_ids ?? []));
@@ -185,7 +320,7 @@ export async function loadHoldActivity(
     // EVERY run on each hold's property (not just the latest): an older run can carry a newer step.
     ...chunks(propertyIds).map(async (ids) => {
       const res = await fetchAllKeyset<PipelineRun>(() =>
-        supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("property_id", ids),
+        supabase.from("pipeline_runs").select(ACTIVITY_RUN_COLUMNS).eq("org_id", orgId).in("property_id", ids),
       );
       if (res.error) failed = true;
       else take(res.rows);
@@ -197,20 +332,20 @@ export async function loadHoldActivity(
     }),
     ...chunks(msgIds).map(async (ids) => {
       const res = await fetchAllKeyset<PipelineRun>(() =>
-        supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("inbound_message_id", ids),
+        supabase.from("pipeline_runs").select(ACTIVITY_RUN_COLUMNS).eq("org_id", orgId).in("inbound_message_id", ids),
       );
       if (res.error) failed = true;
       else take(res.rows);
     }),
     ...chunks(draftRunIds).map(async (ids) => {
-      const res = await fetchAllKeyset<PipelineRun>(() => supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids));
+      const res = await fetchAllKeyset<PipelineRun>(() => supabase.from("pipeline_runs").select(ACTIVITY_RUN_COLUMNS).eq("org_id", orgId).in("id", ids));
       if (res.error) failed = true;
       else take(res.rows);
     }),
     // Only PROPERTY-LESS runs in a hold's conversations count: a run on another property never moves this hold.
     ...chunks(convIds).map(async (ids) => {
       const res = await fetchAllKeyset<PipelineRun>(() =>
-        supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("conversation_id", ids).is("property_id", null),
+        supabase.from("pipeline_runs").select(ACTIVITY_RUN_COLUMNS).eq("org_id", orgId).in("conversation_id", ids).is("property_id", null),
       );
       if (res.error) failed = true;
       else take(res.rows);
@@ -219,28 +354,38 @@ export async function loadHoldActivity(
   if (failed) return null;
 
   const all = [...runs.values()];
+  if (out) out.runs = all;
 
   // Every (run -> hold) link from every path: property, source message, draft run, property-less conversation run.
+  // Indexed, not holds x runs: each run looks up the holds each of its keys links to.
+  const index = (pairs: Array<[string, string]>) => {
+    const m = new Map<string, Set<string>>();
+    for (const [k, h] of pairs) m.set(k, (m.get(k) ?? new Set<string>()).add(h));
+    return m;
+  };
+  const heldIds = new Set(holds.map((h) => h.id));
+  const byMsg = index(holds.flatMap((h) => (h.message_ids ?? []).map((m) => [m, h.id] as [string, string])));
+  const byDraftRun = index([...links.draftRunsByProperty].flatMap(([h, rs]) => [...rs].map((r) => [r, h] as [string, string])));
+  const byConv = index([...links.convsByProperty].flatMap(([h, cs]) => [...cs].map((c) => [c, h] as [string, string])));
+  const holdOrder = new Map(holds.map((h, i) => [h.id, i]));
   const candidates = new Map<string, string[]>();
-  for (const h of holds) {
-    const msgs = new Set(h.message_ids ?? []);
-    const draftRuns = links.draftRunsByProperty.get(h.id) ?? new Set<string>();
-    const convs = links.convsByProperty.get(h.id) ?? new Set<string>();
-    for (const r of all) {
-      const linked =
-        r.property_id === h.id ||
-        msgs.has(r.inbound_message_id) ||
-        draftRuns.has(r.id) ||
-        (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id));
-      if (linked) candidates.set(r.id, [...(candidates.get(r.id) ?? []), h.id]);
-    }
+  for (const r of all) {
+    const linked = new Set<string>();
+    if (r.property_id && heldIds.has(r.property_id)) linked.add(r.property_id);
+    for (const h of byMsg.get(r.inbound_message_id) ?? []) linked.add(h);
+    for (const h of byDraftRun.get(r.id) ?? []) linked.add(h);
+    if (r.property_id === null && r.conversation_id !== null) for (const h of byConv.get(r.conversation_id) ?? []) linked.add(h);
+    // Same order the old holds-outer loop produced (pick() sorts, but keep it identical anyway).
+    if (linked.size) candidates.set(r.id, [...linked].sort((a, b) => holdOrder.get(a)! - holdOrder.get(b)!));
   }
 
   const stepRunIds = [...candidates.keys()];
   const steps = new Map<string, PipelineRunStep[]>();
   const stepResults = await Promise.all(
     chunks(stepRunIds).map((ids) =>
-      fetchAllKeyset<PipelineRunStep>(() => supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids)),
+      fetchAllKeyset<PipelineRunStep>(() =>
+        supabase.from("pipeline_run_steps").select(ACTIVITY_STEP_COLUMNS).eq("org_id", orgId).in("run_id", ids),
+      ),
     ),
   );
   if (stepResults.some((r) => r.error)) return null;
@@ -301,18 +446,91 @@ export async function loadHoldActivity(
   });
 }
 
+/** `unverified` is the whole-org count for an unscoped build, null for a scoped one (it only sees some sources). */
 export type EligibleHolds =
-  | { ok: true; holds: OpenHold<RunWithSteps>[]; unverified: number }
+  | { ok: true; holds: OpenHold<RunWithSteps>[]; unverified: number | null }
   | { ok: false; error: string };
 
-/** Steps 1-5: the COMPLETE eligible list, sorted newest activity first. */
-/** Steps 1-5: the COMPLETE eligible list from CURRENT sources, sorted newest activity first. */
-export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string): Promise<EligibleHolds> {
+/**
+ * Steps 1-5: the COMPLETE eligible list from CURRENT sources, sorted newest activity first. With `scope`, the same
+ * build for only those properties (see HoldScope).
+ */
+export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string, scope?: HoldScope): Promise<EligibleHolds> {
+  if (!scope) return buildEligible(supabase, orgId);
+  // A run can be linked to several holds (a property-less run in a shared conversation, a source message, a draft
+  // run); its owner is decided by ALL of them. So grow the scope with every hold competing for a run the build saw,
+  // until nothing new appears, and decide ownership exactly as the whole list does. Not settled -> fail closed.
   const fail = { ok: false as const, error: HOLDS_LOAD_ERROR };
-  const sources = await loadHoldSources(supabase, orgId);
+  const ids = new Set(scope.propertyIds);
+  for (let round = 0; round < MAX_SCOPE_ROUNDS; round++) {
+    const out = { runs: [] as PipelineRun[] };
+    const res = await buildEligible(supabase, orgId, { propertyIds: [...ids] }, out);
+    if (!res.ok) return res;
+    const held = new Set(res.holds.map((h) => h.id));
+    const competing = await competingProperties(supabase, orgId, out.runs.filter((r) => !(r.property_id && held.has(r.property_id))));
+    if (!competing) return fail;
+    const grown = [...competing].filter((p) => !ids.has(p));
+    if (!grown.length) return res;
+    for (const p of grown) ids.add(p);
+  }
+  return fail;
+}
+
+/**
+ * Rounds of scope growth before a scoped build gives up (fails closed). A chain is one hold per round sharing a
+ * run with the next (e.g. several properties texting from one shared conversation); real chains are 1-2 deep.
+ */
+const MAX_SCOPE_ROUNDS = 5;
+
+/**
+ * Every property whose hold could also claim one of these runs: the run's own property, and the properties of
+ * pending decisions / reviews / drafts linked by the run's source message, by the run itself (drafts), or, for a
+ * property-less run, by its conversation. Drafts are resolved in full. Null when any lookup fails.
+ */
+export async function competingProperties(supabase: LooseSupabase, orgId: string, runs: readonly PipelineRun[]): Promise<Set<string> | null> {
+  const out = new Set<string>();
+  for (const r of runs) if (r.property_id) out.add(r.property_id);
+  const inbound = uniq(runs.flatMap((r) => (r.inbound_message_id ? [r.inbound_message_id] : [])));
+  const runIds = uniq(runs.map((r) => r.id));
+  const convs = uniq(runs.flatMap((r) => (r.property_id === null && r.conversation_id ? [r.conversation_id] : [])));
+  const drafts = new Map<string, HoldDraftRow>();
+  const pending = (table: string, cols: string, col: string, ids: string[]) =>
+    chunks(ids).map((c) => fetchAllKeyset<Record<string, unknown>>(() => supabase.from(table).select(cols).eq("org_id", orgId).eq("status", "pending").in(col, c)));
+  const reads = [
+    ...pending("jev_lead_decisions", "id, property_id", "source_inbound_message_id", inbound),
+    ...pending("jev_lead_decisions", "id, property_id", "conversation_id", convs),
+    ...pending("ai_disposition_reviews", "id, property_id", "source_inbound_message_id", inbound),
+    ...pending("ai_disposition_reviews", "id, property_id", "conversation_id", convs),
+  ];
+  const draftReads = [
+    ...pending("ai_reply_drafts", draftColumns(false), "inbound_message_id", inbound),
+    ...pending("ai_reply_drafts", draftColumns(false), "run_id", runIds),
+    ...pending("ai_reply_drafts", draftColumns(false), "conversation_id", convs),
+  ];
+  const [rows, draftRows] = await Promise.all([Promise.all(reads), Promise.all(draftReads)]);
+  if ([...rows, ...draftRows].some((r) => r.error)) return null;
+  for (const r of rows.flatMap((x) => x.rows)) if (typeof r.property_id === "string") out.add(r.property_id);
+  for (const d of draftRows.flatMap((x) => x.rows) as HoldDraftRow[]) drafts.set(d.id, d);
+  if (drafts.size) {
+    const resolved = await resolveDraftProperties(supabase, orgId, [...drafts.values()]);
+    if (!resolved) return null;
+    for (const c of resolved.values()) for (const p of c) out.add(p);
+  }
+  return out;
+}
+
+async function buildEligible(
+  supabase: LooseSupabase,
+  orgId: string,
+  scope?: HoldScope,
+  activityOut?: { runs: PipelineRun[] },
+): Promise<EligibleHolds> {
+  const fail = { ok: false as const, error: HOLDS_LOAD_ERROR };
+  const sources = await loadHoldSources(supabase, orgId, scope);
   if (!sources) return fail;
   const candidates = await resolveDraftProperties(supabase, orgId, sources.drafts);
   if (!candidates) return fail;
+  const inScope = scope ? new Set(scope.propertyIds) : null;
 
   const every = uniq([
     ...sources.properties.map((p) => p.id),
@@ -320,23 +538,52 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
     ...sources.reviews.map((r) => r.property_id),
     ...[...candidates.values()].flatMap((s) => [...s]),
   ]);
-  const locked = every.length ? await lockedPropertyIds(supabase, orgId, every) : new Set<string>();
-  if (!locked) return fail;
+  // EVERY candidate property from EVERY source must be positively verified: in this org and readably unlocked.
+  const verified = every.length ? await verifyProperties(supabase, orgId, every) : { unlocked: new Set<string>(), locked: new Set<string>() };
+  if (!verified) return fail;
+  const { locked, unlocked } = verified;
 
   let unverified = 0;
   const drafts: HoldDraftRow[] = [];
   for (const d of sources.drafts) {
     const c = [...(candidates.get(d.id) ?? [])];
     if (c.some((p) => locked.has(p))) continue; // locked: never shown, not "unverified"
-    if (c.length !== 1) {
-      unverified += 1; // no property, or more than one: cannot be verified
+    if (c.length !== 1 || !unlocked.has(c[0])) {
+      unverified += 1; // no property, more than one, or one that cannot be verified
       continue;
     }
+    if (inScope && !inScope.has(c[0])) continue; // another hold's draft: counted above, not built here
     drafts.push({ ...d, property_id: c[0] });
   }
-  const decisions = sources.decisions.filter((d) => !locked.has(d.property_id));
-  const reviews = sources.reviews.filter((r) => !locked.has(r.property_id));
-  const properties = sources.properties.filter((p) => !locked.has(p.id));
+  // Locked: hidden, not counted. Absent / another org's / unreadable: hidden AND counted.
+  const keep = (pid: string) => {
+    if (locked.has(pid)) return false;
+    if (!unlocked.has(pid)) {
+      unverified += 1;
+      return false;
+    }
+    return true;
+  };
+  // Decisions and reviews pass the SAME reference check as drafts: an unresolved source message or conversation
+  // makes the row unverifiable (hidden + counted), even when its property verifies.
+  const pendingRefs = await readMessageReferences(
+    supabase,
+    orgId,
+    uniq([...sources.decisions, ...sources.reviews].flatMap((r) => (r.source_inbound_message_id ? [r.source_inbound_message_id] : []))),
+    uniq([...sources.decisions, ...sources.reviews].flatMap((r) => (r.conversation_id ? [r.conversation_id] : []))),
+  );
+  if (!pendingRefs) return fail;
+  const keepPending = (r: { property_id: string; source_inbound_message_id: string | null; conversation_id: string | null }) => {
+    if (locked.has(r.property_id)) return false;
+    if (!referencesReadable(pendingRefs, r.source_inbound_message_id, r.conversation_id)) {
+      unverified += 1;
+      return false;
+    }
+    return keep(r.property_id);
+  };
+  const decisions = sources.decisions.filter(keepPending);
+  const reviews = sources.reviews.filter(keepPending);
+  const properties = sources.properties.filter((p) => keep(p.id));
 
   const convsByProperty = new Map<string, Set<string>>();
   const draftRunsByProperty = new Map<string, Set<string>>();
@@ -360,9 +607,9 @@ export async function loadEligibleHolds(supabase: LooseSupabase, orgId: string):
     const row = original.get(h.draft.id);
     return { ...h, draft: { ...h.draft, sendable: row?.property_id === h.id && !!row?.inbound_message_id } };
   });
-  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty });
+  const withRuns = await loadHoldActivity(supabase, orgId, base, { convsByProperty, draftRunsByProperty }, activityOut);
   if (!withRuns) return fail;
-  return { ok: true, holds: sortNewestFirst(withRuns), unverified };
+  return { ok: true, holds: sortNewestFirst(withRuns), unverified: scope ? null : unverified };
 }
 
 /**
@@ -459,12 +706,43 @@ export function effectiveFlagReasons(holds: readonly OpenHold<RunWithSteps>[]): 
 
 /** Step 6 (returned page only): draft text, dead letters, alert status, fresh "seen". Failures are notes. */
 
+/** Full steps (with detail), in seq order, for the runs a page shows. Null when any lookup fails. */
+export async function loadShownSteps(
+  supabase: LooseSupabase,
+  orgId: string,
+  runIds: readonly string[],
+): Promise<Map<string, PipelineRunStep[]> | null> {
+  const results = await Promise.all(
+    chunks(uniq(runIds)).map((ids) =>
+      fetchAllKeyset<PipelineRunStep>(() => supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids)),
+    ),
+  );
+  if (results.some((r) => r.error)) return null;
+  const steps = new Map<string, PipelineRunStep[]>();
+  for (const st of results.flatMap((r) => r.rows)) steps.set(st.run_id, [...(steps.get(st.run_id) ?? []), st]);
+  for (const list of steps.values()) list.sort((a, b) => a.seq - b.seq);
+  return steps;
+}
+
+/** Null when the shown runs' full steps cannot be loaded (fail closed: a card never renders activity-only steps). */
 export async function enrichPage(
   supabase: LooseSupabase,
   orgId: string,
-  holds: OpenHold<RunWithSteps>[],
-): Promise<{ holds: OpenHold<RunWithSteps>[]; contextErrors: string[]; deadLetterUnavailable: boolean }> {
+  listed: OpenHold<RunWithSteps>[],
+): Promise<{ holds: OpenHold<RunWithSteps>[]; contextErrors: string[]; deadLetterUnavailable: boolean } | null> {
   const contextErrors: string[] = [];
+  const shownRunIds = uniq(listed.flatMap((h) => (h.run ? [h.run.id] : [])));
+  const [full, fullRuns] = await Promise.all([
+    loadShownSteps(supabase, orgId, shownRunIds),
+    Promise.all(
+      chunks(shownRunIds).map((ids) => fetchAllKeyset<PipelineRun>(() => supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids))),
+    ),
+  ]);
+  if (!full || fullRuns.some((r) => r.error)) return null;
+  const runRow = new Map(fullRuns.flatMap((r) => r.rows).map((r) => [r.id, r] as const));
+  // A shown run that can no longer be read whole fails the page closed, never a card with a partial run.
+  if (shownRunIds.some((id) => !runRow.has(id))) return null;
+  const holds = listed.map((h) => (h.run ? { ...h, run: { ...runRow.get(h.run.id)!, steps: full.get(h.run.id) ?? [] } } : h));
   const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
   const bodies = new Map<string, { body: string; edited_body: string | null; edited_at: string | null }>();
   for (const ids of chunks(draftIds)) {
@@ -534,7 +812,8 @@ export async function recheckOpen(
   const version = new Map<string, HoldSeen>();
   const changed = new Set<string>();
   if (!holds.length) return { open, badDraft, version, changed, unsendable };
-  const list = await loadEligibleHolds(supabase, orgId);
+  // Recomputed from CURRENT data for these holds only (not the whole list): cost follows the page, not the backlog.
+  const list = await loadEligibleHolds(supabase, orgId, { propertyIds: holds.map((h) => h.id) });
   if (!list.ok) return null;
   const current = new Map(list.holds.map((h) => [h.id, h]));
   const pinsOf = (h: OpenHold<RunWithSteps>) => {
@@ -585,7 +864,7 @@ export type HoldLiveState = {
 
 /** Current state of some ids, from the CURRENT eligible list (locked / resolved / unverifiable -> eligible false). */
 export async function liveStateOf(supabase: LooseSupabase, orgId: string, ids: readonly string[]): Promise<HoldLiveState[] | null> {
-  const list = await loadEligibleHolds(supabase, orgId);
+  const list = ids.length ? await loadEligibleHolds(supabase, orgId, { propertyIds: ids }) : ({ ok: true, holds: [], unverified: 0 } as const);
   if (!list.ok) return null;
   const byId = new Map(list.holds.map((h) => [h.id, h]));
   return ids.map((id) => {
@@ -627,7 +906,7 @@ export async function draftStillOn(
   if (!candidates) return null;
   const c = [...(candidates.get(draftId) ?? [])];
   if (c.length !== 1 || c[0] !== propertyId) return "stale";
-  const locked = await lockedPropertyIds(supabase, orgId, [propertyId]);
-  if (!locked) return null;
-  return locked.has(propertyId) ? "stale" : "ok";
+  const verified = await verifyProperties(supabase, orgId, [propertyId]);
+  if (!verified) return null;
+  return verified.unlocked.has(propertyId) ? "ok" : "stale";
 }

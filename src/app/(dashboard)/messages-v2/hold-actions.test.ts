@@ -123,6 +123,7 @@ function deps(over: Partial<HoldActionDeps> = {}, reply = baseReply()) {
     suppressNumber: vi.fn().mockResolvedValue({ ok: true, data: null }),
     resolveHostileReply: vi.fn().mockResolvedValue(null),
     reportError: vi.fn(),
+    draftOwner: vi.fn().mockResolvedValue("ok"),
     ...over,
   };
   return { d, log };

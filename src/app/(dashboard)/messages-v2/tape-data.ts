@@ -29,11 +29,12 @@ async function inBatches<T>(items: readonly T[], task: (item: T) => Promise<void
  * message in the run's conversation sent before the seller's text arrived;
  * `reply` is the outbound message the run itself produced. Each run gets its own
  * bounded query (newest outbound before the run, limit 1), so a busy conversation
- * can never crowd another run's text out of a shared row limit. Safe in the
- * browser (RLS scopes every table), like loadRunLabels.
+ * can never crowd another run's text out of a shared row limit. Every query is
+ * filtered to `orgId` explicitly, not left to RLS alone.
  */
 export async function loadRunThreads(
   supabase: LooseSupabase,
+  orgId: string,
   runs: ReadonlyArray<Pick<PipelineRun, "id" | "conversation_id" | "outbound_message_id" | "started_at"> & { inbound_message_id?: string }>,
 ): Promise<{ threads: Map<string, RunThread>; failedRunIds: string[] }> {
   const replyIds = [...new Set(runs.flatMap((r) => (r.outbound_message_id ? [r.outbound_message_id] : [])))];
@@ -48,7 +49,7 @@ export async function loadRunThreads(
   const inboundIds = [...new Set(runs.flatMap((r) => (r.inbound_message_id ? [r.inbound_message_id] : [])))];
   const inboundAt = new Map<string, string>();
   for (const ids of chunk(inboundIds)) {
-    const res = await fetchAllKeyset<{ id: string; created_at: string }>(() => supabase.from("messages").select("id, created_at").in("id", ids));
+    const res = await fetchAllKeyset<{ id: string; created_at: string }>(() => supabase.from("messages").select("id, created_at").eq("org_id", orgId).in("id", ids));
     if (res.error) {
       for (const r of runs) if (r.inbound_message_id && ids.includes(r.inbound_message_id)) failed.add(r.id);
       continue;
@@ -62,7 +63,7 @@ export async function loadRunThreads(
 
   await Promise.all([
     inBatches(chunk(replyIds), async (ids) => {
-      const res = await supabase.from("messages").select("id, body").in("id", ids);
+      const res = await supabase.from("messages").select("id, body").eq("org_id", orgId).in("id", ids);
       if (res.error) {
         for (const id of ids) failedReplyIds.add(id);
         return;
@@ -80,6 +81,7 @@ export async function loadRunThreads(
         const res = await supabase
           .from("messages")
           .select("id, body")
+          .eq("org_id", orgId)
           .eq("conversation_id", run.conversation_id)
           .eq("direction", "outbound")
           .lt("created_at", cutoff)
@@ -134,14 +136,17 @@ export function isOlderThanCursor(run: { started_at: string; id: string }, c: Ru
   return cmp < 0 || (cmp === 0 && run.id < c.id);
 }
 
-/** Runs that started in [fromIso, toIso), newest first, with their steps. Same shape as the page's feed query. */
+/**
+ * Runs that started in [fromIso, toIso), newest first, with their steps. Same shape as the page's feed query.
+ * `hasMore` = the window holds runs older than the last one returned (one extra row is read to know).
+ */
 export async function loadRunsWindow(
   supabase: LooseSupabase,
   orgId: string,
   fromIso: string,
   toIso: string,
   before?: RunCursor | null,
-): Promise<{ runs: RunWithSteps[]; error: string | null }> {
+): Promise<{ runs: RunWithSteps[]; hasMore: boolean; error: string | null }> {
   let query = supabase
     .from("pipeline_runs")
     .select("*")
@@ -152,9 +157,11 @@ export async function loadRunsWindow(
   const res = await query
     .order("started_at", { ascending: false })
     .order("id", { ascending: false })
-    .limit(MAX_RUNS);
-  if (res.error) return { runs: [], error: "The earlier tape could not be loaded." };
-  const runs = (res.data ?? []) as PipelineRun[];
+    .limit(MAX_RUNS + 1);
+  if (res.error) return { runs: [], hasMore: false, error: "The earlier tape could not be loaded." };
+  const read = (res.data ?? []) as PipelineRun[];
+  const hasMore = read.length > MAX_RUNS;
+  const runs = read.slice(0, MAX_RUNS);
   const stepResults = await Promise.all(
     chunk(runs.map((r) => r.id), STEP_RUNS_PER_QUERY).map((ids) =>
       fetchAllKeyset<PipelineRunStep>(() =>
@@ -162,9 +169,9 @@ export async function loadRunsWindow(
       ),
     ),
   );
-  if (stepResults.some((r) => r.error)) return { runs: [], error: "The earlier tape could not be loaded." };
+  if (stepResults.some((r) => r.error)) return { runs: [], hasMore: false, error: "The earlier tape could not be loaded." };
   const steps = groupStepsByRun(stepResults.flatMap((r) => r.rows));
-  return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), error: null };
+  return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), hasMore, error: null };
 }
 
 export const TAPE_TZ = CHICAGO_TZ;

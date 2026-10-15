@@ -62,7 +62,7 @@ export type HoldActionDeps = {
    * Does the draft still resolve to exactly this unlocked, same-org property (its own id, run, message or
    * conversation)? Run INSIDE the property lease, after the re-read, before any write or send.
    */
-  draftOwner?: (draftId: string, propertyId: string) => Promise<"ok" | "stale" | null>;
+  draftOwner: (draftId: string, propertyId: string) => Promise<"ok" | "stale" | null>;
 };
 
 /** Longest reply a human may send from a hold (SMS concatenation ceiling, not a content rule). */
@@ -362,10 +362,8 @@ export async function withPropertyLease<T>(
  */
 async function ownedByExpected(d: HoldActionDeps, draft: DraftRow, leasedPropertyId: string, expected: string): Promise<Result<null>> {
   if (draft.property_id !== expected || leasedPropertyId !== expected) return fail("HOLD_STALE", DRAFT_MOVED_MESSAGE);
-  if (d.draftOwner) {
-    const verdict = await d.draftOwner(draft.id, expected);
-    if (verdict !== "ok") return fail("HOLD_STALE", verdict === "stale" ? DRAFT_MOVED_MESSAGE : "Could not confirm the draft. Nothing was sent; refresh and try again.");
-  }
+  const verdict = await d.draftOwner(draft.id, expected);
+  if (verdict !== "ok") return fail("HOLD_STALE", verdict === "stale" ? DRAFT_MOVED_MESSAGE : "Could not confirm the draft. Nothing was sent; refresh and try again.");
   return ok(null);
 }
 

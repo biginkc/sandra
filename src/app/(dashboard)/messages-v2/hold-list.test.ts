@@ -48,8 +48,27 @@ const latestRpc = (tables: Record<string, Row[]>) => ({
   },
 });
 
+/**
+ * Pending decisions / reviews must reference a source message and a conversation that exist in their org. Fixtures
+ * written for other invariants get those rows added here (property-less, so no draft resolution changes); tests of
+ * the reference check itself mark their rows `_noRefs: true`.
+ */
+function withRefs(tables: Record<string, Row[]>) {
+  const msgs = (tables.messages ??= []);
+  for (const r of [...(tables.jev_lead_decisions ?? []), ...(tables.ai_disposition_reviews ?? [])]) {
+    if (r._noRefs) continue;
+    const id = r.source_inbound_message_id as string | null;
+    if (id && !msgs.some((m) => m.id === id)) msgs.push({ id, org_id: r.org_id, conversation_id: null, property_id: null, direction: "inbound", body: "b", created_at: r.created_at });
+    const conv = r.conversation_id as string | null;
+    if (conv && !msgs.some((m) => m.conversation_id === conv && m.org_id === r.org_id))
+      msgs.push({ id: `conv-${conv}`, org_id: r.org_id, conversation_id: conv, property_id: null, direction: "outbound", body: "b", created_at: r.created_at });
+  }
+  return tables;
+}
+
 function db(tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) {
-  return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), ...(opts.rpc ?? {}) } });
+  withRefs(tables);
+  return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), hold_alert_latest_status: () => ({ data: [], error: null }), ...(opts.rpc ?? {}) } });
 }
 
 const eligible = async (tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) => {
@@ -216,7 +235,8 @@ describe("I3 no locked property renders; every hold has exactly one property", (
     const page = await loadMessagesV2Page(
       db(
         { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(9), t(2))] },
-        { fail: (tb, _n, ops) => tb === "properties" && ops.some((o) => o.k === "eq" && "col" in o && o.col === "is_dnc_locked" && o.v === true) },
+        // the positive verification read (by id, not the flagged-source read)
+        { fail: (tb, _n, ops) => tb === "properties" && ops.some((o) => o.k === "in" && o.col === "id") && !ops.some((o) => "col" in o && o.col === "needs_human_attention") },
       ).client,
       "org",
     );
@@ -243,7 +263,7 @@ describe("I4 every list query pages by keyset to exhaustion", () => {
 
   it("decisions with tied created_at are neither duplicated nor dropped", async () => {
     const decisions = Array.from({ length: 1200 }, (_, i) => decision(i, u(i), t(1)));
-    const list = await eligible({ jev_lead_decisions: decisions }, { cap: 500 });
+    const list = await eligible({ jev_lead_decisions: decisions, properties: decisions.map((_, i) => plainProp(i)) }, { cap: 500 });
     expect(list.holds).toHaveLength(1200);
     expect(new Set(list.holds.map((h) => h.id)).size).toBe(1200);
   });
@@ -637,9 +657,9 @@ describe("fresh version check", () => {
     const tables: Record<string, Row[]> = { properties: [flagged(1, t(1))] };
     const list = await eligible(tables);
     const res = await enrichPage(db(tables, { fail: (table) => table === "jev_lead_decisions" }).client, "org", list.holds);
-    expect(res.contextErrors).toContain("version check");
+    expect(res!.contextErrors).toContain("version check");
     const ok = await enrichPage(db(tables).client, "org", list.holds);
-    expect(ok.contextErrors).not.toContain("version check");
+    expect(ok!.contextErrors).not.toContain("version check");
   });
 
   it("the final check returns each hold's current flag and pending version", async () => {
@@ -737,5 +757,330 @@ describe("Send / Edit guard: the draft must still be on the property the clicker
   it("liveStateOf reports the hold's current draft and its property", async () => {
     const states = (await liveStateOf(db({ properties: [flagged(3, t(1)), plainProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] }).client, "org", [u(3)]))!;
     expect(states[0]).toMatchObject({ id: u(3), eligible: true, draftId: null, draftProperty: null }); // the draft now belongs to 4, not 3
+  });
+});
+
+describe("scale: one light build per request, full steps only for shown runs, checks scoped to shown ids", () => {
+  const step = (run: string, seq: number, at: string): Row => ({
+    id: `${run}-s${String(seq).padStart(3, "0")}`, run_id: run, org_id: "org", seq, kind: "hold", name: "held", result: "held", detail: { big: "x".repeat(50) }, created_at: at,
+  });
+  const world = (n: number) => {
+    const tables: Record<string, Row[]> = { properties: [], pipeline_runs: [], pipeline_run_steps: [] };
+    for (let i = 1; i <= n; i++) {
+      tables.properties.push(flagged(i, t(i)));
+      tables.pipeline_runs.push(runRow(i, { property_id: u(i), started_at: t(i) }));
+      tables.pipeline_run_steps.push(step(u(i, 5), 1, t(i)), step(u(i, 5), 2, t(i + 1)));
+    }
+    return tables;
+  };
+  type Log = ReturnType<typeof fakePostgrest>["log"];
+  const holdPropertyReads = (log: Log) =>
+    log.filter((l) => l.table === "properties" && l.ops.some((o) => o.k === "eq" && "col" in o && o.col === "needs_human_attention"));
+  // One keyset read = its first page (no cursor); later pages carry a `gt` on id.
+  const unscoped = (log: Log) => holdPropertyReads(log).filter((l) => !l.ops.some((o) => o.k === "in" || o.k === "gt"));
+  const inIds = (l: Log[number], col: string) => l.ops.flatMap((o) => (o.k === "in" && o.col === col ? (o.v as string[]) : []));
+
+  it("a list build reads steps with activity columns only (never detail) and in a bounded number of requests", async () => {
+    const tables = world(60);
+    const { client, log, requests } = db(tables);
+    const list = await loadEligibleHolds(client, "org");
+    expect(list.ok && list.holds).toHaveLength(60);
+    const stepReads = log.filter((l) => l.table === "pipeline_run_steps");
+    expect(stepReads.length).toBeGreaterThan(0);
+    for (const l of stepReads) expect(l.select).toBe("id, run_id, seq, created_at");
+    for (const l of log.filter((x) => x.table === "pipeline_runs")) expect(l.select).not.toContain("detail");
+    expect(unscoped(log)).toHaveLength(1);
+    expect(requests.get("properties")).toBeLessThanOrEqual(4); // 1 source read (+ its empty last page) + draft org check
+  });
+
+  it("the page builds the whole list ONCE; enrichment loads full steps only for first-page runs; the final check is scoped to them", async () => {
+    const tables = world(60);
+    const { client, log } = db(tables);
+    const page = await loadMessagesV2Page(client, "org");
+    expect(decodeSnapshot(page.snapshot).entries).toHaveLength(60);
+    expect(page.holds).toHaveLength(40);
+    expect(unscoped(log)).toHaveLength(1);
+    const shown = new Set(page.holds.map((h) => h.id));
+    const scopedReads = holdPropertyReads(log).filter((l) => l.ops.some((o) => o.k === "in"));
+    expect(scopedReads.length).toBeGreaterThan(0);
+    for (const l of scopedReads) for (const id of inIds(l, "id")) expect(shown.has(id)).toBe(true);
+    const shownRuns = new Set(page.holds.map((h) => h.run!.id));
+    // Full steps are read for every shown run (the feed, loadMessagesV2Data, also reads its own recent runs' steps;
+    // the list build itself reads activity columns only, asserted above and in Show older below).
+    const fullIds = new Set(log.filter((l) => l.table === "pipeline_run_steps" && l.select === "*").flatMap((l) => inIds(l, "run_id")));
+    expect([...shownRuns].every((id) => fullIds.has(id))).toBe(true);
+    // Cards render full steps (with detail), in seq order.
+    expect(page.holds[0].run!.steps.map((s) => s.seq)).toEqual([1, 2]);
+    expect(page.holds[0].run!.steps[0].detail).toEqual({ big: "x".repeat(50) });
+  });
+
+  it("Show older and the live re-check never build the whole list: every hold read is scoped to the requested ids", async () => {
+    const tables = world(60);
+    const ids = [u(3), u(7), u(11)];
+    const older = db(tables);
+    const slice = (await loadHoldsByIds(older.client, "org", ids))!;
+    expect(slice.holds.map((h) => h.id).sort()).toEqual([...ids].sort());
+    expect(unscoped(older.log)).toHaveLength(0);
+    for (const l of holdPropertyReads(older.log)) for (const id of inIds(l, "id")) expect(ids).toContain(id);
+    const full = older.log.filter((l) => l.table === "pipeline_run_steps" && l.select === "*");
+    expect(new Set(full.flatMap((l) => inIds(l, "run_id")))).toEqual(new Set(ids.map((id) => tables.pipeline_runs.find((r) => r.property_id === id)!.id)));
+    expect(slice.holds.every((h) => h.run!.steps.every((s) => s.detail !== undefined))).toBe(true);
+
+    const live = db(tables);
+    const states = (await liveStateOf(live.client, "org", ids))!;
+    expect(states.every((s) => s.eligible)).toBe(true);
+    expect(unscoped(live.log)).toHaveLength(0);
+    expect(live.log.filter((l) => l.table === "pipeline_run_steps").every((l) => l.select === "id, run_id, seq, created_at")).toBe(true);
+  });
+
+  it("a scoped build reports no count (null) and still lock-checks every candidate of an in-scope draft", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(1)), flagged(2, t(2)), lockedProp(9), plainProp(3)],
+      // ambiguous (two properties) -> unverified; on a locked property -> hidden, not counted; to hold 2 -> out of scope
+      ai_reply_drafts: [
+        draft(1, { property_id: u(3), run_id: u(1, 5) }),
+        draft(2, { property_id: u(1), run_id: u(2, 5) }),
+        draft(3, { property_id: u(2) }),
+      ],
+      pipeline_runs: [runRow(1, { property_id: u(1) }), runRow(2, { property_id: u(9) })],
+    };
+    const full = await eligible(tables);
+    const scoped = await loadEligibleHolds(db(tables).client, "org", { propertyIds: [u(1)] });
+    expect(scoped.ok && scoped.unverified).toBeNull();
+    expect(full.unverified).toBe(1);
+    expect(scoped.ok && scoped.holds.map((h) => h.id)).toEqual([u(1)]);
+    expect(scoped.ok && scoped.holds[0].draft).toBeUndefined(); // draft 2 also resolves to locked 9: never shown
+  });
+
+  it("a full-step lookup failure during enrichment fails the page closed (no cards with activity-only steps)", async () => {
+    const tables = world(3);
+    const list = await eligible(tables);
+    const failing = db(tables, { fail: (tb) => tb === "pipeline_run_steps" });
+    expect(await enrichPage(failing.client, "org", list.holds)).toBeNull();
+  });
+});
+
+describe("the test fake refuses forms it does not implement", () => {
+  it(".is with a non-null value, .not other than (is, null), and an unregistered RPC all throw", async () => {
+    const { client } = fakePostgrest({ t: [] });
+    const q = client.from("t") as unknown as { is: (c: string, v: unknown) => unknown; not: (c: string, op: string, v: unknown) => unknown };
+    expect(() => q.is("a", true)).toThrow(/unsupported/);
+    expect(() => q.not("a", "eq", 1)).toThrow(/unsupported/);
+    expect(() => q.not("a", "is", "x")).toThrow(/unsupported/);
+    await expect(client.rpc("nope", {})).rejects.toThrow(/not registered/);
+  });
+});
+
+describe("Astra: an unresolved reference makes a draft unverifiable everywhere (list, paging, re-check, Send/Edit)", () => {
+  const review = (n: number, property: string): Row => ({
+    id: u(n, 8), org_id: "org", status: "pending", property_id: property, conversation_id: null, source_inbound_message_id: null, disposition: "x", created_at: t(5),
+  });
+  const cases: Array<[string, Row, Row[]]> = [
+    ["a run_id with no row", draft(1, { property_id: u(3), run_id: u(77, 5) }), []],
+    ["a run_id on ANOTHER org's run", draft(1, { property_id: u(3), run_id: u(77, 5) }), [runRow(77, { org_id: "other", property_id: u(3) })]],
+    ["an inbound_message_id with no row", draft(1, { property_id: u(3), inbound_message_id: u(77, 7) }), []],
+    ["an inbound_message_id on ANOTHER org's message", draft(1, { property_id: u(3), inbound_message_id: u(77, 7) }), []],
+    ["a conversation_id with no message in the org", draft(1, { property_id: u(3), conversation_id: u(77, 2) }), []],
+    ["a conversation_id that is another org's", draft(1, { property_id: u(3), conversation_id: u(77, 2) }), []],
+  ];
+  // Rows that exist, but in another org (the cross-org cases above read them through the org filter).
+  const otherOrg: Row[] = [message(77, { org_id: "other", property_id: u(3), conversation_id: u(77, 2) })];
+  for (const [name, d, runs] of cases) {
+    it(`${name}: hidden + counted, missing on paging, not eligible on re-check, Send refused`, async () => {
+      const tables: Record<string, Row[]> = { properties: [plainProp(3)], ai_reply_drafts: [d], pipeline_runs: runs, messages: name.includes("ANOTHER") || name.includes("another org") ? otherOrg : [] };
+      const list = await eligible(tables);
+      expect(list.holds).toHaveLength(0);
+      expect(list.unverified).toBe(1);
+      expect((await loadHoldsByIds(db(tables).client, "org", [u(3)]))!.missing).toEqual([u(3)]);
+      expect((await liveStateOf(db(tables).client, "org", [u(3)]))![0].eligible).toBe(false);
+      expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(3))).toBe("stale");
+    });
+  }
+
+  it("a pending review or decision on an absent or another org's property: hidden + counted; never eligible", async () => {
+    for (const props of [[], [{ id: u(5), org_id: "other", needs_human_attention: false, is_dnc_locked: false }]] as Row[][]) {
+      const tables: Record<string, Row[]> = { properties: props, ai_disposition_reviews: [review(1, u(5))], jev_lead_decisions: [decision(2, u(5), t(3))] };
+      const list = await eligible(tables);
+      expect(list.holds).toHaveLength(0);
+      expect(list.unverified).toBe(2);
+      expect((await loadHoldsByIds(db(tables).client, "org", [u(5)]))!.missing).toEqual([u(5)]);
+      expect((await liveStateOf(db(tables).client, "org", [u(5)]))![0].eligible).toBe(false);
+    }
+  });
+
+  it("a property whose lock state is unreadable (null) is unverifiable, and Send refuses", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [{ id: u(6), org_id: "org", needs_human_attention: false, is_dnc_locked: null }],
+      ai_reply_drafts: [draft(1, { property_id: u(6), inbound_message_id: u(1, 7) })],
+      messages: [message(1, { property_id: u(6) })],
+    };
+    expect((await eligible(tables)).unverified).toBe(1);
+    expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(6))).toBe("stale");
+  });
+});
+
+describe("Astra: revalidation and Show older cost follows the requested ids, not the backlog", () => {
+  const world = (n: number) => {
+    const tables: Record<string, Row[]> = { properties: [], pipeline_runs: [], pipeline_run_steps: [], ai_reply_drafts: [], messages: [] };
+    for (let i = 1; i <= n; i++) {
+      tables.properties.push(flagged(i, t(i)));
+      tables.pipeline_runs.push(runRow(i, { property_id: u(i), started_at: t(i) }));
+      tables.pipeline_run_steps.push({ id: `${u(i, 5)}-s1`, run_id: u(i, 5), org_id: "org", seq: 1, kind: "hold", name: "held", result: "held", detail: {}, created_at: t(i) });
+      tables.ai_reply_drafts.push(draft(i, { property_id: u(i), inbound_message_id: u(i, 6), created_at: t(i) }));
+      tables.messages.push(message(i, { id: u(i, 6), property_id: u(i) }));
+    }
+    return tables;
+  };
+  const tableRequests = (requests: Map<string, number>) => [...requests.values()].reduce((a, b) => a + b, 0);
+
+  it("one-card re-check and a one-card Show older: the same request count (tables + RPCs) at 150 and at 10,000 holds", async () => {
+    const counts: Record<string, number[]> = { live: [], older: [] };
+    for (const n of [150, 10_000]) {
+      const tables = world(n);
+      const live = db(tables);
+      expect((await liveStateOf(live.client, "org", [u(7)]))![0].eligible).toBe(true);
+      counts.live.push(tableRequests(live.requests) + live.rpcLog.length);
+      const older = db(tables);
+      expect((await loadHoldsByIds(older.client, "org", [u(7)]))!.holds).toHaveLength(1);
+      counts.older.push(tableRequests(older.requests) + older.rpcLog.length);
+    }
+    expect(counts.live[0]).toBe(counts.live[1]);
+    expect(counts.older[0]).toBe(counts.older[1]);
+    expect(counts.live[1]).toBeLessThanOrEqual(40);
+    expect(counts.older[1]).toBeLessThanOrEqual(80);
+  });
+
+  it("no scoped read touches a property, draft, run or step outside the requested ids' links", async () => {
+    const tables = world(150);
+    const { client, log } = db(tables);
+    await liveStateOf(client, "org", [u(7), u(9)]);
+    const ok = new Set([u(7), u(9), u(7, 4), u(9, 4), u(7, 5), u(9, 5), u(7, 6), u(9, 6)]);
+    for (const l of log) for (const o of l.ops) if (o.k === "in") for (const v of o.v as string[]) expect(ok.has(v)).toBe(true);
+  });
+});
+
+describe("Sol: a scoped re-check decides shared-run ownership exactly as the whole list", () => {
+  // Holds A (u1) and B (u2) both have a pending decision in conversation C; a property-less run R in C is linked to
+  // both. R goes to the hold with the newer uncontested activity.
+  const tables = (bNewer: boolean): Record<string, Row[]> => ({
+    properties: [plainProp(1), plainProp(2)],
+    jev_lead_decisions: [
+      decision(1, u(1), t(10), { conversation_id: u(50, 2), source_inbound_message_id: u(1, 3) }),
+      decision(2, u(2), bNewer ? t(30) : t(5), { conversation_id: u(50, 2), source_inbound_message_id: u(2, 3) }),
+    ],
+    pipeline_runs: [runRow(9, { property_id: null, conversation_id: u(50, 2), started_at: t(40), reason: "shared" })],
+  });
+
+  it("after the snapshot B gains newer activity: the whole list moves R to B, and the one-card re-check of A agrees", async () => {
+    const before = await eligible(tables(false));
+    expect(before.holds.find((h) => h.id === u(1))!.run?.id).toBe(u(9, 5));
+    const now = tables(true);
+    const full = await eligible(now);
+    expect(full.holds.find((h) => h.id === u(2))!.run?.id).toBe(u(9, 5));
+    const [a] = (await liveStateOf(db(now).client, "org", [u(1)]))!;
+    expect(a.runId).toBe(full.holds.find((h) => h.id === u(1))!.run?.id ?? null);
+    expect(a.runId).not.toBe(u(9, 5)); // the card's pinned run -> the column marks it Updated (actions paused)
+    const still = (await recheckOpen(db(now).client, "org", before.holds.filter((h) => h.id === u(1))))!;
+    expect(still.changed.has(u(1))).toBe(true);
+  });
+
+  it("a competitor lookup failure fails the scoped re-check closed", async () => {
+    const now = tables(true);
+    const failing = db(now, { fail: (tb, _n, ops) => tb === "jev_lead_decisions" && ops.some((o) => o.k === "in" && o.col === "conversation_id") });
+    expect(await liveStateOf(failing.client, "org", [u(1)])).toBeNull();
+  });
+
+  it("scoped reads select only activity columns for runs and steps; whole rows only for the runs a page shows", async () => {
+    const now = tables(true);
+    const live = db(now);
+    await liveStateOf(live.client, "org", [u(1)]);
+    for (const l of live.log.filter((x) => x.table === "pipeline_runs")) expect(["id", "id, property_id, inbound_message_id, conversation_id, started_at, reason"]).toContain(l.select);
+    for (const l of live.log.filter((x) => x.table === "pipeline_run_steps")) expect(l.select).toBe("id, run_id, seq, created_at");
+    const older = db(now);
+    const slice = (await loadHoldsByIds(older.client, "org", [u(2)]))!;
+    const whole = older.log.filter((x) => x.table === "pipeline_runs" && x.select === "*");
+    expect(new Set(whole.flatMap((l) => l.ops.flatMap((o) => (o.k === "in" ? (o.v as string[]) : []))))).toEqual(new Set([u(9, 5)]));
+    expect(slice.holds[0].run).toMatchObject({ id: u(9, 5), status: "held", inbound_preview: "x" });
+  });
+});
+
+describe("Opus: Show older of a hold that lost a shared run on the whole list renders it as the whole list does", () => {
+  it("B (newer) owns the shared run on page 1's build; Show older of A alone gives A the same run, not Updated", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [plainProp(1), plainProp(2)],
+      jev_lead_decisions: [
+        decision(1, u(1), t(5), { conversation_id: u(50, 2), source_inbound_message_id: u(1, 3) }),
+        decision(2, u(2), t(30), { conversation_id: u(50, 2), source_inbound_message_id: u(2, 3) }),
+      ],
+      pipeline_runs: [runRow(9, { property_id: null, conversation_id: u(50, 2), started_at: t(40) })],
+    };
+    const page = await loadMessagesV2Page(db(tables).client, "org");
+    const pinned = decodeSnapshot(page.snapshot).entries.find((e) => e.id === u(1))!;
+    const slice = (await loadHoldsByIds(db(tables).client, "org", [u(1)]))!;
+    expect(slice.holds[0].run?.id ?? null).toBe(pinned.run);
+    expect(slice.holds[0].recheck_changed).toBeUndefined();
+    expect(slice.snapshot.entries[0].run).toBe(pinned.run);
+  });
+});
+
+describe("Sol r3: decisions and reviews pass the same in-org reference check as drafts", () => {
+  const otherOrgMsgs: Row[] = [
+    message(80, { id: u(80, 3), org_id: "other", conversation_id: u(80, 2) }),
+  ];
+  const pendingRow = (kind: "decision" | "review", over: Row): Row =>
+    kind === "decision"
+      ? decision(1, u(3), t(5), { _noRefs: true, ...over })
+      : { id: u(1, 8), org_id: "org", status: "pending", property_id: u(3), disposition: "x", created_at: t(5), _noRefs: true, ...over };
+  const good = { source_inbound_message_id: u(81, 3), conversation_id: u(81, 2) };
+  const goodMsgs: Row[] = [message(81, { id: u(81, 3), conversation_id: u(81, 2) })];
+  const cases: Array<[string, Row]> = [
+    ["a missing source message", { ...good, source_inbound_message_id: u(99, 3) }],
+    ["another org's source message", { ...good, source_inbound_message_id: u(80, 3) }],
+    ["a conversation with no message in the org", { ...good, conversation_id: u(99, 2) }],
+    ["another org's conversation", { ...good, conversation_id: u(80, 2) }],
+  ];
+  for (const kind of ["decision", "review"] as const) {
+    const table = kind === "decision" ? "jev_lead_decisions" : "ai_disposition_reviews";
+    it(`${kind} with readable references is a hold (control)`, async () => {
+      const tables: Record<string, Row[]> = { properties: [plainProp(3)], [table]: [pendingRow(kind, good)], messages: [...goodMsgs, ...otherOrgMsgs] };
+      const list = await eligible(tables);
+      expect(list.holds.map((h) => h.id)).toEqual([u(3)]);
+      expect(list.unverified).toBe(0);
+    });
+    for (const [name, over] of cases) {
+      it(`${kind} with ${name}: hidden + counted; missing on paging; not eligible on re-check; dropped by the final check`, async () => {
+        const tables: Record<string, Row[]> = { properties: [plainProp(3)], [table]: [pendingRow(kind, over)], messages: [...goodMsgs, ...otherOrgMsgs] };
+        const list = await eligible(tables);
+        expect(list.holds).toHaveLength(0);
+        expect(list.unverified).toBe(1);
+        expect((await loadHoldsByIds(db(tables).client, "org", [u(3)]))!.missing).toEqual([u(3)]);
+        expect((await liveStateOf(db(tables).client, "org", [u(3)]))![0].eligible).toBe(false); // actions paused
+        const before = await eligible({ properties: [plainProp(3)], [table]: [pendingRow(kind, good)], messages: [...goodMsgs] });
+        expect([...(await recheckOpen(db(tables).client, "org", before.holds))!.open]).toEqual([]);
+      });
+    }
+  }
+});
+
+describe("Fable: conversation references are read narrowly", () => {
+  it("one limit-1 existence read per conversation, plus a property read that skips messages without a property", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [plainProp(3)],
+      ai_reply_drafts: [draft(1, { property_id: u(3), conversation_id: u(60, 2) }), draft(2, { property_id: u(3), conversation_id: u(61, 2) })],
+      messages: [
+        message(60, { conversation_id: u(60, 2), property_id: u(3) }),
+        ...Array.from({ length: 30 }, (_, i) => message(100 + i, { conversation_id: u(61, 2), property_id: null })),
+      ],
+    };
+    const { client, log } = db(tables);
+    const list = await loadEligibleHolds(client, "org");
+    expect(list.ok && list.holds.map((h) => h.id)).toEqual([u(3)]);
+    const convReads = log.filter((l) => l.table === "messages" && l.ops.some((o) => "col" in o && o.col === "conversation_id"));
+    const exists = convReads.filter((l) => l.select === "conversation_id");
+    expect(exists).toHaveLength(2); // one per referenced conversation
+    for (const l of exists) expect(l.ops).toContainEqual(expect.objectContaining({ k: "eq", col: "conversation_id" }));
+    const props = convReads.filter((l) => l.select !== "conversation_id");
+    expect(props.length).toBeGreaterThan(0);
+    for (const l of props) expect(l.ops).toContainEqual({ k: "isnull", col: "property_id", not: true });
   });
 });

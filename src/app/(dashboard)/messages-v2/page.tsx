@@ -235,7 +235,7 @@ export default async function MessagesV2Page({
   }));
   const [labels, thread] = await Promise.all([
     loadRunLabels(supabase, [...data.runs, ...holdLabelInputs]),
-    loadRunThreads(supabase, data.runs),
+    loadRunThreads(supabase, orgId, data.runs),
   ]);
 
   return (

@@ -384,7 +384,8 @@ export function WaitingColumn({
             labels: new Map([...cur.labels, ...res.data.labels]),
             missing,
             nextPos: Math.max(cur.nextPos, requestedFrom + ids.length),
-            unverified: res.data.unverified,
+            // null = the slice could not count the whole org: keep what we had.
+            unverified: res.data.unverified ?? cur.unverified,
             error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
           };
         });
