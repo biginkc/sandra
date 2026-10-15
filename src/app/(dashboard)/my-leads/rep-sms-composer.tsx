@@ -18,7 +18,7 @@ import {
 } from "@/lib/messaging/rep-sms-composition"
 
 import type { RepSmsContext, RepSmsPendingSubmission, RepSmsTargetRequest } from "@/lib/messaging/rep-sms"
-import { acknowledgeRepSmsSubmission, loadRepSmsContext, sendRepSms } from "./sms-actions"
+import { acknowledgeRepSmsSubmission, checkRepSmsReceipt, loadRepSmsContext, sendRepSms } from "./sms-actions"
 
 /** The fixed identity used by Acquisitions texts. The remainder stays editable. */
 export const REP_SMS_INTRO = DEFAULT_REP_SMS_INTRODUCTION.body
@@ -544,6 +544,35 @@ export function RepSmsComposer({
     const allowed = mode === "reconcile" ? canReconcile : canSend
     if (!allowed || !sender || !recipient || sendInFlight.current || !composition) return
     sendInFlight.current = true
+    if (mode === "reconcile" && chosenTarget?.sourceKind === "ledger") {
+      // Check status on a chosen receipt is a read-only server check: it can never claim the ledger or send.
+      setPending(true)
+      setSendState({ status: "sending", message: "Sandra is checking the saved SMS request." })
+      void checkRepSmsReceipt({ propertyId, ledgerId: chosenTarget.refId })
+        .then((result) => {
+          if (!result.ok) {
+            setSendState({ status: "provider_unknown", message: result.error.message || "Sandra could not check this text. Nothing was sent." })
+            return
+          }
+          const { disposition, reason } = result.data
+          if (disposition === "resolved") {
+            clearSubmission()
+            setSendState({ status: "accepted", message: "Accepted by the messaging provider. Delivery status will appear in text history." })
+          } else if (disposition === "replace") {
+            setSendState({ status: "delivery_failed", message: `${reason ?? "The provider did not confirm delivery."} Nothing was sent by this check.` })
+          } else if (disposition === "review") {
+            setSendState({ status: "blocked", message: reason ?? "Sandra blocked this text before delivery." })
+          } else {
+            setSendState({ status: "provider_unknown", message: "Still waiting on the provider. Nothing was sent; check again shortly." })
+          }
+        })
+        .catch(() => setSendState({ status: "provider_unknown", message: "Sandra lost the check result. Nothing was sent." }))
+        .finally(() => {
+          sendInFlight.current = false
+          setPending(false)
+        })
+      return
+    }
     const submittedComposition = submission.current?.composition ?? composition
     const idempotencyKey = resumableObligationId ?? (() => {
       if (!submission.current) {

@@ -67,6 +67,12 @@ describe("Broken fix button follows the item's action (design 2.1)", () => {
     });
     expect(dismissableBroken(f).map((i) => i.refId)).toEqual(["b"]);
   });
+  it("never offers Dismiss on a Norma review, even with its request id as refId", () => {
+    const f = workFacts("broken", "6", {}, {
+      broken: [{ kind: "norma_needs_review", action: "review", at: null, refId: "11111111-1111-4111-8111-111111111111" }],
+    });
+    expect(dismissableBroken(f)).toEqual([]);
+  });
 });
 
 describe("no phone / do not contact", () => {

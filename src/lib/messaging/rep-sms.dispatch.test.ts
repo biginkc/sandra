@@ -481,3 +481,42 @@ describe("dispatchRepSms replacing a failed send", () => {
     expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
   });
 });
+
+describe("dispatchRepSms fenced resume adopts the fenced obligation", () => {
+  const base = { propertyId: "property-1", assignmentId: "sender-1", composition };
+  const fenceFor = (id: string) => createRepSmsObligationFence({
+    obligationId: id, claimToken: "t", claimGeneration: 2, actorId: "rep-1",
+    propertyId: "property-1", assignmentId: "sender-1", toNumber: "+18165550123", composition: composeRepSms(composition),
+  });
+  const oblRow = (id: string, state: string) => ({
+    id, attempt_id: "att", state, message_body: "x", composition, blocked_reason: null, sender_assignment_id: "sender-1",
+    from_number: "+18163706846", to_number: "+18165550123",
+  });
+  function clientWith(newest: Record<string, unknown>, rows: Record<string, unknown>) {
+    const client = {
+      rpc: vi.fn((name: string) => Promise.resolve(name === "fn_get_rep_sms_context" ? { data: { ...contextData, obligation: newest }, error: null } : { data: { draft: null }, error: null })),
+      from: vi.fn((table: string) => {
+        const filters: Record<string, string> = {}
+        const chain: Record<string, unknown> = {}
+        chain.select = () => chain
+        chain.eq = (c: string, v: string) => ((filters[c] = v), chain)
+        chain.maybeSingle = () => Promise.resolve({ data: table === "rep_sms_obligations" ? rows[filters.id] ?? null : { phone_1: "+18165550123", phone_1_type: "mobile" }, error: null })
+        return chain
+      }),
+    }
+    mocks.createClient.mockResolvedValue(client)
+  }
+  const newest = { id: "obl-B", attemptId: "b", status: "required", messageBody: "x", composition, blockedReason: null, senderAssignmentId: "sender-1", fromNumber: "+18163706846", toNumber: "+18165550123" }
+
+  it("an older fenced obligation already in 'sending' proceeds although a newer open one exists", async () => {
+    clientWith(newest, { "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": oblRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "sending") })
+    const outcome = await dispatchRepSms({ ...base, to: "+18165550123", obligationFence: fenceFor("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") })
+    expect(outcome.status).toBe("sent")
+  })
+
+  it("a fence for a row this actor does not own still throws", async () => {
+    clientWith(newest, {})
+    await expect(dispatchRepSms({ ...base, to: "+18165550123", obligationFence: fenceFor("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") })).rejects.toThrow(/follow-up changed/)
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled()
+  })
+})

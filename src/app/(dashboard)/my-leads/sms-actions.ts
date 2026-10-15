@@ -162,6 +162,35 @@ export async function acknowledgeRepSmsSubmission(input: {
   }
 }
 
+/**
+ * Check status on ONE chosen ledger receipt. Strictly read-only toward the provider: it re-reads the receipt through
+ * fn_get_rep_sms_delivery_target (same auth as the target load), never claims the ledger, never calls dispatchRepSms
+ * or a provider, and works whatever other obligation the lead holds. Only a receipt already in a final accepted state
+ * is acknowledged (the existing non-claiming close of the recovery draft); a failed or pending one is only reported.
+ */
+export async function checkRepSmsReceipt(input: { propertyId: string; ledgerId: string }) {
+  try {
+    const context = await readRepSmsContext(input.propertyId, cleanTarget({ sourceKind: "ledger", refId: input.ledgerId }));
+    const target = context.target;
+    if (!target || target.sourceKind !== "ledger" || target.disposition === "unavailable") {
+      throw new Error(target?.reason ?? "That text could not be found.");
+    }
+    let acknowledged = false;
+    if (target.disposition === "resolved" && target.submissionKey) {
+      const ack = await acknowledgeRepSmsSubmission({
+        propertyId: input.propertyId,
+        idempotencyKey: target.submissionKey,
+        target: { sourceKind: "ledger", refId: input.ledgerId },
+      });
+      acknowledged = ack.ok;
+      if (!ack.ok) throw new Error(ack.error.message);
+    }
+    return ok({ state: target.state, disposition: target.disposition, reason: target.reason, acknowledged });
+  } catch (error) {
+    return errFromUnknown(error, "TEXTING_UNAVAILABLE");
+  }
+}
+
 async function persistResumedResult(
   admin: { rpc(name: string, input: Record<string, unknown>): Promise<ObligationRpc> },
   obligationId: string,

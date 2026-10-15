@@ -246,7 +246,11 @@ function normalizeContext(raw: unknown): RepSmsContext {
   };
 }
 
-export async function readRepSmsContext(propertyId: string, target?: RepSmsTargetRequest | null): Promise<RepSmsContext> {
+export async function readRepSmsContext(
+  propertyId: string,
+  target?: RepSmsTargetRequest | null,
+  options?: { adoptFencedObligation?: boolean },
+): Promise<RepSmsContext> {
   const client = await createClient();
   const { data, error } = await client.rpc("fn_get_rep_sms_context", {
     p_property_id: propertyId,
@@ -299,7 +303,9 @@ export async function readRepSmsContext(propertyId: string, target?: RepSmsTarge
   // chosen row, not whichever obligation the context read happened to return.
   return {
     ...base,
-    ...(info.target.disposition === "resume" && info.obligation ? { obligation: info.obligation } : {}),
+    ...((info.target.disposition === "resume" || (options?.adoptFencedObligation && target.sourceKind === "obligation")) && info.obligation
+      ? { obligation: info.obligation }
+      : {}),
     target: info.target,
   };
 }
@@ -358,7 +364,9 @@ async function readRepSmsTarget(
       select: (columns: string) => {
         eq: (c: string, v: string) => {
           eq: (c: string, v: string) => {
-            eq: (c: string, v: string) => { maybeSingle: () => PromiseLike<{ data: unknown; error: unknown }> };
+            eq: (c: string, v: string) => {
+              eq: (c: string, v: string) => { maybeSingle: () => PromiseLike<{ data: unknown; error: unknown }> };
+            };
           };
         };
       };
@@ -372,6 +380,7 @@ async function readRepSmsTarget(
       .eq("id", request.refId)
       .eq("property_id", propertyId)
       .eq("org_id", context.orgId)
+      .eq("actor_user_id", context.actorId)
       .maybeSingle();
     if (error) throw new Error("Texting recovery could not be loaded. Please retry.");
     const row = jsonObject(data);
@@ -463,6 +472,8 @@ async function readRepSmsTarget(
   const metadata = jsonObject(row.metadata);
   const repSms = jsonObject(metadata?.repSms);
   const status = String(row.status ?? "");
+  // A transport-only failed manual text has no repSms metadata; keep its body as the editable remainder.
+  const plainBody = str(row.body);
   const composition = repSms
     ? {
         acquisitionsManager: repSms.acquisitionsManager,
@@ -474,19 +485,30 @@ async function readRepSmsTarget(
         remainder: repSms.finalRemainder,
         initialBody: repSms.initialBody,
       }
-    : null;
+    : plainBody
+      ? { remainder: plainBody }
+      : null;
+  let disposition = messageTargetDisposition(status, metadata?.providerOutcome);
+  const receiptId = str(repSms?.receiptId);
+  if (disposition === "replace" && receiptId) {
+    // The message failed, but its ledger receipt is the authority on whether the provider may still have it.
+    const { data: receiptData, error: receiptError } = await loose.rpc("fn_get_rep_sms_delivery_target", { p_property_id: propertyId, p_ledger_id: receiptId });
+    const receipt = jsonObject(jsonObject(receiptData)?.target);
+    disposition = receiptError || !receipt ? "check" : ledgerTargetDisposition(String(receipt.state ?? ""));
+  }
   return {
     target: {
       sourceKind: "message",
       refId: request.refId,
-      disposition: messageTargetDisposition(status, metadata?.providerOutcome),
+      disposition,
       state: status,
       body: str(repSms?.finalBody) ?? str(row.body),
       composition: composition && typeof composition.remainder === "string" ? composition : null,
       assignmentId: str(repSms?.senderAssignmentId),
       from: str(repSms?.from),
       to: null,
-      submissionKey: null,
+      // A message's own submission key (when it carries one) can never be reused by its replacement.
+      submissionKey: str(repSms?.idempotencyKey),
       reason: str(metadata?.providerError) ?? str(metadata?.error),
     },
   };
@@ -918,6 +940,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
   const context = await readRepSmsContext(
     input.propertyId,
     input.obligationFence ? { sourceKind: "obligation", refId: input.obligationFence.obligationId } : null,
+    { adoptFencedObligation: Boolean(input.obligationFence) },
   );
   const manager = input.composition?.acquisitionsManager;
   const replayingSavedSubmission = Boolean(context.submission && context.submission.key === input.idempotencyKey);

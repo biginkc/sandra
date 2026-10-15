@@ -241,9 +241,17 @@ it('is additive: every pre-existing column and facts key is identical before and
     const dripLead = await w.lead('drip'); await w.drip(dripLead); ids.push(dripLead);
     const broken = await w.lead('broken'); await w.text(broken, 'outbound', w.at(-HOUR), { status: 'failed' }); ids.push(broken);
     const plain = await w.lead('plain'); ids.push(plain);
+    const norma = await w.lead('norma'); await w.norma(norma, 'needs_review', w.at(-3 * HOUR)); ids.push(norma);
+    const normaRequest = (await db.query("select id from public.norma_call_requests where property_id=$1 and status='needs_review'", [norma])).rows[0].id;
     const before = await rows(w, db);
     await applyNew();
     const after = await rows(w, db);
+    // The one intentional change to an existing key: the norma_needs_review broken item's refId goes from null to the request id.
+    const normaItems = (r: Record<string, Json>) => (r[norma].facts.broken as Json[]).filter((b) => b.kind === 'norma_needs_review');
+    expect(normaItems(before)).toHaveLength(1);
+    expect(normaItems(before)[0].refId).toBeNull();
+    expect(normaItems(after)).toHaveLength(1);
+    expect(normaItems(after)[0].refId).toBe(normaRequest);
     expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
     for (const id of ids) {
       const { facts: bf, ...b } = before[id];
@@ -253,7 +261,8 @@ it('is additive: every pre-existing column and facts key is identical before and
         const { zip, contractSignedAt, lastTouch, ...rest } = f;
         void zip; void contractSignedAt; void lastTouch;
         const headline = { ...rest.headline }; delete headline.taskKind; delete headline.snoozed;
-        return { ...rest, headline };
+        const broken = (rest.broken as Json[] | undefined)?.map((b) => (b.kind === 'norma_needs_review' ? { ...b, refId: '<asserted separately>' } : b));
+        return { ...rest, ...(broken ? { broken } : {}), headline };
       };
       expect(strip(af), id).toEqual(strip(bf));
       for (const k of newKeys) expect(Object.keys(af), id).toContain(k);

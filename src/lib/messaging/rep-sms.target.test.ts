@@ -76,7 +76,7 @@ describe("readRepSmsContext with a target", () => {
     expect(ctx.target).toEqual(expect.objectContaining({ sourceKind: "obligation", refId: ID, disposition: "resume" }));
     expect(ctx.obligation?.id).toBe(ID);
     const read = f.calls.find((c) => c.table === "rep_sms_obligations");
-    expect(read?.filters).toEqual([["id", ID], ["property_id", "prop-1"], ["org_id", "org-1"]]);
+    expect(read?.filters).toEqual([["id", ID], ["property_id", "prop-1"], ["org_id", "org-1"], ["actor_user_id", "rep-1"]]);
   });
 
   it("a delivery_failed obligation target is a replacement and leaves the lead's context obligation alone", async () => {
@@ -111,6 +111,35 @@ describe("readRepSmsContext with a target", () => {
     const ctx = await readRepSmsContext("prop-1", { sourceKind: "message", refId: ID });
     expect(ctx.target).toEqual(expect.objectContaining({ disposition: "replace", body: "full A", assignmentId: "sender-1" }));
     expect(ctx.target?.composition).toEqual(expect.objectContaining({ remainder: "Body A" }));
+  });
+
+  it("a failed manual text with a body and NO repSms metadata keeps its body as the editable remainder", async () => {
+    const f = fakeClient({ messageRow: { id: ID, body: "Typed by hand", status: "failed", metadata: {} } });
+    createClient.mockResolvedValue(f.client);
+    const ctx = await readRepSmsContext("prop-1", { sourceKind: "message", refId: ID });
+    expect(ctx.target).toEqual(expect.objectContaining({ disposition: "replace", body: "Typed by hand" }));
+    expect(ctx.target?.composition).toEqual({ remainder: "Typed by hand" });
+  });
+
+  it("a failed message whose ledger receipt is still unknown is a check, not a replacement", async () => {
+    const f = fakeClient({ ledger: { key: "11111111-1111-4111-8111-111111111111", state: "unknown" }, messageRow: { id: ID, body: "b", status: "failed", metadata: { repSms: { receiptId: ID, finalRemainder: "r" } } } });
+    createClient.mockResolvedValue(f.client);
+    const ctx = await readRepSmsContext("prop-1", { sourceKind: "message", refId: ID });
+    expect(ctx.target?.disposition).toBe("check");
+    expect(f.rpc).toHaveBeenCalledWith("fn_get_rep_sms_delivery_target", { p_property_id: "prop-1", p_ledger_id: ID });
+  });
+
+  it("a failed message whose receipt cannot be read is forced to check", async () => {
+    const f = fakeClient({ ledger: null, messageRow: { id: ID, body: "b", status: "failed", metadata: { repSms: { receiptId: ID, finalRemainder: "r" } } } });
+    createClient.mockResolvedValue(f.client);
+    expect((await readRepSmsContext("prop-1", { sourceKind: "message", refId: ID })).target?.disposition).toBe("check");
+  });
+
+  it("the replacement key of a message can never be its own submission key", async () => {
+    const k = "22222222-2222-4222-8222-222222222222";
+    const f = fakeClient({ messageRow: { id: ID, body: "b", status: "failed", metadata: { repSms: { idempotencyKey: k, finalRemainder: "r" } } } });
+    createClient.mockResolvedValue(f.client);
+    expect((await readRepSmsContext("prop-1", { sourceKind: "message", refId: ID })).target?.submissionKey).toBe(k);
   });
 
   it("a foreign or malformed id comes back unavailable", async () => {

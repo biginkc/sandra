@@ -25,10 +25,9 @@ type LooseQuery = PromiseLike<{ data: unknown; count?: number | null }> & {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default async function NormaQueuePage({ searchParams }: { searchParams: Promise<{ request?: string | string[]; property?: string | string[] }> }) {
+export default async function NormaQueuePage({ searchParams }: { searchParams: Promise<{ request?: string | string[] }> }) {
   const params = await searchParams;
   const requestId = typeof params.request === "string" && UUID.test(params.request) ? params.request : null;
-  const reviewPropertyId = typeof params.property === "string" && UUID.test(params.property) ? params.property : null;
   const client = await createClient();
   const {
     data: { user },
@@ -54,11 +53,11 @@ export default async function NormaQueuePage({ searchParams }: { searchParams: P
     from("norma_call_requests").select("id", { count: "exact", head: true }).eq("status", "needs_review").limit(1),
   ]);
 
-  // ?request=<id> (or ?property=<id>, from My Leads Broken): the calls waiting for review that the link points at.
+  // ?request=<id> (from My Leads Broken): the one call waiting for review that the link points at.
   let reviewRows: NormaReviewRow[] = [];
-  if (requestId || reviewPropertyId) {
+  if (requestId) {
     let review = from("norma_call_requests").select("id, property_id, status, summary, outcome, updated_at").eq("status", "needs_review");
-    review = requestId ? review.eq("id", requestId) : review.eq("property_id", reviewPropertyId as string);
+    review = review.eq("id", requestId);
     const { data: reviewData } = await review.order("updated_at", { ascending: true }).limit(20);
     const requests = (reviewData ?? []) as Array<{ id: string; property_id: string; status: string; summary: string | null; outcome: string | null; updated_at: string }>;
     const reviewIds = [...new Set(requests.map((r) => r.property_id))];
@@ -87,7 +86,7 @@ export default async function NormaQueuePage({ searchParams }: { searchParams: P
 
   return <Page>
     <PageHeader title={NORMA_QUEUE_COPY.page.title} />
-    {(requestId || reviewPropertyId) && <NormaReviewCard rows={reviewRows} />}
+    {requestId && <NormaReviewCard rows={reviewRows} />}
     <NormaQueueTable rows={rows} todayCount={todayCount} dailyCap={config.dailyCap ?? 0} heldSlots={held ?? 0} />
   </Page>;
 }

@@ -24,6 +24,6 @@ describe("brokenTarget", () => {
     expect(messagesDeadLetterHref("dl-1", "p1")).toBe("/messages-v2?deadLetter=dl-1");
     expect(messagesDeadLetterHref(null, "p1")).toBe("/messages-v2?property=p1");
     expect(normaReviewHref("nr-1", "p1")).toBe("/norma/queue?request=nr-1");
-    expect(normaReviewHref(null, "p1")).toBe("/norma/queue?property=p1");
+    expect(normaReviewHref(null, "p1")).toBe("/norma/queue");
   });
 });

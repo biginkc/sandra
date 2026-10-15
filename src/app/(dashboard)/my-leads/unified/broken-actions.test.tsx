@@ -2,8 +2,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ load: vi.fn(), send: vi.fn(), acknowledge: vi.fn() }));
-vi.mock("../sms-actions", () => ({ loadRepSmsContext: mocks.load, sendRepSms: mocks.send, acknowledgeRepSmsSubmission: mocks.acknowledge }));
+const mocks = vi.hoisted(() => ({ load: vi.fn(), send: vi.fn(), acknowledge: vi.fn(), check: vi.fn() }));
+vi.mock("../sms-actions", () => ({ loadRepSmsContext: mocks.load, sendRepSms: mocks.send, acknowledgeRepSmsSubmission: mocks.acknowledge, checkRepSmsReceipt: mocks.check }));
 vi.mock("@/components/sequences/after-attempt-drip-picker", () => ({ AfterAttemptDripPicker: () => null }));
 
 import { queueRowFixture } from "../_components/call-next-test-support";
@@ -50,6 +50,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   window.localStorage.clear();
   mocks.send.mockResolvedValue({ ok: true, data: { outcome: { status: "sent", messageId: "m1", externalId: "e" } } });
+  mocks.check.mockResolvedValue({ ok: true, data: { state: "unknown", disposition: "check", reason: null, acknowledged: false } });
   mocks.acknowledge.mockResolvedValue({ ok: true, data: { ok: true, state: "accepted" } });
 });
 
@@ -99,7 +100,7 @@ describe("Broken fixes route through the existing composer workflows", () => {
     open.mockRestore();
   });
 
-  it("Review on a Norma item opens the Norma review surface by request id (by lead until the item carries one), never the lead page", async () => {
+  it("Review on a Norma item opens the Norma review surface by request id (the plain queue without one), never the lead page", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     mount(item("norma_needs_review", "review", "nr-3"));
     await clickFix();
@@ -109,7 +110,7 @@ describe("Broken fixes route through the existing composer workflows", () => {
     mount(item("norma_needs_review", "review", null));
     await userEvent.click(screen.getAllByTestId("work-row-toggle-b1").at(-1)!);
     await userEvent.click((await screen.findAllByTestId("work-row-broken-fix-0-b1")).at(-1)!);
-    expect(again).toHaveBeenLastCalledWith("/norma/queue?property=b1", "_blank", expect.any(String));
+    expect(again).toHaveBeenLastCalledWith("/norma/queue", "_blank", expect.any(String));
     again.mockRestore();
   });
 });
@@ -189,16 +190,16 @@ describe("the selected Broken record (refId) is the one resumed, resent or check
     expect(mocks.send).not.toHaveBeenCalled();
   });
 
-  it("unverified ledger receipt: Check status replays the saved request under its own key and acknowledges that receipt", async () => {
+  it("unverified ledger receipt: Check status is a read-only receipt check; it never calls sendRepSms", async () => {
     const key = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
     loadByTarget({ "led-9": { target: target({ refId: "led-9", disposition: "check", state: "unknown", submissionKey: key }) } });
     mount(item("text_status_unknown", "check_status", "led-9"));
     await clickFix();
     await screen.findByTestId("rep-sms-composer");
     await userEvent.click(await within(screen.getByTestId("rep-sms-composer")).findByRole("button", { name: "Check status" }));
-    await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: key })));
-    expect(mocks.send.mock.calls[0][0].replaceFailed).toBeUndefined();
-    await waitFor(() => expect(mocks.acknowledge).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: key, target: { sourceKind: "ledger", refId: "led-9" } })));
+    await waitFor(() => expect(mocks.check).toHaveBeenCalledWith({ propertyId: "b1", ledgerId: "led-9" }));
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.acknowledge).not.toHaveBeenCalled();
   });
 
   it("blocked: Review shows that item's block reason and offers no send", async () => {
@@ -216,5 +217,22 @@ describe("the selected Broken record (refId) is the one resumed, resent or check
     await clickFix();
     await userEvent.click(await screen.findByRole("button", { name: "Send resumed draft" }));
     await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ obligationId: "obl-2" })));
+  });
+});
+
+describe("composer per disposition", () => {
+  it.each([["check", "unknown"], ["review", "blocked"], ["resolved", "delivered"]] as const)("%s never offers Send text", async (disposition, state) => {
+    loadByTarget({ "led-d": { target: target({ refId: "led-d", disposition, state }) } });
+    mount(item("text_status_unknown", "check_status", "led-d"));
+    await clickFix();
+    await screen.findByTestId("rep-sms-composer");
+    expect(screen.queryByRole("button", { name: "Send text" })).toBeNull();
+  });
+
+  it("a failed message with a body and NO repSms metadata opens with that body in the editor", async () => {
+    loadByTarget({ "msg-p": { target: target({ sourceKind: "message", refId: "msg-p", state: "failed", submissionKey: null, composition: { remainder: "Typed by hand" }, body: "Typed by hand" }) } });
+    mount(item("text_not_sent", "resend", "msg-p"));
+    await clickFix();
+    await waitFor(() => expect(screen.getByLabelText("Editable message remainder")).toHaveValue("Typed by hand"));
   });
 });

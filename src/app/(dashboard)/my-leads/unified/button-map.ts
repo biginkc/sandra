@@ -96,9 +96,10 @@ export function brokenButton(item: BrokenItem, facts: Pick<WorkFacts, "hasPhone"
   return spec(`broken-${item.action}`, BROKEN_ACTION_LABELS[item.action], { type: "broken", item }, block);
 }
 
-/** Dismiss is offered only for broken items that carry a reference id. */
+/** Dismiss is offered only for broken items that carry a reference id. A Norma review is never dismissed here:
+ *  it clears through Norma's own Mark reviewed, not a rep_sms_failure_dismissed event. */
 export function dismissableBroken(facts: Pick<WorkFacts, "broken">): BrokenItem[] {
-  return facts.broken.filter((item) => item.refId !== null);
+  return facts.broken.filter((item) => item.refId !== null && item.kind !== "norma_needs_review");
 }
 
 /** Stage commands in the More menu, in design order, with the stages that offer each today. */

@@ -34,7 +34,7 @@ export function messagesDeadLetterHref(refId: string | null, propertyId: string)
   return `/messages-v2?${new URLSearchParams(refId ? { deadLetter: refId } : { property: propertyId }).toString()}`;
 }
 
-/** The Norma queue's review section opened on this request (or, until the classifier supplies its id, this lead's). */
-export function normaReviewHref(refId: string | null, propertyId: string): string {
-  return `/norma/queue?${new URLSearchParams(refId ? { request: refId } : { property: propertyId }).toString()}`;
+/** The Norma queue's review section opened on this request id; without one, the plain queue. */
+export function normaReviewHref(refId: string | null, _propertyId: string): string {
+  return refId ? `/norma/queue?${new URLSearchParams({ request: refId }).toString()}` : "/norma/queue";
 }
