@@ -620,7 +620,10 @@ async function resolveRepSmsInboundStamp(args: {
       p_org_id: args.orgId,
       p_inbound_message_id: supplied,
     });
-    if (result.error) return supplied;
+    if (result.error) {
+      console.warn(`[inbound-stamp] bind failed for ${args.target.kind} ${args.target.id}: ${result.error.message ?? "unknown"}`);
+      return supplied;
+    }
     if (typeof result.data !== "string") return supplied;
     // Stored wins, re-validated; an invalid stored value is dropped, never replaced
     // by a newer capture.
