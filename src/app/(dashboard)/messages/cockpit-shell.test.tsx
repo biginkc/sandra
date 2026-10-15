@@ -55,6 +55,7 @@ vi.mock("./actions", () => ({
   })),
 }));
 
+vi.mock("../leads/send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("../leads/actions", () => ({
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),

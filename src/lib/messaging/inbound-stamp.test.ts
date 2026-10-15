@@ -10,7 +10,7 @@ function client(result: { data: unknown; error?: unknown } | Error) {
   return { from: vi.fn(() => ({ select: () => ({ eq: () => ({ maybeSingle }) }) })), maybeSingle };
 }
 const row = (over: Record<string, unknown> = {}) => ({
-  direction: "inbound", org_id: "org-1", property_id: "prop-1", conversation_id: null, ...over,
+  direction: "inbound", org_id: "org-1", property_id: "prop-1", ...over,
 });
 
 describe("normalizeInboundMessageId", () => {
@@ -24,10 +24,6 @@ describe("normalizeInboundMessageId", () => {
 describe("resolveInboundStamp", () => {
   it("returns the id for an inbound message on the same org and property", async () => {
     expect(await resolveInboundStamp(client({ data: row() }), ID, scope)).toBe(ID);
-  });
-  it("accepts a same-conversation message on another property row", async () => {
-    const c = client({ data: row({ property_id: null, conversation_id: "conv-1" }) });
-    expect(await resolveInboundStamp(c, ID, { ...scope, conversationId: "conv-1" })).toBe(ID);
   });
   it("drops outbound, cross-org, cross-property, missing and errored lookups", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -63,6 +59,12 @@ describe("latestInboundMessageId", () => {
         { id: "mmm", direction: "outbound", created_at: "2026-10-14T12:00:00Z" },
       ]),
     ).toBe("aaa");
+  });
+  it("breaks identical timestamps by (created_at, id) regardless of input order", () => {
+    const a = { id: "aaa", direction: "inbound", created_at: "2026-10-14T10:00:00Z" };
+    const b = { id: "bbb", direction: "inbound", created_at: "2026-10-14T10:00:00Z" };
+    expect(latestInboundMessageId([a, b])).toBe("bbb");
+    expect(latestInboundMessageId([b, a])).toBe("bbb");
   });
   it("ignores non-sms channels and returns null when none", () => {
     expect(latestInboundMessageId([{ id: "c", direction: "inbound", channel: "call", created_at: "2026-10-14T10:00:00Z" }])).toBeNull();

@@ -11,7 +11,8 @@ import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
 
-import { sendSmsFromLead, loadLeadVars } from "../actions";
+import { loadLeadVars } from "../actions";
+import { sendSmsFromLeadStamped } from "../send-sms-stamped";
 
 type Props = {
   propertyId: string;
@@ -33,12 +34,12 @@ type Props = {
   onPendingChange?: (pending: boolean) => void;
   /** Newest inbound message currently shown in the thread; frozen while a draft is open. */
   inboundMessageId?: string | null;
-  sendAction?: (body: string, to: string | null, inboundMessageId?: string | null) => ReturnType<typeof sendSmsFromLead>;
+  sendAction?: (body: string, to: string | null, inboundMessageId?: string | null) => ReturnType<typeof sendSmsFromLeadStamped>;
 };
 
 /**
  * Inline reply box under the SMS thread. Sends via the existing
- * `sendSmsFromLead` server action — same TCPA + quiet-hours guardrails
+ * `sendSmsFromLeadStamped` server action (`sendSmsFromLead` plus the reply stamp) — same TCPA + quiet-hours guardrails
  * as the modal composer. Kept intentionally minimal: no from-number
  * picker here; it replies from the business number the seller most
  * recently texted. The modal composer handles explicit sender changes.
@@ -108,14 +109,13 @@ export function InlineReply({
     startTransition(async () => {
       try {
       const result = await callAction(
-        sendAction ? sendAction(submittedBody, effectiveToPhone, ...(submittedInbound ? [submittedInbound] : [])) : sendSmsFromLead(
+        sendAction ? sendAction(submittedBody, effectiveToPhone, submittedInbound) : sendSmsFromLeadStamped(
           propertyId,
           submittedBody,
           fromNumber,
           false,
           effectiveToPhone,
-          // Omitted entirely when absent so an unstamped send is the same call as before.
-          ...(submittedInbound ? [submittedInbound] : []),
+          submittedInbound,
         ),
         {
           fallbackMessage: "Send not confirmed",

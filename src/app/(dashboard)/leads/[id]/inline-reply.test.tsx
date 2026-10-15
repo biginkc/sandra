@@ -11,6 +11,7 @@ vi.mock("../actions", () => ({
   loadLeadVars: vi.fn(),
   sendSmsFromLead: vi.fn(),
 }));
+vi.mock("../send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
@@ -19,7 +20,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
-import { sendSmsFromLead } from "../actions";
+import { sendSmsFromLeadStamped as sendSmsFromLead } from "../send-sms-stamped";
 import { InlineReply } from "./inline-reply";
 
 describe("<InlineReply /> disabled explanations", () => {
@@ -136,6 +137,7 @@ describe("<InlineReply /> disabled explanations", () => {
         null,
         false,
         "+18165550123",
+        null,
       );
     });
     expect(composer).toHaveValue("");
@@ -307,6 +309,7 @@ describe("<InlineReply /> disabled explanations", () => {
       null,
       false,
       "+18165550123",
+      null,
     );
     expect(composer).toBeDisabled();
     expect(sendButton).toBeDisabled();

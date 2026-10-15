@@ -4,7 +4,7 @@
  * `metadata.inbound_message_id` (same key the AI responder writes).
  *
  * The browser supplies the id, so it is never trusted: it must reference an
- * inbound message in the same org and the same property (or conversation).
+ * inbound message in the same org and the same property.
  * Anything else is dropped silently (logged once) and the send proceeds
  * unstamped. Ordering is never derived from the id itself.
  */
@@ -14,7 +14,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export type InboundStampScope = {
   orgId: string;
   propertyId: string;
-  conversationId?: string | null;
 };
 
 export function normalizeInboundMessageId(value: unknown): string | null {
@@ -27,7 +26,6 @@ type StampRow = {
   direction: string | null;
   org_id: string | null;
   property_id: string | null;
-  conversation_id: string | null;
 };
 
 /** Returns the id when valid for this send, otherwise null. Never throws. */
@@ -48,15 +46,17 @@ export async function resolveInboundStamp(
   try {
     const { data, error } = await client
       .from("messages")
-      .select("direction, org_id, property_id, conversation_id")
+      .select("direction, org_id, property_id")
       .eq("id", id)
       .maybeSingle();
     const row = data as StampRow | null;
-    const sameThread =
-      row !== null &&
-      ((row.property_id !== null && row.property_id === scope.propertyId) ||
-        (Boolean(scope.conversationId) && row.conversation_id === scope.conversationId));
-    if (error || !row || row.direction !== "inbound" || row.org_id !== scope.orgId || !sameThread) {
+    if (
+      error ||
+      !row ||
+      row.direction !== "inbound" ||
+      row.org_id !== scope.orgId ||
+      row.property_id !== scope.propertyId
+    ) {
       console.warn("[inbound-stamp] dropped: inbound_message_id failed validation");
       return null;
     }
@@ -68,8 +68,10 @@ export async function resolveInboundStamp(
 }
 
 /**
- * Newest inbound SMS id in a thread, by `created_at` (ties keep the later list
- * position). Ids are never compared with each other.
+ * Newest inbound SMS id in a thread: highest `created_at`, ties broken by the
+ * larger id so the result is the same for any input order. The id is only a
+ * deterministic tie-break between rows with identical timestamps, matching the
+ * `(created_at, id)` order the classifier uses.
  */
 export function latestInboundMessageId(
   messages: ReadonlyArray<{ id: string; direction: string | null; channel?: string | null; created_at: string | null }>,
@@ -80,7 +82,7 @@ export function latestInboundMessageId(
     if (message.channel !== undefined && message.channel !== null && message.channel !== "sms") continue;
     const at = message.created_at ? Date.parse(message.created_at) : NaN;
     if (!Number.isFinite(at)) continue;
-    if (!best || at >= best.at) best = { id: message.id, at };
+    if (!best || at > best.at || (at === best.at && message.id > best.id)) best = { id: message.id, at };
   }
   return best?.id ?? null;
 }

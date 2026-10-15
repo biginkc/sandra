@@ -6,7 +6,7 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 import { DialpadCallContext } from "@/components/dialpad/dialpad-call-context";
 import { InboxDetail } from "./inbox-detail";
 import { outboundStatusClearsDripReply, type InboxDetail as InboxDetailData } from "./inbox-detail-data";
-import { sendSmsFromLead } from "../leads/actions";
+import { sendSmsFromLeadStamped as sendSmsFromLead } from "../leads/send-sms-stamped";
 import type { Database } from "@/lib/supabase/types";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
@@ -92,6 +92,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
 // they pull in next/server's `after` and the Supabase server client.
+vi.mock("../leads/send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("../leads/actions", () => ({
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),
@@ -495,6 +496,7 @@ describe("<InboxDetail />", () => {
         "+18162804181",
         false,
         "+15550000002",
+        null,
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
@@ -954,6 +956,7 @@ describe("<InboxDetail />", () => {
           fromAddress,
           false,
           toAddress,
+          null,
         );
       });
     },

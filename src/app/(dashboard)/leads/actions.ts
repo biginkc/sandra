@@ -27,7 +27,6 @@ import {
   partitionPropertyDncLocks,
 } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
-import { resolveInboundStamp } from "@/lib/messaging/inbound-stamp";
 import {
   LEAD_EVENT_TYPES,
   recordLeadEvent,
@@ -2122,7 +2121,6 @@ export async function sendSmsFromLead(
   from?: string | null,
   queueOnly?: boolean,
   to?: string | null,
-  inboundMessageId?: string | null,
 ): Promise<Result<SendSmsPayload>> {
   const trimmed = body.trim();
   if (!trimmed) {
@@ -2151,7 +2149,7 @@ export async function sendSmsFromLead(
       const context = await readRepSmsContext(propertyId);
       const sender = from ? context.senders.find(s => s.number === from) : context.senders.find(s => s.isDefault);
       if (!sender) throw new Error("Choose a texting number assigned to you.");
-      return ok({ outcome: await dispatchRepSms({ propertyId, assignmentId: sender.id, body: trimmed, to, inboundMessageId }) });
+      return ok({ outcome: await dispatchRepSms({ propertyId, assignmentId: sender.id, body: trimmed, to }) });
     }
     const supabase = await createClient();
     await assertNotTrainingTarget(supabase, { propertyId });
@@ -2160,7 +2158,7 @@ export async function sendSmsFromLead(
 
     const { data: property, error } = await supabase
       .from("properties")
-      .select("id, org_id, homeowner_contact_id")
+      .select("id, homeowner_contact_id")
       .eq("id", propertyId)
       .maybeSingle();
     if (error) {
@@ -2185,12 +2183,6 @@ export async function sendSmsFromLead(
       };
     }
 
-    const inboundStamp = inboundMessageId
-      ? await resolveInboundStamp(supabase, inboundMessageId, {
-          orgId: property.org_id,
-          propertyId,
-        })
-      : null;
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
       contactId: property.homeowner_contact_id,
@@ -2200,7 +2192,6 @@ export async function sendSmsFromLead(
       to: to ?? undefined,
       queueOnly: queueOnly ?? false,
       requireStickyFrom: true,
-      ...(inboundStamp ? { metadata: { inbound_message_id: inboundStamp } } : {}),
     });
     return ok({ outcome });
   } catch (e) {
