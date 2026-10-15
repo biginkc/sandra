@@ -58,7 +58,6 @@ const GROUPS: RuleGroup[] = [
 ];
 
 const HOT_DETAIL = "Sandra marks this seller as a lead for a person to follow up. She never texts them back on her own.";
-const CLOSE_DETAIL = "When this is on, Sandra sends the reply you approved for this situation and closes out the property so it stops showing up.";
 
 /**
  * Nine-question rows. Details reuse the approved sentences above; the three marked PLACEHOLDER are new.
@@ -67,8 +66,10 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
   open_to_selling: HOT_DETAIL,
   talked_price: HOT_DETAIL,
   maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
-  not_interested: CLOSE_DETAIL,
-  wrong_person: CLOSE_DETAIL,
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  not_interested: "When this is on, Sandra sends the approved reply and starts the Not interested drip.",
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  wrong_person: "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.",
   // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   asked_who: "Sandra answers who is texting and why.",
   // PLACEHOLDER — needs Jarrad's verbatim approval before merge
@@ -84,7 +85,16 @@ const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | 
   { heading: "Waits for a person", group: "person", ids: ["asked_stop", "hostile"] },
 ];
 
-function NineRules() {
+/** Nine-question answer -> the per-label switch that still gates it. */
+const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
+  open_to_selling: "new_lead",
+  maybe_later: "nurture",
+  not_interested: "not_interested",
+  wrong_person: "wrong_number",
+  asked_stop: "opted_out",
+};
+
+function NineRules({ renderState }: { renderState: (outcome: string | undefined) => React.ReactNode }) {
   return (
     <div data-testid="nine-rules" className="flex flex-col gap-2">
       {NINE_GROUPS.map((g) => (
@@ -93,7 +103,7 @@ function NineRules() {
           {g.ids
             .filter((id) => NINE_ANSWER_GROUP[id] === g.group)
             .map((id) => (
-              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{null}</Row>
+              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{renderState(NINE_BADGE[id])}</Row>
             ))}
         </section>
       ))}
@@ -185,7 +195,21 @@ export function RulesPanel({
                 {pageText(badgesError)}
               </p>
             )}
-            {classifierEngine === "nine_questions" && <NineRules />}
+            {classifierEngine === "nine_questions" && <NineRules
+                renderState={(outcome) => {
+                  const badge = outcome ? byOutcome.get(outcome) : undefined;
+                  if (!outcome) return null;
+                  const st = stateText(badge);
+                  return (
+                    <>
+                      <span className={cn("rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap", TONE[st.tone])}>{st.text}</span>
+                      {isOwner && badge && isEditableBadge(badge) && (
+                        <LabelRuleEditor orgId={orgId} badge={badge} text={`${badge.label} [${formatModeBadge(badge)}]`} trigger="button" />
+                      )}
+                    </>
+                  );
+                }}
+              />}
             {classifierEngine !== "nine_questions" && GROUPS.map((group) => (
               <section key={group.heading} aria-label={group.heading} className="flex flex-col gap-2">
                 <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group.heading}</h3>
