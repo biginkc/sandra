@@ -216,7 +216,8 @@ describe("I3 no locked property renders; every hold has exactly one property", (
     const page = await loadMessagesV2Page(
       db(
         { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(9), t(2))] },
-        { fail: (tb, _n, ops) => tb === "properties" && ops.some((o) => o.k === "eq" && "col" in o && o.col === "is_dnc_locked" && o.v === true) },
+        // the positive verification read (by id, not the flagged-source read)
+        { fail: (tb, _n, ops) => tb === "properties" && ops.some((o) => o.k === "in" && o.col === "id") && !ops.some((o) => "col" in o && o.col === "needs_human_attention") },
       ).client,
       "org",
     );
@@ -243,7 +244,7 @@ describe("I4 every list query pages by keyset to exhaustion", () => {
 
   it("decisions with tied created_at are neither duplicated nor dropped", async () => {
     const decisions = Array.from({ length: 1200 }, (_, i) => decision(i, u(i), t(1)));
-    const list = await eligible({ jev_lead_decisions: decisions }, { cap: 500 });
+    const list = await eligible({ jev_lead_decisions: decisions, properties: decisions.map((_, i) => plainProp(i)) }, { cap: 500 });
     expect(list.holds).toHaveLength(1200);
     expect(new Set(list.holds.map((h) => h.id)).size).toBe(1200);
   });
@@ -813,7 +814,7 @@ describe("scale: one light build per request, full steps only for shown runs, ch
     expect(live.log.filter((l) => l.table === "pipeline_run_steps").every((l) => l.select === "id, run_id, seq, created_at")).toBe(true);
   });
 
-  it("a scoped build keeps the whole-org unverified count and still lock-checks every candidate of an in-scope draft", async () => {
+  it("a scoped build reports no count (null) and still lock-checks every candidate of an in-scope draft", async () => {
     const tables: Record<string, Row[]> = {
       properties: [flagged(1, t(1)), flagged(2, t(2)), lockedProp(9), plainProp(3)],
       // ambiguous (two properties) -> unverified; on a locked property -> hidden, not counted; to hold 2 -> out of scope
@@ -826,7 +827,7 @@ describe("scale: one light build per request, full steps only for shown runs, ch
     };
     const full = await eligible(tables);
     const scoped = await loadEligibleHolds(db(tables).client, "org", { propertyIds: [u(1)] });
-    expect(scoped.ok && scoped.unverified).toBe(full.unverified);
+    expect(scoped.ok && scoped.unverified).toBeNull();
     expect(full.unverified).toBe(1);
     expect(scoped.ok && scoped.holds.map((h) => h.id)).toEqual([u(1)]);
     expect(scoped.ok && scoped.holds[0].draft).toBeUndefined(); // draft 2 also resolves to locked 9: never shown
@@ -848,5 +849,88 @@ describe("the test fake refuses forms it does not implement", () => {
     expect(() => q.not("a", "eq", 1)).toThrow(/unsupported/);
     expect(() => q.not("a", "is", "x")).toThrow(/unsupported/);
     await expect(client.rpc("nope", {})).rejects.toThrow(/not registered/);
+  });
+});
+
+describe("Astra: an unresolved reference makes a draft unverifiable everywhere (list, paging, re-check, Send/Edit)", () => {
+  const review = (n: number, property: string): Row => ({
+    id: u(n, 8), org_id: "org", status: "pending", property_id: property, conversation_id: null, source_inbound_message_id: null, disposition: "x", created_at: t(5),
+  });
+  const cases: Array<[string, Row, Row[]]> = [
+    ["a run_id with no row", draft(1, { property_id: u(3), run_id: u(77, 5) }), []],
+    ["a run_id on ANOTHER org's run", draft(1, { property_id: u(3), run_id: u(77, 5) }), [runRow(77, { org_id: "other", property_id: u(3) })]],
+    ["an inbound_message_id with no row", draft(1, { property_id: u(3), inbound_message_id: u(77, 7) }), []],
+  ];
+  for (const [name, d, runs] of cases) {
+    it(`${name}: hidden + counted, missing on paging, not eligible on re-check, Send refused`, async () => {
+      const tables: Record<string, Row[]> = { properties: [plainProp(3)], ai_reply_drafts: [d], pipeline_runs: runs };
+      const list = await eligible(tables);
+      expect(list.holds).toHaveLength(0);
+      expect(list.unverified).toBe(1);
+      expect((await loadHoldsByIds(db(tables).client, "org", [u(3)]))!.missing).toEqual([u(3)]);
+      expect((await liveStateOf(db(tables).client, "org", [u(3)]))![0].eligible).toBe(false);
+      expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(3))).toBe("stale");
+    });
+  }
+
+  it("a pending review or decision on an absent or another org's property: hidden + counted; never eligible", async () => {
+    for (const props of [[], [{ id: u(5), org_id: "other", needs_human_attention: false, is_dnc_locked: false }]] as Row[][]) {
+      const tables: Record<string, Row[]> = { properties: props, ai_disposition_reviews: [review(1, u(5))], jev_lead_decisions: [decision(2, u(5), t(3))] };
+      const list = await eligible(tables);
+      expect(list.holds).toHaveLength(0);
+      expect(list.unverified).toBe(2);
+      expect((await loadHoldsByIds(db(tables).client, "org", [u(5)]))!.missing).toEqual([u(5)]);
+      expect((await liveStateOf(db(tables).client, "org", [u(5)]))![0].eligible).toBe(false);
+    }
+  });
+
+  it("a property whose lock state is unreadable (null) is unverifiable, and Send refuses", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [{ id: u(6), org_id: "org", needs_human_attention: false, is_dnc_locked: null }],
+      ai_reply_drafts: [draft(1, { property_id: u(6), inbound_message_id: u(1, 7) })],
+      messages: [message(1, { property_id: u(6) })],
+    };
+    expect((await eligible(tables)).unverified).toBe(1);
+    expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(6))).toBe("stale");
+  });
+});
+
+describe("Astra: revalidation and Show older cost follows the requested ids, not the backlog", () => {
+  const world = (n: number) => {
+    const tables: Record<string, Row[]> = { properties: [], pipeline_runs: [], pipeline_run_steps: [], ai_reply_drafts: [], messages: [] };
+    for (let i = 1; i <= n; i++) {
+      tables.properties.push(flagged(i, t(i)));
+      tables.pipeline_runs.push(runRow(i, { property_id: u(i), started_at: t(i) }));
+      tables.pipeline_run_steps.push({ id: `${u(i, 5)}-s1`, run_id: u(i, 5), org_id: "org", seq: 1, kind: "hold", name: "held", result: "held", detail: {}, created_at: t(i) });
+      tables.ai_reply_drafts.push(draft(i, { property_id: u(i), inbound_message_id: u(i, 6), created_at: t(i) }));
+      tables.messages.push(message(i, { id: u(i, 6), property_id: u(i) }));
+    }
+    return tables;
+  };
+  const tableRequests = (requests: Map<string, number>) => [...requests.values()].reduce((a, b) => a + b, 0);
+
+  it("one-card re-check and a one-card Show older: the same request count at 150 and at 10,000 holds", async () => {
+    const counts: Record<string, number[]> = { live: [], older: [] };
+    for (const n of [150, 10_000]) {
+      const tables = world(n);
+      const live = db(tables);
+      expect((await liveStateOf(live.client, "org", [u(7)]))![0].eligible).toBe(true);
+      counts.live.push(tableRequests(live.requests));
+      const older = db(tables);
+      expect((await loadHoldsByIds(older.client, "org", [u(7)]))!.holds).toHaveLength(1);
+      counts.older.push(tableRequests(older.requests));
+    }
+    expect(counts.live[0]).toBe(counts.live[1]);
+    expect(counts.older[0]).toBe(counts.older[1]);
+    expect(counts.live[1]).toBeLessThanOrEqual(30);
+    expect(counts.older[1]).toBeLessThanOrEqual(60);
+  });
+
+  it("no scoped read touches a property, draft, run or step outside the requested ids' links", async () => {
+    const tables = world(150);
+    const { client, log } = db(tables);
+    await liveStateOf(client, "org", [u(7), u(9)]);
+    const ok = new Set([u(7), u(9), u(7, 4), u(9, 4), u(7, 5), u(9, 5), u(7, 6), u(9, 6)]);
+    for (const l of log) for (const o of l.ops) if (o.k === "in") for (const v of o.v as string[]) expect(ok.has(v)).toBe(true);
   });
 });

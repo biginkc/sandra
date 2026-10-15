@@ -86,7 +86,7 @@ export async function loadMessagesV2Page(
     holds: keep.holds,
     holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
     snapshot: encodeSnapshot(snapshot),
-    unverified: list.unverified,
+    unverified: list.unverified ?? 0,
     missing: keep.missing,
     flagReasons: snapshotFlagReasons(snapshot),
     error: null,
@@ -105,7 +105,7 @@ export async function loadHoldsByIds(
 ): Promise<{
   holds: OpenHold<RunWithSteps>[];
   missing: string[];
-  unverified: number;
+  unverified: number | null;
   contextErrors: string[];
   /** The requested holds' pins as of this load (same source and shape as the page snapshot). */
   snapshot: WaitingSnapshot;

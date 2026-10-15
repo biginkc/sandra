@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { loadHeldPropertyIds, loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadHeldPropertyIds, loadMessagesV2Data } from "./alert-loader";
 import { loadRunLabels } from "@/app/(dashboard)/messages-v2/labels";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
