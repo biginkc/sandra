@@ -38,12 +38,17 @@ export type SendInput = {
   latencyMs: number;
   /** Make the bind RPC fail (the lane that drops the function inside a transaction). */
   bindFails?: boolean;
+  /** The caller already holds an open transaction (the rolled-back bind-failure lane); otherwise the driver opens and commits its own. */
+  inTransaction?: boolean;
 };
 export type SendDriver = { name: string; send(input: SendInput): Promise<{ messageId: string; stamped: boolean; unresolved: boolean }> };
 
 export const sqlSendDriver: SendDriver = {
   name: "sql-protocol",
-  async send({ db, ctx, property, contact, inboundMessageId, latencyMs }) {
+  async send({ db, ctx, property, contact, inboundMessageId, latencyMs, inTransaction }) {
+    // Reserve, bind and write the pending message in one short transaction (a SAVEPOINT needs one), committed BEFORE the provider wait,
+    // exactly like the app: the stamp is durable before the seller's next reply can race it.
+    if (!inTransaction) await db.query("begin");
     const ledger = randomUUID();
     await db.query(
       `insert into public.rep_sms_delivery_ledger(id,org_id,actor_user_id,submission_key,property_id,contact_id,sender_assignment_id,provider,provider_account_id,provider_sender_id,from_number,to_number,body,state,claim_token)
@@ -73,6 +78,7 @@ export const sqlSendDriver: SendDriver = {
       `insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata)
        values ($1,$2,'sms','outbound','On our way','pending',$3,$4,clock_timestamp(),$5)`,
       [messageId, ctx.org, property, contact, JSON.stringify(meta)]);
+    if (!inTransaction) await db.query("commit");
     await sleep(latencyMs); // the fake provider "takes" this long to accept
     await db.query("update public.messages set status='sent', sent_at=clock_timestamp() where id=$1", [messageId]);
     await db.query("update public.rep_sms_delivery_ledger set state='accepted', message_id=$2, updated_at=clock_timestamp() where id=$1", [ledger, messageId]);
@@ -111,7 +117,7 @@ export async function laneBindFailure(url: string, reps: number, seed: number, d
         const x = mat.messageIds.get(lead.key)!.get("x")!;
         await db.query("alter function public.fn_bind_rep_sms_inbound_stamp(text,uuid,uuid,uuid) rename to fn_bind_rep_sms_inbound_stamp_s1_off");
         await db.query("set local session_replication_role='replica'");
-        const sent = await driver.send({ db, ctx, property, contact, inboundMessageId: x, latencyMs: 0, bindFails: true });
+        const sent = await driver.send({ db, ctx, property, contact, inboundMessageId: x, latencyMs: 0, bindFails: true, inTransaction: true });
         const at = new Date(Date.now() + 5 * SEC);
         const row = (await classify(db, ctx, at)).get(property)!;
         const meta = (await db.query("select metadata from public.messages where id=$1", [sent.messageId])).rows[0].metadata as Json;
@@ -271,7 +277,9 @@ export async function preflightCommitLanes(url: string): Promise<string | null> 
     const have = await c.query("select to_regprocedure('public.my_leads_work_classified(uuid,uuid,timestamptz)') as f");
     if (!have.rows[0].f) return "the classifier migration (20261015010000) is not applied to this database; the committed race lanes need it applied";
     const counts = (await c.query("select count(*)::int as properties, count(*) filter (where address not like $1)::int as foreign from public.properties", [`${HARNESS_ADDRESS_PREFIX}%`])).rows[0];
-    assertOnlyHarnessLeads(counts);
+    // The CI provisioner's disposable database (E2E_DISPOSABLE_DATABASE=1, set only by scripts/provision-e2e-local-database.mjs on a GitHub
+    // runner) is shared by earlier steps; there the exact footprint check (race:cleanup / the dispatch suite) is the guarantee instead.
+    if (process.env.E2E_DISPOSABLE_DATABASE !== "1") assertOnlyHarnessLeads(counts);
     return null;
   } finally {
     await c.end();
@@ -300,6 +308,7 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
       const latencyMs = rng.int(timing.latencyMs[0], timing.latencyMs[1]), yDelay = rng.int(timing.yDelayMs[0], timing.yDelayMs[1]);
       let y = "";
       let sentId = "";
+      let sentInfo = { stamped: false, unresolved: false };
       try {
         const send = driver.send({ db: b, ctx, property, contact, inboundMessageId: refs.get("x")!, latencyMs });
         const reply = (async () => {
@@ -309,6 +318,7 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
         })();
         const [sent] = await Promise.all([send, reply]);
         sentId = sent.messageId;
+        sentInfo = { stamped: sent.stamped, unresolved: sent.unresolved };
       } finally {
         await b.end(); await a.end();
       }
@@ -319,9 +329,12 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
       const row = (await classify(admin, ctx, new Date(Date.now() + 5 * SEC))).get(property)!;
       lane.runs += 1;
       const latest = row.facts.latestInbound;
-      if (!(row.row_no === "5" && latest?.messageId === y && latest?.handled === false)) {
+      // The positive lane must really exercise the stamp: bound to X, not unresolved, persisted on the message.
+      const stampedRow = (await admin.query("select metadata from public.messages where id=$1", [sentId])).rows[0]?.metadata;
+      const stampOk = driver.name.includes("mutation") || (sentInfo.stamped && !sentInfo.unresolved && stampedRow?.inbound_message_id === refs.get("x") && !stampedRow?.inbound_stamp_unresolved);
+      if (!stampOk || !(row.row_no === "5" && latest?.messageId === y && latest?.handled === false)) {
         lane.failures += 1;
-        lane.samples.push({ rep: n, latencyMs, yDelay, got: cell(row), latestInbound: latest, expected: "row 5, latest inbound = Y, handled=false" });
+        lane.samples.push({ rep: n, latencyMs, yDelay, got: cell(row), latestInbound: latest, stamp: { ...sentInfo, persisted: stampedRow }, expected: "stamp bound to X; row 5, latest inbound = Y, handled=false" });
       }
     }
   } finally {

@@ -115,6 +115,12 @@ export function summarizeFamily(run: FamilyRun, samplesPerKind = 3): FamilyRepor
   };
 }
 
+/** A scale size counts only if it has timing samples and every one is finite. */
+function measured(x: ScaleSize): boolean {
+  const stats = Object.entries(x.timings).filter(([k]) => !k.startsWith("projection:")).map(([, v]) => v);
+  return stats.length > 0 && stats.every((v) => v.n > 0 && Number.isFinite(v.p95) && Number.isFinite(v.p50)) && Number.isFinite(x.worstP95Ms);
+}
+
 export function buildReport(input: {
   mode: "full" | "smoke"; seed: number; repeats: number; sha: string; database: string; startedAt: string;
   runs: FamilyRun[]; lanes: LaneResult[]; scale: ScaleSize[];
@@ -139,11 +145,15 @@ export function buildReport(input: {
   for (const size of [...new Set([400, 2000, ...input.scale.map((y) => y.leads)])].sort((a, b) => a - b)) {
     const x = input.scale.find((y) => y.leads === size);
     criteria.push({ id: `p95_${size}`, label: `scale p95 within ${P95_BUDGET_MS} ms at ${size} leads`, value: x ? x.worstP95Ms : null, limit: P95_BUDGET_MS,
-      pass: x ? x.worstP95Ms < P95_BUDGET_MS : input.mode === "smoke", evaluated: !!x });
+      pass: x ? measured(x) && x.worstP95Ms < P95_BUDGET_MS : input.mode === "smoke", evaluated: !!x,
+      note: x && !measured(x) ? "no usable timing samples (empty or non-finite): fails" : undefined });
   }
   const errors = families.reduce((a, f) => a + f.errors.length, 0);
   criteria.push({ id: "errors", label: "worlds that failed to run (setup or SQL errors)", value: errors, limit: 0, pass: errors === 0, evaluated: true });
   const fullRunNeeds: string[] = [];
+  // Zero work never passes: every family that ran must have executed worlds and checks, every lane that is not skipped must have runs.
+  for (const f of families) if (f.worlds === 0 || f.checks === 0) fullRunNeeds.push(`family ${f.family} executed ${f.worlds} worlds / ${f.checks} checks`);
+  for (const l of input.lanes) if (!l.skipped && l.runs === 0) fullRunNeeds.push(`lane ${l.id} executed 0 runs`);
   if (input.mode === "full") {
     if (families.length < 31) fullRunNeeds.push(`only ${families.length} of 31 families ran`);
     if (input.scale.length < 2) fullRunNeeds.push("the scale lane did not run at both 400 and 2,000 leads");

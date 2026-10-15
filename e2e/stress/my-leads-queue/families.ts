@@ -76,6 +76,9 @@ export const FAMILIES: readonly FamilyDef[] = [
     k.lead("never", { stage: "not_contacted", attempts: [], assignedAt: k.now - k.rng.int(0, 2 * DAY) }),
     k.lead("called_since", { stage: "not_contacted", attempts: [k.attempt(k.j(k.now - HOUR))], assignedAt: k.now - 2 * DAY }),
   ] },
+  // Placement-only: the "first call overdue" suffix comes from the existing episode working-hours deadline (design row 3 "the existing
+  // warning"), which this model does not re-derive. The family asserts that overdue new leads stay Your move · New lead; the headline
+  // suffix is out of scope (noted in the PR).
   { id: "first_call_overdue", title: "first call overdue", build: (k) => [
     k.lead("overdue", { stage: "not_contacted", attempts: [], assignedAt: k.j(k.now - pick(k, [4 * HOUR, DAY, 3 * DAY, 9 * DAY]), 5 * MIN) }),
   ] },

@@ -164,14 +164,20 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     if (read.first.total !== read.ids.length) add("count_row", null, `${tab}/${chip ?? "all"}: total ${read.first.total}`, `${read.ids.length} rows returned`);
     if (read.first.total !== expectIds.size) add("count_row", null, `${tab}/${chip ?? "all"}: oracle count ${expectIds.size}`, `total ${read.first.total}`, legacyExplains(`${tab}|${chip ?? ""}`, read.first.total));
     if (chip === null && tab === "all") {
-      const tc = read.first.tabCounts as Record<string, number>;
+      const tc = (read.first.tabCounts ?? {}) as Record<string, number>;
       const exp = { needs_attention: views.get("needs_attention|")?.length ?? 0, waiting: views.get("waiting|")?.length ?? 0, all: world.leads.length };
       checks += 1;
       for (const k of Object.keys(exp) as Array<keyof typeof exp>) if (Number(tc[k]) !== exp[k]) add("count_row", null, `tabCounts.${k}: ${exp[k]}`, tc[k], legacyExplains(`${k}|`, Number(tc[k])));
-      const cc = read.first.chipCounts as Record<string, number>;
-      for (const [reason, n] of Object.entries(cc)) {
+      // The full map, both directions: a reason the oracle populates must be present, and the SQL may not invent one.
+      const cc = (read.first.chipCounts ?? null) as Record<string, number> | null;
+      if (!cc || typeof cc !== "object") add("count_row", null, "chipCounts map present", cc);
+      const expectedReasons = new Set([...placements.values()].map((p) => p.reason));
+      for (const reason of new Set([...expectedReasons, ...Object.keys(cc ?? {})])) {
+        checks += 1;
         const e = views.get(`all|${reason}`)?.length ?? 0;
-        if (Number(n) !== e) add("count_row", null, `chipCounts.${reason}: ${e}`, n, legacyExplains(`all|${reason}`, Number(n)));
+        const got = cc && reason in cc ? Number(cc[reason]) : undefined;
+        if (got === undefined) add("count_row", null, `chipCounts.${reason}: ${e}`, "missing key", legacyExplains(`all|${reason}`, 0));
+        else if (got !== e) add("count_row", null, `chipCounts.${reason}: ${e}`, got, legacyExplains(`all|${reason}`, got));
       }
     }
     // within-chip order (design 2 / 3): consecutive rows whose oracle key is known must be non-decreasing
@@ -196,7 +202,12 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
   for (const l of world.leads) byStage.set(l.stage, (byStage.get(l.stage) ?? 0) + 1);
   const sc = all.first.stageCounts as Record<string, number>;
   checks += 1;
-  for (const [stage, n] of byStage) if (Number(sc[stage] ?? 0) !== n) add("count_row", null, `stageCounts.${stage}: ${n}`, sc[stage] ?? 0);
+  if (!sc || typeof sc !== "object") add("count_row", null, "stageCounts map present", sc);
+  for (const stage of new Set([...byStage.keys(), ...Object.keys(sc ?? {})])) {
+    const n = byStage.get(stage as never) ?? 0;
+    const got = sc && stage in sc ? Number(sc[stage]) : undefined;
+    if (got !== n) add("count_row", null, `stageCounts.${stage}: ${n}`, got ?? "missing key");
+  }
   for (const stage of byStage.keys()) {
     const page = await reader.page("all", null, 1, 50, stage);
     checks += 1;

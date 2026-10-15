@@ -14,12 +14,13 @@ function parse(argv: string[]): StressOptions | "list" {
   const arg = (name: string) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
   if (argv.includes("--list")) return "list";
   const base = argv.includes("--smoke") ? SMOKE_DEFAULTS : FULL_DEFAULTS;
-  const num = (name: string, fallback: number) => { const v = arg(name); if (v === undefined) return fallback; const n = Number(v); if (!Number.isInteger(n) || n < 0) throw new Error(`--${name} must be a non-negative integer`); return n; };
+  // Counts that size the work must be positive: a zero-work run must never be able to PASS.
+  const num = (name: string, fallback: number, min = 0) => { const v = arg(name); if (v === undefined) return fallback; const n = Number(v); if (!Number.isInteger(n) || n < min) throw new Error(`--${name} must be an integer >= ${min}`); return n; };
   const lanes = arg("lanes")?.split(",") as StressOptions["lanes"] | undefined;
   for (const l of lanes ?? []) if (!["oracle", "refresh", "races", "scale"].includes(l)) throw new Error(`unknown lane ${l}`);
   return {
     ...base,
-    repeats: num("repeats", base.repeats), seed: num("seed", base.seed), raceReps: num("race-reps", base.raceReps), scaleSamples: num("scale-samples", base.scaleSamples),
+    repeats: num("repeats", base.repeats, 1), seed: num("seed", base.seed), raceReps: num("race-reps", base.raceReps, 1), scaleSamples: num("scale-samples", base.scaleSamples, 1),
     scaleSizes: arg("scale-sizes")?.split(",").map(Number) ?? base.scaleSizes, families: arg("families")?.split(",") ?? base.families, lanes: lanes ?? base.lanes,
     outDir: arg("out") ? path.resolve(arg("out")!) : base.outDir, dispatchLanesFile: arg("dispatch-lanes") ? path.resolve(arg("dispatch-lanes")!) : null, log: (l) => console.log(l),
   };

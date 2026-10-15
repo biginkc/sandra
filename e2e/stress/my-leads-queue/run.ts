@@ -74,6 +74,9 @@ export async function runStress(opts: StressOptions, env: Record<string, string 
     if (file.sha !== head) problems.push(`written at ${file.sha ?? "unknown"}, not ${head}`);
     if (opts.mode === "full" && (file.reps ?? 0) < opts.raceReps) problems.push(`${file.reps ?? 0} reps, fewer than --race-reps ${opts.raceReps}`);
     for (const id of ["race:dispatch_stamped_send_vs_inbound", "race:dispatch_bind_failure"]) if (!ids.has(id)) problems.push(`missing ${id}`);
+    // executed reps, not the requested number: a lane that threw early has fewer runs
+    for (const l of file.lanes ?? []) if (!l.skipped && l.runs < Math.min(file.reps ?? 0, l.id === "race:dispatch_bind_failure" ? 20 : Infinity)) problems.push(`${l.id} executed ${l.runs} of ${file.reps} reps`);
+    if ((file.reps ?? 0) < 1) problems.push("0 reps");
     if (problems.length) lanes.push({ id: "race:dispatch_file", title: "dispatchRepSms lane results file", runs: 0, failures: 1, samples: problems });
     lanes.push(...(file.lanes ?? []));
   }

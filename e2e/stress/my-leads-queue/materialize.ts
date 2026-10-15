@@ -258,8 +258,8 @@ async function insertLedger(db: Client, ctx: OrgCtx, member: string, property: s
 
 /** Row counts the committed lanes must leave exactly as they found them. */
 export async function footprint(db: Client): Promise<Record<string, number>> {
-  const tables = ["auth.users", "public.organizations", "public.memberships", "public.properties", "public.contacts", "public.messages",
-    "public.rep_sms_delivery_ledger", "public.rep_sms_sender_assignments", "public.rep_sms_rollout_enrollments", "public.tasks", "public.lead_events"];
+  // Every public base table plus auth.users: whatever a fixture writes, directly or through a trigger, is counted.
+  const tables = ["auth.users", ...(await db.query("select format('%I.%I', table_schema, table_name) as t from information_schema.tables where table_schema='public' and table_type='BASE TABLE' order by 1")).rows.map((r) => r.t as string)];
   const out: Record<string, number> = {};
   for (const t of tables) out[t] = Number((await db.query(`select count(*)::int as n from ${t}`)).rows[0].n);
   return out;
@@ -283,10 +283,25 @@ export async function purgeOrg(db: Client, ctx: OrgCtx): Promise<void> {
     await db.query("select set_config('my_leads.designation_update','',true)");
     // Everything keyed by these orgs, children before parents, with triggers off so guard/audit triggers do not block a test teardown.
     await db.query("set local session_replication_role='replica'");
-    const tables = (await db.query(
-      `select c.table_schema, c.table_name from information_schema.columns c join information_schema.tables t using (table_schema, table_name)
-       where c.column_name='org_id' and c.table_schema='public' and t.table_type='BASE TABLE'`)).rows as Array<{ table_schema: string; table_name: string }>;
-    for (const t of tables) await db.query(`delete from ${t.table_schema}.${t.table_name} where org_id = any($1::uuid[])`, [orgs]);
+    // Children first, by the keys the fixtures write through (steps/runs have no org_id), then every org-keyed table.
+    const ids = async (sql: string) => (await db.query(sql, [orgs])).rows.map((r) => r.id as string);
+    const keys: Record<string, string[]> = {
+      enrollment_id: await ids("select id from public.sequence_enrollments where org_id = any($1::uuid[])"),
+      sequence_id: await ids("select id from public.sequences where org_id = any($1::uuid[])"),
+      property_id: await ids("select id from public.properties where org_id = any($1::uuid[])"),
+      contact_id: await ids("select id from public.contacts where org_id = any($1::uuid[])"),
+      message_id: await ids("select id from public.messages where org_id = any($1::uuid[])"),
+    };
+    const cols = (await db.query(
+      `select format('%I.%I', c.table_schema, c.table_name) as t, c.column_name as col from information_schema.columns c
+         join information_schema.tables t using (table_schema, table_name)
+        where c.table_schema='public' and t.table_type='BASE TABLE' and c.data_type='uuid'
+          and c.column_name in ('enrollment_id','sequence_id','property_id','contact_id','message_id','org_id')`)).rows as Array<{ t: string; col: string }>;
+    for (const key of ["enrollment_id", "sequence_id", "message_id", "property_id", "contact_id"]) {
+      if (!keys[key]!.length) continue;
+      for (const c of cols.filter((x) => x.col === key)) await db.query(`delete from ${c.t} where ${key} = any($1::uuid[])`, [keys[key]]);
+    }
+    for (const c of cols.filter((x) => x.col === "org_id")) await db.query(`delete from ${c.t} where org_id = any($1::uuid[])`, [orgs]);
     await db.query("delete from public.organizations where id = any($1::uuid[])", [orgs]);
     await db.query("delete from auth.users where id = any($1::uuid[])", [users]);
     await db.query("commit");

@@ -48,4 +48,15 @@ describe("my-leads queue stress harness smoke", () => {
   }, 120_000);
 
   afterAll(() => undefined);
+
+  it("notices a dropped chip count: removing Due from chipCounts is caught (the full count map is compared, not the returned keys)", async () => {
+    const sql = loadClassifierMigration();
+    const last = lastClassifierMigration();
+    const needle = "(select t.reason, count(*) as n from t group by t.reason)";
+    expect(last.sql).toContain(needle);
+    const mutatedLast = last.sql.replace(needle, "(select t.reason, count(*) as n from t where t.reason <> 'due' group by t.reason)");
+    const runs = await runFamilies(url, { families: FAMILIES.filter((f) => f.id === "callback_boundary"), repeats: 1, seed: 1, migrationSql: `${sql}\n;\n${mutatedLast}` });
+    expect(runs[0]!.errors).toEqual([]);
+    expect(runs[0]!.mismatches.some((m) => m.kind === "count_row" && String(m.expected).startsWith("chipCounts.due"))).toBe(true);
+  }, 240_000);
 });
