@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
+import { NINE_ANSWER_GROUP, NINE_ANSWER_LABELS, NINE_QUESTION_CUTOFF, type NineQuestionId } from "@/lib/sms-classification/nine-questions";
+
 import { pageText } from "./page-text";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
 import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
@@ -55,6 +57,51 @@ const GROUPS: RuleGroup[] = [
   },
 ];
 
+const HOT_DETAIL = "Sandra marks this seller as a lead for a person to follow up. She never texts them back on her own.";
+const CLOSE_DETAIL = "When this is on, Sandra sends the reply you approved for this situation and closes out the property so it stops showing up.";
+
+/**
+ * Nine-question rows. Details reuse the approved sentences above; the three marked PLACEHOLDER are new.
+ */
+const NINE_DETAIL: Record<NineQuestionId, string> = {
+  open_to_selling: HOT_DETAIL,
+  talked_price: HOT_DETAIL,
+  maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
+  not_interested: CLOSE_DETAIL,
+  wrong_person: CLOSE_DETAIL,
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  asked_who: "Sandra answers who is texting and why.",
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  confirmed_owner: "Sandra notes that this is the owner.",
+  asked_stop: "Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.",
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  hostile: "Sandra sends nothing. A person reads it.",
+};
+
+const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
+  { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
+  { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
+  { heading: "Waits for a person", group: "person", ids: ["asked_stop", "hostile"] },
+];
+
+function NineRules() {
+  return (
+    <div data-testid="nine-rules" className="flex flex-col gap-2">
+      {NINE_GROUPS.map((g) => (
+        <section key={g.heading} aria-label={g.heading} className="flex flex-col gap-2">
+          <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{g.heading}</h3>
+          {g.ids
+            .filter((id) => NINE_ANSWER_GROUP[id] === g.group)
+            .map((id) => (
+              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{null}</Row>
+            ))}
+        </section>
+      ))}
+      <Row title={sureOrMore(NINE_QUESTION_CUTOFF)} detail="">{null}</Row>
+    </div>
+  );
+}
+
 function stateText(badge: ModeBadge | undefined): { text: string; tone: "on" | "off" | "watch" | "unknown" } {
   if (!badge) return { text: "Not set up", tone: "unknown" };
   switch (badge.mode) {
@@ -85,7 +132,7 @@ function Row({ title, detail, children }: { title: string; detail: string; child
     <div data-testid="rule-row" className="flex items-center gap-3 rounded-2xl border px-3.5 py-3">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <b className="font-semibold">{title}</b>
-        <span className="text-[13px] text-muted-foreground">{detail}</span>
+        {detail && <span className="text-[13px] text-muted-foreground">{detail}</span>}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1.5">{children}</div>
     </div>
@@ -101,6 +148,7 @@ export function RulesPanel({
   nurtureAutoDrip,
   replyGeneration,
   setReplyGeneration,
+  classifierEngine,
 }: {
   orgId: string;
   isOwner: boolean;
@@ -109,6 +157,8 @@ export function RulesPanel({
   nurtureAutoDrip?: NurtureAutoDripState | null;
   replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
   setReplyGeneration?: SetReplyGenerationAction;
+  /** ai_responder_configs.classifier_engine; 'nine_questions' swaps in the nine-row panel. */
+  classifierEngine?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const byOutcome = new Map(badges.map((b) => [b.label, b]));
@@ -135,7 +185,8 @@ export function RulesPanel({
                 {pageText(badgesError)}
               </p>
             )}
-            {GROUPS.map((group) => (
+            {classifierEngine === "nine_questions" && <NineRules />}
+            {classifierEngine !== "nine_questions" && GROUPS.map((group) => (
               <section key={group.heading} aria-label={group.heading} className="flex flex-col gap-2">
                 <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group.heading}</h3>
                 {group.rows.map((row) => {

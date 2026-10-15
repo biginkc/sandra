@@ -47,6 +47,8 @@ export type MessagesV2ViewProps = {
   /** The org's "AI drafts" setting; null/absent hides the control. */
   replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
   setReplyGeneration?: SetReplyGenerationAction;
+  /** ai_responder_configs.classifier_engine (null/absent = old engine). */
+  classifierEngine?: string | null;
   /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
   undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
   findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
@@ -568,6 +570,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             nurtureAutoDrip={props.nurtureAutoDrip}
             replyGeneration={props.replyGeneration}
             setReplyGeneration={props.setReplyGeneration}
+            classifierEngine={props.classifierEngine}
           />
         </div>
         {coverage && (coverage.gap || coverage.degraded) && (
