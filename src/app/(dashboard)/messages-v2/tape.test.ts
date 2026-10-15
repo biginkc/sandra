@@ -188,3 +188,21 @@ describe("snapshot reason wins (pinned)", () => {
     expect(deriveTape(r, "Dee", "hostile_needs_confirm", false).kind === "decided" && (deriveTape(r, "Dee", "hostile_needs_confirm", false) as { tag: { label: string } }).tag.label).toBe("Talked price");
   });
 });
+
+describe("pinned snapshot reasons are the only source (null / unmapped -> neutral)", () => {
+  it("an unmapped pinned reason with a conflicting classifier outcome shows the neutral tag and sentence on tape and card", () => {
+    const r = run({ status: "held", reason: "model:hot_lead", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" })] });
+    const tape = deriveTape(r, "Dee", "suppression_incomplete:abc", true);
+    expect(tape.kind === "decided" && tape.tag?.label).toBe("Waits for a person");
+    const card = holdReasonSentence({ ...r, reason: "suppression_incomplete:abc" }, "suppression_incomplete:abc", "Dee", true);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Needs a person to look at it. Nothing sent.");
+  });
+
+  it("a pinned NULL reason is authoritative: the run's own reason is not used", () => {
+    const r = run({ status: "held", reason: "model:price_or_offer", steps: [] });
+    const tape = deriveTape(r, "Dee", null, true);
+    expect(tape.kind === "decided" && tape.tag?.label).toBe("Waits for a person");
+    expect(tape.kind === "decided" && tape.sentence).toBe(holdReasonSentence({ ...r, reason: null }, null, "Dee", true));
+  });
+});

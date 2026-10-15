@@ -370,9 +370,12 @@ export function buildSnapshot(sorted: readonly OpenHold<RunWithSteps>[]): Waitin
   return { reasons, entries };
 }
 
-/** Run id -> frozen reason, for the tape, from the snapshot (each run has exactly one owning hold). */
-export function snapshotFlagReasons(s: WaitingSnapshot): Array<[string, string]> {
-  return s.entries.flatMap((e) => (e.run && e.r >= 0 ? [[e.run, s.reasons[e.r]] as [string, string]] : []));
+/**
+ * Run id -> frozen reason for EVERY snapshot run, for the tape. A null value is a "pinned null": present and
+ * authoritative, so no later (live) reason may replace it. Each run has exactly one owning hold.
+ */
+export function snapshotFlagReasons(s: WaitingSnapshot): Array<[string, string | null]> {
+  return s.entries.flatMap((e) => (e.run ? [[e.run, e.r >= 0 ? s.reasons[e.r] : null] as [string, string | null]] : []));
 }
 
 /**

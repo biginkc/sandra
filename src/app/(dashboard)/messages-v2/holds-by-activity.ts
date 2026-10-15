@@ -13,7 +13,7 @@ export type WaitingList = {
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
   /** [runId, reason] from the snapshot, for the tape. */
-  flagReasons: Array<[string, string]>;
+  flagReasons: Array<[string, string | null]>;
   error: string | null;
 };
 

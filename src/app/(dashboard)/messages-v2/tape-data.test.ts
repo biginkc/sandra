@@ -190,3 +190,27 @@ describe("I7 Chicago times do not depend on the machine's zone", () => {
     expect(tokyo).toEqual(utc);
   });
 });
+
+describe("our last text is cut off at the seller's inbound message, not the run start", () => {
+  it("an outbound sent between the inbound text and the run start is not shown as what preceded it", async () => {
+    const { client } = fakePostgrest({
+      messages: [
+        { id: "in-1", conversation_id: "c1", direction: "inbound", body: "No thanks", created_at: "2026-10-14T12:00:00.000Z" },
+        { id: "out-before", conversation_id: "c1", direction: "outbound", body: "Still own the place?", created_at: "2026-10-14T11:00:00.000Z" },
+        { id: "out-between", conversation_id: "c1", direction: "outbound", body: "a campaign text", created_at: "2026-10-14T12:00:30.000Z" },
+      ],
+    });
+    const out = await loadRunThreads(client, [
+      { id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "in-1", started_at: "2026-10-14T12:01:00.000Z" },
+    ]);
+    expect(out.threads.get("r1")?.lastOutbound).toBe("Still own the place?");
+  });
+
+  it("falls back to the run start when the inbound timestamp is unavailable", async () => {
+    const { client } = fakePostgrest({
+      messages: [{ id: "out-1", conversation_id: "c1", direction: "outbound", body: "x", created_at: "2026-10-14T11:00:00.000Z" }],
+    });
+    const out = await loadRunThreads(client, [{ id: "r1", conversation_id: "c1", outbound_message_id: null, inbound_message_id: "gone", started_at: "2026-10-14T12:00:00.000Z" }]);
+    expect(out.threads.get("r1")?.lastOutbound).toBe("x");
+  });
+});

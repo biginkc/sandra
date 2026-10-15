@@ -168,6 +168,10 @@ function sentenceFor(tag: TapeTag | null, who: string, o: { replySent: boolean; 
  * The ONE effective reason for a held run: the run's own reason, else the property's flag reason.
  * Both the tape card and the "Waiting for a person" card read it from here, so they cannot disagree.
  */
+/** The neutral tag for a waiting hold whose snapshot reason is empty or not one Sandra has words for. */
+export const NEUTRAL_TAG: TapeTag = { label: "Waits for a person", tone: "unclear" };
+export const pinnedTag = (reason: string | null | undefined): TapeTag => tapeTagForWord(reasonWord(reason)) ?? NEUTRAL_TAG;
+
 export function withEffectiveReason<T extends { reason: string | null }>(run: T, flagReason?: string | null): T {
   return run.reason || !flagReason ? run : { ...run, reason: flagReason };
 }
@@ -175,11 +179,13 @@ export function withEffectiveReason<T extends { reason: string | null }>(run: T,
 /** Plain-English view of one run, ready for the tape card. `who` is the seller's first name, or "They". `flagReason` is the hold's flag reason when this run is the hold's current run. */
 export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: string | null, pinned = false): TapeView {
   // `pinned`: the reason is the waiting-list snapshot's, and it wins over the run's own reason and outcome.
-  const run = pinned && flagReason ? { ...rawRun, reason: flagReason } : withEffectiveReason(rawRun, flagReason);
+  const run = pinned ? { ...rawRun, reason: flagReason ?? null } : withEffectiveReason(rawRun, flagReason);
   if (run.status === "skipped") return { kind: "quiet", text: quietSkip(run) };
   if (run.status === "error") return { kind: "error", sentence: "Something went wrong reading this one. A person should take a look." };
 
-  const tag = tapeTagForRun(run, pinned ? flagReason : null);
+  // Pinned: the snapshot reason is the ONLY source of the tag. Null or unmapped -> the neutral tag, never the run's
+  // old reason or classifier outcome (so the tape cannot say more than the card).
+  const tag = pinned ? pinnedTag(flagReason) : tapeTagForRun(run);
   const terminal = TERMINAL.has(run.status);
   const delayed = hasStep(run.steps, "reply_delay_scheduled", "applied");
   const replySent = run.status === "replied" || run.steps.some((s) => s.kind === "reply" && s.result === "sent");
@@ -209,7 +215,7 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
     stage,
     // A held run reads exactly like its card in "Waiting for a person": what Sandra thought and why it waited.
     sentence:
-      waiting && !handed
+      pinned || (waiting && !handed)
         ? holdReasonSentence(run, run.reason, who, pinned)
         : sentenceFor(tag, who, { replySent, closed, waiting: false, handed }),
     did: didLine(run, stage, replySent),
@@ -223,7 +229,8 @@ export function holdReasonSentence(
   who: string,
   pinned = false,
 ): string {
-  const tag = run ? tapeTagForRun(run, pinned ? flagReason : null) : null;
+  // Pinned: only the snapshot reason counts (null or unmapped -> the neutral sentence).
+  const tag = pinned ? null : run ? tapeTagForRun(run) : null;
   const word = reasonWord(flagReason);
   const t = tag ?? tapeTagForWord(word);
   switch (t?.label) {

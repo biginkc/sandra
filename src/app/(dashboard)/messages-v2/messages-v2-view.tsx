@@ -61,7 +61,7 @@ export type MessagesV2ViewProps = {
   /** The frozen waiting-list order the column pages through (see hold-list.ts buildSnapshot). */
   holdsSnapshot?: WaitingSnapshot;
   /** [runId, reason] from the snapshot (the reason each card shows), for the tape. */
-  flagReasons?: Array<[string, string]>;
+  flagReasons?: Array<[string, string | null]>;
   /** Runs whose thread text failed to load on the server: fetched again in the browser. */
   threadFailedRunIds?: string[];
   /** The hold lookup failed (reason): say so, never "nothing is waiting". */
@@ -403,7 +403,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   // earlier days, read the same effective reason on the tape and on the card.
   // Snapshot reasons win (the tape must match the cards); earlier days add reasons for runs the snapshot does not cover.
   const [dayFlagReasons, setDayFlagReasons] = useState<Array<[string, string]>>([]);
-  const flagByRun = useMemo(() => new Map([...dayFlagReasons, ...(props.flagReasons ?? [])]), [dayFlagReasons, props.flagReasons]);
+  // Snapshot entries (including pinned nulls) are applied last, so day data can never override them.
+  const flagByRun = useMemo(
+    () => new Map<string, string | null>([...dayFlagReasons, ...(props.flagReasons ?? [])]),
+    [dayFlagReasons, props.flagReasons],
+  );
   const snapshotRuns = useMemo(() => new Set((props.flagReasons ?? []).map(([runId]) => runId)), [props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);

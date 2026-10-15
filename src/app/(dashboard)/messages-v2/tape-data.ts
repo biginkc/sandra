@@ -34,13 +34,26 @@ async function inBatches<T>(items: readonly T[], task: (item: T) => Promise<void
  */
 export async function loadRunThreads(
   supabase: LooseSupabase,
-  runs: ReadonlyArray<Pick<PipelineRun, "id" | "conversation_id" | "outbound_message_id" | "started_at">>,
+  runs: ReadonlyArray<Pick<PipelineRun, "id" | "conversation_id" | "outbound_message_id" | "started_at"> & { inbound_message_id?: string }>,
 ): Promise<{ threads: Map<string, RunThread>; failedRunIds: string[] }> {
   const replyIds = [...new Set(runs.flatMap((r) => (r.outbound_message_id ? [r.outbound_message_id] : [])))];
   const replyBodies = new Map<string, string>();
   const failedReplyIds = new Set<string>();
   const lastOutbound = new Map<string, string>();
   const failed = new Set<string>();
+
+  // "Our last text" is the last one before the SELLER'S text arrived, not before the run started (an outbound can
+  // land in between). Cut-off = the inbound message's created_at; the run start only if that is unavailable.
+  const inboundIds = [...new Set(runs.flatMap((r) => (r.inbound_message_id ? [r.inbound_message_id] : [])))];
+  const inboundAt = new Map<string, string>();
+  for (const ids of chunk(inboundIds)) {
+    const res = await fetchAllKeyset<{ id: string; created_at: string }>(() => supabase.from("messages").select("id, created_at").in("id", ids));
+    if (res.error) {
+      for (const r of runs) if (r.inbound_message_id && ids.includes(r.inbound_message_id)) failed.add(r.id);
+      continue;
+    }
+    for (const m of res.rows) inboundAt.set(m.id, m.created_at);
+  }
 
   await Promise.all([
     inBatches(chunk(replyIds), async (ids) => {
@@ -54,14 +67,15 @@ export async function loadRunThreads(
       }
     }),
     inBatches(
-      runs.filter((r) => r.conversation_id),
+      runs.filter((r) => r.conversation_id && !failed.has(r.id)),
       async (run) => {
+        const cutoff = (run.inbound_message_id && inboundAt.get(run.inbound_message_id)) || run.started_at;
         const res = await supabase
           .from("messages")
           .select("id, body")
           .eq("conversation_id", run.conversation_id)
           .eq("direction", "outbound")
-          .lt("created_at", run.started_at)
+          .lt("created_at", cutoff)
           .order("created_at", { ascending: false })
           .order("id", { ascending: false })
           .limit(1);

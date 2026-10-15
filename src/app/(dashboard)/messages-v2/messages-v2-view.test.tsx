@@ -356,6 +356,21 @@ describe("MessagesV2View", () => {
     expect(dismiss).toHaveBeenCalledWith(expect.objectContaining({ propertyId: "p9", seen: expect.objectContaining({ flagReason: null, flagAt: null }) }));
   });
 
+  it("a pinned NULL snapshot reason is not overridden by a live reason from a loaded earlier day", async () => {
+    const held = run("r-null", { status: "held", reason: "model:price_or_offer", started_at: new Date(NOW - 60_000).toISOString() });
+    const loadTapeDay = vi.fn(async () => ({
+      ok: true as const,
+      data: { runs: [], labels: [], threads: [], failedRunIds: [], flagReasons: [["r-null", "model:opt_out"]] as Array<[string, string]> },
+    }));
+    await mount({ ...props([held]), flagReasons: [["r-null", null]], loadTapeDay });
+    const tagBefore = within(screen.getByTestId("tape-card")).getByTestId("tape-tag").textContent;
+    expect(tagBefore).toBe("Waits for a person");
+    await userEvent.click(screen.getByTestId("show-earlier"));
+    await waitFor(() => expect(loadTapeDay).toHaveBeenCalled());
+    expect(within(screen.getByTestId("tape-card")).getByTestId("tape-tag")).toHaveTextContent("Waits for a person");
+    expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
+  });
+
   it("renders the snapshot time, not the live time", async () => {
     const snapHold = { ...openHold("p1"), since: "2026-10-01T10:00:00.000Z" };
     const snapshot = buildSnapshot([snapHold]);

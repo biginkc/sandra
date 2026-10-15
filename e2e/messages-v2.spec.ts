@@ -24,6 +24,7 @@ const TAG_VOCABULARY = [
   "Asked to stop",
   "Hostile",
   "Can't read it",
+  "Waits for a person",
 ];
 const ENGINE_WORDS = ["reply_delay_scheduled", "resolve_threshold", "needs_attention", "luna_suggest", "gates passed", "gate passed"];
 
