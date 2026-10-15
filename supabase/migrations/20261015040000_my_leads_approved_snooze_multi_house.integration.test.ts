@@ -129,7 +129,7 @@ async function world(db: Client) {
 const cell = (r: Json) => `${r.place}/${r.reason}/${r.row_no}`;
 
 describe('Rule 1: a snoozed offer follow-up is due at its snooze time', () => {
-  it('Waiting · Offer out while the snooze is a day away, Needs attention · Offer once it has passed', async () => {
+  it('Waiting · Offer out until the snooze time, Needs attention · Offer from it, no early window; unsnoozed keeps the window', async () => {
     await withDb(async (db) => {
       const w = await world(db);
       const snoozed = await w.lead({ stage: 'offer_sent' }); await w.chainOffer(snoozed.id, w.at(-HOUR), w.at(DAY));
@@ -140,7 +140,18 @@ describe('Rule 1: a snoozed offer follow-up is due at its snooze time', () => {
       expect(new Date(r[snoozed.id].facts.headline.at).getTime()).toBe(new Date(w.at(DAY)).getTime());
       expect(cell(r[passed.id])).toBe('your_move/offer/8');
       expect(cell(r[plain.id])).toBe('your_move/offer/8');
-      // the exact instant and the 15-minute window before the snooze end are not asserted: that boundary is a question for Jarrad
+      // Ruling (Jarrad, 2026-10-15): no 15-minute early window for a snoozed chain task; next_change_at is the snooze time itself
+      const end = new Date(w.at(DAY));
+      expect(new Date(r[snoozed.id].next_change_at).getTime()).toBe(end.getTime());
+      expect(cell((await w.classified(new Date(end.getTime() - 10 * MIN)))[snoozed.id])).toBe('their_move/offer_out/12');
+      expect(cell((await w.classified(new Date(end.getTime() - 1)))[snoozed.id])).toBe('their_move/offer_out/12');
+      expect(cell((await w.classified(end))[snoozed.id])).toBe('your_move/offer/8');
+      expect(cell((await w.classified(new Date(end.getTime() + 1)))[snoozed.id])).toBe('your_move/offer/8');
+      // an unsnoozed chain follow-up still shows 15 minutes early
+      const early = await w.lead({ stage: 'offer_sent' }); await w.chainOffer(early.id, w.at(15 * MIN), null);
+      const r2 = await w.classified();
+      expect(cell(r2[early.id])).toBe('your_move/offer/8');
+      expect(cell((await w.classified(new Date(w.pAt.getTime() - 1)))[early.id])).toBe('their_move/offer_out/12');
     });
   });
 });

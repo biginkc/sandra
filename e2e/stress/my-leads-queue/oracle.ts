@@ -259,6 +259,10 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   // time. Until the snooze time passes, the lead stays in Waiting on them · Offer out." So the chain task's time is its effective
   // time greatest(due, snoozed_until), as for every other commitment.
   const chainEff = chainTasks.length ? Math.min(...chainTasks.map(effTime)) : null;
+  // Ruling relayed 2026-10-15 with Jarrad's authority: exactly as written, so a SNOOZED chain task (its snooze time is its effective
+  // time) has no 15-minute early window: due once the snooze time is reached. Unsnoozed follow-ups keep the window.
+  const firstChain = [...chainTasks].sort((a, b) => effTime(a) - effTime(b) || a.ref.localeCompare(b.ref))[0];
+  const chainSnoozed = !!firstChain && firstChain.status === "snoozed" && firstChain.snoozedUntil !== undefined && firstChain.snoozedUntil >= firstChain.due;
 
   const group = opts.group ?? [];
   const inbound = latestInbound(lead, group);
@@ -285,6 +289,7 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   const loDeadline = lo ? addBusinessDays(sendTime(lo), 3) : null;
   const loFinal = !!lo && lo.source === "drip" && !!lo.dripFinal && lead.enrollment?.status === "completed" && !inboundAfterLo;
 
+  const offerDue = offerEff !== null && offerEff <= now + (chainEff !== null && chainSnoozed ? 0 : SOON);
   const mk = (row: string, placeOf: Place, reason: Reason, headline: Placement["headline"] = {}, sortAt?: number): Placement =>
     ({ row, place: placeOf, reason, inBadge: ["4", "9", "5", "6"].includes(row), headline, brokenActions, sortAt, ...(homeownerPropertyCount === undefined ? {} : { homeownerPropertyCount }) });
   const onlyDrip = dripHealthy(lead, now) && !campHealthy && lead.enrollment?.status === "active" ? lead.enrollment.nextRunAt ?? undefined : undefined;
@@ -298,16 +303,16 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   if (broken.length > 0) return mk("6", "your_move", "broken");
   if (manualQueued) return mk("6a", "your_move", "nothing_planned", { variant: "text_waiting" });
   if (lead.stage === "needs_offer" && !offerPending) return mk("7", "your_move", "offer", { kind: "ready" });
-  if (lead.stage === "offer_sent" && offerPending && ((offer!.hasChain && chainEff === null) || (offerEff !== null && offerEff <= now + SOON)))
+  if (lead.stage === "offer_sent" && offerPending && ((offer!.hasChain && chainEff === null) || offerDue))
     return mk("8", "your_move", "offer", { kind: offer!.hasChain && chainEff === null ? "follow_up_missing" : "follow_up_due" });
   if (missedAt !== null) return mk("9", "your_move", "due", { overdueDays: Math.floor((now - missedAt) / DAY) }, missedAt);
   if (automationOk) return mk("10", "their_move", "in_drip", {}, onlyDrip);
   if (futureAt !== null) {
     // 3.1: a lead with both a callback and an offer follow-up shows the earlier of the two; chip = the earlier one's kind
-    const offerEarlier = offerEff !== null && offerEff > now + SOON && offerEff < futureAt;
+    const offerEarlier = offerEff !== null && !offerDue && offerEff < futureAt;
     return mk("11", "their_move", offerEarlier ? "offer_out" : "callback_booked", {}, offerEarlier ? offerEff! : futureAt);
   }
-  if (offerEff !== null && offerEff > now + SOON) return mk("12", "their_move", "offer_out", {}, offerEff);
+  if (offerEff !== null && !offerDue) return mk("12", "their_move", "offer_out", {}, offerEff);
   if (textedOk && loDeadline !== null && now < loDeadline) return mk("13", "their_move", "texted_last", { by: lo!.source === "campaign" ? "campaign" : AI_CLASS.has(lo!.source!) ? "ai" : "human" }, loDeadline);
   if ((textedOk && loDeadline !== null && now >= loDeadline) || loFinal) return mk("14", "your_move", "gone_quiet", { kind: textedOk ? "texted_silent" : "drip_finished" });
   return mk("15", "your_move", "nothing_planned");

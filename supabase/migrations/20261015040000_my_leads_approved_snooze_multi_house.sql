@@ -4,7 +4,13 @@
 -- Rule 1 (snooze), approved text:
 --   "An offer follow-up that the rep snoozed is due at its snooze time, not its original time. Until the snooze time passes,
 --   the lead stays in Waiting on them · Offer out."
--- No SQL change: ap.eff is greatest(due_at, snoozed_until) for chain tasks too, and next_change_at already carries eff - 15 min.
+-- Ruling relayed 2026-10-15 with Jarrad's authority: implement it exactly as written. A SNOOZED offer-chain task gets no 15-minute
+-- early window: Waiting · Offer out while p_at < snoozed_until, Needs attention · Offer from the snooze time itself (due when the
+-- effective time <= p_at). Unsnoozed offer follow-ups keep the existing 15-minute early window.
+--   ap.snz_eff   the task is snoozed and its snooze time is its effective time (snoozed_until >= due_at)
+--   chain_snz    the earliest chain task (by effective time, then id) is such a snoozed task
+--   offer_due    offer_eff <= p_at for a snoozed chain task, <= p_at + 15 min otherwise (rows 8, 11, 12)
+--   tm           a snoozed chain task's clock boundary is snoozed_until itself, not snoozed_until - 15 min
 --
 -- Rule 2 (contact-only texts), approved text:
 --   "A text Sandra can tie to one lead goes to that lead. A text Sandra cannot tie to one lead shows on every lead where that
@@ -236,6 +242,7 @@ language sql stable security definer set search_path = '' as $$
     select b.property_id as lead_id, greatest(t.due_at, coalesce(t.snoozed_until, t.due_at)) as eff, t.mode, t.status, t.source_key,
       t.id as task_id, case when t.type = 'appointment' then 'appointment' else 'callback' end as task_kind,
       (t.status = 'snoozed' and t.snoozed_until is not null) as snz,
+      (t.status = 'snoozed' and t.snoozed_until is not null and t.snoozed_until >= t.due_at) as snz_eff,
       (po.pending and po.chain is not null and po.chain = t.calendar_chain_id) as is_offer
     from base b
     join public.tasks t on t.org_id = p_org and t.related_property_id = b.property_id and t.next_step_kind = 'appointment'
@@ -255,7 +262,9 @@ language sql stable security definer set search_path = '' as $$
       (array_agg(task_kind order by eff, task_id) filter (where not is_offer and eff > p_at + interval '15 minutes'))[1] as future_tk,
       (array_agg(snz order by eff, task_id) filter (where not is_offer and eff > p_at + interval '15 minutes'))[1] as future_snz,
       min(eff) filter (where is_offer) as chain_eff,
-      min(eff - interval '15 minutes') filter (where eff - interval '15 minutes' > p_at) as next_boundary,
+      (array_agg(snz_eff order by eff, task_id) filter (where is_offer))[1] as chain_snz,
+      min(case when is_offer and snz_eff then eff else eff - interval '15 minutes' end)
+        filter (where case when is_offer and snz_eff then eff else eff - interval '15 minutes' end > p_at) as next_boundary,
       -- a callback is a missed callback once it is MORE than 7 Chicago days old, so the change lands 1 ms after the cutoff
       min(((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' + interval '1 millisecond')
         filter (where not is_offer and ((eff at time zone 'America/Chicago') + interval '7 days') at time zone 'America/Chicago' + interval '1 millisecond' > p_at) as next_missed
@@ -422,7 +431,7 @@ language sql stable security definer set search_path = '' as $$
       (e.enr_status = 'active' and e.next_run_at is not null and e.next_run_at >= p_at - interval '60 minutes' and not coalesce(e.claim_at < p_at - interval '15 minutes', false))
         or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at >= p_at - interval '30 minutes') as drip_healthy,
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
-      apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff,
+      apx.any_min, apx.due_min, apx.missed_min, apx.future_min, apx.chain_eff, coalesce(apx.chain_snz, false) as chain_snz,
       apx.due_tk, apx.due_snz, apx.missed_tk, apx.missed_snz, apx.future_tk, apx.future_snz, lt.kind as lt_kind, lt.ts as lt_ts,
       camp.healthy_at as camp_healthy_at, camp.manual_at,
       coalesce(bka.n, 0) as broken_n, (dr.lead_id is not null) as draft_waiting, dr.draft_id, bka.first_kind, bka.first_action, bka.first_at as broken_at, bka.items as broken_items,
@@ -445,13 +454,17 @@ language sql stable security definer set search_path = '' as $$
     left join nt on nt.lead_id = b.property_id
     left join tmn on tmn.lead_id = b.property_id
     left join hpc on hpc.lead_id = b.property_id),
-  fe as (
+  fe0 as (
     select fl.*,
       case when fl.offer_pending and fl.stage = 'offer_sent'
-        then coalesce(fl.chain_eff, case when not fl.offer_has_chain then fl.offer_follow_up_at end) end as offer_eff,
+        then coalesce(fl.chain_eff, case when not fl.offer_has_chain then fl.offer_follow_up_at end) end as offer_eff
+    from fl),
+  fe as (
+    select fl.*,
+      fl.offer_eff <= p_at + case when fl.chain_eff is not null and fl.chain_snz then interval '0' else interval '15 minutes' end as offer_due,
       (fl.lo_cls in ('human', 'ai', 'campaign') and not fl.inbound_after_lo) as texted_ok,
       (fl.drip_healthy or fl.camp_healthy_at is not null) as automation_ok
-    from fl),
+    from fe0 fl),
   pl as (
     select fe.*,
       case
@@ -464,11 +477,11 @@ language sql stable security definer set search_path = '' as $$
         when fe.manual_at is not null then '6a'
         when fe.stage = 'needs_offer' and not fe.offer_pending then '7'
         when fe.stage = 'offer_sent' and fe.offer_pending
-          and ((fe.offer_has_chain and fe.chain_eff is null) or fe.offer_eff <= p_at + interval '15 minutes') then '8'
+          and ((fe.offer_has_chain and fe.chain_eff is null) or fe.offer_due) then '8'
         when fe.missed_min is not null then '9'
         when fe.automation_ok then '10'
         when fe.future_min is not null then '11'
-        when fe.offer_eff > p_at + interval '15 minutes' then '12'
+        when fe.offer_eff is not null and not fe.offer_due then '12'
         when fe.texted_ok and p_at < fe.lo_deadline then '13'
         when (fe.texted_ok and p_at >= fe.lo_deadline) or (fe.lo_final and not fe.inbound_after_lo) then '14'
         else '15'
@@ -485,7 +498,7 @@ language sql stable security definer set search_path = '' as $$
         when '4' then 'due' when '9' then 'due' when '5' then 'new_reply' when '6' then 'broken'
         when '6a' then 'nothing_planned' when '7' then 'offer' when '8' then 'offer'
         when '10' then 'in_drip'
-        when '11' then case when pl.offer_eff > p_at + interval '15 minutes' and pl.offer_eff < pl.future_min then 'offer_out' else 'callback_booked' end
+        when '11' then case when not pl.offer_due and pl.offer_eff < pl.future_min then 'offer_out' else 'callback_booked' end
         when '12' then 'offer_out' when '13' then 'texted_last' when '14' then 'gone_quiet'
         else 'nothing_planned' end as reason
     from pl),
