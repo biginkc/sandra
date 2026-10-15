@@ -656,6 +656,28 @@ fixture('S Unresolved-stamp text after a reached call: reply handled by the call
   const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR)); await w.attempt(id, w.at(-2 * HOUR), 'reached');
   await w.text(id, 'outbound', w.at(-HOUR), { meta: { inbound_stamp_unresolved: true } }); return id;
 }, { place: WT, reason: 'texted_last', row: '13' });
+// Durable acceptance: a later delivery failure never reopens the inbound it answered
+fixture('S Ledger-accepted reply, newer inbound Y, then late delivery failure: Y stays unhandled', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-6 * HOUR));
+  const m = await w.text(id, 'outbound', w.at(-5 * HOUR), { status: 'failed' }); await w.ledger(id, 'accepted', w.at(-5 * HOUR), { messageId: m });
+  await w.text(id, 'inbound', w.at(-4 * HOUR));
+  await w.raw("update public.rep_sms_delivery_ledger set state='delivery_failed', updated_at=$2 where message_id=$1", [m, w.at(-HOUR)]); return id;
+}, { place: NA, reason: 'new_reply', row: '5' });
+fixture('S Unstamped text accepted before Y then marked delivery_failed later does not handle Y or move the deadline', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'outbound', w.at(-6 * HOUR));
+  const m = await w.text(id, 'outbound', w.at(-5 * HOUR)); await w.ledger(id, 'accepted', w.at(-5 * HOUR), { messageId: m });
+  await w.text(id, 'inbound', w.at(-4 * HOUR));
+  await w.raw("update public.rep_sms_delivery_ledger set state='delivery_failed', updated_at=$2 where message_id=$1", [m, w.at(-MIN)]); return id;
+}, { place: NA, reason: 'new_reply', row: '5' });
+fixture('S Non-ledger reply with sent_at later flips to failed, no newer inbound: stays handled, Broken', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-3 * HOUR));
+  await w.text(id, 'outbound', w.at(-2 * HOUR), { status: 'failed', sentAt: w.at(-2 * HOUR) }); return id;
+}, { place: NA, reason: 'broken', row: '6', headline: { kind: 'text_not_sent' } });
+fixture('S Non-ledger reply with sent_at later flips to failed, then a newer inbound: New reply with Broken label', async (w) => {
+  const id = await w.lead('s'); await w.text(id, 'inbound', w.at(-5 * HOUR));
+  await w.text(id, 'outbound', w.at(-4 * HOUR), { status: 'failed', sentAt: w.at(-4 * HOUR) });
+  await w.text(id, 'inbound', w.at(-HOUR)); return id;
+}, { place: NA, reason: 'new_reply', row: '5', labels: ['broken'] });
 fixture('S Ledger sending 5 min is not Broken yet', async (w) => {
   const id = await w.lead('s'); await w.ledger(id, 'sending', w.at(-5 * MIN)); return id;
 }, { place: NA, reason: 'nothing_planned', row: '15' });
@@ -962,6 +984,20 @@ it('a callback crossing 7 Chicago days with an unanswered reply present: next_ch
   });
 });
 
+it('a 7-day-old pending text leaves Broken and the badge at the returned boundary', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const id = await w.lead('s'); await w.text(id, 'outbound', w.at(-(7 * DAY - 2 * HOUR)), { status: 'pending' });
+    const r = await w.page(w.sam, { tab: 'needs_attention' });
+    expect(r.rows[0]).toMatchObject({ reason: 'broken', headline: { kind: 'text_status_unknown' } });
+    expect(await w.badge(w.sam)).toBe(1);
+    expect(new Date(r.nextChangeAt).toISOString()).toBe(w.at(2 * HOUR));
+    const later = new Date(r.nextChangeAt);
+    expect((await w.page(w.sam, { tab: 'needs_attention', when: later })).rows[0]).toMatchObject({ reason: 'nothing_planned' });
+    expect(await w.badge(w.sam, later)).toBe(0);
+  });
+});
+
 it('search is bounded, stacks with chips and stage, and matches name, address and phone', async () => {
   await withDb(async (db) => {
     const w = await world(db);
@@ -1074,7 +1110,7 @@ it('classifies a 400-lead queue within the timing bound, rows and counts from on
       else if (i % 4 === 1) await w.text(id, 'outbound', w.at(-(i % 50 + 1) * HOUR));
       else if (i % 4 === 2) await w.drip(id, { next: w.at((i % 30 + 1) * HOUR) });
       if (i % 7 === 0) await w.appt(id, w.at((i % 5 - 2) * DAY));
-      if (i % 13 === 0) await w.ledger(id, 'delivery_failed', w.at(-HOUR));
+      if (i % 13 === 0) { const m = await w.text(id, 'outbound', w.at(-2 * HOUR), { status: 'failed' }); await w.ledger(id, 'delivery_failed', w.at(-HOUR), { messageId: m }); }
       for (let k = 0; k < 4; k += 1) await w.text(id, k % 2 ? 'inbound' : 'outbound', w.at(-(20 + k) * DAY));   // older message history
     }
     await db.query('analyze');

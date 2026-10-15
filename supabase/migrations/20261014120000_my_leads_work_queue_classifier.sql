@@ -92,20 +92,21 @@ language sql stable security definer set search_path = '' as $$
         when x.gen is null then 'human'
         else 'other'
       end as cls,
-      -- accepted: provider accepted (sent/delivered, or the ledger says accepted/delivered, or it
-      -- was accepted and later failed delivery). Nothing queued/pending/reserved/sending counts.
-      (x.status in ('sent', 'delivered') or x.ledger_state in ('accepted', 'delivered', 'delivery_failed')) as acc,
-      -- effective send time of an outbound text: when it actually went out (sent_at, then delivered_at, then the ledger
-      -- receipt's accepted/delivered timestamp), falling back to created_at only for legacy rows that never recorded one.
+      -- accepted: the provider accepted it. Acceptance is durable: sent/delivered, a ledger accepted/delivered/delivery_failed
+      -- receipt, or a recorded sent_at (the status events keep sent_at when a text later flips to failed), so a later delivery
+      -- failure never un-answers the inbound it answered (it raises Broken instead). Nothing queued/pending/reserved/sending counts.
+      (x.status in ('sent', 'delivered') or x.ledger_state in ('accepted', 'delivered', 'delivery_failed') or x.sent_at is not null) as acc,
+      -- effective send time of an outbound text: when it actually went out (sent_at, then delivered_at), falling back to
+      -- created_at for rows that never recorded one. Never a ledger updated_at or any failure time (the ledger has no
+      -- accepted_at/delivered_at column, and its updated_at moves on delivery_failed settlement).
       -- A scheduled/campaign text created days before it was sent is measured from the send.
-      case when x.direction = 'outbound' then coalesce(x.sent_at, x.delivered_at,
-        case when x.ledger_state in ('accepted', 'delivered', 'delivery_failed') then x.ledger_at end, x.created_at) else x.created_at end as eff_at
+      case when x.direction = 'outbound' then coalesce(x.sent_at, x.delivered_at, x.created_at) else x.created_at end as eff_at
     from (
       select mx.*, mx.metadata ->> 'inbound_message_id' as stamp, mx.metadata ->> 'generated_by' as gen,
         mx.metadata ->> 'reply_source' as reply_source,
         (mx.metadata ->> 'approved_by_user_id') is not null as approved,
         mx.direction = 'outbound' and exists (select 1 from public.sequence_step_runs r where r.message_id = mx.id) as is_drip,
-        lg.state as ledger_state, lg.updated_at as ledger_at
+        lg.state as ledger_state
       from mx left join lg on lg.message_id = mx.id and mx.direction = 'outbound') x),
   -- User events used by the handled-reply rule and by failure supersession. An attempt logged
   -- through the workflow (log_acquisition_attempt) is deliberately NOT here: attempts count only
@@ -305,7 +306,7 @@ language sql stable security definer set search_path = '' as $$
       union all select lead_id, claim_at + interval '15 minutes 1 millisecond' from en
       union all select lead_id, healthy_at + interval '30 minutes 1 millisecond' from camp
       union all select m.lead_id, m.created_at + interval '15 minutes 1 millisecond' from mf m where m.status = 'pending' and m.cls = 'human'
-      union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status = 'failed' and m.cls = 'human'
+      union all select m.lead_id, m.created_at + interval '7 days' from mf m where m.status in ('failed', 'pending') and m.cls = 'human'
       union all select b.property_id, l.updated_at + interval '15 minutes 1 millisecond' from base b
         join public.rep_sms_delivery_ledger l on l.org_id = p_org and l.property_id = b.property_id and l.state in ('reserved', 'sending')
       union all select b.property_id, o.lease_expires_at + interval '1 millisecond' from base b
