@@ -60,7 +60,8 @@ async function world(db: Client) {
   await db.query("select set_config('my_leads.designation_update','',true)");
   await db.query("select set_config('request.jwt.claim.sub','',true)");
 
-  const pAt = new Date();
+  // CLASSIFIER_TEST_ANCHOR (ISO instant) pins the whole timeline for clock-sensitivity proofs; default is the wall clock.
+  const pAt = process.env.CLASSIFIER_TEST_ANCHOR ? new Date(process.env.CLASSIFIER_TEST_ANCHOR) : new Date();
   const at = (ms: number) => new Date(pAt.getTime() + ms).toISOString();
   let phoneSeq = 0;
   const lead = async (key: string, o: { assignee?: string; phone?: boolean; stage?: string; dnc?: boolean; fresh?: boolean } = {}) => {
@@ -79,6 +80,13 @@ async function world(db: Client) {
       await db.query('update public.contacts set do_not_contact=true where id=$1', [contact]);
       await db.query("set local session_replication_role='origin'");
     }
+    // Episodes default assigned_at to the DB wall clock, which would make the first-call warning (30 working minutes after
+    // assignment; a 09:30 Chicago boundary before 09:00) depend on when the suite runs and can land nearer than the boundary a
+    // test expects. Pin assignment to the fixture timeline: a worked lead already made its first call a month ago (no
+    // first-call warning); a fresh lead is assigned exactly at pAt.
+    if (o.fresh) await setAssigned(id, pAt.toISOString());
+    else await raw('update public.acquisition_assignment_episodes set assigned_at=$2, first_call_started_at=$3, first_call_actor_user_id=$4 where property_id=$1 and ended_at is null',
+      [id, new Date(pAt.getTime() - 31 * DAY).toISOString(), new Date(pAt.getTime() - 30 * DAY).toISOString(), assignee]);
     if (o.stage) await setStage(id, o.stage);
     // Most fixtures want a lead that has been worked once, so it is not a brand-new lead by accident.
     if (!o.fresh) await attempt(id, new Date(pAt.getTime() - 30 * DAY).toISOString());
@@ -1000,6 +1008,22 @@ it('a 7-day-old pending text leaves Broken and the badge at the returned boundar
     const later = new Date(r.nextChangeAt);
     expect((await w.page(w.sam, { tab: 'needs_attention', when: later })).rows[0]).toMatchObject({ reason: 'nothing_planned' });
     expect(await w.badge(w.sam, later)).toBe(0);
+  });
+});
+
+it('the first-call warning is a clock-only boundary: next_change_at returns it exactly and the headline flips at that instant', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    // Assigned Wednesday 8:00 AM CDT (before working hours): 30 working minutes run from 9:00, so the deadline is 9:30 AM CDT.
+    const id = await w.lead('fresh', { fresh: true }); await w.setAssigned(id, '2026-10-14T13:00:00Z');
+    const early = iso('2026-10-14T13:30:00Z');
+    const r = await w.page(w.sam, { tab: 'needs_attention', when: early });
+    expect(r.rows[0]).toMatchObject({ reason: 'new_lead', headline: { firstCallOverdue: false } });
+    expect(new Date(r.nextChangeAt).toISOString()).toBe('2026-10-14T14:30:00.000Z');
+    const before = await w.page(w.sam, { tab: 'needs_attention', when: new Date(new Date(r.nextChangeAt).getTime() - 1) });
+    expect(before.rows[0]).toMatchObject({ reason: 'new_lead', headline: { firstCallOverdue: false } });
+    const after = await w.page(w.sam, { tab: 'needs_attention', when: new Date(r.nextChangeAt) });
+    expect(after.rows[0]).toMatchObject({ reason: 'new_lead', headline: { firstCallOverdue: true } });
   });
 });
 
