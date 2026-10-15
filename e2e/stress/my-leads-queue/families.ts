@@ -143,8 +143,8 @@ export const FAMILIES: readonly FamilyDef[] = [
       k.lead("contact_only", { messages: [k.inb("i", at, { contactOnly: true })] }),
       // v9 17 (SQ5): the same contact is homeowner on two queue leads -> ambiguous, never New reply
       ...(() => { const g = `shared${k.rng.int(0, 1e9)}`; return [
-        k.lead("contact_shared", { contactShared: true, contactGroup: g, messages: [k.inb("i", at, { contactOnly: true })] }),
-        k.lead("contact_shared_sibling", { contactShared: true, contactGroup: g }),
+        k.lead("contact_shared", { question: "SQ5", contactShared: true, contactGroup: g, messages: [k.inb("i", at, { contactOnly: true })] }),
+        k.lead("contact_shared_sibling", { question: "SQ5", contactShared: true, contactGroup: g }),
       ]; })(),
       k.lead("missed_call", { missedCalls: [at] }),
     ];

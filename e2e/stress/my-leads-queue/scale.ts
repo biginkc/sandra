@@ -5,7 +5,7 @@ import { materializeWorld, setupOrg } from "./materialize";
 import { loadClassifierMigration } from "./migration";
 import { NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place } from "./oracle";
 import { PROD_SHAPE_2026_10_14, prodShapedWorld, scaleCounts } from "./prod-shape";
-import { P95_BUDGET_MS, stat, type ScaleSize } from "./report";
+import { P95_BUDGET_MS, stat, type PlanNode, type ScaleSize } from "./report";
 import { Reader, type Mismatch } from "./runner";
 
 export type ScaleOptions = {
@@ -14,7 +14,32 @@ export type ScaleOptions = {
   samples: number;
   seed: number;
   messages?: [number, number];
+  /** Also EXPLAIN below 2,000 leads. */
+  explainAll?: boolean;
 };
+
+type RawPlan = { "Node Type": string; "Actual Total Time": number; "Actual Loops": number; "Actual Rows": number; Plans?: RawPlan[]; "CTE Name"?: string; "Subplan Name"?: string; "Relation Name"?: string; "Function Name"?: string; "Index Name"?: string; "Parent Relationship"?: string };
+
+/**
+ * The classifier is SECURITY DEFINER, so EXPLAIN on a call shows one Function Scan. Run its body instead, with the parameters bound as
+ * literals, and rank plan nodes by exclusive time (own time x loops minus children), labelled with their CTE / relation.
+ */
+export async function explainClassifier(db: Client, org: string, member: string, at: string): Promise<PlanNode[]> {
+  const def = (await db.query("select prosrc from pg_proc where oid = 'public.my_leads_work_classified(uuid,uuid,timestamptz)'::regprocedure")).rows[0].prosrc as string;
+  const body = def.replace(/\bp_org\b/g, `'${org}'::uuid`).replace(/\bp_member\b/g, `'${member}'::uuid`).replace(/\bp_at\b/g, `'${at}'::timestamptz`).trim().replace(/;\s*$/, "");
+  const plan = (await db.query(`explain (analyze, format json) ${body}`)).rows[0]["QUERY PLAN"][0].Plan as RawPlan;
+  const out: PlanNode[] = [];
+  const walk = (p: RawPlan, cte: string | null) => {
+    const label = p["CTE Name"] ?? p["Subplan Name"] ?? cte;
+    const total = p["Actual Total Time"] * p["Actual Loops"];
+    const kids = (p.Plans ?? []).reduce((a, c) => a + c["Actual Total Time"] * c["Actual Loops"], 0);
+    const what = p["Relation Name"] ?? p["Function Name"] ?? p["Index Name"] ?? "";
+    out.push({ node: `${p["Node Type"]}${what ? ` ${what}` : ""}${label ? ` [${label}]` : ""}`, exclusiveMs: Math.round(Math.max(0, total - kids) * 10) / 10, totalMs: Math.round(total * 10) / 10, loops: p["Actual Loops"], rows: p["Actual Rows"] });
+    for (const c of p.Plans ?? []) walk(c, p["Node Type"] === "CTE Scan" ? cte : (c["Parent Relationship"] === "InitPlan" || c["Subplan Name"]) ? (c["Subplan Name"] ?? label) : label);
+  };
+  walk(plan, null);
+  return out.sort((a, b) => b.exclusiveMs - a.exclusiveMs).slice(0, 5);
+}
 
 /**
  * Scale lane: prod-shaped queues of N leads (4-12 messages each, ledger receipts linked), seeded in a rolled-back transaction.
@@ -69,9 +94,10 @@ export async function runScale(url: string, opts: ScaleOptions): Promise<{ sizes
           (reader.timings[label] ??= []).push(Number(process.hrtime.bigint() - t) / 1e6);
         }
       }
+      const explainTop = n >= 2000 || opts.explainAll ? await explainClassifier(db, ctx.org, ctx.rep, new Date(now).toISOString()) : undefined;
       const timings = Object.fromEntries(Object.entries(reader.timings).map(([k, v]) => [k, stat(v)]));
       const budgeted = Object.entries(timings).filter(([k]) => !k.startsWith("projection:"));
-      sizes.push({ leads: n, messagesPerLead: opts.messages ?? [4, 12], messages, seedMs, timings, worstP95Ms: budgeted.reduce((a, [, v]) => Math.max(a, v.p95), 0), budgetMs: P95_BUDGET_MS });
+      sizes.push({ explainTop, leads: n, messagesPerLead: opts.messages ?? [4, 12], messages, seedMs, timings, worstP95Ms: budgeted.reduce((a, [, v]) => Math.max(a, v.p95), 0), budgetMs: P95_BUDGET_MS });
       void mat;
     } finally {
       await db.query("rollback").catch(() => {});

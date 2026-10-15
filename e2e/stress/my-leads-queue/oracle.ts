@@ -30,10 +30,14 @@ export type Placement = {
 
 /** Places where the design text and the A1 SQL disagree. Registered so the report can group mismatches. */
 export const SPEC_QUESTIONS: Readonly<Record<string, string>> = {
+  SQ5: "v9 17: a contact-only inbound counts only when its contact is homeowner on exactly one queue lead; otherwise never New reply (label check texts). The A1 SQL counts it on every lead sharing the contact. Confirmed SQL bug; fix in A1.2 (classifier performance PR). Still gating.",
   SQ2: "v9 17: ledger/obligation 'unknown' younger than 15 min is in flight, not Broken (oracle follows this). The A1 SQL still marks it Broken; fix routed to PR #876 migration 20261015020200.",
 };
 
 /** Spec questions whose SQL fix is in flight elsewhere: their mismatches are reported but do not fail the run until that PR lands. */
+/** Confirmed SQL bugs whose fix is in flight. Labelled in the report but NOT excused: they keep failing the run until fixed. */
+export const FIX_PENDING: Readonly<Record<string, string>> = { SQ5: "A1.2" };
+
 export const EXPECTED_UNTIL: Readonly<Record<string, string>> = { SQ2: "#876" };
 
 // ---------- America/Chicago wall-clock arithmetic (business days, "7 Chicago days") ----------

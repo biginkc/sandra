@@ -1,4 +1,4 @@
-import { EXPECTED_UNTIL, SPEC_QUESTIONS } from "./oracle";
+import { EXPECTED_UNTIL, FIX_PENDING, SPEC_QUESTIONS } from "./oracle";
 import type { FamilyRun, Mismatch, MismatchKind, Timing } from "./runner";
 
 export const P95_BUDGET_MS = 1500;
@@ -28,7 +28,10 @@ export type LaneResult = {
   notes?: string[];
 };
 
-export type ScaleSize = { leads: number; messagesPerLead: [number, number]; messages: number; seedMs: number; timings: Record<string, Stat>; worstP95Ms: number; budgetMs: number };
+export type PlanNode = { node: string; exclusiveMs: number; totalMs: number; loops: number; rows: number };
+export type ScaleSize = {
+  /** EXPLAIN ANALYZE of the my_leads_work_classified body at this size: top nodes by exclusive time. */
+  explainTop?: PlanNode[]; leads: number; messagesPerLead: [number, number]; messages: number; seedMs: number; timings: Record<string, Stat>; worstP95Ms: number; budgetMs: number };
 
 export type FamilyReport = {
   family: string;
@@ -63,7 +66,7 @@ export type Report = {
   families: FamilyReport[];
   lanes: LaneResult[];
   scale: ScaleSize[];
-  specQuestions: Record<string, { text: string; mismatches: number; expectedUntil?: string }>;
+  specQuestions: Record<string, { text: string; mismatches: number; expectedUntil?: string; gating: boolean }>;
   criteria: Criterion[];
   verdict: "PASS" | "FAIL";
   failReasons: string[];
@@ -128,13 +131,12 @@ export function buildReport(input: {
   const raceRan = raceLanes.filter((l) => !l.skipped);
   criteria.push({ id: "race", label: "race lanes: newer replies marked handled / placement wrong at refresh", value: raceFailures, limit: 0, pass: raceFailures === 0 && (input.mode === "smoke" || raceRan.length === raceLanes.length && raceLanes.length > 0), evaluated: raceRan.length > 0,
     note: raceLanes.some((l) => l.skipped) ? `skipped: ${raceLanes.filter((l) => l.skipped).map((l) => `${l.id} (${l.skipped})`).join("; ")}` : undefined });
-  // Gate (Fable, design v9 17): flag-on needs the 400-lead budget; larger queues are reported as WARN (MLQ-D2 before a second rep).
-  const at400 = input.scale.filter((x) => x.leads <= 400);
-  const larger = input.scale.filter((x) => x.leads > 400);
-  const worst400 = at400.reduce((a, x) => Math.max(a, x.worstP95Ms), 0);
-  criteria.push({ id: "p95", label: `scale p95 within ${P95_BUDGET_MS} ms at 400 leads (hard gate)`, value: at400.length ? worst400 : null, limit: P95_BUDGET_MS, pass: at400.length > 0 ? worst400 < P95_BUDGET_MS : input.mode === "smoke", evaluated: at400.length > 0 });
-  for (const x of larger) criteria.push({ id: `p95_${x.leads}`, label: `scale p95 at ${x.leads} leads (reported, not gating: MLQ-D2)`, value: x.worstP95Ms, limit: P95_BUDGET_MS, pass: true, evaluated: true,
-    note: x.worstP95Ms < P95_BUDGET_MS ? undefined : `WARN ${x.worstP95Ms} ms over budget` });
+  // Gate (master acceptance 2.19, kept by the root coordinator): p95 < 1.5 s at BOTH 400 and 2,000 leads.
+  for (const size of [400, 2000]) {
+    const x = input.scale.find((y) => y.leads === size);
+    criteria.push({ id: `p95_${size}`, label: `scale p95 within ${P95_BUDGET_MS} ms at ${size} leads`, value: x ? x.worstP95Ms : null, limit: P95_BUDGET_MS,
+      pass: x ? x.worstP95Ms < P95_BUDGET_MS : input.mode === "smoke", evaluated: !!x });
+  }
   const errors = families.reduce((a, f) => a + f.errors.length, 0);
   criteria.push({ id: "errors", label: "worlds that failed to run (setup or SQL errors)", value: errors, limit: 0, pass: errors === 0, evaluated: true });
   const fullRunNeeds: string[] = [];
@@ -144,7 +146,7 @@ export function buildReport(input: {
     if (raceRan.length === 0) fullRunNeeds.push("no race lane ran");
     if (!raceRan.some((l) => l.id.startsWith("race:dispatch_"))) fullRunNeeds.push("the dispatchRepSms race lanes did not run (npm run stress:my-leads-queue:dispatch writes dispatch-lanes.json into --out first)");
   }
-  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0), expectedUntil: EXPECTED_UNTIL[id] }]));
+  const specQuestions: Report["specQuestions"] = Object.fromEntries(Object.entries(SPEC_QUESTIONS).map(([id, text]) => [id, { text, mismatches: families.reduce((a, f) => a + (f.bySpecQuestion[id] ?? 0), 0), expectedUntil: EXPECTED_UNTIL[id] ?? FIX_PENDING[id], gating: !EXPECTED_UNTIL[id] }]));
   const failReasons = [...criteria.filter((c) => !c.pass).map((c) => `${c.label}: ${c.value ?? "not measured"}`), ...fullRunNeeds];
   return {
     schema: "my-leads-queue-stress/v1", mode: input.mode, startedAt: input.startedAt, finishedAt: new Date().toISOString(), seed: input.seed, repeats: input.repeats,
@@ -171,7 +173,7 @@ export function renderMarkdown(r: Report): string {
   L.push("", "## Spec questions (design text and SQL disagree; the oracle follows the text)", "");
   const expectedTotal = r.families.reduce((a, f) => a + f.expected, 0);
   if (expectedTotal) L.push(`${expectedTotal} mismatches are expected until their SQL fix lands and do not fail the run.`, "");
-  for (const [id, q] of sq) L.push(`- **${id}**${q.expectedUntil ? ` (expected_until: ${q.expectedUntil})` : ""} (${q.mismatches} mismatch${q.mismatches === 1 ? "" : "es"}): ${q.text}`);
+  for (const [id, q] of sq) L.push(`- **${id}**${q.expectedUntil ? ` (expected_until: ${q.expectedUntil}${q.gating ? ", still fails the run" : ", excused"})` : ""} (${q.mismatches} mismatch${q.mismatches === 1 ? "" : "es"}): ${q.text}`);
   L.push("", "## Race and refresh lanes", "");
   if (r.lanes.length === 0) L.push("(not run)");
   for (const l of r.lanes) L.push(`- **${l.id}** ${l.title}: ${l.skipped ? `SKIPPED — ${l.skipped}` : `${l.runs} runs, ${l.failures} failure${l.failures === 1 ? "" : "s"}`}${l.notes?.length ? ` (${l.notes.join("; ")})` : ""}`);
@@ -181,6 +183,11 @@ export function renderMarkdown(r: Report): string {
     L.push(`### ${s.leads} leads, ${s.messagesPerLead[0]}-${s.messagesPerLead[1]} messages each (${s.messages} messages, seeded in ${Math.round(s.seedMs)} ms)`, "", "| Call | n | p50 ms | p95 ms | max ms |", "|---|---:|---:|---:|---:|");
     for (const [k, v] of Object.entries(s.timings)) L.push(`| ${k} | ${v.n} | ${v.p50} | ${v.p95} | ${v.max} |`);
     L.push("");
+    if (s.explainTop?.length) {
+      L.push("EXPLAIN ANALYZE of `my_leads_work_classified` (top nodes by exclusive time):", "", "| Node | exclusive ms | total ms | loops | rows |", "|---|---:|---:|---:|---:|");
+      for (const n of s.explainTop) L.push(`| ${n.node} | ${n.exclusiveMs} | ${n.totalMs} | ${n.loops} | ${n.rows} |`);
+      L.push("");
+    }
   }
   const withSamples = r.families.filter((f) => f.samples.length);
   if (withSamples.length) {
