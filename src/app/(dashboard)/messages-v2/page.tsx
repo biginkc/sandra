@@ -18,9 +18,7 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
-import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
-
-import { applyLunaSuggestionAction, rejectLunaSuggestionAction } from "./luna-actions";
+import { withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Split, type LooseSupabase } from "./queries";
@@ -33,6 +31,8 @@ import {
   type ScorecardRow,
 } from "./scorecard";
 import { loadReplayBatchId } from "./replay-batch";
+import { loadTapeDayAction } from "./tape-actions";
+import { loadRunThreads } from "./tape-data";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import type { PipelineCoverage } from "./types";
 
@@ -168,13 +168,12 @@ export default async function MessagesV2Page() {
   if (!access) notFound();
   const { orgId, isOwner } = access;
 
-  const lunaEnabled = lunaSuggestionsEnabled();
   const supabase = (await createClient()) as unknown as LooseSupabase;
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
   const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip] = await Promise.all([
-    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true, includeLuna: lunaEnabled }),
+    loadMessagesV2Split(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
@@ -183,7 +182,11 @@ export default async function MessagesV2Page() {
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
-  const data = { ...loaded, holds: await withFreshSeen(supabase, orgId, loaded.holds) };
+  // Permanently do-not-contact locked properties are never shown as waiting: nobody can act on them.
+  const data = {
+    ...loaded,
+    holds: await withoutDncLocked(supabase, orgId, await withFreshSeen(supabase, orgId, loaded.holds)),
+  };
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
@@ -193,9 +196,9 @@ export default async function MessagesV2Page() {
     property_id: h.property_id,
     inbound_message_id: h.run?.inbound_message_id ?? "",
   }));
-  const labels = await loadRunLabels(supabase, [
-    ...data.runs,
-    ...holdLabelInputs,
+  const [labels, threads] = await Promise.all([
+    loadRunLabels(supabase, [...data.runs, ...holdLabelInputs]),
+    loadRunThreads(supabase, data.runs),
   ]);
 
   return (
@@ -222,8 +225,9 @@ export default async function MessagesV2Page() {
         badges={data.badges}
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
+        threads={[...threads.entries()]}
+        loadTapeDay={loadTapeDayAction}
         nowMs={data.nowMs}
-        lunaEnabled={lunaEnabled}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,
@@ -233,12 +237,6 @@ export default async function MessagesV2Page() {
           retrySuppression: retrySuppressionHoldAction,
           confirmDoNotContact: confirmDoNotContactAction,
           listAssignees: listHoldAssigneesAction,
-          ...(lunaEnabled
-            ? {
-                lunaApply: applyLunaSuggestionAction,
-                lunaReject: rejectLunaSuggestionAction,
-              }
-            : {}),
         }}
       />
     </div>

@@ -8,4 +8,4 @@ export const NEVER_AUTO: ReadonlySet<string> = new Set(["opted_out"]);
 export const isNeverAuto = (outcome: string): boolean => NEVER_AUTO.has(outcome);
 
 export const NEVER_AUTO_NOTE = "Held for a person by policy";
-export const NEW_LEAD_AUTO_NOTE = "Jev will promote leads automatically";
+export const NEW_LEAD_AUTO_NOTE = "Sandra will promote leads automatically";

@@ -6,6 +6,7 @@ import { lunaSuggestionsEnabled } from "@/lib/sms-classification/luna/config";
 import { createClient } from "@/lib/supabase/server";
 
 import { messagesV2OrgId } from "./access";
+import { withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { BACKLOG_PAGE, loadBacklogHolds, type LooseSupabase } from "./queries";
@@ -55,7 +56,7 @@ export async function loadBacklogHoldsAction(input: {
   if (!page || page.failed) {
     return err({ code: "BACKLOG_UNAVAILABLE", message: "Backlog holds could not be loaded." });
   }
-  const holds = await withFreshSeen(supabase, orgId, page.holds);
+  const holds = await withoutDncLocked(supabase, orgId, await withFreshSeen(supabase, orgId, page.holds));
   const labels = await loadRunLabels(
     supabase,
     holds.map((h) => ({

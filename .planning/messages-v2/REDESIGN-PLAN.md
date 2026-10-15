@@ -6,8 +6,8 @@ Design source: the mockup Jarrad approved on 2026-10-14 (scratchpad `mockup/inde
 
 ## Ground rules for every PR
 
-- [ ] Sandra's sidebar and top bar are untouched. Only the page inside changes.
-- [ ] In the UI, every AI action is "Sandra". The word "Jev" never appears on the page.
+- [x] Sandra's sidebar and top bar are untouched. Only the page inside changes.
+- [x] In the UI, every AI action is "Sandra". The word "Jev" never appears on the page. (PR 1: checked on the page and in the rules panel; the confirm dialog still shows engine rule text such as `nurture: auto-apply at native confidence ≥ 0.95 (ON)` because that is the exact text an owner approves.)
 - [ ] Sandra only sends texts Jarrad approved word for word. No LLM-written replies go out alone.
 - [ ] Sandra only does things that can be undone (start a drip, set a reply type, send an approved text). Do-not-contact is always a person.
 - [ ] No business rule text (question wording, reply text, drip text) is added or changed without Jarrad approving the exact text in a fenced block, one text per approval.
@@ -18,18 +18,18 @@ Design source: the mockup Jarrad approved on 2026-10-14 (scratchpad `mockup/inde
 
 Goal: the page looks and reads like the mockup, running on today's engine (the 8-answer Jev classifier). Nothing Sandra does changes yet.
 
-- [ ] Replace the header badges with a `Sandra's rules` button opening a side panel. Panel shows the current switches as plain-English rows (today's 5 switches + drip switch + cutoff), grouped "Goes to Jarrad / Sandra handles alone / Waits for a person".
-- [ ] Replace the live-feed step log with tape cards: time, name, address, our last text, their text, colored tag, one plain sentence, one "what she did" line with undo where undoable.
-- [ ] Map today's engine words to tape words: new_lead → "Wants an offer", nurture → "Maybe later", not_interested → "Not interested", wrong_number → "Wrong person", opted_out → "Asked to stop", unclear → "Can't read it", escalation `hot_lead`/`call_request` → "Wants an offer", `price_or_offer` → "Talked price". (Display mapping only.)
-- [ ] "LEGACY / already_terminal" cards become one quiet line: "Already a lead, left for the person who owns it" with the seller text shown.
-- [ ] Live card state: "Sandra is reading…" → decided → "Replying in a few minutes" → sent.
-- [ ] "Waiting for a person" column: newest first, plain reason, one-click actions (Stop texting them / It's just a no / Send the hostile reply / Dismiss / Open thread). No oldest-first anywhere.
-- [ ] Hide permanently DNC-locked properties from the waiting column (63 today).
-- [ ] One accuracy line in the header: "right N% of the time this week". Remove the scorecard grid and the Luna block from the page (data stays; nothing deleted).
-- [ ] "Show yesterday's tape" loads earlier days.
-- [ ] Rename on-page: "Jev is on" → "Sandra is on", etc. Admin link "Jev thresholds" left alone for now.
-- [ ] Playwright: page renders, tape card shows a plain sentence, rules panel opens, waiting column newest-first, DNC-locked hidden.
-- [ ] Depends on: none.
+- [x] Replace the header badges with a `Sandra's rules` button opening a side panel. Panel shows the current switches as plain-English rows (today's 5 switches + drip switch + cutoff), grouped "Goes to Jarrad / Sandra handles alone / Waits for a person".
+- [x] Replace the live-feed step log with tape cards: time, name, address, our last text, their text, colored tag, one plain sentence, one "what she did" line with undo where undoable.
+- [x] Map today's engine words to tape words: new_lead → "Wants an offer", nurture → "Maybe later", not_interested → "Not interested", wrong_number → "Wrong person", opted_out → "Asked to stop", unclear → "Can't read it", escalation `hot_lead`/`call_request` → "Wants an offer", `price_or_offer` → "Talked price". (Display mapping only.)
+- [x] "LEGACY / already_terminal" cards become one quiet line: "Already a lead, left for the person who owns it" with the seller text shown.
+- [x] Live card state: "Sandra is reading…" → decided → "Replying in a few minutes" → sent.
+- [x] "Waiting for a person" column: newest first, plain reason, today's hold actions relabelled (Send / Edit / Open thread / Dismiss / Stop texting them). No oldest-first anywhere. (New one-click actions "It's just a no" and "Send the hostile reply" are not in PR 1: they change behaviour.)
+- [x] Hide permanently DNC-locked properties from the waiting column (63 today).
+- [x] One accuracy line in the header: "right N% of the time this week". Remove the scorecard grid and the Luna block from the page (data stays; nothing deleted).
+- [x] "Show yesterday's tape" loads earlier days.
+- [x] Rename on-page: "Jev is on" → "Sandra is on", etc. Admin link "Jev thresholds" left alone for now.
+- [x] Playwright (written; needs the Supabase test project to run): page renders, tape card shows a plain sentence, rules panel opens, waiting column newest-first, DNC-locked hidden.
+- [x] Depends on: none.
 
 ## PR 2 — Hot sellers go to Jarrad, and only hot sellers ping
 

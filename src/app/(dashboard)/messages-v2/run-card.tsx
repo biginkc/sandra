@@ -155,7 +155,7 @@ export type UndoControls = {
   undo: (undoId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
 };
 
-function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
+export function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
   const [undoId, setUndoId] = useState<string | null>(null);
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -176,7 +176,7 @@ function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: strin
   if (state === "done") {
     return (
       <p data-testid="undo-done" className="mt-2 text-xs text-muted-foreground">
-        Undone. The lead is back the way it was before Jev acted.
+        Undone. The lead is back the way it was before Sandra acted.
       </p>
     );
   }
@@ -199,7 +199,7 @@ function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: strin
         }}
         className="rounded-md border px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
       >
-        {state === "busy" ? "Undoing..." : "Undo Jev's action"}
+        {state === "busy" ? "Undoing..." : "Undo"}
       </button>
       {error && (
         <span role="alert" data-testid="undo-error" className="text-xs text-destructive">

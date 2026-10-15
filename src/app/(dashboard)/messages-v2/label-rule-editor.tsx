@@ -41,6 +41,8 @@ type Props = {
   /** The badge as displayed, e.g. "nurture [AUTO ≥0.95]". */
   text: string;
   className?: string;
+  /** "button" renders a plain "Change" button (the rules panel); default is the badge. */
+  trigger?: "badge" | "button";
 };
 
 /**
@@ -48,7 +50,7 @@ type Props = {
  * value: the cutoff is typed, the switch is explicit, and the confirmation
  * shows the exact rule text that will be saved before anything is written.
  */
-export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
+export function LabelRuleEditor({ orgId, badge, text, className, trigger = "badge" }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -101,20 +103,36 @@ export function LabelRuleEditor({ orgId, badge, text, className }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        aria-label={`Edit rule for ${badge.label}`}
-        data-testid={`edit-rule-${badge.label}`}
-        className="cursor-pointer rounded-full focus-visible:ring-2 focus-visible:ring-ring"
-        onClick={() => {
-          reset();
-          setOpen(true);
-        }}
-      >
-        <Badge variant="outline" className={className}>
-          {text}
-        </Badge>
-      </button>
+      {trigger === "button" ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          aria-label={`Edit rule for ${badge.label}`}
+          data-testid={`edit-rule-${badge.label}`}
+          onClick={() => {
+            reset();
+            setOpen(true);
+          }}
+        >
+          Change
+        </Button>
+      ) : (
+        <button
+          type="button"
+          aria-label={`Edit rule for ${badge.label}`}
+          data-testid={`edit-rule-${badge.label}`}
+          className="cursor-pointer rounded-full focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={() => {
+            reset();
+            setOpen(true);
+          }}
+        >
+          <Badge variant="outline" className={className}>
+            {text}
+          </Badge>
+        </button>
+      )}
 
       <Dialog open={open} onOpenChange={(o) => !pending && setOpen(o)}>
         <DialogContent className="sm:max-w-lg">

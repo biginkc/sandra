@@ -4,29 +4,27 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import type { Result } from "@/lib/errors/result";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+import { format } from "date-fns/format";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
 import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
-import { HoldsRail } from "./holds-rail";
-import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
-import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
+import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
-import {
-  computeHeaderStats,
-  describeCoverage,
-  formatHoldsTotal,
-  formatSplitTotal,
-  formatModeBadge,
-  type LooseSupabase,
-} from "./queries";
-import { RunCard, type UndoControls } from "./run-card";
+import { describeCoverage, type LooseSupabase } from "./queries";
 import type { ReplyGeneration } from "./reply-generation";
-import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
-import { ScorecardCard } from "./scorecard-card";
+import type { SetReplyGenerationAction } from "./reply-generation-toggle";
+import { RulesPanel } from "./rules-panel";
+import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
+import { TapeCard } from "./tape-card";
+import { loadRunThreads, type RunThread } from "./tape-data";
+import type { TapeDayPage } from "./tape-actions";
+import { WaitingColumn } from "./waiting-column";
 import type {
   HoldsMeta,
   HoldsSplit,
@@ -76,29 +74,37 @@ export type MessagesV2ViewProps = {
   scorecardRows?: ScorecardRow[] | null;
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
+  /** Server-resolved thread text (our last text, Sandra's reply), as [runId, thread] pairs. */
+  threads?: Array<[string, RunThread]>;
+  /** "Show yesterday's tape": loads the 24 hours before the given instant. */
+  loadTapeDay?: (input: { before: string }) => Promise<Result<TapeDayPage>>;
   nowMs: number;
   /** Hold actions (server actions). Absent = the buttons render disabled. */
   actions?: HoldActionsApi;
-  /** Luna suggestions are on: show the scorecard's Luna row. */
-  lunaEnabled?: boolean;
 };
 
-const LEGEND = [
-  ["◀", "inbound"],
-  ["●", "judgment"],
-  ["✔", "applied"],
-  ["▶", "sent"],
-  ["■", "gate"],
-  ["○", "shadow"],
-] as const;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
-  HELD: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
-  AUTO: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
-  SHADOW: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
-  LEGACY: "bg-secondary text-muted-foreground",
-  UNKNOWN: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
-};
+/** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
+export function weekSummary(rows: ScorecardRow[] | null | undefined): { texts: number; rightPct: number | null } | null {
+  if (!rows) return null;
+  const texts = rows.reduce((n, r) => n + r.runs, 0);
+  const settled = rows.reduce((n, r) => n + r.auto_settled, 0);
+  const agreed = rows.reduce((n, r) => n + r.auto_agreed, 0);
+  return { texts, rightPct: settled > 0 ? Math.round((agreed / settled) * 100) : null };
+}
+
+/** "Sandra is on" unless every rule is still watch-only. */
+function sandraIsOn(badges: ModeBadge[]): boolean {
+  return badges.length === 0 || badges.some((b) => b.mode === "AUTO" || b.mode === "HELD");
+}
+
+function dayLabel(ms: number, nowMs: number): string {
+  const startOfToday = new Date(nowMs).setHours(0, 0, 0, 0);
+  if (ms >= startOfToday) return "Today";
+  if (ms >= startOfToday - DAY_MS) return "Yesterday";
+  return format(new Date(ms), "EEEE, MMM d");
+}
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
   const { badges, orgId, isOwner = false } = props;
@@ -115,6 +121,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     setRunsState(next);
   }, []);
   const [labels, setLabels] = useState(() => new Map(props.labels));
+  const [threads, setThreads] = useState(() => new Map(props.threads ?? []));
+  // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
+  const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
+  const [loadedBefore, setLoadedBefore] = useState<number | null>(null);
+  const [earlierBusy, setEarlierBusy] = useState(false);
+  const [earlierNote, setEarlierNote] = useState<string | null>(null);
   const { undoJevAction, findJevUndo } = props;
   const undoControls = useMemo<UndoControls | undefined>(
     () =>
@@ -151,16 +163,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     );
   }, [runs, props.holds]);
 
-  const stats = useMemo(
-    () => computeHeaderStats(runs, nowMs, holds.length),
-    [runs, holds, nowMs],
-  );
   const meta = props.holdsMeta;
-  const holdsLabel = props.holdsSplit
-    ? formatSplitTotal(props.holdsSplit)
-    : meta
-      ? formatHoldsTotal(meta, stats.openHolds)
-      : `${stats.openHolds} holds`;
   const coverage = describeCoverage(props.coverage, props.coverageUnavailable);
 
   useEffect(() => {
@@ -189,6 +192,26 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       })
       .catch(() => {
         for (const r of missing) requested.current.delete(r.id);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runs]);
+
+  // Fetch thread text (our last text, Sandra's reply) for runs that arrive over
+  // realtime, and again when a run gains its sent reply.
+  const requestedThreads = useRef(new Set<string>((props.threads ?? []).map(([id]) => id)));
+  useEffect(() => {
+    const missing = runs.filter((r) => !requestedThreads.current.has(`${r.id}:${r.outbound_message_id ?? ""}`));
+    if (missing.length === 0) return;
+    for (const r of missing) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
+    let cancelled = false;
+    loadRunThreads(createClient() as unknown as LooseSupabase, missing)
+      .then((fetched) => {
+        if (!cancelled) setThreads((curr) => new Map([...curr, ...fetched]));
+      })
+      .catch(() => {
+        for (const r of missing) requestedThreads.current.delete(`${r.id}:${r.outbound_message_id ?? ""}`);
       });
     return () => {
       cancelled = true;
@@ -295,193 +318,176 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     };
   }, [requestRefresh, setRuns, orgId]);
 
-  // Keep the newest card in view when the operator is already at the top.
-  const feedRef = useRef<HTMLDivElement>(null);
-  const newestId = runs[0]?.id;
-  useEffect(() => {
-    const el = feedRef.current;
-    if (el && el.scrollTop < 48 && typeof el.scrollTo === "function")
-      el.scrollTo({ top: 0 });
-  }, [newestId]);
+  const allRuns = useMemo(() => {
+    const seen = new Set(runs.map((r) => r.id));
+    return [...runs, ...earlier.filter((r) => !seen.has(r.id))].sort(
+      (x, y) => Date.parse(y.started_at) - Date.parse(x.started_at),
+    );
+  }, [runs, earlier]);
+
+  const showEarlier = async () => {
+    if (!props.loadTapeDay || earlierBusy) return;
+    const oldest = allRuns.length ? Date.parse(allRuns[allRuns.length - 1].started_at) : nowMs;
+    const before = loadedBefore ?? oldest;
+    setEarlierBusy(true);
+    setEarlierNote(null);
+    try {
+      const res = await props.loadTapeDay({ before: new Date(before).toISOString() });
+      if (res.ok) {
+        setEarlier((curr) => [...curr, ...res.data.runs]);
+        setLabels((curr) => new Map([...curr, ...res.data.labels]));
+        setThreads((curr) => new Map([...curr, ...res.data.threads]));
+        for (const r of res.data.runs) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
+        setLoadedBefore(before - DAY_MS);
+        if (res.data.runs.length === 0) setEarlierNote("No texts came in that day.");
+      } else {
+        setEarlierNote(res.error.message);
+      }
+    } catch {
+      setEarlierNote("The earlier tape could not be loaded.");
+    } finally {
+      setEarlierBusy(false);
+    }
+  };
+
+  const week = weekSummary(props.scorecardRows);
+  const on = sandraIsOn(badges);
+
+  // Day dividers: "Today", "Yesterday", then the date.
+  const tapeItems: Array<{ kind: "day"; label: string } | { kind: "run"; run: RunWithSteps }> = [];
+  let lastDay = "";
+  for (const run of allRuns) {
+    const label = dayLabel(Date.parse(run.started_at), nowMs);
+    if (label !== lastDay) {
+      tapeItems.push({ kind: "day", label });
+      lastDay = label;
+    }
+    tapeItems.push({ kind: "run", run });
+  }
 
   return (
-    // lg: fill the viewport below the dashboard chrome (md:pt-16 header + md:p-6 page padding = 7rem)
-    // so the live feed and the holds rail each scroll on their own.
-    <div
-      className="flex flex-col gap-4 lg:h-[calc(100dvh-7rem)]"
-      data-testid="messages-v2"
-    >
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h1 className="text-xl font-semibold">Messages v2</h1>
+    <div className="flex flex-col gap-5" data-testid="messages-v2">
+      <header className="flex flex-wrap items-end gap-x-4 gap-y-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Messages v2</h1>
+          <p className="text-[13px] text-muted-foreground">Sandra is answering seller texts. You are watching her work.</p>
+        </div>
         {isOwner && props.replayBatchId && (
-          <Badge
-            variant="outline"
-            data-testid="replay-batch-badge"
-            className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200"
-          >
+          <Badge variant="outline" data-testid="replay-batch-badge" className="bg-amber-100 text-amber-800">
             Replay batch {props.replayBatchId}
           </Badge>
         )}
-        <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
-          {props.badgesError && (
-            <span
-              role="alert"
-              data-testid="badges-unavailable"
-              className="text-xs text-red-700 dark:text-red-300"
-            >
-              {props.badgesError}
-            </span>
-          )}
-          {badges.map((b) =>
-            // Owners can edit a label's rule; Acquisitions members see the
-            // same badge read-only.
-            isOwner && isEditableBadge(b) ? (
-              <LabelRuleEditor
-                key={b.label}
-                orgId={orgId}
-                badge={b}
-                text={`${b.label} [${formatModeBadge(b)}]`}
-                className={cn("gap-1", BADGE_CLASS[b.mode])}
-              />
-            ) : (
-              <Badge
-                key={b.label}
-                variant="outline"
-                className={cn("gap-1", BADGE_CLASS[b.mode])}
-              >
-                {b.label} [{formatModeBadge(b)}]
-              </Badge>
-            ),
-          )}
-          {isOwner && props.nurtureAutoDrip && <NurtureAutoDripSwitch state={props.nurtureAutoDrip} />}
-        </div>
-        <ReplyGenerationToggle
-          configId={props.replyGeneration?.configId ?? null}
-          replyGeneration={props.replyGeneration?.replyGeneration ?? null}
-          isOwner={isOwner}
-          action={props.setReplyGeneration}
-        />
-        <p
-          className="ml-auto text-sm text-muted-foreground"
-          data-testid="header-status"
-        >
-          <span
-            aria-hidden
-            className={live ? "text-emerald-600" : "text-muted-foreground"}
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <p
+            data-testid="header-status"
+            className="inline-flex items-center gap-2 rounded-full border bg-card px-3.5 py-2 text-[13px]"
           >
-            ●
-          </span>{" "}
-          {live ? "live" : "connecting"} · {stats.runsLastHour} runs last hour ·{" "}
-          {holdsLabel}
-          {coverage && (
-            <>
-              {" "}
-              ·{" "}
-              <span
-                data-testid="coverage"
-                data-gap={coverage.gap ? "true" : "false"}
-                data-degraded={coverage.degraded ? "true" : "false"}
-                className={cn(
-                  coverage.gap && "font-medium text-red-600 dark:text-red-400",
-                )}
-                title={
-                  coverage.gap
-                    ? "Fewer runs than inbound texts: the pipeline seam may be failing silently"
-                    : undefined
-                }
-              >
-                {coverage.text}
+            <span
+              aria-hidden
+              title={live ? "Live" : "Connecting"}
+              className={cn("size-2 rounded-full", live && on ? "bg-emerald-600" : "bg-muted-foreground")}
+            />
+            <span className="font-medium">{on ? "Sandra is on" : "Sandra is watching, not acting yet"}</span>
+            {week && (
+              <span className="text-muted-foreground">
+                · {week.texts.toLocaleString("en-US")} texts this week
+                {week.rightPct !== null ? ` · right ${week.rightPct}% of the time` : ""}
               </span>
-            </>
-          )}
-        </p>
+            )}
+          </p>
+          <RulesPanel
+            orgId={orgId}
+            isOwner={isOwner}
+            badges={badges}
+            badgesError={props.badgesError}
+            nurtureAutoDrip={props.nurtureAutoDrip}
+            replyGeneration={props.replyGeneration}
+            setReplyGeneration={props.setReplyGeneration}
+          />
+        </div>
+        {coverage && (coverage.gap || coverage.degraded) && (
+          <p
+            data-testid="coverage"
+            data-gap={coverage.gap ? "true" : "false"}
+            data-degraded={coverage.degraded ? "true" : "false"}
+            className="basis-full text-xs font-medium text-red-600"
+            title="Fewer runs than inbound texts: some seller texts may not have reached Sandra"
+          >
+            {coverage.text}
+          </p>
+        )}
       </header>
 
-      <div className="grid gap-6 lg:min-h-[20rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
-        <section
-          aria-label="Live feed"
-          className="flex min-w-0 flex-col gap-3 lg:min-h-0"
-        >
-          <h2 className="text-sm font-semibold">Live feed</h2>
-          <div
-            ref={feedRef}
-            data-testid="live-feed-scroll"
-            className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1"
-          >
-            {props.feedError && (
-              <p
-                role="alert"
-                data-testid="feed-unavailable"
-                className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
-              >
-                {props.feedError}
+      <div className="flex flex-wrap items-start gap-6">
+        <section aria-label="Sandra's tape" className="flex min-w-0 flex-[999_1_560px] flex-col gap-3">
+          <div className="flex items-baseline gap-3">
+            <h2 className="text-base font-semibold">Sandra&apos;s tape</h2>
+            <span className="text-[13px] text-muted-foreground">Newest on top</span>
+          </div>
+          {props.feedError && (
+            <p role="alert" data-testid="feed-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">
+              {props.feedError}
+            </p>
+          )}
+          {props.stepsUnavailable && (
+            <p role="alert" data-testid="steps-unavailable" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+              Some details are unavailable, so a few cards may read as unfinished.
+            </p>
+          )}
+          {allRuns.length === 0 ? (
+            props.feedError ? null : (
+              <p className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+                No seller texts yet. New ones will appear here as Sandra reads them.
               </p>
-            )}
-            {props.stepsUnavailable && (
-              <p
-                role="alert"
-                data-testid="steps-unavailable"
-                className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
-              >
-                Step details unavailable — run cards may be missing steps.
-              </p>
-            )}
-            {runs.length === 0 ? (
-              props.feedError ? null : (
-                <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-                  No pipeline runs yet. New inbound texts will appear here as
-                  they are processed.
-                </p>
-              )
-            ) : (
-              runs.map((run) => (
-                <RunCard
-                  key={run.id}
-                  run={run}
-                  label={labels.get(run.id)}
-                  isOwner={isOwner}
+            )
+          ) : (
+            tapeItems.map((item) =>
+              item.kind === "day" ? (
+                <h3
+                  key={`day-${item.label}`}
+                  data-testid="tape-day"
+                  className="pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  {item.label}
+                </h3>
+              ) : (
+                <TapeCard
+                  key={item.run.id}
+                  run={item.run}
+                  label={labels.get(item.run.id)}
+                  thread={threads.get(item.run.id)}
                   undoControls={undoControls}
                 />
-              ))
-            )}
-          </div>
+              ),
+            )
+          )}
+          {earlierNote && (
+            <p data-testid="earlier-note" className="text-center text-xs text-muted-foreground">
+              {earlierNote}
+            </p>
+          )}
+          {props.loadTapeDay && (
+            <div className="flex justify-center">
+              <Button type="button" variant="ghost" size="sm" data-testid="show-earlier" disabled={earlierBusy} onClick={showEarlier}>
+                {earlierBusy ? "Loading…" : loadedBefore === null ? "Show yesterday's tape" : "Show the day before"}
+              </Button>
+            </div>
+          )}
         </section>
-        <HoldsRail
-          holds={holds}
-          labels={labels}
-          nowMs={nowMs}
-          meta={meta}
-          split={props.holdsSplit}
-          loadBacklog={props.loadBacklog}
-          backlogRefreshKey={props.holds}
-          actions={props.actions}
-          onReload={() => router.refresh()}
-        />
-      </div>
 
-      {/* lg: the scorecard gets a bounded, scrollable slice so the feed and holds
-          columns above always keep their height (min 20rem). */}
-      <div
-        data-testid="scorecard-slot"
-        className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
-      >
-        <ScorecardCard
-          orgId={orgId}
-          initialRows={props.scorecardRows ?? null}
-          lunaEnabled={props.lunaEnabled ?? false}
-        />
+        <div className="flex min-w-0 max-w-[420px] flex-[1_1_340px] flex-col">
+          <WaitingColumn
+            holds={holds}
+            labels={labels}
+            meta={meta}
+            split={props.holdsSplit}
+            loadBacklog={props.loadBacklog}
+            backlogRefreshKey={props.holds}
+            actions={props.actions}
+            onReload={() => router.refresh()}
+          />
+        </div>
       </div>
-
-      <ul
-        aria-label="Legend"
-        className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground"
-      >
-        {LEGEND.map(([glyph, text]) => (
-          <li key={text}>
-            <span aria-hidden>{glyph}</span> {text}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

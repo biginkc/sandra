@@ -171,7 +171,7 @@ describe("HoldsRail", () => {
 
   it("renders the actions disabled (not hidden) when no action handlers are supplied", () => {
     render(<HoldsRail holds={[hold("a", 5)]} labels={new Map()} nowMs={NOW} />);
-    for (const name of ["Send", "Edit", "Take over", "Assign", "Dismiss"]) {
+    for (const name of ["Send", "Edit", "Open thread", "Assign", "Dismiss"]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${name}`) })).toBeDisabled();
     }
   });

@@ -60,7 +60,7 @@ describe("hold action controls", () => {
   it("shows the pending draft and enables all five actions", () => {
     renderRail();
     expect(screen.getByTestId("draft-text")).toHaveTextContent("Draft text for the seller");
-    for (const name of ["Send", "Edit", "Take over", "Assign", "Dismiss"]) {
+    for (const name of ["Send", "Edit", "Open thread", "Assign", "Dismiss"]) {
       expect(button(new RegExp(`^${name}`))).toBeEnabled();
     }
   });
@@ -74,7 +74,7 @@ describe("hold action controls", () => {
     renderRail(hold({ draft: undefined, draft_held: false, sources: ["needs_attention"] }));
     expect(button(/^Send/)).toBeDisabled();
     expect(button(/^Edit/)).toBeDisabled();
-    expect(button(/^Take over/)).toBeEnabled();
+    expect(button(/^Open thread/)).toBeEnabled();
     expect(button(/^Assign/)).toBeEnabled();
     expect(button(/^Dismiss/)).toBeEnabled();
   });
@@ -159,7 +159,7 @@ describe("hold action controls", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(message);
       expect(button(/^Send/)).toBeDisabled();
       expect(button(/^Edit/)).toBeDisabled();
-      expect(button(/^Take over/)).toBeEnabled();
+      expect(button(/^Open thread/)).toBeEnabled();
     });
   });
 
@@ -200,10 +200,10 @@ describe("hold action controls", () => {
     });
   });
 
-  describe("Take over", () => {
+  describe("Open thread", () => {
     it("marks the lead human-owned and offers the lead link", async () => {
       const actions = renderRail();
-      await userEvent.click(button(/^Take over/));
+      await userEvent.click(button(/^Open thread/));
       expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1", seen: SEEN_HOLD });
       const link = await screen.findByRole("link", { name: /open lead/i });
       expect(link).toHaveAttribute("href", "/leads/p1");
@@ -212,9 +212,9 @@ describe("hold action controls", () => {
 
     it("rolls back on failure", async () => {
       renderRail(hold(), api({ takeOver: vi.fn().mockResolvedValue(fail("HOLD_RESOLVE_FAILED", "Could not update that hold.")) }));
-      await userEvent.click(button(/^Take over/));
+      await userEvent.click(button(/^Open thread/));
       expect(await screen.findByRole("alert")).toHaveTextContent(/could not update/i);
-      expect(button(/^Take over/)).toBeEnabled();
+      expect(button(/^Open thread/)).toBeEnabled();
     });
   });
 
@@ -390,7 +390,7 @@ describe("Luna suggestion on the hold card", () => {
   });
 });
 
-describe("hostile hold: Confirm do-not-contact", () => {
+describe("hostile hold: Stop texting them", () => {
   const hostileHold = () =>
     hold({
       draft: undefined,
@@ -405,7 +405,7 @@ describe("hostile hold: Confirm do-not-contact", () => {
     const confirm = vi.fn().mockResolvedValue(ok({ replySent: true, replyNote: null }));
     renderRail(hostileHold(), api({ confirmDoNotContact: confirm }));
     expect(screen.getByTestId("hostile-confirm")).toHaveTextContent("number is still active");
-    await user.click(button("Confirm do-not-contact"));
+    await user.click(button("Stop texting them"));
     expect(confirm).not.toHaveBeenCalled();
     await user.click(button(/^Yes, stop all texts/));
     await waitFor(() =>
@@ -420,7 +420,7 @@ describe("hostile hold: Confirm do-not-contact", () => {
   it("says plainly when no reply went out but the number is suppressed", async () => {
     const user = userEvent.setup();
     renderRail(hostileHold(), api({ confirmDoNotContact: vi.fn().mockResolvedValue(ok({ replySent: false, replyNote: "no approved hostile reply is mapped" })) }));
-    await user.click(button("Confirm do-not-contact"));
+    await user.click(button("Stop texting them"));
     await user.click(button(/^Yes, stop all texts/));
     expect(await screen.findByTestId("hold-status")).toHaveTextContent("number suppressed (no approved hostile reply is mapped)");
   });

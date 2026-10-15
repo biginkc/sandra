@@ -1,11 +1,11 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
   OpenHold,
   PipelineCoverage,
-  PipelineRun,
   PipelineRunStep,
   RunWithSteps,
 } from "./types";
@@ -44,8 +44,8 @@ const mocks = vi.hoisted(() => {
     rpc: vi.fn(async () => ({ data: [], error: null })),
     from: vi.fn(() => {
       const q: Record<string, unknown> = {};
-      q.select = () => q;
-      q.in = async () => ({ data: [] });
+      for (const m of ["select", "in", "eq", "order", "limit"]) q[m] = () => q;
+      q.then = (resolve: (v: { data: never[] }) => unknown) => resolve({ data: [] });
       return q;
     }),
   };
@@ -57,7 +57,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: mocks.refresh }),
 }));
 
-const run = (id: string, over: Partial<PipelineRun> = {}): RunWithSteps => ({
+const run = (id: string, over: Partial<RunWithSteps> = {}): RunWithSteps => ({
   id,
   org_id: "o",
   inbound_message_id: `m-${id}`,
@@ -134,7 +134,12 @@ beforeEach(() => {
   mocks.client.realtime.setAuth.mockClear();
 });
 
-describe("MessagesV2View label rules", () => {
+const openRules = async () => {
+  await userEvent.click(screen.getByTestId("open-rules"));
+  return screen.findByTestId("rules-panel");
+};
+
+describe("MessagesV2View rules panel", () => {
   const ruleBadges = [
     {
       label: "nurture",
@@ -142,81 +147,110 @@ describe("MessagesV2View label rules", () => {
       minConfidence: 0.95,
       rule: { minConfidence: 0.95, automationEnabled: true, version: 2 },
     },
-    { label: "paused", mode: "HELD" as const },
+    { label: "wrong_number", mode: "HELD" as const },
   ];
 
-  it("owners get an edit button on badges whose rule is known; others stay plain", async () => {
+  it("replaces the header badges with one Sandra's rules button that opens a side panel", async () => {
     await mount({ ...props(), badges: ruleBadges });
-    expect(screen.getByRole("button", { name: "Edit rule for nurture" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Edit rule for paused" })).not.toBeInTheDocument();
-    expect(screen.getByText("paused [HELD]")).toBeInTheDocument();
+    expect(screen.queryByText(/\[AUTO/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("open-rules")).toHaveTextContent("Sandra's rules");
+    const panel = await openRules();
+    expect(within(panel).getByRole("heading", { name: "Goes to Jarrad" })).toBeInTheDocument();
+    expect(within(panel).getByRole("heading", { name: "Sandra handles alone" })).toBeInTheDocument();
+    expect(within(panel).getByRole("heading", { name: "Waits for a person" })).toBeInTheDocument();
   });
 
-  it("Acquisitions members see the same badges read-only", async () => {
+  it("shows each switch in plain English with the cutoff as 'N% sure or more'", async () => {
+    await mount({ ...props(), badges: ruleBadges });
+    const panel = await openRules();
+    expect(within(panel).getByText("On · 95% sure or more")).toBeInTheDocument();
+    expect(within(panel).getByText("Off · waits for a person")).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/jev/i);
+  });
+
+  it("owners get a Change button on switches whose rule is known; others stay read-only", async () => {
+    await mount({ ...props(), badges: ruleBadges });
+    const panel = await openRules();
+    expect(within(panel).getByRole("button", { name: "Edit rule for nurture" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Edit rule for wrong_number" })).not.toBeInTheDocument();
+  });
+
+  it("Acquisitions members see the switches read-only", async () => {
     await mount({ ...props(), isOwner: false, badges: ruleBadges });
-    expect(screen.getByText("nurture [AUTO ≥0.95]")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Edit rule/ })).not.toBeInTheDocument();
+    const panel = await openRules();
+    expect(within(panel).getByText("On · 95% sure or more")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: /Edit rule/ })).not.toBeInTheDocument();
   });
 });
 
 describe("MessagesV2View AI drafts control", () => {
   const setting = { configId: "cfg-1", replyGeneration: "off" as const };
-  it("owner sees the toggle in the header", async () => {
+  it("owner sees the toggle in the rules panel", async () => {
     await mount({ ...props(), replyGeneration: setting, setReplyGeneration: vi.fn() });
+    await openRules();
     expect(screen.getByTestId("reply-generation-toggle")).toHaveTextContent("AI drafts: off");
   });
   it("acquisitions sees a read-only badge, no toggle", async () => {
     await mount({ ...props(), isOwner: false, replyGeneration: setting, setReplyGeneration: vi.fn() });
+    await openRules();
     expect(screen.getByTestId("reply-generation-badge")).toHaveTextContent("AI drafts: off");
     expect(screen.queryByTestId("reply-generation-toggle")).toBeNull();
   });
   it("no control when the setting is unavailable", async () => {
     await mount(props());
+    await openRules();
     expect(screen.queryByTestId("reply-generation-toggle")).toBeNull();
     expect(screen.queryByTestId("reply-generation-badge")).toBeNull();
   });
 });
 
 describe("MessagesV2View", () => {
-  it("renders header, mode badges, columns, empty states and legend", async () => {
+  it("renders the header line, the tape and the waiting column with empty states", async () => {
     await mount();
-    expect(
-      screen.getByRole("heading", { name: "Messages v2" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("not_interested [AUTO ≥0.95]")).toBeInTheDocument();
-    expect(screen.getByText("nurture [SHADOW]")).toBeInTheDocument();
-    expect(screen.getByText("paused [HELD]")).toBeInTheDocument();
-    expect(screen.getByLabelText("Live feed")).toBeInTheDocument();
-    expect(screen.getByLabelText("Holds")).toBeInTheDocument();
-    expect(screen.getByText(/no pipeline runs yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/no open holds/i)).toBeInTheDocument();
-    expect(
-      within(screen.getByLabelText("Legend")).getAllByRole("listitem"),
-    ).toHaveLength(6);
+    expect(screen.getByRole("heading", { name: "Messages v2" })).toBeInTheDocument();
+    expect(screen.getByTestId("header-status")).toHaveTextContent("Sandra is on");
+    expect(screen.getByLabelText("Sandra's tape")).toBeInTheDocument();
+    expect(screen.getByLabelText("Waiting for a person")).toBeInTheDocument();
+    expect(screen.getByText(/no seller texts yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing is waiting for you/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Shadow scorecard")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Legend")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/jev|luna/i);
   });
 
-  it("renders the shadow scorecard from server rows instead of the placeholder", async () => {
+  it("shows 'N texts this week · right N% of the time' from the 7-day scorecard", async () => {
+    const row = (outcome: string, runs: number, settled: number, agreed: number) => ({
+      outcome,
+      runs,
+      auto_applied: 0,
+      held: 0,
+      auto_settled: settled,
+      auto_agreed: agreed,
+      held_decided: 0,
+      held_agreed: 0,
+      threshold: 0.9,
+      automation_enabled: true,
+      samples: [],
+    });
+    await mount({ ...props(), scorecardRows: [row("nurture", 7, 0, 0), row("not_interested", 196, 50, 47)] });
+    expect(screen.getByTestId("header-status")).toHaveTextContent("203 texts this week · right 94% of the time");
+  });
+
+  it("omits the percentage when nothing has been confirmed yet", async () => {
     await mount({
       ...props(),
       scorecardRows: [
-        {
-          outcome: "nurture",
-          runs: 7,
-          auto_applied: 5,
-          held: 2,
-          auto_settled: 0,
-          auto_agreed: 0,
-          held_decided: 0,
-          held_agreed: 0,
-          threshold: 0.9,
-          automation_enabled: true,
-          samples: [],
-        },
+        { outcome: "nurture", runs: 7, auto_applied: 5, held: 2, auto_settled: 0, auto_agreed: 0, held_decided: 0, held_agreed: 0, threshold: 0.9, automation_enabled: true, samples: [] },
       ],
     });
-    const card = screen.getByLabelText("Shadow scorecard");
-    expect(within(card).getByText(/7 runs/)).toBeInTheDocument();
-    expect(screen.queryByText(/available after 2h/i)).not.toBeInTheDocument();
+    const text = screen.getByTestId("header-status").textContent ?? "";
+    expect(text).toContain("7 texts this week");
+    expect(text).not.toContain("right");
+  });
+
+  it("says Sandra is watching, not on, when every rule is watch-only", async () => {
+    await mount({ ...props(), badges: [{ label: "nurture", mode: "SHADOW" as const }] });
+    expect(screen.getByTestId("header-status")).toHaveTextContent("watching");
   });
 
   it("subscribes on messages-v2:feed with the session token, every subscription filtered to the org", async () => {
@@ -249,61 +283,99 @@ describe("MessagesV2View", () => {
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
   });
 
-  it("adds a streamed run on top and appends streamed steps without refreshing", async () => {
-    await mount(
-      props([run("old", { started_at: new Date(NOW - 60_000).toISOString() })]),
-    );
+  it("shows 'Sandra is reading…' for a streamed run, then the plain decision as steps arrive, without refreshing", async () => {
+    await mount(props([run("old", { started_at: new Date(NOW - 60_000).toISOString() })]));
     await fire("INSERT", "pipeline_runs", run("new"));
-    const cards = screen.getAllByTestId("run-card");
+    const cards = screen.getAllByTestId("tape-card");
     expect(cards[0]).toHaveTextContent("hello new");
+    expect(within(cards[0]).getByTestId("tape-reading")).toHaveTextContent("Sandra is reading…");
     await fire("INSERT", "pipeline_run_steps", {
       id: "s1",
       run_id: "new",
       org_id: "o",
       seq: 1,
-      kind: "action",
-      name: "set_stage",
-      result: "applied",
-      detail: {},
+      kind: "jev",
+      name: "classify",
+      result: "pass",
+      detail: { outcome: "not_interested" },
       created_at: "",
     } satisfies PipelineRunStep);
-    expect(
-      within(screen.getAllByTestId("run-card")[0]).getByTestId("step-action"),
-    ).toBeInTheDocument();
+    const card = screen.getAllByTestId("tape-card")[0];
+    expect(within(card).getByTestId("tape-tag")).toHaveTextContent("Not interested");
+    expect(within(card).getByTestId("tape-sentence")).toHaveTextContent("Sandra: They said no.");
+    expect(within(card).queryByTestId("tape-reading")).toBeNull();
     expect(mocks.refresh).not.toHaveBeenCalled();
   });
 
-  it("applies run UPDATEs (pulse stops) but a held run alone does not open a hold", async () => {
+  it("says 'Replying in a few minutes' while a reply is scheduled, then shows the sent reply", async () => {
+    await mount(props([run("a", { outbound_message_id: null })]));
+    await fire("INSERT", "pipeline_run_steps", {
+      id: "s1", run_id: "a", org_id: "o", seq: 1, kind: "jev", name: "classify", result: "pass",
+      detail: { outcome: "nurture" }, created_at: "",
+    } satisfies PipelineRunStep);
+    await fire("INSERT", "pipeline_run_steps", {
+      id: "s2", run_id: "a", org_id: "o", seq: 2, kind: "action", name: "reply_delay_scheduled", result: "applied",
+      detail: { delaySeconds: 240 }, created_at: "",
+    } satisfies PipelineRunStep);
+    expect(screen.getByTestId("tape-did")).toHaveTextContent("Replying in a few minutes");
+    expect(screen.getByTestId("tape-card")).toHaveAttribute("data-stage", "replying");
+    await fire("UPDATE", "pipeline_runs", run("a", { status: "replied", completed_at: new Date().toISOString() }));
+    expect(screen.getByTestId("tape-card")).toHaveAttribute("data-stage", "sent");
+    expect(screen.getByTestId("tape-did")).toHaveTextContent("Reply sent");
+  });
+
+  it("never shows engine step names on a card", async () => {
+    const steps: PipelineRunStep[] = ["claim", "resolve_threshold", "reply_delay_scheduled", "needs_attention"].map((name, i) => ({
+      id: `s${i}`, run_id: "a", org_id: "o", seq: i + 1, kind: i === 1 ? "threshold" : i === 3 ? "hold" : "action",
+      name, result: "applied", detail: {}, created_at: "",
+    }));
+    await mount(props([run("a", { status: "held", reason: "model:price_or_offer", steps })]));
+    const text = screen.getByTestId("tape-card").textContent ?? "";
+    for (const word of ["claim", "resolve_threshold", "reply_delay_scheduled", "needs_attention", "luna_suggest", "gates passed"]) {
+      expect(text).not.toContain(word);
+    }
+    expect(screen.getByTestId("tape-tag")).toHaveTextContent("Talked price");
+  });
+
+  it("turns an already_terminal skip into one quiet card with the seller's text", async () => {
+    await mount(props([run("a", { status: "skipped", reason: "already_terminal", steps: [
+      { id: "g", run_id: "a", org_id: "o", seq: 1, kind: "gate", name: "already_terminal", result: "block", detail: {}, created_at: "" },
+    ] })]));
+    const card = screen.getByTestId("tape-card");
+    expect(card).toHaveAttribute("data-kind", "quiet");
+    expect(card).toHaveTextContent("hello a");
+    expect(screen.getByTestId("tape-quiet")).toHaveTextContent("Already a lead, left for the person who owns it");
+    expect(within(card).queryByTestId("tape-tag")).toBeNull();
+  });
+
+  it("a held run alone does not open a waiting card", async () => {
     await mount(props([run("a")]));
-    expect(screen.getByTestId("run-pulse")).toBeInTheDocument();
-    await fire(
-      "UPDATE",
-      "pipeline_runs",
-      run("a", { status: "held", completed_at: new Date().toISOString() }),
-    );
-    expect(screen.queryByTestId("run-pulse")).not.toBeInTheDocument();
-    expect(screen.queryAllByTestId("hold-card")).toHaveLength(0);
+    await fire("UPDATE", "pipeline_runs", run("a", { status: "held", completed_at: new Date().toISOString() }));
+    expect(screen.queryByTestId("tape-reading")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("waiting-card")).toHaveLength(0);
   });
 
-  it("renders server-derived holds, including a runless fallback card", async () => {
-    await mount(
-      props(
-        [run("a")],
-        [openHold("p1", run("a", { status: "closed" })), openHold("p2")],
-      ),
-    );
-    expect(screen.getAllByTestId("hold-card")).toHaveLength(2);
-    expect(screen.getByTestId("header-status")).toHaveTextContent("2 holds");
+  it("lists waiting holds newest first, however the server ordered them", async () => {
+    const hold = (id: string, minsAgo: number) => ({ ...openHold(id), since: new Date(NOW - minsAgo * 60_000).toISOString() });
+    await mount(props([], [hold("old", 600), hold("newest", 5), hold("middle", 120)]));
+    const times = screen.getAllByTestId("waiting-time").map((el) => el.querySelector("time")!.getAttribute("datetime")!);
+    expect(times).toEqual([...times].sort().reverse());
+    expect(times).toHaveLength(3);
   });
 
-  it("shows inbound/run coverage and highlights a gap", async () => {
+  it("renders server-derived holds with a plain reason and relabelled actions, including a runless card", async () => {
+    await mount(props([run("a")], [openHold("p1", run("a", { status: "closed" })), openHold("p2")], null));
+    expect(screen.getAllByTestId("waiting-card")).toHaveLength(2);
+    expect(screen.getByTestId("waiting-count")).toHaveTextContent("2");
+    expect(screen.getAllByRole("button", { name: "Open thread" })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /take over/i })).toBeNull();
+  });
+
+  it("stays quiet while coverage is healthy and highlights a gap", async () => {
     const { unmount } = render(
       <MessagesV2View {...props([], [], { inboundMessages: 3, runs: 3 })} />,
     );
-    expect(screen.getByTestId("coverage")).toHaveTextContent(
-      "3 inbound / 3 runs (last hour)",
-    );
-    expect(screen.getByTestId("coverage")).toHaveAttribute("data-gap", "false");
+    expect(screen.queryByTestId("coverage")).toBeNull();
     unmount();
     render(
       <MessagesV2View {...props([], [], { inboundMessages: 5, runs: 2 })} />,
@@ -338,9 +410,9 @@ describe("MessagesV2View", () => {
   it("backfills via refresh after the channel drops and reconnects", async () => {
     await mount();
     await act(async () => mocks.state.status!("SUBSCRIBED"));
-    expect(screen.getByTestId("header-status")).toHaveTextContent("live");
+    expect(screen.getByTitle("Live")).toBeInTheDocument();
     await act(async () => mocks.state.status!("CHANNEL_ERROR"));
-    expect(screen.getByTestId("header-status")).toHaveTextContent("connecting");
+    expect(screen.getByTitle("Connecting")).toBeInTheDocument();
     expect(mocks.refresh).not.toHaveBeenCalled();
     await act(async () => mocks.state.status!("SUBSCRIBED"));
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
@@ -353,47 +425,46 @@ describe("MessagesV2View", () => {
     expect(el).toHaveAttribute("data-degraded", "true");
   });
 
-  it("header says 'holds unavailable' on a failed source and 'N holds (M shown)' when truncated", async () => {
-    const m = {
-      total: 0,
-      shown: 0,
-      truncated: false,
-      totalState: "exact" as const,
-      failed: [] as never[],
-      contextErrors: [],
-    };
-    const { unmount } = render(
-      <MessagesV2View
-        {...props()}
-        holdsMeta={{ ...m, failed: ["needs_attention"] }}
-      />,
-    );
-    expect(screen.getByTestId("header-status")).toHaveTextContent(
-      "holds unavailable",
-    );
-    unmount();
-    render(
-      <MessagesV2View
-        {...props([], [openHold("a")])}
-        holdsMeta={{ ...m, total: 350, shown: 1, truncated: true }}
-      />,
-    );
-    expect(screen.getByTestId("header-status")).toHaveTextContent(
-      "350 holds (1 shown)",
-    );
+  it("shows a plain failure line, not an empty column, when a hold source failed", async () => {
+    const m = { total: 0, shown: 0, truncated: false, totalState: "exact" as const, failed: ["needs_attention" as const], contextErrors: [] };
+    await mount({ ...props(), holdsMeta: m });
+    expect(screen.getByTestId("holds-unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(/nothing is waiting for you/i)).toBeNull();
   });
 
-  it("shows New and Backlog counts in the header and passes the split to the rail", () => {
-    render(
-      <MessagesV2View
-        {...props([], [openHold("a")])}
-        holdsSplit={{ backlogBefore: "2026-10-08T00:00:00Z", newTotal: 1, newShown: 1, backlogTotal: 2504 }}
-        loadBacklog={async () => ({ ok: false, error: { code: "X", message: "x" } })}
-      />,
-    );
-    expect(screen.getByTestId("header-status")).toHaveTextContent("1 new · 2,504 backlog");
-    expect(screen.getByLabelText("New holds")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Backlog/ })).toHaveAttribute("aria-expanded", "false");
+  it("'Show older' reveals the loaded holds beyond the first 20, then pages in the backlog", async () => {
+    const holds = Array.from({ length: 22 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
+    const loadBacklog = vi.fn(async () => ({
+      ok: true as const,
+      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], backlogTotal: 1, hasMore: false, nextOffset: 1 },
+    }));
+    await mount({
+      ...props([], holds),
+      holdsSplit: { backlogBefore: "2026-10-08T00:00:00Z", newTotal: 22, newShown: 22, backlogTotal: 1 },
+      loadBacklog,
+    });
+    expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
+    await userEvent.click(screen.getByTestId("show-older"));
+    expect(screen.getAllByTestId("waiting-card")).toHaveLength(22);
+    expect(loadBacklog).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(23));
+    expect(loadBacklog).toHaveBeenCalledWith({ offset: 0, limit: 50 });
+    expect(screen.queryByText(/backlog/i)).toBeNull();
+  });
+
+  it("'Show yesterday's tape' loads the earlier day and shows it under its own day heading", async () => {
+    const yesterdayRun = run("y1", { started_at: new Date(NOW - 20 * 3600_000).toISOString(), status: "closed" });
+    const loadTapeDay = vi.fn(async () => ({
+      ok: true as const,
+      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [] },
+    }));
+    await mount({ ...props([run("today")]), loadTapeDay });
+    expect(screen.getAllByTestId("tape-card")).toHaveLength(1);
+    await userEvent.click(screen.getByTestId("show-earlier"));
+    await waitFor(() => expect(screen.getAllByTestId("tape-card")).toHaveLength(2));
+    expect(loadTapeDay).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("show-earlier")).toHaveTextContent("Show the day before");
   });
 
   it("shows 'Feed unavailable' instead of the empty-feed message when the feed query failed", async () => {
@@ -401,7 +472,7 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("feed-unavailable")).toHaveTextContent(
       "Feed unavailable — timeout",
     );
-    expect(screen.queryByText(/no pipeline runs yet/i)).toBeNull();
+    expect(screen.queryByText(/no seller texts yet/i)).toBeNull();
   });
 
   it("shows step and badge failures explicitly", async () => {
@@ -411,37 +482,10 @@ describe("MessagesV2View", () => {
       badgesError: "Mode badges unavailable — x",
     });
     expect(screen.getByTestId("steps-unavailable")).toBeInTheDocument();
-    expect(screen.getByTestId("badges-unavailable")).toHaveTextContent(
-      "Mode badges unavailable",
-    );
+    await openRules();
+    expect(screen.getByTestId("badges-unavailable")).toHaveTextContent("Mode badges unavailable");
   });
 
-  it("header says '2,000+ holds (incomplete)' when capped and 'holds count unavailable' when counts failed", async () => {
-    const m = {
-      total: 2000,
-      shown: 1,
-      truncated: true,
-      totalState: "capped" as const,
-      failed: [] as never[],
-      contextErrors: [],
-    };
-    const { unmount } = render(
-      <MessagesV2View {...props([], [openHold("a")])} holdsMeta={m} />,
-    );
-    expect(screen.getByTestId("header-status")).toHaveTextContent(
-      "2,000+ holds (incomplete)",
-    );
-    unmount();
-    render(
-      <MessagesV2View
-        {...props([], [openHold("a")])}
-        holdsMeta={{ ...m, totalState: "unavailable", truncated: false }}
-      />,
-    );
-    expect(screen.getByTestId("header-status")).toHaveTextContent(
-      "holds count unavailable",
-    );
-  });
   describe("replay batch badge", () => {
     it("shows for owner with a batch id", async () => {
       await mount({ ...props(), replayBatchId: "2026-10-07" });
