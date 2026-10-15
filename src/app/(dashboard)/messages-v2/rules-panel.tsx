@@ -60,7 +60,7 @@ const GROUPS: RuleGroup[] = [
 const HOT_DETAIL = "Sandra marks this seller as a lead for a person to follow up. She never texts them back on her own.";
 
 /**
- * Nine-question rows. Details reuse the approved sentences above; the three marked PLACEHOLDER are new.
+ * Nine-question rows. Reused sentences carry no marker; every row marked PLACEHOLDER is new text.
  */
 const NINE_DETAIL: Record<NineQuestionId, string> = {
   open_to_selling: HOT_DETAIL,
@@ -79,6 +79,7 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
   hostile: "Sandra sends nothing. A person reads it.",
 };
 
+// PLACEHOLDER — needs Jarrad's verbatim approval before merge (group headings; "Goes to Jarrad" is the only new one, the other two reuse today's)
 const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
   { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
   { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
@@ -112,12 +113,12 @@ function NineRules({ renderState }: { renderState: (outcome: string | undefined)
   );
 }
 
-function stateText(badge: ModeBadge | undefined): { text: string; tone: "on" | "off" | "watch" | "unknown" } {
+function stateText(badge: ModeBadge | undefined, hideCutoff = false): { text: string; tone: "on" | "off" | "watch" | "unknown" } {
   if (!badge) return { text: "Not set up", tone: "unknown" };
   switch (badge.mode) {
     case "AUTO":
       return {
-        text: badge.minConfidence != null ? `On · ${sureOrMore(badge.minConfidence)}` : "On",
+        text: !hideCutoff && badge.minConfidence != null ? `On · ${sureOrMore(badge.minConfidence)}` : "On",
         tone: "on",
       };
     case "HELD":
@@ -199,7 +200,7 @@ export function RulesPanel({
                 renderState={(outcome) => {
                   const badge = outcome ? byOutcome.get(outcome) : undefined;
                   if (!outcome) return null;
-                  const st = stateText(badge);
+                  const st = stateText(badge, true); // nine-question mode: the one 60% row is the cutoff
                   return (
                     <>
                       <span className={cn("rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap", TONE[st.tone])}>{st.text}</span>

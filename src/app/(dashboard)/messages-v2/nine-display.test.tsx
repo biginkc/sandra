@@ -74,7 +74,9 @@ describe("rules panel", () => {
     expect(group("Waits for a person")).toEqual(["Asked to stop", "Hostile"]);
     expect(within(panel).getByText("60% sure or more")).toBeTruthy();
     expect(panel.textContent).not.toMatch(/Jev/);
-    expect(within(panel).getByText("On · 90% sure or more")).toBeTruthy();
+    expect(within(panel).getByText("On")).toBeTruthy();
+    expect(panel.textContent).not.toMatch(/90%/);
+    expect(within(panel).getAllByText(/sure or more/)).toHaveLength(1);
   });
 
   it("old engine: today's panel unchanged", async () => {
