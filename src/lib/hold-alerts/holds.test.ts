@@ -140,6 +140,7 @@ describe("toAlertHolds", () => {
       flagHot: false,
       runHot: false,
       runInbound: "msg-1",
+      runReason: null,
       runStartedAt: "2026-10-08T10:00:00.000Z",
     });
   });

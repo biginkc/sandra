@@ -368,11 +368,46 @@ describe("design B hot holds and failed hand-offs", () => {
     expect(t.store.rows.map((r) => r.lastError)).toEqual(["owned_by_someone_else", "owned_by_someone_else"]);
   });
 
-  it("a hot hold whose reason is a failure reason is NOT alerted via the hold path", async () => {
-    const t = setup({ holds: [hold({ hot: true, reasonKey: "hot_lead_assign_failed", flagHot: true, flagAt: "2026-10-15T11:00:00.000Z", startedAt: "2026-10-15T11:00:00.000Z" })] });
+  it("a failed hand-off whose FLAG is the failure is a normal hot flag hold: hot_flag:<property>:<flagAt>, even with a later run for another text", async () => {
+    const t = setup({ holds: [hold({ hot: true, reasonKey: "hot_lead_assign_failed", flagHot: true, flagAt: "2026-10-15T11:00:00.000Z", runInbound: "in-later", runReason: "already_terminal", runStartedAt: "2026-10-15T11:30:00.000Z", startedAt: "2026-10-15T11:00:00.000Z" })] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(keys(t)).toEqual([]);
+    expect(chans(t).map((s) => s.channel)).toEqual(["slack", "sms"]);
+    expect(keys(t)).toEqual(["hot_flag:prop-1:2026-10-15T11:00:00.000Z"]);
+  });
+
+  it("a failed hand-off known only by its RUN reason (flag not hot: the flag write no-oped) alerts under hot_failed:<run inbound>", async () => {
+    const t = setup({ holds: [hold({ hot: true, flagHot: false, runHot: false, reasonKey: "jev_decision", runReason: "hot_lead_assign_failed", runInbound: "in-g", runStartedAt: "2026-10-15T11:00:00.000Z", startedAt: "2026-10-15T11:00:00.000Z" })] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(keys(t)).toEqual(["hot_failed:in-g"]);
+  });
+
+  it("a failed hold and its own event (same hot_flag key) dedupe: one Slack + one SMS in total", async () => {
+    const failedPromotion: HotPromotion = { propertyId: "prop-1", assigneeUserId: "", name: "Dana", assignedAt: "2026-10-15T11:00:00.000Z", kind: "hot_failed", key: "hot_flag:prop-1:2026-10-15T11:00:00.000Z", reason: "hot_lead_assign_failed" };
+    const t = setup({
+      promotions: [failedPromotion],
+      holds: [hold({ hot: true, reasonKey: "hot_lead_assign_failed", flagHot: true, flagAt: "2026-10-15T11:00:00.000Z", runInbound: "in-f", runStartedAt: "2026-10-15T11:00:00.000Z", startedAt: "2026-10-15T11:00:00.000Z" })],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toHaveLength(2);
+    expect(keys(t)).toEqual(["hot_flag:prop-1:2026-10-15T11:00:00.000Z"]);
+  });
+
+  it("a run-only failed hold and its own event (same hot_failed key) dedupe too", async () => {
+    const failedPromotion: HotPromotion = { propertyId: "prop-1", assigneeUserId: "", name: "Dana", assignedAt: "2026-10-15T11:00:00.000Z", kind: "hot_failed", key: "hot_failed:in-g", reason: "hot_lead_assign_failed" };
+    const t = setup({
+      promotions: [failedPromotion],
+      holds: [hold({ hot: true, flagHot: false, runHot: false, reasonKey: "jev_decision", runReason: "hot_lead_assign_failed", runInbound: "in-g", runStartedAt: "2026-10-15T11:00:00.000Z", startedAt: "2026-10-15T11:00:00.000Z" })],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(chans(t)).toHaveLength(2);
+    expect(keys(t)).toEqual(["hot_failed:in-g"]);
+  });
+
+  it("a run-only failed hold with no run inbound fails closed (reported)", async () => {
+    const none = setup({ holds: [hold({ hot: true, reasonKey: "jev_decision", flagHot: false, runReason: "hot_lead_assign_failed", startedAt: "2026-10-15T11:00:00.000Z" })] });
+    await runHoldAlertsForOrg(none.deps, "org-failed-no-time"); // own org: the unverified report is rate-limited per org per hour
+    expect(chans(none)).toEqual([]);
+    expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("without a verified hot time") }), expect.anything());
   });
 
   it("flag-hot hold: key hot_flag:<property>:<flagAt>, cutoff on flagAt (a pre-cutoff flag is silent even if the hold started later)", async () => {
@@ -399,5 +434,18 @@ describe("design B hot holds and failed hand-offs", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toEqual([]);
     expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("without a verified hot time") }), expect.anything());
+  });
+
+  it("the 'unverified hot time' report is rate-limited to once per org per hour", async () => {
+    const unverified = () => hold({ hot: true, flagHot: true, flagAt: null, startedAt: "2026-10-15T11:00:00.000Z" });
+    const reports = () => vi.mocked(reportError).mock.calls.filter((c) => String((c[0] as Error)?.message ?? "").includes("without a verified hot time")).length;
+    const org = "org-unverified-rl";
+    const t = setup({ holds: [unverified()] });
+    await runHoldAlertsForOrg(t.deps, org);
+    await runHoldAlertsForOrg(t.deps, org);
+    expect(reports()).toBe(1);
+    const later = setup({ holds: [unverified()], nowIso: "2026-10-15T14:00:00.000Z" });
+    await runHoldAlertsForOrg(later.deps, org);
+    expect(reports()).toBe(2);
   });
 });

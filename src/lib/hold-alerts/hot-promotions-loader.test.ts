@@ -16,7 +16,7 @@ type EventRow = {
   source_type: string;
   source_id: string;
   created_at: string;
-  payload: { to?: string; reason?: string; inbound?: string; covered_by_hold?: boolean };
+  payload: { to?: string; reason?: string; inbound?: string; covered_by_hold?: boolean; flag_at?: string | null };
 };
 type DeliveryRow = { hold_key: string; channel: string; status: string; attempts: number };
 
@@ -38,11 +38,14 @@ function fakeDb(
     failDeliveriesAt?: number;
     failEventsAt?: number;
     assignees?: Record<string, string | null>;
+    /** inbound message id -> messages.created_at (default: the event's own time); null = no such message. */
+    inboundTimes?: Record<string, string | null>;
+    failMessagesAt?: number;
   } = {},
 ) {
   // Newest first, id descending on ties: sorted once, then filtered in order.
   const sorted = [...events].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? 1 : -1));
-  const calls = { eventPages: 0, deliveryBatches: [] as number[], propertyBatches: [] as number[] };
+  const calls = { eventPages: 0, deliveryBatches: [] as number[], propertyBatches: [] as number[], messageBatches: 0 };
   const db = {
     from(table: string) {
       const eq: Array<[string, unknown]> = [];
@@ -64,6 +67,14 @@ function fakeDb(
         order: () => q,
         limit: (n: number) => ((limit = n), q),
         then(resolve: (v: { data: unknown[] | null; error: { message: string } | null }) => void) {
+          if (table === "messages") {
+            const ids = inn.find(([c]) => c === "id")![1] as string[];
+            calls.messageBatches += 1;
+            if (opts.failMessagesAt === calls.messageBatches) return resolve({ data: null, error: { message: "boom" } });
+            const timeOf = (id: string): string | null =>
+              opts.inboundTimes && id in opts.inboundTimes ? opts.inboundTimes[id]! : (events.find((e) => e.source_id === id)?.created_at ?? null);
+            return resolve({ data: ids.map((id) => ({ id, created_at: timeOf(id) })).filter((m) => m.created_at !== null), error: null });
+          }
           if (table === "properties") {
             const ids = inn.find(([c]) => c === "id")![1] as string[];
             calls.propertyBatches.push(ids.length);
@@ -408,6 +419,13 @@ describe("failed hand-offs (hot_seller_failed)", () => {
     expect(promotions[0]).toMatchObject({ kind: "hot_failed", key: "hot_failed:inbound-f", propertyId: "prop-f", reason: "hot_lead_assign_failed", assigneeUserId: "" });
   });
 
+  it("a failure whose payload carries flag_at is keyed hot_flag:<property>:<flag_at> (the same key as its hold)", async () => {
+    const { db } = fakeDb([failed({ payload: { reason: "hot_lead_assign_failed", covered_by_hold: false, flag_at: "2026-10-15T02:00:00.000Z" } })]);
+    const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions).toHaveLength(1);
+    expect(promotions[0]).toMatchObject({ kind: "hot_failed", key: "hot_flag:prop-f:2026-10-15T02:00:00.000Z" });
+  });
+
   it("a failure already covered by an alerted hot hold is dropped", async () => {
     const { db } = fakeDb([failed({ payload: { reason: "hot_lead_assign_failed", covered_by_hold: true } })]);
     expect((await loadHotPromotions(db, ORG, MARK, NOW_MS)).promotions).toEqual([]);
@@ -416,5 +434,42 @@ describe("failed hand-offs (hot_seller_failed)", () => {
   it("a failure is kept even when the lead is currently owned by someone else (the sender skips it, not the loader)", async () => {
     const { db } = fakeDb([failed()], { assignees: { "prop-f": "rep-1" } });
     expect((await loadHotPromotions(db, ORG, MARK, NOW_MS)).promotions.map((p) => p.key)).toEqual(["hot_failed:inbound-f"]);
+  });
+});
+
+describe("a promotion's time is its INBOUND text's arrival", () => {
+  const ev = (over: Partial<EventRow> = {}): EventRow => ({
+    id: "h1", org_id: ORG, property_id: "prop-h", event_type: "assigned", source_type: HOT_HANDOFF_SOURCE_TYPE,
+    source_id: "inbound-h", created_at: "2026-10-15T05:00:00.000Z", payload: { to: OWNER.userId }, ...over,
+  });
+
+  it("assignedAt is messages.created_at, not the event row time", async () => {
+    const { db } = fakeDb([ev()], { inboundTimes: { "inbound-h": "2026-10-15T04:30:00.000Z" } });
+    const { promotions, complete } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(complete).toBe(true);
+    expect(promotions[0]).toMatchObject({ key: "hot_handoff:inbound-h", assignedAt: "2026-10-15T04:30:00.000Z" });
+  });
+
+  it("a pre-cutoff inbound retried after the cutoff (event written after, inbound before) does not page through the alert pass", async () => {
+    const { db } = fakeDb([ev({ created_at: "2026-10-15T05:00:00.000Z" })], { inboundTimes: { "inbound-h": "2026-10-14T23:00:00.000Z" } });
+    const t = makeDeps({ holds: [], recipients: [OWNER], nowIso: NOW });
+    t.deps.loadHotPromotions = (org, since) => loadHotPromotions(db, org, since, NOW_MS);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows).toEqual([]);
+  });
+
+  it("an event whose inbound time cannot be loaded (missing message) is dropped and the load is incomplete", async () => {
+    const { db } = fakeDb([ev()], { inboundTimes: { "inbound-h": null } });
+    const { promotions, complete } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions).toEqual([]);
+    expect(complete).toBe(false);
+  });
+
+  it("a failed messages lookup drops the batch (fail closed) and marks the load incomplete", async () => {
+    const { db } = fakeDb([ev()], { failMessagesAt: 1 });
+    const { promotions, complete } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
+    expect(promotions).toEqual([]);
+    expect(complete).toBe(false);
   });
 });

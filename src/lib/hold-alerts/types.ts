@@ -26,6 +26,8 @@ export type HoldInfo = {
   /** The hold's run (latest) is hot by its own outcome/reason. */
   runHot?: boolean;
   runInbound?: string | null;
+  /** The hold's run reason (to recognise a failed hand-off whose flag write no-oped). */
+  runReason?: string | null;
   runStartedAt?: string | null;
   /** The hold's reason key (its flag reason, else its sources). */
   reasonKey?: string;
@@ -42,6 +44,7 @@ export type HotPromotion = {
   assigneeUserId: string;
   /** First name (or "Unknown sender"); never message text or address. */
   name: string;
+  /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
   kind?: "handoff" | "hot_text" | "hot_failed";

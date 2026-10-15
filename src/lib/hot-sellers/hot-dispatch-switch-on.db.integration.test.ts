@@ -8,6 +8,8 @@ import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { createHoldAlertDeps } from "@/lib/hold-alerts";
 import { runHoldAlertsForOrg } from "@/lib/hold-alerts/core";
+import { finishRunFromOutcome } from "@/lib/pipeline-runs/outcome";
+import { startRun } from "@/lib/pipeline-runs/record";
 import type { HoldAlertDeps } from "@/lib/hold-alerts/types";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 import type { Database } from "@/lib/supabase/types";
@@ -589,12 +591,20 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     if (error || !data) throw new Error(`inbound insert failed: ${error?.message}`);
     return data.id;
   }
-  const dispatchWith = (s: Awaited<ReturnType<typeof seedScenario>>, inboundMessageId: string, body: string) =>
-    dispatchAiResponse(
+  // As the production caller does: a pipeline run is started for the inbound and stamped with its real outcome
+  // (a hold's alert key for a failed hand-off comes from that run's inbound).
+  const dispatchWith = async (s: Awaited<ReturnType<typeof seedScenario>>, inboundMessageId: string, body: string) => {
+    const runContext = await startRun(admin, {
+      orgId: s.orgId, inboundMessageId, propertyId: s.propertyId, contactId: s.contactId, conversationId: s.conversationId, mode: "automatic", inboundPreview: "switch-on",
+    });
+    const outcome = await dispatchAiResponse(
       admin,
       { propertyId: s.propertyId, contactId: s.contactId, conversationId: s.conversationId, inboundMessageId, inboundFromPhone: s.phone, inboundBody: body },
-      { anthropic: forbiddenAnthropic },
+      { anthropic: forbiddenAnthropic, runContext },
     );
+    if (outcome.outcome !== "retry") await finishRunFromOutcome(admin, runContext, outcome);
+    return outcome;
+  };
 
   it("the assignment update fails: dispatch holds hot_lead_assign_failed, ONE alert pass sends exactly one Slack + one SMS (via its own hot_failed event); a later hand-off on a NEW text while the hold is open is covered (no second ping)", async () => {
     resetMockState();
@@ -624,9 +634,10 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
       expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
       expect(sent.every((x) => x.userId === s.owner)).toBe(true);
       const { rows: d1 } = await pg.query("select channel, status, hold_key from public.hold_alert_deliveries where org_id = $1 order by channel", [s.orgId]);
-      // The failed hand-off alerts through its own event, keyed by the inbound.
+      // The failed hand-off alerts through its own event, keyed hot_flag:<property>:<flagAt>, the same as its hold.
       expect(d1.map((d) => [d.channel, d.status])).toEqual([["slack", "sent"], ["sms", "sent"]]);
-      expect(d1.every((d) => d.hold_key === `hot_failed:${s.inboundMessageId}`)).toBe(true);
+      const { data: flagged } = await admin.from("properties").select("last_ai_escalation_at").eq("id", s.propertyId).single();
+      expect(d1.every((d) => d.hold_key === `hot_flag:${s.propertyId}:${flagged?.last_ai_escalation_at}`)).toBe(true);
       // Same text, further passes: nothing.
       expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
     } finally {

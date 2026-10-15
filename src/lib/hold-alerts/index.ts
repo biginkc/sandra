@@ -19,7 +19,7 @@ import type {
   Recipient,
 } from "./types";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotFailedKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
 
 export { runHoldAlertsForOrg } from "./core";
@@ -151,7 +151,9 @@ export async function loadHotPromotions(
     r.source_type === HOT_TEXT_SOURCE_TYPE
       ? hotTextKey(r.source_id)
       : r.source_type === HOT_FAILED_SOURCE_TYPE
-        ? hotFailedKey(r.source_id)
+        ? typeof (r.payload as { flag_at?: unknown } | null)?.flag_at === "string"
+          ? hotFlagKey(r.property_id, (r.payload as { flag_at: string }).flag_at)
+          : hotFailedKey(r.source_id)
         : hotHandoffKey(r.source_id);
   // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
   const done = new Set<string>();
@@ -176,7 +178,26 @@ export async function loadHotPromotions(
     }
     for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
   }
-  const todo = rows.filter((r) => !done.has(keyOf(r)));
+  const todo0 = rows.filter((r) => !done.has(keyOf(r)));
+  // A hot event's moment is its INBOUND text's arrival, never when the event
+  // row was written (a pre-cutoff text retried later must not page). Every
+  // event's source_id is that inbound; no verifiable time → dropped (fail closed).
+  const inboundAt = new Map<string, string>();
+  const inboundIds = [...new Set(todo0.map((r) => r.source_id))];
+  for (let i = 0; i < inboundIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("messages")
+      .select("id, created_at")
+      .eq("org_id", orgId)
+      .in("id", inboundIds.slice(i, i + HOT_PROMOTION_PAGE));
+    if (error) {
+      complete = false;
+      continue;
+    }
+    for (const m of (data ?? []) as Array<{ id: string; created_at: string | null }>) if (m.created_at) inboundAt.set(m.id, m.created_at);
+  }
+  const todo = todo0.filter((r) => inboundAt.has(r.source_id));
+  if (todo.length < todo0.length) complete = false;
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
   const addresses = new Map<string, string>();
@@ -208,7 +229,7 @@ export async function loadHotPromotions(
       propertyId: r.property_id,
       assigneeUserId: to ?? "",
       name: names.get(r.property_id) ?? "Unknown sender",
-      assignedAt: r.created_at,
+      assignedAt: inboundAt.get(r.source_id) as string,
       kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : failed ? "hot_failed" : "handoff",
       ...(failed && typeof (r.payload as { reason?: unknown } | null)?.reason === "string"
         ? { reason: (r.payload as { reason: string }).reason }

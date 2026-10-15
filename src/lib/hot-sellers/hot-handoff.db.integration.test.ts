@@ -371,6 +371,23 @@ describe("assignHotLeadToOwner (real database)", () => {
     expect(await handoffEvents(propertyId)).toHaveLength(1);
   });
 
+  it("a replay of a handed-off text reports who has the lead NOW and never fails: a rep -> owned_by_someone_else, nobody -> already_assigned (blank)", async () => {
+    const { orgId, owner } = await oneOwnerOrg("replay-now");
+    const rep = await createMember(orgId, "member");
+    const propertyId = await createProperty(orgId);
+    const inbound = await insertInbound(orgId, propertyId);
+    expect((await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).status).toBe("assigned");
+    // A person moves the lead to a rep; the same text is replayed.
+    expect((await admin.from("properties").update({ assigned_user_id: rep }).eq("id", propertyId)).error).toBeNull();
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "owned_by_someone_else", ownerUserId: rep });
+    // Unassigned since: the replay re-takes nothing and is not a failure.
+    expect((await admin.from("properties").update({ assigned_user_id: null }).eq("id", propertyId)).error).toBeNull();
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "already_assigned", assigneeUserId: "" });
+    expect(await assignedColumn(propertyId)).toBeNull();
+    expect(await handoffEvents(propertyId)).toHaveLength(1);
+    void owner;
+  });
+
   it("(b) a rep wins the race: owned_by_someone_else, no assigned event; a later human assignment to Jarrad + a NEW inbound is already_owned (hot_text), never a hand-off", async () => {
     const { orgId, owner } = await oneOwnerOrg("race-lost");
     const rep = await createMember(orgId, "member");

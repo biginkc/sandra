@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFlagKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -60,13 +60,14 @@ async function hotOwnerStillIs(
 }
 
 /** "Couldn't tell who to alert" is reported once per org per hour (per instance), not every pass. */
-const ownerUnknownReported = new Map<string, number>();
-function shouldReportOwnerUnknown(orgId: string, nowMs: number): boolean {
+const reportedThisHour = new Map<string, number>();
+function shouldReportOnce(key: string, nowMs: number): boolean {
   const hour = Math.floor(nowMs / HOUR_MS);
-  if (ownerUnknownReported.get(orgId) === hour) return false;
-  ownerUnknownReported.set(orgId, hour);
+  if (reportedThisHour.get(key) === hour) return false;
+  reportedThisHour.set(key, hour);
   return true;
 }
+const shouldReportOwnerUnknown = (orgId: string, nowMs: number) => shouldReportOnce(orgId, nowMs);
 
 const emptySummary = (): OrgAlertSummary => ({
   holds: 0,
@@ -157,15 +158,24 @@ export async function runHoldAlertsForOrg(
   //  - no verifiable hot time → fail closed (not alerted, reported).
   // A failed hand-off hold is alerted by its own event instead.
   type HotHoldAlert = { hold: HoldInfo; key: string; at: string };
-  const hotCandidates = holds.filter((h) => h.hot && !HOT_HANDOFF_FAILED_REASONS.includes(h.reasonKey ?? ""));
+  // A failed hand-off whose FLAG is the failure is a normal hot flag hold:
+  // hot_flag:<property>:<flagAt>, stable while open (later texts never re-key
+  // it), and its own event carries the same key. Only when the flag write
+  // no-oped (a non-hot flag was already open) is it keyed by its run,
+  // hot_failed:<run inbound>, again matching its event. Either way the hold
+  // alerts even if the event could not be written, and they dedupe.
+  const isFailedReason = (v: string | null | undefined) => HOT_HANDOFF_FAILED_REASONS.includes(v ?? "");
+  const hotCandidates = holds.filter((h) => h.hot);
   const hotAlerts: HotHoldAlert[] = [];
   let unverified = 0;
   for (const h of hotCandidates) {
-    if (h.flagHot && h.flagAt) hotAlerts.push({ hold: h, key: hotFlagKey(h.propertyId, h.flagAt), at: h.flagAt });
+    const failedByRunOnly = !h.flagHot && isFailedReason(h.runReason);
+    if (failedByRunOnly && h.runInbound && h.runStartedAt) hotAlerts.push({ hold: h, key: hotFailedKey(h.runInbound), at: h.runStartedAt });
+    else if (h.flagHot && h.flagAt) hotAlerts.push({ hold: h, key: hotFlagKey(h.propertyId, h.flagAt), at: h.flagAt });
     else if (!h.flagHot && h.runHot && h.runInbound && h.runStartedAt) hotAlerts.push({ hold: h, key: hotTextKey(h.runInbound), at: h.runStartedAt });
     else unverified += 1;
   }
-  if (unverified > 0) {
+  if (unverified > 0 && shouldReportOnce(`unverified:${orgId}`, startMs)) {
     reportError(new Error("hold alerts: hot hold without a verified hot time; not alerted"), {
       tags: { surface: "hold_alerts", orgId },
       extra: { count: unverified },

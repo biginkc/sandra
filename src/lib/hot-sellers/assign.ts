@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { validateActiveAssigneeForProperties } from "@/app/(dashboard)/leads/assignment-safety";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, isHotReason } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, hotFlagKey, isHotReason } from "@/lib/hot-sellers/hot";
 import type { Database, Json } from "@/lib/supabase/types";
 
 /**
@@ -98,6 +98,17 @@ export async function assignHotLeadToOwner(
     if (!property || property.deleted_at) return { status: "failed", reason: "not_found" };
     if (property.is_dnc_locked) return { status: "failed", reason: "dnc_locked" };
 
+    // Replay of a text Sandra already handed off: nothing new, nothing re-taken,
+    // never a failure alert. Report who has the lead NOW.
+    const handedOff = await findBySource(db, HOT_HANDOFF_SOURCE_TYPE, inbound);
+    if (handedOff === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
+    if (handedOff) {
+      const current = property.assigned_user_id;
+      const hotOwnerNow = await resolveHotOwner(db, property.org_id, env).catch(() => null);
+      if (current && current !== hotOwnerNow) return { status: "owned_by_someone_else", ownerUserId: current };
+      return { status: "already_assigned", assigneeUserId: current ?? "" };
+    }
+
     const owner = await resolveHotOwner(db, property.org_id, env);
     if (!owner) return { status: "failed", reason: "no_hot_owner" };
     const validation = await validateActiveAssigneeForProperties(db, [propertyId], owner);
@@ -109,11 +120,6 @@ export async function assignHotLeadToOwner(
     const failedBefore = await findBySource(db, HOT_FAILED_SOURCE_TYPE, inbound);
     const coveredByHold = failedBefore === true || (await isCoveredByHotHold(db, property));
 
-    // Replay of a text Sandra already handed off: nothing new.
-    const handedOff = await findBySource(db, HOT_HANDOFF_SOURCE_TYPE, inbound);
-    if (handedOff === "error") return { status: "failed", reason: "db_error", detail: "handoff event lookup" };
-    // Even if the lead was unassigned since: a replay never re-takes it.
-    if (handedOff) return { status: "already_assigned", assigneeUserId: owner };
 
     const previous = property.assigned_user_id;
     if (previous === owner) return hotTextOn(db, propertyId, owner, inbound, coveredByHold);
@@ -202,8 +208,8 @@ async function recordOnce(
 }
 
 /**
- * Record a failed hot hand-off as its own event (one per inbound). The alert
- * goes to the resolved hot owner; an open hot hold already covers it.
+ * Record a failed hot hand-off as its own event (one per inbound), after the
+ * hold's flag write. The alert goes to the resolved hot owner.
  * Best-effort read back; false = not recorded (the hold still stands).
  */
 export async function recordHotFailure(
@@ -218,11 +224,17 @@ export async function recordHotFailure(
     .select("id, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("id", propertyId)
     .maybeSingle();
-  const coveredByHold = property ? await isCoveredByHotHold(db, property) : false;
+  // Called AFTER the flag write. If the open flag is this failure, the event
+  // carries its flag time so the hold and the event share hot_flag:<property>:<flagAt>
+  // (stable; later texts never re-key it). An earlier hot hold that already
+  // alerted covers it.
+  const flagIsOurs = property?.needs_human_attention === true && property.last_ai_escalation_reason === reason;
+  const flagAt = flagIsOurs ? property?.last_ai_escalation_at ?? null : null;
+  const coveredByHold = property && !flagIsOurs ? await isCoveredByHotHold(db, property) : false;
   return recordOnce(db, {
     propertyId,
     eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
-    payload: { reason, covered_by_hold: coveredByHold },
+    payload: { reason, covered_by_hold: coveredByHold, flag_at: flagAt },
     sourceType: HOT_FAILED_SOURCE_TYPE,
     sourceId: inboundMessageId,
   });
@@ -230,8 +242,8 @@ export async function recordHotFailure(
 
 /**
  * An open hot hold covers later hot texts ONLY if it actually pinged Jarrad:
- * hot flag reason, flag time at/after the cutoff, and a non-skipped delivery
- * for its key. A pre-cutoff or never-alerted hot hold covers nothing.
+ * hot flag reason, flag time at/after the cutoff, and a SENT delivery (at
+ * least one channel) for its key. A pre-cutoff or never-alerted hot hold covers nothing.
  */
 async function isCoveredByHotHold(
   db: SupabaseClient<Database>,
@@ -239,25 +251,15 @@ async function isCoveredByHotHold(
 ): Promise<boolean> {
   if (!p.needs_human_attention || !isHotReason(p.last_ai_escalation_reason) || !p.last_ai_escalation_at) return false;
   if (Date.parse(p.last_ai_escalation_at) < Date.parse(HOT_ALERTS_START_ISO)) return false;
-  // Which key that hold alerted under: a failed hand-off alerts by its own
-  // event (hot_failed:<inbound>), any other hot hold by hot_flag:<property>:<flagAt>.
-  let key = hotFlagKey(p.id, p.last_ai_escalation_at);
-  if (HOT_HANDOFF_FAILED_REASONS.includes(p.last_ai_escalation_reason ?? "")) {
-    const { data: ev, error: evError } = await db
-      .from("lead_events")
-      .select("source_id, created_at")
-      .eq("property_id", p.id)
-      .eq("source_type", HOT_FAILED_SOURCE_TYPE)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    const src = (ev ?? [])[0]?.source_id;
-    if (evError || !src) return false;
-    key = hotFailedKey(src);
-  }
+  // Every hot flag hold (failed hand-offs included) alerts under
+  // hot_flag:<property>:<flagAt>.
+  const key = hotFlagKey(p.id, p.last_ai_escalation_at);
   const { data, error } = await (db as unknown as { from: (t: string) => ReturnType<SupabaseClient<Database>["from"]> })
     .from("hold_alert_deliveries")
     .select("id, status")
     .eq("hold_key" as never, key as never);
   if (error) return false;
-  return ((data ?? []) as unknown as Array<{ status: string }>).some((d) => d.status !== "skipped");
+  // Covered only by an alert that is CONFIRMED sent (at least one channel).
+  // Pending (capped), sending, failed or skipped never silence a later hot text.
+  return ((data ?? []) as unknown as Array<{ status: string }>).some((d) => d.status === "sent");
 }

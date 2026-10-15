@@ -1510,9 +1510,9 @@ async function classifyAndHandleNonRouteOutcomes(
         // assigned_unrecorded: the lead IS on My Leads, but its note did not
         // save; the hold keeps a person in the loop and still alerts (hot).
         const assignReason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
-        // Before the flag: the alert comes from this event, never the flag.
-        await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, assignReason);
         const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx);
+        // After the flag, so the event shares the hold's alert key when the flag is ours.
+        await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, assignReason);
         await completeClaim(supabase, input.propertyId, {
           claimId: responseClaim.claimId,
           outcome: "escalated",
@@ -1544,8 +1544,8 @@ async function classifyAndHandleNonRouteOutcomes(
       result: "error",
       detail: { status: applyResult.status },
     }, runCtx);
-    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
     await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
     await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",

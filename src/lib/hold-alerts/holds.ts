@@ -187,6 +187,7 @@ export function toAlertHolds(
       flagHot: isHotReason(hold.flag_reason),
       runHot: [hold.run?.final_outcome, hold.run?.reason].some((v) => typeof v === "string" && isHotReason(v)),
       runInbound: hold.run?.inbound_message_id ?? null,
+      runReason: hold.run?.reason ?? null,
       runStartedAt: hold.run?.started_at ?? null,
     });
   }
