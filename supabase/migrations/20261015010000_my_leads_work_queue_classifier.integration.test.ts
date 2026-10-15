@@ -11,7 +11,7 @@ import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url'
 // pending migrations applied); this suite then re-applies its own migration inside a rolled-back
 // transaction, so it always tests the SQL in this checkout.
 const migration = (() => {
-  const sql = readFileSync(new URL('./20261014120000_my_leads_work_queue_classifier.sql', import.meta.url), 'utf8');
+  const sql = readFileSync(new URL('./20261015010000_my_leads_work_queue_classifier.sql', import.meta.url), 'utf8');
   if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error('transaction wrapper changed');
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 })();

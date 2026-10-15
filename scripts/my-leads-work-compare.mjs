@@ -13,7 +13,7 @@
 //
 // DO NOT RUN THIS AGAINST PRODUCTION. It refuses the production project host and requires the
 // connection string in COMPARE_DB_URL (it never reads .env files). Run it against the test project
-// or a local database that holds the A1 migration (20261014120000_my_leads_work_queue_classifier):
+// or a local database that holds the A1 migration (20261015010000_my_leads_work_queue_classifier):
 //
 //   COMPARE_DB_URL='postgresql://...test-project or 127.0.0.1...' \
 //     node scripts/my-leads-work-compare.mjs --org <org uuid> --member <rep uuid> [--at <iso time>] [--json]

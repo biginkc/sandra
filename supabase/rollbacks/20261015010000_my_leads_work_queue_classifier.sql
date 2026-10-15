@@ -1,4 +1,4 @@
--- Roll back 20261014120000_my_leads_work_queue_classifier.
+-- Roll back 20261015010000_my_leads_work_queue_classifier.
 -- Drops the new read-only functions. No table, row or existing function is touched.
 begin;
 
