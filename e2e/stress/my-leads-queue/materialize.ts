@@ -302,6 +302,11 @@ export async function purgeOrg(db: Client, ctx: OrgCtx): Promise<void> {
       for (const c of cols.filter((x) => x.col === key)) await db.query(`delete from ${c.t} where ${key} = any($1::uuid[])`, [keys[key]]);
     }
     for (const c of cols.filter((x) => x.col === "org_id")) await db.query(`delete from ${c.t} where org_id = any($1::uuid[])`, [orgs]);
+    // Replica mode disables ON DELETE CASCADE, so rows keyed only by the lane's users are deleted explicitly too.
+    const userCols = (await db.query(
+      `select format('%I.%I', c.table_schema, c.table_name) as t from information_schema.columns c join information_schema.tables t using (table_schema, table_name)
+        where c.table_schema='public' and t.table_type='BASE TABLE' and c.data_type='uuid' and c.column_name='user_id'`)).rows as Array<{ t: string }>;
+    for (const c of userCols) await db.query(`delete from ${c.t} where user_id = any($1::uuid[])`, [users]);
     await db.query("delete from public.organizations where id = any($1::uuid[])", [orgs]);
     await db.query("delete from auth.users where id = any($1::uuid[])", [users]);
     await db.query("commit");

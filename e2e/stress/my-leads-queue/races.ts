@@ -415,10 +415,14 @@ export async function runCommittedLanes(url: string, reps: number, seed: number,
   }
   const c = new Client({ connectionString: url });
   await c.connect();
-  const before = await footprint(c);
-  const lanes = [await laneStampedSendVsInbound(url, reps, seed, driver), await laneLateDeliveryFailure(url, Math.max(20, Math.floor(reps / 4)), seed + 1)];
-  const after = await footprint(c);
-  await c.end();
+  let before: Record<string, number>, after: Record<string, number>, lanes: LaneResult[];
+  try {
+    before = await footprint(c);
+    lanes = [await laneStampedSendVsInbound(url, reps, seed, driver), await laneLateDeliveryFailure(url, Math.max(20, Math.floor(reps / 4)), seed + 1)];
+    after = await footprint(c);
+  } finally {
+    await c.end();
+  }
   const changed = Object.keys(before).filter((k) => before[k] !== after[k]);
   lanes.push({ id: "race:cleanup", title: "committed lanes leave every row count as they found it", runs: 1, failures: changed.length ? 1 : 0, samples: changed.map((k) => ({ table: k, before: before[k], after: after[k] })) });
   return lanes;
