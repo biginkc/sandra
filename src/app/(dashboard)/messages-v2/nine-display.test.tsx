@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { NINE_ANSWER_LABELS, NINE_QUESTION_IDS, type NineAnswer } from "@/lib/sms-classification/nine-questions";
 
 import { RulesPanel } from "./rules-panel";
-import { deriveTape, tapeTagForRun } from "./tape";
+import { deriveTape, reasonWord, tapeTagForRun, tapeTagForWord } from "./tape";
 import type { PipelineRunStep, RunWithSteps } from "./types";
 
 vi.mock("./label-rule-editor", () => ({ isEditableBadge: () => false, LabelRuleEditor: () => null }));
@@ -35,13 +35,28 @@ describe("nine-question tape tag", () => {
     expect(tapeTagForRun(run([step({ outcome: "nurture" })]))?.label).toBe("Maybe later");
   });
 
+  it("a shadow run (shadow_engine) reads as old-engine", () => {
+    expect(tapeTagForRun(run([step({ shadow_engine: "nine_questions", answer: "hostile", outcome: "nurture" })]))?.label).toBe("Maybe later");
+  });
+
+  it.each([
+    ["nine_asked_stop", "Asked to stop"],
+    ["nine_needs_person", "Can't read it"],
+    ["nine_automation_disabled:wrong_number", "Wrong person"],
+    ["nine_reply_not_sent:automation_disabled", "Waits for a person"],
+    ["reply_text_not_approved", "Waits for a person"],
+    ["drip_switch_off", "Waits for a person"],
+  ])("hold reason %s -> %s", (reason, label) => {
+    expect(tapeTagForWord(reasonWord(reason))?.label).toBe(label);
+  });
+
   it("ignores a malformed nine payload and falls back", () => {
     expect(tapeTagForRun(run([step({ engine: "nine_questions", answer: "bogus", outcome: "nurture" })]))?.label).toBe("Maybe later");
     expect(tapeTagForRun(run([step({ engine: "nine_questions" })]))).toBeNull();
   });
 });
 
-const base = { orgId: "o", isOwner: true, badges: [] };
+const base = { orgId: "o", isOwner: true, badges: [{ label: "nurture", mode: "AUTO", minConfidence: 0.9 }] as never };
 const open = async (props: Partial<Parameters<typeof RulesPanel>[0]> = {}) => {
   const { default: userEvent } = await import("@testing-library/user-event");
   render(<RulesPanel {...base} {...props} />);
@@ -59,6 +74,7 @@ describe("rules panel", () => {
     expect(group("Waits for a person")).toEqual(["Asked to stop", "Hostile"]);
     expect(within(panel).getByText("60% sure or more")).toBeTruthy();
     expect(panel.textContent).not.toMatch(/Jev/);
+    expect(within(panel).getByText("On · 90% sure or more")).toBeTruthy();
   });
 
   it("old engine: today's panel unchanged", async () => {

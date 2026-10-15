@@ -61,13 +61,21 @@ export function tapeTagForWord(word: string | null | undefined): TapeTag | null 
     case "jev_unclear_no_action":
     case "low_confidence":
       return TAGS.unclear;
+    case "nine_asked_stop":
+      return TAGS.stop;
+    case "nine_needs_person":
+      return TAGS.unclear;
+    case "nine_reply_not_sent":
+    case "reply_text_not_approved":
+    case "drip_switch_off":
+      return NEUTRAL_TAG;
     default:
       return null;
   }
 }
 
 /** Reason formats whose SECOND part is the word that matters (`<prefix>:<outcome or kind>`). */
-const WORD_AFTER_PREFIX = new Set(["model", "keyword", "jev_below_threshold", "automation_disabled", "human_only_outcome", "not_applicable"]);
+const WORD_AFTER_PREFIX = new Set(["nine_automation_disabled", "model", "keyword", "jev_below_threshold", "automation_disabled", "human_only_outcome", "not_applicable"]);
 
 /**
  * The word that matters in an engine reason, for every format the engine writes:
@@ -288,6 +296,12 @@ export function holdReasonSentence(
   const tag = pinned ? null : run ? tapeTagForRun(run) : null;
   const word = reasonWord(flagReason);
   const t = tag ?? tapeTagForWord(word);
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  if (word === "nine_reply_not_sent") return "The reply was not sent. A person should take a look.";
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  if (word === "reply_text_not_approved") return "There is no approved reply for this one. A person should take a look.";
+  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
+  if (word === "drip_switch_off") return "The drip switch is off, so no drip started. A person should take a look.";
   switch (t?.label) {
     case "Asked to stop":
       return `${who} asked to stop. Nothing sent.`;
