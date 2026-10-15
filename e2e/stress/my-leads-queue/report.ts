@@ -1,5 +1,5 @@
 import { classifierMigrationFiles, sq2FixLanded } from "./migration";
-import { FULL_FLOORS } from "./reps";
+import { FULL_FLOORS, requiredFullLanes } from "./reps";
 import { EXPECTED_UNTIL, FIX_PENDING, SPEC_QUESTIONS } from "./oracle";
 import type { FamilyRun, Mismatch, MismatchKind, Timing } from "./runner";
 
@@ -160,11 +160,14 @@ export function buildReport(input: {
   if (input.mode === "full") {
     // Volume floors: a full run below the design's volume is not the gate.
     if (input.repeats < FULL_FLOORS.repeats) fullRunNeeds.push(`repeats ${input.repeats} < ${FULL_FLOORS.repeats}`);
-    for (const l of input.lanes) {
-      if (l.skipped) continue;
-      const floor = /bind/.test(l.id) ? FULL_FLOORS.bindReps : /stamped_send_vs_inbound/.test(l.id) ? FULL_FLOORS.raceReps : 0;
-      if (floor && l.runs < floor) fullRunNeeds.push(`lane ${l.id} ran ${l.runs} < ${floor}`);
+    // The complete lane set, each with its floor: a --lanes subset or a lane that ran short can never produce a full-run PASS.
+    for (const req of requiredFullLanes()) {
+      const l = input.lanes.find((x) => x.id === req.id);
+      if (!l) fullRunNeeds.push(`required lane ${req.id} is missing`);
+      else if (l.skipped) fullRunNeeds.push(`required lane ${req.id} was skipped (${l.skipped})`);
+      else if (l.runs < req.minRuns) fullRunNeeds.push(`required lane ${req.id} ran ${l.runs} < ${req.minRuns}`);
     }
+    for (const size of [400, 2000]) if (!input.scale.some((x) => x.leads === size)) fullRunNeeds.push(`required scale size ${size} is missing`);
     for (const x of input.scale) for (const [k, v] of Object.entries(x.timings)) if (v.n < FULL_FLOORS.scaleSamples) fullRunNeeds.push(`scale ${x.leads} ${k}: ${v.n} samples < ${FULL_FLOORS.scaleSamples}`);
   }
   if (input.mode === "full") {

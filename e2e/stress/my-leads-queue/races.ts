@@ -10,6 +10,7 @@ import { loadClassifierMigration } from "./migration";
 import { DAY, HOUR, MIN, SEC, emptyLead, type Lead, type Msg, type World } from "./model";
 import { place, addBusinessDays, minusChicagoDays, type Placement } from "./oracle";
 import type { LaneResult } from "./report";
+import { REFRESH_FAMILY_IDS } from "./reps";
 import { Reader } from "./runner";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -429,3 +430,6 @@ export async function runCommittedLanes(url: string, reps: number, seed: number,
 }
 
 void fromChicagoLocal; void DAY;
+
+// The report requires one refresh lane per boundary family by id; keep the two lists identical.
+if (BOUNDARY_FAMILIES.map((f) => f.id).join(",") !== REFRESH_FAMILY_IDS.join(",")) throw new Error("BOUNDARY_FAMILIES and REFRESH_FAMILY_IDS diverged");
