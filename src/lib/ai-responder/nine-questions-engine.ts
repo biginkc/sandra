@@ -9,7 +9,6 @@ import type { Database } from "@/lib/supabase/types";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import {
   classifyNineQuestions,
-  type NineAnswer,
   type NineDripName,
   type NineQuestionResult,
 } from "@/lib/sms-classification/nine-questions";
@@ -50,17 +49,13 @@ export async function readClassifierEngine(
 }
 
 /** What the tape / audit rows carry so the UI can tell the engines apart. */
-export type NineDecisionRecord = {
-  engine: "nine_questions";
-  answer: NineAnswer;
-  probabilities: NineQuestionResult["probabilities"];
-  chosen: NineQuestionResult["chosen"];
-  cutoff: number;
-};
-
-export function nineDecisionRecord(result: NineQuestionResult): NineDecisionRecord {
+/**
+ * `shadowMode` records under `shadow_engine` instead of `engine`, so the tape
+ * (which reads `engine`) ignores a record-only run.
+ */
+export function nineDecisionRecord(result: NineQuestionResult, shadowMode = false): Record<string, unknown> {
   return {
-    engine: "nine_questions",
+    [shadowMode ? "shadow_engine" : "engine"]: "nine_questions",
     answer: result.answer,
     probabilities: result.probabilities,
     chosen: result.chosen,
@@ -108,10 +103,12 @@ function isDuplicateKeyError(message: string): boolean {
 export async function runNineClassification(
   supabase: SupabaseClient<Database>,
   input: NineClassificationInput,
-  deps: { fetch: typeof fetch; typesafeApiKey: string; runContext?: MaybeRunContext },
+  deps: { fetch: typeof fetch; typesafeApiKey: string; runContext?: MaybeRunContext; shadow?: boolean },
 ): Promise<NineClassificationOutcome> {
+  const shadow = deps.shadow === true;
   const failed = async (reason: string): Promise<NineClassificationOutcome> => {
-    if (input.conversationId && input.inboundMessageId) {
+    // Shadow writes no failure rows: nothing for the eight-answer queue or tape to pick up.
+    if (!shadow && input.conversationId && input.inboundMessageId) {
       const { error } = await supabase.from("sms_classification_runs").insert({
         org_id: input.orgId,
         property_id: input.propertyId,
@@ -133,7 +130,7 @@ export async function runNineClassification(
       kind: "jev",
       name: "classify",
       result: "error",
-      detail: { engine: "nine_questions", reason },
+      detail: { [shadow ? "shadow_engine" : "engine"]: "nine_questions", reason },
     });
     return { kind: "failed", reason };
   };
@@ -192,8 +189,8 @@ export async function runNineClassification(
     policy_version: NINE_POLICY_VERSION,
     provider: "jev" as const,
     model: result.model ?? JEV_MODEL,
-    decision: { ...nineDecisionRecord(result), evaluationRevision },
-    resolved_outcome: hot ? "new_lead" : null,
+    decision: { ...nineDecisionRecord(result, shadow), evaluationRevision },
+    resolved_outcome: hot && !shadow ? "new_lead" : null,
     usage: result.usage,
     latency_ms: result.latencyMs,
   };
@@ -225,7 +222,7 @@ export async function runNineClassification(
     name: "classify",
     result: "pass",
     detail: {
-      ...nineDecisionRecord(result),
+      ...nineDecisionRecord(result, shadow),
       classificationRunId,
       model: result.model,
       latencyMs: result.latencyMs,

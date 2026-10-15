@@ -28,6 +28,8 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { assignHotLeadToOwner } from "@/lib/hot-sellers/assign";
 
+/** Hold reason: the rendered nine-question reply differs from the approved text; nothing was sent. */
+export const NINE_REPLY_TEXT_NOT_APPROVED = "reply_text_not_approved";
 /** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
 /** Hold reason when the lead is on My Leads under Jarrad but its 'assigned' event did not save (hot). */
@@ -91,8 +93,10 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
+import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
 import {
   enrollNineDrip,
+  CLASSIFIER_ENGINE_UNREADABLE,
   readClassifierEngine,
   runNineClassification,
   type NineDripResult,
@@ -580,6 +584,18 @@ async function dispatchAiResponseCore(
     .eq("active", true)
     .maybeSingle();
 
+  // Messages v2 PR 3: the org's engine, read ONCE per inbound and carried on `config`.
+  // Any read problem = the eight-answer engine.
+  const engineRead =
+    config?.classifier_provider === "jev" ? await readClassifierEngine(supabase, property.org_id) : "outcome_v1";
+  if (engineRead === "unreadable") {
+    // The switch state is unknown: run neither engine, a person looks (not a hot hold).
+    await markPropertyNeedsAttention(supabase, input.propertyId, CLASSIFIER_ENGINE_UNREADABLE, deps.runContext);
+    return { outcome: "escalated", reason: CLASSIFIER_ENGINE_UNREADABLE };
+  }
+  const classifierEngine = engineRead;
+  if (config) (config as { classifier_engine?: string }).classifier_engine = classifierEngine;
+
   if (deps.runContext) {
     await updateRun(supabase, deps.runContext, {
       mode:
@@ -822,9 +838,7 @@ async function dispatchAiResponseCore(
   // Messages v2 PR 3: with the nine questions on, "who is this" is one of Jev's nine
   // answers (and ranks BELOW stop / wrong person / price in the approved order), so
   // the wording shortcut must not answer first. Any read failure = the old engine.
-  const nineEngineOn =
-    config?.classifier_provider === "jev" &&
-    (await readClassifierEngine(supabase, property.org_id)) === "nine_questions";
+  const nineEngineOn = classifierEngine === "nine_questions" && config?.classifier_mode === "automatic";
 
   if (!hostileInbound && !nineEngineOn && isIdentityQuestion(input.inboundBody)) {
     // "Who is this?" that is ALSO "how did you get my number?": send only the
@@ -1053,6 +1067,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
   config: {
     classifier_provider?: string | null;
     classifier_mode?: string | null;
+    classifier_engine?: string | null;
     model: string;
     system_prompt: string;
     min_confidence: number;
@@ -1148,6 +1163,7 @@ async function classifyAndHandleNonRouteOutcomes(
     | {
         classifier_provider?: string | null;
         classifier_mode?: string | null;
+        classifier_engine?: string | null;
         escalation_keywords?: ReadonlyArray<string> | null;
       }
     | null
@@ -1161,10 +1177,7 @@ async function classifyAndHandleNonRouteOutcomes(
   | { handled: false; classification: ClassificationBridgeResult }
 > {
   // Messages v2 PR 3: per-org engine switch (default outcome_v1 = today's path).
-  if (
-    config?.classifier_provider === "jev" &&
-    (await readClassifierEngine(supabase, property.org_id)) === "nine_questions"
-  ) {
+  if (config?.classifier_provider === "jev" && config.classifier_engine === "nine_questions") {
     if (config.classifier_mode === "automatic") {
       return {
         handled: true,
@@ -1182,14 +1195,14 @@ async function classifyAndHandleNonRouteOutcomes(
         inboundMessageId: input.inboundMessageId ?? null,
         inboundBody: input.inboundBody,
       },
-      { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+      { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx, shadow: true },
     );
     if (shadow.kind === "ok") {
       await trace(supabase, {
         kind: "shadow",
         name: "would_apply",
         result: "would_apply",
-        detail: { engine: "nine_questions", answer: shadow.result.answer },
+        detail: { shadow_engine: "nine_questions", answer: shadow.result.answer },
       }, runCtx);
     }
   }
@@ -1506,31 +1519,9 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
-      // Hot seller (PR 2): the lead goes on My Leads under Jarrad. A failed
-      // hand-off fails CLOSED: the property is held (a hot hold, so the alert
-      // cron still texts Jarrad) and the run is escalated, never auto_closed.
-      const handoff = await assignHotLeadToOwner(supabase, input.propertyId, { inboundMessageId: input.inboundMessageId });
-      await trace(supabase, {
-        kind: "action",
-        name: "assign_hot_lead",
-        result: handoff.status === "failed" ? "error" : "applied",
-        detail: handoff.status === "failed"
-          ? { status: handoff.status, reason: handoff.reason }
-          : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
-      }, runCtx);
-      if (handoff.status === "failed" || handoff.status === "assigned_unrecorded") {
-        // assigned_unrecorded: the lead IS on My Leads, but its note did not
-        // save; the hold keeps a person in the loop and still alerts (hot).
-        const assignReason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
-        const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx);
-        await completeClaim(supabase, input.propertyId, {
-          claimId: responseClaim.claimId,
-          outcome: "escalated",
-          flagOk: assignFlagOk,
-          errorMessage: handoff.status === "failed" ? handoff.reason : handoff.detail,
-        });
-        return { handled: true, outcome: { outcome: "escalated", reason: assignReason } };
-      }
+      // Hot seller (PR 2): the lead goes on My Leads under Jarrad (shared with the nine-question path).
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, responseClaim, runCtx, input.inboundMessageId);
+      if (handoffEscalation) return { handled: true, outcome: handoffEscalation };
       const newLeadHoldOk = classification.askedHowNumberObtained
         // A new lead never auto-replies (PLAN D5), so the number-source reply
         // is not sent either; the lead's owner sees the question.
@@ -2702,6 +2693,11 @@ export async function runApprovedTemplateStep(
     askedHowNumberObtained?: boolean;
     /** Messages v2 PR 3: decided by the nine questions (see resolveApprovedTemplateReply). */
     decidedBy?: "nine_questions";
+    /**
+     * The exact approved text. When set, the final rendered body must equal it
+     * byte for byte or nothing is sent (`reply_text_not_approved`).
+     */
+    requiredBody?: string;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
@@ -2745,6 +2741,15 @@ export async function runApprovedTemplateStep(
     return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(resolved.reason), notSentReason: resolved.reason };
   }
 
+  if (a.requiredBody !== undefined && resolved.body !== a.requiredBody) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: { outcome: a.outcome, templateId: resolved.templateId, mappingId: resolved.mappingId, reason: NINE_REPLY_TEXT_NOT_APPROVED },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: null, notSentReason: NINE_REPLY_TEXT_NOT_APPROVED };
+  }
   // The randomized reply delay was bypassed (workflow could not start): never
   // send a template instantly. Drop it; the outcome still applies.
   if (input.replyDelayBypassed) {
@@ -7137,8 +7142,8 @@ async function nineRecordDrip(
 /**
  * Hot answers (open_to_selling, talked_price) reuse TODAY's new_lead path unchanged:
  * promote atomically when the org's new_lead automation switch is on, otherwise
- * record the proposal and hold for a person. Messages v2 PR 2 replaces this one
- * function; nothing else here knows how a hot lead is handled.
+ * record the proposal and hold for a person. After a promotion it uses PR 2's hand-off
+ * (`assignHotLeadToOwner`). This stays the single seam for hot handling.
  */
 async function routeNineHot(
   supabase: SupabaseClient<Database>,
@@ -7157,7 +7162,8 @@ async function routeNineHot(
     outcome: "new_lead" as const,
     nativeConfidence: chosen.probability,
     thresholdAtDecision: r.result.cutoff,
-    thresholdVersion: newLead?.version ?? null,
+    // The old new_lead settings version belongs to the 0.9 cutoff, not this 0.6 decision.
+    thresholdVersion: null,
     expectedRevision: r.evaluationRevision,
   };
   if (newLead?.automationEnabled === true) {
@@ -7172,6 +7178,8 @@ async function routeNineHot(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx, input.inboundMessageId);
+      if (handoffEscalation) return handoffEscalation;
       await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
       return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
     }
@@ -7257,22 +7265,26 @@ export async function runNineQuestionsStep(
     if (thresholds.wrong_number?.automationEnabled !== true) {
       return nineHoldAndComplete(supabase, a, "nine_automation_disabled:wrong_number");
     }
-    let messageId: string | null = null;
-    if (templateCtx) {
-      const step = await runApprovedTemplateStep(supabase, {
-        input,
-        property,
-        ctx: templateCtx,
-        claim,
-        outcome: "wrong_number",
-        nativeConfidence: chosenProbability,
-        escalationReason: "not_applicable",
-        decidedBy: "nine_questions",
-        runCtx,
-      });
-      if (step.kind === "stop") return step.outcome;
-      messageId = step.outboundMessageId;
+    // Close ONLY after the approved reply was accepted by the provider.
+    if (!templateCtx) return nineHoldAndComplete(supabase, a, "nine_reply_not_sent:reply_ineligible");
+    const wrongStep = await runApprovedTemplateStep(supabase, {
+      input,
+      property,
+      ctx: templateCtx,
+      claim,
+      outcome: "wrong_number",
+      nativeConfidence: chosenProbability,
+      escalationReason: "not_applicable",
+      decidedBy: "nine_questions",
+      requiredBody: APPROVED_REPLY_TEXTS.wrong_number,
+      runCtx,
+    });
+    if (wrongStep.kind === "stop") return wrongStep.outcome;
+    if (!wrongStep.outboundMessageId || wrongStep.replyKey !== "wrong_number") {
+      const why = wrongStep.notSentReason ?? "not_sent";
+      return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
     }
+    const messageId: string | null = wrongStep.outboundMessageId;
     // Our own reply is an outbound message, which moves decision_context_revision. The
     // revision guard is for someone ELSE changing the lead while Jev was reading, so
     // after a send, re-baseline on the revision our own reply produced.
@@ -7320,7 +7332,7 @@ export async function runNineQuestionsStep(
       result: "skipped",
       detail: { why: "reply_not_sent", detail: why, route: action.drip, engine: "nine_questions" },
     }, runCtx);
-    return nineHoldAndComplete(supabase, a, `nine_reply_not_sent:${why}`);
+    return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
   };
   if (!templateCtx) return noReply("reply_ineligible");
 
@@ -7375,6 +7387,7 @@ export async function runNineQuestionsStep(
       nativeConfidence: chosenProbability,
       escalationReason: "not_applicable",
       decidedBy: "nine_questions",
+      requiredBody: APPROVED_REPLY_TEXTS[label],
       runCtx,
     });
     if (step.kind === "stop") return step.outcome;
@@ -7382,6 +7395,19 @@ export async function runNineQuestionsStep(
     messageId = step.outboundMessageId;
   }
 
+  // "Maybe later" is the nurture outcome, so the org's nurture auto-drip switch governs it
+  // (reply still went out; no enrolment, no hold: switching it off is a choice, not a failure).
+  // The other three drips have no such switch today and are not governed by it.
+  if (action.drip === "Maybe later" && !(await nineNurtureDripSwitchOn(supabase, property.org_id))) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "drip_switch_off", route: action.drip, engine: "nine_questions" },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", outboundMessageId: messageId });
+    return { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
+  }
   const dripResult = await enrollNineDrip(supabase, {
     orgId: property.org_id,
     propertyId: input.propertyId,
@@ -7398,4 +7424,49 @@ export async function runNineQuestionsStep(
   return dripResult.status === "refused"
     ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
     : { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
+}
+
+/** `ai_responder_configs.nurture_auto_drip`; any read problem counts as OFF (no enrolment). */
+async function nineNurtureDripSwitchOn(supabase: SupabaseClient<Database>, orgId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("ai_responder_configs")
+    .select("nurture_auto_drip")
+    .eq("org_id", orgId)
+    .eq("active", true)
+    .maybeSingle();
+  return !error && data?.nurture_auto_drip === true;
+}
+
+/**
+ * PR 2's hot hand-off, the ONE place it is applied for both engines: assign the lead to Jarrad
+ * and trace it. Returns null on success, or the escalated outcome (a hot hold: the alert cron
+ * still texts Jarrad) when the hand-off failed. Never auto-closes a failed hand-off.
+ */
+async function handOffHotLead(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  claim: { claimId: string | null },
+  runCtx?: MaybeRunContext,
+  inboundMessageId?: string | null,
+): Promise<AiDispatchOutcome | null> {
+  const handoff = await assignHotLeadToOwner(supabase, propertyId, { inboundMessageId });
+  await trace(supabase, {
+    kind: "action",
+    name: "assign_hot_lead",
+    result: handoff.status === "failed" ? "error" : "applied",
+    detail: handoff.status === "failed"
+      ? { status: handoff.status, reason: handoff.reason }
+      : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
+  }, runCtx);
+  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded") return null;
+  // assigned_unrecorded: the lead IS on My Leads, but its note did not save; the hold keeps a person in the loop.
+  const reason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
+  const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx);
+  await completeClaim(supabase, propertyId, {
+    claimId: claim.claimId,
+    outcome: "escalated",
+    flagOk,
+    errorMessage: handoff.status === "failed" ? handoff.reason : handoff.detail,
+  });
+  return { outcome: "escalated", reason };
 }
