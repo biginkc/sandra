@@ -13,6 +13,8 @@ const t = (sec: number, micros = "000000") => {
   const d = new Date(Date.UTC(2026, 9, 1) + sec * 1000).toISOString().slice(0, 19);
   return `${d}.${micros}+00:00`;
 };
+/** An unflagged, unlocked property that simply exists in the org (drafts may resolve to it). */
+const plainProp = (n: number): Row => ({ id: u(n), org_id: "org", needs_human_attention: false, is_dnc_locked: false });
 const flagged = (n: number, at: string, over: Row = {}): Row => ({
   id: u(n), org_id: "org", needs_human_attention: true, is_dnc_locked: false,
   last_ai_escalation_at: at, last_ai_escalation_reason: "model:unclear", updated_at: at, needs_human_attention_since: at, ...over,
@@ -176,6 +178,7 @@ describe("I3 no locked property renders; every hold has exactly one property", (
 
   it("conversation-only and inbound-only drafts resolve through messages", async () => {
     const list = await eligible({
+      properties: [plainProp(11), plainProp(12)],
       ai_reply_drafts: [draft(1, { conversation_id: u(1, 9) }), draft(2, { inbound_message_id: u(2, 7) })],
       messages: [message(1, { conversation_id: u(1, 9), property_id: u(11) }), message(2, { property_id: u(12) })],
     });
@@ -473,10 +476,10 @@ describe("final checks and live re-check", () => {
   });
 
   it("recheckOpen keeps a draft-only hold whose draft is still pending, and fails closed on an error", async () => {
-    const tables = { properties: [], ai_reply_drafts: [draft(1, { property_id: null, run_id: u(1, 5) })], pipeline_runs: [runRow(1, { property_id: u(3) })] };
+    const tables = { properties: [plainProp(3)], ai_reply_drafts: [draft(1, { property_id: null, run_id: u(1, 5) })], pipeline_runs: [runRow(1, { property_id: u(3) })] };
     const list = await eligible(tables);
     expect(list.holds.map((h) => h.id)).toEqual([u(3)]);
-    expect([...(await recheckOpen(db(tables).client, "org", list.holds))!]).toEqual([u(3)]);
+    expect([...(await recheckOpen(db(tables).client, "org", list.holds))!.open]).toEqual([u(3)]);
     expect(await recheckOpen(db(tables, { fail: () => true }).client, "org", list.holds)).toBeNull();
   });
 
@@ -496,7 +499,7 @@ describe("final checks and live re-check", () => {
 describe("final check re-resolves drafts", () => {
   it("a draft reassigned to a locked property between snapshot and enrichment lands in missing", async () => {
     const tables: Record<string, Row[]> = {
-      properties: [lockedProp(9)],
+      properties: [lockedProp(9), plainProp(3)],
       ai_reply_drafts: [draft(1, { run_id: u(1, 5) })],
       pipeline_runs: [runRow(1, { property_id: u(3) })],
     };
@@ -513,5 +516,51 @@ describe("final check re-resolves drafts", () => {
     expect(page.snapshot.entries.map((e) => e.id)).toEqual([u(3)]);
     expect(page.holds).toHaveLength(0);
     expect(page.missing).toEqual([u(3)]);
+  });
+});
+
+describe("Codex round: drafts must still belong to the hold, and to the org", () => {
+  it("a displayed draft moved to another property mid-enrichment is removed from the card (Send disabled), original flag keeps the hold", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(3, t(1))],
+      ai_reply_drafts: [draft(1, { property_id: u(3), created_at: t(5) })],
+    };
+    const client = db(tables).client;
+    let moved = false;
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !moved) {
+        moved = true;
+        tables.ai_reply_drafts = tables.ai_reply_drafts.map((d) => ({ ...d, property_id: u(4) }));
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.holds.map((h) => h.id)).toEqual([u(3)]);
+    expect(page.holds[0].draft).toBeUndefined();
+  });
+
+  it("the same move on a draft-only hold sends the hold to missing", async () => {
+    const tables: Record<string, Row[]> = { ai_reply_drafts: [draft(1, { property_id: u(3), created_at: t(5) })], properties: [{ id: u(3), org_id: "org", needs_human_attention: false, is_dnc_locked: false }, { id: u(4), org_id: "org", needs_human_attention: false, is_dnc_locked: false }] };
+    const client = db(tables).client;
+    let moved = false;
+    (client as unknown as { rpc: (fn: string, a: Record<string, unknown>) => unknown }).rpc = async (fn: string, a: Record<string, unknown>) => {
+      if (fn === "hold_alert_latest_status" && !moved) {
+        moved = true;
+        tables.ai_reply_drafts = tables.ai_reply_drafts.map((d) => ({ ...d, property_id: u(4) }));
+      }
+      return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
+    };
+    const page = await loadMessagesV2Page(client, "org");
+    expect(page.holds).toHaveLength(0);
+    expect(page.missing).toEqual([u(3)]);
+  });
+
+  it("a draft pointing at another org's property is excluded and counted unverifiable", async () => {
+    const list = await eligible({
+      properties: [{ id: u(7), org_id: "other-org", needs_human_attention: false, is_dnc_locked: true }],
+      ai_reply_drafts: [draft(1, { property_id: u(7) })],
+    });
+    expect(list.holds).toHaveLength(0);
+    expect(list.unverified).toBe(1);
   });
 });

@@ -29,6 +29,17 @@ const meta = (shown: number, total: number, contextErrors: string[], deadLetterU
   ...(deadLetterUnavailable ? { deadLetterUnavailable: true } : {}),
 });
 
+/** Applies the final check: holds no longer open -> missing; a displayed draft that no longer validates is removed. */
+function finalCards(
+  holds: OpenHold<RunWithSteps>[],
+  still: { open: Set<string>; badDraft: Set<string> },
+): { holds: OpenHold<RunWithSteps>[]; missing: string[] } {
+  const kept = holds
+    .filter((h) => still.open.has(h.id))
+    .map((h) => (still.badDraft.has(h.id) ? { ...h, draft: undefined, draft_held: false } : h));
+  return { holds: kept, missing: holds.filter((h) => !still.open.has(h.id)).map((h) => h.id) };
+}
+
 /** The page: the feed plus a snapshot of the complete waiting list and cards for its first entries. */
 export async function loadMessagesV2Page(
   supabase: LooseSupabase,
@@ -52,13 +63,14 @@ export async function loadMessagesV2Page(
   if (!still) {
     return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
   }
+  const keep = finalCards(enriched.holds, still);
   return {
     ...rest,
-    holds: enriched.holds.filter((x) => still.has(x.id)),
+    holds: keep.holds,
     holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
     snapshot,
     unverified: list.unverified,
-    missing: enriched.holds.filter((x) => !still.has(x.id)).map((x) => x.id),
+    missing: keep.missing,
     flagReasons: snapshotFlagReasons(snapshot),
     error: null,
   };
@@ -82,9 +94,10 @@ export async function loadHoldsByIds(
   const enriched = await enrichPage(supabase, orgId, found);
   const still = await recheckOpen(supabase, orgId, enriched.holds);
   if (!still) return null;
+  const keep = finalCards(enriched.holds, still);
   return {
-    holds: enriched.holds.filter((x) => still.has(x.id)),
-    missing: [...missing, ...enriched.holds.filter((x) => !still.has(x.id)).map((x) => x.id)],
+    holds: keep.holds,
+    missing: [...missing, ...keep.missing],
     unverified: list.unverified,
     contextErrors: enriched.contextErrors,
   };

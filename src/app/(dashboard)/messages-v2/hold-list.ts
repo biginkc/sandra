@@ -130,6 +130,20 @@ export async function resolveDraftProperties(
   ]);
   if (failed) return null;
 
+  // Every candidate property, from any path, must exist in THIS org; otherwise the draft is unverifiable (an
+  // org-scoped lock check could not see it). Keyset-paged, fail closed.
+  const raw = new Set<string>();
+  for (const d of drafts) if (d.property_id) raw.add(d.property_id);
+  for (const p of runProperty.values()) if (p) raw.add(p);
+  for (const p of msgProperty.values()) if (p) raw.add(p);
+  for (const set of convProperties.values()) for (const p of set) raw.add(p);
+  const inOrg = new Set<string>();
+  for (const c of chunks([...raw])) {
+    const res = await fetchAllKeyset<{ id: string }>(() => supabase.from("properties").select("id").eq("org_id", orgId).in("id", c));
+    if (res.error) return null;
+    for (const p of res.rows) inOrg.add(p.id);
+  }
+
   const out = new Map<string, Set<string>>();
   for (const d of drafts) {
     const c = new Set<string>();
@@ -139,7 +153,8 @@ export async function resolveDraftProperties(
     const viaMsg = d.inbound_message_id ? msgProperty.get(d.inbound_message_id) : null;
     if (viaMsg) c.add(viaMsg);
     for (const p of d.conversation_id ? (convProperties.get(d.conversation_id) ?? []) : []) c.add(p);
-    out.set(d.id, c);
+    // A property outside the org makes the draft unverifiable: return no candidates (excluded and counted).
+    out.set(d.id, [...c].every((p) => inOrg.has(p)) ? c : new Set());
   }
   return out;
 }
@@ -440,13 +455,15 @@ export async function recheckOpen(
   supabase: LooseSupabase,
   orgId: string,
   holds: readonly OpenHold<RunWithSteps>[],
-): Promise<Set<string> | null> {
+): Promise<{ open: Set<string>; badDraft: Set<string> } | null> {
   const ids = holds.map((h) => h.id);
-  if (!ids.length) return new Set();
+  if (!ids.length) return { open: new Set(), badDraft: new Set() };
   const draftIds = holds.flatMap((h) => (h.draft ? [h.draft.id] : []));
   const open = new Set<string>();
   const locked = new Set<string>();
   const draftOk = new Set<string>();
+  /** Draft ids that still resolve to exactly their hold's unlocked property. */
+  const validDraftIds = new Set<string>();
   let failed = false;
   await Promise.all([
     ...chunks(ids).map(async (c) => {
@@ -504,13 +521,19 @@ export async function recheckOpen(
       for (const d of rows) {
         const c = [...(candidates.get(d.id) ?? [])];
         // Counts for a hold only if it resolves to exactly that one property today, and that property is unlocked.
-        if (c.length === 1 && idSet.has(c[0]) && !lockedNow.has(c[0])) draftOk.add(c[0]);
+        if (c.length === 1 && idSet.has(c[0]) && !lockedNow.has(c[0])) {
+          draftOk.add(c[0]);
+          validDraftIds.add(`${d.id}|${c[0]}`);
+        }
       }
     })(),
   ]);
   if (failed) return null;
   for (const id of draftOk) open.add(id);
-  return new Set(ids.filter((id) => open.has(id) && !locked.has(id)));
+  // A displayed draft that no longer belongs to this hold's property (moved, locked, gone) is dropped from the card,
+  // so Send/Edit cannot act on it; if nothing else keeps the hold open it is missing.
+  const badDraft = new Set(holds.filter((h) => h.draft && !validDraftIds.has(`${h.draft.id}|${h.id}`)).map((h) => h.id));
+  return { open: new Set(ids.filter((id) => open.has(id) && !locked.has(id))), badDraft };
 }
 
 /** What a rendered card is checked against while the page stays open (no migration: properties is not in realtime). */

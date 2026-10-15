@@ -450,6 +450,36 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("a failed re-check pauses every card's actions; the next successful check re-enables them", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1) };
+      const snapshot = buildSnapshot([a]);
+      let fail = true;
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) =>
+        fail
+          ? { ok: false as const, error: { code: "X", message: "x" } }
+          : { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at })) },
+      );
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.getByTestId("holds-recheck-failed")).toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+      fail = false;
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.queryByTestId("holds-recheck-failed")).toBeNull());
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders the snapshot time, not the live time", async () => {
     const snapHold = { ...openHold("p1"), since: "2026-10-01T10:00:00.000Z" };
     const snapshot = buildSnapshot([snapHold]);

@@ -40,6 +40,7 @@ function WaitingCard({
   updated,
   at,
   pinned,
+  paused,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
@@ -47,6 +48,8 @@ function WaitingCard({
   at?: string | null;
   /** Newer activity arrived after this list was built: actions are locked until the list is refreshed. */
   updated?: boolean;
+  /** The last live re-check failed: actions are paused until a check succeeds. */
+  paused?: boolean;
   /** flag_reason is the snapshot's reason: it wins over the run's own reason and outcome (as on the tape). */
   pinned?: boolean;
   actions?: HoldActionsApi;
@@ -117,9 +120,11 @@ function WaitingCard({
           The reply text was saved for review.
         </p>
       )}
-      {!informational && updated && (
-        <div data-testid="hold-changed" className="flex flex-col gap-2">
-          <p className="text-xs text-amber-800">Changed since this list loaded. Refresh to act.</p>
+      {!informational && (updated || paused) && (
+        <div data-testid={updated ? "hold-changed" : "hold-paused"} className="flex flex-col gap-2">
+          <p className="text-xs text-amber-800">
+            {updated ? "Changed since this list loaded. Refresh to act." : "Couldn't re-check this list. Actions are paused until it can be checked."}
+          </p>
           <div className="flex flex-wrap items-center gap-2">
             <DisabledHoldActions title="Changed since this list loaded. Refresh to act." />
             {onReload && (
@@ -132,6 +137,7 @@ function WaitingCard({
       )}
       {!informational &&
         !updated &&
+        !paused &&
         (actions ? (
           <HoldActionControls
             // A changed draft or hold remounts the controls, so no stale edit text or status survives a reload.
@@ -265,6 +271,8 @@ export function WaitingColumn({
   // missing (removed); any snapshot field differs -> Updated (actions locked).
   const [stale, setStale] = useState<{ forKey: unknown; ids: Set<string> }>({ forKey: refreshKey, ids: new Set() });
   const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
+  // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
+  const [checkFailed, setCheckFailed] = useState(false);
   const shownIdsRef = useRef<string[]>([]);
   const entriesRef = useRef(entries);
   const olderRef = useRef(older);
@@ -287,9 +295,14 @@ export function WaitingColumn({
         try {
           res = await revalidate({ ids: ids.slice(i, i + 100) });
         } catch {
+          if (alive) setCheckFailed(true);
           return;
         }
-        if (!alive || !res.ok) return;
+        if (!alive) return;
+        if (!res.ok) {
+          setCheckFailed(true);
+          return;
+        }
         for (const st of res.data) {
           const e = byId.get(st.id);
           if (!e) continue;
@@ -298,6 +311,7 @@ export function WaitingColumn({
         }
       }
       if (!alive) return;
+      setCheckFailed(false);
       if (gone.length) setOlder({ ...olderRef.current, forKey: refreshKey, missing: new Set([...olderRef.current.missing, ...gone]) });
       setStale({ forKey: refreshKey, ids: new Set(changedIds) });
     };
@@ -361,6 +375,11 @@ export function WaitingColumn({
           {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
+      {checkFailed && (
+        <p role="alert" data-testid="holds-recheck-failed" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          Couldn&apos;t re-check this list. Actions are paused until it can be checked.
+        </p>
+      )}
       {older.missing.size > 0 && (
         <p data-testid="holds-missing" className="rounded-xl border bg-secondary p-3 text-xs text-muted-foreground">
           {older.missing.size.toLocaleString("en-US")} {older.missing.size === 1 ? "was" : "were"} handled or {older.missing.size === 1 ? "is" : "are"} no longer available since this list loaded.
@@ -403,6 +422,7 @@ export function WaitingColumn({
               onReload={onReload}
               updated={changed || updatedIds?.has(e.id) || staleIds.has(e.id)}
               pinned={!!snapshot}
+              paused={checkFailed}
             />
           );
         })
