@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeInstant } from "./chicago-time";
-import { holdCursor, holdsAfter, sortNewestFirst } from "./hold-activity";
+import { buildSnapshot } from "./hold-list";
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
   OpenHold,
@@ -81,7 +81,6 @@ const run = (id: string, over: Partial<RunWithSteps> = {}): RunWithSteps => ({
 });
 
 const NOW = Date.now();
-const SNAP = "2099-01-01T00:00:00.000000Z";
 const openHold = (
   id: string,
   r: RunWithSteps | null = null,
@@ -258,61 +257,100 @@ describe("MessagesV2View", () => {
     expect(text).not.toContain("Sandra is on");
   });
 
-  // A server over a mutable list, like loadHoldsSlice: pages after the cursor IT issued, and issues the next one.
-  const keysetServer = (list: () => OpenHold<RunWithSteps>[]) =>
-    vi.fn(async (input: { cursor: { at: string | null; id: string; snapshotAt: string } | null; limit?: number }) => {
-      const sorted = sortNewestFirst(list());
-      const after = holdsAfter(sorted, input.cursor);
-      const holdsPage = after.slice(0, input.limit ?? 50);
-      const remaining = after.length - holdsPage.length;
+  const at = (minsAgo: number) => ({ since: new Date(NOW - minsAgo * 60_000).toISOString() });
+  /** A server answering "Show older" with CURRENT details for the requested snapshot ids. */
+  const byIdsServer = (current: () => OpenHold<RunWithSteps>[]) =>
+    vi.fn(async (input: { ids: string[] }) => {
+      const byId = new Map(current().map((h) => [h.id, h]));
       return {
         ok: true as const,
         data: {
-          holds: holdsPage,
+          holds: input.ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : [])),
           labels: [] as Array<[string, { name: string; address: null }]>,
-          remaining,
-          total: sorted.length,
+          missing: input.ids.filter((id) => !byId.has(id)),
           unverified: 0,
-          nextCursor: remaining > 0 ? { ...holdCursor(holdsPage[holdsPage.length - 1]), snapshotAt: SNAP } : null,
           contextErrors: [] as string[],
         },
       };
     });
-  const at = (minsAgo: number) => ({ since: new Date(NOW - minsAgo * 60_000).toISOString() });
 
-  it("'Show older' echoes the server's cursor verbatim and says how many remain", async () => {
+  it("'Show older' asks for the next snapshot ids and renders them in snapshot order", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
-    const loadOlderHolds = keysetServer(() => all);
-    const serverCursor = { at: "2026-01-01T00:00:00.000000Z", id: "server-issued", snapshotAt: SNAP };
-    loadOlderHolds.mockImplementationOnce(async (input) => {
-      expect(input.cursor).toBe(serverCursor); // the exact object the server sent, never rebuilt
-      return keysetServer(() => all)({ cursor: { ...holdCursor(all[2]), snapshotAt: SNAP }, limit: input.limit });
-    });
-    await mount({ ...props([], all.slice(0, 3)), holdsTotal: 5, holdsRemaining: 2, holdsNextCursor: serverCursor, loadOlderHolds });
+    const loadOlderHolds = byIdsServer(() => all);
+    await mount({ ...props([], all.slice(0, 3)), holdsSnapshot: buildSnapshot(all), loadOlderHolds });
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("5");
     expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
+    expect(loadOlderHolds).toHaveBeenCalledWith({ ids: ["h4", "h5"] });
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
-  it("never re-sorts what the server sent", async () => {
-    // Deliberately "wrong" by activity: the client must keep the server order anyway.
-    const page1 = [{ ...openHold("older-first"), ...at(50) }, { ...openHold("newer-second"), ...at(1) }];
-    await mount({ ...props([], page1), holdsTotal: 2 });
-    const cards = screen.getAllByTestId("waiting-card").map((c) => c.textContent ?? "");
-    expect(cards).toHaveLength(2);
-    expect(screen.getAllByTestId("waiting-time")[0].querySelector("time")!.getAttribute("datetime")).toBe(normalizeInstant(page1[0].since));
+  it("holds handled since the snapshot come back missing: not rendered, counted out, with a note", async () => {
+    const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    const loadOlderHolds = byIdsServer(() => all.filter((h) => h.id !== "h5"));
+    await mount({ ...props([], all.slice(0, 3)), holdsSnapshot: buildSnapshot(all), loadOlderHolds });
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
+    expect(screen.getByTestId("holds-missing")).toHaveTextContent("1 was handled or is no longer available since this list loaded.");
+    expect(screen.getByTestId("waiting-count")).toHaveTextContent("4");
   });
 
-  it("a hold arriving between page 1 and 'Show older' causes no repeat and no skip; the last hold is reachable", async () => {
-    let server = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
-    const loadOlderHolds = keysetServer(() => server);
-    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, holdsRemaining: 3, holdsNextCursor: { ...holdCursor(server[2]), snapshotAt: SNAP }, loadOlderHolds });
+  it("a hold arriving after the snapshot is not inserted; order stays the snapshot's", async () => {
+    let server = [1, 2, 3, 4].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    const snapshot = buildSnapshot(server);
+    const loadOlderHolds = byIdsServer(() => server);
+    await mount({ ...props([], server.slice(0, 2)), holdsSnapshot: snapshot, loadOlderHolds });
     server = [{ ...openHold("brand-new"), ...at(0.1) }, ...server];
     await userEvent.click(screen.getByTestId("show-older"));
-    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
-    expect(screen.queryByTestId("show-older")).toBeNull();
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4));
+    expect(loadOlderHolds).toHaveBeenCalledWith({ ids: ["h3", "h4"] });
+  });
+
+  it("a failed 'Show older' keeps the position: the retry asks for the same ids", async () => {
+    const all = [1, 2, 3].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
+    const ok = byIdsServer(() => all);
+    const loadOlderHolds = vi
+      .fn<(i: { ids: string[] }) => ReturnType<typeof ok>>()
+      .mockResolvedValueOnce({ ok: false, error: { code: "X", message: "Older waiting texts could not be loaded." } } as never)
+      .mockImplementation(ok);
+    await mount({ ...props([], all.slice(0, 1)), holdsSnapshot: buildSnapshot(all), loadOlderHolds });
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getByTestId("older-error")).toBeInTheDocument());
+    expect(screen.getAllByTestId("waiting-card")).toHaveLength(1);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(3));
+    expect(loadOlderHolds.mock.calls.map((c) => c[0].ids)).toEqual([["h2", "h3"], ["h2", "h3"]]);
+  });
+
+  it("R2: a reason changed after the snapshot renders the snapshot reason (card = tape), marks Updated, and actions carry the snapshot reason so they come back STALE", async () => {
+    const snapHold = { ...openHold("p45"), ...at(5), flag_reason: "model:opt_out", seen: { through: null, flagReason: "model:opt_out", flagAt: "2026-10-01T00:00:00.000000Z" } };
+    const liveHold = { ...snapHold, flag_reason: "model:price_or_offer", seen: { through: null, flagReason: "model:price_or_offer", flagAt: "2026-10-02T00:00:00.000000Z" } };
+    const others = [1, 2].map((m) => ({ ...openHold(`p${m}`), ...at(m) }));
+    const snapshot = buildSnapshot([...others, snapHold]);
+    const loadOlderHolds = byIdsServer(() => [...others, liveHold]);
+    const dismiss = vi.fn(async () => ({ ok: true as const, data: null }));
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss, listAssignees: vi.fn() };
+    await mount({ ...props([], others), holdsSnapshot: snapshot, loadOlderHolds, actions });
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(3));
+    const card = screen.getAllByTestId("waiting-card")[2];
+    expect(within(card).getByTestId("waiting-reason")).toHaveTextContent("asked to stop");
+    expect(within(card).getByTestId("hold-updated")).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
+    await userEvent.type(within(card).getByLabelText("Reason for dismissing"), "done");
+    await userEvent.click(within(card).getByRole("button", { name: "Confirm dismiss" }));
+    expect(dismiss).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "p45", seen: expect.objectContaining({ flagReason: "model:opt_out", flagAt: "2026-10-01T00:00:00.000000Z" }) }),
+    );
+  });
+
+  it("renders the snapshot time, not the live time", async () => {
+    const snapHold = { ...openHold("p1"), since: "2026-10-01T10:00:00.000Z" };
+    const snapshot = buildSnapshot([snapHold]);
+    await mount({ ...props([], [{ ...snapHold, last_activity: "2026-10-09T10:00:00.000Z" }]), holdsSnapshot: snapshot });
+    expect(screen.getByTestId("waiting-time").querySelector("time")!.getAttribute("datetime")).toBe(normalizeInstant(snapHold.since));
+    expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
   });
 
   it("fails closed: when the waiting list could not be verified it shows the error and a retry, and no cards", async () => {
@@ -366,7 +404,7 @@ describe("MessagesV2View", () => {
 
   it("continues the same Chicago day from the oldest run returned when a day comes back full", async () => {
     const runs = Array.from({ length: 200 }, (_, i) => run(`y${i}`, { started_at: new Date(NOW - 3600_000 * 2 - i * 60_000).toISOString(), status: "closed" }));
-    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [], failedRunIds: [] } }));
+    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [], failedRunIds: [], flagReasons: [] } }));
     await mount({ ...props([run("today", { started_at: new Date(NOW).toISOString() })]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
     await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
@@ -380,7 +418,7 @@ describe("MessagesV2View", () => {
   it("skips empty days on its own so one click shows the next day with texts", async () => {
     const loadTapeDay = vi.fn(async (_input: { day: string }) => ({
       ok: true as const,
-      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [], failedRunIds: [] },
+      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [], failedRunIds: [], flagReasons: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
@@ -607,11 +645,12 @@ describe("MessagesV2View", () => {
 
   it("'Show older' reveals the loaded holds beyond the first 20 before asking the server", async () => {
     const holds = Array.from({ length: 22 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
+    const ancient = { ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() };
     const loadOlderHolds = vi.fn(async () => ({
       ok: true as const,
-      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], remaining: 0, total: 23, unverified: 0, nextCursor: null, contextErrors: [] },
+      data: { holds: [ancient], labels: [], missing: [], unverified: 0, contextErrors: [] },
     }));
-    await mount({ ...props([], holds), holdsTotal: 23, holdsRemaining: 1, holdsNextCursor: { ...holdCursor(holds[21]), snapshotAt: SNAP }, loadOlderHolds });
+    await mount({ ...props([], holds), holdsSnapshot: buildSnapshot([...holds, ancient]), loadOlderHolds });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
     await userEvent.click(screen.getByTestId("show-older"));
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(22);
@@ -625,7 +664,7 @@ describe("MessagesV2View", () => {
     const yesterdayRun = run("y1", { started_at: new Date(NOW - 20 * 3600_000).toISOString(), status: "closed" });
     const loadTapeDay = vi.fn(async () => ({
       ok: true as const,
-      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [] },
+      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [], flagReasons: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     expect(screen.getAllByTestId("tape-card")).toHaveLength(1);

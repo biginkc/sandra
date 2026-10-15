@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
-import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds, WaitingSnapshot } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
 import { compareInstants, describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
@@ -58,11 +58,9 @@ export type MessagesV2ViewProps = {
   coverageUnavailable?: boolean;
   holdsMeta?: HoldsMeta;
   /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
-  holdsTotal?: number;
-  /** Holds after the first page, and the server-issued cursor to fetch them. */
-  holdsRemaining?: number;
-  holdsNextCursor?: { at: string | null; id: string; snapshotAt: string } | null;
-  /** [runId, flag reason] over the complete eligible waiting list. */
+  /** The frozen waiting-list order the column pages through (see hold-list.ts buildSnapshot). */
+  holdsSnapshot?: WaitingSnapshot;
+  /** [runId, reason] from the snapshot (the reason each card shows), for the tape. */
   flagReasons?: Array<[string, string]>;
   /** Runs whose thread text failed to load on the server: fetched again in the browser. */
   threadFailedRunIds?: string[];
@@ -375,6 +373,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         const got = res.data.runs;
         setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
+        setDayFlagReasons((curr) => [...curr, ...(res.data.flagReasons ?? [])]);
         setThreads((curr) => new Map([...curr, ...res.data.threads]));
         const failedIds = res.data.failedRunIds ?? [];
         for (const r of got) if (!failedIds.includes(r.id)) requestedThreads.current.add(threadKey(r));
@@ -402,7 +401,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   // A hold's flag reason applies only to the run the hold is showing, so old runs are never relabelled by a later flag.
   // Built on the server from the COMPLETE eligible waiting list, so a hold on any "Show older" page, and runs on
   // earlier days, read the same effective reason on the tape and on the card.
-  const flagByRun = useMemo(() => new Map(props.flagReasons ?? []), [props.flagReasons]);
+  // Snapshot reasons win (the tape must match the cards); earlier days add reasons for runs the snapshot does not cover.
+  const [dayFlagReasons, setDayFlagReasons] = useState<Array<[string, string]>>([]);
+  const flagByRun = useMemo(() => new Map([...dayFlagReasons, ...(props.flagReasons ?? [])]), [dayFlagReasons, props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);
   const on = sandraIsOn(badges);
@@ -547,9 +548,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             holds={holds}
             labels={labels}
             meta={meta}
-            total={props.holdsTotal ?? holds.length}
-            remaining={props.holdsRemaining ?? 0}
-            nextCursor={props.holdsNextCursor ?? null}
+            snapshot={props.holdsSnapshot}
             error={props.holdsError}
             unverified={props.holdsUnverified}
             loadOlder={props.loadOlderHolds}

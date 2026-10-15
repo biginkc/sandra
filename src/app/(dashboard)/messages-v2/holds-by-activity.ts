@@ -1,21 +1,18 @@
-import { normalizeInstant } from "./chicago-time";
-import type { PageCursor } from "./hold-list";
-import { effectiveFlagReasons, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, pageHolds } from "./hold-list";
+import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
 import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
 export { HOLDS_LOAD_ERROR };
 
 export type WaitingList = {
-  /** The first page of the waiting list (server order). Empty, with `error`, when it could not be built. */
+  /** Cards for the first FIRST_PAGE snapshot entries. Empty, with `error`, when the list could not be built. */
   holds: OpenHold<RunWithSteps>[];
   holdsMeta: HoldsMeta;
-  total: number;
-  remaining: number;
-  nextCursor: PageCursor | null;
+  /** The frozen order (and time, reason, run) the client pages through. */
+  snapshot: WaitingSnapshot;
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
-  /** [runId, flag reason] for the run each eligible hold shows, over the COMPLETE list (tape and card share it). */
+  /** [runId, reason] from the snapshot, for the tape. */
   flagReasons: Array<[string, string]>;
   error: string | null;
 };
@@ -30,66 +27,50 @@ const meta = (shown: number, total: number, contextErrors: string[], deadLetterU
   ...(deadLetterUnavailable ? { deadLetterUnavailable: true } : {}),
 });
 
-const FAILED: Omit<WaitingList, "holdsMeta"> = {
-  holds: [],
-  total: 0,
-  remaining: 0,
-  nextCursor: null,
-  unverified: 0,
-  flagReasons: [],
-  error: HOLDS_LOAD_ERROR,
-};
-
-/** The page: the feed (runs, badges) plus the first page of the waiting list, built by hold-list.ts. */
+/** The page: the feed plus a snapshot of the complete waiting list and cards for its first entries. */
 export async function loadMessagesV2Page(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
 ): Promise<Omit<MessagesV2Data, "holds" | "holdsMeta"> & WaitingList> {
-  // The snapshot this page (and every "Show older" from it) is ordered at.
-  const snapshotAt = normalizeInstant(new Date(nowMs).toISOString())!;
   const [feed, list] = await Promise.all([
-    // Feed only: an empty hold scope means no hold queries run here.
     loadMessagesV2Data(supabase, orgId, nowMs, { scope: { propertyIds: [], noPropertyDrafts: false } }),
-    loadEligibleHolds(supabase, orgId, snapshotAt),
+    loadEligibleHolds(supabase, orgId),
   ]);
-  const { holds: _ignored, holdsMeta: _ignoredMeta, ...rest } = feed;
-  void _ignored;
-  void _ignoredMeta;
-  if (!list.ok) return { ...rest, ...FAILED, holdsMeta: meta(0, 0, [], false) };
-  const page = pageHolds(list.holds, null, FIRST_PAGE, snapshotAt);
-  const enriched = await enrichPage(supabase, orgId, page.holds);
+  const { holds: _h, holdsMeta: _m, ...rest } = feed;
+  void _h;
+  void _m;
+  if (!list.ok) {
+    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, flagReasons: [], error: HOLDS_LOAD_ERROR };
+  }
+  const snapshot = buildSnapshot(list.holds);
+  const enriched = await enrichPage(supabase, orgId, list.holds.slice(0, FIRST_PAGE));
   return {
     ...rest,
     holds: enriched.holds,
-    holdsMeta: meta(enriched.holds.length, page.total, enriched.contextErrors, enriched.deadLetterUnavailable),
-    total: page.total,
-    remaining: page.remaining,
-    nextCursor: page.nextCursor,
+    holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
+    snapshot,
     unverified: list.unverified,
-    flagReasons: effectiveFlagReasons(list.holds),
+    flagReasons: snapshotFlagReasons(snapshot),
     error: null,
   };
 }
 
-/** "Show older": the same list, the keyset page after the server-issued cursor. Null when it could not be built. */
-export async function loadHoldsSlice(
+/**
+ * "Show older": CURRENT card details for the requested snapshot ids. Ids no longer eligible (resolved, locked,
+ * unverifiable since the snapshot) come back in `missing` and are never rendered. Null when the list cannot be
+ * built (fail closed).
+ */
+export async function loadHoldsByIds(
   supabase: LooseSupabase,
   orgId: string,
-  cursor: PageCursor,
-  limit: number,
-): Promise<{ holds: OpenHold<RunWithSteps>[]; total: number; remaining: number; nextCursor: PageCursor | null; unverified: number; contextErrors: string[] } | null> {
-  // Same snapshot as the page that issued the cursor: activity after it is ignored, so the order cannot shift.
-  const list = await loadEligibleHolds(supabase, orgId, cursor.snapshotAt);
+  ids: readonly string[],
+): Promise<{ holds: OpenHold<RunWithSteps>[]; missing: string[]; unverified: number; contextErrors: string[] } | null> {
+  const list = await loadEligibleHolds(supabase, orgId);
   if (!list.ok) return null;
-  const page = pageHolds(list.holds, { at: cursor.at, id: cursor.id }, limit, cursor.snapshotAt);
-  const enriched = await enrichPage(supabase, orgId, page.holds);
-  return {
-    holds: enriched.holds,
-    total: page.total,
-    remaining: page.remaining,
-    nextCursor: page.nextCursor,
-    unverified: list.unverified,
-    contextErrors: enriched.contextErrors,
-  };
+  const byId = new Map(list.holds.map((h) => [h.id, h]));
+  const found = ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
+  const missing = ids.filter((id) => !byId.has(id));
+  const enriched = await enrichPage(supabase, orgId, found);
+  return { holds: enriched.holds, missing, unverified: list.unverified, contextErrors: enriched.contextErrors };
 }

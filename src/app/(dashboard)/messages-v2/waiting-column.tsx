@@ -4,9 +4,9 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
-import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
+import type { HoldActionsApi, LoadOlderHolds, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
-import { holdActivityAt, sortNewestFirst } from "./hold-activity";
+import { holdActivityAt } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
 import { holdReasonSentence, withEffectiveReason } from "./tape";
@@ -22,7 +22,7 @@ const SOURCE_NAME: Record<HoldSource, string> = {
   pending_draft: "reply draft",
 };
 
-export { holdActivityAt, sortNewestFirst };
+export { holdActivityAt };
 
 /** One short plain line when the text alert for this hold did not go out. */
 function alertLine(alert: OpenHold["alert"]): string | null {
@@ -38,9 +38,12 @@ function WaitingCard({
   actions,
   onReload,
   updated,
+  at,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
+  /** The snapshot time this card was ordered by (shown instead of the live one). */
+  at?: string | null;
   /** Newer activity arrived after this list was built. */
   updated?: boolean;
   actions?: HoldActionsApi;
@@ -50,7 +53,7 @@ function WaitingCard({
   const who = sellerWho(label);
   const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
   const draft = effectiveDraftBody(hold);
-  const activity = holdActivityAt(hold);
+  const activity = at !== undefined ? at : holdActivityAt(hold);
   const alertText = alertLine(hold.alert);
   const dls = hold.dead_letters;
   const hasLate = dls ? dls.some((d) => d.late) : !!hold.dead_letter_late;
@@ -127,32 +130,29 @@ function WaitingCard({
 }
 
 type OlderState = {
-  /** The server data these slices were loaded against; a newer one starts them over. */
+  /** The snapshot these cards were loaded against; a new snapshot starts them over. */
   forKey: unknown;
-  holds: OpenHold<RunWithSteps>[];
+  cards: Map<string, OpenHold<RunWithSteps>>;
   labels: Map<string, RunLabel>;
-  /** The server's cursor for the next page (echoed verbatim; the client never builds or re-sorts). */
-  cursor: HoldCursorInput | null;
-  remaining: number;
-  total: number | null;
+  /** Snapshot ids that are no longer waiting (resolved, locked, unverifiable since the snapshot). */
+  missing: Set<string>;
+  /** Next snapshot position to request. */
+  nextPos: number;
   unverified: number | null;
   error: string | null;
 };
 
-type HoldCursorInput = { at: string | null; id: string; snapshotAt: string };
-
 /**
- * "Waiting for a person": ONE list, in the order the server built over every eligible hold. The client shows
- * what it has, then "Show older" echoes the server's cursor for the next page. It never re-sorts and never
- * computes a cursor itself, so pages cannot overlap or skip.
+ * "Waiting for a person": rendered in SNAPSHOT order. The server froze the order (with each hold's time, reason,
+ * shown run and flag time) when the page loaded; "Show older" asks for the next snapshot ids and gets their
+ * CURRENT details. The order, time and reason always come from the snapshot (the tape uses the same reasons);
+ * a card whose live data differs is marked "Updated", and ids that are no longer waiting are dropped with a note.
  */
 export function WaitingColumn({
   holds,
   labels,
   meta,
-  total,
-  remaining,
-  nextCursor,
+  snapshot,
   error,
   unverified,
   loadOlder,
@@ -164,30 +164,27 @@ export function WaitingColumn({
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   meta?: HoldsMeta;
-  /** All eligible holds on the server (locked and unverifiable excluded). */
-  total: number;
-  /** Holds after the first page. */
-  remaining: number;
-  /** The server's cursor for the page after the first. */
-  nextCursor: HoldCursorInput | null;
+  /** The frozen order. Holds not in it (for example in tests) are shown after it, in the order given. */
+  snapshot?: WaitingSnapshot;
   error?: string | null;
   /** Texts hidden because their property could not be determined. */
   unverified?: number;
   loadOlder?: LoadOlderHolds;
-  /** Changes when the server data refreshes (drops stale older slices). */
+  /** Changes with every new snapshot (drops older cards loaded against the previous one). */
   refreshKey?: unknown;
-  /** Holds with activity newer than the snapshot they were ordered at (shown as "Updated", not reordered). */
+  /** Holds with realtime activity newer than the snapshot. */
   updatedIds?: ReadonlySet<string>;
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
+  const entries = snapshot?.entries ?? holds.map((h) => ({ id: h.id, at: holdActivityAt(h), r: -1, run: h.run?.id ?? null, fa: h.seen?.flagAt ?? null }));
+  const reasonOf = (r: number) => (snapshot && r >= 0 ? snapshot.reasons[r] : null);
   const fresh = (): OlderState => ({
     forKey: refreshKey,
-    holds: [],
+    cards: new Map(),
     labels: new Map(),
-    cursor: nextCursor,
-    remaining,
-    total: null,
+    missing: new Set(),
+    nextPos: holds.length,
     unverified: null,
     error: null,
   });
@@ -196,14 +193,16 @@ export function WaitingColumn({
   const [busy, setBusy] = useState(false);
   const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
 
-  const seen = new Set(holds.map((h) => h.id));
-  const loaded = [...holds, ...older.holds.filter((h) => !seen.has(h.id))];
-  const shown = loaded.slice(0, visible);
-  const hiddenLoaded = loaded.length - shown.length;
-  const notLoadedYet = older.cursor ? older.remaining : 0;
-  const serverTotal = older.total ?? total;
+  const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
+  const present = entries.filter((e) => !older.missing.has(e.id));
+  const loadedEntries = present.filter((e) => live.has(e.id));
+  const shown = loadedEntries.slice(0, visible);
+  const hiddenLoaded = loadedEntries.length - shown.length;
+  const unrequested = entries.slice(older.nextPos).filter((e) => !live.has(e.id) && !older.missing.has(e.id));
+  const notLoadedYet = unrequested.length;
+  const serverTotal = present.length;
   const hiddenUnverified = older.unverified ?? unverified ?? 0;
-  const canLoadMore = !!loadOlder && !!older.cursor && notLoadedYet > 0;
+  const canLoadMore = !!loadOlder && notLoadedYet > 0;
 
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
@@ -211,22 +210,23 @@ export function WaitingColumn({
       return;
     }
     if (!loadOlder || busy || !canLoadMore) return;
+    const ids = entries.slice(older.nextPos, older.nextPos + OLDER_PAGE).map((e) => e.id);
     setBusy(true);
     try {
-      const res = await loadOlder({ cursor: older.cursor, limit: OLDER_PAGE });
+      const res = await loadOlder({ ids });
       if (res.ok) {
         setOlder({
           forKey: refreshKey,
-          holds: [...older.holds, ...res.data.holds],
+          cards: new Map([...older.cards, ...res.data.holds.map((h) => [h.id, h] as const)]),
           labels: new Map([...older.labels, ...res.data.labels]),
-          cursor: res.data.nextCursor,
-          remaining: res.data.remaining,
-          total: res.data.total,
+          missing: new Set([...older.missing, ...res.data.missing]),
+          nextPos: older.nextPos + ids.length,
           unverified: res.data.unverified,
           error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
         });
         setVisible((v) => v + PAGE);
       } else {
+        // Position kept: the same ids are asked for again on retry.
         setOlder({ ...older, error: res.error.message });
       }
     } catch {
@@ -234,6 +234,22 @@ export function WaitingColumn({
     } finally {
       setBusy(false);
     }
+  };
+
+  /** The card as frozen by the snapshot: its reason and flag time, so an action on a changed hold comes back STALE. */
+  const asSnapshot = (e: (typeof entries)[number]): { hold: OpenHold<RunWithSteps>; changed: boolean } => {
+    const h = live.get(e.id)!;
+    if (!snapshot) return { hold: h, changed: false };
+    const reason = reasonOf(e.r);
+    const changed = (h.flag_reason ?? null) !== reason || holdActivityAt(h) !== e.at || (h.run?.id ?? null) !== e.run;
+    return {
+      hold: {
+        ...h,
+        ...(reason ? { flag_reason: reason } : { flag_reason: null }),
+        seen: { through: h.seen?.through ?? null, flagReason: h.seen?.flagReason !== undefined && h.seen?.flagReason !== null ? reason : null, flagAt: h.seen?.flagAt ? e.fa : null },
+      },
+      changed,
+    };
   };
 
   const failures = meta?.failed ?? [];
@@ -262,6 +278,11 @@ export function WaitingColumn({
           {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
+      {older.missing.size > 0 && (
+        <p data-testid="holds-missing" className="rounded-xl border bg-secondary p-3 text-xs text-muted-foreground">
+          {older.missing.size.toLocaleString("en-US")} {older.missing.size === 1 ? "was" : "were"} handled or {older.missing.size === 1 ? "is" : "are"} no longer available since this list loaded.
+        </p>
+      )}
       {failures.length > 0 && (
         <p role="alert" data-testid="holds-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
           Some waiting texts could not be loaded ({failures.map((f) => SOURCE_NAME[f]).join(", ")}).
@@ -287,9 +308,20 @@ export function WaitingColumn({
           <p className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">Nothing is waiting for you.</p>
         )
       ) : (
-        shown.map((hold) => (
-          <WaitingCard key={hold.id} hold={hold} label={labelFor(hold.id)} actions={actions} onReload={onReload} updated={updatedIds?.has(hold.id)} />
-        ))
+        shown.map((e) => {
+          const { hold, changed } = asSnapshot(e);
+          return (
+            <WaitingCard
+              key={e.id}
+              hold={hold}
+              at={snapshot ? e.at : undefined}
+              label={labelFor(e.id)}
+              actions={actions}
+              onReload={onReload}
+              updated={changed || updatedIds?.has(e.id)}
+            />
+          );
+        })
       )}
       {(hiddenLoaded > 0 || canLoadMore) && (
         <div className="flex flex-col items-center gap-1">

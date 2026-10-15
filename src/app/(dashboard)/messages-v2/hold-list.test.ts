@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeInstant } from "./chicago-time";
 import { fakePostgrest } from "./fake-postgrest.test-util";
-import { holdCursor } from "./hold-activity";
-import { loadHoldsSlice, loadMessagesV2Page } from "./holds-by-activity";
-import { effectiveFlagReasons, loadEligibleHolds, pageHolds } from "./hold-list";
+import { parseSnapshotIds } from "./hold-activity";
+import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
+import { buildSnapshot, effectiveFlagReasons, loadEligibleHolds, snapshotFlagReasons } from "./hold-list";
 import { deriveTape, holdReasonSentence, withEffectiveReason } from "./tape";
-import type { HoldCursor } from "./hold-activity";
 import type { OpenHold, RunWithSteps } from "./types";
 
 type Row = Record<string, unknown>;
-const SNAP = "2099-01-01T00:00:00.000000Z";
 const u = (n: number, ns = 0) => `${String(ns).padStart(8, "0")}-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const t = (sec: number, micros = "000000") => {
   const d = new Date(Date.UTC(2026, 9, 1) + sec * 1000).toISOString().slice(0, 19);
@@ -58,50 +55,65 @@ const eligible = async (tables: Record<string, Row[]>, opts: Parameters<typeof f
   return res;
 };
 
-const walk = (sorted: OpenHold<RunWithSteps>[], limit: number) => {
-  const ids: string[] = [];
-  let cursor: HoldCursor | null = null;
-  for (;;) {
-    const page = pageHolds(sorted, cursor, limit, SNAP);
-    ids.push(...page.holds.map((h) => h.id));
-    if (!page.nextCursor) return ids;
-    cursor = page.nextCursor;
+/** Walks a snapshot the way the column does: first page from page 1, then 50 ids at a time against CURRENT data. */
+const walkSnapshot = async (tables: Record<string, Row[]>, between?: (page: number) => void) => {
+  const first = await loadMessagesV2Page(db(tables).client, "org");
+  const entries = first.snapshot.entries;
+  w0Order = entries.map((e) => e.id);
+  const shown = first.holds.map((h) => h.id);
+  const missing: string[] = [];
+  let pos = first.holds.length;
+  let page = 0;
+  while (pos < entries.length) {
+    between?.(page++);
+    const ids = entries.slice(pos, pos + 50).map((e) => e.id);
+    const res = await loadHoldsByIds(db(tables).client, "org", ids);
+    if (!res) throw new Error("slice failed");
+    const found = new Set(res.holds.map((h) => h.id));
+    for (const id of ids) (found.has(id) ? shown : missing).push(id);
+    pos += ids.length;
   }
+  return { first, shown, missing, order: entries.map((e) => e.id) };
 };
 
-describe("I1 every eligible hold is reachable in one order", () => {
-  it("2,500 holds, 41 per page: walking the server's nextCursor yields every id exactly once", async () => {
+describe("I1 every eligible hold is reachable in one snapshot order", () => {
+  it("2,500 holds, 50 at a time: every id exactly once, in snapshot order", async () => {
     const properties = Array.from({ length: 2500 }, (_, i) => flagged(i, t(i)));
-    const list = await eligible({ properties });
-    const ids = walk(list.holds, 41);
-    expect(ids).toHaveLength(2500);
-    expect(new Set(ids).size).toBe(2500);
+    const w = await walkSnapshot({ properties });
+    expect(w.shown).toEqual(w.order);
+    expect(new Set(w.shown).size).toBe(2500);
+    expect(w.missing).toEqual([]);
   });
 
-  it("a hold resolved between pages does not shift the rest", async () => {
-    const tables: Record<string, Row[]> = { properties: Array.from({ length: 100 }, (_, i) => flagged(i, t(i))) };
-    const first = pageHolds((await eligible(tables)).holds, null, 41, SNAP);
-    const resolved = (await eligible(tables)).holds[50].id; // on what would be page 2
-    tables.properties = tables.properties.filter((p) => p.id !== resolved);
-    const rest = walk((await eligible(tables)).holds, 41).filter((id) => !first.holds.some((h) => h.id === id));
-    const expected = (await eligible(tables)).holds.map((h) => h.id).filter((id) => !first.holds.some((h) => h.id === id));
-    expect(rest).toEqual(expected);
-    const second = pageHolds((await eligible(tables)).holds, first.nextCursor, 1000, SNAP);
-    expect(second.holds.map((h) => h.id)).toEqual(expected); // nothing skipped, nothing repeated
-  });
-
-  it("the first page and a 'Show older' slice give the identical order, even for a conversation-matched run", async () => {
+  it("churn between pages (30 resolved, 20 new, 5 re-flagged, a draft approved): no skip, no duplicate; resolved -> missing; new only after reload", async () => {
     const tables: Record<string, Row[]> = {
-      properties: [flagged(1, t(100)), flagged(2, t(200))],
-      jev_lead_decisions: [decision(1, u(1), t(100), { conversation_id: u(9, 2) })],
-      pipeline_runs: [runRow(1, { conversation_id: u(9, 2), property_id: null, started_at: t(900) })], // newest; also in the feed window
+      properties: Array.from({ length: 300 }, (_, i) => flagged(i, t(i))),
+      ai_reply_drafts: [draft(1, { property_id: u(100), run_id: u(1, 5), created_at: t(100) })],
+      pipeline_runs: [runRow(1, { property_id: null, started_at: t(9000) })], // the draft's run lifts property 100
     };
-    const page = await loadMessagesV2Page(db(tables).client, "org");
-    const listed = await eligible(tables);
-    expect(page.holds.map((h) => h.id)).toEqual([u(1), u(2)]); // the conversation run lifted property 1
-    expect(listed.holds.map((h) => h.id)).toEqual(page.holds.map((h) => h.id)); // slices walk this same list
+    let resolved: string[] = [];
+    const w = await walkSnapshot(tables, (page) => {
+      if (page !== 0) return;
+      const tail = w0Order.slice(-60);
+      resolved = tail.slice(0, 30);
+      tables.properties = tables.properties
+        .filter((p) => !resolved.includes(p.id as string))
+        .map((p) => (tail.slice(30, 35).includes(p.id as string) ? { ...p, needs_human_attention_since: t(99_999), last_ai_escalation_at: t(99_999) } : p));
+      tables.properties.push(...Array.from({ length: 20 }, (_, i) => flagged(1000 + i, t(50_000 + i))));
+      tables.ai_reply_drafts = []; // approved: the run no longer lifts property 100
+    });
+    expect(new Set(w.shown).size).toBe(w.shown.length); // no duplicate
+    expect([...w.shown, ...w.missing].sort()).toEqual([...w.order].sort()); // no skip
+    expect(w.missing.sort()).toEqual([...resolved].sort());
+    expect(w.order.some((id) => id === u(1000))).toBe(false);
+    const reload = await loadMessagesV2Page(db(tables).client, "org");
+    const ids = reload.snapshot.entries.map((e) => e.id);
+    expect(ids).toContain(u(1000 + 19)); // new ones appear after reload
+    expect(ids.slice(0, 5).sort()).toEqual(w0Order.slice(-30, -25).sort()); // re-flagged ones rise to the top
   });
 });
+
+let w0Order: string[] = [];
 
 describe("I2 latest activity, microsecond precise, never from incomplete data", () => {
   it(".123456 vs .123457 order correctly", async () => {
@@ -233,27 +245,26 @@ describe("I4 every list query pages by keyset to exhaustion", () => {
   });
 });
 
-describe("I6 one effective reason from the complete list", () => {
-  it("a hold on an older slice whose run has no reason shows its flag reason on the tape and the card", async () => {
+describe("I6 / I8 snapshot reasons and counts", () => {
+  it("a hold beyond page 1 whose run has no reason shows the flag reason on the tape and the card", async () => {
     const properties = Array.from({ length: 45 }, (_, i) => flagged(i, t(i), { last_ai_escalation_reason: i === 0 ? "model:opt_out" : "model:unclear" }));
     const runs = [runRow(0, { property_id: u(0), reason: null, started_at: t(0) })];
     const page = await loadMessagesV2Page(db({ properties, pipeline_runs: runs }).client, "org");
-    expect(page.holds.some((h) => h.id === u(0))).toBe(false); // oldest: not on page 1
+    expect(page.holds.some((h) => h.id === u(0))).toBe(false);
     const reason = new Map(page.flagReasons).get(u(0, 5));
     expect(reason).toBe("model:opt_out");
-    const slice = await loadHoldsSlice(db({ properties, pipeline_runs: runs }).client, "org", page.nextCursor!, 50);
-    const hold = slice!.holds.find((h) => h.id === u(0))!;
-    const eff = withEffectiveReason(hold.run!, hold.flag_reason);
-    const card = holdReasonSentence(eff, eff.reason ?? hold.flag_reason, "Dee");
+    const more = await loadHoldsByIds(db({ properties, pipeline_runs: runs }).client, "org", [u(0)]);
+    const hold = more!.holds[0];
+    const entry = page.snapshot.entries.find((e) => e.id === u(0))!;
+    const snapReason = page.snapshot.reasons[entry.r];
+    const eff = withEffectiveReason(hold.run!, snapReason);
+    const card = holdReasonSentence(eff, eff.reason ?? snapReason, "Dee");
     const tape = deriveTape(hold.run!, "Dee", reason);
     expect(tape.kind === "decided" && tape.sentence).toBe(card);
     expect(card).toBe("Dee asked to stop. Nothing sent.");
-    expect(effectiveFlagReasons([hold])).toEqual([[u(0, 5), "model:opt_out"]]);
   });
-});
 
-describe("I8 totals exclude locked and unverifiable holds", () => {
-  it("total, remaining and the next cursor only count eligible holds", async () => {
+  it("locked and unverifiable holds are never snapshot entries", async () => {
     const page = await loadMessagesV2Page(
       db({
         properties: [...Array.from({ length: 42 }, (_, i) => flagged(i, t(i))), lockedProp(500)],
@@ -262,12 +273,9 @@ describe("I8 totals exclude locked and unverifiable holds", () => {
       }).client,
       "org",
     );
-    expect(page.total).toBe(42);
-    expect(page.remaining).toBe(2);
+    expect(page.snapshot.entries).toHaveLength(42);
     expect(page.unverified).toBe(1);
-    expect(page.nextCursor).toMatchObject(holdCursor(page.holds[page.holds.length - 1]));
-    expect(page.nextCursor?.snapshotAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
-    expect(page.nextCursor?.at).toBe(normalizeInstant(t(2)));
+    expect(page.holds).toHaveLength(40);
   });
 });
 
@@ -372,120 +380,65 @@ describe("Codex round 11", () => {
       expect(tape.kind === "decided" && tape.sentence).toBe(card);
     }
   });
-
-  it("snapshot paging: a hold that gains activity after the snapshot keeps its place; a brand-new hold waits for a reload", async () => {
-    const tables: Record<string, Row[]> = {
-      properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))],
-      pipeline_runs: [],
-    };
-    const snap = normalizeInstant(t(600))!;
-    const page1 = pageHolds((await eligible(tables)).holds.filter(() => true), null, 1, snap);
-    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
-    // Between pages: hold 3 gets a fresh run, and a brand-new hold 4 is flagged.
-    tables.pipeline_runs = [runRow(3, { property_id: u(3), started_at: t(900) })];
-    tables.properties = [...tables.properties, flagged(4, t(950))];
-    const ids: string[] = [...page1.holds.map((h) => h.id)];
-    let cursor = page1.nextCursor;
-    while (cursor) {
-      const slice = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
-      ids.push(...slice!.holds.map((h) => h.id));
-      cursor = slice!.nextCursor;
-    }
-    expect(ids).toEqual([u(1), u(2), u(3)]); // 3 is still reached at its snapshot place; 4 is not in this walk
-    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
-    expect(reloaded.ok && reloaded.holds.map((h) => h.id).slice(0, 2)).toEqual([u(4), u(3)]); // a reload shows both at the top
-  });
 });
 
-describe("Codex round 12: one snapshot rule for every input", () => {
-  const walkFrom = async (tables: Record<string, Row[]>, snap: string) => {
-    const first = await loadEligibleHolds(db(tables).client, "org", snap);
-    if (!first.ok) throw new Error(first.error);
-    const page1 = pageHolds(first.holds, null, 1, snap);
-    return { page1, next: async () => {
-      const ids: string[] = [];
-      let cursor = page1.nextCursor;
-      while (cursor) {
-        const s = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
-        ids.push(...s!.holds.map((h) => h.id));
-        cursor = s!.nextCursor;
-      }
-      return ids;
-    } };
+
+describe("spec 2: client-held snapshot", () => {
+  const stamp = (tables: Record<string, Row[]>, id: string, reason: string, at: string) => {
+    // Mirrors dispatch.ts stampHoldReason / flagConfirmDncHold / number-source refresh: columns overwritten, no event.
+    tables.properties = tables.properties.map((p) => (p.id === id ? { ...p, last_ai_escalation_reason: reason, last_ai_escalation_at: at } : p));
   };
 
-  it("an escalation AFTER the snapshot on an older flag does not move the hold ahead of the cursor", async () => {
-    const tables: Record<string, Row[]> = { properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))] };
-    const snap = normalizeInstant(t(600))!;
-    const { page1, next } = await walkFrom(tables, snap);
-    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
-    tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, last_ai_escalation_at: t(950) } : p)); // flag time kept
-    tables.lead_events = [{ id: u(3, 9), org_id: "org", event_type: "ai_escalated", property_id: u(3), created_at: t(950) }];
-    expect(await next()).toEqual([u(2), u(3)]);
-    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
-    expect(reloaded.ok && reloaded.holds[0].id).toBe(u(3)); // a reload sees the escalation
+  it.each(["stampHoldReason", "flagConfirmDncHold", "number-source refresh"])(
+    "R1 (%s): an older hold re-stamped after page 1 keeps its snapshot place; a reload puts it first",
+    async () => {
+      const tables: Record<string, Row[]> = { properties: Array.from({ length: 60 }, (_, i) => flagged(i, t(i))) };
+      const first = await loadMessagesV2Page(db(tables).client, "org");
+      const target = first.snapshot.entries[55].id;
+      stamp(tables, target, "hostile_needs_confirm", t(99_999));
+      const res = await loadHoldsByIds(db(tables).client, "org", first.snapshot.entries.slice(40, 60).map((e) => e.id));
+      expect(res!.missing).toEqual([]);
+      const card = res!.holds.find((h) => h.id === target)!;
+      const entry = first.snapshot.entries[55];
+      expect(card.flag_reason).not.toBe(first.snapshot.reasons[entry.r]); // live differs -> the column marks it Updated
+      const reload = await loadMessagesV2Page(db(tables).client, "org");
+      expect(reload.snapshot.entries[0].id).toBe(target);
+    },
+  );
+
+  it("I2: a failed lookup inside the slice fails closed (null: no new cards, the client keeps its position)", async () => {
+    const tables = { properties: [flagged(1, t(1))], pipeline_runs: [runRow(1, { property_id: u(1) })] };
+    expect(await loadHoldsByIds(db(tables, { fail: (tb) => tb === "pipeline_run_steps" }).client, "org", [u(1)])).toBeNull();
   });
 
-  it("a message added after the snapshot does not change draft resolution within the walk; it does after reload", async () => {
-    const tables: Record<string, Row[]> = {
-      properties: [flagged(1, t(500)), flagged(2, t(400))],
-      ai_reply_drafts: [draft(1, { conversation_id: u(3, 9), created_at: t(450) })], // no property yet: unverifiable
-      messages: [],
-    };
-    const snap = normalizeInstant(t(600))!;
-    const first = await loadEligibleHolds(db(tables).client, "org", snap);
-    expect(first.ok && first.unverified).toBe(1);
-    const { next } = await walkFrom(tables, snap);
-    tables.messages = [message(1, { conversation_id: u(3, 9), property_id: u(30), created_at: t(900) })];
-    expect(await next()).toEqual([u(2)]); // the late message does not make the draft eligible mid-walk
-    const reloaded = await loadEligibleHolds(db(tables).client, "org", normalizeInstant(t(1000)));
-    expect(reloaded.ok && reloaded.holds.map((h) => h.id)).toContain(u(30));
+  it("I3: a hold locked after page 1 comes back missing and is not rendered", async () => {
+    const tables: Record<string, Row[]> = { properties: [flagged(1, t(1)), flagged(2, t(2))] };
+    await loadMessagesV2Page(db(tables).client, "org");
+    tables.properties = tables.properties.map((p) => (p.id === u(1) ? { ...p, is_dnc_locked: true } : p));
+    const res = await loadHoldsByIds(db(tables).client, "org", [u(1), u(2)]);
+    expect(res!.missing).toEqual([u(1)]);
+    expect(res!.holds.map((h) => h.id)).toEqual([u(2)]);
   });
 
-  it("a DNC lock set after the snapshot still hides the hold (the lock is never snapshotted)", async () => {
-    const tables: Record<string, Row[]> = { properties: [flagged(1, t(500)), flagged(2, t(400)), flagged(3, t(300))] };
-    const { next } = await walkFrom(tables, normalizeInstant(t(600))!);
-    tables.properties = tables.properties.map((p) => (p.id === u(3) ? { ...p, is_dnc_locked: true } : p));
-    expect(await next()).toEqual([u(2)]);
-  });
-});
-
-describe("Codex round 13: immutable escalation history", () => {
-  const esc = (n: number, property: string, at: string): Row => ({ id: u(n, 9), org_id: "org", event_type: "ai_escalated", property_id: property, created_at: at });
-
-  it("a hold shown on page 1 that escalates again between pages is neither repeated nor skipped", async () => {
-    const tables: Record<string, Row[]> = {
-      properties: [flagged(1, t(100)), flagged(2, t(90)), flagged(3, t(80))],
-      lead_events: [esc(1, u(1), t(500)), esc(2, u(2), t(400)), esc(3, u(3), t(300))],
-    };
-    const snap = normalizeInstant(t(600))!;
-    const first = await loadEligibleHolds(db(tables).client, "org", snap);
-    const page1 = pageHolds(first.ok ? first.holds : [], null, 1, snap);
-    expect(page1.holds.map((h) => h.id)).toEqual([u(1)]);
-    // Re-escalation after the snapshot: the mutable column is overwritten and a new event is logged.
-    tables.properties = tables.properties.map((p) => (p.id === u(1) ? { ...p, last_ai_escalation_at: t(900) } : p));
-    tables.lead_events = [...tables.lead_events, esc(4, u(1), t(900))];
-    const ids: string[] = [];
-    let cursor = page1.nextCursor;
-    while (cursor) {
-      const s = await loadHoldsSlice(db(tables).client, "org", cursor, 1);
-      ids.push(...s!.holds.map((h) => h.id));
-      cursor = s!.nextCursor;
-    }
-    expect(ids).toEqual([u(2), u(3)]);
+  it("input validation: more than 100 ids, a non-uuid or nothing is rejected; another org's id leaks nothing", async () => {
+    expect(parseSnapshotIds(Array.from({ length: 101 }, (_, i) => u(i)))).toBeNull();
+    expect(parseSnapshotIds([u(1), "nope"])).toBeNull();
+    expect(parseSnapshotIds([])).toBeNull();
+    expect(parseSnapshotIds([u(1), u(1)])).toEqual([u(1)]);
+    const other = { properties: [flagged(1, t(1), { org_id: "other-org" })] };
+    const res = await loadHoldsByIds(db(other).client, "org", [u(1)]);
+    expect(res!.holds).toEqual([]);
+    expect(res!.missing).toEqual([u(1)]);
   });
 
-  it("the mutable escalation column never drives order; the event log does", async () => {
-    const list = await eligible({
-      properties: [flagged(1, t(10), { last_ai_escalation_at: t(999) }), flagged(2, t(20))],
-      lead_events: [esc(1, u(2), t(500))],
-    });
-    expect(list.holds.map((h) => h.id)).toEqual([u(2), u(1)]);
-  });
-
-  it("a failed escalation-history read fails the list closed", async () => {
-    const page = await loadMessagesV2Page(db({ properties: [flagged(1, t(1))] }, { fail: (tb) => tb === "lead_events" }).client, "org");
-    expect(page.error).not.toBeNull();
-    expect(page.holds).toHaveLength(0);
+  it("a 10,000-entry snapshot serializes under 2 MB", () => {
+    const holds = Array.from({ length: 10_000 }, (_, i) => ({
+      id: u(i), property_id: u(i), conversation_id: null, sources: ["needs_attention"], since: t(i), reason: "r",
+      flag_reason: i % 2 ? "model:unclear" : "model:opt_out", seen: { through: null, flagReason: "model:unclear", flagAt: t(i) },
+      run: { ...runRow(i), steps: [] },
+    })) as unknown as OpenHold<RunWithSteps>[];
+    const snap = buildSnapshot(holds);
+    expect(JSON.stringify(snap).length).toBeLessThan(2_000_000);
+    expect(snapshotFlagReasons(snap)).toHaveLength(10_000);
   });
 });

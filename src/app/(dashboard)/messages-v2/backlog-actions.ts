@@ -9,8 +9,8 @@ import { withoutDncLocked } from "./dnc-locked";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { BACKLOG_PAGE, loadBacklogHolds, type LooseSupabase } from "./queries";
-import { parsePageCursor } from "./hold-activity";
-import { loadHoldsSlice } from "./holds-by-activity";
+import { parseSnapshotIds } from "./hold-activity";
+import { loadHoldsByIds } from "./holds-by-activity";
 import type { BacklogPage, OlderHoldsPage } from "./hold-action-types";
 
 const MAX_PAGE = 500;
@@ -89,10 +89,7 @@ export async function loadBacklogHoldsAction(input: {
  * "Show older" for the waiting column: the next slice of ONE ordering (latest
  * activity first, DNC-locked excluded) across every open hold, New and Backlog.
  */
-export async function loadOlderHoldsAction(input: {
-  cursor: { at: string | null; id: string; snapshotAt: string } | null;
-  limit?: number;
-}): Promise<Result<OlderHoldsPage>> {
+export async function loadOlderHoldsAction(input: { ids: string[] }): Promise<Result<OlderHoldsPage>> {
   let orgId: string | null = null;
   try {
     const supabase = await createClient();
@@ -109,11 +106,12 @@ export async function loadOlderHoldsAction(input: {
   if (!orgId) {
     return err({ code: "UNAUTHORIZED", message: "You do not have access to Messages v2." });
   }
-  const cursor = parsePageCursor(input?.cursor);
-  if (!cursor) return err({ code: "VALIDATION", message: "Bad cursor." });
-  const limit = Math.max(1, clampInt(input?.limit, 50, MAX_PAGE));
+  // At most 100 uuids. Org scope, DNC lock and open status are re-checked by building the CURRENT list for this
+  // caller's org: an id from another org, a locked or a resolved hold simply comes back in `missing`.
+  const ids = parseSnapshotIds(input?.ids);
+  if (!ids) return err({ code: "VALIDATION", message: "Bad ids." });
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const slice = await loadHoldsSlice(supabase, orgId, cursor, limit);
+  const slice = await loadHoldsByIds(supabase, orgId, ids);
   if (!slice) {
     return err({ code: "OLDER_UNAVAILABLE", message: "Older waiting texts could not be loaded." });
   }
@@ -132,10 +130,8 @@ export async function loadOlderHoldsAction(input: {
     data: {
       holds,
       labels: [...labels.entries()],
-      remaining: slice.remaining,
-      total: slice.total,
+      missing: slice.missing,
       unverified: slice.unverified,
-      nextCursor: slice.nextCursor,
       contextErrors: slice.contextErrors,
     },
   };

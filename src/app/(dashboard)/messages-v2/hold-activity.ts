@@ -19,13 +19,12 @@ export function holdActivityAt(hold: OpenHold<RunWithSteps>): string | null {
   return stamps.length ? stamps.reduce((a, b) => (a >= b ? a : b)) : null;
 }
 
-/** A hold's place in the list: its activity time (null = unknown, sorts last) and id (the tiebreak). */
-export type HoldCursor = { at: string | null; id: string };
-
-export const holdCursor = (hold: OpenHold<RunWithSteps>): HoldCursor => ({ at: holdActivityAt(hold), id: hold.id });
+/** A hold's place in the order: its activity time (null = unknown, sorts last) and id (the tiebreak). */
+type OrderKey = { at: string | null; id: string };
+const orderKey = (hold: OpenHold<RunWithSteps>): OrderKey => ({ at: holdActivityAt(hold), id: hold.id });
 
 /** Negative when `a` comes before `b` in the list: newest activity first, unknown time last, ties by id. */
-export function compareHoldOrder(a: HoldCursor, b: HoldCursor): number {
+export function compareHoldOrder(a: OrderKey, b: OrderKey): number {
   if (a.at !== b.at) {
     if (a.at === null) return 1;
     if (b.at === null) return -1;
@@ -36,27 +35,15 @@ export function compareHoldOrder(a: HoldCursor, b: HoldCursor): number {
 
 /** Newest activity first. A hold with no known time sorts last, never first by accident. */
 export function sortNewestFirst(holds: readonly OpenHold<RunWithSteps>[]): OpenHold<RunWithSteps>[] {
-  return [...holds].sort((a, b) => compareHoldOrder(holdCursor(a), holdCursor(b)));
+  return [...holds].sort((a, b) => compareHoldOrder(orderKey(a), orderKey(b)));
 }
 
-/** Holds strictly after the cursor in list order (a keyset page: no offsets, so arrivals between requests cannot shift it). */
-export function holdsAfter(sorted: readonly OpenHold<RunWithSteps>[], cursor: HoldCursor | null): OpenHold<RunWithSteps>[] {
-  return cursor ? sorted.filter((h) => compareHoldOrder(holdCursor(h), cursor) > 0) : [...sorted];
-}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const MAX_SNAPSHOT_IDS = 100;
 
-/** A "Show older" cursor from untrusted input: hold cursor plus the snapshot instant it belongs to. */
-export function parsePageCursor(input: unknown): (HoldCursor & { snapshotAt: string }) | null {
-  const base = parseHoldCursor(input);
-  const snap = (input as { snapshotAt?: unknown } | null)?.snapshotAt;
-  if (!base || typeof snap !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(snap)) return null;
-  return { ...base, snapshotAt: snap };
-}
-
-/** A cursor from untrusted input: a normalized timestamp (or null) and a uuid (every hold is keyed by its property). It is only ever compared, never put in a query. */
-export function parseHoldCursor(input: unknown): HoldCursor | null {
-  if (!input || typeof input !== "object") return null;
-  const { at, id } = input as { at?: unknown; id?: unknown };
-  if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
-  if (at !== null && !(typeof at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(at))) return null;
-  return { at: at as string | null, id };
+/** "Show older" ids from untrusted input: an array of uuids, deduped, at most 100. Null when anything is off. */
+export function parseSnapshotIds(input: unknown): string[] | null {
+  if (!Array.isArray(input) || input.length === 0 || input.length > MAX_SNAPSHOT_IDS) return null;
+  if (!input.every((v) => typeof v === "string" && UUID.test(v))) return null;
+  return [...new Set(input as string[])];
 }

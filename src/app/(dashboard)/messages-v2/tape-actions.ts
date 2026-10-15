@@ -5,6 +5,7 @@ import { err, type Result } from "@/lib/errors/result";
 import { createClient } from "@/lib/supabase/server";
 
 import { messagesV2OrgId } from "./access";
+import { effectiveFlagReasons, loadEligibleHolds } from "./hold-list";
 import { loadRunLabels } from "./labels";
 import type { LooseSupabase } from "./queries";
 import { chicagoDayWindow, loadRunsWindow, loadRunThreads, parseRunCursor, type RunCursor, type RunThread } from "./tape-data";
@@ -16,6 +17,11 @@ export type TapeDayPage = {
   threads: Array<[string, RunThread]>;
   /** Runs whose thread text failed to load: the client retries them. */
   failedRunIds: string[];
+  /**
+   * [runId, flag reason] from the CURRENT eligible list, for runs on this day. The browser's snapshot map takes
+   * precedence for any run the snapshot covers (so the tape matches the cards it shows); these fill in the rest.
+   */
+  flagReasons: Array<[string, string]>;
 };
 
 /**
@@ -45,9 +51,15 @@ export async function loadTapeDayAction(input: { day: string; before?: RunCursor
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const { runs, error } = await loadRunsWindow(supabase, orgId, window.from, window.to, before);
   if (error) return err({ code: "TAPE_UNAVAILABLE", message: error });
-  const [labels, thread] = await Promise.all([loadRunLabels(supabase, runs), loadRunThreads(supabase, runs)]);
+  const [labels, thread, list] = await Promise.all([
+    loadRunLabels(supabase, runs),
+    loadRunThreads(supabase, runs),
+    loadEligibleHolds(supabase, orgId),
+  ]);
+  const dayRunIds = new Set(runs.map((r) => r.id));
+  const flagReasons = list.ok ? effectiveFlagReasons(list.holds).filter(([runId]) => dayRunIds.has(runId)) : [];
   return {
     ok: true,
-    data: { runs, labels: [...labels.entries()], threads: [...thread.threads.entries()], failedRunIds: thread.failedRunIds },
+    data: { runs, labels: [...labels.entries()], threads: [...thread.threads.entries()], failedRunIds: thread.failedRunIds, flagReasons },
   };
 }

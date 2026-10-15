@@ -41,28 +41,22 @@ export type BacklogPage = {
   nextOffset: number;
 };
 
-/** One slice of the waiting list in latest-activity order (DNC-locked already excluded). */
+/** Current card details for some snapshot ids ("Show older"). */
 export type OlderHoldsPage = {
   holds: OpenHold<RunWithSteps>[];
   labels: Array<[string, RunLabel]>;
-  /** Holds still to load after this page. */
-  remaining: number;
-  /** All eligible holds right now (locked and unverifiable excluded). */
-  total: number;
+  /** Requested ids no longer waiting (resolved, locked or unverifiable since the snapshot). */
+  missing: string[];
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
-  /** Echo back for the next page; null = nothing more. Issued by the server, never built by the client. */
-  nextCursor: { at: string | null; id: string; snapshotAt: string } | null;
   /** Card annotations that failed for this page (amber note). */
   contextErrors: string[];
 };
 
-/** Server action behind "Show older": the next keyset page after the last loaded hold. */
-export type LoadOlderHolds = (input: {
-  /** The cursor the server issued with the previous page (echoed verbatim). Holds strictly after it come back. */
-  cursor: { at: string | null; id: string; snapshotAt: string } | null;
-  limit?: number;
-}) => Promise<Result<OlderHoldsPage>>;
+/** Server action behind "Show older": the next snapshot ids (at most 100). */
+export type LoadOlderHolds = (input: { ids: string[] }) => Promise<Result<OlderHoldsPage>>;
+
+export type { WaitingSnapshot, SnapshotEntry } from "./hold-list";
 
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
 export type LoadBacklog = (input: {

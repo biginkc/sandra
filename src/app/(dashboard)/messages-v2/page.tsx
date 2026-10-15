@@ -206,9 +206,7 @@ export default async function MessagesV2Page() {
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
-        holdsTotal={loaded.total}
-        holdsRemaining={loaded.remaining}
-        holdsNextCursor={loaded.nextCursor}
+        holdsSnapshot={loaded.snapshot}
         holdsError={loaded.error}
         holdsUnverified={loaded.unverified}
         flagReasons={loaded.flagReasons}
