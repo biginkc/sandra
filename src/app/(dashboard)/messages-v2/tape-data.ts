@@ -1,3 +1,4 @@
+import { CHICAGO_TZ } from "./chicago-time";
 import { groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
@@ -133,7 +134,7 @@ export async function loadRunsWindow(
   return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), error: null };
 }
 
-export const TAPE_TZ = "America/Chicago";
+export const TAPE_TZ = CHICAGO_TZ;
 
 /** "2026-10-14": the America/Chicago calendar day an instant falls on. */
 export const chicagoDayKey = (ms: number): string => new Date(ms).toLocaleDateString("en-CA", { timeZone: TAPE_TZ });

@@ -90,7 +90,7 @@ export async function loadBacklogHoldsAction(input: {
  * activity first, DNC-locked excluded) across every open hold, New and Backlog.
  */
 export async function loadOlderHoldsAction(input: {
-  cursor: { at: number | null; id: string } | null;
+  cursor: { at: string | null; id: string } | null;
   limit?: number;
 }): Promise<Result<OlderHoldsPage>> {
   let orgId: string | null = null;
@@ -127,5 +127,5 @@ export async function loadOlderHoldsAction(input: {
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  return { ok: true, data: { holds, labels: [...labels.entries()], remaining: slice.remaining, cutFrom: slice.cutFrom } };
+  return { ok: true, data: { holds, labels: [...labels.entries()], remaining: slice.remaining } };
 }

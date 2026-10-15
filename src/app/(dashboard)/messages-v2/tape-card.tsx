@@ -1,9 +1,8 @@
 "use client";
 
-import { format } from "date-fns/format";
-
 import { cn } from "@/lib/utils";
 
+import { chicagoClock } from "./chicago-time";
 import { hasUndoableJevAction, UndoJevButton, type UndoControls } from "./run-card";
 import { deriveTape, type TapeTone } from "./tape";
 import type { RunThread } from "./tape-data";
@@ -29,8 +28,8 @@ export function sellerWho(label: RunLabel | undefined): string {
 function Meta({ run, label }: { run: RunWithSteps; label: RunLabel | undefined }) {
   return (
     <>
-      <time suppressHydrationWarning dateTime={run.started_at} className="font-semibold text-foreground tabular-nums">
-        {format(new Date(run.started_at), "h:mm a")}
+      <time dateTime={run.started_at} className="font-semibold text-foreground tabular-nums">
+        {chicagoClock(run.started_at)}
       </time>
       <span className="font-semibold text-foreground">{label?.name ?? "Unknown sender"}</span>
       {label?.address && <span>· {label.address}</span>}

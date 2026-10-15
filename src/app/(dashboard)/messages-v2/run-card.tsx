@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
+import { chicagoMonthDay } from "./chicago-time";
+
 import { readJevScores, replyPersona } from "./step-format";
 import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
 
@@ -24,7 +26,7 @@ export function dripEnrollmentSummary(step: PipelineRunStep): string | null {
   const route = typeof step.detail?.route === "string" ? step.detail.route : null;
   const label = route ? (DRIP_ROUTE_LABELS[route] ?? route) : null;
   const at = typeof step.detail?.firstSendNotBefore === "string" ? new Date(step.detail.firstSendNotBefore) : null;
-  const when = at && !Number.isNaN(at.getTime()) ? `first text ${format(at, "MMM d")}` : null;
+  const when = at && !Number.isNaN(at.getTime()) ? `first text ${chicagoMonthDay(at)}` : null;
   const parts = [label, when].filter(Boolean);
   return parts.length ? parts.join(", ") : null;
 }

@@ -1,12 +1,12 @@
 "use client";
 
-import { format } from "date-fns/format";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
 import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
-import { HOLD_SORT_CAP, holdActivityMs, holdCursor, sortNewestFirst } from "./hold-activity";
+import { chicagoDateClock } from "./chicago-time";
+import { holdActivityAt, holdCursor, sortNewestFirst } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
 import { holdReasonSentence, withEffectiveReason } from "./tape";
@@ -22,7 +22,7 @@ const SOURCE_NAME: Record<HoldSource, string> = {
   pending_draft: "reply draft",
 };
 
-export { holdActivityMs, sortNewestFirst };
+export { holdActivityAt, sortNewestFirst };
 
 /** One short plain line when the text alert for this hold did not go out. */
 function alertLine(alert: OpenHold["alert"]): string | null {
@@ -47,7 +47,7 @@ function WaitingCard({
   const who = sellerWho(label);
   const effectiveRun = run ? withEffectiveReason(run, hold.flag_reason) : null;
   const draft = effectiveDraftBody(hold);
-  const activity = holdActivityMs(hold);
+  const activity = holdActivityAt(hold);
   const alertText = alertLine(hold.alert);
   const dls = hold.dead_letters;
   const hasLate = dls ? dls.some((d) => d.late) : !!hold.dead_letter_late;
@@ -65,9 +65,7 @@ function WaitingCard({
         {label?.address && <span>· {label.address}</span>}
         <span data-testid="waiting-time" className="ml-auto tabular-nums">
           {activity !== null ? (
-            <time suppressHydrationWarning dateTime={new Date(activity).toISOString()}>
-              {format(new Date(activity), "MMM d, h:mm a")}
-            </time>
+            <time dateTime={activity}>{chicagoDateClock(activity)}</time>
           ) : (
             "time unknown"
           )}
@@ -141,7 +139,6 @@ export function WaitingColumn({
   labels,
   meta,
   total,
-  cutFrom,
   error,
   loadOlder,
   refreshKey,
@@ -153,8 +150,6 @@ export function WaitingColumn({
   meta?: HoldsMeta;
   /** All waiting holds on the server. */
   total: number;
-  /** All holds when more exist than the sort ceiling. */
-  cutFrom?: number | null;
   error?: string | null;
   loadOlder?: LoadOlderHolds;
   /** Changes when the server data refreshes (drops stale older slices). */
@@ -228,11 +223,6 @@ export function WaitingColumn({
             </Button>
           )}
         </div>
-      )}
-      {cutFrom != null && (
-        <p data-testid="holds-capped" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          Showing the newest {HOLD_SORT_CAP.toLocaleString("en-US")} of {cutFrom.toLocaleString("en-US")} waiting texts.
-        </p>
       )}
       {failures.length > 0 && (
         <p role="alert" data-testid="holds-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">

@@ -47,14 +47,12 @@ export type OlderHoldsPage = {
   labels: Array<[string, RunLabel]>;
   /** Holds still to load after this page. */
   remaining: number;
-  /** All holds when more than the sort ceiling exist; null otherwise. */
-  cutFrom?: number | null;
 };
 
 /** Server action behind "Show older": the next keyset page after the last loaded hold. */
 export type LoadOlderHolds = (input: {
   /** The last card the client has: (activity time, id). The server returns holds strictly after it; no offsets. */
-  cursor: { at: number | null; id: string } | null;
+  cursor: { at: string | null; id: string } | null;
   limit?: number;
 }) => Promise<Result<OlderHoldsPage>>;
 

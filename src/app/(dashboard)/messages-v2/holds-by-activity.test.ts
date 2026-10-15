@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HOLD_SORT_CAP } from "./hold-activity";
-import { sortNewestFirst } from "./hold-activity";
-import { applyHoldCeiling, collectOpenHoldSources, loadHoldsSlice } from "./holds-by-activity";
-import type { OpenHold, RunWithSteps } from "./types";
+import { collectOpenHoldSources, HOLDS_LOAD_ERROR, loadHoldsSlice, loadMessagesV2Page, orderingDataComplete } from "./holds-by-activity";
 import type { LooseSupabase } from "./queries";
 
 type Tables = Record<string, Array<Record<string, unknown>>>;
@@ -62,21 +59,20 @@ describe("collectOpenHoldSources", () => {
     expect(out.total).toBe(1);
   });
 
-  it("collects everything with no ceiling: the cut happens only after sorting", async () => {
-    const properties = Array.from({ length: HOLD_SORT_CAP + 10 }, (_, i) => prop(i, at(i)));
+  it("collects everything: there is no ceiling anywhere", async () => {
+    const properties = Array.from({ length: 5010 }, (_, i) => prop(i, at(i)));
     const out = await collectOpenHoldSources(client({ properties }), "org");
-    expect(out.properties).toHaveLength(HOLD_SORT_CAP + 10);
-    expect(out.total).toBe(HOLD_SORT_CAP + 10);
+    expect(out.properties).toHaveLength(5010);
+    expect(out.total).toBe(5010);
   });
 
   it("locked properties never count: their pending rows are dropped before anything is loaded or sorted", async () => {
-    const properties = Array.from({ length: HOLD_SORT_CAP }, (_, i) => prop(i, at(i)));
+    const properties = Array.from({ length: 5000 }, (_, i) => prop(i, at(i)));
     const lockedRows = Array.from({ length: 100 }, (_, i) => ({ property_id: `locked${i}`, conversation_id: "c", source_inbound_message_id: `m${i}`, created_at: at(10_000 + i) }));
     const lockedIds = lockedRows.map((r) => r.property_id);
     const out = await collectOpenHoldSources(client({ properties, jev_lead_decisions: lockedRows }, undefined, lockedIds), "org");
     expect(out.decisions).toHaveLength(0);
-    expect(out.total).toBe(HOLD_SORT_CAP); // no slots used by locked holds, so no ceiling is hit
-    expect(applyHoldCeiling(Array.from({ length: out.total })).cutFrom).toBeNull();
+    expect(out.total).toBe(5000); // no slots used by locked holds, so no ceiling is hit
   });
 
   it("FAILS CLOSED when the lock lookup fails: no rows from unverified properties", async () => {
@@ -112,23 +108,28 @@ describe("collectOpenHoldSources", () => {
   });
 });
 
-describe("applyHoldCeiling", () => {
-  const h = (id: string, last: number, since: number): OpenHold<RunWithSteps> => ({
-    id, property_id: id, conversation_id: null, sources: ["needs_attention"], since: new Date(since).toISOString(),
-    last_activity: new Date(last).toISOString(), reason: "r", run: null,
+describe("ordering data must be complete (fail closed)", () => {
+  it("a failed run or step lookup makes ordering data incomplete", () => {
+    const ok = { failed: [], contextErrors: ["alert status"] };
+    expect(orderingDataComplete(ok)).toBe(true);
+    expect(orderingDataComplete({ failed: [], contextErrors: ["run lookup by property"] })).toBe(false);
+    expect(orderingDataComplete({ failed: [], contextErrors: ["run lookup by message"] })).toBe(false);
+    expect(orderingDataComplete({ failed: [], contextErrors: ["step lookup"] })).toBe(false);
+    expect(orderingDataComplete({ failed: ["needs_attention"], contextErrors: [] })).toBe(false);
   });
 
-  it("an OLD hold that was active just now survives the ceiling; the oldest-activity holds are what get cut", () => {
-    const many = Array.from({ length: HOLD_SORT_CAP + 20 }, (_, i) => h(`h${i}`, 1_000_000 + i, 1_000_000 + i));
-    const oldButActive = h("old-but-active", 9_000_000, 1);
-    const { holds, cutFrom } = applyHoldCeiling(sortNewestFirst([...many, oldButActive]));
-    expect(cutFrom).toBe(HOLD_SORT_CAP + 21);
-    expect(holds).toHaveLength(HOLD_SORT_CAP);
-    expect(holds[0].id).toBe("old-but-active");
-    expect(holds.some((x) => x.id === "h0")).toBe(false);
+  it("when the latest-run lookup fails the page shows the error and renders zero cards", async () => {
+    const supabase = client({ properties: [prop(1, at(1))] });
+    (supabase as unknown as { rpc: unknown }).rpc = async (fn: string) =>
+      fn === "pipeline_runs_latest_for_properties" ? { data: null, error: { message: "boom" } } : { data: [], error: null };
+    const page = await loadMessagesV2Page(supabase, "org");
+    expect(page.error).toBe(HOLDS_LOAD_ERROR);
+    expect(page.holds).toHaveLength(0);
   });
 
-  it("does not cut at or below the ceiling", () => {
-    expect(applyHoldCeiling(Array.from({ length: HOLD_SORT_CAP })).cutFrom).toBeNull();
+  it("the same failure makes 'Show older' fail instead of returning an unordered slice", async () => {
+    const supabase = client({ properties: [prop(1, at(1))] });
+    (supabase as unknown as { rpc: unknown }).rpc = async () => ({ data: null, error: { message: "boom" } });
+    expect(await loadHoldsSlice(supabase, "org", null, 10)).toBeNull();
   });
 });

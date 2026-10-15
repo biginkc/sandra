@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { normalizeInstant } from "./chicago-time";
 import { holdsAfter, sortNewestFirst } from "./hold-activity";
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
@@ -258,7 +259,7 @@ describe("MessagesV2View", () => {
 
   // A keyset server over a mutable list, like loadHoldsSlice: strictly after the client's last card, `remaining` after the page.
   const keysetServer = (list: () => OpenHold<RunWithSteps>[]) =>
-    vi.fn(async (input: { cursor: { at: number | null; id: string } | null; limit?: number }) => {
+    vi.fn(async (input: { cursor: { at: string | null; id: string } | null; limit?: number }) => {
       const after = holdsAfter(sortNewestFirst(list()), input.cursor);
       const holdsPage = after.slice(0, input.limit ?? 50);
       return { ok: true as const, data: { holds: holdsPage, labels: [] as Array<[string, { name: string; address: null }]>, remaining: after.length - holdsPage.length } };
@@ -273,7 +274,7 @@ describe("MessagesV2View", () => {
     expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
-    expect(loadOlderHolds).toHaveBeenLastCalledWith({ cursor: { at: Date.parse(all[2].since!), id: "h3" }, limit: 50 });
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ cursor: { at: normalizeInstant(all[2].since)!, id: "h3" }, limit: 50 });
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
@@ -298,9 +299,18 @@ describe("MessagesV2View", () => {
     expect(mocks.refresh).toHaveBeenCalled();
   });
 
-  it("says 'Showing the newest 5,000 of N' when waiting texts were cut, never silently", async () => {
-    await mount({ ...props([], [openHold("a")]), holdsCutFrom: 5321 });
-    expect(screen.getByTestId("holds-capped")).toHaveTextContent("Showing the newest 5,000 of 5,321 waiting texts.");
+  it("shows times in America/Chicago and files a 7:30 PM Chicago run under the right day", async () => {
+    // 00:30 UTC on Oct 15 is 7:30 PM CDT on Oct 14. In the browser's own zone (or UTC) it could read as Oct 15.
+    const evening = run("late", { started_at: "2026-10-15T00:30:00.000Z", status: "closed" });
+    await mount({ ...props([evening]), nowMs: Date.parse("2026-10-15T15:00:00Z") });
+    const card = screen.getByTestId("tape-card");
+    expect(within(card).getByText("7:30 PM")).toBeInTheDocument();
+    expect(screen.getByTestId("tape-day")).toHaveTextContent("Yesterday");
+  });
+
+  it("waiting cards show their time in Chicago too", async () => {
+    await mount(props([], [{ ...openHold("p1"), since: "2026-10-15T00:30:00.000Z" }]));
+    expect(screen.getByTestId("waiting-time")).toHaveTextContent("Oct 14, 7:30 PM");
   });
 
   it("shows a failed alert and load warnings as short plain lines", async () => {

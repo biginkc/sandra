@@ -1,4 +1,4 @@
-import { HOLD_SORT_CAP, holdsAfter, sortNewestFirst, type HoldCursor } from "./hold-activity";
+import { holdsAfter, sortNewestFirst, type HoldCursor } from "./hold-activity";
 import { lockedPropertyIds, withoutDncLocked } from "./dnc-locked";
 import {
   DECISION_COLUMNS,
@@ -119,23 +119,19 @@ export async function collectOpenHoldSources(supabase: LooseSupabase, orgId: str
   return { ...base, total: holdKeys.size, failed: false };
 }
 
-/** Newest HOLD_SORT_CAP of an already-sorted list, plus the full count when it had to cut (never silent). */
-export function applyHoldCeiling<T>(sorted: readonly T[]): { holds: T[]; cutFrom: number | null } {
-  return sorted.length > HOLD_SORT_CAP
-    ? { holds: sorted.slice(0, HOLD_SORT_CAP), cutFrom: sorted.length }
-    : { holds: [...sorted], cutFrom: null };
-}
-
 export type SortedHolds = {
-  /** All open holds, DNC-locked excluded, latest activity first. Empty (with `error`) if anything could not be verified. */
+  /** EVERY open hold (no ceiling), DNC-locked excluded, latest activity first. Empty (with `error`) if anything could not be verified. */
   holds: OpenHold<RunWithSteps>[];
-  /** All open holds when more than HOLD_SORT_CAP exist (only the newest are kept); null otherwise. Never silent. */
-  cutFrom: number | null;
   /** The waiting list could not be loaded or verified: show this and no cards. */
   error: string | null;
 };
 
 export const HOLDS_LOAD_ERROR = "Waiting list could not be loaded. Reload to retry.";
+
+/** False when a source, run or step lookup failed: the activity order would be built on incomplete data. */
+export function orderingDataComplete(meta: { failed: readonly unknown[]; contextErrors: readonly string[] }): boolean {
+  return meta.failed.length === 0 && !meta.contextErrors.some((e) => e.startsWith("run lookup") || e === "step lookup");
+}
 
 const NO_SCOPE = { propertyIds: [] as string[], noPropertyDrafts: false };
 
@@ -151,10 +147,10 @@ export async function loadMessagesV2Page(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  const verified = sources.failed ? null : await withoutDncLocked(supabase, orgId, data.holds);
-  if (!verified) return { ...data, holds: [], cutFrom: null, error: HOLDS_LOAD_ERROR };
-  const { holds, cutFrom } = applyHoldCeiling(sortNewestFirst(verified));
-  return { ...data, holds, cutFrom, error: null };
+  // Ordering needs every hold's latest run and steps. If any of that is missing, a sort would be wrong: fail closed.
+  const verified = sources.failed || !orderingDataComplete(data.holdsMeta) ? null : await withoutDncLocked(supabase, orgId, data.holds);
+  if (!verified) return { ...data, holds: [], error: HOLDS_LOAD_ERROR };
+  return { ...data, holds: sortNewestFirst(verified), error: null };
 }
 
 /**
@@ -167,7 +163,7 @@ export async function loadHoldsSlice(
   cursor: HoldCursor | null,
   limit: number,
   nowMs: number = Date.now(),
-): Promise<{ holds: OpenHold<RunWithSteps>[]; remaining: number; cutFrom: number | null } | null> {
+): Promise<{ holds: OpenHold<RunWithSteps>[]; remaining: number } | null> {
   const sources = await collectOpenHoldSources(supabase, orgId);
   if (sources.failed) return null;
   const data = await loadMessagesV2Data(supabase, orgId, nowMs, {
@@ -176,10 +172,9 @@ export async function loadHoldsSlice(
     scope: NO_SCOPE,
     preloaded: sources,
   });
-  if (data.holdsMeta.failed.length > 0) return null;
+  if (!orderingDataComplete(data.holdsMeta)) return null;
   const verified = await withoutDncLocked(supabase, orgId, data.holds);
   if (!verified) return null;
-  const { holds: sorted, cutFrom } = applyHoldCeiling(sortNewestFirst(verified));
-  const after = holdsAfter(sorted, cursor);
-  return { holds: after.slice(0, limit), remaining: Math.max(0, after.length - limit), cutFrom };
+  const after = holdsAfter(sortNewestFirst(verified), cursor);
+  return { holds: after.slice(0, limit), remaining: Math.max(0, after.length - limit) };
 }

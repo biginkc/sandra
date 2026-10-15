@@ -219,7 +219,6 @@ export default async function MessagesV2Page() {
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
         holdsTotal={loaded.holds.length}
-        holdsCutFrom={loaded.cutFrom}
         holdsError={loaded.error}
         loadOlderHolds={loadOlderHoldsAction}
         runs={data.runs}
