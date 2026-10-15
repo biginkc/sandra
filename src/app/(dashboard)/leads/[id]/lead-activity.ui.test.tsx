@@ -210,10 +210,20 @@ describe("<LeadActivityTimeline /> with lead events", () => {
     expect(bubbles[1]).toHaveTextContent("Outbound → Seller");
     expect(bubbles[0]).toHaveTextContent("Existing SMS bubble stays intact");
     expect(bubbles[1]).toHaveTextContent("First existing SMS bubble");
-    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(1);
+    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(2);
     expect(
       screen.getByTestId("messages-thread-delivery-status"),
     ).toHaveTextContent("Queued · in Outbox");
+  });
+
+  it("keeps the newest inbound STOP badge and each timestamp visible", () => {
+    const older = { ...message({ id: "older", body: "Hello", createdAt: "2026-08-25T17:00:00Z", status: "received" }), direction: "inbound" as const };
+    const newer = { ...older, id: "newer", body: "stop", created_at: "2026-08-25T18:00:00Z", metadata: { keyword: "stop" } };
+    render(<LeadActivityTimeline propertyId="property-1" contactId={null} initialMessages={[older, newer]} initialNotes={[]} initialCalls={[]} initialEvents={[]} messageError={null} noteError={null} callError={null} eventError={null} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost="" />);
+    const rows = screen.getAllByTestId("messages-thread-msg");
+    expect(within(rows[0]).getByText("STOP", { exact: true })).toBeVisible();
+    expect(within(rows[0]).getByTestId("messages-thread-metadata")).toBeVisible();
+    expect(within(rows[1]).getByTestId("messages-thread-metadata")).toBeVisible();
   });
 
   it("keeps newly received activity first and older-history controls last", () => {

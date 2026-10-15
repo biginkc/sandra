@@ -379,9 +379,11 @@ export function LeadActivityTimeline(props: Props) {
               const previous = events[index - 1];
               const next = events[index + 1];
               const isContinuation =
+                index !== activity.trustBoundaryIndex &&
                 previous?.source === "message" &&
                 previous.row.direction === event.row.direction;
               const isLastInGroup =
+                index + 1 === activity.trustBoundaryIndex ||
                 next?.source !== "message" ||
                 next.row.direction !== event.row.direction;
               return (
