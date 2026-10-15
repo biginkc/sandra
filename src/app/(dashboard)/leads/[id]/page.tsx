@@ -109,6 +109,8 @@ import {
   type NormaRequestView,
 } from "@/lib/norma/view";
 import { SendForSignature } from "./send-for-signature";
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
+import { loadHomeownerHouses, type HomeownerHouses, type HousesClient } from "@/lib/leads/homeowner-houses";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
 import { LeadCalculationsSection } from "./lead-calculations-section";
@@ -340,6 +342,23 @@ export default async function LeadDetailPage({
   const {
     data: { user: sessionUser },
   } = await supabase.auth.getUser();
+
+  // "Owns N houses": every house this homeowner owns in the org. A failed read shows no badge.
+  let homeownerHouses: HomeownerHouses | null = null;
+  if (lead.homeowner?.id) {
+    try {
+      homeownerHouses =
+        (await loadHomeownerHouses(supabase as unknown as HousesClient, {
+          orgId: lead.org_id,
+          viewerId: sessionUser?.id ?? "",
+          contactIds: [lead.homeowner.id],
+        }))[lead.homeowner.id] ?? null;
+    } catch (error) {
+      console.error("[leads] homeowner houses read failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   // Outcome bar: hidden for Acquisitions members (no Messages access) and
   // contacts flagged do-not-contact. A failed drip read is "unknown", never "none".
@@ -782,6 +801,10 @@ export default async function LeadDetailPage({
       ? null
       : MY_LEAD_ROW_REASON_COPY.other_rep;
 
+  const ownerBadge = (
+    <MultiHouseBadge houses={homeownerHouses} ownerName={homeownerName} currentPropertyId={lead.id} testId="lead-houses" />
+  );
+
   const heroActions = (
     <>
       <SoftphoneLeadButton lead={detailSoftphoneLead} />
@@ -920,6 +943,7 @@ export default async function LeadDetailPage({
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
+        ownerBadge={ownerBadge}
         collectionHref={collection.href}
         collectionLabel={collection.label}
         actions={heroActions}

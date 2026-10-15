@@ -252,3 +252,28 @@ describe("busy", () => {
     expect(screen.getByTestId("work-row-open-lead-lead-1")).not.toHaveAttribute("disabled");
   });
 });
+
+describe("Owns N houses badge", () => {
+  const houses = {
+    count: 2,
+    houses: [
+      { propertyId: "lead-1", address: "lead-1 Main St, Kansas City, MO", assignedUserId: "me", isMine: true },
+      { propertyId: "lead-9", address: "9 Elm St, Olathe, KS", assignedUserId: "rep", isMine: false },
+    ],
+  };
+  it("sits with the owner's name and leaves the collapsed buttons alone", async () => {
+    const { h } = renderRow({ ...dueFacts(), homeownerHouses: houses });
+    const badge = screen.getByTestId("work-row-houses-lead-1");
+    expect(badge).toHaveTextContent("Owns 2 houses");
+    const group = within(screen.getByRole("group", { name: /Actions for/ }));
+    expect(group.queryByTestId("work-row-houses-lead-1")).not.toBeInTheDocument();
+    expect(group.queryAllByRole("button").length + group.queryAllByRole("link").length).toBe(2);
+    await userEvent.click(badge);
+    expect(h.onToggle).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("work-row-houses-lead-1-house-lead-9")).toHaveTextContent("another rep's lead");
+  });
+  it("is absent for a one-house homeowner", () => {
+    renderRow({ ...dueFacts(), homeownerHouses: { count: 1, houses: houses.houses.slice(0, 1) } });
+    expect(screen.queryByTestId("work-row-houses-lead-1")).not.toBeInTheDocument();
+  });
+});

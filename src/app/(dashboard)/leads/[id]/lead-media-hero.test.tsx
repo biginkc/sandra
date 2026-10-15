@@ -4,6 +4,7 @@ import { hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
 import { LeadMediaHero } from "./lead-media-hero";
 
 const shared = {
@@ -455,5 +456,31 @@ describe("<LeadMediaHero />", () => {
     );
 
     expect(screen.getByTestId("lead-media-street-view")).toBeInTheDocument();
+  });
+
+  it("shows the Owns N houses badge after the homeowner on both header styles", () => {
+    const badge = (
+      <MultiHouseBadge
+        houses={{
+          count: 2,
+          houses: [
+            { propertyId: "p1", address: "123 Main St, Kansas City, MO", assignedUserId: "me", isMine: true },
+            { propertyId: "p2", address: "9 Elm St, Olathe, KS", assignedUserId: "rep", isMine: false },
+          ],
+        }}
+        ownerName="Jamie Seller"
+        testId="lead-houses"
+      />
+    );
+    const { unmount } = render(
+      <LeadMediaHero {...shared} ownerBadge={badge} media={{ kind: "flat", reason: "missing-location" }} />,
+    );
+    expect(screen.getByRole("button", { name: "Owns 2 houses. Show Jamie Seller's houses" })).toBeVisible();
+    expect(within(screen.getByTestId("lead-media-actions")).queryByTestId("lead-houses")).toBeNull();
+    unmount();
+    render(
+      <LeadMediaHero {...shared} ownerBadge={badge} media={{ kind: "streetView", images: streetImages, aerialImages, aerialResolvedBy: "address", heading: 173, panoramaId: "pano-1" }} />,
+    );
+    expect(screen.getByTestId("lead-houses")).toHaveTextContent("Owns 2 houses");
   });
 });

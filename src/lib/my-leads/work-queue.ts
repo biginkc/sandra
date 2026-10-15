@@ -18,6 +18,8 @@ import {
   type WorkStage,
   type WorkTab,
 } from "@/app/(dashboard)/my-leads/unified/contract";
+import { loadHomeownerHouses, type HousesClient } from "@/lib/leads/homeowner-houses";
+import { reportError } from "@/lib/errors/report";
 import { isQueueRowFor, MyLeadsReadError, myLeadsViewer, readBadgeV2, readRpc, type MyLeadsViewer } from "./queries";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -253,7 +255,8 @@ export async function getWorkPage(input: {
     p_size: size,
     p_at: null,
   });
-  return parseWorkPage(data);
+  const page = parseWorkPage(data);
+  return { ...page, rows: await withHomeownerHouses(page.rows, viewer) };
 }
 
 /** Current facts for up to 50 leads (retained rows, or the one row an action touched). */
@@ -268,7 +271,42 @@ export async function getWorkFacts(memberId: string, ids: string[], resolved?: M
     p_ids: ids,
     p_at: null,
   });
-  return parseWorkFactsResult(data);
+  const result = parseWorkFactsResult(data);
+  return { ...result, rows: await withHomeownerHouses(result.rows, viewer) };
+}
+
+/**
+ * Adds every house each row's homeowner owns (one read per page). When the classifier already reports
+ * homeownerPropertyCount, rows below 2 skip the read. A failed read leaves the rows without a badge.
+ */
+export async function withHomeownerHouses(
+  rows: WorkFacts[],
+  viewer: Pick<MyLeadsViewer, "client" | "orgId" | "userId">,
+): Promise<WorkFacts[]> {
+  const wanted = rows
+    .filter((facts) => {
+      const count = (facts as { homeownerPropertyCount?: unknown }).homeownerPropertyCount;
+      return typeof count !== "number" || count >= 2;
+    })
+    .map((facts) => facts.row.contactId);
+  if (!wanted.some(Boolean)) return rows;
+  try {
+    const houses = await loadHomeownerHouses(viewer.client as unknown as HousesClient, {
+      orgId: viewer.orgId,
+      viewerId: viewer.userId,
+      contactIds: wanted,
+    });
+    return rows.map((facts) => {
+      const entry = facts.row.contactId ? houses[facts.row.contactId] : undefined;
+      return entry ? { ...facts, homeownerHouses: entry } : facts;
+    });
+  } catch (error) {
+    reportError(error instanceof Error ? error : new Error("homeowner houses read failed"), {
+      errorClass: "database",
+      tags: { surface: "database", operation: "my_leads_homeowner_houses" },
+    });
+    return rows;
+  }
 }
 
 /** Call today (pin, no expiry) or its Undo (clear). The caller has already checked the unified flag. */

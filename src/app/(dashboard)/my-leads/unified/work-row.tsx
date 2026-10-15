@@ -4,6 +4,7 @@ import { type MouseEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Ellipsis, Phone, Undo2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -200,6 +201,13 @@ export function WorkRow({
         <div className="min-w-0 flex-1 basis-60 space-y-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="break-words text-[14.5px] font-bold">{name}</span>
+            <MultiHouseBadge
+              houses={facts.homeownerHouses}
+              ownerName={facts.row.homeownerName}
+              currentPropertyId={id}
+              className="self-center"
+              testId={`work-row-houses-${id}`}
+            />
             <Badge
               variant="secondary"
               data-testid={`work-row-stage-${id}`}
