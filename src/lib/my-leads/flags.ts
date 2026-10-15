@@ -17,6 +17,7 @@ export const MY_LEADS_FLAGS = [
   "facts_job",
   "offer_projection",
   "comp_queue",
+  "unified_queue",
 ] as const;
 
 export type MyLeadsFlag = (typeof MY_LEADS_FLAGS)[number];

@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
-const mocks=vi.hoisted(()=>({rpc:vi.fn(),getUser:vi.fn(),memberships:vi.fn(),from:vi.fn(),fetch:vi.fn(),teamMembers:vi.fn()}));
+const mocks=vi.hoisted(()=>({unified:vi.fn(),rpc:vi.fn(),getUser:vi.fn(),memberships:vi.fn(),from:vi.fn(),fetch:vi.fn(),teamMembers:vi.fn()}));
 vi.mock('@/lib/supabase/server',()=>({createClient:async()=>({rpc:mocks.rpc,from:mocks.from,auth:{getUser:mocks.getUser}})}));
 vi.mock('@/lib/auth/team-roster',()=>({loadOrgTeamMembers:mocks.teamMembers}));
 vi.mock('@/lib/auth/memberships',()=>({getCallerMemberships:mocks.memberships}));
+vi.mock('./unified-queue',()=>({unifiedQueueEnabled:mocks.unified}));
 import { getAcquisitionBadge,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster,getMyLeadsQueueRow } from './queries';
 beforeEach(()=>{
   vi.resetAllMocks();
   mocks.teamMembers.mockResolvedValue([]);
+  mocks.unified.mockResolvedValue(false);
   mocks.getUser.mockResolvedValue({data:{user:{id:'rep'}}});
   mocks.memberships.mockResolvedValue([{user_id:'rep',org_id:'org',role:'member'}]);
   mocks.rpc.mockResolvedValue({data:{stages:{}},error:null});
@@ -38,6 +40,22 @@ it('treats the disabled badge as absent but preserves real read errors',async()=
   expect(await getAcquisitionBadge()).toBe(0);
   mocks.rpc.mockResolvedValue({data:null,error:{code:'08006'}});
   await expect(getAcquisitionBadge()).rejects.toMatchObject({code:'READ_FAILED'});
+});
+it('reads the old badge function, with no extra call, while the unified queue is off',async()=>{
+  mocks.rpc.mockResolvedValue({data:3,error:null});
+  expect(await getAcquisitionBadge()).toBe(3);
+  expect(mocks.unified).toHaveBeenCalledWith('org');
+  expect(mocks.rpc.mock.calls).toEqual([['fn_get_acquisition_badge',{p_org_id:'org'}]]);
+});
+it('reads the distinct-lead badge while the unified queue is on',async()=>{
+  mocks.unified.mockResolvedValue(true);
+  mocks.rpc.mockResolvedValue({data:5,error:null});
+  expect(await getAcquisitionBadge()).toBe(5);
+  expect(mocks.rpc.mock.calls).toEqual([['fn_my_leads_badge_v2',{}]]);
+  mocks.rpc.mockResolvedValue({data:'5',error:null});
+  await expect(getAcquisitionBadge()).rejects.toMatchObject({code:'READ_FAILED'});
+  mocks.rpc.mockResolvedValue({data:null,error:{code:'42501',message:'FEATURE_DISABLED'}});
+  expect(await getAcquisitionBadge()).toBe(0);
 });
 it('does not pick an arbitrary organization',async()=>{
   mocks.memberships.mockResolvedValue([{user_id:'rep',org_id:'one',role:'member'},{user_id:'rep',org_id:'two',role:'member'}]);
@@ -94,11 +112,25 @@ describe('acquisition text history',()=>{
     expect(Object.fromEntries(property)).toMatchObject({select:'homeowner_contact_id',org_id:`eq.${orgId}`,id:`eq.${propertyId}`,
       assigned_user_id:`eq.${memberId}`,deleted_at:'is.null',is_dnc_locked:'eq.false'});
     const sms=requests('messages')[0].searchParams;
-    expect(Object.fromEntries(sms)).toMatchObject({select:'id,created_at,body,direction,status,metadata',org_id:`eq.${orgId}`,channel:'eq.sms',order:'created_at.desc,id.desc',limit:'21'});
+    expect(Object.fromEntries(sms)).toMatchObject({select:'id,created_at,body,direction,status,metadata,campaign_id',org_id:`eq.${orgId}`,channel:'eq.sms',order:'created_at.desc,id.desc',limit:'21'});
     expect(sms.getAll('or')).toEqual([
       '(direction.eq.inbound,and(direction.eq.outbound,status.in.(sent,delivered,failed,bounced)))',
       `(property_id.eq.${propertyId},and(property_id.is.null,contact_id.eq.${contactId}))`,
     ]);
+  });
+
+  it('derives who sent each outbound text (drip, campaign, Sandra) without changing the other fields',async()=>{
+    const out=(index:number,extra:Record<string,unknown>)=>({...message(index),direction:'outbound',status:'sent',campaign_id:null as unknown,...extra});
+    messages=[
+      out(1,{metadata:{generated_by:'sequence_tick',sequence_enrollment_id:'e'}}),
+      out(2,{campaign_id:'30000000-0000-4000-8000-000000000001'}),
+      out(3,{metadata:{generated_by:'ai_responder_v1'}}),
+      out(4,{metadata:null}),
+      {...message(5),campaign_id:'30000000-0000-4000-8000-000000000001'},
+    ] as typeof messages;
+    const rows=(await getAcquisitionDetail({memberId,propertyId})).groups.messages!.rows;
+    expect(rows.map(row=>row.automation)).toEqual(['drip','campaign','sandra',null,null]);
+    expect(rows[0]).toMatchObject({id:id(1),direction:'outbound',deliveryStatus:'sent',attachmentCount:0});
   });
 
   it.each([
@@ -181,7 +213,7 @@ describe('acquisition text history',()=>{
   it('returns actual direction, failure state, and attachment count without metadata or media URLs',async()=>{
     messages=[{...message(1),body:'',direction:'outbound',status:'failed',metadata:{mediaUrls:['https://provider.example/private.jpg',null,''],providerSecret:'private'}}];
     const page=(await getAcquisitionDetail({memberId,propertyId,group:'messages'})).groups.messages!;
-    expect(page).toEqual({rows:[{id:id(1),at,actorId:null,body:'',direction:'outbound',deliveryStatus:'failed',attachmentCount:1}],cursor:null,hasMore:false});
+    expect(page).toEqual({rows:[{id:id(1),at,actorId:null,automation:null,body:'',direction:'outbound',deliveryStatus:'failed',attachmentCount:1}],cursor:null,hasMore:false});
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
   });
 

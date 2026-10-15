@@ -81,6 +81,8 @@ export type MessagesV2ViewProps = {
   actions?: HoldActionsApi;
   /** Luna suggestions are on: show the scorecard's Luna row. */
   lunaEnabled?: boolean;
+  /** Opened with ?deadLetter=<id>: that failed reply's lead (null when the id did not resolve). */
+  focusDeadLetter?: { deadLetterId: string; propertyId: string | null } | null;
 };
 
 const LEGEND = [
@@ -456,6 +458,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           backlogRefreshKey={props.holds}
           actions={props.actions}
           onReload={() => router.refresh()}
+          focus={props.focusDeadLetter ?? null}
         />
       </div>
 

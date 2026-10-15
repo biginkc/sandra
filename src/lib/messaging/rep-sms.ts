@@ -102,6 +102,34 @@ type RepSmsDeliveryLedgerRpc = {
   error: { message?: string; code?: string } | null;
 };
 
+/**
+ * The exact failed/unverified record a My Leads Broken item points at. refId wins over "the lead's saved submission"
+ * so a lead with several failures resumes, resends or checks the one the rep chose. The ledger is not directly readable
+ * (no grants), so it is read through a SECURITY DEFINER read function; obligations and messages go through RLS.
+ */
+export type RepSmsTargetSource = "ledger" | "obligation" | "message";
+export type RepSmsTargetRequest = { sourceKind: RepSmsTargetSource; refId: string };
+/**
+ * resume   a required/draft/failed_not_dispatched obligation: the existing obligation resume (its own id is the key)
+ * replace  a definitive failure: prefill THAT body and send as a NEW submission (never the failed key)
+ * check    unverified (unknown, stale in-flight, provider_unknown): reconcile/refresh that id, never a fresh send
+ * review   blocked: show that item's block reason
+ * resolved the record is no longer failing; unavailable: not found / not this lead's
+ */
+export type RepSmsTargetDisposition = "resume" | "replace" | "check" | "review" | "resolved" | "unavailable";
+export type RepSmsTargetInfo = RepSmsTargetRequest & {
+  disposition: RepSmsTargetDisposition;
+  state: string | null;
+  body: string | null;
+  composition: Record<string, unknown> | null;
+  assignmentId: string | null;
+  from: string | null;
+  to: string | null;
+  /** Ledger only: the original submission key (the replacement must NOT reuse it). */
+  submissionKey: string | null;
+  reason: string | null;
+};
+
 export type RepSmsContext = {
   orgId: string;
   actorId: string;
@@ -114,6 +142,8 @@ export type RepSmsContext = {
   obligation?: RepSmsPendingObligation | null;
   /** Generic send recovery is separate from no-answer obligations. */
   submission?: RepSmsPendingSubmission | null;
+  /** Present only when the caller asked for a specific failed/unverified record (see RepSmsTargetRequest). */
+  target?: RepSmsTargetInfo | null;
 };
 
 type RawRepSmsContext = Omit<RepSmsContext, "senders"> & {
@@ -216,7 +246,11 @@ function normalizeContext(raw: unknown): RepSmsContext {
   };
 }
 
-export async function readRepSmsContext(propertyId: string): Promise<RepSmsContext> {
+export async function readRepSmsContext(
+  propertyId: string,
+  target?: RepSmsTargetRequest | null,
+  options?: { adoptFencedObligation?: boolean },
+): Promise<RepSmsContext> {
   const client = await createClient();
   const { data, error } = await client.rpc("fn_get_rep_sms_context", {
     p_property_id: propertyId,
@@ -259,9 +293,224 @@ export async function readRepSmsContext(propertyId: string): Promise<RepSmsConte
   if (contactError) {
     throw new Error("Could not load the lead phone number. Please retry.");
   }
-  return {
+  const base = {
     ...recoveredContext,
     phone: selectBestSmsPhone(contact)?.phone ?? null,
+  };
+  if (!target) return base;
+  const info = await readRepSmsTarget(client, propertyId, base, target);
+  // A resumable obligation target replaces the lead's "current" obligation so the existing resume path acts on the
+  // chosen row, not whichever obligation the context read happened to return.
+  return {
+    ...base,
+    ...((info.target.disposition === "resume" || (options?.adoptFencedObligation && target.sourceKind === "obligation")) && info.obligation
+      ? { obligation: info.obligation }
+      : {}),
+    target: info.target,
+  };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LEDGER_CHECK_STATES = new Set(["reserved", "sending", "unknown"]);
+const OBLIGATION_RESUME_STATES = new Set(["required", "draft", "failed_not_dispatched"]);
+const OBLIGATION_CHECK_STATES = new Set(["unknown", "claimed", "sending"]);
+
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+function str(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+/** Pure: how a ledger receipt state is handled. Exported for tests. */
+export function ledgerTargetDisposition(state: string): RepSmsTargetDisposition {
+  if (state === "failed_not_dispatched" || state === "delivery_failed") return "replace";
+  if (state === "blocked") return "review";
+  if (LEDGER_CHECK_STATES.has(state)) return "check";
+  return "resolved";
+}
+export function obligationTargetDisposition(state: string): RepSmsTargetDisposition {
+  if (OBLIGATION_RESUME_STATES.has(state)) return "resume";
+  if (state === "delivery_failed") return "replace";
+  if (state === "blocked") return "review";
+  if (OBLIGATION_CHECK_STATES.has(state)) return "check";
+  return "resolved";
+}
+export function messageTargetDisposition(status: string, providerOutcome: unknown): RepSmsTargetDisposition {
+  if (status === "failed") return providerOutcome === "provider_unknown" ? "check" : "replace";
+  if (status === "pending" || status === "queued") return "check";
+  return "resolved";
+}
+
+type TargetRead = { target: RepSmsTargetInfo; obligation?: RepSmsPendingObligation };
+
+/**
+ * Read-only: load the ONE record the caller chose, scoped to this lead and org. The context read above already proved
+ * the caller may text this lead; this adds the lead/org filter on the chosen id (a foreign id comes back unavailable).
+ */
+async function readRepSmsTarget(
+  client: Awaited<ReturnType<typeof createClient>>,
+  propertyId: string,
+  context: RepSmsContext,
+  request: RepSmsTargetRequest,
+): Promise<TargetRead> {
+  const unavailable = (reason: string): TargetRead => ({
+    target: { ...request, disposition: "unavailable", state: null, body: null, composition: null, assignmentId: null, from: null, to: null, submissionKey: null, reason },
+  });
+  if (!UUID_RE.test(request.refId)) return unavailable("That text could not be found.");
+  const loose = client as unknown as {
+    rpc: (name: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message?: string } | null }>;
+    from: (table: string) => {
+      select: (columns: string) => {
+        eq: (c: string, v: string) => {
+          eq: (c: string, v: string) => {
+            eq: (c: string, v: string) => {
+              eq: (c: string, v: string) => { maybeSingle: () => PromiseLike<{ data: unknown; error: unknown }> };
+            };
+          };
+        };
+      };
+    };
+  };
+
+  if (request.sourceKind === "obligation") {
+    const { data, error } = await loose
+      .from("rep_sms_obligations")
+      .select("id,attempt_id,state,message_body,composition,blocked_reason,sender_assignment_id,from_number,to_number,provider_error,last_error")
+      .eq("id", request.refId)
+      .eq("property_id", propertyId)
+      .eq("org_id", context.orgId)
+      .eq("actor_user_id", context.actorId)
+      .maybeSingle();
+    if (error) throw new Error("Texting recovery could not be loaded. Please retry.");
+    const row = jsonObject(data);
+    if (!row) return unavailable("That follow-up could not be found.");
+    const state = String(row.state ?? "");
+    const disposition = obligationTargetDisposition(state);
+    const composition = jsonObject(row.composition);
+    const blockedReason = str(row.blocked_reason);
+    const obligation: RepSmsPendingObligation = {
+      id: request.refId,
+      attemptId: String(row.attempt_id ?? ""),
+      status: state,
+      messageBody: str(row.message_body),
+      composition,
+      blockedReason,
+      senderAssignmentId: str(row.sender_assignment_id),
+      fromNumber: str(row.from_number),
+      toNumber: str(row.to_number),
+    };
+    return {
+      obligation,
+      target: {
+        ...request,
+        disposition,
+        state,
+        body: str(row.message_body),
+        composition,
+        assignmentId: obligation.senderAssignmentId,
+        from: obligation.fromNumber,
+        to: obligation.toNumber,
+        submissionKey: null,
+        reason: blockedReason ?? str(row.provider_error) ?? str(row.last_error),
+      },
+    };
+  }
+
+  if (request.sourceKind === "ledger") {
+    const { data, error } = await loose.rpc("fn_get_rep_sms_delivery_target", { p_property_id: propertyId, p_ledger_id: request.refId });
+    if (error) throw new Error("Texting recovery could not be loaded. Please retry.");
+    const row = jsonObject(jsonObject(data)?.target);
+    if (row) {
+      const state = String(row.state ?? "");
+      return {
+        target: {
+          ...request,
+          disposition: ledgerTargetDisposition(state),
+          state,
+          body: str(row.body),
+          composition: jsonObject(row.composition),
+          assignmentId: str(row.assignmentId),
+          from: str(row.from),
+          to: str(row.to),
+          submissionKey: str(row.key),
+          reason: str(row.providerError) ?? str(row.lastPreDispatchFailure),
+        },
+      };
+    }
+    // text_status_unknown can come from a ledger receipt OR a bare message (the classifier does not say which). Ids are
+    // uuids, so a miss in the ledger falls through to the messages table with the same id; never a guess by kind.
+  }
+
+  const orScope = context.contactId
+    ? `property_id.eq.${propertyId},and(property_id.is.null,contact_id.eq.${context.contactId})`
+    : `property_id.eq.${propertyId}`;
+  const messages = client as unknown as {
+    from: (table: string) => {
+      select: (columns: string) => {
+        eq: (c: string, v: string) => {
+          eq: (c: string, v: string) => {
+            eq: (c: string, v: string) => {
+              or: (filter: string) => { maybeSingle: () => PromiseLike<{ data: unknown; error: unknown }> };
+            };
+          };
+        };
+      };
+    };
+  };
+  const { data, error } = await messages
+    .from("messages")
+    .select("id,body,status,metadata")
+    .eq("id", request.refId)
+    .eq("org_id", context.orgId)
+    .eq("channel", "sms")
+    .or(orScope)
+    .maybeSingle();
+  if (error) throw new Error("Texting recovery could not be loaded. Please retry.");
+  const row = jsonObject(data);
+  if (!row) return unavailable("That text could not be found.");
+  const metadata = jsonObject(row.metadata);
+  const repSms = jsonObject(metadata?.repSms);
+  const status = String(row.status ?? "");
+  // A transport-only failed manual text has no repSms metadata; keep its body as the editable remainder.
+  const plainBody = str(row.body);
+  const composition = repSms
+    ? {
+        acquisitionsManager: repSms.acquisitionsManager,
+        introId: repSms.introId,
+        introVersion: repSms.introVersion,
+        templateId: repSms.templateId,
+        templateVersion: repSms.templateVersion,
+        initialRemainder: repSms.initialRemainder,
+        remainder: repSms.finalRemainder,
+        initialBody: repSms.initialBody,
+      }
+    : plainBody
+      ? { remainder: plainBody }
+      : null;
+  let disposition = messageTargetDisposition(status, metadata?.providerOutcome);
+  const receiptId = str(repSms?.receiptId);
+  if (disposition === "replace" && receiptId) {
+    // The message failed, but its ledger receipt is the authority on whether the provider may still have it.
+    const { data: receiptData, error: receiptError } = await loose.rpc("fn_get_rep_sms_delivery_target", { p_property_id: propertyId, p_ledger_id: receiptId });
+    const receipt = jsonObject(jsonObject(receiptData)?.target);
+    disposition = receiptError || !receipt ? "check" : ledgerTargetDisposition(String(receipt.state ?? ""));
+  }
+  return {
+    target: {
+      sourceKind: "message",
+      refId: request.refId,
+      disposition,
+      state: status,
+      body: str(repSms?.finalBody) ?? str(row.body),
+      composition: composition && typeof composition.remainder === "string" ? composition : null,
+      assignmentId: str(repSms?.senderAssignmentId),
+      from: str(repSms?.from),
+      to: null,
+      // A message's own submission key (when it carries one) can never be reused by its replacement.
+      submissionKey: str(repSms?.idempotencyKey),
+      reason: str(metadata?.providerError) ?? str(metadata?.error),
+    },
   };
 }
 
@@ -674,6 +923,11 @@ export type DispatchRepSmsInput = {
   inboundMessageId?: string | null;
   /** Present only when resuming a claimed durable obligation. */
   obligationFence?: RepSmsObligationFence;
+  /**
+   * Server-set only (never copied from browser input): this send replaces a verified definitive failure, so a lead
+   * obligation that is itself terminal-failed (delivery_failed/blocked) does not block it.
+   */
+  replacingFailedSend?: boolean;
 };
 
 /**
@@ -682,14 +936,23 @@ export type DispatchRepSmsInput = {
  * persistence/suppression/provider pipeline.
  */
 export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSmsOutcome> {
-  const context = await readRepSmsContext(input.propertyId);
+  // A resume names its obligation; read that row so a lead with several saved follow-ups acts on the chosen one.
+  const context = await readRepSmsContext(
+    input.propertyId,
+    input.obligationFence ? { sourceKind: "obligation", refId: input.obligationFence.obligationId } : null,
+    { adoptFencedObligation: Boolean(input.obligationFence) },
+  );
   const manager = input.composition?.acquisitionsManager;
   const replayingSavedSubmission = Boolean(context.submission && context.submission.key === input.idempotencyKey);
   if (!input.obligationFence && !replayingSavedSubmission && (typeof manager !== "string" || !manager.trim())) {
     throw new Error("Enter the acquisitions manager before sending.");
   }
   const composition = compositionFromInput(input);
-  if (context.obligation && !input.obligationFence) {
+  // Only a definitively undelivered follow-up may be replaced by a new send; a blocked one stays blocked (Review only).
+  const terminalFailedObligation = Boolean(
+    input.replacingFailedSend && context.obligation && context.obligation.status === "delivery_failed",
+  );
+  if (context.obligation && !input.obligationFence && !terminalFailedObligation) {
     throw new Error(
       "This lead has a saved SMS follow-up. Resume the exact saved follow-up before sending another message.",
     );

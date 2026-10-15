@@ -15,20 +15,35 @@ import {
   dispatchRepSms,
   createRepSmsObligationFence,
   type DispatchRepSmsInput,
+  type RepSmsTargetRequest,
 } from "@/lib/messaging/rep-sms";
 import { composeRepSms, type RepSmsCompositionInput } from "@/lib/messaging/rep-sms-composition";
 import { assertSendilloOrganizationScope } from "@/lib/messaging/rep-sms-scope";
 
-export async function loadRepSmsContext(propertyId: string) {
+/** A forged runtime payload must not reach the read with an unknown source kind. */
+function cleanTarget(target: unknown): RepSmsTargetRequest | null {
+  if (!target || typeof target !== "object") return null;
+  const { sourceKind, refId } = target as Record<string, unknown>;
+  if ((sourceKind !== "ledger" && sourceKind !== "obligation" && sourceKind !== "message") || typeof refId !== "string" || !refId.trim()) return null;
+  return { sourceKind, refId: refId.trim() };
+}
+
+/**
+ * The lead's texting context. With `target` (a Broken item's {sourceKind, refId}) it also carries that exact record's
+ * state and body, read-only and scoped to this lead, so the selected failure (not "the lead's saved one") is acted on.
+ */
+export async function loadRepSmsContext(propertyId: string, target?: RepSmsTargetRequest | null) {
   try {
-    return ok(await readRepSmsContext(propertyId));
+    return ok(await readRepSmsContext(propertyId, cleanTarget(target)));
   } catch (error) {
     return errFromUnknown(error, "TEXTING_UNAVAILABLE");
   }
 }
 
-type PublicSendRepSmsInput = Omit<DispatchRepSmsInput, "obligationFence"> & {
+type PublicSendRepSmsInput = Omit<DispatchRepSmsInput, "obligationFence" | "replacingFailedSend"> & {
   obligationId?: string | null;
+  /** Replace THAT definitive failure with this body under the new idempotencyKey (verified server-side). */
+  replaceFailed?: RepSmsTargetRequest | null;
 };
 
 function safeDispatchInput(input: PublicSendRepSmsInput): DispatchRepSmsInput {
@@ -57,6 +72,19 @@ function safeDispatchInput(input: PublicSendRepSmsInput): DispatchRepSmsInput {
 export async function sendRepSms(input: PublicSendRepSmsInput) {
   try {
     const safeInput = safeDispatchInput(input);
+    const replaceFailed = cleanTarget(input.replaceFailed);
+    if (replaceFailed) {
+      // A definitive failure is replaced by a brand-new submission. The chosen record must still be a definitive failure
+      // of this lead, and the new key must not be the failed receipt's own key.
+      const verified = await readRepSmsContext(safeInput.propertyId, replaceFailed);
+      if (verified.target?.disposition !== "replace") {
+        throw new Error("That text is no longer a failed send. Refresh before sending.");
+      }
+      if (!safeInput.idempotencyKey?.trim() || safeInput.idempotencyKey === verified.target.submissionKey) {
+        throw new Error("A replacement text needs a new submission key. Refresh the composer before sending.");
+      }
+      return ok({ outcome: await dispatchRepSms({ ...safeInput, replacingFailedSend: true }) });
+    }
     // A no-answer follow-up is durable. Resume that exact obligation after a
     // reload instead of falling back to the generic manual sender.
     const obligationId = typeof input.obligationId === "string" ? input.obligationId.trim() : "";
@@ -102,10 +130,14 @@ function resultReason(value: Record<string, unknown>, fallback: string): string 
 export async function acknowledgeRepSmsSubmission(input: {
   propertyId: string;
   idempotencyKey: string;
+  /** A chosen ledger receipt that is not the lead's newest open draft; its key is verified against that receipt. */
+  target?: RepSmsTargetRequest | null;
 }) {
   try {
-    const context = await readRepSmsContext(input.propertyId);
-    if (context.submission && context.submission.key !== input.idempotencyKey) {
+    const target = cleanTarget(input.target);
+    const context = await readRepSmsContext(input.propertyId, target);
+    const targetOwnsKey = Boolean(target && context.target?.sourceKind === "ledger" && context.target.submissionKey === input.idempotencyKey);
+    if (!targetOwnsKey && context.submission && context.submission.key !== input.idempotencyKey) {
       throw new Error("The saved SMS request changed. Refresh before acknowledging the send.");
     }
     const admin = createAdminClient() as unknown as {
@@ -125,6 +157,35 @@ export async function acknowledgeRepSmsSubmission(input: {
       );
     }
     return ok(acknowledged);
+  } catch (error) {
+    return errFromUnknown(error, "TEXTING_UNAVAILABLE");
+  }
+}
+
+/**
+ * Check status on ONE chosen ledger receipt. Strictly read-only toward the provider: it re-reads the receipt through
+ * fn_get_rep_sms_delivery_target (same auth as the target load), never claims the ledger, never calls dispatchRepSms
+ * or a provider, and works whatever other obligation the lead holds. Only a receipt already in a final accepted state
+ * is acknowledged (the existing non-claiming close of the recovery draft); a failed or pending one is only reported.
+ */
+export async function checkRepSmsReceipt(input: { propertyId: string; ledgerId: string }) {
+  try {
+    const context = await readRepSmsContext(input.propertyId, cleanTarget({ sourceKind: "ledger", refId: input.ledgerId }));
+    const target = context.target;
+    if (!target || target.sourceKind !== "ledger" || target.disposition === "unavailable") {
+      throw new Error(target?.reason ?? "That text could not be found.");
+    }
+    let acknowledged = false;
+    if (target.disposition === "resolved" && target.submissionKey) {
+      const ack = await acknowledgeRepSmsSubmission({
+        propertyId: input.propertyId,
+        idempotencyKey: target.submissionKey,
+        target: { sourceKind: "ledger", refId: input.ledgerId },
+      });
+      acknowledged = ack.ok;
+      if (!ack.ok) throw new Error(ack.error.message);
+    }
+    return ok({ state: target.state, disposition: target.disposition, reason: target.reason, acknowledged });
   } catch (error) {
     return errFromUnknown(error, "TEXTING_UNAVAILABLE");
   }
@@ -182,7 +243,8 @@ async function persistResumedResult(
 }
 
 async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string }) {
-  const context = await readRepSmsContext(input.propertyId);
+  // Read THAT obligation (not whichever one the lead's context returns first) so the chosen refId is what resumes.
+  const context = await readRepSmsContext(input.propertyId, { sourceKind: "obligation", refId: input.obligationId });
   const obligation = context.obligation;
   if (!obligation || obligation.id !== input.obligationId) {
     throw new Error("The saved follow-up is no longer the current lead obligation. Refresh before sending.");

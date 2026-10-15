@@ -447,3 +447,76 @@ describe("dispatchRepSms stamp binding to the durable record", () => {
     expect(metadata).not.toHaveProperty("inbound_stamp_unresolved");
   });
 });
+
+describe("dispatchRepSms replacing a failed send", () => {
+  const withLeadObligation = (status: string) => {
+    const client = setupClient();
+    const obligation = {
+      id: "obligation-9", attemptId: "attempt-9", status, messageBody: "x", composition,
+      blockedReason: null, senderAssignmentId: "sender-1", fromNumber: "+18163706846", toNumber: "+18165550123",
+    };
+    client.rpc.mockImplementation(((name: string) => Promise.resolve(
+      name === "fn_get_rep_sms_context"
+        ? { data: { ...contextData, obligation }, error: null }
+        : { data: { draft: null }, error: null },
+    )) as never);
+  };
+  const send = (extra: Record<string, unknown>) => dispatchRepSms({
+    propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "33333333-3333-4333-8333-333333333333", composition, ...extra,
+  } as never);
+
+  it("a terminal-failed lead obligation (delivery_failed) does not block a verified replacement", async () => {
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "r", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    withLeadObligation("delivery_failed");
+    await expect(send({ replacingFailedSend: true })).resolves.toMatchObject({ status: "sent" });
+  });
+
+  it("without the server-set flag, or with a live obligation (required), the saved follow-up still blocks a generic send", async () => {
+    withLeadObligation("delivery_failed");
+    await expect(send({})).rejects.toThrow(/saved SMS follow-up/);
+    withLeadObligation("required");
+    await expect(send({ replacingFailedSend: true })).rejects.toThrow(/saved SMS follow-up/);
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
+  });
+});
+
+describe("dispatchRepSms fenced resume adopts the fenced obligation", () => {
+  const base = { propertyId: "property-1", assignmentId: "sender-1", composition };
+  const fenceFor = (id: string) => createRepSmsObligationFence({
+    obligationId: id, claimToken: "t", claimGeneration: 2, actorId: "rep-1",
+    propertyId: "property-1", assignmentId: "sender-1", toNumber: "+18165550123", composition: composeRepSms(composition),
+  });
+  const oblRow = (id: string, state: string) => ({
+    id, attempt_id: "att", state, message_body: "x", composition, blocked_reason: null, sender_assignment_id: "sender-1",
+    from_number: "+18163706846", to_number: "+18165550123",
+  });
+  function clientWith(newest: Record<string, unknown>, rows: Record<string, unknown>) {
+    const client = {
+      rpc: vi.fn((name: string) => Promise.resolve(name === "fn_get_rep_sms_context" ? { data: { ...contextData, obligation: newest }, error: null } : { data: { draft: null }, error: null })),
+      from: vi.fn((table: string) => {
+        const filters: Record<string, string> = {}
+        const chain: Record<string, unknown> = {}
+        chain.select = () => chain
+        chain.eq = (c: string, v: string) => ((filters[c] = v), chain)
+        chain.maybeSingle = () => Promise.resolve({ data: table === "rep_sms_obligations" ? rows[filters.id] ?? null : { phone_1: "+18165550123", phone_1_type: "mobile" }, error: null })
+        return chain
+      }),
+    }
+    mocks.createClient.mockResolvedValue(client)
+  }
+  const newest = { id: "obl-B", attemptId: "b", status: "required", messageBody: "x", composition, blockedReason: null, senderAssignmentId: "sender-1", fromNumber: "+18163706846", toNumber: "+18165550123" }
+
+  it("an older fenced obligation already in 'sending' proceeds although a newer open one exists", async () => {
+    clientWith(newest, { "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": oblRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "sending") })
+    const outcome = await dispatchRepSms({ ...base, to: "+18165550123", obligationFence: fenceFor("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") })
+    expect(outcome.status).toBe("sent")
+  })
+
+  it("a fence for a row this actor does not own still throws", async () => {
+    clientWith(newest, {})
+    await expect(dispatchRepSms({ ...base, to: "+18165550123", obligationFence: fenceFor("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") })).rejects.toThrow(/follow-up changed/)
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled()
+  })
+})
