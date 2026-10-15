@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -87,13 +87,23 @@ export function LeadAppointmentsSection({
 }: Props) {
   const router = useRouter();
   const { upcoming, pastDue } = groupLeadAppointments(appointments, nowMs);
-  const [extra, setExtra] = useState<LeadAppointmentHistoryPage>({
-    rows: [],
-    hasMore: history.hasMore,
-    cursor: history.cursor,
-  });
+  const emptyExtra: LeadAppointmentHistoryPage = { rows: [], hasMore: false, cursor: null };
+  const [extra, setExtra] = useState<LeadAppointmentHistoryPage>(emptyExtra);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  // A server refresh (after Held / Cancel / Done / Snooze) shifts every page
+  // boundary. Drop appended pages and ignore any in-flight load, then resume
+  // from the refreshed first page's cursor.
+  const [baseHistory, setBaseHistory] = useState(history);
+  const historyRef = useRef(history);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+  if (baseHistory !== history) {
+    setBaseHistory(history);
+    setExtra(emptyExtra);
+    setError(null);
+  }
 
   const seen = new Set<string>();
   const historyRows = [...history.rows, ...extra.rows].filter((row) => {
@@ -112,6 +122,7 @@ export function LeadAppointmentsSection({
   function loadMore() {
     if (!paging.cursor) return;
     const cursor = paging.cursor;
+    const base = history;
     startTransition(async () => {
       let result: LeadAppointmentHistoryResult;
       try {
@@ -119,6 +130,7 @@ export function LeadAppointmentsSection({
       } catch {
         result = { ok: false, message: "Appointment history could not be loaded. Retry." };
       }
+      if (base !== historyRef.current) return;
       if (!result.ok) {
         setError(result.message);
         return;

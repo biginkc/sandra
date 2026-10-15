@@ -48,3 +48,14 @@ export function groupLeadAppointments(
     pastDue: liveRows.filter((r) => new Date(r.due_at).getTime() <= nowMs).sort(byDue),
   };
 }
+
+/** Owner of the lead's own org — an owner role in another org does not count. */
+export function isLeadOrgOwner(
+  memberships: ReadonlyArray<{ user_id: string; org_id: string; role: string }>,
+  viewerId: string | null | undefined,
+  leadOrgId: string,
+) {
+  return memberships.some(
+    (m) => m.user_id === viewerId && m.org_id === leadOrgId && m.role === "owner",
+  );
+}

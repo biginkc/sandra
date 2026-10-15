@@ -79,7 +79,10 @@ import {
 import { loadLeadAppointmentHistory } from "./lead-appointments-actions";
 import { AssignmentEpisodeHistory } from "./assignment-episode-history";
 import { getAcquisitionDetail } from "@/lib/my-leads/queries";
-import { LEAD_APPOINTMENT_COLUMNS } from "@/lib/leads/lead-appointments";
+import {
+  LEAD_APPOINTMENT_COLUMNS,
+  isLeadOrgOwner,
+} from "@/lib/leads/lead-appointments";
 import { deriveLeadSmsPresentation } from "./lead-detail-state";
 import { LeadIdentityActions } from "./lead-identity-actions";
 import { LeadLoadFailure } from "./lead-load-failure";
@@ -765,6 +768,13 @@ export default async function LeadDetailPage({
     .replace(/^./, (character) => character.toUpperCase());
 
   // Cheap server-side decision: a rep logs only their own lead; an owner logs for the assignee.
+  // Lifecycle controls follow the My Leads panel rule: owner of THIS lead's
+  // org (memberships.org_id = lead org), not owner of any org.
+  const viewerIsLeadOrgOwner = isLeadOrgOwner(
+    callerMemberships,
+    sessionUser?.id,
+    lead.org_id,
+  );
   const viewerIsOwner = callerMemberships.some((m) => m.user_id === sessionUser?.id && m.role === "owner");
   const logFollowUpDisabledReason = !lead.assigned_user_id
     ? MY_LEAD_ROW_REASON_COPY.unassigned
@@ -1174,7 +1184,7 @@ export default async function LeadDetailPage({
                       cursor: appointmentHistory.cursor,
                     }}
                     viewerId={sessionUser?.id ?? null}
-                    viewerIsOwner={viewerIsOwner}
+                    viewerIsOwner={viewerIsLeadOrgOwner}
                     timezone={viewerTimezone}
                     nowMs={requestNowMs}
                   />

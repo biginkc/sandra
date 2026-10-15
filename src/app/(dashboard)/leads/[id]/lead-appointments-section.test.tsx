@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -223,6 +223,51 @@ describe("<LeadAppointmentsSection />", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
     await waitFor(() => expect(loadHistory).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", fresh.cursor));
+  });
+
+  it("drops appended pages and resumes from the refreshed cursor when a task finishes after page 2 loaded", async () => {
+    const pid = "11111111-1111-4111-8111-111111111111";
+    const page = (from: number, n: number) =>
+      Array.from({ length: n }, (_, i) => makeRow({ id: `h${from + i}`, status: "completed", due_at: iso(-100 - from - i) }));
+    loadHistory.mockResolvedValueOnce({ ok: true, rows: page(21, 20), hasMore: true, cursor: { dueAt: iso(-140), id: "h40" } });
+    const first = { rows: page(1, 20), hasMore: true, cursor: { dueAt: iso(-120), id: "h20" } };
+    const { rerender } = renderSection({ history: first });
+    fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
+    await waitFor(() => expect(screen.getByTestId("lead-appointment-h40")).toBeInTheDocument());
+
+    // A newer task finishes; the server's first page is now [new, h1..h19].
+    const refreshed = {
+      rows: [makeRow({ id: "new", status: "completed", due_at: iso(-90) }), ...page(1, 19)],
+      hasMore: true,
+      cursor: { dueAt: iso(-119), id: "h19" },
+    };
+    rerender(
+      <LeadAppointmentsSection propertyId={pid} appointments={[]} history={refreshed}
+        viewerId="rep-1" viewerIsOwner={false} timezone={TZ} nowMs={NOW_MS} />,
+    );
+    expect(screen.queryByTestId("lead-appointment-h40")).not.toBeInTheDocument();
+    loadHistory.mockResolvedValueOnce({ ok: true, rows: page(20, 20), hasMore: true, cursor: { dueAt: iso(-139), id: "h39" } });
+    fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
+    await waitFor(() => expect(screen.getByTestId("lead-appointment-h20")).toBeInTheDocument());
+    expect(loadHistory).toHaveBeenLastCalledWith(pid, refreshed.cursor);
+  });
+
+  it("ignores a load that was in flight when the server history refreshed", async () => {
+    const pid = "11111111-1111-4111-8111-111111111111";
+    let resolve!: (v: unknown) => void;
+    loadHistory.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const first = { rows: [makeRow({ id: "h1", status: "completed" })], hasMore: true, cursor: { dueAt: iso(-50), id: "h1" } };
+    const { rerender } = renderSection({ history: first });
+    fireEvent.click(screen.getByRole("button", { name: "Load more history" }));
+    rerender(
+      <LeadAppointmentsSection propertyId={pid} appointments={[]} viewerId="rep-1" viewerIsOwner={false}
+        timezone={TZ} nowMs={NOW_MS}
+        history={{ rows: [makeRow({ id: "h0", status: "completed" })], hasMore: false, cursor: null }} />,
+    );
+    await act(async () => {
+      resolve({ ok: true, rows: [makeRow({ id: "stale", status: "completed" })], hasMore: false, cursor: null });
+    });
+    expect(screen.queryByTestId("lead-appointment-stale")).not.toBeInTheDocument();
   });
 
   it("keeps loaded history and shows an error when paging fails", async () => {
