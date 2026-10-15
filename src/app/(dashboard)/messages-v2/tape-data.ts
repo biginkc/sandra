@@ -1,3 +1,4 @@
+import { attachHotAlertTimes } from "./hot-alert-times";
 import { CHICAGO_TZ } from "./chicago-time";
 import { fetchAllKeyset } from "./paged";
 import { compareInstants, groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
@@ -171,7 +172,8 @@ export async function loadRunsWindow(
   );
   if (stepResults.some((r) => r.error)) return { runs: [], hasMore: false, error: "The earlier tape could not be loaded." };
   const steps = groupStepsByRun(stepResults.flatMap((r) => r.rows));
-  return { runs: runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] })), hasMore, error: null };
+  const withSteps = runs.map((run) => ({ ...run, steps: steps.get(run.id) ?? [] }));
+  return { runs: await attachHotAlertTimes(supabase, orgId, withSteps), hasMore, error: null };
 }
 
 export const TAPE_TZ = CHICAGO_TZ;

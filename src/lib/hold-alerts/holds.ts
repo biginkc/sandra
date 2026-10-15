@@ -1,13 +1,15 @@
 import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages-v2/types";
 
+import { isHotReason } from "@/lib/hot-sellers/hot";
+
 import { holdReasonLabel } from "./messages";
 import type { HoldInfo } from "./types";
 
 /**
- * A hold is HOT (SMS to the owner) when one of its reasons is EXACTLY one of the
- * configured values (or matches a `prefix:*` / `*:backed` wildcard entry). Not substring: `price_quoted` or
- * `distressed_seller` are not hot. The default is EMPTY: no hold is hot until
- * reasons are named in `HOLD_ALERT_HOT_REASONS` (comma-separated).
+ * EXTRA hot reasons beyond the hot-seller definition (lib/hot-sellers/hot.ts):
+ * a hold is also hot when one of its reasons is EXACTLY one of the configured
+ * values (or matches a `prefix:*` / `*:backed` wildcard entry). Not substring.
+ * Optional; empty by default (`HOLD_ALERT_HOT_REASONS`, comma-separated).
  */
 export const HOT_HOLD_REASONS: readonly string[] = [];
 
@@ -50,6 +52,8 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "workflow_start_and_fallback_failed",
   "jev_unexpected_send_route",
   "jev_new_lead_promotion_failed",
+  "hot_lead_assign_failed",
+  "hot_lead_event_failed",
   "jev_unclear_no_action",
   // Model judgments about opt-out / DNC / phone-wide wrong number never act
   // on their own (Jarrad 2026-10-07); a human confirms each one.
@@ -177,12 +181,16 @@ export function parseHotHoldReasons(
   return out;
 }
 
-/** The reasons a hold carries, each compared whole against `hotReasons`: flag reason, run outcome, run reason. */
+/**
+ * Hot = the shared hot-seller definition (lib/hot-sellers/hot.ts) on any reason
+ * the hold carries (flag reason, run outcome, run reason), or an optional extra
+ * `HOLD_ALERT_HOT_REASONS` entry (exact or wildcard).
+ */
 export function isHotHold(hold: OpenHold<PipelineRun>, hotReasons: readonly string[] = HOT_HOLD_REASONS): boolean {
   const reasons = [hold.flag_reason, hold.run?.final_outcome, hold.run?.reason].filter(
     (v): v is string => typeof v === "string",
   );
-  return reasons.some((reason) => hotReasons.some((entry) => matchesHotEntry(reason, entry)));
+  return reasons.some((reason) => isHotReason(reason) || hotReasons.some((entry) => matchesHotEntry(reason, entry)));
 }
 
 /** What the hold is about, stable while the hold is: its flag reason, else the sources that opened it. */

@@ -11,7 +11,17 @@ import { createChannelSenders } from "./channels";
 import { runHoldAlertsForOrg } from "./core";
 import { parseHotHoldReasons, toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
-import type { HoldAlertDeps, HoldInfo, OrgAlertSummary, Recipient } from "./types";
+import type {
+  HoldAlertDeps,
+  HoldInfo,
+  HotPromotion,
+  OrgAlertSummary,
+  Recipient,
+} from "./types";
+import {
+  HOT_HANDOFF_SOURCE_TYPE,
+  resolveHotOwner,
+} from "@/lib/hot-sellers/assign";
 
 export { HOT_HOLD_REASONS, parseHotHoldReasons } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
@@ -29,12 +39,18 @@ const MEMBERSHIP_COLUMNS =
 
 /** Owner or Acquisitions caller, with active Sandra access. Same predicate at load and at send. */
 export function isHoldAlertRecipient(m: MembershipRow): boolean {
-  return hasActiveSandraAccess(m) && (m.role === "owner" || isAcquisitionsCaller(m));
+  return (
+    hasActiveSandraAccess(m) && (m.role === "owner" || isAcquisitionsCaller(m))
+  );
 }
 
-export function resolveAppBaseUrl(env: Record<string, string | undefined> = process.env): string {
+export function resolveAppBaseUrl(
+  env: Record<string, string | undefined> = process.env,
+): string {
   const raw =
-    env.NEXT_PUBLIC_APP_URL ?? env.VERCEL_PROJECT_PRODUCTION_URL ?? "https://sandra-sooty.vercel.app";
+    env.NEXT_PUBLIC_APP_URL ??
+    env.VERCEL_PROJECT_PRODUCTION_URL ??
+    "https://sandra-sooty.vercel.app";
   return (raw.startsWith("http") ? raw : `https://${raw}`).replace(/\/+$/, "");
 }
 
@@ -66,6 +82,88 @@ async function loadAlertHolds(
   return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
 }
 
+const HOT_PROMOTION_PAGE = 200;
+const HOT_PROMOTION_MAX = 5_000;
+
+/**
+ * Hot promotions since the watermark: the checked lead_events 'assigned' row the
+ * hand-off writes (source hot_seller_handoff). First name from the homeowner
+ * contact; never message text or address.
+ */
+export async function loadHotPromotions(
+  db: LooseSupabase,
+  orgId: string,
+  alertsSince: string,
+): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
+  // Keyset-paged to exhaustion (created_at, id), so a pass never re-reads only
+  // the oldest page: every promotion since the watermark is seen. Delivery rows
+  // keep it idempotent; HOT_PROMOTION_MAX bounds one pass (complete=false past it).
+  type Row = {
+    id: string;
+    property_id: string;
+    payload: { to?: unknown } | null;
+    created_at: string;
+  };
+  const rows: Row[] = [];
+  let complete = true;
+  let after: { at: string; id: string } | null = null;
+  for (;;) {
+    let q = db
+      .from("lead_events")
+      .select("id, property_id, payload, created_at")
+      .eq("org_id", orgId)
+      .eq("event_type", "assigned")
+      .eq("source_type", HOT_HANDOFF_SOURCE_TYPE)
+      .gte("created_at", alertsSince);
+    if (after)
+      q = q.or(
+        `created_at.gt.${after.at},and(created_at.eq.${after.at},id.gt.${after.id})`,
+      );
+    const { data, error } = await q
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(HOT_PROMOTION_PAGE);
+    if (error) return { promotions: [], complete: false };
+    const page = (data ?? []) as Row[];
+    rows.push(...page);
+    if (page.length < HOT_PROMOTION_PAGE) break;
+    if (rows.length >= HOT_PROMOTION_MAX) {
+      complete = false;
+      break;
+    }
+    const last = page[page.length - 1]!;
+    after = { at: last.created_at, id: last.id };
+  }
+  const ids = rows.map((r) => r.property_id);
+  const names = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
+    const { data: props, error: propError } = await db
+      .from("properties")
+      .select("id, contacts:homeowner_contact_id(first_name)")
+      .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
+    if (propError) complete = false;
+    for (const p of (props ?? []) as Array<{
+      id: string;
+      contacts: { first_name: string | null } | null;
+    }>) {
+      const first = p.contacts?.first_name?.trim();
+      if (first) names.set(p.id, first);
+    }
+  }
+  const promotions: HotPromotion[] = [];
+  for (const r of rows) {
+    const to = typeof r.payload?.to === "string" ? r.payload.to : null;
+    if (!to) continue;
+    promotions.push({
+      propertyId: r.property_id,
+      assigneeUserId: to,
+      name: names.get(r.property_id) ?? "Unknown sender",
+      assignedAt: r.created_at,
+    });
+  }
+  return { promotions, complete };
+}
+
 export function createHoldAlertDeps(
   admin: SupabaseClient<Database>,
   env: Record<string, string | undefined> = process.env,
@@ -79,10 +177,17 @@ export function createHoldAlertDeps(
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
+    loadHolds: (orgId, alertsSince) =>
+      loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
+    loadHotPromotions: (orgId, alertsSince) =>
+      loadHotPromotions(db, orgId, alertsSince),
+    loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     async loadRecipients(orgId): Promise<Recipient[]> {
-      const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
+      const { data, error } = await db
+        .from("memberships")
+        .select(MEMBERSHIP_COLUMNS)
+        .eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);
       return ((data ?? []) as MembershipRow[])
         .filter(isHoldAlertRecipient)
@@ -95,7 +200,8 @@ export function createHoldAlertDeps(
         .eq("org_id", orgId)
         .eq("user_id", userId)
         .maybeSingle();
-      if (error) throw new Error(`membership re-check failed: ${error.message}`);
+      if (error)
+        throw new Error(`membership re-check failed: ${error.message}`);
       if (!data) return false;
       const m = data as MembershipRow;
       if (!isHoldAlertRecipient(m)) return false;
@@ -106,7 +212,9 @@ export function createHoldAlertDeps(
 }
 
 /** Kill switch: alerts send only when HOLD_ALERTS_ENABLED is exactly "1". Default off. */
-export function holdAlertsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function holdAlertsEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   return env.HOLD_ALERTS_ENABLED === "1";
 }
 
@@ -130,7 +238,9 @@ export async function runHoldAlertsForAllOrgs(
 ): Promise<AllOrgsSummary> {
   const env = opts.env ?? process.env;
   if (!holdAlertsEnabled(env)) {
-    (opts.log ?? ((m: string) => console.warn(m)))("hold alerts skipped: HOLD_ALERTS_ENABLED is not 1");
+    (opts.log ?? ((m: string) => console.warn(m)))(
+      "hold alerts skipped: HOLD_ALERTS_ENABLED is not 1",
+    );
     return {
       disabled: true,
       orgs: 0,
@@ -144,12 +254,21 @@ export async function runHoldAlertsForAllOrgs(
       archived: 0,
       errors: 0,
       budgetExhausted: false,
+      hotOwnerUnknown: false,
     };
   }
   const db = admin as unknown as LooseSupabase;
-  const { data, error } = await db.from("ai_responder_configs").select("org_id").eq("active", true);
-  if (error) throw new Error(`ai_responder_configs lookup failed: ${error.message}`);
-  const orgIds = [...new Set(((data ?? []) as Array<{ org_id: string }>).map((r) => r.org_id))];
+  const { data, error } = await db
+    .from("ai_responder_configs")
+    .select("org_id")
+    .eq("active", true);
+  if (error)
+    throw new Error(`ai_responder_configs lookup failed: ${error.message}`);
+  const orgIds = [
+    ...new Set(
+      ((data ?? []) as Array<{ org_id: string }>).map((r) => r.org_id),
+    ),
+  ];
 
   const deps = createHoldAlertDeps(admin, env);
   const total: AllOrgsSummary = {
@@ -164,6 +283,7 @@ export async function runHoldAlertsForAllOrgs(
     archived: 0,
     errors: 0,
     budgetExhausted: false,
+    hotOwnerUnknown: false,
   };
   const startMs = Date.now();
   const budgetMs = opts.budgetMs ?? 50_000;
@@ -184,6 +304,7 @@ export async function runHoldAlertsForAllOrgs(
       total.interrupted += s.interrupted;
       total.archived += s.archived;
       total.budgetExhausted ||= s.budgetExhausted;
+      total.hotOwnerUnknown ||= s.hotOwnerUnknown;
     } catch (e) {
       total.errors += 1;
       opts.onError?.(e, orgId);

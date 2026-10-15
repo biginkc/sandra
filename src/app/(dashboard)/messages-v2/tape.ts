@@ -7,6 +7,7 @@
  * `resolve_threshold`.
  */
 import { nineTapeTag } from "./nine-tape";
+import { chicagoClock } from "./chicago-time";
 import { dripEnrollmentSummary } from "./run-card";
 import type { PipelineRunStep, RunWithSteps } from "./types";
 
@@ -151,7 +152,23 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
   if (replySent) parts.push("Reply sent");
   const drip = run.steps.map(dripEnrollmentSummary).find((s) => s !== null);
   if (drip) parts.push(`Drip started: ${drip}`);
-  if (hasStep(run.steps, "promote_new_lead", "applied")) parts.push("Marked as a lead");
+  const handoff = run.steps.find((s) => s.name === "assign_hot_lead" && s.result === "applied");
+  const handoffStatus = (handoff?.detail as { status?: string } | null | undefined)?.status;
+  if (handoffStatus === "already_owned") {
+    parts.push("Already on My Leads under Jarrad");
+  } else if (handoffStatus === "assigned_unrecorded") {
+    parts.push("On My Leads under Jarrad, but the note about it couldn't be saved");
+  } else if (handoff) {
+    parts.push(
+      run.hotAlertSentAt
+        ? `Handed to Jarrad · now on My Leads · Slack and text sent ${chicagoClock(run.hotAlertSentAt)}`
+        : "Handed to Jarrad · now on My Leads",
+    );
+  } else if (hasStep(run.steps, "assign_hot_lead", "error")) {
+    parts.push("Couldn't hand this to Jarrad, so it waits for a person");
+  } else if (hasStep(run.steps, "promote_new_lead", "applied")) {
+    parts.push("Marked as a lead");
+  }
   if (!replySent && !drip && hasStep(run.steps, "opted_out", "applied")) parts.push("Stopped texting this number");
   if (parts.length === 0 && stage === "waiting") parts.push('Moved to "Waiting for a person"');
   if (parts.length === 0 && (hasStep(run.steps, "not_interested", "applied") || hasStep(run.steps, "wrong_number", "applied"))) {
@@ -245,7 +262,7 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
     run.status === "closed" ||
     hasStep(run.steps, "not_interested", "applied") ||
     hasStep(run.steps, "wrong_number", "applied");
-  const handed = hasStep(run.steps, "promote_new_lead", "applied");
+  const handed = hasStep(run.steps, "promote_new_lead", "applied") && !hasStep(run.steps, "assign_hot_lead", "error");
   const stage: TapeStage = waiting ? "waiting" : replySent ? "sent" : "decided";
   return {
     kind: "decided",

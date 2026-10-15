@@ -1,5 +1,7 @@
 import { reportError } from "@/lib/errors/report";
-import { digestMessage, slackFirstText, slackNudgeText, smsText } from "./messages";
+import { hotPromotionKey } from "@/lib/hot-sellers/hot";
+
+import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
   MAX_ATTEMPTS,
   ROUTE_MAX_DURATION_MS,
@@ -16,14 +18,19 @@ const HOUR_MS = 60 * 60 * 1000;
 export const MAX_DMS_PER_RECIPIENT_PER_HOUR = 20;
 export const MAX_SMS_PER_HOUR = 10;
 export const DEFAULT_BUDGET_MS = 50_000;
+/**
+ * Hot alerts (Slack + SMS to Jarrad) start with PR 2. Hot holds that began
+ * before this stay silent, so switching the hot definition on does not text
+ * Jarrad about weeks-old holds (about 38 were open on 2026-10-15). Today's
+ * hot sellers still alert.
+ */
+export const HOT_ALERTS_START_ISO = "2026-10-15T00:00:00.000Z";
 
 type Task = {
   input: EnsureInput;
   send: (ctx: { deliveryId: string }) => Promise<ChannelResult>;
   /** The recipient must still be an owner when the send happens (SMS). */
   requireOwner?: boolean;
-  /** Asked before the row is even created; false = nothing to do yet. */
-  eligible?: () => Promise<boolean>;
 };
 
 /** A hold may alert only when it began at or after the watermark. No known start never does. */
@@ -43,11 +50,12 @@ const emptySummary = (): OrgAlertSummary => ({
   interrupted: 0,
   archived: 0,
   budgetExhausted: false,
+  hotOwnerUnknown: false,
 });
 
 /**
- * One alert pass for one org: derive tasks (first/nudge Slack DMs, owner SMS
- * for hot holds, hourly email digest), then run each through
+ * One alert pass for one org: derive tasks (one Slack DM + one SMS to Jarrad
+ * per hot hold and per hot promotion, hourly email digest), then run each through
  * ensure -> cap -> claim -> authorize -> send -> record. Idempotent: every
  * delivery is keyed (hold, recipient, channel, stage) and claimed atomically;
  * a claimed row is `sending` before the provider is called, so a run that dies
@@ -68,11 +76,12 @@ export async function runHoldAlertsForOrg(
     new Date(startMs - ROUTE_MAX_DURATION_MS).toISOString(),
   );
 
-  // Alerts are for holds that START after they were enabled. The first run for an
-  // org only records the watermark and sends nothing; everything open right now is
-  // backlog and stays silent.
-  const mark = await deps.store.getOrInitAlertsSince(orgId, deps.now().toISOString());
-  if (mark.created) return summary;
+  // Alerts are for holds that START after they were enabled. A new org's
+  // watermark starts no later than HOT_ALERTS_START_ISO, so a hot seller that
+  // arrived before the first pass still alerts on it; older backlog stays silent.
+  const nowIso = deps.now().toISOString();
+  const initIso = Date.parse(nowIso) > Date.parse(HOT_ALERTS_START_ISO) ? HOT_ALERTS_START_ISO : nowIso;
+  const mark = await deps.store.getOrInitAlertsSince(orgId, initIso);
   const alertsSinceMs = Date.parse(mark.alertsSince);
 
   const loaded = await deps.loadHolds(orgId, mark.alertsSince);
@@ -87,6 +96,7 @@ export async function runHoldAlertsForOrg(
   // rows so a re-opened hold gets fresh keys. Bounded and independent of the
   // alert load: look only at properties that have live delivery rows, ask which
   // are still held, and archive the rest. Any incomplete answer archives nothing.
+  // Hot-promotion rows carry no property_id, so they are never archived (once per property, ever).
   const delivered = await deps.store.deliveredPropertyIds(orgId);
   if (delivered.complete && delivered.ids.length > 0) {
     const held = await deps.loadHeldPropertyIds(orgId, delivered.ids);
@@ -97,8 +107,19 @@ export async function runHoldAlertsForOrg(
       summary.archived = await deps.store.archiveClosed(orgId, [...open], delivered.ids);
     }
   }
+  const promoted = await deps.loadHotPromotions(orgId, mark.alertsSince);
+  if (!promoted.complete) {
+    reportError(new Error("hold alerts: hot-promotion load incomplete; some hot sellers may not have alerted"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+  }
+  const promotions = promoted.promotions.filter(
+    (p) => isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) && isNewHold({ startedAt: p.assignedAt }, Date.parse(HOT_ALERTS_START_ISO)),
+  );
   summary.holds = holds.length;
-  if (holds.length === 0) return summary;
+  const hotStartMs = Date.parse(HOT_ALERTS_START_ISO);
+  const hotHolds = holds.filter((h) => h.hot && isNewHold(h, hotStartMs));
+  if (hotHolds.length === 0 && promotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
   const link = deps.baseUrl;
@@ -106,44 +127,56 @@ export async function runHoldAlertsForOrg(
   const base = { orgId };
   const tasks: Task[] = [];
 
-  for (const hold of holds) {
-    for (const r of recipients) {
+  // PR 2 (Jarrad 2026-10-14): only hot sellers ping, and only Jarrad: one Slack
+  // DM + one text per hot hold or hot promotion. Non-hot holds send nothing per
+  // hold (no first DM, no 1h nudge); they stay on the page and in the digest.
+  // Jarrad = the org's one active owner. Unknown (several owners, or the lookup
+  // failed) → fail closed: no hot hold alerts this pass, said out loud. The
+  // digest still goes. Promotions name their own assignee.
+  let hotOwner: string | null = null;
+  try {
+    hotOwner = await deps.loadHotOwner(orgId);
+  } catch (error) {
+    reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "hot_owner" } });
+  }
+  if (hotOwner === null && hotHolds.length > 0) {
+    summary.hotOwnerUnknown = true;
+    reportError(new Error("hold alerts: couldn't tell who to alert for hot holds; none sent"), {
+      tags: { surface: "hold_alerts", orgId },
+      extra: { hotHolds: hotHolds.length },
+    });
+  }
+  const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
+  // ONE alert key per hot seller (hotPromotionKey), shared by holds and
+  // promotions, property_id null so archive-on-clear never re-fires it: a seller
+  // whose promotion also left a hold gets one Slack + one SMS, not two.
+  for (const p of promotions) {
+    // The promotion's own assignee, who must still be an active owner at send time.
+    if (!recipients.some((r) => r.userId === p.assigneeUserId && r.role === "owner")) continue;
+    for (const channel of ["slack", "sms"] as const) {
       tasks.push({
-        input: { ...base, propertyId: hold.propertyId, holdKey: hold.holdKey, recipientUserId: r.userId, channel: "slack", stage: "first" },
-        send: () => deps.sendSlack(r.userId, slackFirstText(hold, link)),
+        input: { ...base, propertyId: null, holdKey: hotPromotionKey(p.propertyId), recipientUserId: p.assigneeUserId, channel, stage: "first" },
+        send: () =>
+          channel === "slack"
+            ? deps.sendSlack(p.assigneeUserId, hotPromotionSlackText(p, link))
+            : deps.sendSms(p.assigneeUserId, hotPromotionSmsText(p, link)),
+        requireOwner: true,
       });
     }
-    if (hold.hot) {
-      for (const r of recipients.filter((x) => x.role === "owner")) {
+  }
+  for (const hold of hotHolds) {
+    for (const r of hotRecipients) {
+      for (const channel of ["slack", "sms"] as const) {
         tasks.push({
-          input: { ...base, propertyId: hold.propertyId, holdKey: hold.holdKey, recipientUserId: r.userId, channel: "sms", stage: "first" },
-          send: () => deps.sendSms(r.userId, smsText(hold, link)),
+          input: { ...base, propertyId: null, holdKey: hotPromotionKey(hold.propertyId), recipientUserId: r.userId, channel, stage: "first" },
+          send: () =>
+            channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link)),
           requireOwner: true,
         });
       }
     }
   }
-  // The nudge is "still unanswered an hour after we told you": it keys off when
-  // the first DM was actually SENT, never off the hold's own age. On first
-  // deploy every old hold would otherwise get its first DM and a nudge at once.
-  for (const hold of holds) {
-    for (const r of recipients) {
-      tasks.push({
-        input: { ...base, propertyId: hold.propertyId, holdKey: hold.holdKey, recipientUserId: r.userId, channel: "slack", stage: "nudge_1h" },
-        send: () => deps.sendSlack(r.userId, slackNudgeText(hold, link)),
-        eligible: async () => {
-          const firstSentAt = await deps.store.sentAt({
-            holdKey: hold.holdKey,
-            recipientUserId: r.userId,
-            channel: "slack",
-            stage: "first",
-          });
-          return firstSentAt !== null && nowMs - Date.parse(firstSentAt) >= HOUR_MS;
-        },
-      });
-    }
-  }
-  if (deps.emailEnabled) {
+  if (deps.emailEnabled && holds.length > 0) {
     const hourKey = `digest:${orgId}:${new Date(nowMs).toISOString().slice(0, 13)}`;
     const message: EmailMessage = digestMessage(holds, nowMs, link);
     for (const r of recipients) {
@@ -170,7 +203,6 @@ async function runTask(
   task: Task,
 ): Promise<"sent" | "skipped" | "failed" | "untouched" | "deferred"> {
   const { store } = deps;
-  if (task.eligible && !(await task.eligible())) return "untouched";
   const row = await store.ensure(task.input);
   const claimable = (row.status === "pending" || row.status === "failed") && row.attempts < MAX_ATTEMPTS;
   if (!claimable) return "untouched";
@@ -180,6 +212,13 @@ async function runTask(
   if (await capReached(deps, task.input)) return "deferred";
 
   if (!(await store.claim(row))) return "untouched";
+  // Two overlapping passes can both see room under a cap before claiming. The
+  // count includes rows in 'sending', so re-check now that ours is claimed; if
+  // over, give the claim back (pending, no attempt spent) for the next pass.
+  if (await capReached(deps, task.input, 1)) {
+    await store.release(row.id);
+    return "deferred";
+  }
 
   let sendStarted = false;
   try {
@@ -209,6 +248,8 @@ async function runTask(
 async function capReached(
   deps: HoldAlertDeps,
   input: EnsureInput,
+  /** Claimed rows of our own already in the count (0 before claim, 1 after). */
+  own = 0,
 ): Promise<"cap_dm_per_hour" | "cap_sms_per_hour" | null> {
   const sinceIso = new Date(deps.now().getTime() - HOUR_MS).toISOString();
   if (input.channel === "slack") {
@@ -218,11 +259,11 @@ async function capReached(
       recipientUserId: input.recipientUserId,
       sinceIso,
     });
-    return n >= MAX_DMS_PER_RECIPIENT_PER_HOUR ? "cap_dm_per_hour" : null;
+    return n - own >= MAX_DMS_PER_RECIPIENT_PER_HOUR ? "cap_dm_per_hour" : null;
   }
   if (input.channel === "sms") {
     const n = await deps.store.countSentSince({ orgId: input.orgId, channel: "sms", sinceIso });
-    return n >= MAX_SMS_PER_HOUR ? "cap_sms_per_hour" : null;
+    return n - own >= MAX_SMS_PER_HOUR ? "cap_sms_per_hour" : null;
   }
   return null;
 }

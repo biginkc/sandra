@@ -1,6 +1,6 @@
 import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
-import type { EmailMessage, HoldInfo } from "./types";
+import type { EmailMessage, HoldInfo, HotPromotion } from "./types";
 
 /** Alert copy carries ids, first name, age and a link only: never seller message text or the property address. */
 
@@ -49,12 +49,16 @@ export function slackFirstText(hold: HoldInfo, baseUrl: string): string {
   return `New hold needs review: ${escapeSlack(where(hold))} (${escapeSlack(hold.reasonLabel)}). ${leadLink(baseUrl, hold.propertyId)}`;
 }
 
-export function slackNudgeText(hold: HoldInfo, baseUrl: string): string {
-  return `Still on hold after 1h: ${escapeSlack(where(hold))} (${escapeSlack(hold.reasonLabel)}). ${leadLink(baseUrl, hold.propertyId)}`;
-}
-
 export function smsText(hold: HoldInfo, baseUrl: string): string {
   return `Hot hold: ${where(hold)} (${hold.reasonLabel}). ${leadLink(baseUrl, hold.propertyId)}`;
+}
+
+export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
+}
+
+export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
+  return `Hot seller: ${p.name} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
 }
 
 export function digestMessage(holds: readonly HoldInfo[], nowMs: number, baseUrl: string): EmailMessage {

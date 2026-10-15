@@ -33,7 +33,7 @@ const GROUPS: RuleGroup[] = [
       {
         outcome: "new_lead",
         title: "Open to selling or wants an offer",
-        detail: "Sandra marks this seller as a lead for a person to follow up. She never texts them back on her own.",
+        detail: "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.",
       },
     ],
   },

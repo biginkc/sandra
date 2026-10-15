@@ -6,6 +6,7 @@ import type {
   HoldAlertDeps,
   HoldInfo,
   Recipient,
+  HotPromotion,
 } from "./types";
 
 /** In-memory DeliveryStore with the same unique-key + atomic-claim semantics as the table. */
@@ -103,6 +104,13 @@ export class FakeStore implements DeliveryStore {
     r.status = "sent";
     r.sentAt = this.clock().toISOString();
   }
+  async release(id: string) {
+    const r = this.rows.find((x) => x.id === id);
+    if (!r || r.status !== "sending") return;
+    r.status = "pending";
+    r.attempts = Math.max(0, r.attempts - 1);
+    r.sendingAt = null;
+  }
   async markSkipped(id: string, reason: string) {
     const r = this.rows.find((x) => x.id === id)!;
     r.status = "skipped";
@@ -134,8 +142,8 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
   return {
     holdKey: "prop-1:draft_held",
     propertyId: "prop-1",
-    since: "2026-10-08T10:00:00.000Z",
-    startedAt: "2026-10-08T10:00:00.000Z",
+    since: "2026-10-15T10:00:00.000Z",
+    startedAt: "2026-10-15T10:00:00.000Z",
     name: "Dana",
     reasonLabel: "price talk",
     hot: false,
@@ -146,9 +154,9 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
 export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string; idempotencyKey?: string };
 
 export function makeDeps(
-  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string; noWatermark?: boolean } = {},
+  over: Partial<HoldAlertDeps> & { promotions?: HotPromotion[]; hotOwner?: string | null; holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string; noWatermark?: boolean } = {},
 ) {
-  let nowIso = over.nowIso ?? "2026-10-08T10:02:00.000Z";
+  let nowIso = over.nowIso ?? "2026-10-15T10:02:00.000Z";
   const clock = () => new Date(nowIso);
   const store = (over.store as FakeStore | undefined) ?? new FakeStore(clock);
   // Existing tests model an org whose alerts were enabled long ago; watermark tests clear this.
@@ -170,6 +178,8 @@ export function makeDeps(
       const held = new Set((await deps.loadHolds(org, "")).holds.map((h) => h.propertyId));
       return new Set(ids.filter((id) => held.has(id)));
     },
+    loadHotPromotions: async () => ({ promotions: over.promotions ?? [], complete: true }),
+    loadHotOwner: async () => (over.hotOwner === undefined ? OWNER.userId : over.hotOwner),
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,
     sendSlack: async (userId, text) => {

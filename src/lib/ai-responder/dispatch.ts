@@ -26,6 +26,12 @@ import { enrollLead, pausePropertyEnrollments } from "@/lib/sequences/enrollment
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { assignHotLeadToOwner } from "@/lib/hot-sellers/assign";
+
+/** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
+const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
+/** Hold reason when the lead is on My Leads under Jarrad but its 'assigned' event did not save (hot). */
+const HOT_LEAD_EVENT_FAILED_REASON = "hot_lead_event_failed";
 
 import {
   recordStep,
@@ -1499,6 +1505,31 @@ async function classifyAndHandleNonRouteOutcomes(
           eventType: LEAD_EVENT_TYPES.QUALIFIED,
           payload: { from: "prospect", to: "new_lead" },
         });
+      }
+      // Hot seller (PR 2): the lead goes on My Leads under Jarrad. A failed
+      // hand-off fails CLOSED: the property is held (a hot hold, so the alert
+      // cron still texts Jarrad) and the run is escalated, never auto_closed.
+      const handoff = await assignHotLeadToOwner(supabase, input.propertyId);
+      await trace(supabase, {
+        kind: "action",
+        name: "assign_hot_lead",
+        result: handoff.status === "failed" ? "error" : "applied",
+        detail: handoff.status === "failed"
+          ? { status: handoff.status, reason: handoff.reason }
+          : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
+      }, runCtx);
+      if (handoff.status === "failed" || handoff.status === "assigned_unrecorded") {
+        // assigned_unrecorded: the lead IS on My Leads, but its note did not
+        // save; the hold keeps a person in the loop and still alerts (hot).
+        const assignReason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
+        const assignFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, assignReason, runCtx);
+        await completeClaim(supabase, input.propertyId, {
+          claimId: responseClaim.claimId,
+          outcome: "escalated",
+          flagOk: assignFlagOk,
+          errorMessage: handoff.status === "failed" ? handoff.reason : handoff.detail,
+        });
+        return { handled: true, outcome: { outcome: "escalated", reason: assignReason } };
       }
       const newLeadHoldOk = classification.askedHowNumberObtained
         // A new lead never auto-replies (PLAN D5), so the number-source reply
