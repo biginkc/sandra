@@ -250,6 +250,12 @@ class IndexedStore extends FakeStore {
     this.inFlight.delete(id);
     return super.release(id);
   }
+  /** O(log n) cap check (FakeStore's scans every row): same count as countSentSince, then the plain claim. */
+  async claimWithCap(row: Parameters<FakeStore["claim"]>[0], cap: Parameters<FakeStore["claimWithCap"]>[1]) {
+    const n = await this.countSentSince({ orgId: cap.orgId, channel: cap.channel, sinceIso: cap.sinceIso });
+    if (n >= cap.cap) return "capped" as const;
+    return (await this.claim(row)) ? ("claimed" as const) : ("lost" as const);
+  }
   async markSent(id: string) {
     this.inFlight.delete(id);
     await super.markSent(id);

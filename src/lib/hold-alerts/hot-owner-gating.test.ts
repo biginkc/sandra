@@ -174,51 +174,39 @@ describe("hot owner re-resolved immediately before each provider call", () => {
   });
 });
 
-describe("cap re-check that throws", () => {
-  it("puts the row back to pending (never left 'sending'), counts it deferred, and delivers it on a later pass", async () => {
+describe("claimWithCap that throws (replaces the old post-claim cap re-check tests)", () => {
+  it("an atomic-claim error defers that row (pending, no attempt spent), the rest of the pass carries on, and the next pass delivers it", async () => {
     const t = setup({ holds: [hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z" })] });
+    const real = t.store.claimWithCap.bind(t.store);
     let calls = 0;
-    const real = t.store.countSentSince.bind(t.store);
-    t.store.countSentSince = async (q) => {
+    t.store.claimWithCap = async (row, cap) => {
       calls += 1;
-      // Call 1 = slack pre-claim check, call 2 = slack post-claim re-check.
-      if (calls === 2) throw new Error("count down");
-      return real(q);
+      if (calls === 1) throw new Error("claim rpc down");
+      return real(row, cap);
     };
     const first = await runHoldAlertsForOrg(t.deps, ORG);
-    const slackRow = t.store.rows.find((r) => r.channel === "slack")!;
-    expect(slackRow.status).toBe("pending");
-    expect(slackRow.attempts).toBe(0);
-    expect(t.store.rows.some((r) => r.status === "sending")).toBe(false);
-    expect(t.sent.filter((s) => s.channel === "slack")).toEqual([]);
     expect(first.deferred).toBe(1);
-    expect(reportError).toHaveBeenCalled();
-    // The text (separate row) is unaffected.
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+    expect(first.sent).toBe(1);
+    const slackRow = t.store.rows.find((r) => r.channel === "slack")!;
+    expect([slackRow.status, slackRow.attempts]).toEqual(["pending", 0]);
+    expect(t.store.rows.some((r) => r.status === "sending")).toBe(false);
+    expect(t.sent.map((x) => x.channel)).toEqual(["sms"]);
 
     t.setNow("2026-10-15T12:05:00.000Z");
     const second = await runHoldAlertsForOrg(t.deps, ORG);
     expect(second.sent).toBe(1);
-    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
     expect(t.store.rows.every((r) => r.status === "sent")).toBe(true);
   });
 
-  it("if the release itself also throws the pass still ends normally (best effort)", async () => {
+  it("a 'capped' answer defers the row (pending, no attempt spent) and 'lost' leaves it untouched, with no send", async () => {
     const t = setup({ holds: [hold({ hot: true, startedAt: "2026-10-15T11:00:00.000Z" })] });
-    let calls = 0;
-    const real = t.store.countSentSince.bind(t.store);
-    t.store.countSentSince = async (q) => {
-      calls += 1;
-      if (calls === 2) throw new Error("count down");
-      return real(q);
-    };
-    t.store.release = async () => {
-      throw new Error("release down");
-    };
+    const answers: Array<"capped" | "lost"> = ["capped", "lost"];
+    t.store.claimWithCap = async () => answers.shift() ?? "lost";
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     expect(summary.deferred).toBe(1);
-    expect(t.sent.filter((s) => s.channel === "slack")).toEqual([]);
+    expect(summary.untouched).toBe(1);
+    expect(t.sent).toEqual([]);
+    expect(t.store.rows.filter((r) => r.channel !== "email").every((r) => r.status === "pending" && r.attempts === 0)).toBe(true);
   });
 });
 

@@ -87,6 +87,16 @@ export type ChannelResult =
   /** `terminal`: delivery is ambiguous (may have been transmitted); never retry. */
   | { status: "failed"; error: string; terminal?: boolean };
 
+/** One hourly cap bucket: Slack per recipient, SMS per org. */
+export type CapBucket = {
+  orgId: string;
+  channel: AlertChannel;
+  /** null = the whole org (SMS). */
+  recipientUserId: string | null;
+  cap: number;
+  sinceIso: string;
+};
+
 export interface DeliveryStore {
   /**
    * The org's alert watermark. Inserts `alerts_since = nowIso` when the org has
@@ -104,6 +114,12 @@ export interface DeliveryStore {
    * there first or the row is no longer claimable.
    */
   claim(row: DeliveryRow): Promise<boolean>;
+  /**
+   * Atomic cap reservation + claim (hold_alert_claim_with_cap): counts sent +
+   * sending rows in the bucket under a per-bucket lock and claims only if
+   * under the cap. 'capped' leaves the row untouched.
+   */
+  claimWithCap(row: DeliveryRow, cap: CapBucket): Promise<"claimed" | "capped" | "lost">;
   /**
    * Rows stuck in 'sending' since before `cutoffIso` (the run died mid-send)
    * become terminal failed:interrupted. They are never resent: the provider may

@@ -9,6 +9,7 @@ import {
   type EmailMessage,
   type EnsureInput,
   type HoldAlertDeps,
+  type CapBucket,
   type HoldInfo,
   type OrgAlertSummary,
 } from "./types";
@@ -303,25 +304,25 @@ async function runTask(
   const claimable = (row.status === "pending" || row.status === "failed") && row.attempts < MAX_ATTEMPTS;
   if (!claimable) return "untouched";
 
-  // Over a cap: leave the row pending (nothing is claimed, no attempt is spent)
-  // so the next run delivers it once the hour has rolled.
-  if (await capReached(deps, task.input)) return "deferred";
-
-  if (!(await store.claim(row))) return "untouched";
-  // Two overlapping passes can both see room under a cap before claiming. The
-  // count includes rows in 'sending', so re-check now that ours is claimed; if
-  // over, give the claim back (pending, no attempt spent) for the next pass.
-  try {
-    if (await capReached(deps, task.input, 1)) {
-      await store.release(row.id);
+  // Capped channels: the cap check and the claim are ONE atomic database step
+  // (hold_alert_claim_with_cap, advisory-locked per cap bucket), so two
+  // overlapping passes can never both send into the last free slot. Over the
+  // cap → the row stays pending (no attempt spent) for the next pass.
+  const cap = capFor(deps, task.input);
+  if (cap) {
+    let result: "claimed" | "capped" | "lost";
+    try {
+      result = await store.claimWithCap(row, cap);
+    } catch (error) {
+      // Nothing was claimed or sent: the row stays pending for the next pass,
+      // and the rest of this pass carries on.
+      reportError(error, { tags: { surface: "hold_alerts" }, extra: { stage: "claim_with_cap", deliveryId: row.id } });
       return "deferred";
     }
-  } catch (error) {
-    // Nothing was sent: never leave the row 'sending' (it would later be swept
-    // to failed:interrupted and lost). Best effort back to pending.
-    reportError(error, { tags: { surface: "hold_alerts" }, extra: { stage: "cap_recheck", deliveryId: row.id } });
-    await store.release(row.id).catch(() => undefined);
-    return "deferred";
+    if (result === "capped") return "deferred";
+    if (result !== "claimed") return "untouched";
+  } else if (!(await store.claim(row))) {
+    return "untouched";
   }
 
   let sendStarted = false;
@@ -349,25 +350,14 @@ async function runTask(
   }
 }
 
-async function capReached(
-  deps: HoldAlertDeps,
-  input: EnsureInput,
-  /** Claimed rows of our own already in the count (0 before claim, 1 after). */
-  own = 0,
-): Promise<"cap_dm_per_hour" | "cap_sms_per_hour" | null> {
+/** The hourly cap bucket for a delivery (null = uncapped channel, e.g. email). */
+function capFor(deps: HoldAlertDeps, input: EnsureInput): CapBucket | null {
   const sinceIso = new Date(deps.now().getTime() - HOUR_MS).toISOString();
   if (input.channel === "slack") {
-    const n = await deps.store.countSentSince({
-      orgId: input.orgId,
-      channel: "slack",
-      recipientUserId: input.recipientUserId,
-      sinceIso,
-    });
-    return n - own >= MAX_DMS_PER_RECIPIENT_PER_HOUR ? "cap_dm_per_hour" : null;
+    return { orgId: input.orgId, channel: "slack", recipientUserId: input.recipientUserId, cap: MAX_DMS_PER_RECIPIENT_PER_HOUR, sinceIso };
   }
   if (input.channel === "sms") {
-    const n = await deps.store.countSentSince({ orgId: input.orgId, channel: "sms", sinceIso });
-    return n - own >= MAX_SMS_PER_HOUR ? "cap_sms_per_hour" : null;
+    return { orgId: input.orgId, channel: "sms", recipientUserId: null, cap: MAX_SMS_PER_HOUR, sinceIso };
   }
   return null;
 }
