@@ -922,8 +922,8 @@ describe("Astra: revalidation and Show older cost follows the requested ids, not
     }
     expect(counts.live[0]).toBe(counts.live[1]);
     expect(counts.older[0]).toBe(counts.older[1]);
-    expect(counts.live[1]).toBeLessThanOrEqual(30);
-    expect(counts.older[1]).toBeLessThanOrEqual(60);
+    expect(counts.live[1]).toBeLessThanOrEqual(40);
+    expect(counts.older[1]).toBeLessThanOrEqual(80);
   });
 
   it("no scoped read touches a property, draft, run or step outside the requested ids' links", async () => {
@@ -932,5 +932,50 @@ describe("Astra: revalidation and Show older cost follows the requested ids, not
     await liveStateOf(client, "org", [u(7), u(9)]);
     const ok = new Set([u(7), u(9), u(7, 4), u(9, 4), u(7, 5), u(9, 5), u(7, 6), u(9, 6)]);
     for (const l of log) for (const o of l.ops) if (o.k === "in") for (const v of o.v as string[]) expect(ok.has(v)).toBe(true);
+  });
+});
+
+describe("Sol: a scoped re-check decides shared-run ownership exactly as the whole list", () => {
+  // Holds A (u1) and B (u2) both have a pending decision in conversation C; a property-less run R in C is linked to
+  // both. R goes to the hold with the newer uncontested activity.
+  const tables = (bNewer: boolean): Record<string, Row[]> => ({
+    properties: [plainProp(1), plainProp(2)],
+    jev_lead_decisions: [
+      decision(1, u(1), t(10), { conversation_id: u(50, 2), source_inbound_message_id: u(1, 3) }),
+      decision(2, u(2), bNewer ? t(30) : t(5), { conversation_id: u(50, 2), source_inbound_message_id: u(2, 3) }),
+    ],
+    pipeline_runs: [runRow(9, { property_id: null, conversation_id: u(50, 2), started_at: t(40), reason: "shared" })],
+  });
+
+  it("after the snapshot B gains newer activity: the whole list moves R to B, and the one-card re-check of A agrees", async () => {
+    const before = await eligible(tables(false));
+    expect(before.holds.find((h) => h.id === u(1))!.run?.id).toBe(u(9, 5));
+    const now = tables(true);
+    const full = await eligible(now);
+    expect(full.holds.find((h) => h.id === u(2))!.run?.id).toBe(u(9, 5));
+    const [a] = (await liveStateOf(db(now).client, "org", [u(1)]))!;
+    expect(a.runId).toBe(full.holds.find((h) => h.id === u(1))!.run?.id ?? null);
+    expect(a.runId).not.toBe(u(9, 5)); // the card's pinned run -> the column marks it Updated (actions paused)
+    const still = (await recheckOpen(db(now).client, "org", before.holds.filter((h) => h.id === u(1))))!;
+    expect(still.changed.has(u(1))).toBe(true);
+  });
+
+  it("a competitor lookup failure fails the scoped re-check closed", async () => {
+    const now = tables(true);
+    const failing = db(now, { fail: (tb, _n, ops) => tb === "jev_lead_decisions" && ops.some((o) => o.k === "in" && o.col === "conversation_id") });
+    expect(await liveStateOf(failing.client, "org", [u(1)])).toBeNull();
+  });
+
+  it("scoped reads select only activity columns for runs and steps; whole rows only for the runs a page shows", async () => {
+    const now = tables(true);
+    const live = db(now);
+    await liveStateOf(live.client, "org", [u(1)]);
+    for (const l of live.log.filter((x) => x.table === "pipeline_runs")) expect(["id", "id, property_id, inbound_message_id, conversation_id, started_at, reason"]).toContain(l.select);
+    for (const l of live.log.filter((x) => x.table === "pipeline_run_steps")) expect(l.select).toBe("id, run_id, seq, created_at");
+    const older = db(now);
+    const slice = (await loadHoldsByIds(older.client, "org", [u(2)]))!;
+    const whole = older.log.filter((x) => x.table === "pipeline_runs" && x.select === "*");
+    expect(new Set(whole.flatMap((l) => l.ops.flatMap((o) => (o.k === "in" ? (o.v as string[]) : []))))).toEqual(new Set([u(9, 5)]));
+    expect(slice.holds[0].run).toMatchObject({ id: u(9, 5), status: "held", inbound_preview: "x" });
   });
 });
