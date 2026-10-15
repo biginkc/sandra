@@ -223,3 +223,17 @@ describe("our last text is cut off at the seller's inbound message, not the run 
     expect(out.threads.get("r1")?.lastOutbound).toBe("x");
   });
 });
+
+describe("referenced messages that are missing are retried, never cached as empty", () => {
+  it("outbound_message_id set but the row is missing -> failed; when the row appears the retry gets it", async () => {
+    const tables: Record<string, Array<Record<string, unknown>>> = { messages: [] };
+    const run1 = { id: "r1", conversation_id: null, outbound_message_id: "o1", started_at: "2026-10-14T12:00:00.000Z" };
+    const first = await loadRunThreads(fakePostgrest(tables).client, [run1]);
+    expect(first.failedRunIds).toEqual(["r1"]);
+    expect(first.threads.has("r1")).toBe(false);
+    tables.messages = [{ id: "o1", body: "Thanks, take care.", conversation_id: null, direction: "outbound", created_at: "2026-10-14T12:05:00.000Z" }];
+    const retry = await loadRunThreads(fakePostgrest(tables).client, [run1]);
+    expect(retry.failedRunIds).toEqual([]);
+    expect(retry.threads.get("r1")?.reply).toBe("Thanks, take care.");
+  });
+});

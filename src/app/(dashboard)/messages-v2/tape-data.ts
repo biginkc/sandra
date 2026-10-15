@@ -39,6 +39,7 @@ export async function loadRunThreads(
   const replyIds = [...new Set(runs.flatMap((r) => (r.outbound_message_id ? [r.outbound_message_id] : [])))];
   const replyBodies = new Map<string, string>();
   const failedReplyIds = new Set<string>();
+  const foundReplyIds = new Set<string>();
   const lastOutbound = new Map<string, string>();
   const failed = new Set<string>();
 
@@ -67,6 +68,7 @@ export async function loadRunThreads(
         return;
       }
       for (const row of (res.data ?? []) as Array<{ id: string; body: string | null }>) {
+        foundReplyIds.add(row.id);
         if (row.body) replyBodies.set(row.id, row.body);
       }
     }),
@@ -96,7 +98,8 @@ export async function loadRunThreads(
 
   const threads = new Map<string, RunThread>();
   for (const run of runs) {
-    if (run.outbound_message_id && failedReplyIds.has(run.outbound_message_id)) failed.add(run.id);
+    // A referenced message with no row is a failed lookup (retried), never "no reply": the same rule as the inbound.
+    if (run.outbound_message_id && (failedReplyIds.has(run.outbound_message_id) || !foundReplyIds.has(run.outbound_message_id))) failed.add(run.id);
     // A failed run gets no entry: it is retried, never cached as "no text".
     if (failed.has(run.id)) continue;
     threads.set(run.id, {
