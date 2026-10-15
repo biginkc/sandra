@@ -95,14 +95,18 @@ export async function resolveDraftProperties(
 
   await Promise.all([
     ...chunks(runIds).map(async (ids) => {
-      const res = await supabase.from("pipeline_runs").select("id, property_id").eq("org_id", orgId).in("id", ids);
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null }>(() =>
+        supabase.from("pipeline_runs").select("id, property_id").eq("org_id", orgId).in("id", ids),
+      );
       if (res.error) failed = true;
-      else for (const r of (res.data ?? []) as Array<{ id: string; property_id: string | null }>) runProperty.set(r.id, r.property_id);
+      else for (const r of res.rows) runProperty.set(r.id, r.property_id);
     }),
     ...chunks(msgIds).map(async (ids) => {
-      const res = await supabase.from("messages").select("id, property_id").eq("org_id", orgId).in("id", ids);
+      const res = await fetchAllKeyset<{ id: string; property_id: string | null }>(() =>
+        supabase.from("messages").select("id, property_id").eq("org_id", orgId).in("id", ids),
+      );
       if (res.error) failed = true;
-      else for (const m of (res.data ?? []) as Array<{ id: string; property_id: string | null }>) msgProperty.set(m.id, m.property_id);
+      else for (const m of res.rows) msgProperty.set(m.id, m.property_id);
     }),
     ...chunks(convIds).map(async (ids) => {
       const res = await fetchAllKeyset<{ conversation_id: string; property_id: string }>(() =>
@@ -166,14 +170,16 @@ export async function loadHoldActivity(
       else take(res.data);
     }),
     ...chunks(msgIds).map(async (ids) => {
-      const res = await supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("inbound_message_id", ids);
+      const res = await fetchAllKeyset<PipelineRun>(() =>
+        supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("inbound_message_id", ids),
+      );
       if (res.error) failed = true;
-      else take(res.data);
+      else take(res.rows);
     }),
     ...chunks(draftRunIds).map(async (ids) => {
-      const res = await supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids);
+      const res = await fetchAllKeyset<PipelineRun>(() => supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids));
       if (res.error) failed = true;
-      else take(res.data);
+      else take(res.rows);
     }),
     // Only PROPERTY-LESS runs in a hold's conversations count: a run on another property never moves this hold.
     ...chunks(convIds).map(async (ids) => {
@@ -187,24 +193,27 @@ export async function loadHoldActivity(
   if (failed) return null;
 
   const all = [...runs.values()];
+  const related = new Map<string, PipelineRun[]>();
   const chosen = new Map<string, PipelineRun>();
   for (const h of holds) {
     const msgs = new Set(h.message_ids ?? []);
     const draftRuns = links.draftRunsByProperty.get(h.id) ?? new Set<string>();
     const convs = links.convsByProperty.get(h.id) ?? new Set<string>();
-    let best: PipelineRun | null = null;
-    for (const r of all) {
-      const mine =
+    const mine = all.filter(
+      (r) =>
         r.property_id === h.id ||
         msgs.has(r.inbound_message_id) ||
         draftRuns.has(r.id) ||
-        (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id));
-      if (mine) best = newerRun(best, r);
-    }
+        (r.property_id === null && r.conversation_id !== null && convs.has(r.conversation_id)),
+    );
+    related.set(h.id, mine);
+    let best: PipelineRun | null = null;
+    for (const r of mine) best = newerRun(best, r);
     if (best) chosen.set(h.id, best);
   }
 
-  const stepRunIds = uniq([...chosen.values()].map((r) => r.id));
+  // Steps for EVERY related run, not only the one shown: a later step on an older related run is still activity.
+  const stepRunIds = uniq([...related.values()].flatMap((rs) => rs.map((r) => r.id)));
   const steps = new Map<string, PipelineRunStep[]>();
   const stepResults = await Promise.all(
     chunks(stepRunIds).map((ids) =>
@@ -219,9 +228,17 @@ export async function loadHoldActivity(
   }
   for (const list of steps.values()) list.sort((a, b) => a.seq - b.seq);
 
+  const newest = (vals: string[]): string | null =>
+    vals.reduce<string | null>((m, v) => (m === null || compareInstants(v, m) > 0 ? v : m), null);
   return holds.map((h) => {
     const run = chosen.get(h.id);
-    return { ...h, run: run ? { ...run, steps: steps.get(run.id) ?? [] } : null };
+    return {
+      ...h,
+      related_activity: newest(
+        (related.get(h.id) ?? []).flatMap((r) => [r.started_at, ...(steps.get(r.id) ?? []).map((st) => st.created_at)]),
+      ),
+      run: run ? { ...run, steps: steps.get(run.id) ?? [] } : null,
+    };
   });
 }
 
@@ -298,9 +315,27 @@ export function pageHolds(sorted: readonly OpenHold<RunWithSteps>[], cursor: Hol
   return { holds, total: sorted.length, remaining, nextCursor: remaining > 0 && holds.length ? holdCursor(holds[holds.length - 1]) : null };
 }
 
-/** Run id -> the hold's flag reason, for the run each hold is showing, over the COMPLETE eligible list. */
+/**
+ * Run id -> the flag reason the TAPE may claim for that run, over the COMPLETE eligible list. One run can be the
+ * shown run of several holds (a property-less run in a shared conversation). If they all agree, that reason; if
+ * one of them owns the run's property, that hold's reason; otherwise no reason is claimed (the tape says it waits
+ * for a person without guessing).
+ */
 export function effectiveFlagReasons(holds: readonly OpenHold<RunWithSteps>[]): Array<[string, string]> {
-  return holds.flatMap((h) => (h.run && h.flag_reason ? [[h.run.id, h.flag_reason] as [string, string]] : []));
+  const owners = new Map<string, OpenHold<RunWithSteps>[]>();
+  for (const h of holds) if (h.run) owners.set(h.run.id, [...(owners.get(h.run.id) ?? []), h]);
+  const out: Array<[string, string]> = [];
+  for (const [runId, hs] of owners) {
+    const reasons = uniq(hs.map((h) => h.flag_reason ?? null));
+    if (reasons.length === 1) {
+      if (reasons[0]) out.push([runId, reasons[0]]);
+      continue;
+    }
+    const runProperty = hs[0].run?.property_id ?? null;
+    const owner = runProperty ? hs.find((h) => h.id === runProperty) : undefined;
+    if (owner?.flag_reason) out.push([runId, owner.flag_reason]);
+  }
+  return out;
 }
 
 /** Step 6 (returned page only): draft text, dead letters, alert status, fresh "seen". Failures are notes. */

@@ -10,6 +10,7 @@ export function holdActivityAt(hold: OpenHold<RunWithSteps>): string | null {
   const stamps = [
     hold.since,
     hold.last_activity,
+    hold.related_activity,
     hold.run?.started_at,
     ...(hold.run?.steps ?? []).map((st) => st.created_at),
   ]

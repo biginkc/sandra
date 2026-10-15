@@ -496,6 +496,15 @@ describe("MessagesV2View", () => {
     expect(screen.queryAllByTestId("waiting-card")).toHaveLength(0);
   });
 
+  it("orders tape runs within the same millisecond by microseconds, like the server", async () => {
+    const a = run("micro-a", { started_at: "2026-10-14T12:00:00.123100+00:00", inbound_preview: "first" });
+    const b = run("micro-b", { started_at: "2026-10-14T12:00:00.123900+00:00", inbound_preview: "second" });
+    await mount(props([a, b]));
+    const cards = screen.getAllByTestId("tape-card").map((c) => c.textContent ?? "");
+    expect(cards[0]).toContain("second");
+    expect(cards[1]).toContain("first");
+  });
+
   it("keeps the waiting list in exactly the order the server sent (the server owns the order)", async () => {
     const hold = (id: string, minsAgo: number) => ({ ...openHold(id), since: new Date(NOW - minsAgo * 60_000).toISOString() });
     const sent = [hold("newest", 5), hold("middle", 120), hold("old", 600)];

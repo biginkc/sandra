@@ -1,3 +1,4 @@
+import { fetchAllKeyset } from "./paged";
 import type { LooseSupabase } from "./queries";
 import type { OpenHold, RunWithSteps } from "./types";
 
@@ -16,14 +17,13 @@ export async function lockedPropertyIds(
   const locked = new Set<string>();
   try {
     for (let i = 0; i < ids.length; i += CHUNK) {
-      const { data, error } = await supabase
-        .from("properties")
-        .select("id")
-        .eq("org_id", orgId)
-        .eq("is_dnc_locked", true)
-        .in("id", ids.slice(i, i + CHUNK));
-      if (error) return null;
-      for (const row of (data ?? []) as Array<{ id: string }>) locked.add(row.id);
+      const slice = ids.slice(i, i + CHUNK);
+      // Keyset-paged: a server row cap must never silently drop a locked id (that would fail open).
+      const res = await fetchAllKeyset<{ id: string }>(() =>
+        supabase.from("properties").select("id").eq("org_id", orgId).eq("is_dnc_locked", true).in("id", slice),
+      );
+      if (res.error) return null;
+      for (const row of res.rows) locked.add(row.id);
     }
   } catch {
     return null;

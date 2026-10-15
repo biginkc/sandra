@@ -177,6 +177,8 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
    * must use this. null = nothing reliable known.
    */
   last_activity?: string | null;
+  /** Newest run start / step across ALL runs related to the hold (not only the one shown). Set by the waiting list. */
+  related_activity?: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;

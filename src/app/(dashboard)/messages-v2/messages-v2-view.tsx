@@ -14,7 +14,7 @@ import { appendStep, upsertRun } from "./feed-state";
 import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
-import { describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
+import { compareInstants, describeCoverage, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { ReplyGeneration } from "./reply-generation";
 import type { SetReplyGenerationAction } from "./reply-generation-toggle";
 import { RulesPanel } from "./rules-panel";
@@ -337,7 +337,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const allRuns = useMemo(() => {
     const seen = new Set(runs.map((r) => r.id));
     return [...runs, ...earlier.filter((r) => !seen.has(r.id))].sort(
-      (x, y) => Date.parse(y.started_at) - Date.parse(x.started_at) || (x.id < y.id ? 1 : x.id > y.id ? -1 : 0),
+      (x, y) => compareInstants(y.started_at, x.started_at) || (x.id < y.id ? 1 : x.id > y.id ? -1 : 0),
     );
   }, [runs, earlier]);
 

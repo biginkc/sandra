@@ -268,3 +268,64 @@ describe("I8 totals exclude locked and unverifiable holds", () => {
     expect(page.nextCursor?.at).toBe(normalizeInstant(t(2)));
   });
 });
+
+describe("Codex round 9", () => {
+  it("a later step on an OLDER related run lifts the hold (steps load for every related run)", async () => {
+    const steps = [{ id: u(1, 8), org_id: "org", run_id: u(1, 5), seq: 1, kind: "gate", name: "g", result: "pass", detail: {}, created_at: t(900) }];
+    const list = await eligible({
+      properties: [flagged(1, t(100)), flagged(2, t(800))],
+      ai_reply_drafts: [draft(1, { property_id: u(1), run_id: u(1, 5), created_at: t(100) })],
+      pipeline_runs: [runRow(1, { property_id: null, started_at: t(200) }), runRow(2, { property_id: u(1), started_at: t(500) })],
+      pipeline_run_steps: steps,
+    });
+    expect(list.holds[0].id).toBe(u(1)); // t(900) step on the older run beats property 2's t(800)
+    expect(list.holds[0].run?.id).toBe(u(2, 5)); // the card still shows the newest run
+  });
+
+  it("under a 1-row server cap every lookup is read in full, so the order matches the uncapped order", async () => {
+    const tables = {
+      properties: [flagged(1, t(1)), flagged(2, t(2)), flagged(3, t(3))],
+      jev_lead_decisions: [decision(1, u(1), t(1)), decision(2, u(2), t(2)), decision(3, u(1), t(4), { source_inbound_message_id: u(9, 3) })],
+      pipeline_runs: [runRow(1, { inbound_message_id: u(9, 3), started_at: t(950) }), runRow(2, { inbound_message_id: u(2, 3), started_at: t(940) })],
+      pipeline_run_steps: [],
+    };
+    const capped = await eligible(tables, { cap: 1 });
+    const uncapped = await eligible(tables);
+    expect(capped.holds.map((h) => h.id)).toEqual(uncapped.holds.map((h) => h.id));
+    expect(capped.holds.map((h) => h.id)).toEqual([u(1), u(2), u(3)]);
+  });
+
+  it("a failed source-message run page fails the list rather than ordering on partial runs", async () => {
+    const page = await loadMessagesV2Page(
+      db(
+        { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(1), t(2))], pipeline_runs: [runRow(1, { inbound_message_id: u(1, 3) })] },
+        { cap: 1, fail: (tb, _n, ops) => tb === "pipeline_runs" && ops.some((o) => o.k === "gt") && ops.some((o) => "col" in o && o.col === "inbound_message_id") },
+      ).client,
+      "org",
+    );
+    expect(page.error).not.toBeNull();
+    expect(page.holds).toHaveLength(0);
+  });
+
+  it("one property-less run shown by two holds with DIFFERENT flag reasons claims no reason on the tape", async () => {
+    const tables = {
+      properties: [flagged(1, t(1), { last_ai_escalation_reason: "model:opt_out" }), flagged(2, t(2), { last_ai_escalation_reason: "model:price_or_offer" })],
+      jev_lead_decisions: [decision(1, u(1), t(1), { conversation_id: u(5, 2) }), decision(2, u(2), t(2), { conversation_id: u(5, 2) })],
+      pipeline_runs: [runRow(1, { property_id: null, conversation_id: u(5, 2), started_at: t(900), reason: null })],
+    };
+    const list = await eligible(tables);
+    expect(list.holds.every((h) => h.run?.id === u(1, 5))).toBe(true); // the same run on both cards
+    expect(effectiveFlagReasons(list.holds)).toEqual([]);
+    const tape = deriveTape(list.holds[0].run!, "Dee", new Map(effectiveFlagReasons(list.holds)).get(u(1, 5)));
+    expect(tape.kind === "decided" && tape.sentence).toBe("Needs a person to look at it. Nothing sent.");
+  });
+
+  it("when the sharing holds agree, the tape claims that reason", async () => {
+    const tables = {
+      properties: [flagged(1, t(1), { last_ai_escalation_reason: "model:opt_out" }), flagged(2, t(2), { last_ai_escalation_reason: "model:opt_out" })],
+      jev_lead_decisions: [decision(1, u(1), t(1), { conversation_id: u(5, 2) }), decision(2, u(2), t(2), { conversation_id: u(5, 2) })],
+      pipeline_runs: [runRow(1, { property_id: null, conversation_id: u(5, 2), started_at: t(900), reason: null })],
+    };
+    expect(effectiveFlagReasons((await eligible(tables)).holds)).toEqual([[u(1, 5), "model:opt_out"]]);
+  });
+});
