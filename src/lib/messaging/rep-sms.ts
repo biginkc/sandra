@@ -591,6 +591,45 @@ async function recordRepSmsLedgerResult(
   }
 }
 
+/**
+ * Reply-to stamp for a human rep text. A browser-supplied id is validated, bound
+ * once (first writer wins) to the durable obligation or ledger row, and read back
+ * so a resume, retry or recovered draft reuses the ORIGINAL stamp instead of one
+ * captured after reload. If the bind function is unavailable the validated
+ * supplied id is used; a stamp problem never blocks a send.
+ */
+async function resolveRepSmsInboundStamp(args: {
+  orgId: string;
+  propertyId: string;
+  supplied: string | null | undefined;
+  target: { kind: "obligation" | "draft"; id: string } | null;
+}): Promise<string | null> {
+  const scope = { orgId: args.orgId, propertyId: args.propertyId };
+  const needsLookup = Boolean(args.supplied) || args.target !== null;
+  if (!needsLookup) return null;
+  const admin = createAdminClient();
+  const supplied = args.supplied ? await resolveInboundStamp(admin, args.supplied, scope) : null;
+  if (!args.target) return supplied;
+  try {
+    const bind = admin as unknown as {
+      rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
+    };
+    const result = await bind.rpc("fn_bind_rep_sms_inbound_stamp", {
+      p_kind: args.target.kind,
+      p_id: args.target.id,
+      p_org_id: args.orgId,
+      p_inbound_message_id: supplied,
+    });
+    if (result.error) return supplied;
+    if (typeof result.data !== "string") return supplied;
+    // Stored wins, re-validated; an invalid stored value is dropped, never replaced
+    // by a newer capture.
+    return resolveInboundStamp(admin, result.data, scope);
+  } catch {
+    return supplied;
+  }
+}
+
 export type DispatchRepSmsInput = {
   propertyId: string;
   assignmentId: string;
@@ -680,12 +719,18 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
       deliveryAuthority = claim.authority;
     }
   }
-  const inboundStamp = input.inboundMessageId
-    ? await resolveInboundStamp(createAdminClient(), input.inboundMessageId, {
-        orgId: context.orgId,
-        propertyId: input.propertyId,
-      })
-    : null;
+  const inboundStamp = await resolveRepSmsInboundStamp({
+    orgId: context.orgId,
+    propertyId: input.propertyId,
+    supplied: input.inboundMessageId,
+    // The durable record that survives a reload owns the stamp: the obligation
+    // for a resume, the delivery-ledger row for a generic send/recovered draft.
+    target: fence
+      ? { kind: "obligation", id: fence.obligationId }
+      : deliveryAuthority
+        ? { kind: "draft", id: deliveryAuthority.receiptId }
+        : null,
+  });
   const metadata = {
     ...(inboundStamp ? { inbound_message_id: inboundStamp } : {}),
     repSms: {

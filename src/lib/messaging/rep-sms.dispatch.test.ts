@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   adminRpc: vi.fn(),
   stampRow: vi.fn(),
+  bindRpc: vi.fn(),
   createClient: vi.fn(),
   provider: vi.fn(),
   sendSmsToContact: vi.fn(),
@@ -10,14 +11,16 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({
-    rpc: mocks.adminRpc,
+    rpc: (name: string, args: Record<string, unknown>) =>
+      name === "fn_bind_rep_sms_inbound_stamp" ? mocks.bindRpc(args) : mocks.adminRpc(name, args),
     from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => mocks.stampRow() }) }) }),
   }),
 }));
 vi.mock("./providers/sendillo", () => ({ sendilloFromEnvWithOptions: mocks.provider }));
 vi.mock("./send", () => ({ sendSmsToContact: mocks.sendSmsToContact }));
 
-import { dispatchRepSms, readRepSmsContext } from "./rep-sms";
+import { dispatchRepSms, readRepSmsContext, createRepSmsObligationFence } from "./rep-sms";
+import { composeRepSms } from "./rep-sms-composition";
 
 const composition = {
   acquisitionsManager: "Maria",
@@ -82,6 +85,7 @@ beforeEach(() => {
   vi.stubEnv("MESSAGING_PROVIDER", "sendillo");
   vi.stubEnv("SENDILLO_ORG_ID", "org-1");
   setupClient();
+  mocks.bindRpc.mockImplementation(async (args: { p_inbound_message_id: string | null }) => ({ data: args.p_inbound_message_id, error: null }));
   mocks.provider.mockReturnValue({ providerId: "sendillo" });
   mocks.sendSmsToContact.mockResolvedValue({
     status: "sent",
@@ -310,5 +314,66 @@ describe("dispatchRepSms inbound reply stamp", () => {
     const metadata = mocks.sendSmsToContact.mock.calls[0][1].metadata;
     expect(Object.keys(metadata)).toEqual(["repSms"]);
     expect(mocks.stampRow).not.toHaveBeenCalled();
+  });
+});
+
+describe("dispatchRepSms stamp binding to the durable record", () => {
+  const ORIGINAL = "33333333-3333-4333-8333-333333333333";
+  const NEWER = "44444444-4444-4444-8444-444444444444";
+  const valid = () => mocks.stampRow.mockResolvedValue({
+    data: { direction: "inbound", org_id: "org-1", property_id: "property-1", conversation_id: null },
+    error: null,
+  });
+  const base = { propertyId: "property-1", assignmentId: "sender-1", composition };
+
+  it("binds a generic send to its ledger receipt and a retry reuses the ORIGINAL stamp", async () => {
+    valid();
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    // The ledger already holds ORIGINAL; the browser now (after reload) supplies NEWER.
+    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111", inboundMessageId: NEWER });
+    expect(mocks.bindRpc).toHaveBeenCalledWith({
+      p_kind: "draft", p_id: "receipt-1", p_org_id: "org-1", p_inbound_message_id: NEWER,
+    });
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
+  });
+
+  it("recovers the stored stamp even when the browser supplies none", async () => {
+    valid();
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111" });
+    expect(mocks.bindRpc).toHaveBeenCalledWith(expect.objectContaining({ p_kind: "draft", p_inbound_message_id: null }));
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(ORIGINAL);
+  });
+
+  it("binds an obligation resume to the obligation id and keeps the stored stamp", async () => {
+    valid();
+    mocks.bindRpc.mockResolvedValue({ data: ORIGINAL, error: null });
+    const composed = composeRepSms(composition);
+    await dispatchRepSms({
+      ...base,
+      to: "+18165550123",
+      inboundMessageId: NEWER,
+      obligationFence: createRepSmsObligationFence({
+        obligationId: "obligation-1", claimToken: "t", claimGeneration: 2, actorId: "rep-1",
+        propertyId: "property-1", assignmentId: "sender-1", toNumber: "+18165550123", composition: composed,
+      }),
+    }).catch(() => undefined);
+    expect(mocks.bindRpc).toHaveBeenCalledWith(expect.objectContaining({ p_kind: "obligation", p_id: "obligation-1" }));
+  });
+
+  it("falls back to the validated supplied id if the bind function is unavailable", async () => {
+    valid();
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "c", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted" }, error: null });
+    mocks.bindRpc.mockResolvedValue({ data: null, error: { message: "function does not exist" } });
+    await dispatchRepSms({ ...base, idempotencyKey: "11111111-1111-4111-8111-111111111111", inboundMessageId: NEWER });
+    expect(mocks.sendSmsToContact.mock.calls[0][1].metadata.inbound_message_id).toBe(NEWER);
   });
 });
