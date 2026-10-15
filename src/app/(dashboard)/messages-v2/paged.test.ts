@@ -1,45 +1,37 @@
 import { describe, expect, it } from "vitest";
 
-import { fetchAllPages } from "./paged";
+import { fakePostgrest } from "./fake-postgrest.test-util";
+import { fetchAllKeyset } from "./paged";
 
-/** A table of n rows that answers .range() like PostgREST, counting requests. */
-function table(n: number, failOnPage?: number) {
-  const calls: Array<[number, number]> = [];
-  const make = () => ({
-    range: async (from: number, to: number) => {
-      calls.push([from, to]);
-      if (failOnPage !== undefined && calls.length === failOnPage) return { data: null, error: { message: "boom" } };
-      return { data: Array.from({ length: Math.max(0, Math.min(to + 1, n) - from) }, (_, i) => ({ i: from + i })), error: null };
-    },
+const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `id-${String(i).padStart(6, "0")}`, org_id: "o", v: i }));
+
+describe("fetchAllKeyset", () => {
+  it("reads every row even when the server caps responses BELOW the page size (no 'short page = end')", async () => {
+    const { client, requests } = fakePostgrest({ t: rows(1234) }, { cap: 500 });
+    const out = await fetchAllKeyset<{ id: string }>(() => client.from("t").select("*").eq("org_id", "o"));
+    expect(out.error).toBeNull();
+    expect(out.rows).toHaveLength(1234);
+    expect(new Set(out.rows.map((r) => r.id)).size).toBe(1234);
+    expect(requests.get("t")).toBe(4); // 500 + 500 + 234 + the empty page that ends it
   });
-  return { make, calls };
-}
 
-describe("fetchAllPages", () => {
-  it("a page that returns exactly the cap triggers a further page, so nothing past the cap is lost", async () => {
-    const t = table(3, undefined);
-    const out = await fetchAllPages<{ i: number }>(t.make, 3);
+  it("stops only on an empty page", async () => {
+    const { client, requests } = fakePostgrest({ t: rows(3) });
+    const out = await fetchAllKeyset(() => client.from("t").select("*"), "id", 3);
     expect(out.rows).toHaveLength(3);
-    expect(t.calls).toEqual([[0, 2], [3, 5]]); // the full first page forced a second request, which came back empty
+    expect(requests.get("t")).toBe(2);
   });
 
-  it("reads 2,500 rows in three requests at the default 1,000-row page", async () => {
-    const t = table(2500);
-    const out = await fetchAllPages<{ i: number }>(t.make);
-    expect(out.rows).toHaveLength(2500);
-    expect(t.calls).toHaveLength(3);
-  });
-
-  it("stops after a short page", async () => {
-    const t = table(2);
-    expect((await fetchAllPages(t.make, 3)).rows).toHaveLength(2);
-    expect(t.calls).toHaveLength(1);
-  });
-
-  it("a failing page fails the whole read: no partial rows", async () => {
-    const t = table(10, 2);
-    const out = await fetchAllPages(t.make, 3);
+  it("a failing page (page 3) fails the whole read: no partial rows", async () => {
+    const { client } = fakePostgrest({ t: rows(2500) }, { fail: (_t, n) => n === 3 });
+    const out = await fetchAllKeyset(() => client.from("t").select("*"));
     expect(out.error).not.toBeNull();
     expect(out.rows).toEqual([]);
+  });
+
+  it("a page that does not move the key forward is an error, never an endless loop", async () => {
+    const stuck = { order: () => stuck, gt: () => stuck, limit: async () => ({ data: [{ id: "same" }], error: null }) };
+    const out = await fetchAllKeyset(() => stuck);
+    expect(out.error).not.toBeNull();
   });
 });

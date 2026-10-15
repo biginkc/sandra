@@ -18,10 +18,9 @@ import {
   undoJevAppliedAction,
   findJevUndoAction,
 } from "./actions";
-import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Page } from "./holds-by-activity";
-import { fetchAllPages } from "./paged";
+import { fetchAllKeyset } from "./paged";
 import type { LooseSupabase } from "./queries";
 import { ensureMessagesV2Settings } from "./settings";
 import { loadOlderHoldsAction } from "./backlog-actions";
@@ -39,8 +38,6 @@ import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
 
-/** Waiting holds rendered on first paint; the rest load through "Show older". */
-const FIRST_PAGE = 40;
 
 export const metadata = {
   title: "Messages v2 · Sandra CRM",
@@ -83,15 +80,8 @@ async function loadNurtureAutoDrip(
         .select("id, nurture_auto_drip, nurture_drip_maybe_later_sequence_id, nurture_drip_check_in_60_sequence_id, nurture_drip_listed_not_selling_sequence_id, nurture_drip_hot_book_appointment_sequence_id")
         .eq("org_id", orgId)
         .maybeSingle(),
-      fetchAllPages<{ id: string; name: string }>(() =>
-        supabase
-          .from("sequences")
-          .select("id, name")
-          .eq("org_id", orgId)
-          .eq("active", true)
-          .is("archived_at", null)
-          .order("name")
-          .order("id"),
+      fetchAllKeyset<{ id: string; name: string }>(() =>
+        supabase.from("sequences").select("id, name").eq("org_id", orgId).eq("active", true).is("archived_at", null),
       ),
     ]);
     const row = cfg.data as {
@@ -112,7 +102,7 @@ async function loadNurtureAutoDrip(
         listedNotSelling: row.nurture_drip_listed_not_selling_sequence_id,
         hotBookAppointment: row.nurture_drip_hot_book_appointment_sequence_id,
       },
-      sequences: seqs.rows,
+      sequences: [...seqs.rows].sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : 1)),
     };
   } catch {
     return null;
@@ -187,13 +177,7 @@ export default async function MessagesV2Page() {
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
   ]);
-  // `loaded.holds` is every open hold in ONE order (latest activity first, DNC-locked
-  // already excluded). The first slice renders now; "Show older" continues the same order.
-  // The version each card sends back is read fresh per displayed property.
-  const data = {
-    ...loaded,
-    holds: await withFreshSeen(supabase, orgId, loaded.holds.slice(0, FIRST_PAGE)),
-  };
+  const data = loaded;
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
@@ -203,7 +187,7 @@ export default async function MessagesV2Page() {
     property_id: h.property_id,
     inbound_message_id: h.run?.inbound_message_id ?? "",
   }));
-  const [labels, threads] = await Promise.all([
+  const [labels, thread] = await Promise.all([
     loadRunLabels(supabase, [...data.runs, ...holdLabelInputs]),
     loadRunThreads(supabase, data.runs),
   ]);
@@ -222,9 +206,12 @@ export default async function MessagesV2Page() {
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
-        holdsTotal={loaded.holds.length}
+        holdsTotal={loaded.total}
+        holdsRemaining={loaded.remaining}
+        holdsNextCursor={loaded.nextCursor}
         holdsError={loaded.error}
         holdsUnverified={loaded.unverified}
+        flagReasons={loaded.flagReasons}
         loadOlderHolds={loadOlderHoldsAction}
         runs={data.runs}
         holds={data.holds}
@@ -234,7 +221,8 @@ export default async function MessagesV2Page() {
         badges={data.badges}
         scorecardRows={scorecardRows}
         labels={[...labels.entries()]}
-        threads={[...threads.entries()]}
+        threads={[...thread.threads.entries()]}
+        threadFailedRunIds={thread.failedRunIds}
         loadTapeDay={loadTapeDayAction}
         nowMs={data.nowMs}
         actions={{

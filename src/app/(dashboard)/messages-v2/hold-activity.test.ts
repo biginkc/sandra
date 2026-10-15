@@ -111,12 +111,13 @@ describe("keyset paging (holdsAfter)", () => {
     expect(holdsAfter(sorted, holdCursor(sorted[0])).map((h) => h.id)).toEqual(["x"]);
   });
 
-  it("only a normalized timestamp (or null) and a short id are accepted as a cursor", () => {
-    expect(parseHoldCursor({ at: "2026-10-14T12:00:00.123456Z", id: "p1" })).toEqual({ at: "2026-10-14T12:00:00.123456Z", id: "p1" });
-    expect(parseHoldCursor({ at: null, id: "p1" })).toEqual({ at: null, id: "p1" });
-    expect(parseHoldCursor({ at: "2026-10-14T12:00:00Z", id: "p1" })).toBeNull();
-    expect(parseHoldCursor({ at: 5, id: "p1" })).toBeNull();
-    expect(parseHoldCursor({ at: null, id: "" })).toBeNull();
+  it("only a normalized timestamp (or null) and a uuid are accepted as a cursor", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    expect(parseHoldCursor({ at: "2026-10-14T12:00:00.123456Z", id })).toEqual({ at: "2026-10-14T12:00:00.123456Z", id });
+    expect(parseHoldCursor({ at: null, id })).toEqual({ at: null, id });
+    expect(parseHoldCursor({ at: "2026-10-14T12:00:00Z", id })).toBeNull();
+    expect(parseHoldCursor({ at: 5, id })).toBeNull();
+    expect(parseHoldCursor({ at: null, id: "p1" })).toBeNull(); // not a uuid
   });
 });
 

@@ -59,6 +59,13 @@ export type MessagesV2ViewProps = {
   holdsMeta?: HoldsMeta;
   /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
   holdsTotal?: number;
+  /** Holds after the first page, and the server-issued cursor to fetch them. */
+  holdsRemaining?: number;
+  holdsNextCursor?: { at: string | null; id: string } | null;
+  /** [runId, flag reason] over the complete eligible waiting list. */
+  flagReasons?: Array<[string, string]>;
+  /** Runs whose thread text failed to load on the server: fetched again in the browser. */
+  threadFailedRunIds?: string[];
   /** The hold lookup failed (reason): say so, never "nothing is waiting". */
   holdsError?: string | null;
   /** Waiting texts hidden because their property (and so its DNC lock) could not be determined. */
@@ -196,19 +203,36 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       });
   }, [runs]);
 
-  // Fetch thread text (our last text, Sandra's reply) for runs that arrive over
-  // realtime, and again when a run gains its sent reply.
-  const requestedThreads = useRef(new Set<string>(props.runs.filter((r) => (props.threads ?? []).some(([id]) => id === r.id)).map((r) => `${r.id}:${r.outbound_message_id ?? ""}`)));
+  // Fetch thread text (our last text, Sandra's reply) for runs that arrive over realtime, earlier days, and again
+  // when a run gains its sent reply. A run whose text failed to load is NOT marked fetched: it is retried.
+  const threadKey = (r: Pick<PipelineRun, "id" | "outbound_message_id">) => `${r.id}:${r.outbound_message_id ?? ""}`;
+  const requestedThreads = useRef(
+    new Set<string>(
+      props.runs
+        .filter((r) => (props.threads ?? []).some(([id]) => id === r.id) && !(props.threadFailedRunIds ?? []).includes(r.id))
+        .map(threadKey),
+    ),
+  );
+  const [threadFailures, setThreadFailures] = useState(() => (props.threadFailedRunIds ?? []).length);
+  const [threadRetry, setThreadRetry] = useState(0);
   useEffect(() => {
-    const missing = runs.filter((r) => !requestedThreads.current.has(`${r.id}:${r.outbound_message_id ?? ""}`));
+    const pool = [...runs, ...earlier];
+    const missing = pool.filter((r) => !requestedThreads.current.has(threadKey(r)));
     if (missing.length === 0) return;
-    for (const r of missing) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
+    for (const r of missing) requestedThreads.current.add(threadKey(r));
+    const retryLater = (ids: readonly string[]) => {
+      for (const r of missing) if (ids.includes(r.id)) requestedThreads.current.delete(threadKey(r));
+      setThreadFailures(ids.length);
+      if (ids.length) window.setTimeout(() => setThreadRetry((n) => n + 1), 10_000);
+    };
     loadRunThreads(createClient() as unknown as LooseSupabase, missing)
-      .then((fetched) => setThreads((curr) => new Map([...curr, ...fetched])))
-      .catch(() => {
-        for (const r of missing) requestedThreads.current.delete(`${r.id}:${r.outbound_message_id ?? ""}`);
-      });
-  }, [runs]);
+      .then(({ threads: fetched, failedRunIds }) => {
+        setThreads((curr) => new Map([...curr, ...fetched]));
+        retryLater(failedRunIds);
+      })
+      .catch(() => retryLater(missing.map((r) => r.id)));
+    // threadRetry re-runs this after a failure.
+  }, [runs, earlier, threadRetry]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -341,7 +365,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         setEarlier((curr) => [...curr, ...got]);
         setLabels((curr) => new Map([...curr, ...res.data.labels]));
         setThreads((curr) => new Map([...curr, ...res.data.threads]));
-        for (const r of got) requestedThreads.current.add(`${r.id}:${r.outbound_message_id ?? ""}`);
+        const failedIds = res.data.failedRunIds ?? [];
+        for (const r of got) if (!failedIds.includes(r.id)) requestedThreads.current.add(threadKey(r));
         // A full page means this day was cut off: continue the same day from the oldest run returned.
         // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
         const last = got[got.length - 1];
@@ -364,7 +389,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   };
 
   // A hold's flag reason applies only to the run the hold is showing, so old runs are never relabelled by a later flag.
-  const flagByRun = new Map(holds.flatMap((h) => (h.run && h.flag_reason ? [[h.run.id, h.flag_reason] as const] : [])));
+  // Built on the server from the COMPLETE eligible waiting list, so a hold on any "Show older" page, and runs on
+  // earlier days, read the same effective reason on the tape and on the card.
+  const flagByRun = useMemo(() => new Map(props.flagReasons ?? []), [props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);
   const on = sandraIsOn(badges);
@@ -485,6 +512,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
               ),
             )
           )}
+          {threadFailures > 0 && (
+            <p data-testid="threads-retrying" className="text-center text-xs text-amber-700">
+              Some texts couldn&apos;t load. Retrying…
+            </p>
+          )}
           {earlierNote && (
             <p data-testid="earlier-note" className="text-center text-xs text-muted-foreground">
               {earlierNote}
@@ -505,6 +537,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             labels={labels}
             meta={meta}
             total={props.holdsTotal ?? holds.length}
+            remaining={props.holdsRemaining ?? 0}
+            nextCursor={props.holdsNextCursor ?? null}
             error={props.holdsError}
             unverified={props.holdsUnverified}
             loadOlder={props.loadOlderHolds}

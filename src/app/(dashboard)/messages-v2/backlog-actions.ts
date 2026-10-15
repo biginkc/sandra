@@ -117,7 +117,7 @@ export async function loadOlderHoldsAction(input: {
   if (!slice) {
     return err({ code: "OLDER_UNAVAILABLE", message: "Older waiting texts could not be loaded." });
   }
-  const holds = await withFreshSeen(supabase, orgId, slice.holds);
+  const holds = slice.holds;
   const labels = await loadRunLabels(
     supabase,
     holds.map((h) => ({
@@ -127,5 +127,16 @@ export async function loadOlderHoldsAction(input: {
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  return { ok: true, data: { holds, labels: [...labels.entries()], remaining: slice.remaining } };
+  return {
+    ok: true,
+    data: {
+      holds,
+      labels: [...labels.entries()],
+      remaining: slice.remaining,
+      total: slice.total,
+      unverified: slice.unverified,
+      nextCursor: slice.nextCursor,
+      contextErrors: slice.contextErrors,
+    },
+  };
 }

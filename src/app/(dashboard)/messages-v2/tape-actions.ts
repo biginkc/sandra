@@ -14,6 +14,8 @@ export type TapeDayPage = {
   runs: RunWithSteps[];
   labels: Array<[string, RunLabel]>;
   threads: Array<[string, RunThread]>;
+  /** Runs whose thread text failed to load: the client retries them. */
+  failedRunIds: string[];
 };
 
 /**
@@ -43,6 +45,9 @@ export async function loadTapeDayAction(input: { day: string; before?: RunCursor
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const { runs, error } = await loadRunsWindow(supabase, orgId, window.from, window.to, before);
   if (error) return err({ code: "TAPE_UNAVAILABLE", message: error });
-  const [labels, threads] = await Promise.all([loadRunLabels(supabase, runs), loadRunThreads(supabase, runs)]);
-  return { ok: true, data: { runs, labels: [...labels.entries()], threads: [...threads.entries()] } };
+  const [labels, thread] = await Promise.all([loadRunLabels(supabase, runs), loadRunThreads(supabase, runs)]);
+  return {
+    ok: true,
+    data: { runs, labels: [...labels.entries()], threads: [...thread.threads.entries()], failedRunIds: thread.failedRunIds },
+  };
 }

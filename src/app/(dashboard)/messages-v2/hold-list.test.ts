@@ -1,0 +1,270 @@
+import { describe, expect, it } from "vitest";
+
+import { normalizeInstant } from "./chicago-time";
+import { fakePostgrest } from "./fake-postgrest.test-util";
+import { holdCursor } from "./hold-activity";
+import { loadHoldsSlice, loadMessagesV2Page } from "./holds-by-activity";
+import { effectiveFlagReasons, loadEligibleHolds, pageHolds } from "./hold-list";
+import { deriveTape, holdReasonSentence, withEffectiveReason } from "./tape";
+import type { HoldCursor } from "./hold-activity";
+import type { OpenHold, RunWithSteps } from "./types";
+
+type Row = Record<string, unknown>;
+const u = (n: number, ns = 0) => `${String(ns).padStart(8, "0")}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const t = (sec: number, micros = "000000") => {
+  const d = new Date(Date.UTC(2026, 9, 1) + sec * 1000).toISOString().slice(0, 19);
+  return `${d}.${micros}+00:00`;
+};
+const flagged = (n: number, at: string, over: Row = {}): Row => ({
+  id: u(n), org_id: "org", needs_human_attention: true, is_dnc_locked: false,
+  last_ai_escalation_at: at, last_ai_escalation_reason: "model:unclear", updated_at: at, needs_human_attention_since: at, ...over,
+});
+const lockedProp = (n: number): Row => ({ id: u(n), org_id: "org", needs_human_attention: false, is_dnc_locked: true });
+const decision = (n: number, property: string, at: string, over: Row = {}): Row => ({
+  id: u(n, 1), org_id: "org", status: "pending", property_id: property, conversation_id: u(n, 2), source_inbound_message_id: u(n, 3), created_at: at, ...over,
+});
+const draft = (n: number, over: Row = {}): Row => ({
+  id: u(n, 4), org_id: "org", status: "pending", property_id: null, conversation_id: null, inbound_message_id: null, run_id: null, created_at: t(10), ...over,
+});
+const runRow = (n: number, over: Row = {}): Row => ({
+  id: u(n, 5), org_id: "org", inbound_message_id: u(n, 6), property_id: null, contact_id: null, conversation_id: null, status: "held", mode: "automatic",
+  final_outcome: null, reason: null, classification_run_id: null, claim_id: null, outbound_message_id: null, inbound_preview: "x", started_at: t(1), completed_at: null, ...over,
+});
+const message = (n: number, over: Row = {}): Row => ({ id: u(n, 7), org_id: "org", conversation_id: null, property_id: null, direction: "inbound", body: "b", created_at: t(1), ...over });
+
+/** The latest-run RPC, computed from the fake pipeline_runs table like the SQL function. */
+const latestRpc = (tables: Record<string, Row[]>) => ({
+  pipeline_runs_latest_for_properties: (args: Record<string, unknown>) => {
+    const ids = args.p_property_ids as string[];
+    const best = new Map<string, Row>();
+    for (const r of tables.pipeline_runs ?? []) {
+      const p = r.property_id as string | null;
+      if (!p || !ids.includes(p)) continue;
+      const cur = best.get(p);
+      if (!cur || String(r.started_at) > String(cur.started_at)) best.set(p, r);
+    }
+    return { data: [...best.values()], error: null };
+  },
+});
+
+function db(tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) {
+  return fakePostgrest(tables, { ...opts, rpc: { ...latestRpc(tables), ...(opts.rpc ?? {}) } });
+}
+
+const eligible = async (tables: Record<string, Row[]>, opts: Parameters<typeof fakePostgrest>[1] = {}) => {
+  const res = await loadEligibleHolds(db(tables, opts).client, "org");
+  if (!res.ok) throw new Error(res.error);
+  return res;
+};
+
+const walk = (sorted: OpenHold<RunWithSteps>[], limit: number) => {
+  const ids: string[] = [];
+  let cursor: HoldCursor | null = null;
+  for (;;) {
+    const page = pageHolds(sorted, cursor, limit);
+    ids.push(...page.holds.map((h) => h.id));
+    if (!page.nextCursor) return ids;
+    cursor = page.nextCursor;
+  }
+};
+
+describe("I1 every eligible hold is reachable in one order", () => {
+  it("2,500 holds, 41 per page: walking the server's nextCursor yields every id exactly once", async () => {
+    const properties = Array.from({ length: 2500 }, (_, i) => flagged(i, t(i)));
+    const list = await eligible({ properties });
+    const ids = walk(list.holds, 41);
+    expect(ids).toHaveLength(2500);
+    expect(new Set(ids).size).toBe(2500);
+  });
+
+  it("a hold resolved between pages does not shift the rest", async () => {
+    const tables: Record<string, Row[]> = { properties: Array.from({ length: 100 }, (_, i) => flagged(i, t(i))) };
+    const first = pageHolds((await eligible(tables)).holds, null, 41);
+    const resolved = (await eligible(tables)).holds[50].id; // on what would be page 2
+    tables.properties = tables.properties.filter((p) => p.id !== resolved);
+    const rest = walk((await eligible(tables)).holds, 41).filter((id) => !first.holds.some((h) => h.id === id));
+    const expected = (await eligible(tables)).holds.map((h) => h.id).filter((id) => !first.holds.some((h) => h.id === id));
+    expect(rest).toEqual(expected);
+    const second = pageHolds((await eligible(tables)).holds, first.nextCursor, 1000);
+    expect(second.holds.map((h) => h.id)).toEqual(expected); // nothing skipped, nothing repeated
+  });
+
+  it("the first page and a 'Show older' slice give the identical order, even for a conversation-matched run", async () => {
+    const tables: Record<string, Row[]> = {
+      properties: [flagged(1, t(100)), flagged(2, t(200))],
+      jev_lead_decisions: [decision(1, u(1), t(100), { conversation_id: u(9, 2) })],
+      pipeline_runs: [runRow(1, { conversation_id: u(9, 2), property_id: null, started_at: t(900) })], // newest; also in the feed window
+    };
+    const page = await loadMessagesV2Page(db(tables).client, "org");
+    const slice = await loadHoldsSlice(db(tables).client, "org", null, 50);
+    expect(page.holds.map((h) => h.id)).toEqual([u(1), u(2)]); // the conversation run lifted property 1
+    expect(slice?.holds.map((h) => h.id)).toEqual(page.holds.map((h) => h.id));
+  });
+});
+
+describe("I2 latest activity, microsecond precise, never from incomplete data", () => {
+  it(".123456 vs .123457 order correctly", async () => {
+    const list = await eligible({ properties: [flagged(1, t(5, "123456")), flagged(2, t(5, "123457"))] });
+    expect(list.holds.map((h) => h.id)).toEqual([u(2), u(1)]);
+  });
+
+  it("a newer property-less run in the hold's conversation lifts it; a run on ANOTHER property does not", async () => {
+    const base = {
+      properties: [flagged(1, t(100)), flagged(2, t(200)), flagged(3, t(300))],
+      jev_lead_decisions: [decision(1, u(1), t(100), { conversation_id: u(7, 2) }), decision(3, u(3), t(300), { conversation_id: u(8, 2) })],
+    };
+    const lifted = await eligible({ ...base, pipeline_runs: [runRow(1, { conversation_id: u(7, 2), started_at: t(999) })] });
+    expect(lifted.holds[0].id).toBe(u(1));
+    const notLifted = await eligible({ ...base, pipeline_runs: [runRow(2, { conversation_id: u(7, 2), property_id: u(3), started_at: t(999) })] });
+    expect(notLifted.holds.map((h) => h.id).slice(0, 1)).toEqual([u(3)]); // the other property's own run lifts property 3, not 1
+  });
+
+  it.each([
+    ["latest-run RPC", { rpc: { pipeline_runs_latest_for_properties: () => ({ data: null, error: { message: "x" } }) } }],
+    ["message-run lookup", { fail: (tb: string, _n: number, ops: Array<{ k: string; col?: string }>) => tb === "pipeline_runs" && ops.some((o) => o.col === "inbound_message_id") }],
+    ["draft-run lookup", { fail: (tb: string, _n: number, ops: Array<{ k: string; col?: string; v?: unknown }>) => tb === "pipeline_runs" && ops.some((o) => o.k === "in" && o.col === "id") }],
+    ["conversation-run lookup", { fail: (tb: string, _n: number, ops: Array<{ k: string; col?: string }>) => tb === "pipeline_runs" && ops.some((o) => o.col === "conversation_id") }],
+    ["step lookup", { fail: (tb: string) => tb === "pipeline_run_steps" }],
+  ])("a failed %s fails the list closed: error, zero cards", async (_name, opts) => {
+    const tables = {
+      properties: [flagged(1, t(1))],
+      jev_lead_decisions: [decision(1, u(1), t(2))],
+      ai_reply_drafts: [draft(1, { property_id: u(1), run_id: u(1, 5) })],
+      pipeline_runs: [runRow(1, { property_id: u(1) })],
+    };
+    const page = await loadMessagesV2Page(db(tables, opts as Parameters<typeof fakePostgrest>[1]).client, "org");
+    expect(page.error).not.toBeNull();
+    expect(page.holds).toHaveLength(0);
+  });
+
+  it("a run with more than 1,000 steps (server cap) still uses its newest step", async () => {
+    const steps = Array.from({ length: 1500 }, (_, i) => ({
+      id: u(i, 8), org_id: "org", run_id: u(1, 5), seq: i + 1, kind: "gate", name: "g", result: "pass", detail: {}, created_at: t(1000 + i),
+    }));
+    const list = await eligible(
+      { properties: [flagged(1, t(1)), flagged(2, t(2000))], pipeline_runs: [runRow(1, { property_id: u(1) })], pipeline_run_steps: steps },
+      { cap: 1000 },
+    );
+    expect(list.holds[0].id).toBe(u(1)); // newest step (t(2499)) beats property 2's flag (t(2000))
+    expect(list.holds[0].run?.steps).toHaveLength(1500);
+  });
+});
+
+describe("I3 no locked property renders; every hold has exactly one property", () => {
+  it("a draft linked only by run_id to a locked property's run is hidden and NOT counted unverified", async () => {
+    const list = await eligible({
+      properties: [lockedProp(5)],
+      ai_reply_drafts: [draft(1, { run_id: u(1, 5) })],
+      pipeline_runs: [runRow(1, { property_id: u(5) })],
+    });
+    expect(list.holds).toHaveLength(0);
+    expect(list.unverified).toBe(0);
+  });
+
+  it("conversation-only and inbound-only drafts resolve through messages", async () => {
+    const list = await eligible({
+      ai_reply_drafts: [draft(1, { conversation_id: u(1, 9) }), draft(2, { inbound_message_id: u(2, 7) })],
+      messages: [message(1, { conversation_id: u(1, 9), property_id: u(11) }), message(2, { property_id: u(12) })],
+    });
+    expect(list.holds.map((h) => h.id).sort()).toEqual([u(11), u(12)]);
+    expect(list.unverified).toBe(0);
+  });
+
+  it("a run with no property but an inbound message on a locked property is lock-checked (hidden)", async () => {
+    const list = await eligible({
+      properties: [lockedProp(5)],
+      ai_reply_drafts: [draft(1, { run_id: u(1, 5), inbound_message_id: u(1, 7) })],
+      pipeline_runs: [runRow(1, { property_id: null })],
+      messages: [message(1, { property_id: u(5) })],
+    });
+    expect(list.holds).toHaveLength(0);
+    expect(list.unverified).toBe(0);
+  });
+
+  it("a no-link draft and an ambiguous draft are hidden and counted", async () => {
+    const list = await eligible({
+      ai_reply_drafts: [draft(1), draft(2, { conversation_id: u(2, 9) })],
+      messages: [message(1, { conversation_id: u(2, 9), property_id: u(21) }), message(2, { conversation_id: u(2, 9), property_id: u(22) })],
+    });
+    expect(list.holds).toHaveLength(0);
+    expect(list.unverified).toBe(2);
+  });
+
+  it("decisions on locked properties never render", async () => {
+    const list = await eligible({ properties: [lockedProp(5)], jev_lead_decisions: [decision(1, u(5), t(1))] });
+    expect(list.holds).toHaveLength(0);
+  });
+
+  it("a failed lock lookup fails closed", async () => {
+    const page = await loadMessagesV2Page(
+      db(
+        { properties: [flagged(1, t(1))], jev_lead_decisions: [decision(1, u(9), t(2))] },
+        { fail: (tb, _n, ops) => tb === "properties" && ops.some((o) => o.k === "eq" && "col" in o && o.col === "is_dnc_locked" && o.v === true) },
+      ).client,
+      "org",
+    );
+    expect(page.error).not.toBeNull();
+    expect(page.holds).toHaveLength(0);
+  });
+});
+
+describe("I4 every list query pages by keyset to exhaustion", () => {
+  it("a 500-row server cap still reads all 1,200 flagged properties", async () => {
+    const list = await eligible({ properties: Array.from({ length: 1200 }, (_, i) => flagged(i, t(i))) }, { cap: 500 });
+    expect(list.holds).toHaveLength(1200);
+  });
+
+  it("an error on page 3 of a source fails closed", async () => {
+    const decisions = Array.from({ length: 1200 }, (_, i) => decision(i, u(i), t(i)));
+    const page = await loadMessagesV2Page(
+      db({ properties: Array.from({ length: 1200 }, (_, i) => flagged(i, t(i))), jev_lead_decisions: decisions }, { cap: 500, fail: (tb, n) => tb === "jev_lead_decisions" && n === 3 }).client,
+      "org",
+    );
+    expect(page.error).not.toBeNull();
+    expect(page.holds).toHaveLength(0);
+  });
+
+  it("decisions with tied created_at are neither duplicated nor dropped", async () => {
+    const decisions = Array.from({ length: 1200 }, (_, i) => decision(i, u(i), t(1)));
+    const list = await eligible({ jev_lead_decisions: decisions }, { cap: 500 });
+    expect(list.holds).toHaveLength(1200);
+    expect(new Set(list.holds.map((h) => h.id)).size).toBe(1200);
+  });
+});
+
+describe("I6 one effective reason from the complete list", () => {
+  it("a hold on an older slice whose run has no reason shows its flag reason on the tape and the card", async () => {
+    const properties = Array.from({ length: 45 }, (_, i) => flagged(i, t(i), { last_ai_escalation_reason: i === 0 ? "model:opt_out" : "model:unclear" }));
+    const runs = [runRow(0, { property_id: u(0), reason: null, started_at: t(0) })];
+    const page = await loadMessagesV2Page(db({ properties, pipeline_runs: runs }).client, "org");
+    expect(page.holds.some((h) => h.id === u(0))).toBe(false); // oldest: not on page 1
+    const reason = new Map(page.flagReasons).get(u(0, 5));
+    expect(reason).toBe("model:opt_out");
+    const slice = await loadHoldsSlice(db({ properties, pipeline_runs: runs }).client, "org", page.nextCursor, 50);
+    const hold = slice!.holds.find((h) => h.id === u(0))!;
+    const eff = withEffectiveReason(hold.run!, hold.flag_reason);
+    const card = holdReasonSentence(eff, eff.reason ?? hold.flag_reason, "Dee");
+    const tape = deriveTape(hold.run!, "Dee", reason);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(card).toBe("Dee asked to stop. Nothing sent.");
+    expect(effectiveFlagReasons([hold])).toEqual([[u(0, 5), "model:opt_out"]]);
+  });
+});
+
+describe("I8 totals exclude locked and unverifiable holds", () => {
+  it("total, remaining and the next cursor only count eligible holds", async () => {
+    const page = await loadMessagesV2Page(
+      db({
+        properties: [...Array.from({ length: 42 }, (_, i) => flagged(i, t(i))), lockedProp(500)],
+        jev_lead_decisions: [decision(1, u(500), t(1))],
+        ai_reply_drafts: [draft(1)],
+      }).client,
+      "org",
+    );
+    expect(page.total).toBe(42);
+    expect(page.remaining).toBe(2);
+    expect(page.unverified).toBe(1);
+    expect(page.nextCursor).toEqual(holdCursor(page.holds[page.holds.length - 1]));
+    expect(page.nextCursor?.at).toBe(normalizeInstant(t(2)));
+  });
+});

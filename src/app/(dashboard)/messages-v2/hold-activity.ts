@@ -11,7 +11,6 @@ export function holdActivityAt(hold: OpenHold<RunWithSteps>): string | null {
     hold.since,
     hold.last_activity,
     hold.run?.started_at,
-    hold.run?.completed_at,
     ...(hold.run?.steps ?? []).map((st) => st.created_at),
   ]
     .map((v) => normalizeInstant(v))
@@ -44,11 +43,11 @@ export function holdsAfter(sorted: readonly OpenHold<RunWithSteps>[], cursor: Ho
   return cursor ? sorted.filter((h) => compareHoldOrder(holdCursor(h), cursor) > 0) : [...sorted];
 }
 
-/** A cursor from untrusted input: a normalized timestamp (or null) and a short id. It is only ever compared, never put in a query. */
+/** A cursor from untrusted input: a normalized timestamp (or null) and a uuid (every hold is keyed by its property). It is only ever compared, never put in a query. */
 export function parseHoldCursor(input: unknown): HoldCursor | null {
   if (!input || typeof input !== "object") return null;
   const { at, id } = input as { at?: unknown; id?: unknown };
-  if (typeof id !== "string" || id.length === 0 || id.length > 100) return null;
+  if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
   if (at !== null && !(typeof at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(at))) return null;
   return { at: at as string | null, id };
 }

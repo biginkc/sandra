@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 
 import type { HoldActionsApi, LoadOlderHolds } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
-import { holdActivityAt, holdCursor, sortNewestFirst } from "./hold-activity";
+import { holdActivityAt, sortNewestFirst } from "./hold-activity";
 import { DisabledHoldActions, effectiveDraftBody, HoldActionControls } from "./hold-action-controls";
 import { sellerWho } from "./tape-card";
 import { holdReasonSentence, withEffectiveReason } from "./tape";
@@ -123,22 +123,28 @@ type OlderState = {
   forKey: unknown;
   holds: OpenHold<RunWithSteps>[];
   labels: Map<string, RunLabel>;
-  /** Holds still to load after the last page, from the server; null until the first "Show older". */
-  remaining: number | null;
+  /** The server's cursor for the next page (echoed verbatim; the client never builds or re-sorts). */
+  cursor: HoldCursorInput | null;
+  remaining: number;
+  total: number | null;
+  unverified: number | null;
   error: string | null;
 };
 
+type HoldCursorInput = { at: string | null; id: string };
+
 /**
- * "Waiting for a person": ONE list in latest-activity order. The server sorts
- * every open hold (DNC-locked excluded) and sends the newest slice; "Show older"
- * first reveals what is already loaded, then asks the server for the next slice
- * of that same order, so page 1 really is the newest activity.
+ * "Waiting for a person": ONE list, in the order the server built over every eligible hold. The client shows
+ * what it has, then "Show older" echoes the server's cursor for the next page. It never re-sorts and never
+ * computes a cursor itself, so pages cannot overlap or skip.
  */
 export function WaitingColumn({
   holds,
   labels,
   meta,
   total,
+  remaining,
+  nextCursor,
   error,
   unverified,
   loadOlder,
@@ -149,8 +155,12 @@ export function WaitingColumn({
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   meta?: HoldsMeta;
-  /** All waiting holds on the server. */
+  /** All eligible holds on the server (locked and unverifiable excluded). */
   total: number;
+  /** Holds after the first page. */
+  remaining: number;
+  /** The server's cursor for the page after the first. */
+  nextCursor: HoldCursorInput | null;
   error?: string | null;
   /** Texts hidden because their property could not be determined. */
   unverified?: number;
@@ -160,23 +170,29 @@ export function WaitingColumn({
   actions?: HoldActionsApi;
   onReload?: () => void;
 }) {
+  const fresh = (): OlderState => ({
+    forKey: refreshKey,
+    holds: [],
+    labels: new Map(),
+    cursor: nextCursor,
+    remaining,
+    total: null,
+    unverified: null,
+    error: null,
+  });
   const [visible, setVisible] = useState(PAGE);
-  const [stored, setOlder] = useState<OlderState>({ forKey: refreshKey, holds: [], labels: new Map(), remaining: null, error: null });
+  const [stored, setOlder] = useState<OlderState>(fresh);
   const [busy, setBusy] = useState(false);
+  const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
 
-  const older: OlderState =
-    stored.forKey === refreshKey ? stored : { forKey: refreshKey, holds: [], labels: new Map(), remaining: null, error: null };
-
-  // Page 1 is the top of the server order (re-sorting it is a no-op unless a live step moved it); later slices
-  // continue that order and are never re-sorted across the seam.
   const seen = new Set(holds.map((h) => h.id));
-  const loaded = [...sortNewestFirst(holds), ...older.holds.filter((h) => !seen.has(h.id))];
+  const loaded = [...holds, ...older.holds.filter((h) => !seen.has(h.id))];
   const shown = loaded.slice(0, visible);
   const hiddenLoaded = loaded.length - shown.length;
-  // Before the first "Show older" the page's own total says how many are left; after it, the server's keyset answer does.
-  const notLoadedYet = older.remaining ?? Math.max(0, total - loaded.length);
-  const serverTotal = loaded.length + notLoadedYet;
-  const canLoadMore = !!loadOlder && notLoadedYet > 0;
+  const notLoadedYet = older.cursor ? older.remaining : 0;
+  const serverTotal = older.total ?? total;
+  const hiddenUnverified = older.unverified ?? unverified ?? 0;
+  const canLoadMore = !!loadOlder && !!older.cursor && notLoadedYet > 0;
 
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
@@ -186,14 +202,17 @@ export function WaitingColumn({
     if (!loadOlder || busy || !canLoadMore) return;
     setBusy(true);
     try {
-      const res = await loadOlder({ cursor: loaded.length ? holdCursor(loaded[loaded.length - 1]) : null, limit: OLDER_PAGE });
+      const res = await loadOlder({ cursor: older.cursor, limit: OLDER_PAGE });
       if (res.ok) {
         setOlder({
           forKey: refreshKey,
           holds: [...older.holds, ...res.data.holds],
           labels: new Map([...older.labels, ...res.data.labels]),
+          cursor: res.data.nextCursor,
           remaining: res.data.remaining,
-          error: null,
+          total: res.data.total,
+          unverified: res.data.unverified,
+          error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
         });
         setVisible((v) => v + PAGE);
       } else {
@@ -227,9 +246,9 @@ export function WaitingColumn({
           )}
         </div>
       )}
-      {!!unverified && unverified > 0 && (
+      {hiddenUnverified > 0 && (
         <p data-testid="holds-unverified" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          {unverified.toLocaleString("en-US")} waiting {unverified === 1 ? "text is" : "texts are"} hidden because {unverified === 1 ? "its" : "their"} property could not be determined.
+          {hiddenUnverified.toLocaleString("en-US")} waiting {hiddenUnverified === 1 ? "text" : "texts"} could not be verified (no single property found), so {hiddenUnverified === 1 ? "it is" : "they are"} hidden.
         </p>
       )}
       {failures.length > 0 && (

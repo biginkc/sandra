@@ -1,5 +1,5 @@
 import { CHICAGO_TZ } from "./chicago-time";
-import { fetchAllPages } from "./paged";
+import { fetchAllKeyset } from "./paged";
 import { groupStepsByRun, MAX_RUNS, type LooseSupabase } from "./queries";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
@@ -35,43 +35,57 @@ async function inBatches<T>(items: readonly T[], task: (item: T) => Promise<void
 export async function loadRunThreads(
   supabase: LooseSupabase,
   runs: ReadonlyArray<Pick<PipelineRun, "id" | "conversation_id" | "outbound_message_id" | "started_at">>,
-): Promise<Map<string, RunThread>> {
+): Promise<{ threads: Map<string, RunThread>; failedRunIds: string[] }> {
   const replyIds = [...new Set(runs.flatMap((r) => (r.outbound_message_id ? [r.outbound_message_id] : [])))];
   const replyBodies = new Map<string, string>();
+  const failedReplyIds = new Set<string>();
   const lastOutbound = new Map<string, string>();
+  const failed = new Set<string>();
 
   await Promise.all([
     inBatches(chunk(replyIds), async (ids) => {
-      const { data } = await supabase.from("messages").select("id, body").in("id", ids);
-      for (const row of (data ?? []) as Array<{ id: string; body: string | null }>) {
+      const res = await supabase.from("messages").select("id, body").in("id", ids);
+      if (res.error) {
+        for (const id of ids) failedReplyIds.add(id);
+        return;
+      }
+      for (const row of (res.data ?? []) as Array<{ id: string; body: string | null }>) {
         if (row.body) replyBodies.set(row.id, row.body);
       }
     }),
     inBatches(
       runs.filter((r) => r.conversation_id),
       async (run) => {
-        const { data } = await supabase
+        const res = await supabase
           .from("messages")
-          .select("body")
+          .select("id, body")
           .eq("conversation_id", run.conversation_id)
           .eq("direction", "outbound")
           .lt("created_at", run.started_at)
           .order("created_at", { ascending: false })
+          .order("id", { ascending: false })
           .limit(1);
-        const body = ((data ?? []) as Array<{ body: string | null }>)[0]?.body;
+        if (res.error) {
+          failed.add(run.id);
+          return;
+        }
+        const body = ((res.data ?? []) as Array<{ body: string | null }>)[0]?.body;
         if (body) lastOutbound.set(run.id, body);
       },
     ),
   ]);
 
-  const out = new Map<string, RunThread>();
+  const threads = new Map<string, RunThread>();
   for (const run of runs) {
-    out.set(run.id, {
+    if (run.outbound_message_id && failedReplyIds.has(run.outbound_message_id)) failed.add(run.id);
+    // A failed run gets no entry: it is retried, never cached as "no text".
+    if (failed.has(run.id)) continue;
+    threads.set(run.id, {
       lastOutbound: lastOutbound.get(run.id) ?? null,
       reply: run.outbound_message_id ? (replyBodies.get(run.outbound_message_id) ?? null) : null,
     });
   }
-  return out;
+  return { threads, failedRunIds: [...failed] };
 }
 
 /** Page cursor over (started_at, id) descending: stable when several runs share one timestamp. */
@@ -89,7 +103,7 @@ export function parseRunCursor(input: unknown): RunCursor | null {
 
 /** PostgREST `or` filter for "strictly older than the cursor" in (started_at, id) order. */
 export function olderThanCursorFilter(c: RunCursor): string {
-  return `started_at.lt.${c.at},and(started_at.eq.${c.at},id.lt.${c.id})`;
+  return `started_at.lt."${c.at}",and(started_at.eq."${c.at}",id.lt.${c.id})`;
 }
 
 /** Same rule in code, for tests and for sanity checks. */
@@ -122,14 +136,8 @@ export async function loadRunsWindow(
   const runs = (res.data ?? []) as PipelineRun[];
   const stepResults = await Promise.all(
     chunk(runs.map((r) => r.id), STEP_RUNS_PER_QUERY).map((ids) =>
-      fetchAllPages<PipelineRunStep>(() =>
-        supabase
-          .from("pipeline_run_steps")
-          .select("*")
-          .eq("org_id", orgId)
-          .in("run_id", ids)
-          .order("run_id", { ascending: true })
-          .order("seq", { ascending: true }),
+      fetchAllKeyset<PipelineRunStep>(() =>
+        supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids),
       ),
     ),
   );

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeInstant } from "./chicago-time";
-import { holdsAfter, sortNewestFirst } from "./hold-activity";
+import { holdCursor, holdsAfter, sortNewestFirst } from "./hold-activity";
 import { MessagesV2View, type MessagesV2ViewProps } from "./messages-v2-view";
 import type {
   OpenHold,
@@ -257,36 +257,60 @@ describe("MessagesV2View", () => {
     expect(text).not.toContain("Sandra is on");
   });
 
-  // A keyset server over a mutable list, like loadHoldsSlice: strictly after the client's last card, `remaining` after the page.
+  // A server over a mutable list, like loadHoldsSlice: pages after the cursor IT issued, and issues the next one.
   const keysetServer = (list: () => OpenHold<RunWithSteps>[]) =>
     vi.fn(async (input: { cursor: { at: string | null; id: string } | null; limit?: number }) => {
-      const after = holdsAfter(sortNewestFirst(list()), input.cursor);
+      const sorted = sortNewestFirst(list());
+      const after = holdsAfter(sorted, input.cursor);
       const holdsPage = after.slice(0, input.limit ?? 50);
-      return { ok: true as const, data: { holds: holdsPage, labels: [] as Array<[string, { name: string; address: null }]>, remaining: after.length - holdsPage.length } };
+      const remaining = after.length - holdsPage.length;
+      return {
+        ok: true as const,
+        data: {
+          holds: holdsPage,
+          labels: [] as Array<[string, { name: string; address: null }]>,
+          remaining,
+          total: sorted.length,
+          unverified: 0,
+          nextCursor: remaining > 0 ? holdCursor(holdsPage[holdsPage.length - 1]) : null,
+          contextErrors: [] as string[],
+        },
+      };
     });
   const at = (minsAgo: number) => ({ since: new Date(NOW - minsAgo * 60_000).toISOString() });
 
-  it("'Show older' asks for the holds strictly after its last card and says how many remain", async () => {
+  it("'Show older' echoes the server's cursor verbatim and says how many remain", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = keysetServer(() => all);
-    await mount({ ...props([], all.slice(0, 3)), holdsTotal: 5, loadOlderHolds });
+    const serverCursor = { at: "2026-01-01T00:00:00.000000Z", id: "server-issued" };
+    loadOlderHolds.mockImplementationOnce(async (input) => {
+      expect(input.cursor).toBe(serverCursor); // the exact object the server sent, never rebuilt
+      return keysetServer(() => all)({ cursor: holdCursor(all[2]), limit: input.limit });
+    });
+    await mount({ ...props([], all.slice(0, 3)), holdsTotal: 5, holdsRemaining: 2, holdsNextCursor: serverCursor, loadOlderHolds });
     expect(screen.getByTestId("waiting-count")).toHaveTextContent("5");
     expect(screen.getByTestId("not-loaded-count")).toHaveTextContent("2 more not shown yet");
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
-    expect(loadOlderHolds).toHaveBeenLastCalledWith({ cursor: { at: normalizeInstant(all[2].since)!, id: "h3" }, limit: 50 });
     expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("never re-sorts what the server sent", async () => {
+    // Deliberately "wrong" by activity: the client must keep the server order anyway.
+    const page1 = [{ ...openHold("older-first"), ...at(50) }, { ...openHold("newer-second"), ...at(1) }];
+    await mount({ ...props([], page1), holdsTotal: 2 });
+    const cards = screen.getAllByTestId("waiting-card").map((c) => c.textContent ?? "");
+    expect(cards).toHaveLength(2);
+    expect(screen.getAllByTestId("waiting-time")[0].querySelector("time")!.getAttribute("datetime")).toBe(normalizeInstant(page1[0].since));
   });
 
   it("a hold arriving between page 1 and 'Show older' causes no repeat and no skip; the last hold is reachable", async () => {
     let server = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = keysetServer(() => server);
-    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, loadOlderHolds });
-    server = [{ ...openHold("brand-new"), ...at(0.1) }, ...server]; // lands on top while the page is open
+    await mount({ ...props([], server.slice(0, 3)), holdsTotal: 6, holdsRemaining: 3, holdsNextCursor: holdCursor(server[2]), loadOlderHolds });
+    server = [{ ...openHold("brand-new"), ...at(0.1) }, ...server];
     await userEvent.click(screen.getByTestId("show-older"));
     await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
-    const ids = screen.getAllByTestId("waiting-card").map((c) => c.textContent ?? "");
-    expect(ids).toHaveLength(6); // h1..h6, no repeat of h3, no skip of h4-h6; the new arrival waits for a refresh
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
@@ -341,7 +365,7 @@ describe("MessagesV2View", () => {
 
   it("continues the same Chicago day from the oldest run returned when a day comes back full", async () => {
     const runs = Array.from({ length: 200 }, (_, i) => run(`y${i}`, { started_at: new Date(NOW - 3600_000 * 2 - i * 60_000).toISOString(), status: "closed" }));
-    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [] } }));
+    const loadTapeDay = vi.fn(async () => ({ ok: true as const, data: { runs, labels: [], threads: [], failedRunIds: [] } }));
     await mount({ ...props([run("today", { started_at: new Date(NOW).toISOString() })]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
     await waitFor(() => expect(screen.getByTestId("show-earlier")).not.toBeDisabled());
@@ -355,7 +379,7 @@ describe("MessagesV2View", () => {
   it("skips empty days on its own so one click shows the next day with texts", async () => {
     const loadTapeDay = vi.fn(async (_input: { day: string }) => ({
       ok: true as const,
-      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [] },
+      data: { runs: loadTapeDay.mock.calls.length < 3 ? [] : [run("found", { started_at: new Date(NOW - 5 * 86_400_000).toISOString(), status: "closed" })], labels: [], threads: [], failedRunIds: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     await userEvent.click(screen.getByTestId("show-earlier"));
@@ -472,12 +496,19 @@ describe("MessagesV2View", () => {
     expect(screen.queryAllByTestId("waiting-card")).toHaveLength(0);
   });
 
-  it("lists waiting holds newest first, however the server ordered them", async () => {
+  it("keeps the waiting list in exactly the order the server sent (the server owns the order)", async () => {
     const hold = (id: string, minsAgo: number) => ({ ...openHold(id), since: new Date(NOW - minsAgo * 60_000).toISOString() });
-    await mount(props([], [hold("old", 600), hold("newest", 5), hold("middle", 120)]));
+    const sent = [hold("newest", 5), hold("middle", 120), hold("old", 600)];
+    await mount(props([], sent));
     const times = screen.getAllByTestId("waiting-time").map((el) => el.querySelector("time")!.getAttribute("datetime")!);
-    expect(times).toEqual([...times].sort().reverse());
-    expect(times).toHaveLength(3);
+    expect(times).toEqual(sent.map((h) => normalizeInstant(h.since)));
+  });
+
+  it("a run whose thread text failed on the server shows a retry note and is fetched again in the browser", async () => {
+    const r = run("t1", { conversation_id: "c1" });
+    await mount({ ...props([r]), threads: [], threadFailedRunIds: ["t1"] });
+    expect(screen.getByTestId("threads-retrying")).toHaveTextContent("Some texts couldn't load. Retrying");
+    await waitFor(() => expect(mocks.client.from).toHaveBeenCalledWith("messages"));
   });
 
   it("renders server-derived holds with a plain reason and relabelled actions, including a runless card", async () => {
@@ -555,9 +586,9 @@ describe("MessagesV2View", () => {
     const holds = Array.from({ length: 22 }, (_, i) => ({ ...openHold(`h${i}`), since: new Date(NOW - (i + 1) * 60_000).toISOString() }));
     const loadOlderHolds = vi.fn(async () => ({
       ok: true as const,
-      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], remaining: 0 },
+      data: { holds: [{ ...openHold("ancient"), since: new Date(NOW - 99 * 86_400_000).toISOString() }], labels: [], remaining: 0, total: 23, unverified: 0, nextCursor: null, contextErrors: [] },
     }));
-    await mount({ ...props([], holds), holdsTotal: 23, loadOlderHolds });
+    await mount({ ...props([], holds), holdsTotal: 23, holdsRemaining: 1, holdsNextCursor: holdCursor(holds[21]), loadOlderHolds });
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(20);
     await userEvent.click(screen.getByTestId("show-older"));
     expect(screen.getAllByTestId("waiting-card")).toHaveLength(22);
@@ -571,7 +602,7 @@ describe("MessagesV2View", () => {
     const yesterdayRun = run("y1", { started_at: new Date(NOW - 20 * 3600_000).toISOString(), status: "closed" });
     const loadTapeDay = vi.fn(async () => ({
       ok: true as const,
-      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [] },
+      data: { runs: [yesterdayRun], labels: [["y1", { name: "Casey", address: null }]] as Array<[string, { name: string; address: null }]>, threads: [], failedRunIds: [] },
     }));
     await mount({ ...props([run("today")]), loadTapeDay });
     expect(screen.getAllByTestId("tape-card")).toHaveLength(1);
