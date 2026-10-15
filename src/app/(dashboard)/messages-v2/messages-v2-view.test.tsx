@@ -371,6 +371,23 @@ describe("MessagesV2View", () => {
     expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
   });
 
+  it("card: a pinned NULL snapshot reason shows the neutral sentence even when the run carries an old reason, same as the tape", async () => {
+    const r = run("rr", { property_id: "p7", status: "held", reason: "model:price_or_offer" });
+    const hold = { ...openHold("p7", r), ...at(5), flag_reason: null };
+    await mount({ ...props([r], [hold]), holdsSnapshot: buildSnapshot([hold]), flagReasons: [["rr", null]] });
+    expect(screen.getByTestId("waiting-reason")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
+    expect(within(screen.getByTestId("tape-card")).getByTestId("tape-sentence")).toHaveTextContent("Needs a person to look at it. Nothing sent.");
+  });
+
+  it("same reason but a new flag time after the snapshot: marked Updated and actions locked", async () => {
+    const snapHold = { ...openHold("p8"), ...at(5), flag_reason: "model:unclear", seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-01T00:00:00.000000Z" } };
+    const reflagged = { ...snapHold, seen: { through: null, flagReason: "model:unclear", flagAt: "2026-10-05T00:00:00.000000Z" } };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    await mount({ ...props([], [reflagged]), holdsSnapshot: buildSnapshot([snapHold]), actions });
+    expect(screen.getByTestId("hold-updated")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+  });
+
   it("renders the snapshot time, not the live time", async () => {
     const snapHold = { ...openHold("p1"), since: "2026-10-01T10:00:00.000Z" };
     const snapshot = buildSnapshot([snapHold]);

@@ -54,11 +54,8 @@ function WaitingCard({
 }) {
   const run = hold.run;
   const who = sellerWho(label);
-  const effectiveRun = run
-    ? pinned && hold.flag_reason
-      ? { ...run, reason: hold.flag_reason }
-      : withEffectiveReason(run, hold.flag_reason)
-    : null;
+  // Snapshot holds: the snapshot reason (null included) is the only reason, exactly as on the tape.
+  const effectiveRun = run ? (pinned ? { ...run, reason: hold.flag_reason ?? null } : withEffectiveReason(run, hold.flag_reason)) : null;
   const draft = effectiveDraftBody(hold);
   const activity = at !== undefined ? at : holdActivityAt(hold);
   const alertText = alertLine(hold.alert);
@@ -93,7 +90,7 @@ function WaitingCard({
         <p className="self-stretch rounded-2xl rounded-bl-sm bg-status-new-bg px-3 py-2">{run.inbound_preview}</p>
       )}
       <p data-testid="waiting-reason">
-        <b>Sandra:</b> {holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who, pinned)}
+        <b>Sandra:</b> {pinned ? holdReasonSentence(effectiveRun, hold.flag_reason ?? null, who, true) : holdReasonSentence(effectiveRun, effectiveRun?.reason ?? hold.flag_reason, who)}
       </p>
       {draft !== null && (
         <p data-testid="draft-text" className="whitespace-pre-wrap rounded-2xl rounded-br-sm bg-secondary px-3 py-2 text-[13px] text-muted-foreground">
@@ -262,7 +259,12 @@ export function WaitingColumn({
     const h = live.get(e.id)!;
     if (!snapshot) return { hold: h, changed: false };
     const reason = reasonOf(e.r);
-    const changed = (h.flag_reason ?? null) !== reason || holdActivityAt(h) !== e.at || (h.run?.id ?? null) !== e.run;
+    // Updated = ANY snapshot field differs from live: reason, flag time, activity time or the shown run.
+    const changed =
+      (h.flag_reason ?? null) !== reason ||
+      (h.seen?.flagAt ?? null) !== e.fa ||
+      holdActivityAt(h) !== e.at ||
+      (h.run?.id ?? null) !== e.run;
     return {
       hold: {
         ...h,
