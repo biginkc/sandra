@@ -156,7 +156,11 @@ function dripHealthy(lead: Lead, now: number): boolean {
   return false;
 }
 
-function brokenItems(lead: Lead, now: number): BrokenItem[] {
+/** `preV9Unknown`: the A1 SQL's reading before PR #876 (an 'unknown' ledger/obligation is Broken at once). Used ONLY to recognise the
+ * known SQ2 disagreement precisely; the expected answer always comes from the v9 rule. */
+export type OracleOptions = { preV9Unknown?: boolean };
+
+function brokenItems(lead: Lead, now: number, opts: OracleOptions = {}): BrokenItem[] {
   const out: BrokenItem[] = [];
   const en = lead.enrollment;
   if (en) {
@@ -168,7 +172,7 @@ function brokenItems(lead: Lead, now: number): BrokenItem[] {
   for (const o of lead.obligations) {
     const stale = (o.state === "claimed" || o.state === "sending") && (o.leaseExpiresAt ?? o.updatedAt) < now;
     // v9 17 (SQ2): an 'unknown' obligation gets the same 15-minute in-flight grace as reserved/sending
-    const unknownStale = o.state === "unknown" && o.updatedAt < now - 15 * MIN;
+    const unknownStale = o.state === "unknown" && (opts.preV9Unknown || o.updatedAt < now - 15 * MIN);
     if (!(["required", "draft", "failed_not_dispatched", "delivery_failed", "blocked"].includes(o.state) || unknownStale || stale)) continue;
     const action: BrokenAction = o.state === "delivery_failed" ? "resend" : o.state === "blocked" ? "review" : o.state === "unknown" || stale ? "check_status" : "send_text";
     out.push({ kind: `obligation_${o.state}`, action, at: o.updatedAt, ref: o.ref, failure: ["failed_not_dispatched", "delivery_failed", "blocked"].includes(o.state) });
@@ -180,7 +184,7 @@ function brokenItems(lead: Lead, now: number): BrokenItem[] {
   for (const l of ledgers) {
     const failure = l.state === "failed_not_dispatched" || l.state === "delivery_failed" || l.state === "blocked";
     // Literal 2.1: unknown / reserved / sending count only once older than 15 minutes (SQ2).
-    const unverified = (l.state === "unknown" || l.state === "reserved" || l.state === "sending") && l.updatedAt < now - 15 * MIN;
+    const unverified = ((l.state === "unknown" || l.state === "reserved" || l.state === "sending") && l.updatedAt < now - 15 * MIN) || (l.state === "unknown" && !!opts.preV9Unknown);
     if (!failure && !unverified) continue;
     const action: BrokenAction = l.state === "blocked" ? "review" : failure ? "resend" : "check_status";
     out.push({ kind: `ledger_${l.state}`, action, at: l.updatedAt, ref: l.ref, failure });
@@ -205,8 +209,8 @@ function brokenItems(lead: Lead, now: number): BrokenItem[] {
 }
 
 /** Supersession (2.1): a definitive failure is Broken only while unresolved. Dismissal removes any item. */
-function unresolvedBroken(lead: Lead, now: number): BrokenItem[] {
-  return brokenItems(lead, now).filter((b) => {
+function unresolvedBroken(lead: Lead, now: number, opts: OracleOptions = {}): BrokenItem[] {
+  return brokenItems(lead, now, opts).filter((b) => {
     if (lead.events.some((e) => e.type === "rep_sms_failure_dismissed" && e.actor === "user" && e.dismisses === b.ref)) return false;
     if (!b.failure) return true;
     const laterReply = lead.messages.some((m) => isOutbound(m) && HUMAN_CLASS.has(m.source!) && accepted(m) && sendTime(m) > b.at);
@@ -219,7 +223,7 @@ function unresolvedBroken(lead: Lead, now: number): BrokenItem[] {
 // ---------- the placement table (1.1) ----------
 const SOON = 15 * MIN;
 
-export function place(lead: Lead, now: number): Placement {
+export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placement {
   const appts = lead.appointments.filter(activeAppt);
   const offer = lead.offer;
   const offerPending = offer?.outcome === "pending";
@@ -235,7 +239,7 @@ export function place(lead: Lead, now: number): Placement {
 
   const inbound = latestInbound(lead);
   const unhandled = inbound ? !isHandled(lead, inbound) : false;
-  const broken = unresolvedBroken(lead, now);
+  const broken = unresolvedBroken(lead, now, opts);
   const brokenActions = [...new Set(broken.map((b) => b.action))].sort() as BrokenAction[];
   const manualQueued = lead.messages.some((m) => isOutbound(m) && m.outcome === "queued" && m.scheduledFor === undefined && m.source !== "campaign" && m.source !== "drip");
   const campHealthy = lead.messages.some((m) => isOutbound(m) && m.outcome === "queued" && m.source === "campaign" && m.scheduledFor !== undefined && m.scheduledFor >= now - 30 * MIN);

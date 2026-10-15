@@ -4,7 +4,7 @@ import { FAMILIES, VARIANTS, buildFamilyWorld, type FamilyDef, type Variant } fr
 import { materializeWorld, setupOrg, type Materialized, type OrgCtx } from "./materialize";
 import { loadClassifierMigration } from "./migration";
 import type { Lead, World } from "./model";
-import { NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place, tabOf, type Placement } from "./oracle";
+import { EXPECTED_UNTIL, NEEDS_ATTENTION_CHIPS, WAITING_CHIPS, expectedViews, place, tabOf, type Placement } from "./oracle";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
@@ -20,6 +20,8 @@ export type Mismatch = {
   lead: string;
   tags: string[];
   question?: string;
+  /** Set only when the SQL output is exactly what a known, routed SQL fix would change (EXPECTED_UNTIL); reported, not gating. */
+  expectedUntil?: string;
   expected: unknown;
   actual: unknown;
 };
@@ -98,8 +100,14 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
   const keyOf = new Map([...mat.ids].map(([k, id]) => [id, k]));
   const leadOf = new Map(world.leads.map((l) => [l.key, l]));
   const placements = new Map<string, Placement>(world.leads.map((l) => [l.key, place(l, world.now)]));
-  const add = (kind: MismatchKind, lead: Lead | null, expected: unknown, actual: unknown) =>
-    mismatches.push({ kind, family: c.family, repeat: c.repeat, lead: lead?.key ?? "-", tags: lead?.tags ?? [], question: lead?.question, expected, actual });
+  const add = (kind: MismatchKind, lead: Lead | null, expected: unknown, actual: unknown, expectedUntil?: string) =>
+    mismatches.push({ kind, family: c.family, repeat: c.repeat, lead: lead?.key ?? "-", tags: lead?.tags ?? [], question: lead?.question, expected, actual, ...(expectedUntil ? { expectedUntil } : {}) });
+  // The known SQ2 disagreement (fix routed to #876): the SQL's pre-v9 reading, computed precisely. A mismatch is excused only when the
+  // SQL output equals this reading exactly and differs from v9 only because of it.
+  const sq2 = EXPECTED_UNTIL.SQ2;
+  const legacy = new Map<string, Placement>(world.leads.map((l) => [l.key, place(l, world.now, { preV9Unknown: true })]));
+  const rowMatches = (row: Json, p: Placement) => row.place === p.place && row.reason === p.reason && row.rowNo === p.row
+    && sameSet(brokenActionsOf(row), p.brokenActions) && Object.entries(p.headline).every(([k, v]) => String(row.headline?.[k]) === String(v));
 
   // 1. Per lead, from the All tab (every queue lead appears there with its place, reason and row).
   const all = await reader.view("all", null);
@@ -112,6 +120,10 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     const p = placements.get(lead.key)!;
     const row = byKey.get(lead.key);
     checks += 1;
+    if (row && lead.question === "SQ2" && sq2 && !rowMatches(row, p) && rowMatches(row, legacy.get(lead.key)!)) {
+      add("wrong_chip", lead, { reason: p.reason, row: p.row }, { reason: row.reason, row: row.rowNo }, sq2);
+      continue;
+    }
     if (!row) { add("hidden_lead", lead, { place: p.place, reason: p.reason }, "not returned by the All tab"); continue; }
     if (row.place !== p.place) {
       if (row.place === "neither" && p.place !== "neither") add("hidden_lead", lead, { place: p.place, reason: p.reason, row: p.row }, { place: row.place, reason: row.reason, row: row.rowNo });
@@ -129,6 +141,8 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
 
   // 2. Every tab/chip view: membership equals the oracle's, counts equal both the rows returned and the oracle.
   const { views, badge } = expectedViews(placements);
+  const legacyViews = expectedViews(legacy);
+  const legacyExplains = (key: string, actual: number) => sq2 && (legacyViews.views.get(key)?.length ?? 0) === actual && (views.get(key)?.length ?? 0) !== actual ? sq2 : undefined;
   const wanted: Array<[string, string | null]> = [["all", null], ["needs_attention", null], ["waiting", null],
     ...NEEDS_ATTENTION_CHIPS.map((ch): [string, string | null] => ["needs_attention", ch]),
     ...WAITING_CHIPS.map((ch): [string, string | null] => ["waiting", ch]), ["all", "under_contract"]];
@@ -147,16 +161,16 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
     if (unexplained(missing).length || unexplained(extra).length) add("view_membership", null, `${tab}/${chip ?? "all"}: ${expectIds.size} leads`, { missing: unexplained(missing).map((i) => keyOf.get(i)), extra: unexplained(extra).map((i) => keyOf.get(i)) });
     // count/row consistency: the reported total must equal the rows actually returned, and equal the oracle's count
     if (read.first.total !== read.ids.length) add("count_row", null, `${tab}/${chip ?? "all"}: total ${read.first.total}`, `${read.ids.length} rows returned`);
-    if (read.first.total !== expectIds.size) add("count_row", null, `${tab}/${chip ?? "all"}: oracle count ${expectIds.size}`, `total ${read.first.total}`);
+    if (read.first.total !== expectIds.size) add("count_row", null, `${tab}/${chip ?? "all"}: oracle count ${expectIds.size}`, `total ${read.first.total}`, legacyExplains(`${tab}|${chip ?? ""}`, read.first.total));
     if (chip === null && tab === "all") {
       const tc = read.first.tabCounts as Record<string, number>;
       const exp = { needs_attention: views.get("needs_attention|")?.length ?? 0, waiting: views.get("waiting|")?.length ?? 0, all: world.leads.length };
       checks += 1;
-      for (const k of Object.keys(exp) as Array<keyof typeof exp>) if (Number(tc[k]) !== exp[k]) add("count_row", null, `tabCounts.${k}: ${exp[k]}`, tc[k]);
+      for (const k of Object.keys(exp) as Array<keyof typeof exp>) if (Number(tc[k]) !== exp[k]) add("count_row", null, `tabCounts.${k}: ${exp[k]}`, tc[k], legacyExplains(`${k}|`, Number(tc[k])));
       const cc = read.first.chipCounts as Record<string, number>;
       for (const [reason, n] of Object.entries(cc)) {
         const e = views.get(`all|${reason}`)?.length ?? 0;
-        if (Number(n) !== e) add("count_row", null, `chipCounts.${reason}: ${e}`, n);
+        if (Number(n) !== e) add("count_row", null, `chipCounts.${reason}: ${e}`, n, legacyExplains(`all|${reason}`, Number(n)));
       }
     }
     // within-chip order (design 2 / 3): consecutive rows whose oracle key is known must be non-decreasing
@@ -203,14 +217,18 @@ export async function compareWorld(reader: Reader, world: World, mat: Materializ
   for (const lead of sample) {
     const r = factRows.get(mat.ids.get(lead.key)!), p = placements.get(lead.key)!;
     if (!r) add("hidden_lead", lead, "returned by fn_my_leads_work_facts", "missing");
-    else if (r.place !== p.place || r.reason !== p.reason) add("wrong_chip", lead, { via: "work_facts", place: p.place, reason: p.reason }, { place: r.place, reason: r.reason });
+    else if (r.place !== p.place || r.reason !== p.reason) {
+      const l2 = legacy.get(lead.key)!;
+      add("wrong_chip", lead, { via: "work_facts", place: p.place, reason: p.reason }, { place: r.place, reason: r.reason },
+        lead.question === "SQ2" && sq2 && r.place === l2.place && r.reason === l2.reason ? sq2 : undefined);
+    }
   }
   for (const id of extra) if (!(facts.missing as string[]).includes(id)) add("scope", null, "work_facts reports a decoy / unknown id as missing", id);
 
   // 4. Sidebar badge.
   checks += 1;
   const sqlBadge = await reader.badge();
-  if (sqlBadge !== badge) add("badge", null, badge, sqlBadge);
+  if (sqlBadge !== badge) add("badge", null, badge, sqlBadge, sq2 && sqlBadge === legacyViews.badge ? sq2 : undefined);
 
   return { mismatches, checks };
 }

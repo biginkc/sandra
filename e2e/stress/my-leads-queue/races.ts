@@ -292,6 +292,7 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
       const b = await replicaClient(url), a = await replicaClient(url);
       const latencyMs = rng.int(timing.latencyMs[0], timing.latencyMs[1]), yDelay = rng.int(timing.yDelayMs[0], timing.yDelayMs[1]);
       let y = "";
+      let sentId = "";
       try {
         const send = driver.send({ db: b, ctx, property, contact, inboundMessageId: refs.get("x")!, latencyMs });
         const reply = (async () => {
@@ -299,13 +300,15 @@ export async function laneStampedSendVsInbound(url: string, reps: number, seed: 
           y = randomUUID();
           await a.query("insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata) values ($1,$2,'sms','inbound','Actually, make it Friday','received',$3,$4,clock_timestamp(),'{}')", [y, ctx.org, property, contact]);
         })();
-        await Promise.all([send, reply]);
+        const [sent] = await Promise.all([send, reply]);
+        sentId = sent.messageId;
       } finally {
         await b.end(); await a.end();
       }
       // classify from what the database recorded, not from the intended delays
-      const t = (await admin.query("select (select created_at from public.messages where id=$1) as y, created_at, sent_at from public.messages where property_id=$2 and direction='outbound'", [y, property])).rows[0];
-      if (t && t.y < t.sent_at) yBeforeSend += 1; else yAfterAccept += 1;
+      const t = (await admin.query("select (select created_at from public.messages where id=$1) as y, sent_at from public.messages where id=$2", [y, sentId])).rows[0];
+      if (!t?.sent_at) { lane.runs += 1; lane.failures += 1; lane.samples.push({ rep: n, why: "the send was never accepted (no sent_at)" }); continue; }
+      if (t.y < t.sent_at) yBeforeSend += 1; else yAfterAccept += 1;
       const row = (await classify(admin, ctx, new Date(Date.now() + 5 * SEC))).get(property)!;
       lane.runs += 1;
       const latest = row.facts.latestInbound;

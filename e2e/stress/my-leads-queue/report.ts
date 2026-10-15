@@ -113,19 +113,12 @@ export function buildReport(input: {
   mode: "full" | "smoke"; seed: number; repeats: number; sha: string; database: string; startedAt: string;
   runs: FamilyRun[]; lanes: LaneResult[]; scale: ScaleSize[];
 }): Report {
-  // A world whose lead-level mismatches are all spec questions with a fix in flight elsewhere: its downstream count/badge mismatches
-  // are the same disagreement, so the whole world's mismatches move to "expected" (reported, not gating).
+  // Mismatches the runner proved are exactly a routed SQL fix's disagreement (expectedUntil) are reported, not gating.
   const families = input.runs.map((r) => {
-    const groups = new Map<number, Mismatch[]>();
-    for (const m of r.mismatches) (groups.get(m.repeat) ?? groups.set(m.repeat, []).get(m.repeat)!).push(m);
-    const expected = new Set<Mismatch>();
-    for (const ms of groups.values()) {
-      const leadLevel = ms.filter((m) => m.lead !== "-");
-      if (leadLevel.length > 0 && leadLevel.every((m) => m.question && EXPECTED_UNTIL[m.question])) for (const m of ms) expected.add(m);
-    }
-    const summary = summarizeFamily({ ...r, mismatches: r.mismatches.filter((m) => !expected.has(m)) });
+    const expected = r.mismatches.filter((m) => m.expectedUntil);
+    const summary = summarizeFamily({ ...r, mismatches: r.mismatches.filter((m) => !m.expectedUntil) });
     for (const m of expected) if (m.question) summary.bySpecQuestion[m.question] = (summary.bySpecQuestion[m.question] ?? 0) + 1;
-    summary.expected = expected.size;
+    summary.expected = expected.length;
     return summary;
   });
   const total = (kind: MismatchKind) => families.reduce((a, f) => a + (f.byKind[kind] ?? 0), 0);
