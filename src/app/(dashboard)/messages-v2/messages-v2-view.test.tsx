@@ -503,6 +503,42 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1) };
+      const snapshot = buildSnapshot([a]);
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => (release = r));
+      let calls = 0;
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => {
+        calls += 1;
+        if (calls === 1) {
+          await gate;
+          return { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, through: null, draftId: null, draftProperty: null, draftSendable: false })) };
+        }
+        return { ok: false as const, error: { code: "X", message: "x" } };
+      });
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await waitFor(() => expect(screen.getByTestId("holds-recheck-failed")).toBeInTheDocument());
+      await act(async () => {
+        release();
+        await gate;
+      });
+      expect(screen.getByTestId("holds-recheck-failed")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("the displayed draft moves while through/activity stay equal: card Updated and Send/Edit disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

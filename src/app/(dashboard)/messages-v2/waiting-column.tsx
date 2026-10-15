@@ -322,9 +322,10 @@ export function WaitingColumn({
           if (alive && seq === checkSeq.current) setCheckFailed(true);
           return;
         }
-        if (!alive) return;
+        // Stale responses are discarded entirely: only the newest check may touch any state.
+        if (!alive || seq !== checkSeq.current) return;
         if (!res.ok) {
-          if (seq === checkSeq.current) setCheckFailed(true);
+          setCheckFailed(true);
           return;
         }
         for (const st of res.data) {
@@ -339,9 +340,8 @@ export function WaitingColumn({
           }
         }
       }
-      if (!alive) return;
+      if (!alive || seq !== checkSeq.current) return; // a newer check started: only the latest one commits
       setCheckFailed(false);
-      if (seq !== checkSeq.current) return; // a newer check started: only the latest one commits
       if (gone.length)
         setOlder((prev) => {
           const cur = prev.forKey === refreshKey ? prev : fresh();

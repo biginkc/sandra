@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
+import { asWaitingSnapshot, type CompactSnapshot } from "./snapshot-codec";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { loadRunLabels } from "./labels";
@@ -59,7 +60,7 @@ export type MessagesV2ViewProps = {
   holdsMeta?: HoldsMeta;
   /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
   /** The frozen waiting-list order the column pages through (see hold-list.ts buildSnapshot). */
-  holdsSnapshot?: WaitingSnapshot;
+  holdsSnapshot?: WaitingSnapshot | CompactSnapshot;
   /** First-page snapshot ids the server dropped in its final check. */
   holdsMissing?: string[];
   /** 60-second / tab-focus re-check of rendered cards (properties is not in realtime). */
@@ -425,6 +426,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     () => new Map<string, string | null>([...dayFlagReasons, ...(props.flagReasons ?? [])]),
     [dayFlagReasons, props.flagReasons],
   );
+  const holdsSnapshot = useMemo(() => asWaitingSnapshot(props.holdsSnapshot), [props.holdsSnapshot]);
   const snapshotRuns = useMemo(() => new Set((props.flagReasons ?? []).map(([runId]) => runId)), [props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);
@@ -571,7 +573,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             holds={holds}
             labels={labels}
             meta={meta}
-            snapshot={props.holdsSnapshot}
+            snapshot={holdsSnapshot}
             initialMissing={props.holdsMissing}
             revalidate={props.revalidateHolds}
             error={props.holdsError}

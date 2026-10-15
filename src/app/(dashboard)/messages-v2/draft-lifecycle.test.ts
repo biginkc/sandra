@@ -1,3 +1,4 @@
+import { decodeSnapshot } from "./snapshot-codec";
 /**
  * The complete draft lifecycle matrix (PR body has the same table).
  *
@@ -195,7 +196,7 @@ describe.each([false, true])("draft lifecycle (property also flagged: %s)", (fla
         applyChange(tables, change);
         const page = await loadMessagesV2Page(db(tables), "org");
         const want = expected(link, change, "snapshot build", flagged);
-        const ids = page.snapshot.entries.map((e) => e.id);
+        const ids = decodeSnapshot(page.snapshot).entries.map((e) => e.id);
         if (want.startsWith("render at P (no draft) and at P2")) expect([...ids].sort()).toEqual([P, P2].sort());
         else if (want.startsWith("render at P2")) expect(ids).toEqual([P2]);
         else if (want.startsWith("render at P")) expect(ids).toEqual([P]);
@@ -208,8 +209,8 @@ describe.each([false, true])("draft lifecycle (property also flagged: %s)", (fla
           expect(page.holds.find((h) => h.id === P2)!.draft?.id).toBe(DRAFT);
         }
         // tape sentence === card sentence for every rendered card (pinned snapshot reason)
-        for (const e of page.snapshot.entries) {
-          const reason = e.r >= 0 ? page.snapshot.reasons[e.r] : null;
+        for (const e of decodeSnapshot(page.snapshot).entries) {
+          const reason = e.r >= 0 ? decodeSnapshot(page.snapshot).reasons[e.r] : null;
           const card = page.holds.find((h) => h.id === e.id)!;
           const sentence = holdReasonSentence(card.run ? { ...card.run, reason } : null, reason, "Dee", true);
           if (card.run) {
@@ -234,7 +235,7 @@ describe.each([false, true])("draft lifecycle (property also flagged: %s)", (fla
             "org",
           );
           const want = expected(link, change, "first-page final check", flagged);
-          expect(page.snapshot.entries.map((e) => e.id)).toEqual([P]);
+          expect(decodeSnapshot(page.snapshot).entries.map((e) => e.id)).toEqual([P]);
           if (want === "missing (counted)") {
             expect(page.holds).toEqual([]);
             expect(page.missing).toEqual([P]);

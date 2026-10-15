@@ -1,3 +1,4 @@
+import { decodeSnapshot, encodeSnapshot } from "./snapshot-codec";
 import { describe, expect, it } from "vitest";
 
 import { fakePostgrest } from "./fake-postgrest.test-util";
@@ -60,7 +61,7 @@ const eligible = async (tables: Record<string, Row[]>, opts: Parameters<typeof f
 /** Walks a snapshot the way the column does: first page from page 1, then 50 ids at a time against CURRENT data. */
 const walkSnapshot = async (tables: Record<string, Row[]>, between?: (page: number) => void) => {
   const first = await loadMessagesV2Page(db(tables).client, "org");
-  const entries = first.snapshot.entries;
+  const entries = decodeSnapshot(first.snapshot).entries;
   w0Order = entries.map((e) => e.id);
   const shown = first.holds.map((h) => h.id);
   const missing: string[] = [];
@@ -109,7 +110,7 @@ describe("I1 every eligible hold is reachable in one snapshot order", () => {
     expect(w.missing.sort()).toEqual([...resolved].sort());
     expect(w.order.some((id) => id === u(1000))).toBe(false);
     const reload = await loadMessagesV2Page(db(tables).client, "org");
-    const ids = reload.snapshot.entries.map((e) => e.id);
+    const ids = decodeSnapshot(reload.snapshot).entries.map((e) => e.id);
     expect(ids).toContain(u(1000 + 19)); // new ones appear after reload
     expect(ids.slice(0, 5).sort()).toEqual(w0Order.slice(-30, -25).sort()); // re-flagged ones rise to the top
   });
@@ -258,8 +259,8 @@ describe("I6 / I8 snapshot reasons and counts", () => {
     expect(reason).toBe("model:opt_out");
     const more = await loadHoldsByIds(db({ properties, pipeline_runs: runs }).client, "org", [u(0)]);
     const hold = more!.holds[0];
-    const entry = page.snapshot.entries.find((e) => e.id === u(0))!;
-    const snapReason = page.snapshot.reasons[entry.r];
+    const entry = decodeSnapshot(page.snapshot).entries.find((e) => e.id === u(0))!;
+    const snapReason = decodeSnapshot(page.snapshot).reasons[entry.r];
     const eff = withEffectiveReason(hold.run!, snapReason);
     const card = holdReasonSentence(eff, eff.reason ?? snapReason, "Dee");
     const tape = deriveTape(hold.run!, "Dee", reason);
@@ -276,7 +277,7 @@ describe("I6 / I8 snapshot reasons and counts", () => {
       }).client,
       "org",
     );
-    expect(page.snapshot.entries).toHaveLength(42);
+    expect(decodeSnapshot(page.snapshot).entries).toHaveLength(42);
     expect(page.unverified).toBe(1);
     expect(page.holds).toHaveLength(40);
   });
@@ -397,15 +398,15 @@ describe("spec 2: client-held snapshot", () => {
     async () => {
       const tables: Record<string, Row[]> = { properties: Array.from({ length: 60 }, (_, i) => flagged(i, t(i))) };
       const first = await loadMessagesV2Page(db(tables).client, "org");
-      const target = first.snapshot.entries[55].id;
+      const target = decodeSnapshot(first.snapshot).entries[55].id;
       stamp(tables, target, "hostile_needs_confirm", t(99_999));
-      const res = await loadHoldsByIds(db(tables).client, "org", first.snapshot.entries.slice(40, 60).map((e) => e.id));
+      const res = await loadHoldsByIds(db(tables).client, "org", decodeSnapshot(first.snapshot).entries.slice(40, 60).map((e) => e.id));
       expect(res!.missing).toEqual([]);
       const card = res!.holds.find((h) => h.id === target)!;
-      const entry = first.snapshot.entries[55];
-      expect(card.flag_reason).not.toBe(first.snapshot.reasons[entry.r]); // live differs -> the column marks it Updated
+      const entry = decodeSnapshot(first.snapshot).entries[55];
+      expect(card.flag_reason).not.toBe(decodeSnapshot(first.snapshot).reasons[entry.r]); // live differs -> the column marks it Updated
       const reload = await loadMessagesV2Page(db(tables).client, "org");
-      expect(reload.snapshot.entries[0].id).toBe(target);
+      expect(decodeSnapshot(reload.snapshot).entries[0].id).toBe(target);
     },
   );
 
@@ -439,10 +440,26 @@ describe("spec 2: client-held snapshot", () => {
       id: u(i), property_id: u(i), conversation_id: null, sources: ["needs_attention"], since: t(i), reason: "r",
       flag_reason: i % 2 ? "model:unclear" : "model:opt_out", seen: { through: null, flagReason: "model:unclear", flagAt: t(i) },
       run: { ...runRow(i), steps: [] },
+      draft: { id: u(50_000 + i), inbound_message_id: u(60_000 + i), body: "x", sendable: i % 3 === 0 },
     })) as unknown as OpenHold<RunWithSteps>[];
     const snap = buildSnapshot(holds);
-    expect(JSON.stringify(snap).length).toBeLessThan(2_000_000);
+    const wire = JSON.stringify(encodeSnapshot(snap));
+    expect(wire.length).toBeLessThan(2_000_000);
+    expect(decodeSnapshot(JSON.parse(wire))).toEqual(snap);
     expect(snapshotFlagReasons(snap)).toHaveLength(10_000);
+  });
+
+  it("snapshot encode/decode round-trips every pinned field, including odd instants and missing values", () => {
+    const snap = {
+      reasons: ["model:unclear"],
+      entries: [
+        { id: u(1), at: "2026-10-14T12:00:00.123456Z", r: 0, run: u(2), fa: "2026-10-14T12:00:00.123456Z", th: "2026-10-13T01:02:03.000001Z", d: u(3), ds: true },
+        { id: u(4), at: "2026-10-14T12:00:00.000000Z", r: -1, run: null, fa: null, th: null },
+        { id: u(5), at: null, r: 0, run: null, fa: "2026-10-01 00:00:00+00", th: "2026-10-02T00:00:00Z", d: u(6), ds: false },
+        { id: "not-a-uuid", at: "1969-12-31T23:59:59.999999Z", r: 0, run: "abc", fa: "2026-10-05T00:00:00.000000Z", th: null },
+      ],
+    };
+    expect(decodeSnapshot(JSON.parse(JSON.stringify(encodeSnapshot(snap))))).toEqual(snap);
   });
 });
 
@@ -470,7 +487,7 @@ describe("final checks and live re-check", () => {
       return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
     };
     const page = await loadMessagesV2Page(client, "org");
-    expect(page.snapshot.entries.map((e) => e.id)).toContain(u(2));
+    expect(decodeSnapshot(page.snapshot).entries.map((e) => e.id)).toContain(u(2));
     expect(page.holds.map((h) => h.id)).toEqual([u(1)]);
     expect(page.missing).toEqual([u(2)]);
   });
@@ -513,7 +530,7 @@ describe("final check re-resolves drafts", () => {
       return latestRpc(tables)[fn as "pipeline_runs_latest_for_properties"]?.(a) ?? { data: [], error: null };
     };
     const page = await loadMessagesV2Page(client, "org");
-    expect(page.snapshot.entries.map((e) => e.id)).toEqual([u(3)]);
+    expect(decodeSnapshot(page.snapshot).entries.map((e) => e.id)).toEqual([u(3)]);
     expect(page.holds).toHaveLength(0);
     expect(page.missing).toEqual([u(3)]);
   });

@@ -1,4 +1,5 @@
-import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons, type WaitingSnapshot } from "./hold-list";
+import { encodeSnapshot, type CompactSnapshot } from "./snapshot-codec";
+import { buildSnapshot, enrichPage, FIRST_PAGE, HOLDS_LOAD_ERROR, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
 import { loadMessagesV2Data, type LooseSupabase, type MessagesV2Data } from "./queries";
 import type { HoldsMeta, OpenHold, RunWithSteps } from "./types";
 
@@ -9,7 +10,8 @@ export type WaitingList = {
   holds: OpenHold<RunWithSteps>[];
   holdsMeta: HoldsMeta;
   /** The frozen order (and time, reason, run) the client pages through. */
-  snapshot: WaitingSnapshot;
+  /** Compact wire form; the client decodes it (snapshot-codec.ts). */
+  snapshot: CompactSnapshot;
   /** Hidden because they could not be tied to exactly one property. */
   unverified: number;
   /** First-page snapshot ids dropped by the final check (locked or resolved while the page was built). */
@@ -54,21 +56,21 @@ export async function loadMessagesV2Page(
   void _h;
   void _m;
   if (!list.ok) {
-    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
+    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: encodeSnapshot({ reasons: [], entries: [] }), unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
   }
   const snapshot = buildSnapshot(list.holds);
   const enriched = await enrichPage(supabase, orgId, list.holds.slice(0, FIRST_PAGE));
   // Final check after enrichment: a hold locked or resolved meanwhile is dropped (the column counts it as missing).
   const still = await recheckOpen(supabase, orgId, enriched.holds);
   if (!still) {
-    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: { reasons: [], entries: [] }, unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
+    return { ...rest, holds: [], holdsMeta: meta(0, 0, [], false), snapshot: encodeSnapshot({ reasons: [], entries: [] }), unverified: 0, missing: [], flagReasons: [], error: HOLDS_LOAD_ERROR };
   }
   const keep = finalCards(enriched.holds, still);
   return {
     ...rest,
     holds: keep.holds,
     holdsMeta: meta(enriched.holds.length, snapshot.entries.length, enriched.contextErrors, enriched.deadLetterUnavailable),
-    snapshot,
+    snapshot: encodeSnapshot(snapshot),
     unverified: list.unverified,
     missing: keep.missing,
     flagReasons: snapshotFlagReasons(snapshot),
