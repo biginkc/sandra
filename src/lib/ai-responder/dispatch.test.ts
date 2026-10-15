@@ -284,7 +284,7 @@ type MockState = {
     reply_generation?: "llm" | "off";
     system_prompt: string;
   };
-  smsClassificationRuns: Array<{ id: string }>;
+  smsClassificationRuns: Array<{ id: string; source_inbound_message_id?: unknown }>;
   messages: MessageRow[];
   nextMessageId: number;
   nextClaimId: number;
@@ -963,9 +963,10 @@ function createMockSupabase(state: MockState) {
   }
 
   function buildSmsClassificationRunsQuery() {
+    let sourceFilter: string | null = null;
     const query = {
-      insert() {
-        const row = { id: `run-${state.smsClassificationRuns.length + 1}` };
+      insert(payload?: Record<string, unknown>) {
+        const row = { id: `run-${state.smsClassificationRuns.length + 1}`, source_inbound_message_id: payload?.source_inbound_message_id ?? null };
         state.smsClassificationRuns.push(row);
         return {
           select: () => ({
@@ -973,11 +974,19 @@ function createMockSupabase(state: MockState) {
           }),
         };
       },
-      eq() {
+      eq(field?: string, value?: unknown) {
+        if (field === "source_inbound_message_id") sourceFilter = value as string;
         return query;
       },
       select() {
         return query;
+      },
+      // classify-only replay guard: has this inbound already been classified?
+      limit() {
+        return Promise.resolve({
+          data: state.smsClassificationRuns.filter((r) => sourceFilter === null || (r as { source_inbound_message_id?: unknown }).source_inbound_message_id === sourceFilter),
+          error: null,
+        });
       },
       maybeSingle() {
         return Promise.resolve({
@@ -2343,6 +2352,30 @@ describe("dispatchAiResponse debounce", () => {
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(hotAssign.assign).toHaveBeenCalledTimes(1);
       expect(hotAssign.assign).toHaveBeenCalledWith(supabase, PROPERTY_ID, { inboundMessageId: "inbound-id-hot" });
+    });
+
+    it("identity question + below-threshold nurture + call_request: NO identity reply, held hot model:call_request", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-id-nd-hot", body: ID_BODY });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.5 }, escalation_reason: { choice: "call_request" } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: ID_BODY,
+          inboundMessageId: "inbound-id-nd-hot", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.last_ai_escalation_reason).toBe("model:call_request");
     });
 
     it("Jev says nurture (not hot): the identity reply still goes out, no hand-off", async () => {
@@ -7395,6 +7428,79 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect(sendSmsToContact).not.toHaveBeenCalled();
         expect(state.property.outreach_dispo).toBeNull();
         expect(hotAssign.assign).not.toHaveBeenCalled();
+      });
+
+      it("below-threshold nurture (needs_decision) + price_or_offer: hot hold model:price_or_offer, no send, no lead-decision proposal", async () => {
+        const state = createMockState();
+        nurtureDrip.loadConfig.mockResolvedValue(ON);
+        vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(TEMPLATE);
+        const { result } = await runJev(state, "inbound-hotwins-nd-nurture", "nurture", "price_or_offer", { confidence: 0.5 });
+        expect(result).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+        expect(state.property.needs_human_attention).toBe(true);
+        expect(state.property.last_ai_escalation_reason).toBe("model:price_or_offer");
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.property.outreach_dispo).toBeNull();
+        expect(nurtureDrip.enroll).not.toHaveBeenCalled();
+        expect(hotAssign.assign).not.toHaveBeenCalled();
+        // The hot block returns before the needs_decision handling: no proposal is written.
+        expect(state.jevLeadDecisionCalls).toEqual([]);
+      });
+
+      it("below-threshold not_interested (needs_decision) + call_request: hot hold model:call_request, no send", async () => {
+        const state = createMockState();
+        const { result } = await runJev(state, "inbound-hotwins-nd-ni", "not_interested", "call_request", { confidence: 0.5 });
+        expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.property.outreach_dispo).toBeNull();
+      });
+
+      it("no-action outcome (unclear) + price_or_offer: hot wins - hot_wins hold model:price_or_offer, no send", async () => {
+        const state = createMockState();
+        pipelineSteps.recordStep.mockClear();
+        const { result } = await runJev(state, "inbound-hotwins-noaction", "unclear", "price_or_offer");
+        expect(result).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+        expect(state.property.last_ai_escalation_reason).toBe("model:price_or_offer");
+        const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string; detail?: { kind?: string } });
+        expect(steps.find((x) => x.name === "hot_wins")?.detail?.kind).toBe("jev_no_action");
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.jevLeadDecisionCalls).toEqual([]);
+      });
+
+      it("bad_number + price_or_offer: NOT hot (sits with wrong-number) - held as jev_unclear_no_action, no hot_wins", async () => {
+        const state = createMockState();
+        pipelineSteps.recordStep.mockClear();
+        const { result } = await runJev(state, "inbound-hotwins-badnumber", "bad_number", "price_or_offer");
+        expect(result).toEqual({ outcome: "escalated", reason: "jev_unclear_no_action" });
+        const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string });
+        expect(steps.find((x) => x.name === "hot_wins")).toBeUndefined();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["opted_out", "price_or_offer"],
+        ["dnc", "call_request"],
+      ])("%s + %s: stop/DNC beats hot - not held as hot, its own review path runs", async (outcome, reason) => {
+        const state = createMockState();
+        pipelineSteps.recordStep.mockClear();
+        const { result } = await runJev(state, `inbound-hotwins-${outcome}`, outcome, reason);
+        expect(result).not.toEqual({ outcome: "escalated", reason: `model:${reason}` });
+        expect(state.property.last_ai_escalation_reason).not.toBe(`model:${reason}`);
+        const steps = pipelineSteps.recordStep.mock.calls.map((c) => c[2] as { name: string });
+        expect(steps.find((x) => x.name === "hot_wins")).toBeUndefined();
+        expect(hotAssign.assign).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+      });
+
+      it("a replay of an already-classified inbound on a flagged lead is not classified again (once in total, one hot_text)", async () => {
+        const state = createMockState();
+        const first = await runJev(state, "inbound-replay", "nurture", "price_or_offer");
+        expect(first.result).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+        expect(first.classifierCalls).toBe(1);
+        // Same inbound again (same state: the property is now flagged and a classification run exists).
+        const second = await runJev(state, "inbound-replay", "nurture", "price_or_offer");
+        expect(second.classifierCalls).toBe(0);
+        expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
       });
 
       it("hot wins is traced as hold:hot_wins", async () => {

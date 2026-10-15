@@ -122,6 +122,10 @@ export type ClassificationBridgeResult =
       classificationRunId: string;
       /** Present (true) only when Jev said the seller asked how we got their number. */
       askedHowNumberObtained?: true;
+      /** Carried so the shared hot decision sees a hot escalation whatever the outcome. */
+      escalationReason?: SmsClassificationDecision["escalationReason"];
+      /** The no-action outcome (unclear / bad_number): only "unclear" can be overridden by hot. */
+      outcome?: SmsClassificationDecision["outcome"];
     }
   /**
    * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
@@ -152,6 +156,8 @@ export type ClassificationBridgeResult =
       /** Present (true) only when Jev said the seller asked how we got their number. */
       askedHowNumberObtained?: true;
       outcome: SmsClassificationDecision["outcome"];
+      /** Carried so the shared hot decision sees a hot escalation below the cutoff. */
+      escalationReason?: SmsClassificationDecision["escalationReason"];
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
@@ -404,6 +410,8 @@ export async function classifyForDispatch(
       kind: "jev_no_action",
       classificationRunId,
       ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
+      escalationReason: decision.escalationReason,
+      outcome: decision.outcome,
     };
   }
 
@@ -421,6 +429,7 @@ export async function classifyForDispatch(
           classificationRunId,
           ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
           outcome: decision.outcome,
+          escalationReason: decision.escalationReason,
           nativeConfidence,
           thresholdAtDecision,
           thresholdVersion,

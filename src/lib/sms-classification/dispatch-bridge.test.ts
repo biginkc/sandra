@@ -398,6 +398,7 @@ describe("classifyForDispatch", () => {
       kind: "jev_needs_decision",
       classificationRunId: "run-1",
       outcome: "nurture",
+      escalationReason: null,
       nativeConfidence: 0.5,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
@@ -417,6 +418,7 @@ describe("classifyForDispatch", () => {
       kind: "jev_needs_decision",
       classificationRunId: "run-1",
       outcome: "nurture",
+      escalationReason: null,
       nativeConfidence: null,
       thresholdAtDecision: null,
       thresholdVersion: null,
@@ -476,7 +478,16 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "jev_no_action", classificationRunId: "run-1" });
+    expect(result).toEqual({ kind: "jev_no_action", classificationRunId: "run-1", outcome: "unclear", escalationReason: null });
+  });
+
+  it("carries a hot escalationReason on jev_no_action and on a below-threshold jev_needs_decision", async () => {
+    const a = stubFetch({ answers: { outcome: { choice: "unclear" }, escalation_reason: { choice: "price_or_offer" } } });
+    const noAction = await classifyForDispatch(stubSupabase({}), baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: a.fn, typesafeApiKey: "k" });
+    expect(noAction).toMatchObject({ kind: "jev_no_action", outcome: "unclear", escalationReason: "price_or_offer" });
+    const b = stubFetch({ answers: { outcome: { choice: "nurture", confidence: 0.5 }, escalation_reason: { choice: "call_request" } } });
+    const needs = await classifyForDispatch(stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }), baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: b.fn, typesafeApiKey: "k" });
+    expect(needs).toMatchObject({ kind: "jev_needs_decision", escalationReason: "call_request" });
   });
 
   it("in automatic mode, an HTTP failure fails closed to jev_automatic_failed, not use_legacy", async () => {

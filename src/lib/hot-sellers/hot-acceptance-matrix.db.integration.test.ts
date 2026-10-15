@@ -37,16 +37,18 @@ const admin = createClient<Database>(process.env.TEST_SUPABASE_URL!, process.env
 
 const created = { orgs: [] as string[], users: [] as string[] };
 const realFetch = globalThis.fetch;
-let jevOutcome: "new_lead" | "nurture" = "new_lead";
+let jevOutcome: "new_lead" | "nurture" | "unclear" | "bad_number" | "opted_out" | "dnc" = "new_lead";
 // Set explicitly for EVERY dispatch (no hot default): a "non-hot" follow-up must say so.
 let jevEscalation = "not_applicable";
 let jevTimeframe: string | null = null;
+let jevCalls = 0;
 
 function installFakeJev() {
   vi.stubEnv("TYPESAFE_API_KEY", "fake-test-key");
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.startsWith("https://api.typesafe.ai/")) {
+      jevCalls += 1;
       return new Response(
         JSON.stringify({
           model: "jev-fake",
@@ -160,6 +162,7 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
   jevOutcome = "new_lead";
   jevEscalation = "not_applicable";
   jevTimeframe = null;
+  jevCalls = 0;
   installFakeJev();
 
   const orgId = randomUUID();
@@ -266,7 +269,7 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
   /** Both Jev answers are explicit on every call: outcome and escalation reason (HOT_ESC or NON_HOT_ESC). */
   const dispatch = async (
     inboundMessageId: string,
-    jev: "new_lead" | "nurture",
+    jev: "new_lead" | "nurture" | "unclear" | "bad_number" | "opted_out" | "dnc",
     escalation: string,
     opts: { timeframe?: string } = {},
   ) => {
@@ -981,6 +984,7 @@ const ROWS: Row[] = [
       await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
       const a = await h.newInbound("yes, what would you pay?");
       expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
       expect(await h.runOf(a)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
       expect(await h.hotTextEvents()).toBe(1);
       expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, covered_by_hold: false, to: h.owner });
@@ -1014,6 +1018,7 @@ const ROWS: Row[] = [
       await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
       const a = await h.newInbound("who is this?");
       expect(await h.dispatch(a, "nurture", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(1);
       expect(await h.runOf(a)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
       expect(await h.hotTextEvents()).toBe(0);
       expect((await h.alertPass()).sent).toBe(0);
@@ -1044,7 +1049,152 @@ const ROWS: Row[] = [
       await h.expectOneAlertTotal();
     },
   },
+  {
+    id: "28",
+    name: "below-threshold nurture + price_or_offer through real dispatch: hot wins (needs_decision carries the escalation) - held model:price_or_offer, one hot hold alert, no hand-off, no seller send",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await pg.query(
+        "insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'nurture', 0.99, true)",
+        [h.orgId],
+      );
+      const a = await h.newInbound("Not right now, maybe check back in a few months");
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "model:price_or_offer" });
+      expect(await hotWinsKind(a)).toBe("jev_needs_decision");
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "29",
+    name: "identity question + below-threshold nurture + call_request through real dispatch: NO identity reply, held model:call_request, one hot hold alert, no hand-off",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await pg.query(
+        "insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'nurture', 0.99, true)",
+        [h.orgId],
+      );
+      const a = await h.newInbound("Who is this? I might sell.");
+      expect(await h.dispatch(a, "nurture", "call_request")).toEqual({ outcome: "escalated", reason: "model:call_request" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "model:call_request" });
+      expect(await hotWinsKind(a)).toBe("jev_needs_decision");
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "30",
+    name: "no-action outcome (unclear) + price_or_offer through real dispatch: hot wins (no_action carries the escalation) - held model:price_or_offer, one hot hold alert, no hand-off, no seller send",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("hmm what number are you thinking");
+      expect(await h.dispatch(a, "unclear", HOT_ESC)).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "model:price_or_offer" });
+      expect(await hotWinsKind(a)).toBe("jev_no_action");
+      await expectHotHeld(h, a);
+    },
+  },
+  {
+    id: "34",
+    name: "bad_number + price_or_offer through real dispatch: NOT hot (sits with wrong-number) - held jev_unclear_no_action, no hot_wins, no hot alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("wrong person but what would you pay");
+      expect(await h.dispatch(a, "bad_number", HOT_ESC)).toEqual({ outcome: "escalated", reason: "jev_unclear_no_action" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "31",
+    name: "opted_out + price_or_offer through real dispatch: stop beats hot - the human review row is created as today, NOT held as hot, no hot alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("please take me off your list, though I would like to know what you would pay");
+      const result = await h.dispatch(a, "opted_out", HOT_ESC);
+      expect(await hotWinsCount(a)).toBe(0);
+      expect(await reviewRows(h)).toBeGreaterThanOrEqual(1);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "32",
+    name: "dnc + call_request through real dispatch: DNC beats hot - the human review row is created as today, NOT held as hot, no hot alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound("this number is on the do not call registry, please remove it and call my other number");
+      const result = await h.dispatch(a, "dnc", "call_request");
+      expect(await hotWinsCount(a)).toBe(0);
+      expect(await reviewRows(h)).toBeGreaterThanOrEqual(1);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "33",
+    name: "hot-wins dispatch, then the SAME inbound dispatched again: classifier called once in total, no extra event, still exactly one Slack + SMS",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await pg.query(
+        "insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'nurture', 0.9, true)",
+        [h.orgId],
+      );
+      const a = await h.newInbound("Not right now, maybe check back in a few months");
+      expect(await h.dispatch(a, "nurture", HOT_ESC)).toEqual({ outcome: "escalated", reason: "model:price_or_offer" });
+      expect(jevCalls).toBe(1);
+      const again = await h.dispatch(a, "nurture", HOT_ESC);
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
 ];
+
+/** The classification kind the hot-wins step recorded for this inbound's run. */
+async function hotWinsKind(inboundMessageId: string): Promise<string | null> {
+  const { rows } = await pg.query(
+    "select s.detail->>'kind' as kind from public.pipeline_run_steps s join public.pipeline_runs r on r.id = s.run_id where r.inbound_message_id = $1 and s.name = 'hot_wins'",
+    [inboundMessageId],
+  );
+  expect(rows.length).toBe(1);
+  return rows[0].kind;
+}
+
+async function hotWinsCount(inboundMessageId: string): Promise<number> {
+  const { rows } = await pg.query(
+    "select count(*)::int as n from public.pipeline_run_steps s join public.pipeline_runs r on r.id = s.run_id where r.inbound_message_id = $1 and s.name = 'hot_wins'",
+    [inboundMessageId],
+  );
+  return rows[0].n;
+}
+
+/** Human review rows (AI disposition reviews + lead decisions) for the harness property. */
+async function reviewRows(h: Harness): Promise<number> {
+  let n = 0;
+  for (const t of ["ai_disposition_reviews", "jev_lead_decisions"]) {
+    const { rows } = await pg.query(`select count(*)::int as n from public.${t} where property_id = $1`, [h.propertyId]).catch(() => ({ rows: [{ n: 0 }] }));
+    n += rows[0].n;
+  }
+  return n;
+}
+
+/** Held hot (flag set, no disposition), exactly one Slack + SMS, no hand-off. */
+async function expectHotHeld(h: Harness, inboundMessageId: string): Promise<void> {
+  const { data: prop } = await admin.from("properties").select("outreach_dispo, needs_human_attention").eq("id", h.propertyId).single();
+  expect(prop).toMatchObject({ outreach_dispo: null, needs_human_attention: true });
+  const fk = await h.flagKey();
+  const pass = await h.alertPass();
+  expect(pass.holds).toBe(1);
+  expect(pass.sent).toBe(2);
+  expect(await h.deliveryKeys()).toEqual([fk]);
+  expect(await h.assignee()).toBeNull();
+  expect((await h.alertPass()).sent).toBe(0);
+  await h.expectOneAlertTotal();
+  void inboundMessageId;
+}
 
 describe("hot seller acceptance matrix (real database, real dispatch + alert pass, recording senders)", () => {
   it.each(ROWS)("row $id: $name", async (row) => {

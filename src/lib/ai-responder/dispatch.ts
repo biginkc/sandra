@@ -1208,16 +1208,16 @@ async function classifyAndHandleNonRouteOutcomes(
   // that also says "price or offer" / "call me" is a hot seller. It is held
   // for Jarrad (hot hold → one Slack + one text); no reply, no disposition.
   // new_lead promotions and escalations keep their own hot paths.
-  if (
-    (classification.kind === "jev_nurture" || (classification.kind === "jev_route" && classification.route.kind !== "escalate")) &&
-    isHotSeller({ reasons: [classification.escalationReason] })
-  ) {
-    const hotReason = `model:${classification.escalationReason}`;
+  // Hot wins ONLY over nurture and not-interested (at or below their cutoff).
+  // Stop / DNC / wrong-number always beat hot (Jarrad's approved order puts
+  // "asked to stop" above "talked price"): their human review paths run.
+  if (hotWinsOver(classification)) {
+    const hotReason = `model:${(classification as { escalationReason?: string | null }).escalationReason}`;
     await trace(supabase, {
       kind: "hold",
       name: "hot_wins",
       result: "held",
-      detail: { kind: classification.kind, escalation: classification.escalationReason },
+      detail: { kind: classification.kind, escalation: (classification as { escalationReason?: string | null }).escalationReason ?? null },
     }, runCtx);
     const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, hotReason, runCtx);
     await completeClaim(supabase, input.propertyId, {
@@ -2938,6 +2938,15 @@ async function classifyOnlyForHotText(
       .eq("active", true)
       .maybeSingle();
     if (!cfg || !isJevAutomatic(cfg)) return;
+    // A replay of an inbound that was already classified (full path or an
+    // earlier classify-only look) is never classified again: no paid call,
+    // no second event for one text.
+    const { data: seen } = await supabase
+      .from("sms_classification_runs")
+      .select("id")
+      .eq("source_inbound_message_id", input.inboundMessageId as string)
+      .limit(1);
+    if ((seen ?? []).length > 0) return;
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
     if (!(await isHotRouting(supabase, orgId, c))) return;
     const escalation = "escalationReason" in c ? c.escalationReason : null;
@@ -2994,12 +3003,30 @@ async function isHotRouting(
   return cfg.enabled && routeNurture({ readyTimeframe: c.readyTimeframe, listingStatus: c.listingStatus }).kind === "person";
 }
 
-/** Hot seller by the shared definition (lib/hot-sellers/hot.ts). */
+/**
+ * A hot escalation overrides ONLY a nurture, not-interested (at or below its
+ * cutoff) or unclear result. Never opted_out, dnc, wrong_number, bad_number
+ * or any other route.
+ */
+function hotWinsOver(c: ClassificationBridgeResult): boolean {
+  const hotEsc = (r: string | null | undefined) => isHotSeller({ reasons: [r] });
+  if (c.kind === "jev_nurture") return hotEsc(c.escalationReason);
+  if (c.kind === "jev_route") return c.route.kind === "auto_close" && hotEsc(c.escalationReason);
+  if (c.kind === "jev_needs_decision") {
+    return (c.outcome === "nurture" || c.outcome === "not_interested") && hotEsc(c.escalationReason);
+  }
+  // "Unclear" + a hot escalation is hot; "bad_number" sits with wrong-number and never is.
+  if (c.kind === "jev_no_action") return c.outcome === "unclear" && hotEsc(c.escalationReason);
+  return false;
+}
+
+/** Hot seller by the shared definition (lib/hot-sellers/hot.ts), with stop / DNC / wrong-number always winning. */
 function isHotClassification(c: ClassificationBridgeResult): boolean {
   if (c.kind === "jev_promote_new_lead") return true;
-  if (c.kind === "jev_needs_decision") return isHotSeller({ jevOutcome: c.outcome });
-  if (c.kind === "jev_route" || c.kind === "jev_nurture") return isHotSeller({ reasons: [c.escalationReason] });
-  return false;
+  if (c.kind === "jev_needs_decision" && c.outcome === "new_lead") return true;
+  // A hot escalation route (new_lead below its cutoff, call request, price).
+  if (c.kind === "jev_route" && c.route.kind === "escalate") return isHotSeller({ reasons: [c.escalationReason] });
+  return hotWinsOver(c);
 }
 
 /**
