@@ -27,6 +27,7 @@ on:
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
       - "supabase/migrations/*_my_leads_work_*"
+      - "supabase/migrations/*_my_leads_approved_*"
       - "vitest.norma-queue-stress-fullchain.config.ts"
       - "vitest.norma-stress.config.ts"
       - "scripts/ci/provision-disposable-stack.mjs"
@@ -63,7 +64,7 @@ jobs:
       - run: npm ci
 
       - name: Provision disposable stack (schema without the Norma and My Leads classifier migrations)
-        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*' --exclude-migrations '*_my_leads_work_*'
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*' --exclude-migrations '*_my_leads_work_*' --exclude-migrations '*_my_leads_approved_*'
 
       - name: Run the stress gate
         env:
