@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
+import { pageText } from "./page-text";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
 import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { formatModeBadge } from "./queries";
@@ -131,7 +132,7 @@ export function RulesPanel({
           <div className="flex flex-col gap-2 px-6 py-4">
             {badgesError && (
               <p role="alert" data-testid="badges-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-800">
-                {badgesError}
+                {pageText(badgesError)}
               </p>
             )}
             {GROUPS.map((group) => (

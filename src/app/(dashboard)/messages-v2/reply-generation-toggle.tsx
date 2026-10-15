@@ -15,6 +15,7 @@ import {
 import type { Result } from "@/lib/errors/result";
 import { cn } from "@/lib/utils";
 
+import { pageText } from "./page-text";
 import type { ReplyGeneration, ReplyGenerationSetting } from "./reply-generation";
 
 export type SetReplyGenerationAction = (input: {
@@ -74,7 +75,7 @@ export function ReplyGenerationToggle({
         setCurrent(result.data.replyGeneration);
         setOpen(false);
       } else {
-        setError(result.error.message);
+        setError(pageText(result.error.message));
       }
     } catch {
       setError("Could not change AI drafts. Nothing was changed.");

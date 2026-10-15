@@ -215,9 +215,11 @@ export default async function MessagesV2Page({
   // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.
   const focusPid = focusDeadLetter?.propertyId ?? null;
   let focusHold: OpenHold<RunWithSteps> | null | undefined;
+  let focusHoldErrors: string[] = [];
   if (focusPid && !loaded.error && !data.holds.some((h) => h.property_id === focusPid)) {
     const byId = await loadHoldsByIds(supabase, orgId, [focusPid]);
     focusHold = byId ? (byId.holds.find((h) => h.property_id === focusPid) ?? null) : undefined;
+    focusHoldErrors = byId?.contextErrors ?? [];
   }
 
   // Hold cards are labelled by property id; synthesize label inputs from the
@@ -268,6 +270,7 @@ export default async function MessagesV2Page({
         nowMs={data.nowMs}
         focusDeadLetter={focusDeadLetter}
         focusHold={focusHold}
+        focusHoldErrors={focusHoldErrors}
         actions={{
           send: sendHeldDraftAction,
           editAndSend: editAndSendHeldDraftAction,

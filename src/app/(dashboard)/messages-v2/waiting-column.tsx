@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 
+import { pageText } from "./page-text";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
 import { chicagoDateClock } from "./chicago-time";
 import { SEEN_CHECK_FAILED } from "./snapshot-codec";
@@ -200,7 +201,10 @@ export function WaitingColumn({
   onReload,
   focus,
   focusHold,
+  focusHoldErrors,
 }: {
+  /** contextErrors from loading the pinned card (a failed version check pauses actions). */
+  focusHoldErrors?: readonly string[];
   /** Opened with ?deadLetter=<id>: that failed reply's lead; its card is selected. */
   focus?: { deadLetterId: string; propertyId: string | null } | null;
   /**
@@ -323,7 +327,12 @@ export function WaitingColumn({
   const staleIds = stale.forKey === refreshKey ? stale.ids : new Set<string>();
   // A failed re-check pauses every card's actions until the next successful one (never "assume still fine").
   // Paused from the start when the server could not run the fresh version check for the first page.
-  const [checkFailed, setCheckFailed] = useState(() => !!meta?.contextErrors.includes(SEEN_CHECK_FAILED));
+  // Paused when the server could not run the fresh version check for THIS snapshot's cards (first page or the
+  // pinned My Leads card); keyed by snapshot, so a refresh is judged by its own result. A successful re-check clears it.
+  const seededFail = !!meta?.contextErrors.includes(SEEN_CHECK_FAILED) || !!focusHoldErrors?.includes(SEEN_CHECK_FAILED);
+  const [checkState, setCheckState] = useState<{ forKey: unknown; failed: boolean }>(() => ({ forKey: refreshKey, failed: seededFail }));
+  const checkFailed = checkState.forKey === refreshKey ? checkState.failed : seededFail;
+  const setCheckFailed = (failed: boolean) => setCheckState({ forKey: refreshKeyRef.current, failed });
   const checkSeq = useRef(0);
   const refreshKeyRef = useRef<unknown>(refreshKey);
   const shownIdsRef = useRef<string[]>([]);
@@ -436,7 +445,7 @@ export function WaitingColumn({
       <p className="text-[13px] text-muted-foreground">Not urgent. Check once a day.</p>
       {error && (
         <div role="alert" data-testid="holds-split-unavailable" className="flex flex-col items-start gap-2 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-          <p>{error}</p>
+          <p>{pageText(error)}</p>
           {onReload && (
             <Button type="button" size="xs" variant="outline" data-testid="holds-retry" onClick={onReload}>
               Retry
@@ -509,7 +518,7 @@ export function WaitingColumn({
       )}
       {older.error && (
         <p role="alert" data-testid="older-error" className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-800">
-          {older.error}
+          {pageText(older.error)}
         </p>
       )}
       {shown.length === 0 ? (

@@ -10,6 +10,7 @@ import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 import { useThrottledRefresh } from "../messages/use-throttled-refresh";
+import { pageText, undoErrorText } from "./page-text";
 import { appendStep, upsertRun } from "./feed-state";
 import { asWaitingSnapshot, type CompactSnapshot } from "./snapshot-codec";
 import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
@@ -46,7 +47,7 @@ export type MessagesV2ViewProps = {
   replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
   setReplyGeneration?: SetReplyGenerationAction;
   /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
-  undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { message: string } }>;
+  undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
   findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
@@ -97,6 +98,7 @@ export type MessagesV2ViewProps = {
   focusDeadLetter?: { deadLetterId: string; propertyId: string | null } | null;
   /** That lead's hold when it is beyond the first page (null = no longer eligible). */
   focusHold?: OpenHold<RunWithSteps> | null;
+  focusHoldErrors?: string[];
 };
 
 /** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
@@ -156,7 +158,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             find: findJevUndo,
             undo: async (id) => {
               const r = await undoJevAction(id);
-              return r.ok ? { ok: true } : { ok: false, message: r.error.message };
+              return r.ok ? { ok: true } : { ok: false, message: undoErrorText(r.error.code ?? "") };
             },
           }
         : undefined,
@@ -393,7 +395,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const res = await props.loadTapeDay(next);
         if (!res.ok) {
-          setEarlierNote(res.error.message);
+          setEarlierNote(pageText(res.error.message));
           setCursor(next);
           return;
         }
@@ -531,7 +533,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           </div>
           {props.feedError && (
             <p role="alert" data-testid="feed-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">
-              {props.feedError}
+              {pageText(props.feedError)}
             </p>
           )}
           {props.stepsUnavailable && (
@@ -604,6 +606,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             onReload={() => router.refresh()}
             focus={props.focusDeadLetter ?? null}
             focusHold={props.focusHold}
+            focusHoldErrors={props.focusHoldErrors}
           />
         </div>
       </div>

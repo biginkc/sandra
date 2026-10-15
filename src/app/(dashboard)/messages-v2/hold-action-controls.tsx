@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
 
+import { pageText } from "./page-text";
 import type { HoldActionsApi, SeenDraft } from "./hold-action-types";
 import { LUNA_HUMAN_CONFIRM_OUTCOMES, lunaOutcomeLabel } from "./luna-labels";
 import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./types";
@@ -44,7 +45,7 @@ export function effectiveDraftBody(hold: OpenHold<RunWithSteps>): string | null 
 }
 
 function errorText<T>(result: Result<T>): string {
-  return result.ok ? "" : result.error.message || "That did not work.";
+  return result.ok ? "" : pageText(result.error.message) || "That did not work.";
 }
 
 const LUNA_RELOAD_CODES = new Set(["LUNA_ALREADY_RESOLVED", "LUNA_NO_PENDING_ITEM"]);

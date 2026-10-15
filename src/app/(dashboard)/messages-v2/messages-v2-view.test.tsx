@@ -602,6 +602,66 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("a failed Undo shows page wording; no rendered string contains 'Jev'", async () => {
+    const applied = run("u1", {
+      status: "closed",
+      steps: [{ id: "s1", run_id: "u1", org_id: "o", seq: 1, kind: "action", name: "wrong_number", result: "applied", detail: {}, created_at: "2026-10-08T10:00:01Z" }],
+    });
+    const undoJevAction = vi.fn(async () => ({ ok: false as const, error: { code: "STATE_CHANGED", message: "Someone changed this lead after Jev did, so it was not undone." } }));
+    const findJevUndo = vi.fn(async () => "undo-1");
+    await mount({ ...props([applied]), undoJevAction, findJevUndo });
+    await userEvent.click(await screen.findByTestId("undo-jev-action"));
+    expect(await screen.findByTestId("undo-error")).toHaveTextContent("Sandra already moved on. Refresh and try again.");
+    expect(document.body.textContent ?? "").not.toMatch(/\bJev\b/);
+  });
+
+  it("success, then a refresh whose version check failed: the new cards start paused", async () => {
+    const a = { ...openHold("aaaa"), ...at(1) };
+    const ok = { total: 1, shown: 1, truncated: false, totalState: "exact" as const, failed: [], contextErrors: [] as string[], deadLetterUnavailable: false };
+    const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+    const p1 = { ...props([], [a]), holdsMeta: ok, holdsSnapshot: buildSnapshot([a]), actions };
+    const { rerender } = render(<MessagesV2View {...p1} />);
+    await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    const b = { ...a };
+    rerender(<MessagesV2View {...p1} holds={[b]} holdsSnapshot={buildSnapshot([b])} holdsMeta={{ ...ok, contextErrors: ["version check"] }} />);
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+    expect(screen.getByTestId("holds-recheck-failed")).toBeInTheDocument();
+  });
+
+  it("the pinned My Leads card with a failed version check is paused until a re-check succeeds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = Array.from({ length: 60 }, (_, i) => ({ ...openHold(`h${i}`), property_id: `h${i}`, ...at(i + 1) }));
+      const snapshot = buildSnapshot(all);
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        data: input.ids.map((id) => {
+          const e = snapshot.entries.find((x) => x.id === id)!;
+          return { id, eligible: true, flagAt: e.fa, flagReason: null, runId: null, activityAt: e.at, through: null, draftId: null, draftProperty: null, draftSendable: false };
+        }),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({
+        ...props([], all.slice(0, 40)),
+        holdsSnapshot: snapshot,
+        revalidateHolds,
+        actions,
+        focusDeadLetter: { deadLetterId: "dl-1", propertyId: "h55" },
+        focusHold: all[55],
+        focusHoldErrors: ["version check"],
+      });
+      const pinned = screen.getByTestId("focus-pinned");
+      expect(within(pinned).getByRole("button", { name: "Dismiss" })).toBeDisabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(within(screen.getByTestId("focus-pinned")).getByRole("button", { name: "Dismiss" })).toBeEnabled());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("overlapping re-checks: the newer fails, the older succeeds later -> actions stay disabled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
