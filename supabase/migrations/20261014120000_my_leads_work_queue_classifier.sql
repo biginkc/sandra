@@ -246,6 +246,7 @@ language sql stable security definer set search_path = '' as $$
       m.status = 'failed' and m.metadata ->> 'providerOutcome' is distinct from 'provider_unknown'
     from mf m
     where m.cls = 'human' and m.created_at > p_at - interval '7 days'
+      and m.ledger_state is null   -- a ledger receipt is authoritative for its message
       and (m.status = 'failed' or (m.status = 'pending' and m.created_at < p_at - interval '15 minutes'))
     union all
     select c.lead_id, 'scheduled_text_overdue', 'open_campaign', c.overdue_at, null::uuid, false from camp c where c.overdue_at is not null
@@ -302,7 +303,7 @@ language sql stable security definer set search_path = '' as $$
       (i.ts is not null and lo.ts is not null and i.ts > lo.ts) as inbound_after_lo,
       public.my_leads_add_business_days(lo.ts, 3) as lo_deadline,
       e.enr_id, e.enr_status, e.pause_reason, e.next_run_at, e.enr_completed_at, e.current_step_index, e.seq_name, e.steps_total,
-      e.last_sent_at, e.first_send_not_before,
+      e.last_sent_at, e.first_send_not_before, e.enr_updated_at,
       (e.enr_status = 'active' and e.next_run_at is not null and e.next_run_at >= p_at - interval '60 minutes' and e.stale_claim_at is null)
         or (e.enr_status = 'paused' and e.pause_reason = 'call_in_progress' and e.enr_updated_at >= p_at - interval '30 minutes') as drip_healthy,
       coalesce(po.pending, false) as offer_pending, po.chain is not null as offer_has_chain, po.follow_up_at as offer_follow_up_at, po.offer_sent_at,
@@ -423,7 +424,8 @@ language sql stable security definer set search_path = '' as $$
         when '6a' then jsonb_build_object('variant', 'text_waiting', 'at', f.manual_at)
         when '7' then jsonb_build_object('kind', 'ready', 'since', f.stage_entered_at)
         when '8' then jsonb_build_object('kind', case when f.offer_has_chain and f.chain_eff is null then 'follow_up_missing' else 'follow_up_due' end, 'at', f.offer_eff)
-        when '10' then jsonb_build_object('nextRunAt', f.next_run_at, 'scheduledAt', f.camp_healthy_at, 'callInProgress', f.pause_reason = 'call_in_progress')
+        when '10' then jsonb_build_object('nextRunAt', f.next_run_at, 'scheduledAt', f.camp_healthy_at, 'callInProgress', f.pause_reason = 'call_in_progress',
+          'resumeBy', case when f.pause_reason = 'call_in_progress' then f.enr_updated_at + interval '30 minutes' end)
         when '11' then jsonb_build_object('kind', f.reason, 'at', case when f.reason = 'offer_out' then f.offer_eff else f.future_min end)
         when '12' then jsonb_build_object('at', f.offer_eff)
         when '13' then jsonb_build_object('at', f.lo_ts, 'by', f.lo_cls, 'until', f.lo_deadline)
