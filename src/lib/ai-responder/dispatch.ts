@@ -1239,7 +1239,7 @@ async function classifyAndHandleNonRouteOutcomes(
     if (config.classifier_mode === "automatic") {
       return {
         handled: true,
-        outcome: await runNineQuestionsStep(supabase, { input, property, claim: responseClaim, runCtx, templateCtx }),
+        outcome: await runNineQuestionsStep(supabase, { input, property, claim: responseClaim, runCtx, templateCtx, escalationKeywords: config.escalation_keywords ?? null }),
       };
     }
     // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
@@ -3065,14 +3065,14 @@ async function classifyOnlyForHotText(
     if (prior && (prior.status !== "processing" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
-      .select("classifier_provider, classifier_mode")
+      .select("classifier_provider, classifier_mode, escalation_keywords")
       .eq("org_id", orgId)
       .eq("active", true)
       .maybeSingle();
     if (!cfg || !isJevAutomatic(cfg)) return;
-    // The nine-question engine never runs the eight-answer classification (and an unreadable
-    // switch runs nothing): no classify-only look for it.
-    if ((await readClassifierEngine(supabase, orgId)) !== "outcome_v1") return;
+    // An unreadable switch runs nothing. The nine-question engine gets its own classify-only look.
+    const engine = await readClassifierEngine(supabase, orgId);
+    if (engine === "unreadable") return;
     // A replay of an inbound that was already classified (full path or an
     // earlier classify-only look) is never classified again: no paid call,
     // no second event for one text.
@@ -3095,13 +3095,54 @@ async function classifyOnlyForHotText(
     if (!claim2.claimed || !claim2.claimId) return;
     let classifyOnlyOutcome = "skipped";
     try {
-      classifyOnlyOutcome = await classifyOnlyClaimed(supabase, input, orgId, runCtx);
+      classifyOnlyOutcome = engine === "nine_questions"
+        ? await classifyOnlyClaimedNine(supabase, input, orgId, cfg.escalation_keywords ?? null, runCtx)
+        : await classifyOnlyClaimed(supabase, input, orgId, runCtx);
     } finally {
       await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
     }
   } catch (error) {
     reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
   }
+}
+
+/**
+ * Classify-only for the nine-question engine (a text on a lead that already needs a person): one
+ * nine-question read; hot when the answer is open_to_selling / talked_price, or a price keyword
+ * hits and the answer is not asked_stop / hostile / wrong_person. Records the hot text; sends nothing.
+ */
+async function classifyOnlyClaimedNine(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  escalationKeywords: ReadonlyArray<string> | null,
+  runCtx: MaybeRunContext,
+): Promise<string> {
+  const cls = await runNineClassification(
+    supabase,
+    {
+      orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx ?? undefined },
+  );
+  const keyword = hasHotPriceKeyword(input.inboundBody, escalationKeywords);
+  const answer = cls.kind === "ok" ? cls.result.answer : null;
+  const blocked = answer === "asked_stop" || answer === "hostile" || answer === "wrong_person";
+  const answerHot = answer === "open_to_selling" || answer === "talked_price";
+  if (blocked || !(answerHot || keyword)) return "skipped";
+  const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, answerHot ? "hot_lead" : "price_or_offer");
+  await trace(supabase, {
+    kind: "action",
+    name: "hot_text_on_held_lead",
+    result: recorded ? "applied" : "skipped",
+    detail: { engine: "nine_questions", answer },
+  }, runCtx);
+  return recorded ? "escalated" : "skipped";
 }
 
 /** The classify-only work, under its claim. Returns the claim outcome. */
@@ -7331,7 +7372,45 @@ type NineStepArgs = {
   runCtx?: MaybeRunContext;
   /** Absent on the reply-ineligible (decoupled) path: no reply can be sent. */
   templateCtx?: TemplateStepContext;
+  /** The org's escalation phrases (the same list PR 2's price-keyword decision reads). */
+  escalationKeywords?: ReadonlyArray<string> | null;
 };
+
+/**
+ * Held for Jarrad exactly as the eight-answer path holds a price keyword: a hot hold
+ * (`keyword:price_offer`, one alert), no reply, no drip.
+ */
+async function holdNinePriceKeyword(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  detail: Record<string, unknown>,
+): Promise<AiDispatchOutcome> {
+  const keywordReason = `keyword:${HOT_KEYWORD_TIER}`;
+  await trace(supabase, {
+    kind: "hold",
+    name: "hot_wins",
+    result: "held",
+    detail: { ...detail, keyword: HOT_KEYWORD_TIER },
+  }, a.runCtx);
+  const flagOk = await markPropertyNeedsAttention(supabase, a.input.propertyId, keywordReason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "escalated", flagOk });
+  return { outcome: "escalated", reason: keywordReason };
+}
+
+/** A price keyword (or org escalation phrase of that tier) in the text; same test PR 2 uses. */
+function hasHotPriceKeyword(inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return matchEscalationKeyword(inboundBody, { allowedPhrases: escalationKeywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+}
+
+/**
+ * PR 2's hot-wins precedence for the nine answers: stop (asked_stop, hostile) and wrong person
+ * always beat hot; talked_price / open_to_selling already are hot; every other answer yields to
+ * a hot price keyword. Same phrase test PR 2 uses for the eight-answer path.
+ */
+const NINE_YIELDS_TO_HOT: ReadonlySet<string> = new Set(["maybe_later", "not_interested", "asked_who", "confirmed_owner", "needs_person"]);
+function nineYieldsToHotKeyword(answer: string, inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return NINE_YIELDS_TO_HOT.has(answer) && hasHotPriceKeyword(inboundBody, escalationKeywords);
+}
 
 async function nineHoldAndComplete(
   supabase: SupabaseClient<Database>,
@@ -7460,7 +7539,11 @@ export async function runNineQuestionsStep(
     { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
   );
   if (cls.kind === "failed") {
-    // Never falls back to the other engine: no trusted decision, so a person looks.
+    // Never falls back to the other engine: no trusted decision, so a person looks. A price
+    // keyword still makes it a hot hold (alert only), as in the eight-answer path.
+    if (hasHotPriceKeyword(input.inboundBody, a.escalationKeywords)) {
+      return holdNinePriceKeyword(supabase, a, { kind: "nine_questions", failed: cls.reason });
+    }
     return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${cls.reason}`);
   }
   const { result } = cls;
@@ -7475,6 +7558,11 @@ export async function runNineQuestionsStep(
   // Hostile wording or a hostile answer: never an automatic reply, never an automatic DNC.
   if (isHostileInbound(input.inboundBody) || result.answer === "hostile") {
     return holdHostileForConfirm(supabase, input, claim, runCtx);
+  }
+
+  // PR 2: hot wins over everything but stop / hostile / wrong person (see nineYieldsToHotKeyword).
+  if (nineYieldsToHotKeyword(result.answer, input.inboundBody, a.escalationKeywords)) {
+    return holdNinePriceKeyword(supabase, a, { kind: "nine_questions", answer: result.answer });
   }
 
   if (action.kind === "hot") {

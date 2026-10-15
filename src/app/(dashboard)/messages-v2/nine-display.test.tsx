@@ -49,9 +49,16 @@ describe("nine-question tape tag", () => {
     ["nine_automation_disabled:wrong_number", "Wrong person"],
     ["nine_reply_not_sent:automation_disabled", "Waits for a person"],
     ["reply_text_not_approved", "Waits for a person"],
-    ["drip_switch_off", "Waits for a person"],
   ])("hold reason %s -> %s", (reason, label) => {
     expect(tapeTagForWord(reasonWord(reason))?.label).toBe(label);
+  });
+
+  it("a hostile or hot hold reason beats the nine-question answer on the tape", () => {
+    const nineMaybeLater = step({ engine: "nine_questions", answer: "maybe_later" });
+    expect(tapeTagForRun({ ...run([nineMaybeLater]), reason: "hostile_needs_confirm:abc" })?.label).toBe("Hostile");
+    expect(tapeTagForRun({ ...run([nineMaybeLater]), reason: "keyword:price_offer" })?.label).not.toBe("Maybe later");
+    expect(tapeTagForRun({ ...run([nineMaybeLater]), reason: "hot_lead" })?.label).not.toBe("Maybe later");
+    expect(tapeTagForRun(run([nineMaybeLater]))?.label).toBe("Maybe later");
   });
 
   it("ignores a malformed nine payload and falls back", () => {

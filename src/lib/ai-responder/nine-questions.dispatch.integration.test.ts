@@ -14,6 +14,7 @@ import {
 } from "@/lib/sms-classification/nine-questions";
 
 import { startRun } from "@/lib/pipeline-runs";
+import { HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
 import { dispatchAiResponse } from "./dispatch";
 import { enrollNineDrip } from "./nine-questions-engine";
 import type { AnthropicLike } from "./generate";
@@ -730,6 +731,84 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(nine).toHaveLength(1);
     expect(nine[0]).toMatchObject({ kind: "shadow" });
     expect(nine[0]!.detail).toMatchObject({ shadow_engine: "nine_questions", answer: "maybe_later" });
+  });
+
+  // PR 2's hot-wins precedence on the nine answers (price keyword in the text).
+  const PRICE = "how much would you pay";
+  it.each([
+    ["maybe_later", { maybe_later: 0.8 }],
+    ["not_interested", { not_interested: 0.85 }],
+    ["needs_person", { confirmed_owner: 0.3 }],
+    ["asked_who", { asked_who: 0.9 }],
+    ["confirmed_owner", { confirmed_owner: 0.9 }],
+  ] as Array<[string, Partial<Record<NineQuestionId, number>>]>)("price keyword + %s: hot hold keyword:price_offer, no text, no drip", async (_a, probs) => {
+    await seedOrg();
+    const { lead } = await run(probs, `not right now, ${PRICE}`);
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("keyword:price_offer");
+  });
+
+  it("price keyword + asked_stop: asked_stop wins, not a hot hold", async () => {
+    await seedOrg();
+    const { lead } = await run({ asked_stop: 0.95 }, `STOP, ${PRICE}`);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("nine_asked_stop");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+  });
+
+  it("price keyword + wrong_person: the wrong-person path runs, not a hot hold", async () => {
+    await seedOrg();
+    const { lead } = await run({ wrong_person: 0.9 }, `wrong number, ${PRICE}`);
+    expect(await outboundBodies(lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.wrong_number]);
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).toBe("wrong_number");
+    expect(row.last_ai_escalation_reason).not.toBe("keyword:price_offer");
+  });
+
+  it("classification fails + price keyword: still a hot hold (alert only)", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    const inbound = await seedThread(lead, `what is your price, ${PRICE}`);
+    const keep = globalThis.fetch;
+    globalThis.fetch = (async (i: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof i === "string" ? i : i instanceof URL ? i.toString() : i.url;
+      if (url.includes("api.typesafe.ai")) return new Response("nope", { status: 401 });
+      return realFetch(i, init);
+    }) as typeof fetch;
+    try {
+      await dispatchAiResponse(supabase, { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: `what is your price, ${PRICE}`, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY }, { anthropic: NO_ANTHROPIC });
+    } finally {
+      globalThis.fetch = keep;
+    }
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("keyword:price_offer");
+  });
+
+  async function heldLeadText(probs: Partial<Record<NineQuestionId, number>>, text: string) {
+    await seedOrg();
+    await seedOwner();
+    const lead = await seedLead();
+    await supabase.from("properties").update({ needs_human_attention: true, last_ai_escalation_reason: "draft_held", needs_human_attention_since: new Date().toISOString() } as never).eq("id", lead.propertyId);
+    jevProbabilities = probs;
+    const inbound = await seedThread(lead, text);
+    await dispatchAiResponse(supabase, { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: text, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY }, { anthropic: NO_ANTHROPIC });
+    const { rows } = await pg.query("select payload from public.lead_events where property_id = $1 and source_type = $2 and source_id = $3", [lead.propertyId, HOT_TEXT_SOURCE_TYPE, inbound.id]);
+    return { lead, event: rows[0]?.payload ?? null };
+  }
+
+  it("held lead + hot nine answer: the hot text is recorded for Jarrad, nothing is sent", async () => {
+    const { lead, event } = await heldLeadText({ talked_price: 0.9 }, "ok how about 200k");
+    expect(event).toMatchObject({ held_lead: true });
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+  });
+
+  it("held lead + price keyword on a non-hot answer: the hot text is recorded", async () => {
+    expect((await heldLeadText({ maybe_later: 0.8 }, `maybe later, ${PRICE}`)).event).toMatchObject({ held_lead: true });
+  });
+  it("held lead + price keyword but asked_stop: not recorded", async () => {
+    expect((await heldLeadText({ asked_stop: 0.9 }, `stop texting, ${PRICE}`)).event).toBeNull();
+  });
+  it("held lead + calm non-hot answer: not recorded", async () => {
+    expect((await heldLeadText({ maybe_later: 0.8 }, "maybe later")).event).toBeNull();
   });
 
   it("nine engine in shadow mode: decision recorded, today's path still acts", async () => {

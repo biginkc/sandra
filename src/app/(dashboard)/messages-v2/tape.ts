@@ -67,7 +67,6 @@ export function tapeTagForWord(word: string | null | undefined): TapeTag | null 
       return TAGS.unclear;
     case "nine_reply_not_sent":
     case "reply_text_not_approved":
-    case "drip_switch_off":
       return NEUTRAL_TAG;
     default:
       return null;
@@ -109,13 +108,15 @@ export function tapeTagForRun(run: Pick<RunWithSteps, "reason" | "steps">, pinne
   // A reason frozen by the waiting-list snapshot beats anything the run itself says (old reason or old outcome).
   const pinned = pinnedReason ? tapeTagForWord(reasonWord(pinnedReason)) : null;
   if (pinned) return pinned;
+  const word = reasonWord(run.reason);
+  // A hostile or hot hold says what the text IS, whichever engine ran: it beats the nine-question answer
+  // (so a hostile-held text is never tagged "Maybe later").
+  if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm" || word === "hostile") {
+    return tapeTagForWord(word);
+  }
   // Nine-question engine: its answer is the tag (old-engine runs fall through to the mapping below).
   const nine = nineTapeTag(run.steps);
   if (nine) return nine;
-  const word = reasonWord(run.reason);
-  if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm") {
-    return tapeTagForWord(word);
-  }
   const fromClassifier = tapeTagForWord(classifyOutcome(run.steps));
   if (fromClassifier) return fromClassifier;
   const fromReason = tapeTagForWord(word);
@@ -311,8 +312,6 @@ export function holdReasonSentence(
   if (word === "nine_reply_not_sent") return "The reply was not sent. A person should take a look.";
   // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   if (word === "reply_text_not_approved") return "There is no approved reply for this one. A person should take a look.";
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
-  if (word === "drip_switch_off") return "Sandra sent the reply. The drip switch is off, so no drip started.";
   switch (t?.label) {
     case "Asked to stop":
       return `${who} asked to stop. Nothing sent.`;
