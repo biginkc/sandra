@@ -398,8 +398,8 @@ describe("MessagesV2View", () => {
         ok: true as const,
         data: input.ids.map((id) =>
           id === "aaaa"
-            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null }
-            : { id, eligible: true, flagAt: "2026-10-09T00:00:00.000000Z", flagReason: "hostile_needs_confirm", runId: null, activityAt: snapshot.entries[1].at },
+            ? { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, draftId: null, draftProperty: null }
+            : { id, eligible: true, flagAt: "2026-10-09T00:00:00.000000Z", flagReason: "hostile_needs_confirm", runId: null, activityAt: snapshot.entries[1].at, draftId: null, draftProperty: null },
         ),
       }));
       const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
@@ -459,7 +459,7 @@ describe("MessagesV2View", () => {
       const revalidateHolds = vi.fn(async (input: { ids: string[] }) =>
         fail
           ? { ok: false as const, error: { code: "X", message: "x" } }
-          : { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at })) },
+          : { ok: true as const, data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, draftId: null, draftProperty: null })) },
       );
       const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
       await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
@@ -475,6 +475,29 @@ describe("MessagesV2View", () => {
       });
       await waitFor(() => expect(screen.queryByTestId("holds-recheck-failed")).toBeNull());
       expect(screen.getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a displayed draft moved to another property between checks: card marked Updated and actions disabled", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const a = { ...openHold("aaaa"), ...at(1), draft: { id: "d1", inbound_message_id: null, body: "hi" }, draft_held: true };
+      const snapshot = buildSnapshot([a]);
+      const revalidateHolds = vi.fn(async (input: { ids: string[] }) => ({
+        ok: true as const,
+        // Still eligible (an independent flag keeps it open) but the shown draft now belongs elsewhere.
+        data: input.ids.map((id) => ({ id, eligible: true, flagAt: snapshot.entries[0].fa, flagReason: null, runId: null, activityAt: snapshot.entries[0].at, draftId: null, draftProperty: null })),
+      }));
+      const actions = { send: vi.fn(), editAndSend: vi.fn(), takeOver: vi.fn(), assign: vi.fn(), dismiss: vi.fn(), listAssignees: vi.fn() };
+      await mount({ ...props([], [a]), holdsSnapshot: snapshot, revalidateHolds, actions });
+      expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => expect(screen.getByTestId("hold-updated")).toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     } finally {
       vi.useRealTimers();
     }

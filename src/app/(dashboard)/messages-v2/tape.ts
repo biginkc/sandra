@@ -208,7 +208,10 @@ export function deriveTape(rawRun: RunWithSteps, who: string, flagReason?: strin
       kind: "decided",
       tag,
       stage,
-      sentence: sentenceFor(tag, who, { replySent, closed: false, waiting: false, handed: false }),
+      // A snapshot run reads exactly like its card, whatever its status (the status is in the "did" line).
+      sentence: pinned
+        ? holdReasonSentence(run, run.reason, who, true)
+        : sentenceFor(tag, who, { replySent, closed: false, waiting: false, handed: false }),
       did: didLine(run, stage, replySent),
     };
   }

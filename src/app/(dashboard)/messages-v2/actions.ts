@@ -18,6 +18,8 @@ import { createClient } from "@/lib/supabase/server";
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 import { authorizeMessagesV2 } from "./authorize";
+import { draftStillOn } from "./hold-list";
+import type { LooseSupabase } from "./queries";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
@@ -123,18 +125,38 @@ async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Pro
   }
 }
 
-export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft }) {
-  return run((d) => sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) }));
+/**
+ * The property the clicker saw must still own the draft (it can be re-pointed at another property after the list
+ * loaded). Refused with HOLD_STALE, the code the card already turns into a reload. A failed check also refuses.
+ */
+async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: string | undefined): Promise<Result<null>> {
+  if (!propertyId) return { ok: true, data: null };
+  const verdict = await draftStillOn(d.admin as unknown as LooseSupabase, d.orgId, draftId, propertyId);
+  if (verdict === "ok") return { ok: true, data: null };
+  return err({
+    code: "HOLD_STALE",
+    message: verdict === "stale" ? "This draft no longer belongs to this lead. Refresh to see where it is now." : "Could not confirm the draft. Nothing was sent; refresh and try again.",
+  });
 }
 
-export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft }) {
-  return run((d) =>
-    editAndSendHeldDraft(d, {
+export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft; propertyId?: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input.propertyId ? String(input.propertyId) : undefined);
+    if (!guard.ok) return guard;
+    return sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) });
+  });
+}
+
+export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft; propertyId?: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input.propertyId ? String(input.propertyId) : undefined);
+    if (!guard.ok) return guard;
+    return editAndSendHeldDraft(d, {
       draftId: String(input.draftId),
       body: String(input.body ?? ""),
       seen: seenDraft(input.seen),
-    }),
-  );
+    });
+  });
 }
 
 export async function takeOverHoldAction(input: { propertyId: string; seen: HoldSeen }) {

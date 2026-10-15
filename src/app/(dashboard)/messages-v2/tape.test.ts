@@ -218,3 +218,13 @@ describe("pinned reasons apply whatever the run's status", () => {
     expect(tape.did).toBeTruthy();
   });
 });
+
+describe("every snapshot run reads like its card, whatever its status", () => {
+  it.each([[null], ["model:opt_out"], ["model:price_or_offer"]])("a running (nonterminal) run with pinned %s", (reason) => {
+    const r = run({ status: "running", reason: null, steps: [step(1, "jev", "classify", "pass", { outcome: "not_interested" }), step(2, "reply", "template_reply", "sent")] });
+    const tape = deriveTape(r, "Dee", reason, true);
+    const card = holdReasonSentence({ ...r, reason }, reason, "Dee", true);
+    expect(tape.kind === "decided" && tape.sentence).toBe(card);
+    expect(tape.kind === "decided" && tape.sentence).not.toMatch(/replied|said no/);
+  });
+});

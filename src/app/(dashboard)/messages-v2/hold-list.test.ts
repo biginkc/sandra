@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fakePostgrest } from "./fake-postgrest.test-util";
 import { parseSnapshotIds } from "./hold-activity";
 import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
-import { buildSnapshot, effectiveFlagReasons, liveStateOf, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
+import { buildSnapshot, draftStillOn, effectiveFlagReasons, liveStateOf, loadEligibleHolds, recheckOpen, snapshotFlagReasons } from "./hold-list";
 import { deriveTape, holdReasonSentence, withEffectiveReason } from "./tape";
 import type { OpenHold, RunWithSteps } from "./types";
 
@@ -562,5 +562,24 @@ describe("Codex round: drafts must still belong to the hold, and to the org", ()
     });
     expect(list.holds).toHaveLength(0);
     expect(list.unverified).toBe(1);
+  });
+});
+
+describe("Send / Edit guard: the draft must still be on the property the clicker saw", () => {
+  it("a draft moved to another (unlocked) property -> a Send with the old property id is STALE", async () => {
+    const tables = { properties: [plainProp(3), plainProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] };
+    expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(3))).toBe("stale");
+    expect(await draftStillOn(db(tables).client, "org", u(1, 4), u(4))).toBe("ok");
+  });
+
+  it("a draft now on a locked property, or no longer pending, is STALE; a failed lookup refuses (null)", async () => {
+    expect(await draftStillOn(db({ properties: [lockedProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] }).client, "org", u(1, 4), u(4))).toBe("stale");
+    expect(await draftStillOn(db({ properties: [plainProp(4)], ai_reply_drafts: [] }).client, "org", u(1, 4), u(4))).toBe("stale");
+    expect(await draftStillOn(db({ properties: [plainProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] }, { fail: () => true }).client, "org", u(1, 4), u(4))).toBeNull();
+  });
+
+  it("liveStateOf reports the hold's current draft and its property", async () => {
+    const states = (await liveStateOf(db({ properties: [flagged(3, t(1)), plainProp(4)], ai_reply_drafts: [draft(1, { property_id: u(4) })] }).client, "org", [u(3)]))!;
+    expect(states[0]).toMatchObject({ id: u(3), eligible: true, draftId: null, draftProperty: null }); // the draft now belongs to 4, not 3
   });
 });

@@ -90,7 +90,7 @@ describe("hold action controls", () => {
       const send = vi.fn().mockReturnValue(new Promise((r) => (release = r)));
       renderRail(hold(), api({ send }));
       await userEvent.click(button(/^Send/));
-      expect(send).toHaveBeenCalledWith({ draftId: "d1", seen: { body: "Draft text for the seller", editedAt: null } });
+      expect(send).toHaveBeenCalledWith({ draftId: "d1", seen: { body: "Draft text for the seller", editedAt: null }, propertyId: "p1" });
       expect(screen.getByTestId("hold-status")).toHaveTextContent(/sending/i);
       expect(screen.queryByRole("button", { name: /^Send/ })).toBeNull();
       release(ok({ messageId: "out-1" }));
@@ -129,6 +129,7 @@ describe("hold action controls", () => {
       expect(actions.send).toHaveBeenCalledWith({
         draftId: "d1",
         seen: { body: "edited text", editedAt: "2026-10-08T11:58:00+00:00" },
+        propertyId: "p1",
       });
     });
 
@@ -176,6 +177,7 @@ describe("hold action controls", () => {
         draftId: "d1",
         body: "A shorter reply",
         seen: { body: "Draft text for the seller", editedAt: null },
+        propertyId: "p1",
       });
       await waitFor(() => expect(screen.getByTestId("hold-status")).toHaveTextContent(/sent/i));
     });

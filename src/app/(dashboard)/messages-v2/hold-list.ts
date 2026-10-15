@@ -544,6 +544,9 @@ export type HoldLiveState = {
   flagReason: string | null;
   runId: string | null;
   activityAt: string | null;
+  /** The newest pending draft the hold would show now, and the property it resolves to (null = none). */
+  draftId: string | null;
+  draftProperty: string | null;
 };
 
 /** Current state of some ids, from the CURRENT eligible list (locked / resolved / unverifiable -> eligible false). */
@@ -554,7 +557,41 @@ export async function liveStateOf(supabase: LooseSupabase, orgId: string, ids: r
   return ids.map((id) => {
     const h = byId.get(id);
     return h
-      ? { id, eligible: true, flagAt: h.seen?.flagAt ?? null, flagReason: h.flag_reason ?? null, runId: h.run?.id ?? null, activityAt: holdActivityAt(h) }
-      : { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null };
+      ? {
+          id,
+          eligible: true,
+          flagAt: h.seen?.flagAt ?? null,
+          flagReason: h.flag_reason ?? null,
+          runId: h.run?.id ?? null,
+          activityAt: holdActivityAt(h),
+          draftId: h.draft?.id ?? null,
+          // Every draft in the eligible list resolved to exactly this hold's property.
+          draftProperty: h.draft ? h.id : null,
+        }
+      : { id, eligible: false, flagAt: null, flagReason: null, runId: null, activityAt: null, draftId: null, draftProperty: null };
   });
+}
+
+/**
+ * Send / Edit guard: the draft must still be pending and still resolve to exactly the property the clicker saw,
+ * in this org, unlocked. "ok" | "stale" | null (lookup failed: refuse).
+ */
+export async function draftStillOn(
+  supabase: LooseSupabase,
+  orgId: string,
+  draftId: string,
+  propertyId: string,
+): Promise<"ok" | "stale" | null> {
+  const res = await fetchAllKeyset<HoldDraftRow>(() =>
+    supabase.from("ai_reply_drafts").select(draftColumns(false)).eq("org_id", orgId).eq("status", "pending").in("id", [draftId]),
+  );
+  if (res.error) return null;
+  if (res.rows.length !== 1) return "stale";
+  const candidates = await resolveDraftProperties(supabase, orgId, res.rows);
+  if (!candidates) return null;
+  const c = [...(candidates.get(draftId) ?? [])];
+  if (c.length !== 1 || c[0] !== propertyId) return "stale";
+  const locked = await lockedPropertyIds(supabase, orgId, [propertyId]);
+  if (!locked) return null;
+  return locked.has(propertyId) ? "stale" : "ok";
 }

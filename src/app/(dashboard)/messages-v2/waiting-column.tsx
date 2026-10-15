@@ -276,7 +276,9 @@ export function WaitingColumn({
   const shownIdsRef = useRef<string[]>([]);
   const entriesRef = useRef(entries);
   const olderRef = useRef(older);
+  const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
+    liveRef.current = live;
     shownIdsRef.current = shown.map((e) => e.id);
     entriesRef.current = entries;
     olderRef.current = older;
@@ -307,7 +309,11 @@ export function WaitingColumn({
           const e = byId.get(st.id);
           if (!e) continue;
           if (!st.eligible) gone.push(st.id);
-          else if (st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
+          else {
+            const shownDraft = liveRef.current.get(st.id)?.draft?.id ?? null;
+            const draftMoved = st.draftId !== shownDraft || (shownDraft !== null && st.draftProperty !== st.id);
+            if (draftMoved || st.flagAt !== e.fa || st.flagReason !== reasonOf(e.r) || st.runId !== e.run || st.activityAt !== e.at) changedIds.push(st.id);
+          }
         }
       }
       if (!alive) return;

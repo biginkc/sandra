@@ -12,8 +12,9 @@ export type SeenDraft = { body: string; editedAt: string | null };
  * contract here keeps client components free of server-only imports.
  */
 export type HoldActionsApi = {
-  send(input: { draftId: string; seen: SeenDraft }): Promise<Result<{ messageId: string }>>;
-  editAndSend(input: { draftId: string; body: string; seen: SeenDraft }): Promise<Result<{ messageId: string }>>;
+  /** propertyId = the card the clicker saw; the server refuses (HOLD_STALE) if the draft no longer resolves to it. */
+  send(input: { draftId: string; seen: SeenDraft; propertyId?: string }): Promise<Result<{ messageId: string }>>;
+  editAndSend(input: { draftId: string; body: string; seen: SeenDraft; propertyId?: string }): Promise<Result<{ messageId: string }>>;
   takeOver(input: { propertyId: string; seen: HoldSeen }): Promise<Result<{ leadHref: string }>>;
   assign(input: { propertyId: string; assigneeId: string | null }): Promise<Result<null>>;
   dismiss(input: { propertyId: string; reason: string; seen: HoldSeen }): Promise<Result<null>>;
