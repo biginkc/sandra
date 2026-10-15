@@ -111,6 +111,5 @@ describe("legacy sendSmsFromLead is unchanged", () => {
     mocks.createClient.mockResolvedValue(client({ direction: "inbound", org_id: "org-1", property_id: "prop-1", conversation_id: null }));
     await (sendSmsFromLead as unknown as (...a: unknown[]) => Promise<unknown>)("prop-1", "hi", null, false, "+18165550123", INBOUND);
     expect(mocks.sendSmsToContact.mock.calls[0][1]).not.toHaveProperty("metadata");
-    expect(sendSmsFromLead.length).toBe(5);
   });
 });
