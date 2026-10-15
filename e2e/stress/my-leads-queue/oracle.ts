@@ -256,13 +256,14 @@ export function place(lead: Lead, now: number, opts: OracleOptions = {}): Placem
   const min = (xs: Appointment[]) => (xs.length ? Math.min(...xs.map(effTime)) : null);
   const dueAt = min(dueSet), missedAt = min(missedSet), futureAt = min(futureSet);
   // Approved 2026-10-15 (Jarrad, verbatim): "An offer follow-up that the rep snoozed is due at its snooze time, not its original
-  // time. Until the snooze time passes, the lead stays in Waiting on them · Offer out." So the chain task's time is its effective
-  // time greatest(due, snoozed_until), as for every other commitment.
-  const chainEff = chainTasks.length ? Math.min(...chainTasks.map(effTime)) : null;
-  // Ruling relayed 2026-10-15 with Jarrad's authority: exactly as written, so a SNOOZED chain task (its snooze time is its effective
-  // time) has no 15-minute early window: due once the snooze time is reached. Unsnoozed follow-ups keep the window.
-  const firstChain = [...chainTasks].sort((a, b) => effTime(a) - effTime(b) || a.ref.localeCompare(b.ref))[0];
-  const chainSnoozed = !!firstChain && firstChain.status === "snoozed" && firstChain.snoozedUntil !== undefined && firstChain.snoozedUntil >= firstChain.due;
+  // time. Until the snooze time passes, the lead stays in Waiting on them · Offer out." A snoozed chain task's time is its snooze
+  // time (earlier, equal or later than due), with no 15-minute early window (ruling relayed with Jarrad's authority). An unsnoozed
+  // chain task keeps its due time and the window.
+  const snoozedChain = (a: Appointment) => a.status === "snoozed" && a.snoozedUntil !== undefined;
+  const chainTime = (a: Appointment) => (snoozedChain(a) ? a.snoozedUntil! : effTime(a));
+  const chainEff = chainTasks.length ? Math.min(...chainTasks.map(chainTime)) : null;
+  const firstChain = [...chainTasks].sort((a, b) => chainTime(a) - chainTime(b) || a.ref.localeCompare(b.ref))[0];
+  const chainSnoozed = !!firstChain && snoozedChain(firstChain);
 
   const group = opts.group ?? [];
   const inbound = latestInbound(lead, group);

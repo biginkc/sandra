@@ -33,14 +33,14 @@ const DAY = 24 * HOUR;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
 
-async function withDb(fn: (db: Client) => Promise<void>) {
+async function withDb(fn: (db: Client) => Promise<void>, sql = migration) {
   if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
   requireLoopbackPostgresUrl(url);
   const db = new Client({ connectionString: url });
   await db.connect();
   try {
     await db.query('begin');
-    await db.query(migration);
+    await db.query(sql);
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
 }
@@ -123,7 +123,18 @@ async function world(db: Client) {
     const r = (await db.query('select * from public.my_leads_work_classified($1,$2,$3)', [org, member, when.toISOString()])).rows;
     return Object.fromEntries(r.map((x) => [x.property_id, x]));
   };
-  return { org, sam, other, pAt, at, raw, contact, lead, text, attempt, event, enroll, chainOffer, classified };
+  // A rep text whose only proof of acceptance is its ledger receipt(s): message status pending, no sent_at.
+  const ledgered = async (property: string, homeowner: string, when: string, receipts: Array<[string, string]>) => {
+    const id = randomUUID();
+    await raw(`insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata)
+               values ($1,$2,'sms','outbound','hi','pending',$3,$4,$5,'{}')`, [id, org, property, homeowner, when]);
+    for (const [state, updated] of receipts) await raw(
+      `insert into public.rep_sms_delivery_ledger(id,org_id,actor_user_id,submission_key,property_id,contact_id,sender_assignment_id,provider,provider_account_id,provider_sender_id,from_number,to_number,body,state,claim_token,message_id,created_at,updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,'sendillo','acct','sender','+18165550100','+18165550101','hi',$8,$9,$10,$11,$11)`,
+      [randomUUID(), org, sam, randomUUID(), property, homeowner, randomUUID(), state, randomUUID(), id, updated]);
+    return id;
+  };
+  return { org, sam, other, pAt, at, raw, contact, lead, text, attempt, event, enroll, chainOffer, ledgered, classified };
 }
 
 const cell = (r: Json) => `${r.place}/${r.reason}/${r.row_no}`;
@@ -154,6 +165,24 @@ describe('Rule 1: a snoozed offer follow-up is due at its snooze time', () => {
       expect(cell((await w.classified(new Date(w.pAt.getTime() - 1)))[early.id])).toBe('their_move/offer_out/12');
     });
   });
+});
+
+describe('Rule 1: the snooze time wins whether it is earlier than, equal to or later than the original due time', () => {
+  for (const [name, dueFromEnd] of [['earlier than due', 2 * DAY], ['equal to due', 0], ['later than due', -2 * DAY]] as const) {
+    it(`snoozed ${name}: Waiting until the snooze time, Needs attention from it, next_change_at = snooze time`, async () => {
+      await withDb(async (db) => {
+        const w = await world(db);
+        const end = new Date(w.pAt.getTime() + DAY);
+        const l = await w.lead({ stage: 'offer_sent' }); await w.chainOffer(l.id, new Date(end.getTime() + dueFromEnd).toISOString(), end.toISOString());
+        const r = await w.classified();
+        expect(cell(r[l.id])).toBe('their_move/offer_out/12');
+        expect(new Date(r[l.id].next_change_at).getTime()).toBe(end.getTime());
+        expect(cell((await w.classified(new Date(end.getTime() - 1)))[l.id])).toBe('their_move/offer_out/12');
+        expect(cell((await w.classified(end))[l.id])).toBe('your_move/offer/8');
+        expect(cell((await w.classified(new Date(end.getTime() + 1)))[l.id])).toBe('your_move/offer/8');
+      });
+    });
+  }
 });
 
 describe('Rule 2: a text Sandra cannot tie to one lead', () => {
@@ -253,6 +282,50 @@ describe('Rule 2: a text Sandra cannot tie to one lead', () => {
       const r = await w.classified();
       for (const id of [a.id, b.id]) expect(cell(r[id])).toBe('your_move/new_reply/5');
     });
+  });
+
+  // A sibling's answer whose only proof of acceptance is its ledger receipt (the latest receipt per message wins).
+  const receiptCases: Array<[string, Array<[number, string]>, boolean]> = [
+    ['accepted', [[0, 'accepted']], true],
+    ['delivered', [[0, 'delivered']], true],
+    ['delivery_failed (accepted, then failed)', [[0, 'delivery_failed']], true],
+    ['reserved', [[0, 'reserved']], false],
+    ['sending', [[0, 'sending']], false],
+    ['failed_not_dispatched', [[0, 'failed_not_dispatched']], false],
+    ['blocked', [[0, 'blocked']], false],
+    ['unknown', [[0, 'unknown']], false],
+    ['older accepted, newer failed_not_dispatched (latest wins)', [[0, 'accepted'], [MIN, 'failed_not_dispatched']], false],
+    ['older failed_not_dispatched, newer delivered (latest wins)', [[0, 'failed_not_dispatched'], [MIN, 'delivered']], true],
+  ];
+  for (const [what, receipts, answers] of receiptCases) {
+    it(`a sibling text backed only by a ${what} ledger receipt ${answers ? 'answers' : 'does not answer'} it on every lead`, async () => {
+      await withDb(async (db) => {
+        const w = await world(db);
+        const h = await w.contact();
+        const a = await w.lead({ homeowner: h }), b = await w.lead({ homeowner: h });
+        await w.text(null, h, 'inbound', w.at(-3 * HOUR));
+        const sent = w.pAt.getTime() - HOUR;
+        await w.ledgered(b.id, h, new Date(sent).toISOString(), receipts.map(([d, st]) => [st, new Date(sent + d).toISOString()]));
+        const r = await w.classified();
+        expect(r[a.id].facts.latestInbound.handled).toBe(answers);
+        expect(r[b.id].facts.latestInbound.handled).toBe(answers);
+      });
+    });
+  }
+
+  it('mutation: with the cross-lead receipt read emptied, a ledger-only sibling answer no longer answers the owner lead', async () => {
+    const needle = 'where l.org_id = p_org and l.message_id in (select id from cm)';
+    expect(migration.split(needle).length).toBe(2);
+    await withDb(async (db) => {
+      const w = await world(db);
+      const h = await w.contact();
+      const a = await w.lead({ homeowner: h }), b = await w.lead({ homeowner: h });
+      await w.text(null, h, 'inbound', w.at(-3 * HOUR));
+      await w.ledgered(b.id, h, w.at(-HOUR), [['accepted', w.at(-HOUR)]]);
+      const r = await w.classified();
+      expect(r[a.id].facts.latestInbound.handled).toBe(false);
+      expect(r[a.id].row_no).toBe('5');
+    }, migration.replace(needle, 'where false and l.org_id = p_org and l.message_id in (select id from cm)'));
   });
 });
 

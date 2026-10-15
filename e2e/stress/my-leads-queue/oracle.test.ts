@@ -243,6 +243,10 @@ describe("v9 corrections", () => {
     expect(where(chain(NOW + 1))).toBe("their_move/offer_out/12");
     expect(where(chain(NOW))).toBe("your_move/offer/8");
     expect(where(chain(NOW + 10 * MIN))).toBe("their_move/offer_out/12");
+    // the snooze time wins even when it is earlier than the original due time
+    const early = (snoozedUntil: number) => lead({ stage: "offer_sent", offer: off, appointments: [{ ref: "c", due: NOW + 2 * DAY, status: "snoozed", snoozedUntil, offerChain: true }] });
+    expect(where(early(NOW + 1))).toBe("their_move/offer_out/12");
+    expect(where(early(NOW))).toBe("your_move/offer/8");
     const open = lead({ stage: "offer_sent", offer: { ...off, followUpAt: NOW + 15 * MIN }, appointments: [{ ref: "c", due: NOW + 15 * MIN, status: "open", offerChain: true }] });
     expect(where(open)).toBe("your_move/offer/8");
   });

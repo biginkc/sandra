@@ -7,7 +7,8 @@
 -- Ruling relayed 2026-10-15 with Jarrad's authority: implement it exactly as written. A SNOOZED offer-chain task gets no 15-minute
 -- early window: Waiting · Offer out while p_at < snoozed_until, Needs attention · Offer from the snooze time itself (due when the
 -- effective time <= p_at). Unsnoozed offer follow-ups keep the existing 15-minute early window.
---   ap.snz_eff   the task is snoozed and its snooze time is its effective time (snoozed_until >= due_at)
+--   ap.eff       for a snoozed offer-chain task: snoozed_until itself, whether earlier than, equal to or later than due_at
+--   ap.snz_eff   the task is snoozed (status 'snoozed' with snoozed_until)
 --   chain_snz    the earliest chain task (by effective time, then id) is such a snoozed task
 --   offer_due    offer_eff <= p_at for a snoozed chain task, <= p_at + 15 min otherwise (rows 8, 11, 12)
 --   tm           a snoozed chain task's clock boundary is snoozed_until itself, not snoozed_until - 15 min
@@ -247,10 +248,14 @@ language sql stable security definer set search_path = '' as $$
     where o.org_id = p_org and o.property_id in (select property_id from base)
     order by o.property_id, o.sent_at desc, o.id),
   ap as materialized (
-    select b.property_id as lead_id, greatest(t.due_at, coalesce(t.snoozed_until, t.due_at)) as eff, t.mode, t.status, t.source_key,
+    select b.property_id as lead_id,
+      -- a snoozed offer follow-up is due at its snooze time, earlier or later than due_at (approved Rule 1); every other task keeps
+      -- greatest(due_at, snoozed_until)
+      case when po.pending and po.chain is not null and po.chain = t.calendar_chain_id and t.status = 'snoozed' and t.snoozed_until is not null
+        then t.snoozed_until else greatest(t.due_at, coalesce(t.snoozed_until, t.due_at)) end as eff, t.mode, t.status, t.source_key,
       t.id as task_id, case when t.type = 'appointment' then 'appointment' else 'callback' end as task_kind,
       (t.status = 'snoozed' and t.snoozed_until is not null) as snz,
-      (t.status = 'snoozed' and t.snoozed_until is not null and t.snoozed_until >= t.due_at) as snz_eff,
+      (t.status = 'snoozed' and t.snoozed_until is not null) as snz_eff,
       (po.pending and po.chain is not null and po.chain = t.calendar_chain_id) as is_offer
     from base b
     join public.tasks t on t.org_id = p_org and t.related_property_id = b.property_id and t.next_step_kind = 'appointment'

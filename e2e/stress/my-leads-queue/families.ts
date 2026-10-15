@@ -137,6 +137,9 @@ export const FAMILIES: readonly FamilyDef[] = [
       // Ruling (Jarrad, 2026-10-15): no 15-minute early window for a snoozed chain task. 1 ms before / at / after the snooze end, and
       // 10 minutes before it (Waiting: the early window does not apply); an unsnoozed chain task at due - 15 min still shows early.
       ...EXACT.map((e) => k.lead(`chain_snooze_end${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
+      // the snooze time wins whether it is earlier than or equal to the original due time (later is chain_snooze_end above)
+      ...EXACT.map((e) => k.lead(`chain_snooze_before_due${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
+      ...EXACT.map((e) => k.lead(`chain_snooze_at_due${e}`, { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - e }, appointments: [k.appt("c", k.now - e, { offerChain: true, status: "snoozed", snoozedUntil: k.now - e })] })),
       k.lead("chain_snooze_10min_left", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now - 2 * DAY }, appointments: [k.appt("c", k.now - 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 10 * MIN })] }),
       k.lead("chain_unsnoozed_early", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 15 * MIN }, appointments: [k.appt("c", k.now + 15 * MIN, { offerChain: true })] }),
       k.lead("chain_snoozed_future", { stage: "offer_sent", offer: { ...offer, followUpAt: k.now + 2 * DAY }, appointments: [k.appt("c", k.now + 2 * DAY, { offerChain: true, status: "snoozed", snoozedUntil: k.now + 3 * DAY })] }),
