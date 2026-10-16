@@ -17,6 +17,15 @@ describe("my-leads stress guards", () => {
   ])("refuses %s", (url) => {
     expect(() => resolveDbUrl({ MYLEADS_STRESS_DB_URL: url })).toThrow(GuardRefusal);
   });
+  it("refuses the shared local stack even when it is selected explicitly", () => {
+    for (const shared of ["postgresql://postgres:postgres@127.0.0.1:54329/postgres", "postgresql://postgres:postgres@localhost:54329/postgres"]) {
+      expect(() => resolveDbUrl({ MYLEADS_STRESS_DB_URL: shared })).toThrow(/DB_SHARED_STACK/);
+      expect(() => resolveIntegrationDbUrl({ MYLEADS_STRESS_DB_URL: shared })).toThrow(/DB_SHARED_STACK/);
+      expect(() => resolveDbUrl({ TEST_SUPABASE_DB_URL: shared })).toThrow(/DB_SHARED_STACK/);
+    }
+    expect(() => resolveIntegrationApiUrl({ LOCAL_SUPABASE_URL: "http://127.0.0.1:54331" })).toThrow(/API_SHARED_STACK/);
+    expect(() => resolveIntegrationApiUrl({ LOCAL_SUPABASE_URL: "not a url" })).toThrow(/API_URL_INVALID/);
+  });
   it("integration lanes ignore a config-injected TEST_SUPABASE_DB_URL and need MYLEADS_STRESS_DB_URL", () => {
     const shared = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
     expect(() => resolveIntegrationDbUrl({ TEST_SUPABASE_DB_URL: shared })).toThrow(/DB_URL_UNSET/);

@@ -12,6 +12,9 @@ const SHARED = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
 const OWN = "postgresql://postgres:postgres@127.0.0.1:55722/postgres";
 
 describe("integrationEnv (runtime)", () => {
+  it("refuses an explicitly selected shared-stack MYLEADS_STRESS_DB_URL", () => {
+    expect(() => integrationEnv({ MYLEADS_STRESS_DB_URL: SHARED })).toThrow(/DB_SHARED_STACK/);
+  });
   it("refuses when only the config-injected TEST_SUPABASE_DB_URL is present", () => {
     expect(() => integrationEnv({ TEST_SUPABASE_DB_URL: SHARED })).toThrow(/DB_URL_UNSET/);
   });

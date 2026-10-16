@@ -13,6 +13,9 @@ import { requireLoopbackPostgresUrl } from "../../../src/lib/testing/loopback-po
  *    sendSmsToContact in race.dispatch.integration.test.ts).
  */
 export const HARNESS_ADDRESS_PREFIX = "S1RACE ";
+/** Ports of the machine-wide shared local Supabase stack. The harness commits and deletes rows, so it never runs there. */
+export const SHARED_STACK_DB_PORT = "54329";
+export const SHARED_STACK_API_PORT = "54331";
 
 export class GuardRefusal extends Error {
   constructor(public readonly code: string, message: string) {
@@ -33,6 +36,9 @@ export function resolveDbUrl(env: Env = process.env): string {
     requireLoopbackPostgresUrl(url);
   } catch {
     throw new GuardRefusal("DB_NOT_LOOPBACK", "the stress harness only runs against a loopback Postgres (127.0.0.1 / localhost / [::1]) with no query string.");
+  }
+  if (new URL(url).port === SHARED_STACK_DB_PORT) {
+    throw new GuardRefusal("DB_SHARED_STACK", `port ${SHARED_STACK_DB_PORT} is the shared local stack; point the harness at your own disposable stack.`);
   }
   return url;
 }
@@ -66,6 +72,11 @@ export function integrationEnv(env: Env = process.env): Record<string, string | 
 export function resolveIntegrationApiUrl(env: Env = process.env): string {
   const url = env.LOCAL_SUPABASE_URL;
   if (!url) throw new GuardRefusal("API_URL_UNSET", "set LOCAL_SUPABASE_URL to your own disposable stack's API; there is no default.");
+  let port = "";
+  try { port = new URL(url).port; } catch { throw new GuardRefusal("API_URL_INVALID", "LOCAL_SUPABASE_URL is not a URL."); }
+  if (port === SHARED_STACK_API_PORT) {
+    throw new GuardRefusal("API_SHARED_STACK", `port ${SHARED_STACK_API_PORT} is the shared local stack's API; point the harness at your own disposable stack.`);
+  }
   return url;
 }
 
