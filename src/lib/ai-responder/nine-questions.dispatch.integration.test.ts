@@ -172,13 +172,16 @@ async function seedOwner(): Promise<string> {
   return id;
 }
 
-async function seedLead() {
+async function seedLead(opts: { optedOut?: boolean; responderDisabled?: boolean } = {}) {
   const phone = `+1816755${String(5000 + phoneCounter++).padStart(4, "0")}`;
   const { data: contact } = await supabase.from("contacts").insert({ org_id: orgId, first_name: "Nine", last_name: "Test", phone_1: phone, phone_1_type: "mobile" }).select("id").single();
   await supabase.from("consent_events").insert({ contact_id: contact!.id, channel: "sms", event_type: "opt_in_marketing_written", source: "nine-test", org_id: orgId });
+  if (opts.optedOut) {
+    await supabase.from("consent_events").insert({ contact_id: contact!.id, channel: "sms", event_type: "opt_out", source: "nine-test", org_id: orgId });
+  }
   const { data: property, error } = await supabase
     .from("properties")
-    .insert({ org_id: orgId, address: "1 Nine Ln", state: "MO", status: "prospect", homeowner_contact_id: contact!.id })
+    .insert({ org_id: orgId, address: "1 Nine Ln", state: "MO", status: "prospect", homeowner_contact_id: contact!.id, ...(opts.responderDisabled ? { ai_responder_disabled: true } : {}) })
     .select("id")
     .single();
   expect(error).toBeNull();
@@ -201,6 +204,11 @@ async function seedThread(lead: { propertyId: string; contactId: string; phone: 
   expect(error).toBeNull();
   void out;
   return { id: inbound!.id, conversationId: inbound!.conversation_id as string };
+}
+
+async function hotTextRecords(propertyId: string): Promise<number> {
+  const { rows } = await pg.query("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [propertyId, HOT_TEXT_SOURCE_TYPE]);
+  return rows[0].n as number;
 }
 
 async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>) {
@@ -757,6 +765,61 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { lead } = await run({ asked_stop: 0.95 }, `STOP, ${PRICE}`);
     expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("nine_asked_stop");
     expect(await outboundBodies(lead.propertyId)).toEqual([]);
+  });
+
+  // Mixed legal + price text, and the gates that keep a price text silent.
+  const LAWYER_PRICE = "My lawyer is involved. What's your price?";
+  it.each([
+    ["maybe_later", { maybe_later: 0.8 }],
+    ["needs_person", { confirmed_owner: 0.3 }],
+  ] as Array<[string, Partial<Record<NineQuestionId, number>>]>)("lawyer + price, nine answer %s: held under the legal tier (not price_offer), one hot text record, nothing sent", async (_a, probs) => {
+    await seedOrg();
+    await seedOwner();
+    const { lead } = await run(probs, LAWYER_PRICE);
+    const reason = (await propertyRow(lead.propertyId)).last_ai_escalation_reason;
+    expect(reason).toMatch(/^keyword:/);
+    expect(reason).not.toBe("keyword:price_offer");
+    expect(await hotTextRecords(lead.propertyId)).toBe(1);
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(getMockMessageLog()).toHaveLength(0);
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+  });
+
+  it("lawyer + price, nine answer asked_stop: the hold stays, no hot record, nothing sent", async () => {
+    await seedOrg();
+    await seedOwner();
+    const { lead } = await run({ asked_stop: 0.95 }, LAWYER_PRICE);
+    const row = await propertyRow(lead.propertyId);
+    expect(row.needs_human_attention).toBe(true);
+    expect(await hotTextRecords(lead.propertyId)).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("opted-out contact + price text: no hot hold, no hot record, nothing sent", async () => {
+    await seedOrg();
+    await seedOwner();
+    const lead = await seedLead({ optedOut: true });
+    const { lead: l } = await run({ talked_price: 0.9 }, "what is your price, how much would you pay", lead);
+    const row = await propertyRow(l.propertyId);
+    expect(row.needs_human_attention).toBe(false);
+    expect(row.last_ai_escalation_reason).toBeNull();
+    expect(await hotTextRecords(l.propertyId)).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it.each([
+    ["price only", "what is your price, how much would you pay"],
+    ["lawyer + price", LAWYER_PRICE],
+  ])("responder off for the property + %s: no hold, no hot record, nothing sent", async (_n, text) => {
+    await seedOrg();
+    await seedOwner();
+    const lead = await seedLead({ responderDisabled: true });
+    const { lead: l } = await run({ talked_price: 0.9 }, text, lead);
+    const row = await propertyRow(l.propertyId);
+    expect(row.needs_human_attention).toBe(false);
+    expect(row.last_ai_escalation_reason).toBeNull();
+    expect(await hotTextRecords(l.propertyId)).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(0);
   });
 
   it("price keyword + wrong_person: the wrong-person path runs, not a hot hold", async () => {
