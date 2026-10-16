@@ -1,25 +1,102 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
+
+import { loadHomeownerHouses, MAX_HOMEOWNER_IDS, MAX_PAGE_ROWS, type HousesClient } from "../../../src/lib/leads/homeowner-houses";
 
 /**
  * Retained review findings against the Messages v2 candidate (PR 4 candidate 729a282b, which
- * contains the PR 2 and PR 3 candidates). Each is tracked here as a TODO so it shows up in every
- * stress-branch test run until a fixture proves it fixed. These are KNOWN GAPS, not passing checks.
- * Label format: [KNOWN-FAILING|TODO] <source PR / reviewer>: <finding> (expected: <decision>).
+ * contains the PR 2 and PR 3 candidates), as REAL regression tests asserting the DESIRED
+ * behaviour. A product defect is an expected failure (`it.fails`, labelled [KNOWN DEFECT]): green
+ * while the defect exists, RED the day it is fixed (then remove the marker). No todos.
+ *
+ * Only the DB-free finding lives here. The four that need the real dispatch / webhook path run on a
+ * disposable stack in retained-findings.db.integration.test.ts (npm run stress:messages-v2:db):
+ *   (a) PR 892 confirmed-owner drip-switch read error -> hold for a person
+ *   (c) PR 889 wrong-person close under a concurrent human takeover -> no revision absorption
+ *   (d) PR 889 unreadable engine switch on a responder-off property -> no hold
+ *   (e) PR 882 delayed-reply path, responder-off + non-hot keyword -> no hold
+ *
+ * MV2_RETAINED_STRICT=1 runs them as plain `it` to show the real assertion message.
  */
-describe("Messages v2 retained findings (tracked, not yet fixed)", () => {
-  it.todo(
-    "[KNOWN-FAILING] PR 892: confirmed-owner drip-switch READ ERROR closes silently (expected per decision: hold for a person, not close)",
-  );
-  it.todo(
-    "[TODO] PR 892: homeowner badge loader past 1,000 rows falls back to one query per homeowner (fixture: count queries for 1,001+ homeowners; expected a bounded, batched count)",
-  );
-  it.todo(
-    "[TODO] PR 889 Astra: wrong-person close uses the LATEST revision under a concurrent takeover (expected: act on the revision it read, or stop if a person took over)",
-  );
-  it.todo(
-    "[TODO] PR 889 Astra: unreadable-engine hold is written BEFORE the responder-off check (expected: responder off for the property = no hold, no alert)",
-  );
-  it.todo(
-    "[TODO] PR 882 Astra: delayed-reply path writes non-hot keyword holds on responder-off properties (expected: responder off = no hold, no alert)",
+const knownDefect = process.env.MV2_RETAINED_STRICT === "1" ? it : it.fails;
+
+/** A fake caller client that counts every query and serves `rowsPerOwner` houses per homeowner. */
+function countingClient(rowsPerOwner: number) {
+  let queries = 0;
+  const client = {
+    from() {
+      return {
+        select(_cols: string, options?: { count: "exact" }) {
+          queries++;
+          const filters: { in?: string[]; eq?: string } = {};
+          let limit = Infinity;
+          const q = {
+            eq(column: string, value: string) {
+              if (column === "homeowner_contact_id") filters.eq = value;
+              return q;
+            },
+            in(_column: string, values: string[]) {
+              filters.in = values;
+              return q;
+            },
+            is() {
+              return q;
+            },
+            order() {
+              return q;
+            },
+            limit(n: number) {
+              limit = n;
+              return Promise.resolve(run());
+            },
+            range(from: number, to: number) {
+              limit = to - from + 1;
+              return Promise.resolve(run());
+            },
+          };
+          const run = () => {
+            const owners = filters.eq ? [filters.eq] : (filters.in ?? []);
+            const all = owners.flatMap((owner) =>
+              Array.from({ length: rowsPerOwner }, (_, i) => ({
+                id: `${owner}-${i}`,
+                address: `${i} Fixture St`,
+                city: "Kansas City",
+                state: "MO",
+                assigned_user_id: null,
+                homeowner_contact_id: owner,
+              })),
+            );
+            return { data: all.slice(0, limit), error: null, ...(options ? { count: all.length } : {}) };
+          };
+          return q;
+        },
+      };
+    },
+  } as unknown as HousesClient;
+  return { client, queries: () => queries };
+}
+
+const uuid = (i: number) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+
+describe("Messages v2 retained findings (pure)", () => {
+  it("control (b): under the row ceiling the badge loader is ONE query for the whole page", async () => {
+    const ids = Array.from({ length: MAX_HOMEOWNER_IDS }, (_, i) => uuid(i));
+    const { client, queries } = countingClient(2); // 200 rows < 1,000
+    const result = await loadHomeownerHouses(client, { orgId: uuid(9999), viewerId: uuid(9998), contactIds: ids });
+    expect(Object.keys(result)).toHaveLength(MAX_HOMEOWNER_IDS);
+    expect(queries()).toBe(1);
+  });
+
+  knownDefect(
+    "[KNOWN DEFECT] (b) PR 892: homeowner badge loader past 1,000 rows must keep a bounded, batched query count (today: 1 + one query per homeowner)",
+    async () => {
+      const ids = Array.from({ length: MAX_HOMEOWNER_IDS }, (_, i) => uuid(i));
+      const { client, queries } = countingClient(11); // 1,100 rows: past MAX_PAGE_ROWS
+      expect(MAX_HOMEOWNER_IDS * 11).toBeGreaterThan(MAX_PAGE_ROWS);
+      const result = await loadHomeownerHouses(client, { orgId: uuid(9999), viewerId: uuid(9998), contactIds: ids });
+      expect(result[ids[0]!]!.count).toBe(11); // still exact
+      // Desired: the fallback is batched, so the query count does not grow with the number of
+      // homeowners on the page. Bound: the page query plus at most 10 batched follow-ups.
+      expect(queries()).toBeLessThanOrEqual(11);
+    },
   );
 });

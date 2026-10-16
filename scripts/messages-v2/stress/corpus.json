@@ -1,6 +1,6 @@
 {
   "_about": "Messages v2 Stage 5 wording corpus: 30 seller situations x 10 wordings. Seller wordings are TEST DATA authored for the harness (they are what a homeowner might text, not Sandra's words). The openers (our_last_text) are the synthetic fixture openers from src/lib/sms-classification/__fixtures__/nine-questions-matrix.json and real masked openers from .planning/messages-v2/REPLAY-NINE-QUESTIONS.md with [name]/[address] filled in. No question text, reply text or drip text is defined here: the harness imports those from the product.",
-  "_expected_rule": "expected_buckets follow the precedence in code: up-front non-price keyword gate (dispatch.ts step 2) > hostile wording or hostile answer > asked_stop > wrong_person > hot (talked_price / open_to_selling, or any other answer yielding to a price keyword) > maybe_later > not_interested > asked_who > confirmed_owner > needs_person; responder off for the property = nothing at all. Group order and cutoff come from src/lib/sms-classification/nine-questions.ts (Jarrad, memory note jev-approved-questions). Updated 2026-10-15 for candidate 729a282b (PR 2 decided rules): stop / opted_out, DNC, wrong_number and bad_number beat hot; hot beats nurture, not_interested and unclear; under Jev automatic a mixed price + non-price text is held under the NON-price keyword reason (bucket keyword_hold) and any hot alert comes only from the later classify-only check when precedence allows (alerts are not part of the bucket); responder off for the property = no hold and no alert (silent_off). Not yet covered by any scenario: DNC / bad_number beating hot, org keyword allow-list, numeric amount under an allow-list without a price phrase. Ownership-does-not-change-treatment is design-only (not built) and is deliberately not encoded.",
+  "_expected_rule": "expected_buckets follow the precedence in code: up-front non-price keyword gate (dispatch.ts step 2) > hostile wording or hostile answer > asked_stop > wrong_person > hot (talked_price / open_to_selling, or any other answer yielding to a price keyword) > maybe_later > not_interested > asked_who > confirmed_owner > needs_person; responder off for the property = nothing at all. Group order and cutoff come from src/lib/sms-classification/nine-questions.ts (Jarrad, memory note jev-approved-questions). Updated 2026-10-15 for candidate 729a282b (PR 2 decided rules): stop / opted_out, DNC, wrong_number and bad_number beat hot; hot beats nurture, not_interested and unclear; under Jev automatic a mixed price + non-price text is held under the NON-price keyword reason (bucket keyword_hold) and any hot alert comes only from the later classify-only check when precedence allows (alerts are not part of the bucket); responder off for the property = no hold and no alert (silent_off). Added 2026-10-15: dnc_beats_hot, bad_number_beats_hot (outcome_v1 engine, stub outcome), allowlist_price_phrase_not_hot and numeric_under_allowlist_not_hot (org escalation_keywords allow-list); each cites its already-decided rule in its own 'rule' field. No new business rule is encoded. Ownership-does-not-change-treatment is design-only (not built) and is deliberately not encoded.",
   "openers": {
     "A": "Hi, are you interested in selling 123 Oak St?",
     "B": "Would you consider a cash offer?",
@@ -564,6 +564,94 @@
         "Owner is deceased",
         "My wife passed away, I'm not ready to talk about the house",
         "Dad passed away, we're sorting the estate"
+      ]
+    },
+    {
+      "id": "dnc_beats_hot",
+      "title": "Jev says DNC on a price/call text (DNC beats hot)",
+      "rule": "Decided (PR 2, candidate 729a282b): stop / opted_out, DNC, wrong_number and bad_number beat hot (dispatch.ts stopOrDncWins / hotWinsOver); HARD RULE Jarrad 2026-10-07: Jev dnc opens a pending human review and holds jev_dnc_needs_confirm, no automated DNC, no phone suppression (dispatch.ts close_dnc). Mirrors hot-acceptance-matrix rows 32 and 51. Expected: not hot, no hot alert, the existing DNC review path.",
+      "opener": "E",
+      "expected_answers": null,
+      "expected_buckets": ["dnc_review"],
+      "jev_engine": "outcome_v1",
+      "stub_outcome": "dnc",
+      "stub_escalation": "price_or_offer",
+      "wordings": [
+        "Put me on your do not call list. What's your price anyway?",
+        "Do not call this number again. How much were you offering?",
+        "add me to the DNC list, whats your offer",
+        "Never call me again. I'd only listen if the price is right",
+        "I do not want calls on this line. What sort of price is it",
+        "This number is on the do not call registry. How much?",
+        "dont call me. send your best offer by mail",
+        "Take this number off your calling list. Price?",
+        "I'm on the national do not call list. What would you offer",
+        "No calls please, ever. Just curious how much you'd pay"
+      ]
+    },
+    {
+      "id": "bad_number_beats_hot",
+      "title": "Jev says bad number on a price text (bad number beats hot)",
+      "rule": "Decided (PR 2, candidate 729a282b): bad_number sits with wrong-number and never yields to a price signal (dispatch.ts hotWinsOver: 'bad_number sits with wrong-number and never is'; stopOrDncWins). Mirrors hot-acceptance-matrix row 34: held jev_unclear_no_action, no hot_wins, no hot alert.",
+      "opener": "B",
+      "expected_answers": null,
+      "expected_buckets": ["jev_no_action_hold"],
+      "jev_engine": "outcome_v1",
+      "stub_outcome": "bad_number",
+      "stub_escalation": "price_or_offer",
+      "wordings": [
+        "This number doesn't belong to anyone at that address. What's the price you're offering?",
+        "you have a bad number for them. how much is the offer",
+        "This is a work phone, not theirs. Curious what you'd offer",
+        "Number got reassigned to me last month. What's your price?",
+        "This is a fax line lol. how much",
+        "Disconnected number, I just got it. Out of curiosity what's the offer",
+        "This phone is for a business. How much are you paying for houses",
+        "Not a good number for that owner. what price are you at",
+        "New number, no idea who that is. Your offer?",
+        "This line is shared by an office. What kind of price"
+      ]
+    },
+    {
+      "id": "allowlist_price_phrase_not_hot",
+      "title": "Org allow-list has no price phrase; seller asks the price (keyword does not make it hot)",
+      "rule": "Decided (PR 2, candidate 729a282b, keywords.ts hasAllowedPriceSignal / dispatch.ts isPriceKeyword): when the org sets ai_responder_configs.escalation_keywords, ONLY those phrases count, so 'price' / 'how much' / 'offer' outside the list is not a price keyword and cannot force hot. The stub answers needs_person (nothing over the cutoff) to isolate the KEYWORD path; a live Jev talked_price answer is hot by the nine-question action table and is correct, so live results for this scenario measure Jev, not this rule.",
+      "opener": "B",
+      "expected_answers": ["needs_person"],
+      "expected_buckets": ["needs_person"],
+      "org_escalation_keywords": ["lawyer", "attorney"],
+      "wordings": [
+        "what's your price",
+        "Whats your price?",
+        "what's your price on it",
+        "ok what's your price for it",
+        "What's your price, roughly",
+        "how much",
+        "How much would it be",
+        "your offer?",
+        "Send the offer",
+        "what price"
+      ]
+    },
+    {
+      "id": "numeric_under_allowlist_not_hot",
+      "title": "Org allow-list has no price phrase; seller names a number (held, never hot)",
+      "rule": "Decided (PR 2, candidate 729a282b, dispatch.ts applyKeywordEscalation / keywords.ts priceSignalAllowed): a numeric amount ('$150k', '200k') counts as a price signal only when the allow-list includes a price phrase; otherwise main's up-front hold runs under the NON-hot reason keyword:numeric_amount (a person sees it), never a hot alert. Mirrors hot-acceptance-matrix round 17. Jev is not consulted on this path.",
+      "opener": "B",
+      "expected_answers": null,
+      "expected_buckets": ["numeric_hold"],
+      "org_escalation_keywords": ["lawyer", "attorney"],
+      "wordings": [
+        "$150k and it's yours",
+        "200k",
+        "I'd take 180k",
+        "Need at least $210,000",
+        "would do 175k cash",
+        "Make it $199k",
+        "Paid 120k, want 160k",
+        "Nothing under 250 thousand",
+        "$140k firm",
+        "Maybe 1 million lol"
       ]
     },
     {

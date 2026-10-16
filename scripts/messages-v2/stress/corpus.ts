@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { NINE_QUESTION_IDS } from "../../../src/lib/sms-classification/nine-questions";
-import { BUCKETS, type Scenario } from "./core";
+import { BUCKETS, OUTCOME_V1, type Scenario } from "./core";
 
 export const CORPUS_PATH = path.resolve(__dirname, "corpus.json");
 
@@ -34,6 +34,19 @@ export function loadCorpus(file: string = CORPUS_PATH): Scenario[] {
     for (const b of s.expected_buckets) if (!BUCKET_SET.has(b)) throw new Error(`corpus ${s.id}: unknown bucket ${b}`);
     if (s.expected_buckets.length > 1 && !s.review && !s.known_gap) {
       throw new Error(`corpus ${s.id}: more than one accepted bucket needs a review or known_gap note`);
+    }
+    if (s.org_escalation_keywords !== undefined) {
+      if (!Array.isArray(s.org_escalation_keywords) || s.org_escalation_keywords.some((k) => typeof k !== "string" || k.trim() === "")) {
+        throw new Error(`corpus ${s.id}: org_escalation_keywords must be non-empty strings`);
+      }
+    }
+    if (s.jev_engine !== undefined && s.jev_engine !== "nine_questions" && s.jev_engine !== "outcome_v1") throw new Error(`corpus ${s.id}: bad jev_engine`);
+    if (s.jev_engine === "outcome_v1") {
+      if (!s.stub_outcome || !(OUTCOME_V1 as readonly string[]).includes(s.stub_outcome)) throw new Error(`corpus ${s.id}: outcome_v1 needs a valid stub_outcome`);
+      if (!s.stub_escalation) throw new Error(`corpus ${s.id}: outcome_v1 needs stub_escalation`);
+      if (s.expected_answers !== null) throw new Error(`corpus ${s.id}: outcome_v1 scenarios carry no nine answers (expected_answers: null)`);
+    } else if (s.stub_outcome || s.stub_escalation) {
+      throw new Error(`corpus ${s.id}: stub_outcome / stub_escalation need jev_engine outcome_v1`);
     }
     const { opener, ...rest } = s;
     void opener;

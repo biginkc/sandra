@@ -81,6 +81,8 @@ let orgId = "";
 let phoneCounter = 0;
 /** Set per run: the stub's probabilities for the next Jev call. */
 let nextStub: Record<NineQuestionId, number> | null = null;
+/** Set per run for outcome_v1 scenarios: the fixture outcome + escalation reason the stub returns. */
+let nextOutcomeV1: { outcome: string; escalation: string } | null = null;
 let jevCalls = 0;
 
 function installFetch(live: { fetch: typeof fetch } | null) {
@@ -90,7 +92,22 @@ function installFetch(live: { fetch: typeof fetch } | null) {
       jevCalls++;
       if (live) return live.fetch(input, init);
       const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
-      if (!("asked_stop" in body.questions)) throw new Error("the eight-answer request must not be made with the nine-question engine on");
+      if (!("asked_stop" in body.questions)) {
+        if (!nextOutcomeV1) throw new Error("the eight-answer request must not be made with the nine-question engine on");
+        // outcome_v1 scenario: answer with the corpus fixture outcome (same shape as hot-acceptance-matrix's fake Jev).
+        const { outcome, escalation } = nextOutcomeV1;
+        return new Response(
+          JSON.stringify({
+            model: "jev-stub",
+            answers: {
+              outcome: { choice: outcome, confidence: 0.95, probabilities: { [outcome]: 0.95 } },
+              escalation_reason: { choice: escalation, probabilities: { [escalation]: 0.9 } },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (nextOutcomeV1) throw new Error("a nine-question request was made for an outcome_v1 scenario");
       const probs = nextStub ?? Object.fromEntries(NINE_QUESTION_IDS.map((id) => [id, 0.02]));
       const answers = Object.fromEntries(NINE_QUESTION_IDS.map((id) => [id, { choice: "noul", noul: probs[id as NineQuestionId] }]));
       return new Response(JSON.stringify({ answers, model: "jev-stub", usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
@@ -143,6 +160,20 @@ async function seedOrg() {
     await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, $2, $3)", [orgId, outcome, rows[0].id]);
     await pg.query("commit");
   }
+}
+
+/** Per-scenario org state: classifier engine and escalation allow-list (null = the column default the org was seeded with). */
+let currentOrgState = "";
+let seededKeywords: string[] | null = null;
+async function applyScenarioOrgState(engine: "nine_questions" | "outcome_v1", keywords: readonly string[] | null) {
+  if (!seededKeywords) {
+    const { rows } = await pg.query("select escalation_keywords from public.ai_responder_configs where org_id = $1", [orgId]);
+    seededKeywords = rows[0].escalation_keywords as string[];
+  }
+  const key = JSON.stringify([engine, keywords]);
+  if (key === currentOrgState) return;
+  await pg.query("update public.ai_responder_configs set classifier_engine = $2, escalation_keywords = $3::text[] where org_id = $1", [orgId, engine, keywords ?? seededKeywords]);
+  currentOrgState = key;
 }
 
 async function seedOwner(): Promise<string> {
@@ -231,7 +262,10 @@ describe("Messages v2 Stage 5: wording x repeat matrix through the real dispatch
 
     const rows: RunRow[] = [];
     for (const j of jobs) {
-      nextStub = JEV === "stub" ? stubProbabilities(j.s.expected_answers, { noise, rnd }) : null;
+      if (j.s.jev_engine === "outcome_v1" && JEV === "live") continue; // fixture outcome only; never a paid call on this engine
+      await applyScenarioOrgState(j.s.jev_engine ?? "nine_questions", j.s.org_escalation_keywords ?? null);
+      nextOutcomeV1 = j.s.jev_engine === "outcome_v1" ? { outcome: j.s.stub_outcome!, escalation: j.s.stub_escalation! } : null;
+      nextStub = JEV === "stub" && !nextOutcomeV1 ? stubProbabilities(j.s.expected_answers, { noise, rnd }) : null;
       const lead = await seedLead(j.s.property_disabled === true);
       const inbound = await seedThread(lead, j.s.our_last_text, j.w);
       let bucket: string;

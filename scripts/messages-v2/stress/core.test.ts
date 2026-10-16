@@ -7,6 +7,7 @@ import {
   estimateJevCost,
   mulberry32,
   predictBucket,
+  predictOutcomeV1Bucket,
   stubAnswer,
   summarize,
   summarizeScenario,
@@ -20,8 +21,8 @@ const corpus = loadCorpus();
 const byId = (id: string) => corpus.find((s) => s.id === id)!;
 
 describe("corpus", () => {
-  it("is 30 scenarios x 10 wordings, every id distinct", () => {
-    expect(corpus).toHaveLength(30);
+  it("is 34 scenarios x 10 wordings, every id distinct", () => {
+    expect(corpus).toHaveLength(34);
     for (const s of corpus) expect(s.wordings).toHaveLength(10);
   });
 
@@ -62,9 +63,36 @@ describe("corpus", () => {
       if (s.db_only || s.review || s.known_gap) continue;
       for (const w of s.wordings) {
         const answer = s.expected_answers?.[0] ?? "needs_person";
-        const bucket = predictBucket(answer, w);
-        expect(s.expected_buckets, `${s.id}: "${w}" -> ${bucket}`).toContain(bucket);
+        const bucket =
+          s.jev_engine === "outcome_v1"
+            ? predictOutcomeV1Bucket(s.stub_outcome!, w, s.org_escalation_keywords)
+            : predictBucket(answer, w, s.org_escalation_keywords);
+        expect(s.expected_buckets as readonly string[], `${s.id}: "${w}" -> ${bucket}`).toContain(bucket);
       }
+    }
+  });
+
+  it("the precedence scenarios are not vacuous: every wording carries the signal the rule beats", () => {
+    // DNC / bad number beat hot: each wording has an allowed price signal and no non-price phrase,
+    // so without the outcome it WOULD be hot (a nine needs_person + price keyword is hot).
+    for (const id of ["dnc_beats_hot", "bad_number_beats_hot"]) {
+      for (const w of byId(id).wordings) {
+        expect(upFrontKeywordBucket(w), `${id}: ${w}`).toBeNull();
+        expect(predictBucket("needs_person", w), `${id}: ${w}`).toBe("hot");
+      }
+    }
+    // Allow-list without price phrases: hot under the built-in list, not hot under the org list.
+    const allow = byId("allowlist_price_phrase_not_hot");
+    for (const w of allow.wordings) {
+      expect(predictBucket("needs_person", w), w).toBe("hot");
+      expect(predictBucket("needs_person", w, allow.org_escalation_keywords), w).toBe("needs_person");
+    }
+    // Numeric under the allow-list: deferred (hot path) under the built-in list, numeric hold under the org list.
+    const num = byId("numeric_under_allowlist_not_hot");
+    for (const w of num.wordings) {
+      expect(upFrontKeywordBucket(w), w).toBeNull();
+      expect(predictBucket("needs_person", w), w).toBe("hot");
+      expect(upFrontKeywordBucket(w, num.org_escalation_keywords), w).toBe("numeric_hold");
     }
   });
 });

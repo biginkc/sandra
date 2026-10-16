@@ -1,6 +1,6 @@
 import { isHotReason } from "../../../src/lib/hot-sellers/hot";
 import { isHostileInbound } from "../../../src/lib/ai-responder/hostile";
-import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase } from "../../../src/lib/ai-responder/keywords";
+import { hasAllowedPriceSignal, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "../../../src/lib/ai-responder/keywords";
 import {
   actionForNineAnswer,
   decideNineQuestions,
@@ -36,6 +36,9 @@ export const BUCKETS = [
   "needs_person", // no question reached the cutoff: waits for a person
   "keyword_hold", // up-front non-price keyword hold (lawyer / real person / died ...): a person, no hot alert
   "silent_off", // responder off for this property: no hold, no alert, no reply
+  "numeric_hold", // up-front hold under the NON-hot reason keyword:numeric_amount (allow-list without a price phrase): a person, no hot alert
+  "dnc_review", // Jev dnc: pending human DNC review + jev_dnc_needs_confirm hold, no suppression, not hot
+  "jev_no_action_hold", // Jev unclear / bad_number with no route: held jev_unclear_no_action for a person, not hot
 ] as const;
 export type Bucket = (typeof BUCKETS)[number];
 
@@ -59,8 +62,20 @@ export type Scenario = {
   db_only?: boolean;
   /** Dispatch-lane state: the property has ai_responder_disabled = true. */
   property_disabled?: boolean;
+  /** Dispatch-lane org state: ai_responder_configs.escalation_keywords (the org allow-list). Absent = built-in list. */
+  org_escalation_keywords?: readonly string[];
+  /** Classifier engine for this scenario. Absent = nine_questions. outcome_v1 = the eight-answer Jev outcome engine. */
+  jev_engine?: "nine_questions" | "outcome_v1";
+  /** outcome_v1 only: the stub Jev outcome and escalation reason (the scenario's fixture answer). */
+  stub_outcome?: OutcomeV1;
+  stub_escalation?: string;
+  /** Citation of the already-decided rule the expectation follows. */
+  rule?: string;
   wordings: readonly string[];
 };
+
+export const OUTCOME_V1 = ["new_lead", "nurture", "not_interested", "unclear", "bad_number", "wrong_number", "opted_out", "dnc"] as const;
+export type OutcomeV1 = (typeof OUTCOME_V1)[number];
 
 /* ----------------------------------------------------------------------------------------
  * Dispatch precedence mirror (classifier lane). Order copied from runNineQuestionsStep and
@@ -71,13 +86,31 @@ export type Scenario = {
 const NINE_YIELDS_TO_HOT: ReadonlySet<string> = new Set(["maybe_later", "not_interested", "asked_who", "confirmed_owner", "needs_person"]);
 
 export function upFrontKeywordBucket(text: string, allowedPhrases?: readonly string[] | null): Bucket | null {
-  // Step 2 of dispatch: with Jev automatic the price keyword is deferred UNLESS a non-price
-  // escalation phrase is also present, in which case main's up-front hold runs first.
-  if (!hasNonPriceEscalationPhrase(text, { allowedPhrases: allowedPhrases ?? undefined })) return null;
-  // Candidate 729a282b (applyKeywordEscalation, jevAutomatic): a mixed price + non-price text is
-  // held under the NON-price reason, so the bucket is keyword_hold; a hot alert, if any, comes
-  // later from the classify-only check and is not part of the bucket.
+  // Step 2 of dispatch (applyKeywordEscalation, Jev automatic), candidate 729a282b:
+  //  - no keyword at all: no up-front hold;
+  //  - an ALLOWED price signal alone is deferred to the shared hot decision (null here);
+  //    with a non-price phrase too, it is held under the NON-price reason (keyword_hold);
+  //  - a numeric amount the allow-list does not cover is held under keyword:numeric_amount (numeric_hold);
+  //  - any other (non-price) phrase is held under its reason (keyword_hold).
+  const allowed = allowedPhrases ?? undefined;
+  const kw = matchEscalationKeyword(text, { allowedPhrases: allowed });
+  if (!kw) return null;
+  if (hasAllowedPriceSignal(text, allowedPhrases ?? null)) return nonPriceTier(text, allowedPhrases ?? null) ? "keyword_hold" : null;
+  if (kw.tier === "price_offer" && !priceSignalAllowed(kw, allowedPhrases ?? null)) return "numeric_hold";
   return "keyword_hold";
+}
+
+/**
+ * Classifier-lane mirror for the outcome_v1 engine scenarios. Only the stop / DNC / wrong / bad
+ * number outcomes are modelled (the scenarios that use this lane); anything else is reported as
+ * other:<outcome> so it can never silently pass.
+ */
+export function predictOutcomeV1Bucket(outcome: OutcomeV1, text: string, allowedPhrases?: readonly string[] | null): Bucket | `other:${string}` {
+  const upFront = upFrontKeywordBucket(text, allowedPhrases);
+  if (upFront) return upFront;
+  if (outcome === "dnc") return "dnc_review"; // close_dnc route: review + hold, stopOrDncWins
+  if (outcome === "bad_number") return "jev_no_action_hold"; // jev_no_action, never hot (hotWinsOver)
+  return `other:${outcome}`;
 }
 
 export function predictBucket(answer: NineAnswer, text: string, allowedPhrases?: readonly string[] | null): Bucket {
@@ -110,6 +143,9 @@ export function bucketFromDispatch(o: {
 }): Bucket | `other:${string}` {
   const reason = o.outcome.reason ?? "";
   if (o.outcome.outcome === "skipped" && !o.property.needs_human_attention && o.outboundCount === 0) return "silent_off";
+  if (reason === "keyword:numeric_amount") return "numeric_hold";
+  if (o.property.last_ai_escalation_reason === "jev_dnc_needs_confirm") return "dnc_review";
+  if (reason === "jev_unclear_no_action") return "jev_no_action_hold";
   if (reason === "model:new_lead_promoted" || reason === "hot_lead" || isHotReason(reason)) return "hot";
   if (reason === "nine_asked_stop" || reason === "nine_hostile" || reason === "hostile_needs_confirm") return "stop_person";
   if (reason === "nine_needs_person") return "needs_person";

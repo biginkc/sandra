@@ -13,7 +13,7 @@ assertStressDbEnv(process.env);
 
 export default defineConfig({
   test: {
-    include: ["scripts/messages-v2/stress/dispatch.stress.integration.test.ts"],
+    include: ["scripts/messages-v2/stress/dispatch.stress.integration.test.ts", "scripts/messages-v2/stress/retained-findings.db.integration.test.ts"],
     environment: "node",
     reporters: ["default"],
     testTimeout: 3_600_000,

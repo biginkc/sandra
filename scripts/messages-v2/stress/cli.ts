@@ -25,7 +25,7 @@ import { classifyNineQuestions, type NineAnswer } from "../../../src/lib/sms-cla
 import { guardedFetch } from "../replay/nine-core";
 import { applyStubEnv, assertHarnessEnv } from "../replay/safety";
 import { loadCorpus } from "./corpus";
-import { estimateJevCost, mulberry32, predictBucket, renderReport, stubAnswer, summarize, type RunRow } from "./core";
+import { estimateJevCost, mulberry32, predictBucket, predictOutcomeV1Bucket, renderReport, stubAnswer, summarize, type RunRow } from "./core";
 
 const OP_REF = "op://BMH Secrets/TypeSafe - Jev API Key/credential";
 const OUT_ROOT = path.resolve(process.cwd(), "tmp/stress");
@@ -70,8 +70,11 @@ async function main() {
   assertHarnessEnv(process.env);
 
   const all = loadCorpus();
-  const scenarios = all.filter((s) => !s.db_only && (!values.only || values.only.split(",").includes(s.id)));
-  const skipped = all.filter((s) => s.db_only).map((s) => s.id);
+  // outcome_v1 scenarios are stub-only here: the live lane calls the nine questions, which cannot
+  // answer dnc / bad_number. Their classifier-lane rows only exercise the mirror; dispatch is authoritative.
+  const laneSkip = (s: (typeof all)[number]) => s.db_only === true || (classifier === "live" && s.jev_engine === "outcome_v1");
+  const scenarios = all.filter((s) => !laneSkip(s) && (!values.only || values.only.split(",").includes(s.id)));
+  const skipped = all.filter(laneSkip).map((s) => s.id);
   const jobs = scenarios.flatMap((s) => s.wordings.flatMap((w, wordingIdx) => Array.from({ length: repeats }, (_, repeat) => ({ s, w, wordingIdx, repeat }))));
   const est = estimateJevCost(jobs.length);
   console.log(`stress: ${scenarios.length} scenarios x 10 wordings x ${repeats} repeats = ${jobs.length} runs; classifier=${classifier}; Jev estimate $${est.usd.toFixed(4)} (cap $${maxUsd})`);
@@ -102,8 +105,13 @@ async function main() {
         const i = next++;
         const j = jobs[i]!;
         try {
+          if (j.s.jev_engine === "outcome_v1") {
+            // Fixture outcome from the corpus (no Jev call); the up-front keyword gate still applies.
+            rows[i] = { scenarioId: j.s.id, wordingIdx: j.wordingIdx, repeat: j.repeat, answer: null, bucket: predictOutcomeV1Bucket(j.s.stub_outcome!, j.w, j.s.org_escalation_keywords) };
+            continue;
+          }
           const answer = await classify(j);
-          rows[i] = { scenarioId: j.s.id, wordingIdx: j.wordingIdx, repeat: j.repeat, answer, bucket: predictBucket(answer, j.w) };
+          rows[i] = { scenarioId: j.s.id, wordingIdx: j.wordingIdx, repeat: j.repeat, answer, bucket: predictBucket(answer, j.w, j.s.org_escalation_keywords) };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (/ceiling|auth|billing/i.test(msg)) throw e;
