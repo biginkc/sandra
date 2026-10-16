@@ -7,6 +7,7 @@ import { Client, type Pool } from "pg";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
+import { replayMigrations } from "./replay-migrations";
 import { createStressPool } from "./pg-client";
 
 /**
@@ -20,14 +21,14 @@ import { createStressPool } from "./pg-client";
  * ever read from. Loopback only.
  */
 const SOURCE_URL = requireLoopbackPostgresUrl(
-  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "",
 );
 
-// Every Norma migration, in version order, found by name so a new one can never be forgotten.
+// Every Norma migration, found by name so a new one can never be forgotten, then the My Leads classifier migrations
+// (*_my_leads_work_*, *_my_leads_approved_*), which read tasks.source_key that a Norma migration adds: excluded from the
+// provisioned source too and replayed here after the Norma files (NORMA_STRESS_REPLAY_PATTERNS).
 const MIGRATIONS_DIR = path.join(process.cwd(), "supabase/migrations");
-const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
-  .filter((file) => /^\d{14}_norma_.+\.sql$/.test(file))
-  .sort();
+const ALL_MIGRATIONS = replayMigrations(readdirSync(MIGRATIONS_DIR));
 
 // NORMA_STRESS_EXCLUDE_MIGRATIONS (comma-separated file names) leaves later fix
 // migrations out, to prove a regression test fails without its fix.

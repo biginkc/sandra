@@ -8,6 +8,7 @@ import {
   type AcquisitionHistoryResult,
   type AcquisitionHistoryPage,
 } from "@/lib/leads/acquisition-history";
+import { AttemptFollowUpStatus } from "@/components/leads/attempt-follow-up-status";
 import { loadLeadAcquisitionHistory } from "./acquisition-history-actions";
 const empty: AcquisitionHistoryPage = {
   rows: [],
@@ -117,14 +118,19 @@ export function AcquisitionHistoryCard({
       </p>
       {fact.kind === "attempt" ? (
         <>
-          {fact.outcome === "no_answer" && fact.followUpObligationId && (
-            <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-xs dark:border-amber-900 dark:bg-amber-950/30">
-              <p className="font-medium">
-                Follow-up {fact.followUpStatus?.replaceAll("_", " ") ?? "status unavailable"}
-              </p>
-              {fact.followUpMessage && <p className="mt-0.5 text-muted-foreground">{fact.followUpMessage}</p>}
-            </div>
-          )}
+          {fact.followUpObligationId &&
+            (fact.followUpStatus ? (
+              <AttemptFollowUpStatus
+                attemptId={fact.id}
+                status={fact.followUpStatus}
+                message={fact.followUpMessage}
+                blockedReason={fact.followUpBlockedReason}
+              />
+            ) : (
+              <div className="rounded-md border border-blue-200 bg-blue-50/60 px-2.5 py-2 text-xs dark:border-blue-900 dark:bg-blue-950/30">
+                <p className="font-medium">Follow-up status unavailable</p>
+              </div>
+            ))}
           <p>
             {{
               dialpad: "DialPad",

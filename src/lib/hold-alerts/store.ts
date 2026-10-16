@@ -100,6 +100,20 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return Array.isArray(data) && data.length === 1;
     },
 
+    async claimWithCap(row, cap) {
+      const { data, error } = await db.rpc("hold_alert_claim_with_cap", {
+        p_id: row.id,
+        p_attempts: row.attempts,
+        p_org_id: cap.orgId,
+        p_channel: cap.channel,
+        p_recipient_user_id: cap.recipientUserId,
+        p_cap: cap.cap,
+        p_since: cap.sinceIso,
+      });
+      if (error) fail("claimWithCap", error);
+      return data === "claimed" || data === "capped" ? data : "lost";
+    },
+
     async failInterrupted(cutoffIso) {
       const { data, error } = await table()
         .update({ status: "failed", attempts: MAX_ATTEMPTS, last_error: "interrupted" })
@@ -178,6 +192,19 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         cursor = rows[rows.length - 1]!.id;
       }
       return { ids: [...ids], complete: false };
+    },
+
+    async release(id) {
+      const { data, error: readError } = await table().select("attempts").eq("id", id).eq("status", "sending").maybeSingle();
+      if (readError) fail("release read", readError);
+      if (!data) return;
+      const attempts = (data as { attempts: number }).attempts;
+      const { error } = await table()
+        .update({ status: "pending", sending_at: null, attempts: Math.max(0, attempts - 1) })
+        .eq("id", id)
+        .eq("status", "sending")
+        .eq("attempts", attempts);
+      if (error) fail("release", error);
     },
 
     async markSent(id) {

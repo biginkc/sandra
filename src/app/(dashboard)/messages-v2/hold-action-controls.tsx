@@ -3,11 +3,13 @@
 import { useRef, useState } from "react";
 
 import { isConfirmDncReason } from "@/lib/ai-responder/hostile";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
 
+import { pageText } from "./page-text";
 import type { HoldActionsApi, SeenDraft } from "./hold-action-types";
 import { LUNA_HUMAN_CONFIRM_OUTCOMES, lunaOutcomeLabel } from "./luna-labels";
 import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./types";
@@ -15,7 +17,10 @@ import type { HoldSeen, LunaHoldSuggestion, OpenHold, RunWithSteps } from "./typ
 type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
 
-const ACTIONS = ["Send", "Edit", "Take over ↗", "Assign", "Dismiss"] as const;
+/** Matches the server: only drafts tied directly to a property can be sent from a hold card. */
+const NOT_SENDABLE_HERE = "Can't send from here yet, open the thread.";
+
+const ACTIONS = ["Send", "Edit", "Open thread", "Take over: open the thread and stop Sandra on this lead", "Assign", "Dismiss"] as const;
 
 /** Disabled stand-ins, used when the page supplies no handlers. */
 export function DisabledHoldActions({ title }: { title: string }) {
@@ -40,7 +45,7 @@ export function effectiveDraftBody(hold: OpenHold<RunWithSteps>): string | null 
 }
 
 function errorText<T>(result: Result<T>): string {
-  return result.ok ? "" : result.error.message || "That did not work.";
+  return result.ok ? "" : pageText(result.error.message) || "That did not work.";
 }
 
 const LUNA_RELOAD_CODES = new Set(["LUNA_ALREADY_RESOLVED", "LUNA_NO_PENDING_ITEM"]);
@@ -207,7 +212,7 @@ export function HoldActionControls({
     seenDraft &&
     perform(
       "Sending…",
-      () => actions.send({ draftId: draft.id, seen: seenDraft }),
+      () => actions.send({ draftId: draft.id, seen: seenDraft, propertyId: propertyId ?? "" }),
       () => ({ text: "Sent" }),
     );
 
@@ -216,7 +221,7 @@ export function HoldActionControls({
     seenDraft &&
     perform(
       "Sending…",
-      () => actions.editAndSend({ draftId: draft.id, body: editText, seen: seenDraft }),
+      () => actions.editAndSend({ draftId: draft.id, body: editText, seen: seenDraft, propertyId: propertyId ?? "" }),
       () => ({ text: "Sent (edited)" }),
     );
 
@@ -377,33 +382,59 @@ export function HoldActionControls({
             ) : (
               <div>
                 <Button type="button" size="xs" disabled={!propertyId} onClick={() => setConfirmingDnc(true)}>
-                  Confirm do-not-contact
+                  Stop texting them
                 </Button>
               </div>
             ))}
         </div>
       )}
 
+      {draft?.sendable === false && (
+        <p data-testid="draft-not-sendable" className="text-xs text-muted-foreground">
+          {NOT_SENDABLE_HERE}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" size="xs" variant="outline" disabled={!draft || !seenDraft || sendLocked} onClick={sendDraft} title={draft ? undefined : "No reply draft to send"}>
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          disabled={!draft || !seenDraft || sendLocked || draft.sendable === false}
+          onClick={sendDraft}
+          title={!draft ? "No reply draft to send" : draft.sendable === false ? NOT_SENDABLE_HERE : undefined}
+        >
           Send
         </Button>
         <Button
           type="button"
           size="xs"
           variant="outline"
-          disabled={!draft || !seenDraft || sendLocked}
+          disabled={!draft || !seenDraft || sendLocked || draft.sendable === false}
           onClick={() => {
             setEditText(effectiveDraftBody(hold) ?? "");
             setMode("editing");
             setError(null);
           }}
-          title={draft ? undefined : "No reply draft to edit"}
+          title={!draft ? "No reply draft to edit" : draft.sendable === false ? NOT_SENDABLE_HERE : undefined}
         >
           Edit
         </Button>
+        {propertyId ? (
+          <a
+            href={`/leads/${encodeURIComponent(propertyId)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(buttonVariants({ size: "xs", variant: "outline" }))}
+          >
+            Open thread
+          </a>
+        ) : (
+          <Button type="button" size="xs" variant="outline" disabled>
+            Open thread
+          </Button>
+        )}
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={takeOver}>
-          Take over ↗
+          Take over: open the thread and stop Sandra on this lead
         </Button>
         <Button type="button" size="xs" variant="outline" disabled={!propertyId} onClick={openAssign}>
           Assign
@@ -431,7 +462,7 @@ export function HoldActionControls({
             rows={4}
           />
           <div className="flex gap-2">
-            <Button type="button" size="xs" disabled={editText.trim() === "" || sendLocked} onClick={sendEdit}>
+            <Button type="button" size="xs" disabled={editText.trim() === "" || sendLocked || draft?.sendable === false} onClick={sendEdit}>
               Send edit
             </Button>
             <Button type="button" size="xs" variant="ghost" onClick={() => setMode("idle")}>

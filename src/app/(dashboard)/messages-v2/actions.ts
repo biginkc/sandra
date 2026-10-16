@@ -18,6 +18,8 @@ import { createClient } from "@/lib/supabase/server";
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 import { authorizeMessagesV2 } from "./authorize";
+import { draftStillOn } from "./hold-list";
+import type { LooseSupabase } from "./queries";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
@@ -48,6 +50,7 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
       admin,
       orgId,
       userId,
+      draftOwner: (draftId: string, propertyId: string) => draftStillOn(admin as unknown as LooseSupabase, orgId, draftId, propertyId),
       suppressNumber: async ({ propertyId, contactId, phone, inboundMessageId }) => {
         try {
           // The existing human suppression path: phone-level suppression,
@@ -123,18 +126,43 @@ async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Pro
   }
 }
 
-export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft }) {
-  return run((d) => sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) }));
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Send / Edit carry the property the clicker saw, REQUIRED: missing or malformed -> HOLD_STALE, never sent.
+ * An early check fails fast; the binding check runs again inside the leased send path (hold-actions.ts).
+ */
+async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: unknown): Promise<Result<null>> {
+  if (typeof propertyId !== "string" || !UUID.test(propertyId)) {
+    return err({ code: "HOLD_STALE", message: "Could not tell which lead this draft was for. Nothing was sent; refresh and try again." });
+  }
+  const verdict = await draftStillOn(d.admin as unknown as LooseSupabase, d.orgId, draftId, propertyId);
+  if (verdict === "ok") return { ok: true, data: null };
+  return err({
+    code: "HOLD_STALE",
+    message: verdict === "stale" ? "This draft no longer belongs to this lead. Refresh to see where it is now." : "Could not confirm the draft. Nothing was sent; refresh and try again.",
+  });
 }
 
-export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft }) {
-  return run((d) =>
-    editAndSendHeldDraft(d, {
+export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft; propertyId: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
+    if (!guard.ok) return guard;
+    return sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen), expectedPropertyId: String(input.propertyId) });
+  });
+}
+
+export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft; propertyId: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
+    if (!guard.ok) return guard;
+    return editAndSendHeldDraft(d, {
       draftId: String(input.draftId),
       body: String(input.body ?? ""),
       seen: seenDraft(input.seen),
-    }),
-  );
+      expectedPropertyId: String(input.propertyId),
+    });
+  });
 }
 
 export async function takeOverHoldAction(input: { propertyId: string; seen: HoldSeen }) {

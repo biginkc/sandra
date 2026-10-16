@@ -1,4 +1,5 @@
 import { type NextRequest, type NextResponse } from "next/server";
+import { setHugoSessionProof } from "./hugo-session-proof";
 
 function supabaseAuthCookieBase(): string | null {
   try {
@@ -76,6 +77,7 @@ export function expireSupabaseAuthCookies(
   response: NextResponse,
   writtenCookieNames: ReadonlySet<string> = new Set(),
 ): NextResponse {
+  setHugoSessionProof(request, response, "");
   return expireCookies(
     request,
     response,

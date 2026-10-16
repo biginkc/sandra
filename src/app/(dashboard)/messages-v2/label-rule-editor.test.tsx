@@ -154,14 +154,14 @@ describe("<LabelRuleEditor />", () => {
     );
   });
 
-  it("new_lead: turning On shows the Jev-promotes-leads confirmation line; Off does not", async () => {
+  it("new_lead: turning On shows the Sandra-promotes-leads confirmation line; Off does not", async () => {
     const b = badge({ label: "new_lead" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
     render(<LabelRuleEditor orgId="org-1" badge={b} text="new_lead [HELD]" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Edit rule for new_lead" }));
     expect(screen.queryByTestId("new-lead-auto-note")).toBeNull();
     await user.click(screen.getByRole("radio", { name: "On" }));
-    expect(screen.getByTestId("new-lead-auto-note")).toHaveTextContent("Jev will promote leads automatically");
+    expect(screen.getByTestId("new-lead-auto-note")).toHaveTextContent("Sandra will promote leads automatically");
     await user.click(screen.getByRole("radio", { name: "Off" }));
     expect(screen.queryByTestId("new-lead-auto-note")).toBeNull();
   });

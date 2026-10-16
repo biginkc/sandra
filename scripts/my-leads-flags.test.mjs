@@ -35,9 +35,9 @@ function harness({ rows = [null, { org_id: ORG, call_screen: true }], upsertErro
   return { io, upserts, out, err };
 }
 
-test("allowlist has the thirteen flags", () => {
-  assert.equal(FLAGS.length, 13);
-  assert.equal(new Set(FLAGS).size, 13);
+test("allowlist has the fourteen flags", () => {
+  assert.equal(FLAGS.length, 14);
+  assert.equal(new Set(FLAGS).size, 14);
 });
 
 test("parseArgs accepts a valid call", () => {

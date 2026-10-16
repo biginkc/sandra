@@ -12,8 +12,9 @@ export type SeenDraft = { body: string; editedAt: string | null };
  * contract here keeps client components free of server-only imports.
  */
 export type HoldActionsApi = {
-  send(input: { draftId: string; seen: SeenDraft }): Promise<Result<{ messageId: string }>>;
-  editAndSend(input: { draftId: string; body: string; seen: SeenDraft }): Promise<Result<{ messageId: string }>>;
+  /** propertyId = the card the clicker saw; the server refuses (HOLD_STALE) if the draft no longer resolves to it. */
+  send(input: { draftId: string; seen: SeenDraft; propertyId: string }): Promise<Result<{ messageId: string }>>;
+  editAndSend(input: { draftId: string; body: string; seen: SeenDraft; propertyId: string }): Promise<Result<{ messageId: string }>>;
   takeOver(input: { propertyId: string; seen: HoldSeen }): Promise<Result<{ leadHref: string }>>;
   assign(input: { propertyId: string; assigneeId: string | null }): Promise<Result<null>>;
   dismiss(input: { propertyId: string; reason: string; seen: HoldSeen }): Promise<Result<null>>;
@@ -41,8 +42,29 @@ export type BacklogPage = {
   nextOffset: number;
 };
 
+/** Current card details for some snapshot ids ("Show older"). */
+export type OlderHoldsPage = {
+  holds: OpenHold<RunWithSteps>[];
+  labels: Array<[string, RunLabel]>;
+  /** Requested ids no longer waiting (resolved, locked or unverifiable since the snapshot). */
+  missing: string[];
+  /** Hidden because they could not be tied to exactly one property. */
+  unverified: number | null;
+  /** Card annotations that failed for this page (amber note). */
+  contextErrors: string[];
+};
+
+/** Server action behind "Show older": the next snapshot ids (at most 100). */
+export type LoadOlderHolds = (input: { ids: string[] }) => Promise<Result<OlderHoldsPage>>;
+
+export type { WaitingSnapshot, SnapshotEntry, HoldLiveState } from "./hold-list";
+
+/** Server action behind the waiting column's 60-second / tab-focus re-check (at most 100 ids per call). */
+export type RevalidateHolds = (input: { ids: string[] }) => Promise<Result<import("./hold-list").HoldLiveState[]>>;
+
 /** Server action behind the Backlog disclosure ("Load more" passes the next offset). */
 export type LoadBacklog = (input: {
   offset: number;
   limit?: number;
+  bucket?: "new" | "backlog";
 }) => Promise<Result<BacklogPage>>;

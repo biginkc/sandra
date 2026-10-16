@@ -29,6 +29,8 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "e2e/stress/my-leads-queue/smoke.integration.test.ts",
+      "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
       "supabase/migrations/20261009060100_dialpad_outcome_reconciliation.integration.test.ts",
       "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
@@ -81,6 +83,13 @@ export default defineConfig({
       "supabase/migrations/20261005122000_my_leads_housekeeping_reassign_sources.integration.test.ts",
       "supabase/migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts",
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
+      "supabase/migrations/20261015010000_my_leads_work_queue_classifier.integration.test.ts",
+      "supabase/migrations/20261015020100_my_leads_pin_no_expiry.integration.test.ts",
+      "supabase/migrations/20261015020300_rep_sms_delivery_target_read.integration.test.ts",
+      "supabase/migrations/20261015020200_my_leads_work_facts_zip_signed_touch.integration.test.ts",
+      "supabase/migrations/20261015030000_my_leads_work_classified_perf.integration.test.ts",
+      "supabase/migrations/20261015040000_my_leads_approved_snooze_multi_house.integration.test.ts",
+      "supabase/migrations/20261016040000_homeowner_houses_first_page.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
       "supabase/migrations/20261005180000_dialpad_hangup_link_capture.integration.test.ts",
@@ -135,8 +144,14 @@ export default defineConfig({
       "scripts/messages-v2/replay/replay.integration.test.ts",
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
+      "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
+      "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
+      "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",
+      "src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts",
+      "src/lib/hot-sellers/delayed-path-responder-off.db.integration.test.ts",
+      "src/lib/hold-alerts/claim-with-cap.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
@@ -149,6 +164,7 @@ export default defineConfig({
       "src/lib/prospects/search-eval-budget.integration.test.ts",
       // Local-only: designation setup + failure injection need loopback Postgres.
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
+      "supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts",
       // Slack rehearsal and fixtures must never run against the hosted project.
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",

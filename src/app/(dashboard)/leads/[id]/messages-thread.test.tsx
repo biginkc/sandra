@@ -282,7 +282,7 @@ describe("<MessageBubble presentation=timeline />", () => {
           metadata: { keyword: "stop" },
         })}
         isContinuation={false}
-        isLastInGroup
+        isLastInGroup={false}
         isMostRecentOutbound={false}
         presentation="timeline"
       />,

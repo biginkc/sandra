@@ -1,4 +1,10 @@
-import { buildQuestions, JEV_MODEL, JEV_SCHEMA_VERSION, OUTCOME_CRITERIA } from "../questions";
+import {
+  buildQuestions,
+  JEV_MODEL,
+  JEV_SCHEMA_VERSION,
+  NUMBER_SOURCE_QUESTION_ID,
+  OUTCOME_CRITERIA,
+} from "../questions";
 import type {
   JevEscalationReason,
   JevListingStatus,
@@ -50,6 +56,7 @@ const ESCALATION_REASON_VALUES: readonly JevEscalationReason[] = [
   "not_applicable",
   "uncertain",
 ];
+const YES_NO_VALUES: readonly ("yes" | "no")[] = ["yes", "no"];
 const READY_TIMEFRAME_VALUES: readonly JevReadyTimeframe[] = [
   "within_30_days",
   "one_to_six_months",
@@ -228,6 +235,7 @@ function parseJevResponse(
     "escalation_reason",
     ESCALATION_REASON_VALUES,
   );
+  const numberSource = readChoice(json.answers, NUMBER_SOURCE_QUESTION_ID, YES_NO_VALUES);
   const readyTimeframe = readChoice(json.answers, "ready_timeframe", READY_TIMEFRAME_VALUES);
   const listingStatus = readChoice(json.answers, "listing_status", LISTING_STATUS_VALUES);
   const replyIntent = includeReplyIntent
@@ -241,6 +249,8 @@ function parseJevResponse(
     probabilities.wrong_scope = wrongScope.probabilities;
   if (Object.keys(escalationReason.probabilities).length)
     probabilities.escalation_reason = escalationReason.probabilities;
+  if (Object.keys(numberSource.probabilities).length)
+    probabilities[NUMBER_SOURCE_QUESTION_ID] = numberSource.probabilities;
   if (Object.keys(readyTimeframe.probabilities).length)
     probabilities.ready_timeframe = readyTimeframe.probabilities;
   if (Object.keys(listingStatus.probabilities).length)
@@ -254,6 +264,7 @@ function parseJevResponse(
     wrongScope: wrongScope.value,
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
+    askedHowNumberObtained: numberSource.value === null ? null : numberSource.value === "yes",
     readyTimeframe: readyTimeframe.value,
     listingStatus: listingStatus.value,
     replyIntentAvailable: includeReplyIntent,

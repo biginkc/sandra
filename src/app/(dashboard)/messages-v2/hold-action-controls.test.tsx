@@ -60,7 +60,7 @@ describe("hold action controls", () => {
   it("shows the pending draft and enables all five actions", () => {
     renderRail();
     expect(screen.getByTestId("draft-text")).toHaveTextContent("Draft text for the seller");
-    for (const name of ["Send", "Edit", "Take over", "Assign", "Dismiss"]) {
+    for (const name of ["Send", "Edit", "Take over: open the thread and stop Sandra on this lead", "Assign", "Dismiss"]) {
       expect(button(new RegExp(`^${name}`))).toBeEnabled();
     }
   });
@@ -74,7 +74,7 @@ describe("hold action controls", () => {
     renderRail(hold({ draft: undefined, draft_held: false, sources: ["needs_attention"] }));
     expect(button(/^Send/)).toBeDisabled();
     expect(button(/^Edit/)).toBeDisabled();
-    expect(button(/^Take over/)).toBeEnabled();
+    expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     expect(button(/^Assign/)).toBeEnabled();
     expect(button(/^Dismiss/)).toBeEnabled();
   });
@@ -90,7 +90,7 @@ describe("hold action controls", () => {
       const send = vi.fn().mockReturnValue(new Promise((r) => (release = r)));
       renderRail(hold(), api({ send }));
       await userEvent.click(button(/^Send/));
-      expect(send).toHaveBeenCalledWith({ draftId: "d1", seen: { body: "Draft text for the seller", editedAt: null } });
+      expect(send).toHaveBeenCalledWith({ draftId: "d1", seen: { body: "Draft text for the seller", editedAt: null }, propertyId: "p1" });
       expect(screen.getByTestId("hold-status")).toHaveTextContent(/sending/i);
       expect(screen.queryByRole("button", { name: /^Send/ })).toBeNull();
       release(ok({ messageId: "out-1" }));
@@ -129,6 +129,7 @@ describe("hold action controls", () => {
       expect(actions.send).toHaveBeenCalledWith({
         draftId: "d1",
         seen: { body: "edited text", editedAt: "2026-10-08T11:58:00+00:00" },
+        propertyId: "p1",
       });
     });
 
@@ -159,7 +160,7 @@ describe("hold action controls", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(message);
       expect(button(/^Send/)).toBeDisabled();
       expect(button(/^Edit/)).toBeDisabled();
-      expect(button(/^Take over/)).toBeEnabled();
+      expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     });
   });
 
@@ -176,6 +177,7 @@ describe("hold action controls", () => {
         draftId: "d1",
         body: "A shorter reply",
         seen: { body: "Draft text for the seller", editedAt: null },
+        propertyId: "p1",
       });
       await waitFor(() => expect(screen.getByTestId("hold-status")).toHaveTextContent(/sent/i));
     });
@@ -203,7 +205,7 @@ describe("hold action controls", () => {
   describe("Take over", () => {
     it("marks the lead human-owned and offers the lead link", async () => {
       const actions = renderRail();
-      await userEvent.click(button(/^Take over/));
+      await userEvent.click(button(/^Take over: open the thread and stop Sandra on this lead$/));
       expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1", seen: SEEN_HOLD });
       const link = await screen.findByRole("link", { name: /open lead/i });
       expect(link).toHaveAttribute("href", "/leads/p1");
@@ -212,9 +214,9 @@ describe("hold action controls", () => {
 
     it("rolls back on failure", async () => {
       renderRail(hold(), api({ takeOver: vi.fn().mockResolvedValue(fail("HOLD_RESOLVE_FAILED", "Could not update that hold.")) }));
-      await userEvent.click(button(/^Take over/));
+      await userEvent.click(button(/^Take over: open the thread and stop Sandra on this lead$/));
       expect(await screen.findByRole("alert")).toHaveTextContent(/could not update/i);
-      expect(button(/^Take over/)).toBeEnabled();
+      expect(button(/^Take over: open the thread and stop Sandra on this lead$/)).toBeEnabled();
     });
   });
 
@@ -390,7 +392,7 @@ describe("Luna suggestion on the hold card", () => {
   });
 });
 
-describe("hostile hold: Confirm do-not-contact", () => {
+describe("hostile hold: Stop texting them", () => {
   const hostileHold = () =>
     hold({
       draft: undefined,
@@ -405,7 +407,7 @@ describe("hostile hold: Confirm do-not-contact", () => {
     const confirm = vi.fn().mockResolvedValue(ok({ replySent: true, replyNote: null }));
     renderRail(hostileHold(), api({ confirmDoNotContact: confirm }));
     expect(screen.getByTestId("hostile-confirm")).toHaveTextContent("number is still active");
-    await user.click(button("Confirm do-not-contact"));
+    await user.click(button("Stop texting them"));
     expect(confirm).not.toHaveBeenCalled();
     await user.click(button(/^Yes, stop all texts/));
     await waitFor(() =>
@@ -420,7 +422,7 @@ describe("hostile hold: Confirm do-not-contact", () => {
   it("says plainly when no reply went out but the number is suppressed", async () => {
     const user = userEvent.setup();
     renderRail(hostileHold(), api({ confirmDoNotContact: vi.fn().mockResolvedValue(ok({ replySent: false, replyNote: "no approved hostile reply is mapped" })) }));
-    await user.click(button("Confirm do-not-contact"));
+    await user.click(button("Stop texting them"));
     await user.click(button(/^Yes, stop all texts/));
     expect(await screen.findByTestId("hold-status")).toHaveTextContent("number suppressed (no approved hostile reply is mapped)");
   });
@@ -440,3 +442,15 @@ describe("hostile hold: Confirm do-not-contact", () => {
   });
 });
 
+
+describe("Send edit follows the draft's sendable flag", () => {
+  it("a draft that stops being sendable while the editor is open disables Send edit", async () => {
+    const actions = api();
+    const { rerender } = render(<HoldsRail holds={[hold()]} labels={new Map()} nowMs={NOW} actions={actions} />);
+    await userEvent.click(button(/^Edit/));
+    expect(button("Send edit")).toBeEnabled();
+    const unsendable = hold({ draft: { id: "d1", inbound_message_id: "m1", body: "Draft text for the seller", edited_at: null, sendable: false } });
+    rerender(<HoldsRail holds={[unsendable]} labels={new Map()} nowMs={NOW} actions={actions} />);
+    expect(button("Send edit")).toBeDisabled();
+  });
+});

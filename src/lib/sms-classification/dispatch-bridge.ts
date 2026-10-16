@@ -78,6 +78,8 @@ export type ClassificationBridgeResult =
        *  so the approved-template step can fail closed on anything but
        *  `not_applicable` (PLAN D5: price / distress never auto-reply). */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** Jev's "did the seller ask how we got their number" answer; true only on an explicit yes. */
+      askedHowNumberObtained: boolean;
       /** Jev's raw wrong-contact scope (`route.scope` folds uncertain into
        *  this_property). The approved wrong-number reply fires only on an
        *  explicit `this_property`. */
@@ -109,11 +111,22 @@ export type ClassificationBridgeResult =
       listingStatus: SmsClassificationDecision["listingStatus"];
       /** See `jev_route.escalationReason`. */
       escalationReason: SmsClassificationDecision["escalationReason"];
+      /** See `jev_route.askedHowNumberObtained`. */
+      askedHowNumberObtained: boolean;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
       evaluationRevision: number;
     }
-  | { kind: "jev_no_action"; classificationRunId: string }
+  | {
+      kind: "jev_no_action";
+      classificationRunId: string;
+      /** Present (true) only when Jev said the seller asked how we got their number. */
+      askedHowNumberObtained?: true;
+      /** Carried so the shared hot decision sees a hot escalation whatever the outcome. */
+      escalationReason?: SmsClassificationDecision["escalationReason"];
+      /** The no-action outcome (unclear / bad_number): only "unclear" can be overridden by hot. */
+      outcome?: SmsClassificationDecision["outcome"];
+    }
   /**
    * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
    * automatic-mode-only. Jev's HTTP call failed, no decision-time
@@ -140,7 +153,11 @@ export type ClassificationBridgeResult =
   | {
       kind: "jev_needs_decision";
       classificationRunId: string;
+      /** Present (true) only when Jev said the seller asked how we got their number. */
+      askedHowNumberObtained?: true;
       outcome: SmsClassificationDecision["outcome"];
+      /** Carried so the shared hot decision sees a hot escalation below the cutoff. */
+      escalationReason?: SmsClassificationDecision["escalationReason"];
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
@@ -154,6 +171,8 @@ export type ClassificationBridgeResult =
   | {
       kind: "jev_promote_new_lead";
       classificationRunId: string;
+      /** See `jev_route.askedHowNumberObtained`. */
+      askedHowNumberObtained: boolean;
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
@@ -387,7 +406,13 @@ export async function classifyForDispatch(
   const resolved = await resolvePolicyOutcome(decision);
 
   if (resolved.kind === "no_action") {
-    return { kind: "jev_no_action", classificationRunId };
+    return {
+      kind: "jev_no_action",
+      classificationRunId,
+      ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
+      escalationReason: decision.escalationReason,
+      outcome: decision.outcome,
+    };
   }
 
   if (resolved.kind === "nurture") {
@@ -398,11 +423,13 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, readyTimeframe: decision.readyTimeframe ?? null, listingStatus: decision.listingStatus ?? null, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, readyTimeframe: decision.readyTimeframe ?? null, listingStatus: decision.listingStatus ?? null, askedHowNumberObtained: decision.askedHowNumberObtained === true, escalationReason: decision.escalationReason, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
+          ...(decision.askedHowNumberObtained === true ? { askedHowNumberObtained: true as const } : {}),
           outcome: decision.outcome,
+          escalationReason: decision.escalationReason,
           nativeConfidence,
           thresholdAtDecision,
           thresholdVersion,
@@ -423,6 +450,7 @@ export async function classifyForDispatch(
       return {
         kind: "jev_promote_new_lead",
         classificationRunId,
+        askedHowNumberObtained: decision.askedHowNumberObtained === true,
         nativeConfidence,
         thresholdAtDecision,
         thresholdVersion,
@@ -437,6 +465,7 @@ export async function classifyForDispatch(
       eligibleForAutoAccept: false,
       nativeConfidence,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained === true,
       wrongScope: decision.wrongScope,
       thresholdAtDecision,
       thresholdVersion,
@@ -466,6 +495,7 @@ export async function classifyForDispatch(
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
     escalationReason: decision.escalationReason,
+    askedHowNumberObtained: decision.askedHowNumberObtained === true,
     wrongScope: decision.wrongScope,
   };
 }
@@ -561,6 +591,7 @@ async function persistRun(
       outcomeConfidence: decision.outcomeConfidence ?? null,
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
+      askedHowNumberObtained: decision.askedHowNumberObtained ?? null,
       readyTimeframe: decision.readyTimeframe ?? null,
       listingStatus: decision.listingStatus ?? null,
       probabilities: decision.probabilities,

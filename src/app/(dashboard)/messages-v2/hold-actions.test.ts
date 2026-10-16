@@ -123,6 +123,7 @@ function deps(over: Partial<HoldActionDeps> = {}, reply = baseReply()) {
     suppressNumber: vi.fn().mockResolvedValue({ ok: true, data: null }),
     resolveHostileReply: vi.fn().mockResolvedValue(null),
     reportError: vi.fn(),
+    draftOwner: vi.fn().mockResolvedValue("ok"),
     ...over,
   };
   return { d, log };
@@ -131,7 +132,7 @@ function deps(over: Partial<HoldActionDeps> = {}, reply = baseReply()) {
 describe("sendHeldDraft", () => {
   it("sends the draft as-is through the human send path, then marks it sent and audits it", async () => {
     const { d, log } = deps();
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     expect(result).toMatchObject({ ok: true });
     expect(d.sendHumanDraft).toHaveBeenCalledWith(
       d.admin,
@@ -169,7 +170,7 @@ describe("sendHeldDraft", () => {
 
   it("clears the draft_held flag after a successful send, and only that flag", async () => {
     const { d, log } = deps();
-    await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     const flagUpdate = logFor(log, "properties", "update").at(-1)!;
     expect(flagUpdate.calls.find((c) => c.method === "update")!.args[0]).toMatchObject({ needs_human_attention: false });
     expect(has(flagUpdate.calls, "eq", "last_ai_escalation_reason", "draft_held")).toBe(true);
@@ -177,7 +178,7 @@ describe("sendHeldDraft", () => {
 
   it("never puts message text in the audit trail", async () => {
     const { d } = deps();
-    await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     const audited = JSON.stringify([
       vi.mocked(d.recordLeadEvent).mock.calls,
       vi.mocked(d.recordStep).mock.calls.map((c) => c[2]),
@@ -187,15 +188,15 @@ describe("sendHeldDraft", () => {
 
   it("answers NOT_FOUND for a missing draft and for another org's draft", async () => {
     const missing = deps({}, baseReply({ ai_reply_drafts: { data: null } }));
-    expect(await sendHeldDraft(missing.d, { draftId: "x", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_FOUND" } });
+    expect(await sendHeldDraft(missing.d, { draftId: "x", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_FOUND" } });
     const other = deps({}, baseReply({ ai_reply_drafts: { data: { ...DRAFT, org_id: "org-2" } } }));
-    expect(await sendHeldDraft(other.d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_FOUND" } });
+    expect(await sendHeldDraft(other.d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_FOUND" } });
     expect(other.d.sendHumanDraft).not.toHaveBeenCalled();
   });
 
   it("refuses a draft that is no longer pending", async () => {
     const { d } = deps({}, baseReply({ ai_reply_drafts: { data: { ...DRAFT, status: "discarded" } } }));
-    expect(await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_PENDING" } });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_PENDING" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
   });
 
@@ -203,7 +204,7 @@ describe("sendHeldDraft", () => {
     const { d, log } = deps({
       sendHumanDraft: vi.fn().mockResolvedValue({ status: "refused", reason: "superseded_before_send", retryable: false, flagged: true }),
     });
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     expect(result).toMatchObject({
       ok: false,
       error: { code: "SEND_REFUSED", details: { reason: "superseded_before_send", retryable: false } },
@@ -221,14 +222,14 @@ describe("sendHeldDraft", () => {
     const { d } = deps({}, (table, calls) =>
       table === "ai_reply_drafts" && calls.some((c) => c.method === "update") ? { error: { message: "db down" } } : reply(table, calls),
     );
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     expect(result).toMatchObject({ ok: true });
     expect(d.reportError).toHaveBeenCalled();
   });
 
   it("refuses a draft with no inbound message to answer", async () => {
     const { d } = deps({}, baseReply({ ai_reply_drafts: { data: { ...DRAFT, inbound_message_id: null } } }));
-    expect(await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_SENDABLE" } });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_SENDABLE" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
   });
 });
@@ -236,7 +237,7 @@ describe("sendHeldDraft", () => {
 describe("editAndSendHeldDraft", () => {
   it("records the edit on the draft row (edited_body, edited_by) and sends the edited text", async () => {
     const { d, log } = deps();
-    const result = await editAndSendHeldDraft(d, { draftId: "draft-1", seen: SEEN, body: "  A better draft  " });
+    const result = await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "  A better draft  " });
     expect(result).toMatchObject({ ok: true });
     const edit = logFor(log, "ai_reply_drafts", "update")[0]!;
     expect(edit.calls.find((c) => c.method === "update")!.args[0]).toMatchObject({
@@ -252,8 +253,8 @@ describe("editAndSendHeldDraft", () => {
 
   it("rejects an empty or oversized edit before touching anything", async () => {
     const { d, log } = deps();
-    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", seen: SEEN, body: "   " })).toMatchObject({ ok: false, error: { code: "INVALID_BODY" } });
-    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", seen: SEEN, body: "x".repeat(1601) })).toMatchObject({ ok: false, error: { code: "INVALID_BODY" } });
+    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "   " })).toMatchObject({ ok: false, error: { code: "INVALID_BODY" } });
+    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "x".repeat(1601) })).toMatchObject({ ok: false, error: { code: "INVALID_BODY" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
     expect(log).toHaveLength(0);
   });
@@ -263,7 +264,7 @@ describe("editAndSendHeldDraft", () => {
     const { d } = deps({}, (table, calls) =>
       table === "ai_reply_drafts" && calls.some((c) => c.method === "update") ? { data: [] } : reply(table, calls),
     );
-    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", seen: SEEN, body: "new text" })).toMatchObject({
+    expect(await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "new text" })).toMatchObject({
       ok: false,
       error: { code: "DRAFT_NOT_PENDING" },
     });
@@ -354,7 +355,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
   it("refuses with DRAFT_CHANGED when the stored text is no longer the text the clicker saw, and sends nothing", async () => {
     const edited = { ...DRAFT, edited_body: "Someone else edited this", edited_at: "2026-10-07T12:30:00+00:00" };
     const { d, log } = deps({}, baseReply({ ai_reply_drafts: { data: edited } }));
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     expect(result).toMatchObject({ ok: false, error: { code: "DRAFT_CHANGED" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
     expect(logFor(log, "ai_reply_drafts", "update")).toHaveLength(0);
@@ -363,14 +364,14 @@ describe("review round 1: the clicker's view is what gets sent", () => {
   it("refuses when only the edit version moved (same text re-saved)", async () => {
     const edited = { ...DRAFT, edited_at: "2026-10-07T12:30:00+00:00" };
     const { d } = deps({}, baseReply({ ai_reply_drafts: { data: edited } }));
-    expect(await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_CHANGED" } });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_CHANGED" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
   });
 
   it("sends the human-edited text when that is exactly what the clicker saw", async () => {
     const edited = { ...DRAFT, edited_body: "Edited earlier", edited_at: "2026-10-07T12:30:00+00:00" };
     const { d } = deps({}, baseReply({ ai_reply_drafts: { data: edited } }));
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: { body: "Edited earlier", editedAt: "2026-10-07T12:30:00+00:00" } });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: { body: "Edited earlier", editedAt: "2026-10-07T12:30:00+00:00" } });
     expect(result).toMatchObject({ ok: true });
     expect(d.sendHumanDraft).toHaveBeenCalledWith(d.admin, expect.objectContaining({ body: "Edited earlier", edited: true }));
   });
@@ -378,7 +379,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
   it("an Edit made on top of a draft that has since changed is refused: nothing is written or sent", async () => {
     const moved = { ...DRAFT, edited_body: "Another edit", edited_at: "2026-10-07T12:30:00+00:00" };
     const { d, log } = deps({}, baseReply({ ai_reply_drafts: { data: moved } }));
-    const result = await editAndSendHeldDraft(d, { draftId: "draft-1", seen: SEEN, body: "My version" });
+    const result = await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "My version" });
     expect(result).toMatchObject({ ok: false, error: { code: "DRAFT_CHANGED" } });
     expect(logFor(log, "ai_reply_drafts", "update")).toHaveLength(0);
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
@@ -388,7 +389,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
     const { d, log } = deps({
       sendHumanDraft: vi.fn().mockResolvedValue({ status: "refused", reason: "superseded_before_send", retryable: false, flagged: false }),
     });
-    await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     const reserve = logFor(log, "rpc:fn_reserve_ai_send")[0]!.calls[0]!.args[0] as Record<string, unknown>;
     const release = logFor(log, "rpc:fn_release_ai_send")[0]!.calls[0]!.args[0] as Record<string, unknown>;
     expect(reserve).toMatchObject({ p_conversation_id: "prop-1", p_inbound_message_id: "msg-1", p_lease_seconds: SEND_LEASE_SECONDS });
@@ -403,7 +404,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
 
   it("does not send while another action holds the property lease", async () => {
     const { d } = deps({}, baseReply({ "rpc:fn_reserve_ai_send": { data: false } }));
-    expect(await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "SEND_BUSY" } });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "SEND_BUSY" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
   });
 
@@ -417,7 +418,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
       }
       return reply(table, calls);
     });
-    expect(await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_PENDING" } });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: false, error: { code: "DRAFT_NOT_PENDING" } });
     expect(d.sendHumanDraft).not.toHaveBeenCalled();
   });
 
@@ -426,7 +427,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
       const { d } = deps({
         sendHumanDraft: vi.fn().mockResolvedValue({ status: "refused", reason, retryable: false, flagged: true }),
       });
-      const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+      const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
       expect(result).toMatchObject({
         ok: false,
         error: {
@@ -441,7 +442,7 @@ describe("review round 1: the clicker's view is what gets sent", () => {
     const { d } = deps({
       sendHumanDraft: vi.fn().mockResolvedValue({ status: "refused", reason: "already_flagged:keyword_stop", retryable: false, flagged: true }),
     });
-    const result = await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
+    const result = await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN });
     expect(result).toMatchObject({ ok: false, error: { code: "SEND_REFUSED" } });
     expect(JSON.stringify(result)).toContain("already flagged keyword stop");
   });
@@ -466,7 +467,7 @@ describe("review round 1: Dismiss / Take over from a stale view", () => {
       if (table === "properties" && !calls.some((c) => c.method === "update") && has(calls, "in", "id", ["prop-1"])) {
         return { data: [{ id: "prop-1", needs_human_attention: true, last_ai_escalation_reason: "draft_held", last_ai_escalation_at: "2026-10-07T13:00:00+00:00" }] };
       }
-      if (table === "jev_lead_decisions") return { data: [{ property_id: "prop-1", created_at: "2026-10-07T14:00:00+00:00" }] };
+      if (table === "jev_lead_decisions") return calls.some((c) => c.method === "gt") ? { data: [] } : { data: [{ id: "a", property_id: "prop-1", created_at: "2026-10-07T14:00:00+00:00" }] };
       if (table === "ai_disposition_reviews" || (table === "ai_reply_drafts" && has(calls, "in", "property_id", ["prop-1"]))) return { data: [] };
       return reply(table, calls);
     };
@@ -684,5 +685,53 @@ describe("confirmDoNotContact (hostile_needs_confirm hold)", () => {
       error: { code: "SEND_BUSY" },
     });
     expect(busy.d.suppressNumber).not.toHaveBeenCalled();
+  });
+});
+
+describe("Send / Edit: the property the clicker saw is re-checked INSIDE the lease", () => {
+  it("a draft whose property differs before the lease fails fast with HOLD_STALE and sends nothing", async () => {
+    const { d } = deps();
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-2", seen: SEEN })).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(d.sendHumanDraft).not.toHaveBeenCalled();
+  });
+
+  it.each(["send", "edit"] as const)("%s: a reassignment between the early check and the lease -> HOLD_STALE, nothing written or sent", async (kind) => {
+    let reads = 0;
+    const reply = baseReply();
+    const { d, log } = deps({}, (table, calls) => {
+      if (table === "ai_reply_drafts" && !calls.some((c) => c.method === "update")) {
+        reads += 1;
+        // First read (before the lease) says prop-1; the re-read under the lease says it moved to prop-2.
+        return { data: reads === 1 ? DRAFT : { ...DRAFT, property_id: "prop-2" } };
+      }
+      return reply(table, calls);
+    });
+    const result =
+      kind === "send"
+        ? await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })
+        : await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "new text" });
+    expect(result).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(d.sendHumanDraft).not.toHaveBeenCalled();
+    expect(logFor(log, "ai_reply_drafts", "update")).toHaveLength(0);
+  });
+
+  it.each(["send", "edit"] as const)("%s: the in-lease ownership check (run / message / conversation) refusing -> HOLD_STALE, nothing sent", async (kind) => {
+    const draftOwner = vi.fn().mockResolvedValue("stale");
+    const { d, log } = deps({ draftOwner });
+    const result =
+      kind === "send"
+        ? await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })
+        : await editAndSendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN, body: "new text" });
+    expect(result).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
+    expect(draftOwner).toHaveBeenCalledWith("draft-1", "prop-1");
+    expect(d.sendHumanDraft).not.toHaveBeenCalled();
+    expect(logFor(log, "ai_reply_drafts", "update")).toHaveLength(0);
+  });
+
+  it("the in-lease check passing lets the send go through", async () => {
+    const draftOwner = vi.fn().mockResolvedValue("ok");
+    const { d } = deps({ draftOwner });
+    expect(await sendHeldDraft(d, { draftId: "draft-1", expectedPropertyId: "prop-1", seen: SEEN })).toMatchObject({ ok: true });
+    expect(d.sendHumanDraft).toHaveBeenCalledTimes(1);
   });
 });

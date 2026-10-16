@@ -2,20 +2,19 @@ import path from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-import { requireLoopbackPostgresUrl } from "./src/lib/testing/loopback-postgres-url";
-
 // Norma stress gate (.planning/norma/PLAN.md section 9). Needs a LOCAL Supabase
 // Postgres to clone the schema from; it creates and drops its own scratch
 // database and never writes to the source database.
-const sourceUrl = requireLoopbackPostgresUrl(
-  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
-);
+// No default: the globalSetup guard (isolated-db-env.ts) requires an explicit,
+// loopback, non-shared-port source before any test file loads.
+const sourceUrl = process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "";
 
 export default defineConfig({
   test: {
     include: ["src/lib/norma/stress/**/*.integration.test.ts"],
     setupFiles: ["src/lib/norma/stress/setup.ts"],
     environment: "node",
+    globalSetup: ["./src/lib/testing/isolated-norma-stress.global-setup.ts"],
     reporters: ["default"],
     testTimeout: 120_000,
     hookTimeout: 120_000,

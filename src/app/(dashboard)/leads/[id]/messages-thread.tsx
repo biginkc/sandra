@@ -437,7 +437,7 @@ export function MessageBubble({
     isMostRecentOutbound,
   );
   const aiGenerated = isAiGeneratedMessage(message);
-  const showMetadataFooter = isLastInGroup || aiGenerated || Boolean(dripLabel) || dripReply;
+  const showMetadataFooter = timeline || isLastInGroup || aiGenerated || Boolean(dripLabel) || dripReply;
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a

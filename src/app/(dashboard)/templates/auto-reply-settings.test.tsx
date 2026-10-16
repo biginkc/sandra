@@ -30,7 +30,7 @@ beforeEach(() => {
 describe("<AutoReplySettingsSection />", () => {
   it("lists only the outcomes that may be answered automatically", () => {
     render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
-    for (const outcome of ["nurture", "not_interested", "wrong_number", "hostile"]) {
+    for (const outcome of ["nurture", "not_interested", "wrong_number", "hostile", "number_source"]) {
       expect(screen.getByTestId(`auto-reply-row-${outcome}`)).toBeVisible();
     }
     for (const never of ["new_lead", "opted_out", "dnc"]) {
@@ -43,6 +43,15 @@ describe("<AutoReplySettingsSection />", () => {
     expect(screen.getByTestId("auto-reply-note-wrong_number")).toHaveTextContent("Closes this property only");
     expect(screen.getByTestId("auto-reply-note-hostile")).toHaveTextContent("Never sent automatically");
     expect(screen.queryByTestId("auto-reply-note-nurture")).not.toBeInTheDocument();
+  });
+
+  it("choosing a template for the number-source row saves the number_source mapping", async () => {
+    const user = userEvent.setup();
+    render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
+    await user.selectOptions(screen.getByTestId("auto-reply-select-number_source"), "a");
+    await waitFor(() =>
+      expect(setAutoReplyMapping).toHaveBeenCalledWith({ outcome: "number_source", templateId: "a", active: true }),
+    );
   });
 
   it("offers approved templates only, defaulting to no automatic reply", () => {

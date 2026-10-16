@@ -78,6 +78,10 @@ import {
   changeAcquisitionSettings,
 } from "./actions";
 import { loadTriage, setStripOverride } from "./strip-actions";
+import { UnifiedQueue, type UnifiedQueueHandle } from "./unified/unified-queue";
+import { parseWorkQuery, workQueryToSearchParams } from "./unified/query-params";
+import type { WorkQuery } from "./unified/contract";
+import { dismissBroken, loadUnifiedKpis, loadWorkFacts, loadWorkPage, pinLead } from "./unified-actions";
 
 type Props = {
   viewer: { userId: string; orgId: string; isOwner: boolean };
@@ -97,6 +101,8 @@ type Props = {
   initialSearch?: string;
   focus?: MyLeadsFocus | null;
   selectedLead?: import("./deep-link").SelectedLeadResult;
+  /** The unified work queue's first paint; null or omitted renders today's page. */
+  unified?: import("./unified/contract").UnifiedInitial | null;
 };
 /** A lead opened from a deep link (lead page or Messages). */
 export type MyLeadsFocus = {
@@ -173,6 +179,7 @@ function focusFromSelectedLead(
 }
 
 const REFRESH_INTERVAL_MS = 30_000;
+const UNIFIED_ACTIONS = { loadWorkPage, loadWorkFacts, pinLead, dismissBroken, loadKpis: loadUnifiedKpis };
 /** Any open Base UI popup (dialog, alert dialog, popover, drawer, menu) and the hand-built softphone popover blocks the auto-prompt. */
 const OPEN_FOREIGN_POPUP_SELECTOR =
   "[role=dialog][data-open], [role=alertdialog][data-open], [role=menu][data-open], [data-testid=softphone-popover]";
@@ -318,10 +325,43 @@ export function MyLeadsClient({
   initialSearch = "",
   focus: providedFocus = null,
   selectedLead = { status: "none" },
+  unified = null,
 }: Props) {
   const focus =
     providedFocus ?? focusFromSelectedLead(selectedLead, viewer.userId);
   const router = useRouter();
+  // Unified work queue (flag on): the new container replaces the sectioned queue; every old read below is bypassed.
+  const unifiedMode = unified !== null;
+  const unifiedHandle = useRef<UnifiedQueueHandle | null>(null);
+  const registerUnifiedHandle = useCallback((handle: UnifiedQueueHandle | null) => {
+    unifiedHandle.current = handle;
+  }, []);
+  // Address bar <-> view. Tab, chip, stage and page changes push a history entry so Back/Forward restore the view;
+  // typing in search only rewrites the current entry; changes the rep did not make (page clamp, rep switch) also rewrite.
+  const lastUnifiedQuery = useRef<WorkQuery | null>(unified?.query ?? null);
+  const syncUnifiedUrl = useCallback((query: WorkQuery, options?: { replace?: boolean }) => {
+    const qs = workQueryToSearchParams(query).toString();
+    const url = qs ? `/my-leads?${qs}` : "/my-leads";
+    const previous = lastUnifiedQuery.current;
+    lastUnifiedQuery.current = query;
+    const current = `${window.location.pathname}${window.location.search}`;
+    // Shallow URL update: no server round trip per click.
+    if (options?.replace || !previous || previous.search !== query.search) window.history.replaceState(null, "", url);
+    else if (url !== current) window.history.pushState(null, "", url);
+  }, []);
+  useEffect(() => {
+    if (!unifiedMode) return;
+    const onPopState = () => {
+      if (window.location.pathname !== "/my-leads") return;
+      const query = parseWorkQuery(new URLSearchParams(window.location.search));
+      lastUnifiedQuery.current = query;
+      unifiedHandle.current?.syncQuery(query);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [unifiedMode]);
+  // Leads whose workflow was opened since the last unified refresh: re-read after a commit.
+  const unifiedTouched = useRef(new Set<string>());
   const softphone = useOptionalSoftphone();
   const [member, setMember] = useState(initialMemberId);
   const [search, setSearch] = useState(initialSearch);
@@ -351,6 +391,11 @@ export function MyLeadsClient({
   const [loadingStages, setLoadingStages] = useState<Set<MyLeadStage>>(
     new Set(),
   );
+  // Background reads must not rewind a cursor chain or cancel a page request.
+  const paginationEpoch = useRef(0);
+  const pagingStages = useRef(new Set<MyLeadStage>());
+  const preservingPages = useRef(false);
+  const [paginated, setPaginated] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [callOptions, setCallOptions] = useState<{
     propertyId: string;
@@ -470,7 +515,21 @@ export function MyLeadsClient({
   const refresh = useCallback(
     async (background = false) => {
       if (!roster.settings.enabled) return null;
+      if (unifiedMode) {
+        // The unified container owns every read: re-read the touched leads, or the displayed page.
+        const touched = [...unifiedTouched.current];
+        unifiedTouched.current.clear();
+        const handle = unifiedHandle.current;
+        if (touched.length && handle) await Promise.all(touched.map((id) => handle.afterAction(id)));
+        else handle?.refreshNow();
+        return null;
+      }
       const id = ++request.current;
+      if (!background) {
+        ++paginationEpoch.current;
+        pagingStages.current.clear();
+        setLoadingStages(new Set());
+      }
       try {
         const pinId = pinWanted.current;
         const [loaded, pinResult] = await Promise.all([
@@ -520,7 +579,7 @@ export function MyLeadsClient({
         )
           applyPin(pinResult);
         if (result.ok) {
-          const applied = !background || !reviewingDetails.current;
+          const applied = !background || (!reviewingDetails.current && !preservingPages.current);
           if (pinWanted.current === pinId && pin !== undefined)
             actionPin.current = pin;
           if (pinResult && pinWanted.current === pinId) {
@@ -532,14 +591,20 @@ export function MyLeadsClient({
           }
           // Replacing a paginated/reordered queue can unmount its recording player.
           // Background checks may update KPIs, but must leave open lead details alone.
-          if (!background || !reviewingDetails.current)
+          if (applied) {
+            ++paginationEpoch.current;
+            pagingStages.current.clear();
+            setLoadingStages(new Set());
             setSnapshot(result.snapshot);
+            preservingPages.current = false;
+            setPaginated(false);
+          }
           setKpis(result.kpis);
           setDrips(result.drips);
           // undefined = the strip read failed: keep the last good strip. null = strip is off.
           if (result.strip !== undefined) setStrip(result.strip);
           setLastCheckedAt(result.snapshot.snapshotAt);
-          setError(null);
+          if (!background) setError(null);
           setRefreshError(null);
         } else {
           setRefreshError(result.message);
@@ -555,9 +620,11 @@ export function MyLeadsClient({
         return null;
       }
     },
-    [applyPin, member, search, roster.settings.enabled],
+    [applyPin, member, search, roster.settings.enabled, unifiedMode],
   );
   useEffect(() => {
+    // The unified container loads (and reloads on a rep change) by itself.
+    if (unifiedMode) return;
     if (initialEffect.current) {
       initialEffect.current = false;
       return;
@@ -565,6 +632,11 @@ export function MyLeadsClient({
     const scopeChanged = previousServerScope.current !== serverScopeKey;
     previousServerScope.current = serverScopeKey;
     ++request.current;
+    ++paginationEpoch.current;
+    pagingStages.current.clear();
+    setLoadingStages(new Set());
+    preservingPages.current = false;
+    setPaginated(false);
     if (scopeChanged) {
       setSnapshot(null);
       setKpis(null);
@@ -579,9 +651,9 @@ export function MyLeadsClient({
     return () => {
       clearTimeout(timer);
     };
-  }, [refresh, serverScopeKey]);
+  }, [refresh, serverScopeKey, unifiedMode]);
   useEffect(() => {
-    if (!roster.settings.enabled) return;
+    if (!roster.settings.enabled || unifiedMode) return;
     const delay = Math.min(
       REFRESH_INTERVAL_MS,
       Math.max(
@@ -616,9 +688,10 @@ export function MyLeadsClient({
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [snapshot, refresh, roster.settings.enabled]);
+  }, [snapshot, refresh, roster.settings.enabled, unifiedMode]);
   // The displayed row. Only used to find what the user clicked; command preconditions come from the single-row lookup at opening time.
   const rawRow = (id: string) =>
+    unifiedHandle.current?.rowFor(id) ??
     findRow(snapshot, drips, id, pinRead) ??
     // A strip or triage lead need not be on a loaded section page. Only used to find what the
     // user clicked; the workflow re-reads the lead through the single-row lookup before acting.
@@ -713,6 +786,7 @@ export function MyLeadsClient({
     id: string,
     callActivityId?: string | null,
   ) => {
+    if (unifiedMode) unifiedTouched.current.add(id);
     const row = rawRow(id);
     if (!row) {
       // The persistent call banner can outlive the row's loaded page. Resolve the
@@ -1033,12 +1107,13 @@ export function MyLeadsClient({
     );
     const next = oldestPrompt(candidates);
     // A lead no longer in this queue (reassigned since the poll) is never opened.
-    if (!next || !rawRow(next.propertyId)) return;
+    // Unified mode shows one page of one tab, so a missing row is not "reassigned": action() resolves the lead through the single-row lookup.
+    if (!next || (!unifiedMode && !rawRow(next.propertyId))) return;
     autoPromptSaved.current = false;
     setAutoPrompt(next);
     action("log-attempt", next.propertyId, next.callActivityId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
-  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall]);
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall, unifiedMode]);
   // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
   useEffect(() => {
     if (!autoPrompt) return;
@@ -1160,6 +1235,22 @@ export function MyLeadsClient({
       setClearedForKey(focusKey);
       router.replace("/my-leads", { scroll: false });
     }
+  };
+  // Unified mode: the rep changed the view, so the deep link is spent. The container's URL sync rewrites
+  // the address bar (without ?lead=), so no router round trip here; dialogs and openings are left alone.
+  const clearDeepLink = () => {
+    if (target.propertyId || target.notice)
+      setTarget((previous) => ({
+        propertyId: null,
+        notice: null,
+        retryHref: undefined,
+        nonce: previous.nonce,
+      }));
+    pinWanted.current = null;
+    setPinRead(null);
+    actionPin.current = null;
+    setPinNotice(null);
+    if (focusKey !== "||" && clearedForKey !== focusKey) setClearedForKey(focusKey);
   };
   const view = useMemo(
     () =>
@@ -1426,6 +1517,53 @@ export function MyLeadsClient({
       )}
       {!roster.settings.enabled ? (
         <p>My Leads is not enabled yet.</p>
+      ) : unified ? (
+        <UnifiedQueue
+          // A new deep-link navigation (nonce) restarts the queue from the server's fresh first page.
+          key={target.nonce}
+          initial={unified}
+          actions={UNIFIED_ACTIONS}
+          memberId={member}
+          canAct={ownQueue}
+          canSelectRep={viewer.isOwner}
+          repOptions={roster.members
+            .filter((m) => m.acquisitionsEnabled || m.hasHistory || m.id === viewer.userId)
+            .map((m) => ({
+              id: m.id,
+              label: m.label + (m.acquisitionsEnabled ? "" : " — Acquisitions disabled"),
+            }))}
+          selectedRepLabel={roster.members.find((m) => m.id === member)?.label}
+          onRepChange={(value) => {
+            clearDeepLink();
+            setMember(value);
+          }}
+          paused={dialog !== null || openingStatus !== null}
+          deepLinkId={target.propertyId}
+          deepLinkNonce={target.nonce}
+          onViewChange={clearDeepLink}
+          onQueryChange={syncUnifiedUrl}
+          onAction={(kind, propertyId) => action(kind, propertyId)}
+          onLoadDetailPage={async (propertyId, group, cursor) => {
+            const result = await loadMyLeadDetail({ memberId: member, propertyId, group, cursor });
+            if (!result.ok) return result;
+            const detail = detailView(result.detail, roster);
+            switch (group) {
+              case "messages":
+                return { ok: true, group, page: detail.messages };
+              case "notes":
+                return { ok: true, group, page: detail.notes };
+              case "attempts":
+                return { ok: true, group, page: detail.attempts };
+              case "appointments":
+                return { ok: true, group, page: detail.appointments };
+              case "offers":
+                return { ok: true, group, page: detail.offers };
+              case "history":
+                return { ok: true, group, page: detail.history };
+            }
+          }}
+          registerHandle={registerUnifiedHandle}
+        />
       ) : !pages || !kpis || !tiles ? (
         <p role="status">Loading My Leads…</p>
       ) : (
@@ -1494,8 +1632,12 @@ export function MyLeadsClient({
             }}
             onLoadMore={async (stage) => {
               const cursor = snapshot?.stages[stage]?.cursor;
-              if (!cursor || loadingStages.has(stage)) return;
-              const id = request.current;
+              if (!cursor || pagingStages.current.has(stage)) return;
+              const id = paginationEpoch.current;
+              pagingStages.current.add(stage);
+              preservingPages.current = true;
+              setPaginated(true);
+              setError(null);
               setLoadingStages((previous) => new Set(previous).add(stage));
               try {
                 const result = await loadMyLeadsStage({
@@ -1504,7 +1646,7 @@ export function MyLeadsClient({
                   stage,
                   cursor,
                 });
-                if (id !== request.current) return;
+                if (id !== paginationEpoch.current) return;
                 if (!result.ok) {
                   setError(result.message);
                   return;
@@ -1529,12 +1671,18 @@ export function MyLeadsClient({
                       },
                     };
                   });
+              } catch {
+                if (id === paginationEpoch.current)
+                  setError("Could not load more leads. Try again, or refresh the list.");
               } finally {
-                setLoadingStages((previous) => {
-                  const next = new Set(previous);
-                  next.delete(stage);
-                  return next;
-                });
+                if (id === paginationEpoch.current) {
+                  pagingStages.current.delete(stage);
+                  setLoadingStages((previous) => {
+                    const next = new Set(previous);
+                    next.delete(stage);
+                    return next;
+                  });
+                }
               }
             }}
             onLoadDetail={async (propertyId) => {
@@ -1579,15 +1727,16 @@ export function MyLeadsClient({
 
           {lastCheckedAt && (
             <p className="mb-2 text-sm text-muted-foreground">
-              Counts update every 30 seconds while this page is visible. Last
+              Activity updates every 30 seconds while this page is visible. Last
               successful check:{" "}
               <time dateTime={lastCheckedAt}>
                 {refreshTime.format(new Date(lastCheckedAt))}
               </time>
               .
-              {reviewing
-                ? " The lead list stays in place while details are open."
-                : ""}
+              {paginated
+                ? " Loaded leads stay in place while you browse."
+                : reviewing ? " The lead list stays in place while details are open." : ""}
+              {paginated && <Button variant="outline" className="ml-2" onClick={() => void refresh()}>Refresh list</Button>}
             </p>
           )}
           {search && (
