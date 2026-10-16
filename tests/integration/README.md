@@ -56,8 +56,10 @@ test file loads or connects, and refuses to start unless:
 
 Start a private throwaway stack on unused ports with
 `e2e/stress/provision-stack.mjs` (local-safe: refuses the shared ports, the
-repo root, and any workdir it did not create). It prints `API_URL`, `DB_URL`,
-`ANON_KEY` and `SERVICE_ROLE_KEY` as JSON and writes `<workdir>/stress-env.json`:
+repo root, and any workdir it did not create). It writes the stack's
+`API_URL`, `DB_URL`, `ANON_KEY` and `SERVICE_ROLE_KEY` to
+`<workdir>/stress-env.json` (mode 600); stdout masks the keys, so read them
+from that file:
 
 ```bash
 node e2e/stress/provision-stack.mjs --workdir "$(mktemp -d)/sandra-stack" --api-port 54961 --db-port 54962
@@ -68,8 +70,8 @@ outside a GitHub runner.) Then:
 
 ```bash
 export LOCAL_SUPABASE_URL=http://127.0.0.1:54961
-export LOCAL_SUPABASE_ANON_KEY=<ANON_KEY from the JSON>
-export LOCAL_SUPABASE_SERVICE_ROLE_KEY=<SERVICE_ROLE_KEY from the JSON>
+export LOCAL_SUPABASE_ANON_KEY=$(jq -r .ANON_KEY <workdir>/stress-env.json)
+export LOCAL_SUPABASE_SERVICE_ROLE_KEY=$(jq -r .SERVICE_ROLE_KEY <workdir>/stress-env.json)
 export TEST_SUPABASE_URL=$LOCAL_SUPABASE_URL
 export TEST_SUPABASE_SERVICE_ROLE_KEY=$LOCAL_SUPABASE_SERVICE_ROLE_KEY
 export TEST_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54962/postgres
