@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   deadLetter: vi.fn(async () => true),
   flagAndDeadLetter: vi.fn(async () => ({ deadLettered: true, flagReason: "x" })),
   optOut: vi.fn(async () => undefined),
+  applyKeyword: vi.fn(async (..._a: unknown[]) => ({ escalated: false }) as unknown),
+  checkHot: vi.fn(async (..._a: unknown[]) => undefined),
 }));
 
 vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => ({
@@ -80,7 +82,8 @@ vi.mock("@/lib/ai-responder/delay", () => ({
 }));
 
 vi.mock("@/lib/ai-responder/dispatch", () => ({
-  applyKeywordEscalation: vi.fn(async () => ({ escalated: false })),
+  applyKeywordEscalation: mocks.applyKeyword,
+  checkHotTextAfterKeywordHold: mocks.checkHot,
   checkAiResponderDispatchPreGates: mocks.preGates,
   // Mirrors the real helper: a silent exit stamps `skipped:rule_<n>`.
   inboundStampOutcomeOf: (o: { outcome: string; reason?: string }) =>
@@ -512,6 +515,39 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     expect(mocks.dispatchAi).not.toHaveBeenCalled();
     const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
     expect(args).toMatchObject({ delaySeconds: 31 });
+  });
+
+  it("Jev automatic + mixed price/legal text: held under the NON-price reason and the hot check runs once; nothing scheduled", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
+    mocks.computeDelay.mockReturnValueOnce(10);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract" });
+    await runWebhook();
+    expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: true }));
+    expect(mocks.checkHot).toHaveBeenCalledTimes(1);
+    expect(mocks.checkHot.mock.calls[0][2]).toBe("keyword:legal_contract");
+    expect(mocks.startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("Jev automatic + price-only text: no up-front hold, no hot check here, the delayed dispatch is scheduled", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price"], jevAutomatic: true });
+    mocks.computeDelay.mockReturnValueOnce(10);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: false });
+    await runWebhook();
+    expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: true }));
+    expect(mocks.checkHot).not.toHaveBeenCalled();
+    expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it("non-Jev config: a keyword hold does not run the hot check", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
+    mocks.computeDelay.mockReturnValueOnce(10);
+    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer" });
+    await runWebhook();
+    expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: false }));
+    expect(mocks.checkHot).not.toHaveBeenCalled();
   });
 
   it("only an org with no reply delay (max = 0) dispatches synchronously", async () => {

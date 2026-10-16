@@ -114,6 +114,13 @@ export async function loadHotPromotions(
   orgId: string,
   alertsSince: string,
   nowMs: number = Date.now(),
+  /**
+   * The CURRENT resolved hot owner. An event is "finished" only when THIS
+   * recipient has terminal rows on both channels, so an owner change re-opens
+   * it for the new owner. null (unresolved) → any recipient counts (nothing
+   * is sent without a resolved owner anyway).
+   */
+  currentOwner: string | null = null,
 ): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
   type Row = {
     id: string;
@@ -161,7 +168,7 @@ export async function loadHotPromotions(
   for (let i = 0; i < keys.length; i += HOT_PROMOTION_PAGE) {
     const { data, error } = await db
       .from("hold_alert_deliveries")
-      .select("hold_key, channel, status, attempts")
+      .select("hold_key, channel, status, attempts, recipient_user_id")
       .eq("org_id", orgId)
       .in("hold_key", keys.slice(i, i + HOT_PROMOTION_PAGE));
     if (error) {
@@ -169,7 +176,8 @@ export async function loadHotPromotions(
       continue;
     }
     const finished = new Map<string, Set<string>>();
-    for (const d of (data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number }>) {
+    for (const d of (data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string }>) {
+      if (currentOwner && d.recipient_user_id !== currentOwner) continue;
       const isDone = d.status === "sent" || d.status === "skipped" || (d.status === "failed" && d.attempts >= MAX_ATTEMPTS);
       if (!isDone) continue;
       const set = finished.get(d.hold_key) ?? new Set<string>();
@@ -257,8 +265,10 @@ export function createHoldAlertDeps(
     loadHolds: (orgId, alertsSince) =>
       loadAlertHolds(db, orgId, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
-    loadHotPromotions: (orgId, alertsSince) =>
-      loadHotPromotions(db, orgId, alertsSince),
+    async loadHotPromotions(orgId, alertsSince) {
+      const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+      return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+    },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     async loadPropertyAssignee(orgId, propertyId) {
       const { data, error } = await db

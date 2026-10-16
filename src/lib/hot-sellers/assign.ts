@@ -220,6 +220,8 @@ export async function recordHotFailure(
   propertyId: string,
   inboundMessageId: string | null | undefined,
   reason: string,
+  /** The flag time THIS hand-off failure set (null = the flag was already set by something else). */
+  ourFlagAt: string | null = null,
 ): Promise<boolean> {
   if (!inboundMessageId) return false;
   const { data: property } = await db
@@ -231,7 +233,16 @@ export async function recordHotFailure(
   // carries its flag time so the hold and the event share hot_flag:<property>:<flagAt>
   // (stable; later texts never re-key it). An earlier hot hold that already
   // alerted covers it.
-  const flagIsOurs = property?.needs_human_attention === true && property.last_ai_escalation_reason === reason;
+  // Share the hold's hot_flag key ONLY when this failure set the flag itself
+  // (its stored time, as PostgREST returns it); a flag set by another inbound
+  // (even with the same reason) never lends its key: this failure gets its own
+  // hot_failed:<inbound> key unless that hold's alert covers it.
+  const flagIsOurs =
+    ourFlagAt !== null &&
+    property?.needs_human_attention === true &&
+    property.last_ai_escalation_reason === reason &&
+    !!property.last_ai_escalation_at &&
+    Date.parse(property.last_ai_escalation_at) === Date.parse(ourFlagAt);
   const flagAt = flagIsOurs ? property?.last_ai_escalation_at ?? null : null;
   const owner = property && !flagIsOurs ? await resolveHotOwner(db, property.org_id).catch(() => null) : null;
   const coveredByHold = property && !flagIsOurs ? await isCoveredByHotHold(db, property, owner) : false;
@@ -295,7 +306,8 @@ async function isCoveredByHotHold(
  * A hot text on a lead that already needs a person (dispatch's classify-only
  * step). One `hot_seller_text` event per inbound, flagged `held_lead`, to the
  * resolved hot owner; nothing is assigned. A rep's or DNC-locked lead, or an
- * unresolved owner, records nothing. An open hot hold whose alert was sent covers it.
+ * unresolved owner, records nothing ("skipped"); a failed ledger write is
+ * "write_failed" so the caller keeps the inbound retryable.
  */
 export async function recordHotTextOnHeldLead(
   db: SupabaseClient<Database>,
@@ -303,23 +315,24 @@ export async function recordHotTextOnHeldLead(
   inboundMessageId: string | null,
   reason: string,
   env: Record<string, string | undefined> = process.env,
-): Promise<boolean> {
-  if (!inboundMessageId) return false;
+): Promise<"recorded" | "skipped" | "write_failed"> {
+  if (!inboundMessageId) return "skipped";
   const { data: property } = await db
     .from("properties")
     .select("id, org_id, assigned_user_id, is_dnc_locked, deleted_at, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("id", propertyId)
     .maybeSingle();
-  if (!property || property.deleted_at || property.is_dnc_locked) return false;
+  if (!property || property.deleted_at || property.is_dnc_locked) return "skipped";
   const owner = await resolveHotOwner(db, property.org_id, env).catch(() => null);
-  if (!owner) return false;
-  if (property.assigned_user_id && property.assigned_user_id !== owner) return false;
+  if (!owner) return "skipped";
+  if (property.assigned_user_id && property.assigned_user_id !== owner) return "skipped";
   const coveredByHold = await isCoveredByHotHold(db, property, owner);
-  return recordOnce(db, {
+  const ok = await recordOnce(db, {
     propertyId,
     eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
     payload: { to: owner, reason: "hot_seller_text", held_lead: true, escalation: reason, covered_by_hold: coveredByHold },
     sourceType: HOT_TEXT_SOURCE_TYPE,
     sourceId: inboundMessageId,
   });
+  return ok ? "recorded" : "write_failed";
 }
