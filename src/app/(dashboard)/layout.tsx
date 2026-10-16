@@ -78,7 +78,8 @@ export default async function DashboardLayout({
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value.count : null;
-  const acquisitionBadgeNeedsAttention = badgeResult.status === "fulfilled" && badgeResult.value.needsAttention;
+  const acquisitionBadgeNeedsAttention =
+    showMyLeads && badgeResult.status === "fulfilled" && badgeResult.value.needsAttention;
   const showCalculators = Boolean(acquisitionRoster && canViewCalculators(
     acquisitionRoster.roster,
     acquisitionRoster.viewer.userId,
