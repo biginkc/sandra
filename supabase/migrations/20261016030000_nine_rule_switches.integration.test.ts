@@ -123,6 +123,19 @@ describe("nine rule switches", () => {
     expect((await asUser(users.outsider, () => db.query(`select 1 from public.ai_rule_switch_events where org_id = $1`, [orgId]))).rowCount).toBe(0);
   });
 
+  it("an expired or deletion-prepared owner cannot read the log (same conditions as the setter)", async () => {
+    await asUser(users.owner, set("nine_identity_reply", "false"));
+    const read = () => asUser(users.owner, () => db.query(`select 1 from public.ai_rule_switch_events where org_id = $1`, [orgId]));
+    expect((await read()).rowCount).toBe(1);
+    // The final-owner guard would refuse these test-only edits; bypass triggers as the setup does.
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.memberships set access_expires_at = now() - interval '1 minute' where user_id = $1`, [users.owner]);
+    expect((await read()).rowCount).toBe(0);
+    await db.query(`update public.memberships set access_expires_at = null, deletion_prepared_at = now() where user_id = $1`, [users.owner]);
+    await db.query("set local session_replication_role = origin");
+    expect((await read()).rowCount).toBe(0);
+  });
+
   it("rollback removes everything and is idempotent", async () => {
     await db.query(ROLLBACK);
     await db.query(ROLLBACK);

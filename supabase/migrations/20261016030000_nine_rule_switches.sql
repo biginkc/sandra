@@ -43,6 +43,8 @@ create policy ai_rule_switch_events_owner_read on public.ai_rule_switch_events
     select 1 from public.memberships m
     where m.user_id = auth.uid() and m.org_id = ai_rule_switch_events.org_id
       and m.role = 'owner' and m.access_status = 'active'
+      and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
   ));
 
 create or replace function public.fn_log_ai_rule_switch()

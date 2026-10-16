@@ -69,10 +69,9 @@ export function isMissingSwitchColumnError(
   error: { code?: string | null; message?: string | null },
   column: NineRuleSwitchColumn,
 ): boolean {
-  // The read selects only this column, so an undefined-column error can only be about it.
-  if (error.code === "42703") return true;
+  // Only when the error names THIS column: a 42703 about any other column fails closed.
   const m = error.message ?? "";
-  return m.includes(column) && /(does not exist|could not find|schema cache)/i.test(m);
+  return m.includes(column) && (error.code === "42703" || /(does not exist|could not find|schema cache)/i.test(m));
 }
 
 /**

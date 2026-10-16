@@ -170,7 +170,7 @@ async function loadClassifierEngine(supabase: LooseSupabase, orgId: string): Pro
   }
 }
 
-/** Owner-only PR 4 switches; null (hidden) on any failure, so nothing is shown that was not read. */
+/** PR 4 switch state (read by every viewer of the page; writes are owner-only); null (hidden) on any failure, so nothing is shown that was not read. */
 async function loadRuleSwitches(supabase: LooseSupabase, orgId: string): Promise<AiRuleSwitchState | null> {
   try {
     const { data, error } = await (supabase as unknown as {
@@ -279,7 +279,8 @@ export default async function MessagesV2Page({
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
     loadClassifierEngine(supabase, orgId),
-    isOwner ? loadRuleSwitches(supabase, orgId) : Promise.resolve(null),
+    // Read-only for non-owners (the panel shows the state; only owners get buttons and the engine row).
+    loadRuleSwitches(supabase, orgId),
   ]);
   const data = loaded;
   // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.

@@ -32,7 +32,7 @@ describe("readClassifierEngine", () => {
 describe("readNineRuleSwitch (PR 4, deploy-order safe)", () => {
   for (const column of ["nine_identity_reply", "nine_confirmed_owner_drip"] as const) {
     it(`${column}: missing column (app deployed before the migration) = column default true`, async () => {
-      expect(await readNineRuleSwitch(client({ data: null, error: { code: "42703", message: "x" } }), "o", column)).toBe(true);
+      expect(await readNineRuleSwitch(client({ data: null, error: { code: "42703", message: `column ai_responder_configs.${column} does not exist` } }), "o", column)).toBe(true);
       const schemaCache = { code: "PGRST204", message: `Could not find the '${column}' column of 'ai_responder_configs' in the schema cache` };
       expect(isMissingSwitchColumnError(schemaCache, column)).toBe(true);
       expect(await readNineRuleSwitch(client({ data: null, error: schemaCache }), "o", column)).toBe(true);
@@ -41,6 +41,9 @@ describe("readNineRuleSwitch (PR 4, deploy-order safe)", () => {
     it(`${column}: any other read error, no row, or a non-boolean is OFF (fail closed)`, async () => {
       expect(await readNineRuleSwitch(client({ data: null, error: { code: "57014", message: "statement timeout" } }), "o", column)).toBe(false);
       expect(await readNineRuleSwitch(client({ data: null, error: { message: "fetch failed" } }), "o", column)).toBe(false);
+      // A 42703 that does not name this column (another column missing) is not proof: fail closed.
+      expect(await readNineRuleSwitch(client({ data: null, error: { code: "42703", message: "x" } }), "o", column)).toBe(false);
+      expect(await readNineRuleSwitch(client({ data: null, error: { code: "42703", message: "column ai_responder_configs.active does not exist" } }), "o", column)).toBe(false);
       // A schema-cache message about some OTHER column is not proof this one is missing.
       expect(await readNineRuleSwitch(client({ data: null, error: { message: "Could not find the 'x' column in the schema cache" } }), "o", column)).toBe(false);
       expect(await readNineRuleSwitch(client({ data: null, error: null }), "o", column)).toBe(false);
