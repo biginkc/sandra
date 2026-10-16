@@ -10,6 +10,10 @@ import {
   completeNormaCall,
   createNormaRequest,
   isNormaHoldActive,
+  markNormaDispatchRejected,
+  markNormaDispatchUnknown,
+  markNormaNeedsReview,
+  presendNormaFence,
   releaseNormaPauses,
   sweepResumeCallInProgress,
   upgradeNormaHoldPauses,
@@ -84,6 +88,45 @@ describe("norma rpc wrappers", () => {
     await expect(isNormaHoldActive(client({ data: null }).client, "p")).resolves.toBe(false);
     await expect(isNormaHoldActive(client({ error: { message: "x" } }).client, "p")).rejects.toThrow();
     await expect(releaseNormaPauses(client({ data: 2 }).client, "r")).resolves.toBe(2);
+  });
+
+  it("presend fence includes an attempt when supplied and preserves the legacy omission", async () => {
+    const legacy = client({ data: true });
+    await expect(presendNormaFence(legacy.client, "r")).resolves.toBe(true);
+    expect(legacy.rpc).toHaveBeenCalledWith("fn_norma_presend_fence", { p_request_id: "r" });
+
+    const fenced = client({ data: true });
+    await expect(presendNormaFence(fenced.client, "r", 2)).resolves.toBe(true);
+    expect(fenced.rpc).toHaveBeenCalledWith("fn_norma_presend_fence", { p_request_id: "r", p_expected_attempt: 2 });
+
+    await expect(presendNormaFence(client({ data: "true" }).client, "r", 1)).resolves.toBe(false);
+    await expect(presendNormaFence(client({ error: { message: "timeout" } }).client, "r", 1)).rejects.toThrow("fn_norma_presend_fence: timeout");
+  });
+
+  it("fenced mutators and bind include an attempt only when supplied, preserving legacy calls", async () => {
+    const legacy = client({ data: "dispatch_rejected" });
+    await expect(markNormaDispatchRejected(legacy.client, "r", "why", "requested")).resolves.toBe("dispatch_rejected");
+    expect(legacy.rpc).toHaveBeenCalledWith("fn_norma_mark_dispatch_rejected", {
+      p_request_id: "r", p_reason: "why", p_expected_status: "requested",
+    });
+
+    const fenced = client({ data: "dispatch_unknown" });
+    await expect(markNormaDispatchUnknown(fenced.client, "r", "timeout", 2)).resolves.toBe("dispatch_unknown");
+    expect(fenced.rpc).toHaveBeenCalledWith("fn_norma_mark_dispatch_unknown", {
+      p_request_id: "r", p_reason: "timeout", p_expected_attempt: 2,
+    });
+
+    const review = client({ data: "needs_review" });
+    await expect(markNormaNeedsReview(review.client, "r", "stuck", 2)).resolves.toBe("needs_review");
+    expect(review.rpc).toHaveBeenCalledWith("fn_norma_mark_needs_review", {
+      p_request_id: "r", p_reason: "stuck", p_expected_attempt: 2,
+    });
+
+    const bind = client({ data: "bound" });
+    await expect(bindNormaCallId(bind.client, "r", "c", 2)).resolves.toBe("bound");
+    expect(bind.rpc).toHaveBeenCalledWith("fn_norma_bind_call_id", {
+      p_request_id: "r", p_call_id: "c", p_expected_attempt: 2,
+    });
   });
 
   it("completeNormaCall sends the payload and normalises task_id", async () => {

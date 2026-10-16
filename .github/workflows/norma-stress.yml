@@ -26,6 +26,9 @@ on:
       - "src/app/api/webhooks/bland/**"
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
+      - "supabase/migrations/*_my_leads_work_*"
+      - "supabase/migrations/*_my_leads_approved_*"
+      - "vitest.norma-queue-stress-fullchain.config.ts"
       - "vitest.norma-stress.config.ts"
       - "scripts/ci/provision-disposable-stack.mjs"
       - ".github/workflows/norma-stress.yml"
@@ -60,12 +63,17 @@ jobs:
 
       - run: npm ci
 
-      - name: Provision disposable stack (schema without the Norma migrations)
-        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*'
+      - name: Provision disposable stack (schema without the Norma and My Leads classifier migrations)
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*' --exclude-migrations '*_my_leads_work_*' --exclude-migrations '*_my_leads_approved_*'
 
       - name: Run the stress gate
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          # The runtime fails closed (queue_limits_not_configured) without queue limits, so the gate must supply them. Test
+          # values only, generous on purpose: the gate tests races, not capacity. NORMA_QUEUE_ENABLED stays unset (the queue switch is never on here).
+          NORMA_QUEUE_MAX_CONCURRENT: "1000"
+          NORMA_QUEUE_DAILY_CAP: "100000"
+          NORMA_QUEUE_CAP_TZ: America/Chicago
         run: npm run test:norma-stress
 
       - name: Stop disposable stack

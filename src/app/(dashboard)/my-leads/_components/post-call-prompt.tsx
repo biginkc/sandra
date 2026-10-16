@@ -7,8 +7,8 @@ import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { StartDripPicker } from "@/components/sequences/start-drip-picker"
-import { startDripForLeads, type DripChoice } from "@/app/(dashboard)/sequences/actions"
+import { AfterAttemptDripPicker } from "@/components/sequences/after-attempt-drip-picker"
+import { type DripChoice } from "@/app/(dashboard)/sequences/actions"
 import { REP_SMS_ASSISTANT, REP_SMS_COMPOSITION_POLICY_VERSION } from "@/lib/messaging/rep-sms-composition"
 import { suggestOutcome } from "@/lib/my-leads/outcome-suggestion"
 import { quickPickDueAt, type QuickPick } from "@/lib/my-leads/quick-picks"
@@ -168,7 +168,7 @@ export function PostCallPrompt({
   const [openedAt] = useState(() => Date.now())
   const hasNextStep = nextStepAt !== null && Date.parse(nextStepAt) > openedAt
 
-  const preservedCallId = reconciliationLocked && source === "sandra" && callActivityId && !callReferenceOptions.some((call) => call.id === callActivityId)
+  const preservedCallId = reconciliationLocked && source !== "manual" && callActivityId && !callReferenceOptions.some((call) => call.id === callActivityId)
     ? callActivityId
     : null
   const availableCalls: AcquisitionCallReferenceOption[] = initialCallActivityId && !callReferenceOptions.some((call) => call.id === initialCallActivityId)
@@ -323,7 +323,7 @@ export function PostCallPrompt({
       // The note is written to lead_notes with the extras, not to the attempt.
       note: null,
       recordingUrl: source === "dialpad" ? recordingUrl.trim() || null : null,
-      callActivityId: source === "sandra" ? callActivityId.trim() : null,
+      callActivityId: source !== "manual" ? callActivityId.trim() || null : null,
       ...(composed
         ? {
             smsBody: composed.finalBody,
@@ -373,14 +373,9 @@ export function PostCallPrompt({
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">Add to a drip (optional).</p>
-            <StartDripPicker inline previewChoices={previewDripChoices} onChoose={async (sequenceId) => {
-              const result = await startDripForLeads(sequenceId, [propertyId])
-              if (!result.ok) return { status: "failed", reason: result.error.message }
-              const item = result.data.results[0]
-              if (item?.status === "enrolled") { onDripChanged?.(); onOpenChange(false); return { status: "enrolled", reason: item.reason } }
-              return { status: item?.status ?? "failed", reason: item?.reason ?? "Could not start drip." }
-            }} />
-            <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
+            <AfterAttemptDripPicker key={propertyId} propertyId={propertyId} previewChoices={previewDripChoices}
+            onDripChanged={onDripChanged} onEnrolled={() => onOpenChange(false)} />
+            <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without changing drip</button>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
@@ -509,6 +504,7 @@ export function PostCallPrompt({
                     const next = event.target.value as AcquisitionAttemptSource
                     if (next === "sandra" && !sandraAvailable) return
                     setSource(next)
+                    if (next === "manual") setCallActivityId("")
                     if (next === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
                     clearClientErrors()
                   }}
@@ -528,24 +524,24 @@ export function PostCallPrompt({
                 ) : null}
               </div>
 
-              {source === "sandra" && (
+              {(source === "sandra" || (source === "dialpad" && sandraAvailable)) && (
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center">
-                    <Label htmlFor="post-call-call-reference">Sandra call</Label>
-                    <RequiredHint />
+                    <Label htmlFor="post-call-call-reference">{source === "sandra" ? "Sandra call" : "Call to resolve (optional)"}</Label>
+                    {source === "sandra" && <RequiredHint />}
                   </div>
                   {sandraAvailable ? (
                     <select
                       id="post-call-call-reference"
-                      aria-label="Sandra call"
+                      aria-label={source === "sandra" ? "Sandra call" : "Call to resolve"}
                       value={callActivityId}
                       disabled={locked}
                       onChange={(event) => setCallActivityId(event.target.value)}
                       aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
-                      aria-required="true"
+                      aria-required={source === "sandra"}
                       className={SELECT_FIELD_CLASS}
                     >
-                      <option value="">Choose a call</option>
+                      <option value="">{source === "sandra" ? "Choose a call" : "Match by recording link, or log a separate call"}</option>
                       {availableCalls.map((reference) => (
                         <option key={reference.id} value={reference.id}>{reference.label}</option>
                       ))}
@@ -572,7 +568,7 @@ export function PostCallPrompt({
 
               {source === "dialpad" && (
                 <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="post-call-recording">Recording link (required)</Label>
+                  <Label htmlFor="post-call-recording">Recording link {callActivityId ? "(optional)" : "(required)"}</Label>
                   <Input
                     id="post-call-recording"
                     type="url"
@@ -646,14 +642,17 @@ export function ReceiptLines({
   sentNextStepAt,
   note,
   onRetry,
+  attemptSaved = true,
 }: {
+  /** False for the reload banner of an earlier, unconfirmed save: never claim "Attempt saved" there. */
+  attemptSaved?: boolean
   extras: PostCallExtrasState | null
   sentNextStepAt: string | null
   /** The note the rep typed; shown with a copy button whenever it was not saved. */
   note: string | null
   onRetry?: () => void
 }) {
-  const parts = ["Attempt saved"]
+  const parts = attemptSaved ? ["Attempt saved"] : []
   let failed = false
   let detail: string | undefined
   let noteNotSaved = false

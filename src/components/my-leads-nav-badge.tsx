@@ -12,9 +12,12 @@ export type MyLeadsBadgeRefresh = () => Promise<
 export function MyLeadsNavBadge({
   initialCount,
   onRefresh,
+  needsAttention = false,
 }: {
   initialCount?: number | null;
   onRefresh?: MyLeadsBadgeRefresh;
+  /** unified_queue on: the count is the leads that need attention (Due + New reply + Broken), not Not contacted leads. */
+  needsAttention?: boolean;
 }) {
   const [count, setCount] = useState(normalizeCount(initialCount));
   const lastRefreshAt = useRef(0);
@@ -58,11 +61,16 @@ export function MyLeadsNavBadge({
       aria-hidden="true"
       className="ml-auto inline-flex min-w-5 items-center justify-center rounded-full bg-white/15 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white"
       data-testid="my-leads-badge"
-      title={`${count} Not contacted leads`}
+      title={badgeLabel(count, needsAttention)}
     >
       {count > 99 ? "99+" : count}
     </span>
   );
+}
+
+export function badgeLabel(count: number, needsAttention: boolean): string {
+  if (!needsAttention) return `${count} Not contacted leads`;
+  return count === 1 ? "1 lead needs attention" : `${count} leads need attention`;
 }
 
 function normalizeCount(value: number | null | undefined): number | null {

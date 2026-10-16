@@ -2,7 +2,10 @@ import { createHmac } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { reportError } from "@/lib/errors/report";
+
 import { dispatchNormaCall } from "./dispatch";
+import { mapBlandCallToOutcome } from "./outcome";
 import { fakeClient, KEY, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
 import { handleBlandCallWebhook, MAX_WEBHOOK_BODY_BYTES, verifyBlandSignature } from "./webhook";
 
@@ -66,12 +69,79 @@ describe("bland webhook route core", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
-  it("is not configured without a secret, and rejects an oversized body", async () => {
+  it("is not configured without a secret", async () => {
     const { client } = setup();
     const noSecret = await handleBlandCallWebhook(req("{}", sign("{}")), { client, secret: undefined });
     expect(noSecret.status).toBe(500);
-    const big = "x".repeat(MAX_WEBHOOK_BODY_BYTES + 1);
+  });
+
+  it("accepts a signed long-call body above the old 1 MiB limit, including exactly 4 MiB", async () => {
+    const { client, complete } = setup();
+    const payload = call({ transcript: "" });
+    const overhead = Buffer.byteLength(JSON.stringify(payload));
+    const body = JSON.stringify({ ...payload, transcript: "x".repeat(MAX_WEBHOOK_BODY_BYTES - overhead) });
+    expect(Buffer.byteLength(body)).toBe(4 * 1024 * 1024);
+    expect((await post(client, body)).status).toBe(200);
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("rejects declared oversize before reading, logs 413 and length, and has zero CRM effect", async () => {
+    vi.mocked(reportError).mockClear();
+    const { client, calls, complete } = setup();
+    const request = req("{}", sign("{}"), { "content-length": String(MAX_WEBHOOK_BODY_BYTES + 1) });
+    const read = vi.spyOn(request.body!, "getReader");
+    expect(await handleBlandCallWebhook(request, { client, secret: SECRET })).toEqual({ status: 413, body: { error: "too_large" } });
+    expect(read).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expect.stringContaining("413") }), {
+      tags: { surface: "norma_webhook", httpStatus: 413 },
+      extra: { maxBodyBytes: MAX_WEBHOOK_BODY_BYTES, declaredBytes: MAX_WEBHOOK_BODY_BYTES + 1, observedBytes: 0, callIdHint: null, identityVerified: false },
+    });
+    expect(complete).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([undefined, "1"])("rejects streamed oversize with content-length %s, cancels and logs a bounded call ID hint", async (declared) => {
+    vi.mocked(reportError).mockClear();
+    const { client, calls, complete } = setup();
+    const prefix = new TextEncoder().encode('{"call_id":"3eb22d00-6c96-4c59-b2bd-2d205080a4de","transcript":"');
+    const cancel = vi.fn();
+    let reads = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        reads++;
+        controller.enqueue(reads === 1 ? prefix : new Uint8Array(MAX_WEBHOOK_BODY_BYTES));
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const request = new Request("https://sandra.test/api/webhooks/bland/call", {
+      method: "POST", body: stream, duplex: "half", headers: declared ? { "content-length": declared } : {},
+    } as RequestInit);
+    expect((await handleBlandCallWebhook(request, { client, secret: SECRET })).status).toBe(413);
+    expect(reads).toBe(2);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expect.stringContaining("413") }), {
+      tags: { surface: "norma_webhook", httpStatus: 413 },
+      extra: { maxBodyBytes: MAX_WEBHOOK_BODY_BYTES, declaredBytes: declared ? 1 : null, observedBytes: prefix.byteLength + MAX_WEBHOOK_BODY_BYTES,
+        callIdHint: "3eb22d00-6c96-4c59-b2bd-2d205080a4de", identityVerified: false },
+    });
+    expect(complete).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("counts UTF-8 bytes and does not scan beyond the diagnostic prefix", async () => {
+    vi.mocked(reportError).mockClear();
+    const { client } = setup();
+    const big = JSON.stringify(call({ transcript: "é".repeat(MAX_WEBHOOK_BODY_BYTES / 2) }));
+    expect(big.length).toBeLessThan(MAX_WEBHOOK_BODY_BYTES);
     expect((await post(client, big)).status).toBe(413);
+    expect(reportError).toHaveBeenLastCalledWith(expect.any(Error), expect.objectContaining({
+      extra: expect.objectContaining({ observedBytes: Buffer.byteLength(big), callIdHint: "call-1" }),
+    }));
+    const lateId = JSON.stringify({ transcript: "x".repeat(MAX_WEBHOOK_BODY_BYTES), call_id: "late-call" });
+    expect((await post(client, lateId)).status).toBe(413);
+    expect(reportError).toHaveBeenLastCalledWith(expect.any(Error), expect.objectContaining({
+      extra: expect.objectContaining({ callIdHint: null }),
+    }));
   });
 
   it("signed but malformed JSON is a 400 with no effect", async () => {
@@ -121,6 +191,64 @@ describe("bland webhook route core", () => {
     expect((await post(client, call())).body).toEqual({ status: "ignored", reason: "call_id_mismatch" });
   });
 
+  it("passes the attempt echoed in the call metadata (default 1) and acknowledges a stale-attempt result as ignored", async () => {
+    const { client, complete } = setup();
+    await post(client, call());
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 1 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 } }));
+    expect(complete.mock.calls[1]![0].p_payload).toMatchObject({ attempt: 2 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: "x" } }));
+    expect(complete.mock.calls[2]![0].p_payload).toMatchObject({ attempt: 0 });
+    const stale = setup({ result: "stale_attempt", status: "dispatching" });
+    expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+  });
+
+  it.each([99_999_999_999, "99999999999", Number.MAX_SAFE_INTEGER, 3, -1, 1.5])("fences invalid attempt %s before the SQL integer cast", async (attempt) => {
+    const { client, complete } = setup({ result: "stale_attempt", status: "dispatched" });
+    expect(await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } })))
+      .toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 0 });
+  });
+
+  it.each(["1", "2"])("preserves valid string attempt %s", async (attempt) => {
+    const { client, complete } = setup();
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } }));
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: Number(attempt) });
+  });
+
+  it("attempt-2 voicemail without a pathway outcome completes as confirmed no_answer", async () => {
+    const { client, complete } = setup({ result: "applied", status: "completed", outcome: "no_answer" });
+    expect(await post(client, call({
+      answered_by: "voicemail",
+      variables: { call_outcome: "" },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 },
+    }))).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: "no_answer",
+      p_payload: expect.objectContaining({ attempt: 2 }),
+    });
+  });
+
+  it.each([
+    ["voicemail", "no_answer", null],
+    ["no_answer", "unknown", "unrecognised_call_outcome"],
+    ["voicemail_left", "unknown", "unrecognised_call_outcome"],
+    ["qualified_review_requested", "unknown", "conflict_no_answer_vs_outcome"],
+  ])("voicemail with pathway token %s preserves the completion contract", async (token, outcome, reason) => {
+    const { client, complete } = setup({ result: "applied", status: outcome === "unknown" ? "needs_review" : "requested", outcome });
+    const payload = call({
+      answered_by: "voicemail",
+      variables: { call_outcome: token },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 1 },
+    });
+    expect(mapBlandCallToOutcome(payload)).toMatchObject({ outcome, ...(reason ? { reason } : {}) });
+    expect(await post(client, payload)).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: outcome,
+      p_payload: expect.objectContaining({ attempt: 1 }),
+    });
+  });
+
   it("unmappable payloads complete as unknown (parked for a human)", async () => {
     const { client, complete } = setup({ result: "applied", status: "needs_review", outcome: "unknown" });
     await post(client, call({ variables: {} }));
@@ -145,7 +273,9 @@ describe("bland webhook route core", () => {
     const { client, calls } = fakeClient(
       { norma_call_requests: [requestRow()] },
       {
-        fn_norma_claim_dispatch: () => true,
+        // Runtime now claims through v2 and admits the send through mark_sending (H1); same outcomes as the legacy claim + fence.
+        fn_norma_claim_dispatch_v2: () => "claimed",
+        fn_norma_mark_sending: () => "sending",
         fn_norma_eligibility: () => [{ eligible: true }],
         fn_norma_bind_call_id: () => (state.status === "completed" ? "already_completed" : "bound"),
         fn_norma_mark_dispatch_unknown: unknown,
@@ -165,6 +295,7 @@ describe("bland webhook route core", () => {
       client, bland,
       blandConfig: { apiKey: "k", baseUrl: "x", pathwayId: "p", pathwayVersion: 1, voice: "v", fromNumber: "+12135550100", webhookUrl: "https://x.test", timeoutMs: 1000, waitForGreeting: true, backgroundTrack: "office" },
       gate: { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] },
+      queueConfig: { enabled: true, maxConcurrent: 5, dailyCap: 200, capTz: "America/Chicago", problems: [] },
     });
     expect(result).toEqual({ status: "dispatched", callId: "call-1" });
     expect(complete).toHaveBeenCalledTimes(1);
@@ -228,4 +359,3 @@ describe("callback time conversion in the webhook", () => {
     expect(complete.mock.calls[0]![0].p_payload.callback_requested_for).toBeUndefined();
   });
 });
-

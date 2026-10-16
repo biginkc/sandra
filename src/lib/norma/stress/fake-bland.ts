@@ -55,8 +55,16 @@ export type LookupBehavior =
   | "mismatch_number"
   | "mismatch_call_id";
 
+/** Kinds that end without a conversation: the call-twice retry applies to these. */
+export const NON_CONNECT_KINDS: readonly CallKind[] = ["voicemail", "no_answer_status"];
+
 export type Plan = {
   kind: CallKind;
+  /**
+   * What the SECOND call (the call-twice retry) turns out to be. Default: the
+   * same as `kind`, so a no-answer lead is not answered on either try.
+   */
+  secondKind?: CallKind;
   send: SendBehavior;
   lookup: LookupBehavior;
   /** Webhooks delivered inside the send-call request, before its response returns. */
@@ -66,9 +74,20 @@ export type Plan = {
   followUp?: string;
 };
 
-export type SendRecord = { tick: number; requestId: string; key: string; number: string; callId: string | null; placed: boolean };
+export type SendRecord = { tick: number; requestId: string; key: string; number: string; callId: string | null; placed: boolean; attempt: number | null };
 
-export type FakeCall = { callId: string; requestId: string; key: string; number: string; plan: Plan; createdTick: number };
+export type FakeCall = {
+  callId: string;
+  requestId: string;
+  key: string;
+  number: string;
+  plan: Plan;
+  createdTick: number;
+  /** 1 for the first call of a request, 2 for the retry. */
+  attempt: number;
+  /** What THIS call turns out to be (the plan's kind, or its secondKind for the retry). */
+  kind: CallKind;
+};
 
 export type WebhookFlavor =
   | "good"
@@ -123,19 +142,21 @@ export class FakeBland {
     return json(404, { message: "no such route" });
   };
 
-  private async handleSend(body: { phone_number: string; metadata?: { request_id?: string; idempotency_key?: string } }): Promise<Response> {
+  private async handleSend(body: { phone_number: string; metadata?: { request_id?: string; idempotency_key?: string; attempt?: number } }): Promise<Response> {
     const number = body.phone_number;
     const requestId = body.metadata?.request_id ?? "";
     const key = body.metadata?.idempotency_key ?? "";
     const plan = this.plans.get(number);
-    const record: SendRecord = { tick: this.deps.trace.tick(), requestId, key, number, callId: null, placed: false };
+    const record: SendRecord = { tick: this.deps.trace.tick(), requestId, key, number, callId: null, placed: false, attempt: body.metadata?.attempt ?? null };
     this.sends.push(record);
     this.deps.trace.add("bland", "mark", "send-call", { requestId, number });
     if (!plan) return json(400, { status: "error", message: "unplanned number" });
 
     const place = () => {
       const callId = `call_${randomUUID()}`;
-      const call: FakeCall = { callId, requestId, key, number, plan, createdTick: this.deps.trace.tick() };
+      const attempt = [...this.calls.values()].filter((c) => c.requestId === requestId).length + 1;
+      const kind = attempt === 1 ? plan.kind : (plan.secondKind ?? plan.kind);
+      const call: FakeCall = { callId, requestId, key, number, plan, createdTick: this.deps.trace.tick(), attempt, kind };
       this.calls.set(callId, call);
       record.callId = callId;
       record.placed = true;
@@ -184,7 +205,7 @@ export class FakeBland {
       case "not_completed":
         return json(200, { ...this.payload(call), completed: false, status: "in-progress" });
       case "mismatch_key":
-        return json(200, { ...this.payload(call), metadata: { request_id: call.requestId, idempotency_key: randomUUID() } });
+        return json(200, { ...this.payload(call), metadata: { request_id: call.requestId, idempotency_key: randomUUID(), attempt: call.attempt } });
       case "mismatch_number":
         return json(200, { ...this.payload(call), to: "+18165559999" });
       case "mismatch_call_id":
@@ -209,11 +230,11 @@ export class FakeBland {
       completed: true,
       status: "completed",
       answered_by: "human",
-      metadata: { request_id: call.requestId, idempotency_key: call.key },
+      metadata: { request_id: call.requestId, idempotency_key: call.key, attempt: call.attempt },
       summary: "stress summary",
       variables: vars,
     };
-    switch (call.plan.kind) {
+    switch (call.kind) {
       case "callback":
         vars.call_outcome = "callback_requested seller wants a call back";
         vars.follow_up_preference = call.plan.followUp ?? FOLLOW_UP[0]!;
@@ -310,9 +331,13 @@ export class FakeBland {
   sendsFor(requestId: string) {
     return this.sends.filter((s) => s.requestId === requestId);
   }
-  /** The (single) call placed for a number, if any. */
+  /** The FIRST call placed for a number, if any. */
   callForNumber(number: string) {
     return [...this.calls.values()].find((c) => c.number === number);
+  }
+  /** Every call placed for a number, oldest first (a call-twice request places up to two). */
+  callsForNumber(number: string) {
+    return [...this.calls.values()].filter((c) => c.number === number);
   }
 }
 

@@ -1,4 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress: vi.fn(async () => []) }))
+vi.mock("@/lib/supabase/client", () => ({ createClient: vi.fn() }))
+import { act, fireEvent, screen, waitFor } from "@testing-library/react"
+import { renderWithDialpad as render } from "@/components/dialpad/test-shell"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
@@ -44,6 +47,7 @@ vi.mock("./actions", () => ({
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   listDripChoices: mocks.listDripChoices,
   startDripForLeads: vi.fn(),
+  changeDripAction: vi.fn(),
 }))
 
 vi.mock("./dialpad-actions", () => ({
@@ -257,7 +261,7 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeads.mockResolvedValueOnce({ ok: true, snapshot: { ...initial, snapshotAt: "2026-09-11T14:01:00.000Z" }, kpis })
     const view = renderClient(initial)
     try {
-      expect(screen.getByText(/Counts update every 30 seconds/)).toBeInTheDocument()
+      expect(screen.getByText(/Activity updates every 30 seconds/)).toBeInTheDocument()
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999) })
       expect(mocks.loadMyLeads).not.toHaveBeenCalled()
       await act(async () => { await vi.advanceTimersByTimeAsync(1) })
@@ -446,7 +450,7 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   await user.selectOptions(screen.getByLabelText("External outcome"),"reached");
   fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T09:00"}});
   await user.click(screen.getByRole("button",{name:"Save attempt"}));
-  await user.click(await screen.findByRole('button',{name:'Done without a drip'}));
+  await user.click(await screen.findByRole('button',{name:'Done without changing drip'}));
   await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
   // The next opening reads the lead through the single-row lookup and waits for it.

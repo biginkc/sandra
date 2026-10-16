@@ -7,6 +7,7 @@ import { Client, type Pool } from "pg";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
+import { replayMigrations } from "./replay-migrations";
 import { createStressPool } from "./pg-client";
 
 /**
@@ -20,14 +21,14 @@ import { createStressPool } from "./pg-client";
  * ever read from. Loopback only.
  */
 const SOURCE_URL = requireLoopbackPostgresUrl(
-  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "",
 );
 
-// Every Norma migration, in version order, found by name so a new one can never be forgotten.
+// Every Norma migration, found by name so a new one can never be forgotten, then the My Leads classifier migrations
+// (*_my_leads_work_*, *_my_leads_approved_*), which read tasks.source_key that a Norma migration adds: excluded from the
+// provisioned source too and replayed here after the Norma files (NORMA_STRESS_REPLAY_PATTERNS).
 const MIGRATIONS_DIR = path.join(process.cwd(), "supabase/migrations");
-const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
-  .filter((file) => /^\d{14}_norma_.+\.sql$/.test(file))
-  .sort();
+const ALL_MIGRATIONS = replayMigrations(readdirSync(MIGRATIONS_DIR));
 
 // NORMA_STRESS_EXCLUDE_MIGRATIONS (comma-separated file names) leaves later fix
 // migrations out, to prove a regression test fails without its fix.
@@ -53,6 +54,8 @@ create table stress.audit (
   row_id uuid,
   property_id uuid,
   hold_open boolean,
+  -- The transaction that wrote the row: rows sharing it are one atomic action.
+  txid bigint not null default txid_current(),
   old_row jsonb,
   new_row jsonb
 );
@@ -170,6 +173,9 @@ export async function createScratchDb(): Promise<Scratch> {
     for (const file of MIGRATIONS) {
       await setup.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
     }
+    // This suite exercises the separately activated retry contract. The migration
+    // itself stays OFF; only this owned disposable database explicitly opts in.
+    await setup.query("update public.norma_retry_admission set enabled=true where singleton=true");
     await setup.query(AUDIT_SQL);
   } catch (error) {
     await setup.end().catch(() => undefined);
@@ -179,8 +185,13 @@ export async function createScratchDb(): Promise<Scratch> {
   await setup.end();
 
   const pool = createStressPool(url);
+  // The queue migration adds send_attempted_at (the 10 s same-number spacing and the daily cap read it); it must move with every other stored time.
+  // Checked at advance() time, not pool creation, so a column added or dropped after the pool opens is still handled.
+  const hasSendMarker = async () =>
+    (await pool.query("select 1 from information_schema.columns where table_schema='public' and table_name='norma_call_requests' and column_name='send_attempted_at'")).rowCount === 1;
   const advance = async (ms: number) => {
     const iv = `${Math.floor(ms)} milliseconds`;
+    const sendMarker = await hasSendMarker();
     // REPEATABLE READ: every table is shifted from ONE snapshot, so a request and
     // its task (written in one transaction) can never be shifted by different
     // amounts. A concurrent writer makes this fail with 40001; just retry.
@@ -194,7 +205,7 @@ export async function createScratchDb(): Promise<Scratch> {
           `update public.norma_call_requests set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
              next_check_at = next_check_at - $1::interval, dispatch_started_at = dispatch_started_at - $1::interval,
              dispatched_at = dispatched_at - $1::interval, completed_at = completed_at - $1::interval,
-             callback_requested_for = callback_requested_for - $1::interval`,
+             callback_requested_for = callback_requested_for - $1::interval${sendMarker ? ", send_attempted_at = send_attempted_at - $1::interval" : ""}`,
           [iv],
         );
         await c.query(
@@ -267,6 +278,8 @@ export type World = {
   org: string;
   rep1: string;
   rep2: string;
+  /** A real user who belongs to no org: every request from them must be refused. */
+  outsider: string;
   assignee: string;
   sequences: string[];
   nextLead: (opts?: LeadOptions) => Promise<Lead>;
@@ -284,9 +297,10 @@ export async function seedWorld(pool: Pool): Promise<World> {
   const org = randomUUID();
   const rep1 = randomUUID();
   const rep2 = randomUUID();
+  const outsider = randomUUID();
   const assignee = randomUUID();
   const sequences = [randomUUID(), randomUUID(), randomUUID()];
-  await pool.query("insert into auth.users(id) values ($1), ($2), ($3)", [rep1, rep2, assignee]);
+  await pool.query("insert into auth.users(id) values ($1), ($2), ($3), ($4)", [rep1, rep2, assignee, outsider]);
   await pool.query("insert into public.organizations(id, name) values ($1, 'norma stress')", [org]);
   await pool.query("insert into public.memberships(user_id, org_id, role, access_status) values ($1, $2, 'owner', 'active')", [assignee, org]);
   for (const rep of [rep1, rep2]) {
@@ -321,5 +335,5 @@ export async function seedWorld(pool: Pool): Promise<World> {
     }
     return { property, contact, phone, address, enrollments };
   };
-  return { org, rep1, rep2, assignee, sequences, nextLead };
+  return { org, rep1, rep2, outsider, assignee, sequences, nextLead };
 }

@@ -284,7 +284,7 @@ test.describe("Messages cockpit — design fidelity", () => {
       fullPage: true,
     });
 
-    // Lead detail now normalizes messages, notes, and calls into one timeline.
+    // Lead detail merges messages, notes, and calls newest first.
     const timeline = page.getByTestId("lead-activity-timeline");
     await expect(timeline).toBeVisible();
     const events = timeline.locator(
@@ -297,10 +297,10 @@ test.describe("Messages cockpit — design fidelity", () => {
       ),
     ).toEqual([
       "messages-thread-msg",
-      "lead-activity-note",
-      "messages-thread-msg",
-      "messages-thread-msg",
       "lead-activity-call",
+      "messages-thread-msg",
+      "messages-thread-msg",
+      "lead-activity-note",
       "messages-thread-msg",
     ]);
     await expect(timeline.getByTestId("lead-activity-note")).toContainText(
@@ -343,7 +343,7 @@ test.describe("Messages cockpit — design fidelity", () => {
       ),
     ).not.toHaveCount(0);
 
-    // The approved chat order keeps reply controls after all timeline rows.
+    // Reply controls remain after all timeline rows.
     expect(
       await page.evaluate(() => {
         const activity = document.querySelector(

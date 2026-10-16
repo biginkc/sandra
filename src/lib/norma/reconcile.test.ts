@@ -47,7 +47,7 @@ describe("reconciliation", () => {
     const t = setup({ status: "requested", created_at: ago(T.requestedExpiry + MIN) });
     expect(await t.run()).toMatchObject({ rejected: 1 });
     expect(t.dispatch).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "stranded_requested_expired", p_expected_status: "requested" });
+    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "stranded_requested_expired", p_expected_status: "requested", p_expected_attempt: 1 });
   });
 
   it("expiry close loses the race to a claim: counted as waiting, not rejected", async () => {
@@ -60,6 +60,7 @@ describe("reconciliation", () => {
     const stale = setup({ status: "dispatching", updated_at: ago(T.dispatchingStale + MIN) });
     expect(await stale.run()).toMatchObject({ markedUnknown: 1 });
     expect(stale.dispatch).not.toHaveBeenCalled();
+    expect(stale.rpcs.fn_norma_mark_dispatch_unknown).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "stranded_dispatching", p_expected_attempt: 1 });
     const fresh = setup({ status: "dispatching", updated_at: ago(10_000) });
     expect(await fresh.run()).toMatchObject({ waiting: 1 });
     expect(fresh.rpcs.fn_norma_mark_dispatch_unknown).not.toHaveBeenCalled();
@@ -93,6 +94,7 @@ describe("reconciliation", () => {
     const stuck = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(T.escalateAfter + MIN) }, { kind: "not_found" });
     expect(await stuck.run()).toMatchObject({ escalated: 1 });
     expect(stuck.rpcs.fn_norma_mark_needs_review).toHaveBeenCalled();
+    expect(stuck.rpcs.fn_norma_mark_needs_review.mock.calls[0][0]).toMatchObject({ p_expected_attempt: 1 });
     expect(stuck.dispatch).not.toHaveBeenCalled();
     expect(stuck.rpcs.fn_norma_mark_dispatch_rejected).not.toHaveBeenCalled();
   });
@@ -121,6 +123,7 @@ describe("reconciliation", () => {
     expect(await late.run()).toMatchObject({ escalated: 1 });
     expect(late.getCall).not.toHaveBeenCalled();
     expect(late.dispatch).not.toHaveBeenCalled();
+    expect(late.rpcs.fn_norma_mark_needs_review).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "dispatch outcome unknown and no Bland call id", p_expected_attempt: 1 });
   });
 
   it("needs_review is only rechecked on the slow cadence, and a late real outcome completes it", async () => {
@@ -175,7 +178,7 @@ describe("reconciliation", () => {
     expect(summary.rejected).toBe(1);
     expect(sendCall).not.toHaveBeenCalled();
     expect(rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
-    expect(rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested" });
+    expect(rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested", p_expected_attempt: 1 });
   });
 });
 
@@ -203,4 +206,3 @@ describe("callback time conversion in reconciliation", () => {
     });
   });
 });
-

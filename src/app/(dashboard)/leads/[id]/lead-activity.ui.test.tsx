@@ -208,11 +208,50 @@ describe("<LeadActivityTimeline /> with lead events", () => {
     expect(bubbles[0]).toHaveAttribute("data-continuation", "false");
     expect(bubbles[1]).toHaveAttribute("data-continuation", "true");
     expect(bubbles[1]).toHaveTextContent("Outbound → Seller");
-    expect(bubbles[1]).toHaveTextContent("Existing SMS bubble stays intact");
-    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(1);
+    expect(bubbles[0]).toHaveTextContent("Existing SMS bubble stays intact");
+    expect(bubbles[1]).toHaveTextContent("First existing SMS bubble");
+    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(2);
     expect(
       screen.getByTestId("messages-thread-delivery-status"),
     ).toHaveTextContent("Queued · in Outbox");
+  });
+
+  it("keeps the newest inbound STOP badge and each timestamp visible", () => {
+    const older = { ...message({ id: "older", body: "Hello", createdAt: "2026-08-25T17:00:00Z", status: "received" }), direction: "inbound" as const };
+    const newer = { ...older, id: "newer", body: "stop", created_at: "2026-08-25T18:00:00Z", metadata: { keyword: "stop" } };
+    render(<LeadActivityTimeline propertyId="property-1" contactId={null} initialMessages={[older, newer]} initialNotes={[]} initialCalls={[]} initialEvents={[]} messageError={null} noteError={null} callError={null} eventError={null} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost="" />);
+    const rows = screen.getAllByTestId("messages-thread-msg");
+    expect(within(rows[0]).getByText("STOP", { exact: true })).toBeVisible();
+    expect(within(rows[0]).getByTestId("messages-thread-metadata")).toBeVisible();
+    expect(within(rows[1]).getByTestId("messages-thread-metadata")).toBeVisible();
+  });
+
+  it("keeps newly received activity first and older-history controls last", () => {
+    const props = {
+      propertyId: "property-1", contactId: null,
+      initialMessages: [], initialNotes: [], initialCalls: [], initialEvents: [],
+      messageError: null, noteError: null, callError: null, eventError: null,
+      authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+    };
+    const first = message({ id: "first", body: "Earlier message", createdAt: "2026-08-25T17:00:00Z", status: "sent" });
+    const latest = message({ id: "latest", body: "Newest message", createdAt: "2026-08-25T18:00:00Z", status: "sent" });
+    const history = {
+      ok: true as const,
+      page: {
+        rows: [{ kind: "offer" as const, id: "offer-old", at: "2026-08-25T16:00:00Z", actorId: null, amountCents: "10000", method: "verbal" as const, followUpAt: "2026-08-26T16:00:00Z", outcome: "pending" as const, outcomeAt: null }],
+        hasMore: true, cursor: null,
+      },
+    };
+    const view = render(<LeadActivityTimeline {...props} initialMessages={[first]} initialAcquisitionHistory={history} />);
+    view.rerender(<LeadActivityTimeline {...props} initialMessages={[first, latest]} initialAcquisitionHistory={history} />);
+    const bubbles = screen.getAllByTestId("messages-thread-msg");
+    expect(bubbles[0]).toHaveTextContent("Newest message");
+    expect(bubbles[1]).toHaveTextContent("Earlier message");
+    const offer = screen.getByTestId("lead-acquisition-offer-offer-old");
+    const boundary = screen.getByTestId("lead-activity-trust-floor");
+    const more = screen.getByRole("button", { name: "Load older outreach and offers" });
+    expect(offer.compareDocumentPosition(boundary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(boundary.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("clears a stale server activity error after an empty live reconciliation", async () => {
@@ -309,6 +348,7 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
       initialCalls={[
         {
           id: "physical-call",
+          provider_recording_url: "https://dialpad.com/recording.mp3",
           created_at: "2026-08-25T18:00:00.000Z",
           started_at: "2026-08-25T18:00:00.000Z",
           outcome: "completed",
@@ -316,6 +356,7 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
           recording_status: "none",
           transcript_status: "none",
           summary_status: "none",
+          provider: "sandra_softphone",
           jitter_attempt_id: "attempt-provider",
           jitter_session_id: "session-provider",
           call_recordings: [],
@@ -338,6 +379,8 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
   );
   expect(screen.getAllByTestId("lead-activity-call")).toHaveLength(1);
   const physicalCall = within(screen.getByTestId("lead-activity-call"));
+  expect(physicalCall.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+  expect(physicalCall.queryByText("No recording captured")).not.toBeInTheDocument();
   expect(physicalCall.getByText("Reached")).toBeInTheDocument();
   expect(
     physicalCall.getByText("Seller wants a Friday callback"),
@@ -348,4 +391,19 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
       .getByTestId("lead-acquisition-attempt-linked-attempt")
       .querySelector("time"),
   ).toHaveAttribute("dateTime", attempt.at);
+});
+
+
+it.each(["", "https://jitter.example.test"])("chooses history actions per provider in a mixed timeline (host: %s)", (jitterHost) => {
+  const calls = ["dialpad", "jitter", "sandra_softphone"].map((provider) => ({
+    id: provider, provider, created_at: "2026-10-08T12:00:00Z", started_at: "2026-10-08T12:00:00Z",
+    outcome: "connected_human", disposition: null, recording_status: "none", transcript_status: "none", summary_status: "none",
+    jitter_attempt_id: provider, jitter_session_id: null, call_recordings: [], call_transcripts: [],
+  } as CallActivityRollupRow));
+  render(<LeadActivityTimeline propertyId="property-123" contactId={null} messageError={null} noteError={null} callError={null} eventError={null} initialMessages={[]} initialNotes={[]} initialEvents={[]} initialCalls={calls} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost={jitterHost} />);
+  const cards = screen.getAllByTestId("lead-activity-call");
+  expect(screen.queryByTitle("Jitter host not configured")).not.toBeInTheDocument();
+  expect(screen.queryAllByRole("link", { name: "Open call in Jitter" })).toHaveLength(jitterHost ? 1 : 0);
+  if (jitterHost) expect(screen.getByRole("link", { name: "Open call in Jitter" })).toHaveAttribute("href", "https://jitter.example.test/history?prospect_id=property-123");
+  expect(cards).toHaveLength(3);
 });

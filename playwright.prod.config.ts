@@ -39,7 +39,8 @@ loadEnvLocal();
 export default defineConfig({
   testDir: "./e2e",
   // Local fixture acceptance must never run against a production browser target.
-  testIgnore: ["**/my-leads.local.spec.ts"],
+  // The chaos-day stress specs (e2e/stress) are opt-in and engine-run only; the prod lane must never pick them up.
+  testIgnore: ["**/my-leads.local.spec.ts", "**/stress/**"],
   fullyParallel: false,
   workers: 1,
   retries: 0,

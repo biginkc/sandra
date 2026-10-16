@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Messages v2 — redesign mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --background:#fdfcfb;--foreground:#1c1917;--card:#ffffff;--primary:#111827;--primary-fg:#ffffff;
+  --secondary:#f5f5f4;--muted-fg:#78716c;--border:#e5e1df;--ink-2:#57534e;
+  --hot-bg:#fee2e2;--hot-fg:#b91c1c;--hot-border:#fecaca;
+  --new-bg:#dbeafe;--new-fg:#1d4ed8;--new-border:#bfdbfe;
+  --replying-bg:#ffedd5;--replying-fg:#c2410c;--replying-border:#fed7aa;
+  --contacted-bg:#f5f5f4;--contacted-fg:#57534e;--contacted-border:#e7e5e4;
+  --cold-bg:#cffafe;--cold-fg:#0e7490;--cold-border:#a5f3fc;
+  --healthy:#16a34a;--nav-active:#5ea8e6;
+  --nav-field: radial-gradient(110% 105% at 50% 60%, rgba(0,0,0,0) 60%, rgba(0,0,0,.36) 100%), radial-gradient(125% 120% at 11% 8%, #2a4374 0%, #20355d 24%, #16233f 46%, #0d1526 70%, #070b16 100%), linear-gradient(160deg, #0e1834 0%, #090f20 60%, #05060f 100%);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--background);color:var(--foreground);font-family:"Inter",system-ui,-apple-system,sans-serif;font-size:14px;line-height:20px}
+a{color:inherit}
+button{font-family:inherit}
+
+/* ===== Sandra chrome: unchanged from the live app ===== */
+.shell{display:flex;min-height:100vh}
+.sidebar{width:256px;flex:0 0 256px;background:var(--nav-field);color:#c7d2e6;display:flex;flex-direction:column;padding:12px 0 16px}
+.sidebar .logo{display:block;padding:8px 40px 20px}
+.sidebar .logo img{width:152px;height:auto;display:block}
+.sidebar nav{display:flex;flex-direction:column;gap:2px;font-size:14px}
+.sidebar nav a{display:flex;align-items:center;gap:12px;padding:9px 24px;color:#c7d2e6;text-decoration:none;border-left:3px solid transparent}
+.sidebar nav a:hover{color:#fff}
+.sidebar nav a.active{color:#fff;font-weight:600;background:rgba(255,255,255,.08);border-left-color:var(--nav-active)}
+.sidebar nav svg{width:16px;height:16px;opacity:.85}
+.sidebar .who{margin-top:auto;padding:16px 24px 0;font-size:12px;color:#8fa3c7}
+.main{flex:1 1 560px;min-width:0;display:flex;flex-direction:column}
+.topbar{height:64px;display:flex;align-items:center;gap:24px;padding:0 24px;background:var(--nav-field);color:#c7d2e6;font-size:13px}
+.topbar a{color:#c7d2e6;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+.topbar a:hover{color:#fff}
+.topbar .right{margin-left:auto;display:flex;align-items:center;gap:16px}
+.topbar .search{display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid rgba(255,255,255,.15);border-radius:.8rem;background:rgba(255,255,255,.08);color:#a9b8d6;min-width:240px}
+.topbar .kbd{margin-left:auto;font-size:11px;padding:1px 6px;border:1px solid rgba(255,255,255,.2);border-radius:4px}
+
+/* ===== The page: the redesign ===== */
+.page{padding:24px 28px 40px;display:flex;flex-direction:column;gap:20px}
+.pagehead{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}
+.pagehead h1{margin:0;font-size:24px;line-height:32px;font-weight:600}
+.pagehead .sub{color:var(--muted-fg);font-size:13px}
+.pagehead .right{margin-left:auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--border);border-radius:2.6rem;background:var(--card);font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:2.6rem;border:0;background:var(--primary);color:var(--primary-fg);font-weight:500;font-size:13px;cursor:pointer;text-decoration:none}
+.btn.secondary{background:var(--card);color:var(--foreground);border:1px solid var(--border)}
+.btn.ghost{background:transparent;color:var(--muted-fg)}
+.btn.sm{padding:8px 14px}
+.cols{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}
+.tape{flex:999 1 560px;min-width:0;display:flex;flex-direction:column;gap:12px}
+.waiting{flex:1 1 340px;min-width:0;max-width:420px;display:flex;flex-direction:column;gap:12px}
+h2{margin:0;font-size:16px;line-height:24px;font-weight:600}
+.sechead{display:flex;align-items:baseline;gap:12px}
+.sechead .note{color:var(--muted-fg);font-size:13px}
+.count{padding:1px 8px;border-radius:2.6rem;background:var(--secondary);color:var(--ink-2);font-size:12px;font-weight:500}
+.card{background:var(--card);border:1px solid var(--border);border-radius:1rem;padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.card.live{box-shadow:0 0 0 3px rgba(94,168,230,.18)}
+.card .meta{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted-fg);flex-wrap:wrap}
+.card .meta b{color:var(--foreground);font-weight:600}
+.tag{margin-left:auto;padding:3px 10px;border-radius:2.6rem;font-weight:500;border:1px solid}
+.tag.hot{background:var(--hot-bg);color:var(--hot-fg);border-color:var(--hot-border)}
+.tag.no{background:var(--contacted-bg);color:var(--contacted-fg);border-color:var(--contacted-border)}
+.tag.later{background:var(--cold-bg);color:var(--cold-fg);border-color:var(--cold-border)}
+.tag.who{background:var(--replying-bg);color:var(--replying-fg);border-color:var(--replying-border)}
+.reading{margin-left:auto;display:inline-flex;align-items:center;gap:6px;color:var(--new-fg);font-weight:500}
+.reading .dot{background:var(--new-fg);animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.thread{display:flex;flex-direction:column;gap:6px}
+.ours{align-self:flex-end;max-width:70%;background:var(--secondary);border-radius:1rem 1rem .3rem 1rem;padding:8px 12px;color:var(--ink-2);font-size:13px}
+.ours.sent{background:var(--primary);color:var(--primary-fg)}
+.theirs{align-self:flex-start;max-width:70%;background:var(--new-bg);border-radius:1rem 1rem 1rem .3rem;padding:8px 12px;font-size:14px}
+.verdict{display:flex;flex-direction:column;gap:4px;padding-top:8px;border-top:1px solid var(--border);font-size:13px}
+.verdict .did{color:var(--ink-2)}
+.center{display:flex;justify-content:center;padding:4px 0}
+.center a{font-size:13px;color:var(--muted-fg)}
+.waiting .card{padding:16px}
+.waiting .theirs{max-width:100%;align-self:stretch}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+
+/* ===== Rules panel ===== */
+.backdrop{position:fixed;inset:0;background:rgba(28,25,23,.25);display:none}
+.panel{position:fixed;top:0;right:0;bottom:0;width:560px;max-width:100vw;background:var(--card);border-left:1px solid var(--border);box-shadow:-12px 0 40px rgba(28,25,23,.12);display:none;flex-direction:column;z-index:10}
+body.rules-open .backdrop{display:block}
+body.rules-open .panel{display:flex}
+.panel .head{display:flex;align-items:center;gap:12px;padding:20px 24px;border-bottom:1px solid var(--border)}
+.panel .head h2{font-size:20px;line-height:28px}
+.panel .head .sub{font-size:13px;color:var(--muted-fg)}
+.close{margin-left:auto;width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--border);background:var(--card);cursor:pointer}
+.panel .body{padding:16px 24px;display:flex;flex-direction:column;gap:8px;overflow:auto}
+.group{font-size:12px;line-height:16px;font-weight:500;color:var(--muted-fg);text-transform:uppercase;letter-spacing:.04em;padding:16px 0 4px}
+.group:first-child{padding-top:8px}
+.rule{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:1rem}
+.rule .t{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.rule .t b{font-weight:600}
+.rule .t span{font-size:13px;color:var(--ink-2)}
+.fixed{padding:4px 10px;border-radius:2.6rem;font-size:12px;font-weight:500;white-space:nowrap;border:1px solid}
+.fixed.hot{background:var(--hot-bg);color:var(--hot-fg);border-color:var(--hot-border)}
+.fixed.person{background:var(--contacted-bg);color:var(--contacted-fg);border-color:var(--contacted-border)}
+.switch{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:500;cursor:pointer}
+.switch input{width:18px;height:18px;accent-color:var(--primary)}
+.cut{display:inline-flex;align-items:center;gap:8px;font-size:13px}
+.cut input{width:64px;padding:6px 8px;border:1px solid var(--border);border-radius:.6rem;font-family:inherit;font-size:13px}
+.fine{font-size:12px;color:var(--muted-fg);padding:12px 0 0}
+@media (max-width:900px){.sidebar{display:none}.topbar .search{display:none}}
+
+.card{animation:drop .35s ease-out}
+@keyframes drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.verdict .did em{font-style:normal;color:var(--muted-fg)}
+.step{color:var(--muted-fg)}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="sidebar">
+    <a class="logo" href="#" aria-label="Sandra dashboard home"><img src="sandra-logo-home.svg" alt="Sandra"></a>
+    <nav aria-label="Primary">
+      <a href="#">Overview</a>
+      <a href="#">Calendar</a>
+      <a href="#">Import</a>
+      <a href="#">Search</a>
+      <a href="#">Lists</a>
+      <a href="#">Campaigns</a>
+      <a href="#">Drips</a>
+      <a href="#">Templates</a>
+      <a href="#">Messages</a>
+      <a href="#" class="active">Messages v2</a>
+      <a href="#">Sandra</a>
+      <a href="#">Leads</a>
+      <a href="#">Norma callbacks</a>
+      <a href="#">Norma queue</a>
+    </nav>
+    <div class="who">jarrad@bmhgroupkc.com</div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <a href="#">Team</a><a href="#">Webhooks</a><a href="#">AI responder</a><a href="#">Contract defaults</a><a href="#">Jev thresholds</a>
+      <div class="right">
+        <div class="search">Search properties, owners, texts <span class="kbd">⌘ K</span></div>
+        <a href="#" aria-label="Open dialer">☏</a>
+        <a href="#" aria-label="Notifications">🔔</a>
+        <a href="#" style="font-weight:500">Sign out</a>
+      </div>
+    </div>
+
+    <main class="page">
+      <div class="pagehead">
+        <div>
+          <h1>Messages v2</h1>
+          <div class="sub">Sandra is answering seller texts. You are watching her work.</div>
+        </div>
+        <div class="right">
+          <div class="pill"><span class="dot" style="background:var(--healthy)"></span><b style="font-weight:500">Sandra is on</b><span style="color:var(--muted-fg)">· 203 texts this week · right 94% of the time</span></div>
+          <button class="btn" type="button" onclick="document.body.classList.add('rules-open')">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            Sandra's rules
+          </button>
+        </div>
+      </div>
+
+      <div class="cols">
+        <section class="tape">
+          <div class="sechead"><h2>Sandra's tape</h2><span class="note" id="tapenote">Today · newest on top</span>
+            <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted-fg)">
+              <span id="clock" style="font-weight:600;color:var(--foreground)">8:00 AM</span>
+              <span>Replay of Tue Oct 14 · 60× speed</span>
+              <button class="btn sm secondary" type="button" id="pausebtn" onclick="togglePause()">Pause</button>
+              <button class="btn sm ghost" type="button" onclick="location.reload()">Restart</button>
+            </span>
+          </div>
+          <div id="tape" style="display:flex;flex-direction:column;gap:12px"></div>
+          <div class="center"><a href="#">Show yesterday's tape</a></div>
+        </section>
+
+        <aside class="waiting">
+          <div class="sechead"><h2>Waiting for a person</h2><span class="count" id="waitcount">0</span></div>
+          <div class="note" style="font-size:13px;color:var(--muted-fg)">Not urgent. Check once a day. Nothing here pings you.</div>
+          <div id="waiting" style="display:flex;flex-direction:column;gap:12px"></div>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="backdrop" onclick="document.body.classList.remove('rules-open')"></div>
+<section class="panel" aria-label="Sandra's rules">
+  <div class="head">
+    <div><h2>Sandra's rules</h2><div class="sub">What Sandra may do on her own. Changes take effect on the next text.</div></div>
+    <button class="close" type="button" aria-label="Close" onclick="document.body.classList.remove('rules-open')"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </div>
+  <div class="body">
+    <div class="group">Goes to Jarrad</div>
+    <div class="rule"><div class="t"><b>Open to selling or wants an offer</b><span>Becomes a lead on My Leads under Jarrad. Slack and text sent.</span></div><span class="fixed hot">Always Jarrad</span></div>
+    <div class="rule"><div class="t"><b>Talked price</b><span>Same as above. Sandra never answers a price question.</span></div><span class="fixed hot">Always Jarrad</span></div>
+
+    <div class="group">Sandra handles alone</div>
+    <div class="rule"><div class="t"><b>Maybe later</b><span>Sends the approved reply, starts the "Maybe later" drip.</span></div><label class="switch"><input type="checkbox" checked>On</label></div>
+    <div class="rule"><div class="t"><b>Asked who is texting</b><span>Introduces Mel, starts the "Asked who is texting" drip.</span></div><label class="switch"><input type="checkbox" checked>On</label></div>
+    <div class="rule"><div class="t"><b>Not interested</b><span>Sends the thank-you, starts the "Not interested" check-ins.</span></div><label class="switch"><input type="checkbox" checked>On</label></div>
+    <div class="rule"><div class="t"><b>Wrong person</b><span>Sends the apology, closes this property.</span></div><label class="switch"><input type="checkbox" checked>On</label></div>
+    <div class="rule"><div class="t"><b>Confirmed owner</b><span>Sends the approved reply, starts the "Confirmed owner" drip.</span></div><label class="switch"><input type="checkbox" checked>On</label></div>
+
+    <div class="group">Waits for a person</div>
+    <div class="rule"><div class="t"><b>Asked to stop</b><span>Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.</span></div><span class="fixed person">Always a person</span></div>
+    <div class="rule"><div class="t"><b>Hostile</b><span>Nothing is sent until a person decides.</span></div><span class="fixed person">Always a person</span></div>
+
+    <div class="group">How sure Sandra must be</div>
+    <div class="rule"><div class="t"><b>60% sure or more</b><span>Below that, the text waits for a person instead.</span></div><label class="cut"><span style="color:var(--muted-fg)">Cutoff</span><input type="number" value="60" min="50" max="100">%</label></div>
+
+    <div class="fine">Every change is logged with who made it and when. Sandra only sends texts you approved word for word.</div>
+  </div>
+</section>
+
+<script>
+// One real day of seller texts (Tue Oct 14), with what Sandra decided. Times are Central.
+// kind: hot | no | later | who | wrong | owner | hold_stop | hold_hostile | hold_unclear
+const DAY = [
+ {t:"7:24 AM", who:"Ryan Kerlew", addr:"6118 S Benton Ave, Kansas City MO", ours:"Still happy to have one of my lead managers give you a quick call. What time works?", them:"Have availability today, if still interested", kind:"hot", say:"Ryan can talk today. That's a hot seller.", did:"Handed to Jarrad · now on My Leads · Slack and text sent"},
+ {t:"9:12 AM", who:"Nicole", addr:"209 E Cedar St, Chilhowee MO", ours:"Hey, is this Nicole? Just checking I have the right person for the Cedar St property.", them:"Yes", kind:"owner", say:"Nicole confirmed she's the owner.", reply:"Great, thanks for confirming. Any chance you'd consider a cash offer on it?", did:"Put in the \"Confirmed owner\" drip · first text tomorrow"},
+ {t:"11:12 AM", who:"David", addr:"5541 Lamar Ave, Mission KS", ours:"Hey, Mel again. Still own the place on Lamar?", them:"Stop", kind:"hold_stop", say:"David asked to stop. Nothing sent.", hold:"Asked to stop"},
+ {t:"11:13 AM", who:"David", addr:"5541 Lamar Ave, Mission KS", ours:"", them:"I never did dumbass", kind:"hold_hostile", say:"Hostile. Nothing sent.", hold:"Hostile"},
+ {t:"12:24 PM", who:"Casey", addr:"308 Jackson St, Warrensburg MO", ours:"Hey, Mel with BMH. Would you consider an offer on Jackson St?", them:"You AI?", kind:"who", say:"Casey asked who we are. Introduced Mel.", reply:"Sorry, I should have said. I'm Mel with BMH, local home buyers. Any chance you'd consider an offer on the property?", did:"Put in the \"Asked who is texting\" drip · 4 texts over 2 weeks"},
+ {t:"1:07 PM", who:"Chris", addr:"6 SE 140th Rd, Warrensburg MO", ours:"Hey, Mel with BMH. Would you consider an offer on the 140th Rd property?", them:"Who is this?", kind:"who", say:"Chris asked who we are. Introduced Mel.", reply:"Sorry, I should have said. I'm Mel with BMH, local home buyers. Any chance you'd consider an offer on the property?", did:"Put in the \"Asked who is texting\" drip · 4 texts over 2 weeks"},
+ {t:"1:25 PM", who:"Justin Magee", addr:"1325 SW 21st St, Blue Springs MO", ours:"I've got a couple of openings tomorrow. Morning or afternoon better for you?", them:"noon (cst) is best", kind:"hot", say:"Justin gave a time to call. That's a hot seller.", did:"Handed to Jarrad · now on My Leads · Slack and text sent"},
+ {t:"1:55 PM", who:"William Behrens", addr:"18380 W 161st St, Olathe KS", ours:"Hey, Mel again. Would it be easier to chat for 10 minutes today or tomorrow?", them:"Either is fine", kind:"hot", say:"William is open to a call. That's a hot seller.", did:"Handed to Jarrad · now on My Leads · Slack and text sent"},
+ {t:"2:06 PM", who:"Marguerite", addr:"5705 N Oregon Ave, Kansas City MO", ours:"Hey, Mel again. Still thinking about selling this fall?", them:"Time line has changed probably January now", kind:"later", say:"Marguerite might sell in January. Not now.", reply:"Sounds good. I'll check back with you after the new year.", did:"Put in the \"Maybe later\" drip · next text in 30 days"},
+ {t:"2:56 PM", who:"Tamara", addr:"3919 S Rust Rd, Grain Valley MO", ours:"Hey, Mel with BMH. Would you consider an offer on Rust Rd?", them:"No. Assume spam searching", kind:"hold_stop", say:"Sounds like a stop request, but I'm not sure. Nothing sent.", hold:"Asked to stop?"},
+ {t:"4:03 PM", who:"Patricia", addr:"1212 E 39th St, Kansas City MO", ours:"Hey, Mel with BMH. Still own the place on 39th?", them:"Sorry this note does not tell me I am speaking with or a subject. Pat V", kind:"hold_unclear", say:"I can't tell what Patricia means. Nothing sent.", hold:"Can't read it"},
+ {t:"6:34 PM", who:"Sue Heiman", addr:"22 SW 131, Holden MO", ours:"Hey, Mel again. What's a good time for one of my lead managers to call?", them:"Anytime before 10pm ..but what city is this locale in?", kind:"hot", say:"Sue gave a time to call. That's a hot seller.", did:"Handed to Jarrad · now on My Leads · Slack and text sent"},
+ {t:"9:51 PM", who:"Martha", addr:"4806 NW Harmony Ln, Kansas City MO", ours:"Hey, Mel again. Any update on the Harmony Ln property?", them:"The house is sold.", kind:"no", say:"Martha said no. Sent the thank-you and closed it.", reply:"Understood, thanks for letting me know. Take care.", did:"Put in the \"Not interested\" drip · first check-in in 90 days"},
+];
+const TAG={hot:["hot","Wants an offer"],no:["no","Not interested"],later:["later","Maybe later"],who:["who","Asked who is texting"],owner:["later","Confirmed owner"],wrong:["no","Wrong person"]};
+const SPEED=60; // 1 real minute = 1 second
+function toMin(t){const [hm,ap]=t.split(" ");let [h,m]=hm.split(":").map(Number);if(ap==="PM"&&h!==12)h+=12;if(ap==="AM"&&h===12)h=0;return h*60+m;}
+function fmt(min){let h=Math.floor(min/60)%24,m=min%60;const ap=h>=12?"PM":"AM";h=h%12||12;return h+":"+String(m).padStart(2,"0")+" "+ap;}
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+let clock=8*60, paused=false, idx=0, waitN=0;
+const tape=document.getElementById("tape"), waiting=document.getElementById("waiting");
+function togglePause(){paused=!paused;document.getElementById("pausebtn").textContent=paused?"Play":"Pause";}
+function card(ev){
+  const el=document.createElement("article"); el.className="card live";
+  el.innerHTML=`<div class="meta"><b>${ev.t}</b><b>${esc(ev.who)}</b><span>· ${esc(ev.addr)}</span><span class="reading"><span class="dot"></span>Sandra is reading…</span></div>
+  <div class="thread">${ev.ours?`<div class="ours">${esc(ev.ours)}</div>`:""}<div class="theirs">${esc(ev.them)}</div></div>`;
+  tape.prepend(el); return el;
+}
+function decide(el,ev){
+  el.classList.remove("live");
+  const meta=el.querySelector(".reading");
+  if(ev.kind.startsWith("hold")){
+    meta.outerHTML=`<span class="tag no">Waits for a person</span>`;
+    el.insertAdjacentHTML("beforeend",`<div class="verdict"><div><b>Sandra:</b> ${esc(ev.say)}</div><div class="did step">Moved to "Waiting for a person"</div></div>`);
+    hold(ev); return;
+  }
+  const [cls,label]=TAG[ev.kind]; meta.outerHTML=`<span class="tag ${cls}">${label}</span>`;
+  el.insertAdjacentHTML("beforeend",`<div class="verdict"><div><b>Sandra:</b> ${esc(ev.say)}</div><div class="did step" data-step>${ev.reply?`Replying in a few minutes, like a person would…`:`Handing to Jarrad…`}</div></div>`);
+  const delay=ev.reply? 2+Math.floor(Math.random()*4) : 1; // minutes
+  setTimeout(()=>{
+    if(ev.reply){el.querySelector(".thread").insertAdjacentHTML("beforeend",`<div class="ours sent">${esc(ev.reply)}</div>`);}
+    el.querySelector("[data-step]").outerHTML=`<div class="did">${esc(ev.did)}${ev.reply?' · <a href="#">undo</a>':''}</div>`;
+  }, delay*1000);
+}
+function hold(ev){
+  waitN++; document.getElementById("waitcount").textContent=waitN;
+  const btns = ev.kind==="hold_hostile" ? `<button class="btn sm" type="button">Stop texting them</button><button class="btn sm secondary" type="button">Send the hostile reply</button>`
+             : ev.kind==="hold_stop" ? `<button class="btn sm" type="button">Stop texting them</button><button class="btn sm secondary" type="button">It's just a no</button>`
+             : `<button class="btn sm" type="button">Pick what they meant</button><button class="btn sm secondary" type="button">Open thread</button>`;
+  const el=document.createElement("article"); el.className="card";
+  el.innerHTML=`<div class="meta"><b>${esc(ev.who)}</b><span>· ${esc(ev.addr)}</span><span style="margin-left:auto">${ev.t}</span></div>
+  <div class="theirs">${esc(ev.them)}</div>
+  <div style="font-size:13px"><b>Sandra:</b> ${esc(ev.say)}</div>
+  <div class="actions">${btns}<button class="btn sm ghost" type="button">Dismiss</button></div>`;
+  waiting.prepend(el);
+}
+setInterval(()=>{
+  if(paused) return;
+  clock++; document.getElementById("clock").textContent=fmt(clock);
+  while(idx<DAY.length && toMin(DAY[idx].t)<=clock){
+    const ev=DAY[idx++]; const el=card(ev);
+    setTimeout(()=>decide(el,ev), 1200);
+  }
+  if(clock>=23*60){clock=8*60; idx=0;}
+}, 1000/ (SPEED/60));
+</script>
+</body>
+</html>

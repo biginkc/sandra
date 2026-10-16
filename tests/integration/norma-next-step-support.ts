@@ -14,9 +14,9 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { applyMyLeadsChain } from "@tests/integration/my-leads-housekeeping-fixture";
 
 const dir = `${path.join(process.cwd(), "supabase/migrations")}/`;
-export const url = requireLoopbackPostgresUrl(
-  process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
-);
+// Resolved lazily: importing this module (e.g. for `svc` in the recovery lane,
+// which uses NORMA_ROLLBACK_* URLs) must not require TEST_SUPABASE_DB_URL.
+export const dbUrl = (): string => requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "");
 export const load = (file: string, base = dir) =>
   readFileSync(`${base}${file}`, "utf8").replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
 
@@ -36,7 +36,7 @@ let phoneCounter = 0;
 const nextPhone = () => `+1816557${String(1000 + (phoneCounter++ % 9000)).padStart(4, "0")}`;
 
 export async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, sql = migrations()) {
-  const db = new Client({ connectionString: url });
+  const db = new Client({ connectionString: dbUrl() });
   await db.connect();
   try {
     await db.query("begin");
@@ -102,7 +102,10 @@ export async function create(db: Client, ctx: Ctx, l: Lead) {
 }
 
 export async function dispatched(db: Client, requestId: string, callId = `call-${randomUUID()}`) {
-  expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [requestId])).rows[0]!.c).toBe(true);
+  // After the queue migration the legacy claim is always false (G1); the admitted dispatch is claim_dispatch_v2. Use whichever the schema has.
+  const v2 = (await db.query("select to_regprocedure('public.fn_norma_claim_dispatch_v2(uuid,integer,timestamptz,boolean,integer,integer,text)') is not null as v")).rows[0].v === true;
+  if (v2) expect((await svc<{ c: string }>(db, "select public.fn_norma_claim_dispatch_v2($1,1,now(),false,1000,100000,'America/Chicago') as c", [requestId])).rows[0]!.c).toBe("claimed");
+  else expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [requestId])).rows[0]!.c).toBe(true);
   expect((await svc<{ b: string }>(db, "select public.fn_norma_bind_call_id($1,$2) as b", [requestId, callId])).rows[0]!.b).toBe("bound");
   return callId;
 }

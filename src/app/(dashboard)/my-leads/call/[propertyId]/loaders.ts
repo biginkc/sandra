@@ -2,6 +2,8 @@ import "server-only";
 
 import { loadCoachCallContext } from "@/lib/coach/coach-context-actions";
 import { loadCachedCoachBundle } from "@/lib/coach/script-cache";
+import { FACT_FIELDS } from "@/lib/call-facts/types";
+import { loadProviderData } from "@/lib/comps/provider-data-server";
 import { LEAD_COMPS_MEMBER_COLUMNS } from "@/lib/comps/types";
 import { reportError } from "@/lib/errors/report";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
@@ -18,6 +20,7 @@ import {
   type CallScreenNote,
   type CallScreenPhone,
   type CallScreenScript,
+  type LeadCallFactsView,
   type LeadCompPublic,
   type Section,
 } from "./types";
@@ -44,6 +47,7 @@ type Deps = {
   context?: typeof loadCoachCallContext;
   flag?: typeof getMyLeadsFlag;
   schemaReady?: typeof schemaReady;
+  providerData?: typeof loadProviderData;
   contractCard?: (propertyId: string) => Promise<ContractCardState>;
 };
 
@@ -166,9 +170,12 @@ async function loadComps(client: LooseClient, orgId: string, propertyId: string,
   const val = valuation.data as { arv: unknown; rehab: unknown } | null;
   const num = (v: unknown) => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null);
   const latestRow = latest.data as (Record<string, unknown> & { as_is_value?: unknown; as_is_low?: unknown; as_is_high?: unknown; arv_estimate?: unknown }) | null;
+  const providerData = latestRow && latestRow.provider === "attom"
+    ? await (deps.providerData ?? loadProviderData)(client, orgId, String(latestRow.id)).catch(() => null)
+    : null;
   return {
     latest: latestRow
-      ? ({ ...latestRow, as_is_value: num(latestRow.as_is_value), as_is_low: num(latestRow.as_is_low), as_is_high: num(latestRow.as_is_high), arv_estimate: num(latestRow.arv_estimate) } as unknown as LeadCompPublic)
+      ? ({ ...latestRow, providerData, as_is_value: num(latestRow.as_is_value), as_is_low: num(latestRow.as_is_low), as_is_high: num(latestRow.as_is_high), arv_estimate: num(latestRow.arv_estimate) } as unknown as LeadCompPublic)
       : null,
     request: req,
     settings: { enabled: flagOn && cap > 0, capped: req?.status === "capped" },
@@ -199,6 +206,33 @@ async function loadMessages(client: LooseClient, propertyId: string, contactId: 
 }
 
 /** Flag-off, not-ready, or any failure is `{ ok: false }` and the layout omits the slot. */
+/**
+ * The latest finished, still-open call facts proposal for the lead, as chips. Null (nothing rendered)
+ * until the schema exists or when there is nothing left to accept. Reads through the caller's RLS
+ * client and never selects the job columns (token, lease), which members cannot read.
+ */
+async function loadFacts(client: LooseClient, orgId: string, propertyId: string, deps: Deps): Promise<LeadCallFactsView | null> {
+  if (!(await (deps.schemaReady ?? schemaReady)("call_facts"))) return null;
+  const { data, error } = await client
+    .from("lead_call_facts")
+    .select("id, facts, accepted, status")
+    .eq("org_id", orgId)
+    .eq("property_id", propertyId)
+    .eq("processing_state", "done")
+    .in("status", ["proposed", "partially_accepted"])
+    .order("extracted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const facts = (data.facts ?? {}) as Record<string, { value?: unknown; evidence?: unknown } | undefined>;
+  const accepted = (data.accepted ?? {}) as Record<string, unknown>;
+  const chips = FACT_FIELDS.filter((f) => !(f in accepted))
+    .map((field) => ({ field, value: facts[field]?.value, evidence: facts[field]?.evidence }))
+    .filter((c): c is { field: (typeof FACT_FIELDS)[number]; value: string; evidence: string } => typeof c.value === "string" && typeof c.evidence === "string");
+  return chips.length === 0 ? null : { factId: String(data.id), chips };
+}
+
 async function loadContractSection(propertyId: string, deps: Deps): Promise<Section<ContractCardState>> {
   try {
     const state = await (deps.contractCard ?? loadContractCard)(propertyId);
@@ -234,7 +268,7 @@ export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promi
         notes,
         messages,
         contract: await loadContractSection(propertyId, deps),
-        facts: { ok: false, message: "Call facts arrive with Phase 3c." },
+        facts: await section<LeadCallFactsView | null>("Call facts could not be loaded.", "facts", () => loadFacts(client, viewer.orgId, propertyId, deps)),
       },
     };
   } catch (error) {

@@ -152,6 +152,9 @@ test('Side panel shows "No owner" picker on an unassigned thread; choosing Me as
   const trigger = page.getByTestId("assign-dropdown-trigger");
   await expect(trigger).toBeVisible();
   await expect(trigger).toContainText("No owner");
+  // Base UI adds aria-expanded when the trigger hydrates; an SSR-visible
+  // button can otherwise swallow this first click before its handlers attach.
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
   await trigger.click();
 
   const selfOption = page.getByTestId("assign-dropdown-me");

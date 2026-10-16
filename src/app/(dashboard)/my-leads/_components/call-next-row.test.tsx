@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { CoachCallContext } from "./coach-call-context";
 import { CallNextRowView } from "./call-next-row";
 import { SNAPSHOT_AT, stripItem, queueRowFixture } from "./call-next-test-support";
 
@@ -93,5 +94,36 @@ describe("<CallNextRowView />", () => {
     renderRow({ busy: true });
     expect(screen.getByTestId("call-next-action-call-lead-1")).toBeDisabled();
     expect(screen.getByTestId("call-next-menu-lead-1")).toBeDisabled();
+  });
+
+  it("shows no Call with coach without the Dialpad route", () => {
+    renderRow();
+    expect(screen.queryByText("Call with coach")).not.toBeInTheDocument();
+  });
+
+  it("with the route on, shows Call with coach and it opens the softphone path for that lead", async () => {
+    const coach = vi.fn();
+    const h = handlers();
+    render(
+      <CoachCallContext.Provider value={{ call: coach, disabled: false }}>
+        <ul>
+          <CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...h} />
+        </ul>
+      </CoachCallContext.Provider>,
+    );
+    await userEvent.click(screen.getByText("Call with coach"));
+    expect(coach).toHaveBeenCalledExactlyOnceWith("lead-1");
+    expect(h.onCall).not.toHaveBeenCalled();
+  });
+
+  it("disables Call with coach while a Dialpad call is active", () => {
+    render(
+      <CoachCallContext.Provider value={{ call: vi.fn(), disabled: true }}>
+        <ul>
+          <CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...handlers()} />
+        </ul>
+      </CoachCallContext.Provider>,
+    );
+    expect(screen.getByText("Call with coach")).toBeDisabled();
   });
 });

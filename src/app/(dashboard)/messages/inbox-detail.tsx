@@ -1,5 +1,6 @@
 "use client";
 
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { myLeadsHref } from "@/lib/my-leads/links";
 import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
@@ -30,12 +31,17 @@ import {
 } from "@/lib/messages/sms-parties";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
+import { latestInboundMessageId } from "@/lib/messaging/inbound-stamp";
 import { deriveLeadSmsPresentation } from "../leads/[id]/lead-detail-state";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { DISPO_LABELS, OutcomeBar } from "@/components/leads/outcome-bar";
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
+import { loadHomeownerHousesAction } from "@/lib/leads/homeowner-houses-action";
 
 import { AssignDropdown } from "./assign-dropdown";
+import { QueueNormaAction } from "./queue-norma-action";
 import {
   confirmAiDispositionReview,
 } from "./dispo-actions";
@@ -88,6 +94,7 @@ function SandraDispoReviewBanner({
   onResolved: (status: "confirmed" | "superseded") => void;
 }) {
   const [pending, startTransition] = useTransition();
+  const [warning, setWarning] = useState<string | null>(null);
   const label = DISPO_LABELS[review.disposition] ?? review.disposition;
   const keepsRestrictions =
     review.disposition === "dnc" || review.disposition === "opted_out";
@@ -99,6 +106,14 @@ function SandraDispoReviewBanner({
         toast.error(result.error);
         return;
       }
+      if (result.warning) {
+        // Suppression did not fully apply: keep the banner and the thread
+        // in view; the server re-raised the human-attention hold.
+        setWarning(result.warning);
+        toast.error(result.warning);
+        return;
+      }
+      setWarning(null);
       if (result.status === "confirmed") {
         toast.success("Sandra disposition confirmed");
       } else {
@@ -136,6 +151,15 @@ function SandraDispoReviewBanner({
               >
                 Reviewed message: “{review.sourceMessageBody}”
               </blockquote>
+            ) : null}
+            {warning ? (
+              <p
+                role="alert"
+                className="mt-1 text-xs font-semibold text-destructive"
+                data-testid="sandra-dispo-warning"
+              >
+                {warning}
+              </p>
             ) : null}
             {keepsRestrictions ? (
               <p className="mt-1 text-[11px] font-medium text-[#7c2d12]">
@@ -184,6 +208,7 @@ export function InboxDetail({
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
+  const dialpadCall = useOptionalDialpadCall();
   const searchParams = useSearchParams();
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
@@ -224,6 +249,19 @@ export function InboxDetail({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [closeDetail, data]);
+
+  // "Owns N houses" for the homeowner in this conversation; one read per homeowner, no badge on failure.
+  const housesFor = data && data.contactId && data.contactId === data.homeownerContactId ? data.contactId : null;
+  const [houses, setHouses] = useState<{ contactId: string; houses: HomeownerHouses | null } | null>(null);
+  useEffect(() => {
+    if (!housesFor) return;
+    let live = true;
+    loadHomeownerHousesAction([housesFor])
+      .then((byContact) => { if (live) setHouses({ contactId: housesFor, houses: byContact[housesFor] ?? null }); })
+      .catch(() => { if (live) setHouses({ contactId: housesFor, houses: null }); });
+    return () => { live = false; };
+  }, [housesFor]);
+  const homeownerHouses = houses && houses.contactId === housesFor ? houses.houses : null;
 
   if (isLoading) {
     return <InboxDetailSkeleton onBackToList={closeDetail} />;
@@ -450,8 +488,8 @@ export function InboxDetail({
       className="bg-white border border-border rounded-xl flex h-full flex-col overflow-hidden"
       data-testid="inbox-detail-panel"
     >
-      <header className="border-b border-border bg-white flex flex-col items-stretch justify-between gap-3 px-4 py-4 sm:flex-row sm:items-center sm:px-6">
-        <div className="flex min-w-0 flex-col gap-2">
+      <header className="border-b border-border bg-white flex flex-col items-stretch justify-between gap-3 px-4 py-4 sm:flex-row sm:flex-wrap sm:items-center sm:px-6">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-1 sm:basis-64">
           <button
             type="button"
             onClick={closeDetail}
@@ -467,10 +505,18 @@ export function InboxDetail({
               {initialsOfName(data.contactName)}
             </div>
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-2">
-                <h2 className="truncate text-[18px] font-bold leading-tight text-[#1c1917]">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <h2 className="min-w-0 max-w-full truncate text-[18px] font-bold leading-tight text-[#1c1917]">
                   {data.contactName ?? formatPhoneDisplay(data.contactPhone) ?? "Unknown contact"}
                 </h2>
+                <MultiHouseBadge
+                  houses={homeownerHouses}
+                  contactId={housesFor}
+                  ownerName={data.contactName}
+                  currentPropertyId={data.propertyId ?? undefined}
+                  className="shrink-0"
+                  testId="inbox-detail-houses"
+                />
                 <MessageStageChip
                   status={data.propertyStatus}
                   historical={isPermanentlyLocked}
@@ -502,6 +548,7 @@ export function InboxDetail({
                   ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
                   : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
               </p> : null}
+              {data.propertyId ? <div className="mt-1"><QueueNormaAction propertyId={data.propertyId} propertyAddress={data.propertyAddress} /></div> : null}
               <p
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
                 title={[
@@ -627,6 +674,28 @@ export function InboxDetail({
                 </DropdownMenuItem>
               ) : null}
               {canCall ? (
+                dialpadCall?.enabled && data.propertyId && data.contactId && data.contactPhoneSlot ? (
+                  <DropdownMenuItem
+                    className="min-h-11"
+                    data-testid="inbox-detail-phone"
+                    aria-label={`Call ${formatPhoneDisplay(data.threadCustomerPhone!)} with Dialpad`}
+                    onClick={() =>
+                      dialpadCall.startCall({
+                        propertyId: data.propertyId!,
+                        contactId: data.contactId,
+                        label: data.contactName ?? formatPhoneDisplay(data.threadCustomerPhone!) ?? "this contact",
+                        phoneSlot: data.contactPhoneSlot,
+                        // Dialpad not configured after all: the phone app, exactly as before.
+                        onFallback: () => {
+                          window.location.href = phoneHref!;
+                        },
+                      })
+                    }
+                  >
+                    <PhoneIcon className="h-4 w-4" />
+                    Call {formatPhoneDisplay(data.threadCustomerPhone!)}
+                  </DropdownMenuItem>
+                ) : (
                 <DropdownMenuItem
                   className="min-h-11"
                   render={
@@ -640,6 +709,7 @@ export function InboxDetail({
                     </a>
                   }
                 />
+                )
               ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
@@ -773,6 +843,7 @@ export function InboxDetail({
                   homeownerPhone={data.replyToPhone}
                   replyToPhone={data.replyToPhone}
                   preferredFromNumber={data.threadBusinessPhone}
+                  inboundMessageId={latestInboundMessageId(data.initialMessages)}
                   phoneUnavailableMessage={replyPhoneUnavailableMessage}
                   routeRefreshPending={replyRefreshPending}
                   suspended={isSmsRestricted}

@@ -56,6 +56,7 @@ function expectFlowConsumed(response: Response, nonce = FLOW_NONCE) {
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+  vi.stubEnv("HUGO_SESSION_PROOF_SECRET", "ab".repeat(32));
   vi.stubEnv(
     "NEXT_PUBLIC_SUPABASE_URL",
     "https://copflsklaefwzipsrjqz.supabase.co",
@@ -99,7 +100,7 @@ describe("auth callback route", () => {
       error: null,
     });
     const getClaims = vi.fn().mockResolvedValue({
-      data: { claims: { amr: [{ method: "recovery", timestamp: 1 }] } },
+      data: { claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method: "recovery", timestamp: 1 }] } },
       error: null,
     });
     createClient.mockResolvedValue({
@@ -152,7 +153,7 @@ describe("auth callback route", () => {
       const signOut = vi.fn();
       const getClaims = vi.fn().mockResolvedValue({
         data: {
-          claims: { amr: [{ method: "oauth", timestamp: 1784616840 }] },
+          claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method: "oauth", timestamp: 1784616840 }] },
         },
         error: null,
       });
@@ -196,6 +197,24 @@ describe("auth callback route", () => {
       );
     });
 
+    it("mints a session-bound HttpOnly proof only after a verified callback", async () => {
+      mockAuth();
+      const response = await GET(hugoCallbackRequest("code=code-123"));
+      expect(response.cookies.get("__Host-sandra-hugo-session")).toMatchObject({
+        value: expect.stringMatching(/^v1\.[a-f0-9]{64}$/),
+        httpOnly: true, secure: true, sameSite: "lax", path: "/",
+      });
+    });
+
+    it("does not exchange or revoke a session when signing configuration is absent", async () => {
+      const { exchangeCodeForSession, signOut } = mockAuth();
+      vi.stubEnv("HUGO_SESSION_PROOF_SECRET", "");
+      const response = await GET(hugoCallbackRequest("code=code-123"));
+      expect(response.status).toBe(503);
+      expect(exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(signOut).not.toHaveBeenCalled();
+    });
+
     it.each([
       "//evil.com",
       "/\\evil.example",
@@ -215,7 +234,7 @@ describe("auth callback route", () => {
       async (method) => {
         const { getClaims, signOut } = mockAuth();
         getClaims.mockResolvedValue({
-          data: { claims: { amr: [{ method, timestamp: 1784616840 }] } },
+          data: { claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method, timestamp: 1784616840 }] } },
           error: null,
         });
         const response = await GET(
@@ -261,7 +280,7 @@ describe("auth callback route", () => {
       async (method) => {
         const { getClaims, signOut } = mockAuth();
         getClaims.mockResolvedValue({
-          data: { claims: { amr: [{ method, timestamp: 1 }] } },
+          data: { claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method, timestamp: 1 }] } },
           error: null,
         });
         const response = await GET(
@@ -283,7 +302,7 @@ describe("auth callback route", () => {
         },
       ]);
       getClaims.mockResolvedValue({
-        data: { claims: { amr: [{ method: "oauth", timestamp: 1784616840 }] } },
+        data: { claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method: "oauth", timestamp: 1784616840 }] } },
         error: null,
       });
       const response = await GET(
@@ -507,7 +526,7 @@ describe("auth callback route", () => {
     it("explicitly expires every written or incoming Auth cookie when rejection cleanup fails", async () => {
       const { getClaims, signOut } = mockAuth();
       getClaims.mockResolvedValue({
-        data: { claims: { amr: [{ method: "password", timestamp: 1 }] } },
+        data: { claims: { sub: "canonical-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1", session_id: "callback-session", amr: [{ method: "password", timestamp: 1 }] } },
         error: null,
       });
       signOut.mockResolvedValue({

@@ -33,6 +33,7 @@ export const LEAD_EVENT_TYPES = {
   AI_ESCALATED: "ai_escalated",
   AI_ESCALATION_CLEARED: "ai_escalation_cleared",
   AI_RESPONDER_TOGGLED: "ai_responder_toggled",
+  HOLD_REPLY_SENT: "hold_reply_sent",
   SKIP_TRACE_TOGGLED: "skip_trace_toggled",
   SKIP_TRACE_REQUESTED: "skip_trace_requested",
   SKIP_TRACE_COMPLETED: "skip_trace_completed",
@@ -41,7 +42,9 @@ export const LEAD_EVENT_TYPES = {
   OPTED_OUT: "opted_out",
   QUEUED_MESSAGE_DELETED: "queued_message_deleted",
   NORMA_CALL_REQUESTED: "norma_call_requested",
+  NORMA_CALL_ATTEMPT_NO_ANSWER: "norma_call_attempt_no_answer",
   NORMA_CALL_COMPLETED: "norma_call_completed",
+  NORMA_CALL_REVIEWED: "norma_call_reviewed",
 } as const;
 
 export type LeadEventType =
@@ -160,10 +163,24 @@ export async function recordLeadEvents(
 
   try {
     const { error } = await admin.from("lead_events").insert(rows);
-    if (error) reportLedgerFailure("insert", error, rows.length);
+    if (error) {
+      // A retried action re-records the same (source_type, source_id):
+      // the unique ledger identity already holds the event, so it is not
+      // a failure. Single rows only: a batch violation is ambiguous.
+      if (rows.length === 1 && isUniqueViolation(error)) return;
+      reportLedgerFailure("insert", error, rows.length);
+    }
   } catch (error) {
     reportLedgerFailure("insert", error, rows.length);
   }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "23505"
+  );
 }
 
 export async function recordLeadEvent(

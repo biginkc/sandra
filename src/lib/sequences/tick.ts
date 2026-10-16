@@ -4,6 +4,7 @@ import {
   sendSmsToContact,
   type SequenceAttemptOutcome,
 } from "@/lib/messaging/send";
+import { reportError } from "@/lib/errors/report";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 import { pickFromPool } from "@/lib/templates/pool";
@@ -43,12 +44,17 @@ const FIRST_TOUCH_SENDER_PAUSE_REASON =
  * The return type is a short status the cron endpoint logs for audit.
  */
 
+const CONSENT_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000;
+/** Consecutive consent_unavailable retirements on one step before the enrollment is paused for a human. */
+const CONSENT_UNAVAILABLE_MAX_RETRIES = 12;
+
 export type TickOutcome =
   | { status: "sent"; enrollmentId: string; stepIndex: number; messageId: string | null }
   | { status: "status_changed"; enrollmentId: string; stepIndex: number }
   | { status: "completed"; enrollmentId: string }
   | { status: "paused"; enrollmentId: string; reason: string }
   | { status: "rescheduled_quiet_hours"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_consent_unavailable"; enrollmentId: string; nextRunAt: string; reason: "consent_unavailable" }
   | { status: "skipped_already_claimed"; enrollmentId: string }
   | { status: "skipped_no_step"; enrollmentId: string }
   | { status: "failed"; enrollmentId: string; message: string };
@@ -403,6 +409,9 @@ export async function processEnrollmentTick(
       allowDefaultFromWhenNoSticky: true,
       requiresOpeningIdentity:
         step.step_index === 0 && step.template_category === "Opener - Homeowner",
+      // Provenance stamp: the AI responder reads this to tell a drip tick
+      // from a conversational reply without joining sequence_step_runs.
+      metadata: { generated_by: "sequence_tick", sequence_enrollment_id: enrollment.id },
       sequenceContext: {
         enrollmentId: enrollment.id,
         stepId: step.id,
@@ -459,6 +468,104 @@ export async function processEnrollmentTick(
           enrollmentId: enrollment.id,
           stepIndex: step.step_index,
           messageId: messageId ?? null,
+        };
+      }
+      case "blocked_fresh_state_unavailable": {
+        // Transient consent/suppression read failure: nothing was sent and the
+        // provider did not fail. Record the step as not attempted with reason
+        // consent_unavailable, leave the enrollment active and retry next tick.
+        // (skipped_reason is CHECK-constrained, so the reason lives in
+        // failure_reason / recovery_action.)
+        const retryAt = new Date(Date.now() + CONSENT_UNAVAILABLE_RETRY_MS);
+        const { data: retiredClaim, error: retireError } = await client
+          .from("sequence_step_runs")
+          .update({
+            claim_active: false,
+            run_at: new Date().toISOString(),
+            skipped_reason: null,
+            attempt_outcome: "not_attempted",
+            failure_reason: "consent_unavailable",
+            recovery_action: "consent_unavailable_deferred",
+            recovery_evidence: "consent/suppression state could not be read; no provider attempt was made",
+          })
+          .eq("id", claim.id)
+          .eq("claim_active", true)
+          .eq("attempt_outcome", "not_attempted")
+          .select("id")
+          .maybeSingle();
+        if (retireError || !retiredClaim) {
+          return failAfterRunWrite(
+            client,
+            enrollment.id,
+            retireError?.message ?? "consent-unavailable claim changed before retirement",
+            "Consent-unavailable claim bookkeeping failed",
+          );
+        }
+        // Consecutive consent-check attempts on this step. A step advances only
+        // after a successful run, so rows are scoped to enrollment+step. Rows
+        // before the latest attempt that reached past the consent check (any
+        // outcome other than not_attempted, e.g. a provider failure) do not
+        // count, quiet-hours retirements (not_attempted) are ignored entirely,
+        // and `resume_sequence_enrollment` relabels earlier deferred rows so an
+        // earlier outage never counts toward a later one. Only rows still
+        // labelled consent_unavailable_deferred are counted; this row is
+        // already retired, so it is included.
+        // Fail closed: if the budget cannot be read, pause rather than retry
+        // without a bound.
+        const { data: boundaryRows, error: boundaryError } = await client
+          .from("sequence_step_runs")
+          .select("created_at")
+          .eq("enrollment_id", enrollment.id)
+          .eq("step_id", step.id)
+          .neq("attempt_outcome", "not_attempted")
+          .order("created_at", { ascending: false })
+          .limit(1);
+        let countQuery = client
+          .from("sequence_step_runs")
+          .select("id", { count: "exact", head: true })
+          .eq("enrollment_id", enrollment.id)
+          .eq("step_id", step.id)
+          .eq("recovery_action", "consent_unavailable_deferred");
+        const boundaryAt = (boundaryRows ?? [])[0]?.created_at;
+        if (boundaryAt) countQuery = countQuery.gt("created_at", boundaryAt);
+        const { count: retiredCount, error: countError } = boundaryError
+          ? { count: null, error: boundaryError }
+          : await countQuery;
+        const budgetUnverifiable = Boolean(boundaryError || countError || retiredCount === null);
+        if (budgetUnverifiable || (retiredCount ?? 0) >= CONSENT_UNAVAILABLE_MAX_RETRIES) {
+          const pauseError = await pauseEnrollment(client, enrollment.id, "consent_unavailable", false);
+          const message = budgetUnverifiable
+            ? `Consent/suppression retry budget could not be verified on step ${step.step_index} (${(boundaryError ?? countError)?.message ?? "no count returned"}); enrollment paused${pauseError ? `; ${pauseError}` : ""}`
+            : `Consent/suppression state unreadable for ${retiredCount} consecutive checks on step ${step.step_index}; enrollment paused${pauseError ? `; ${pauseError}` : ""}`;
+          reportError(new Error(message), {
+            tags: { surface: "sequence_tick_consent_unavailable_cap" },
+          });
+          if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message };
+          return { status: "paused", enrollmentId: enrollment.id, reason: "consent_unavailable" };
+        }
+        const { data: deferred, error: deferError } = await client
+          .from("sequence_enrollments")
+          .update({
+            next_run_at: retryAt.toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", enrollment.id)
+          .eq("status", "active")
+          .eq("current_step_index", enrollment.current_step_index)
+          .select("id")
+          .maybeSingle();
+        if (deferError || !deferred) {
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message: deferError?.message ?? "Enrollment changed before consent-unavailable retry was scheduled",
+          };
+        }
+        return {
+          status: "rescheduled_consent_unavailable",
+          enrollmentId: enrollment.id,
+          nextRunAt: retryAt.toISOString(),
+          reason: "consent_unavailable",
         };
       }
       case "blocked_quiet_hours": {

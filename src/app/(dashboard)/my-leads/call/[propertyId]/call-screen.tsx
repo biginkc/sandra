@@ -10,12 +10,13 @@ import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-sto
 import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
-import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
-import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 
+import { CallFactChips } from "./call-fact-chips";
+import { acceptCallFactAction, dismissCallFactsAction } from "./facts-actions";
 import { compLeadAction, setValuationInputsAction } from "./actions";
 import {
   cancelContractAction, reassignAndLogOfferAction, retryOfferProjectionAction, sendContractCardAction, supersedeOfferAction,
@@ -38,6 +39,8 @@ export type CallScreenProps = {
   viewerLabel?: string | null;
   /** `click_to_dial` flag AND `schemaReady('api_dial')`, resolved on the server (getMyLeadsCallFeatures). Off keeps Call disabled. */
   clickToDial?: boolean;
+  /** `post_call_prompt` flag (and its schema), resolved on the server. The dock needs this AND `call_screen`. */
+  postCallPrompt?: boolean;
 };
 
 const STAGE_LABEL: Record<string, string> = {
@@ -51,9 +54,9 @@ const STAGE_LABEL: Record<string, string> = {
 /**
  * D7 layout. ≥1024px: left 60% static script in its own scroll container; right 40% stacked
  * numbers → (contract, hidden in 3b) → history → docked post-call prompt. Below: single column
- * header, numbers, script, history, prompt. The contract and facts slots are omitted here.
+ * header, numbers, script, history, prompt. Call facts chips sit under the numbers when a proposal is open.
  */
-export function CallScreen({ data, viewerLabel = null, clickToDial = false }: CallScreenProps) {
+export function CallScreen({ data, viewerLabel = null, clickToDial = false, postCallPrompt = false }: CallScreenProps) {
   const router = useRouter();
   const { lead, queueRow, viewer } = data;
   const propertyId = lead.propertyId;
@@ -69,13 +72,14 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
   }, []);
 
   // The same dial path (and per-lead key lifecycle) as the My Leads page.
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((id) =>
-    id === propertyId ? { contactId: lead.homeowner.contactId, label: title } : null,
-  );
+  // The flight and its lock are owned by the persistent layout provider.
+  const dialpadCall = useOptionalDialpadCall();
+  const dialActive = dialpadCall?.dialActive ?? false;
   const canDial = clickToDial && !!lead.homeowner.contactId && lead.homeowner.phones.length > 0 && !queueRow.contactDnc && !dialActive;
   const onCall = () => {
     if (!canDial) return;
-    void startApiDial(propertyId, 1);
+    if (!lead.homeowner.contactId) return;
+    dialpadCall?.startCall({ propertyId, contactId: lead.homeowner.contactId, label: title });
   };
 
   // Post-call prompt (P1c) docked; the attempt workflow core is the same one the queue uses.
@@ -124,7 +128,8 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
     if (!recovered) return;
     const result = await saveExtrasRequest(recovered, viewer.userId, extrasInFlight.current, () => setRecoveredState({ status: "saving" }));
     if (!result) return;
-    if (extrasConfirmed(result)) {
+    // Confirmed, or another prompt already saved this call (the saver dropped the entry): no banner, no Retry.
+    if (extrasConfirmed(result) || (!result.ok && result.alreadySaved)) {
       setRecovered(null);
       setRecoveredState(null);
     } else {
@@ -183,7 +188,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
   );
   const recoveredBanner = recovered ? (
     <div data-testid="call-screen-recovered-extras" className="rounded-[16px] border border-border bg-card p-4">
-      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} onRetry={() => void retryRecovered()} />
+      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} attemptSaved={false} onRetry={() => void retryRecovered()} />
     </div>
   ) : null;
   const prompt = (
@@ -229,15 +234,6 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
             Back to My Leads
           </Link>
         </div>
-        {clickToDial ? (
-          <div className="w-full">
-            <DialStatus
-              flight={dialFlight}
-              {...statusHandlers}
-              onEnded={() => router.refresh()}
-            />
-          </div>
-        ) : null}
       </header>
 
       {/* ≥1024px: two columns. Below: single column in the D7 order. */}
@@ -248,6 +244,21 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
         <div data-testid="call-screen-right" className="order-1 flex min-h-0 flex-col gap-4 lg:order-2">
           <div className="contents lg:flex lg:flex-col lg:gap-4">
             {numbers}
+            {data.facts.ok && data.facts.data ? (
+              <div className="order-1 lg:order-none">
+                <CallFactChips
+                  key={data.facts.data.factId}
+                  facts={data.facts.data}
+                  onAccept={(field) => acceptCallFactAction({ propertyId, factId: data.facts.ok && data.facts.data ? data.facts.data.factId : "", field })}
+                  onDismiss={() => dismissCallFactsAction({ propertyId, factId: data.facts.ok && data.facts.data ? data.facts.data.factId : "" })}
+                  // Motivation prefills only the shared entry field (script chip); nothing is written to the lead here.
+                  onAccepted={(field, value) => {
+                    if (field === "motivation") onEntryFieldChange("motivation", value);
+                    router.refresh();
+                  }}
+                />
+              </div>
+            ) : null}
             {data.contract.ok && data.contract.data.enabled ? (
               <div className="order-2 lg:order-none">
                 <ContractCard
@@ -263,7 +274,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
               </div>
             ) : null}
             <div className="order-3 lg:order-none">{history}</div>
-            <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div>
+            {postCallPrompt ? <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div> : null}
           </div>
         </div>
       </div>

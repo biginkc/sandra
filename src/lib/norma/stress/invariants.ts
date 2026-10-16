@@ -1,8 +1,8 @@
-import { EXPECTED_OUTCOME } from "./fake-bland";
+import { EXPECTED_OUTCOME, NON_CONNECT_KINDS } from "./fake-bland";
 import type { Harness } from "./harness";
 
 /**
- * The eight stress-gate invariants (.planning/norma/PLAN.md section 9), checked
+ * The nine stress-gate invariants (.planning/norma/PLAN.md section 9), checked
  * against the audit trail (every committed transition, written by trigger), the
  * final database state, the fake Bland's record of what it was asked, and the
  * in-process trace. Returns human-readable violations; empty means green.
@@ -21,6 +21,11 @@ export type CheckStats = {
   /** DNC / not_interested writes that landed after the dispatch recheck began but before the send (the inherent check-then-act window). */
   windowRaces: number;
   slackPosts: number;
+  /** Requests whose first call was not answered and that placed (or were refused) a second call. */
+  retried: number;
+  /** "Mark reviewed" presses, and how many of them completed a request. */
+  reviewPresses: number;
+  reviewsApplied: number;
 };
 
 type Req = {
@@ -30,12 +35,17 @@ type Req = {
   status: string;
   outcome: string | null;
   bland_call_id: string | null;
+  attempt: number;
+  first_bland_call_id: string | null;
+  first_attempt_outcome: string | null;
   callback_assignee_id: string;
   callback_requested_for: string | null;
   completed_at: string | null;
   created_at: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
 };
-type Audit = { seq: string; tbl: string; op: string; row_id: string; property_id: string | null; hold_open: boolean | null; old_row: Record<string, unknown> | null; new_row: Record<string, unknown> | null };
+type Audit = { seq: string; txid: string; tbl: string; op: string; row_id: string; property_id: string | null; hold_open: boolean | null; old_row: Record<string, unknown> | null; new_row: Record<string, unknown> | null };
 
 const OPEN = ["requested", "dispatching", "dispatched", "dispatch_unknown", "needs_review"];
 const SETTLED = ["completed", "dispatch_rejected", "needs_review"];
@@ -92,6 +102,9 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     auditRows: audit.length,
     windowRaces: 0,
     slackPosts: h.slack.posts.length,
+    retried: requests.filter((r) => r.attempt === 2).length,
+    reviewPresses: h.reviews.length,
+    reviewsApplied: h.reviews.filter((x) => x.result.ok && x.result.code === "reviewed").length,
   };
   for (const r of requests) {
     stats.byStatus[r.status] = (stats.byStatus[r.status] ?? 0) + 1;
@@ -162,15 +175,32 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   for (const r of requests) {
     const sends = h.bland.sendsFor(r.id);
     const placed = h.bland.callsFor(r.id);
-    if (sends.length > 1) v("1", `request ${r.id}: ${sends.length} send-call requests were issued (at most one allowed)`);
-    if (placed.length > 1) v("1", `request ${r.id}: ${placed.length} Bland calls were created`);
-    if (r.status === "dispatch_rejected" && placed.length > 0) v("1", `request ${r.id}: dispatch_rejected although Bland placed a call (a redial would now be possible)`);
+    // Call twice: at most TWO calls per request, the second only after a confirmed non-connect of the first.
+    if (sends.length > 2) v("1", `request ${r.id}: ${sends.length} send-call requests were issued (at most two allowed)`);
+    if (placed.length > 2) v("1", `request ${r.id}: ${placed.length} Bland calls were created`);
+    if (sends.length === 2 || placed.length === 2 || r.attempt === 2 && placed.length > 1) {
+      const first = placed[0];
+      if (r.attempt !== 2 || r.first_attempt_outcome !== "no_answer") {
+        v("1", `request ${r.id}: a second call exists but the request never recorded attempt 1 as no_answer (attempt ${r.attempt}, first outcome ${r.first_attempt_outcome})`);
+      }
+      if (!first || !NON_CONNECT_KINDS.includes(first.kind)) {
+        v("1", `request ${r.id}: a second call was placed although the first was ${first?.kind} (not a confirmed non-connect)`);
+      }
+      if (!first || r.first_bland_call_id !== first.callId) v("1", `request ${r.id}: first_bland_call_id ${r.first_bland_call_id} is not the first call Bland placed (${first?.callId})`);
+    }
+    if (r.attempt === 1 && (r.first_bland_call_id || r.first_attempt_outcome)) v("1", `request ${r.id}: attempt 1 carries a first-attempt record`);
+    // A rejected retry (gate closed, seller became ineligible) leaves exactly the first call behind.
+    const allowedCalls = r.status === "dispatch_rejected" ? (r.attempt === 2 ? 1 : 0) : 2;
+    if (r.status === "dispatch_rejected" && placed.length > allowedCalls) v("1", `request ${r.id}: dispatch_rejected although Bland placed ${placed.length} call(s) (a redial would now be possible)`);
     if (r.bland_call_id && !placed.some((c) => c.callId === r.bland_call_id)) v("1", `request ${r.id}: bound call id ${r.bland_call_id} is not a call Bland placed for it`);
+    if (r.bland_call_id && r.bland_call_id === r.first_bland_call_id) v("1", `request ${r.id}: the current call id equals the first attempt's`);
   }
   for (const [property, list] of reqsByProperty) {
     const withCalls = list.filter((r) => h.bland.callsFor(r.id).length > 0);
     for (const earlier of withCalls.slice(0, -1)) {
-      if (earlier.status !== "completed") v("1", `property ${property}: a later request placed a call while request ${earlier.id} was ${earlier.status} (redial fence broken)`);
+      // A retry that was refused after a confirmed unanswered first call leaves no call in flight.
+      const retryRefused = earlier.status === "dispatch_rejected" && earlier.attempt === 2 && earlier.first_attempt_outcome === "no_answer";
+      if (earlier.status !== "completed" && !retryRefused) v("1", `property ${property}: a later request placed a call while request ${earlier.id} was ${earlier.status} (redial fence broken)`);
     }
   }
 
@@ -208,21 +238,35 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const ctx = ctxOf(r.property_id);
     const ev = events.filter((e) => e.source_id === r.id || e.payload?.request_id === r.id);
     const completedEvents = ev.filter((e) => e.event_type === "norma_call_completed");
+    const reviewedEvents = ev.filter((e) => e.event_type === "norma_call_reviewed");
+    // A rep's "Mark reviewed" completes the request without a call result: no completion event, no Slack post.
+    const reviewed = r.status === "completed" && r.outcome === "reviewed";
     const requestedEvents = ev.filter((e) => e.event_type === "norma_call_requested");
     const rowsForTask = tasksByKey.get(`norma_call:${r.id}`) ?? [];
     const everReviewed = audit.some((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.status === "needs_review");
+    const attemptEvents = ev.filter((e) => e.event_type === "norma_call_attempt_no_answer");
+    if (attemptEvents.length !== (r.attempt === 2 ? 1 : 0)) v("3", `request ${r.id}: ${attemptEvents.length} first-attempt events for attempt ${r.attempt} (expected ${r.attempt === 2 ? 1 : 0})`);
     if (requestedEvents.length !== 1) v("3", `request ${r.id}: ${requestedEvents.length} norma_call_requested events (expected 1)`);
-    if (completedEvents.length !== (r.status === "completed" ? 1 : 0)) {
+    if (reviewedEvents.length !== (reviewed ? 1 : 0)) v("3", `request ${r.id} (${r.status}/${r.outcome}): ${reviewedEvents.length} norma_call_reviewed events (expected ${reviewed ? 1 : 0})`);
+    if (completedEvents.length !== (r.status === "completed" && !reviewed ? 1 : 0)) {
       v("3", `request ${r.id} (${r.status}): ${completedEvents.length} norma_call_completed events`);
     }
 
     if (r.status === "completed") {
       if (!r.completed_at) v("3", `request ${r.id}: completed without completed_at`);
-      if (ctx && r.outcome !== EXPECTED_OUTCOME[ctx.plan.kind]) {
-        v("3", `request ${r.id}: outcome ${r.outcome} but the call was a ${ctx.plan.kind} (expected ${EXPECTED_OUTCOME[ctx.plan.kind]})`);
-      }
       const calls = h.bland.callsFor(r.id);
-      if (calls.length !== 1 || r.bland_call_id !== calls[0]?.callId) v("3", `request ${r.id}: completed with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
+      // The outcome is that of the FINAL call (the retry when there was one).
+      const finalCall = calls.find((c) => c.callId === r.bland_call_id);
+      if (!reviewed && ctx && finalCall && r.outcome !== EXPECTED_OUTCOME[finalCall.kind]) {
+        v("3", `request ${r.id}: outcome ${r.outcome} but the final call was a ${finalCall.kind} (expected ${EXPECTED_OUTCOME[finalCall.kind]})`);
+      }
+      if (!reviewed && (calls.length !== r.attempt || r.bland_call_id !== calls[calls.length - 1]?.callId)) v("3", `request ${r.id}: completed at attempt ${r.attempt} with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
+      // A no_answer on attempt 1 may only complete a request whose first call was never confirmed in time
+      // (late result on dispatch_unknown / needs_review); a normal confirmed miss must have retried.
+      if (r.outcome === "no_answer" && r.attempt === 1) {
+        const done = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.status === "completed");
+        if (!["dispatch_unknown", "needs_review"].includes(String(done?.old_row?.status))) v("3", `request ${r.id}: no_answer completed on attempt 1 from ${done?.old_row?.status} without the retry`);
+      }
       if (r.outcome && ["callback_requested", "reached_no_callback", "wrong_number"].includes(r.outcome)) {
         if (rowsForTask.length > 1 || (rowsForTask.length === 0 && !dncLocked(r.property_id))) {
           v("3", `request ${r.id} (${r.outcome}): ${rowsForTask.length} tasks (expected exactly 1)`);
@@ -236,12 +280,12 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
           const title = String(t.title);
           const wantTitle = r.outcome === "callback_requested" ? /time unconfirmed/ : r.outcome === "reached_no_callback" ? /no callback time given/ : /wrong number/;
           if (!wantTitle.test(title)) v("3", `request ${r.id} (${r.outcome}): unexpected task title "${title}"`);
-          if (t.type !== (r.outcome === "wrong_number" ? "custom" : "appointment")) v("3", `request ${r.id}: task type ${t.type}`);
-          if (t.mode !== "phone") v("3", `request ${r.id}: task mode ${t.mode}, expected phone`);
+          const wantedTypes = r.outcome === "wrong_number" ? ["custom"] : ["callback", "appointment"];
+          if (!wantedTypes.includes(String(t.type))) v("3", `request ${r.id}: task type ${t.type}`);
           const wantDue = r.outcome === "callback_requested" && r.callback_requested_for ? r.callback_requested_for : r.completed_at;
           if (wantDue && Date.parse(String(t.due_at)) !== Date.parse(wantDue)) v("3", `request ${r.id}: task due ${t.due_at}, expected ${wantDue}`);
         }
-      } else if (r.outcome === "no_answer" || r.outcome === "not_interested") {
+      } else if (r.outcome === "no_answer" || r.outcome === "not_interested" || reviewed) {
         // A review task opened before a do-not-contact lock cannot be closed afterwards (tasks on a locked lead are read-only).
         const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
         if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none${whyNotExcused(r, openTasks)}`);
@@ -387,10 +431,62 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     }
   }
 
+  // ===== [9] "Mark reviewed": members only, atomic, never resumes a drip, never dials ======
+  const MEMBERS = [h.world.rep1, h.world.rep2];
+  for (const rec of h.reviews) {
+    if (rec.result.ok && !MEMBERS.includes(rec.user)) v("9", `request ${rec.requestId}: a non-member (${rec.user}) was told "${rec.result.code}"`);
+    if (!rec.result.ok && rec.result.code !== "not_authorized" && rec.user === h.world.outsider) v("9", `request ${rec.requestId}: a non-member got "${rec.result.code}" instead of a refusal`);
+    // The press touches nothing but the review RPC: no dispatch, no provider call, no other write path.
+    const ops = h.trace.events.filter((e) => e.actor === rec.actor && e.phase === "start");
+    if (ops.length !== 1 || ops[0]!.what !== "rpc:fn_norma_mark_reviewed") v("9", `request ${rec.requestId}: the press issued ${ops.map((o) => o.what).join(", ") || "nothing"} (only fn_norma_mark_reviewed is allowed)`);
+    // `endTick` is recorded after the successful review RPC returns, so the
+    // request row's reviewed transition has committed. A fence attempt after
+    // that point is safe and expected to return false; only a provider send
+    // after the committed transition violates the invariant.
+    if (rec.result.ok) {
+      const dialled = h.bland.sendsFor(rec.requestId).filter((send) => send.tick > rec.endTick);
+      if (dialled.length > 0) v("9", `request ${rec.requestId}: ${dialled.length} call(s) were sent after review committed`);
+    }
+  }
+  for (const r of requests) {
+    if (!(r.status === "completed" && r.outcome === "reviewed")) {
+      if (r.reviewed_by || r.reviewed_at) v("9", `request ${r.id} (${r.status}/${r.outcome}): carries a review stamp but was not reviewed`);
+      continue;
+    }
+    if (!r.reviewed_at || !r.reviewed_by || !MEMBERS.includes(r.reviewed_by)) v("9", `request ${r.id}: reviewed by ${r.reviewed_by ?? "nobody"} (members are ${MEMBERS.join(", ")})`);
+    const transitions = audit.filter((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.outcome === "reviewed" && a.old_row?.outcome !== "reviewed");
+    if (transitions.length !== 1) {
+      v("9", `request ${r.id}: ${transitions.length} transitions into reviewed (expected exactly 1)`);
+      continue;
+    }
+    const t = transitions[0]!;
+    if (t.old_row?.status !== "needs_review") v("9", `request ${r.id}: reviewed from ${t.old_row?.status}, only needs_review may be reviewed`);
+    if (!h.reviews.some((rec) => rec.requestId === r.id && rec.result.ok && rec.result.code === "reviewed")) v("9", `request ${r.id}: reviewed without any press that was told it succeeded`);
+    // Everything the review wrote shares one transaction. In it: the request itself, the review task, and
+    // drips only paused or left as they were. Never a resume, a new request, a notification or a created task.
+    for (const a of audit.filter((x) => x.txid === t.txid && x.seq !== t.seq)) {
+      if (a.tbl === "sequence_enrollments") {
+        if (a.new_row?.status === "active" && a.old_row?.status !== "active") v("9", `request ${r.id}: marking it reviewed resumed enrollment ${a.row_id} (${a.old_row?.pause_reason} -> active)`);
+        if (a.op === "INSERT" && a.new_row?.status === "active") v("9", `request ${r.id}: marking it reviewed created an active enrollment`);
+      } else if (a.tbl === "tasks") {
+        const closesReviewTask = a.op === "UPDATE" && a.new_row?.source_key === `norma_call:${r.id}` && a.new_row?.status === "completed" && a.new_row?.completed_by === r.reviewed_by;
+        if (!closesReviewTask) v("9", `request ${r.id}: marking it reviewed wrote task ${a.row_id} (${a.op} ${a.new_row?.status})`);
+      } else if (a.tbl === "norma_call_requests" || a.tbl === "norma_notifications") {
+        v("9", `request ${r.id}: marking it reviewed also wrote ${a.tbl} ${a.row_id}`);
+      } else if (a.tbl === "lead_events") {
+        const type = String(a.new_row?.event_type);
+        if (!["norma_call_reviewed", "sequence_paused"].includes(type)) v("9", `request ${r.id}: marking it reviewed wrote a "${type}" event`);
+      }
+    }
+    // It must have left no task open for a lead that can still be written to.
+    const open = (tasksByKey.get(`norma_call:${r.id}`) ?? []).filter((x) => x.status === "open" || x.status === "snoozed");
+    if (open.length > 0 && !staleReviewExcused(r, open)) v("9", `request ${r.id}: reviewed but its task is still ${open[0]!.status}`);
+  }
+
   // ===== [8] Slack ===========================================================
   const notificationsByRequest = new Map(notifications.map((n) => [n.request_id as string, n]));
   for (const r of requests) {
-    const want = r.status === "completed" ? 1 : 0;
+    const want = r.status === "completed" && r.outcome !== "reviewed" ? 1 : 0;
     const got = notificationCount.get(r.id) ?? 0;
     if (got !== want) v("8", `request ${r.id} (${r.status}): ${got} outbox rows (expected ${want})`);
     if (opts.settled && want === 1) {
@@ -402,7 +498,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   // post per COMPLETED request on that lead, none otherwise.
   if (opts.settled) {
     for (const [property, list] of reqsByProperty) {
-      const want = list.filter((r) => r.status === "completed").length;
+      const want = list.filter((r) => r.status === "completed" && r.outcome !== "reviewed").length;
       const got = h.slack.postsFor(property).length;
       if (got !== want) v("8", `property ${property}: ${got} Slack posts accepted for ${want} completed requests (no ambiguous acceptance in this run)`);
     }

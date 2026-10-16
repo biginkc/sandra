@@ -13,8 +13,10 @@ import {
   List,
   Megaphone,
   MessageSquare,
+  Radio,
   Droplet,
   Search,
+  Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -62,7 +64,11 @@ const ITEMS: readonly Item[] = [
   { href: "/sequences", label: "Drips", icon: Droplet },
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
+  { href: "/messages-v2", label: "Messages v2", icon: Radio },
+  { href: "/jev", label: "Jev", icon: Sparkles, matchAlso: ["/jev/needs-decision", "/jev/review"] },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
+  { href: "/norma/callbacks", label: "Norma callbacks", icon: Headphones },
+  { href: "/norma/queue", label: "Norma queue", icon: Headphones },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/calculators", label: "Calculators", icon: Calculator },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
@@ -74,12 +80,14 @@ function visibleItems(
   showMyRecordings: boolean,
   showCalculators: boolean,
   showMessagesAndLeads: boolean,
+  showMessagesV2: boolean,
 ): readonly Item[] {
   const items = ITEMS.filter(
     (item) =>
       (item.href !== "/my-leads" || showMyLeads) &&
       (item.href !== "/calculators" || showCalculators) &&
-      ((item.href !== "/messages" && item.href !== "/leads") || showMessagesAndLeads),
+      (item.href !== "/messages-v2" || showMessagesV2) &&
+      ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/jev" && item.href !== "/norma/callbacks") || showMessagesAndLeads),
   );
   const recordings: Item[] = [];
   if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
@@ -107,8 +115,10 @@ export function DashboardSidebar({
   showRecordings = false,
   showMyRecordings = false,
   showMessagesAndLeads = true,
+  showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
+  acquisitionBadgeNeedsAttention = false,
 }: {
   activePathname?: string;
   showCalculators?: boolean;
@@ -116,8 +126,10 @@ export function DashboardSidebar({
   showRecordings?: boolean;
   showMyRecordings?: boolean;
   showMessagesAndLeads?: boolean;
+  showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+  acquisitionBadgeNeedsAttention?: boolean;
 }) {
   const routePathname = usePathname();
   const pathname = activePathname ?? routePathname;
@@ -127,6 +139,7 @@ export function DashboardSidebar({
     showMyRecordings,
     showCalculators,
     showMessagesAndLeads,
+    showMessagesV2,
   );
 
   const isActive = (item: Item): boolean => {
@@ -156,6 +169,7 @@ export function DashboardSidebar({
               <MyLeadsNavBadge
                 initialCount={initialAcquisitionBadge}
                 onRefresh={onRefreshAcquisitionBadge}
+                needsAttention={acquisitionBadgeNeedsAttention}
               />
             )}
           </Link>
@@ -171,16 +185,20 @@ export function DashboardMobileNav({
   showRecordings = false,
   showMyRecordings = false,
   showMessagesAndLeads = true,
+  showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
+  acquisitionBadgeNeedsAttention = false,
 }: {
   showCalculators?: boolean;
   showMyLeads?: boolean;
   showRecordings?: boolean;
   showMyRecordings?: boolean;
   showMessagesAndLeads?: boolean;
+  showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+  acquisitionBadgeNeedsAttention?: boolean;
 }) {
   const pathname = usePathname();
   const items = visibleItems(
@@ -189,6 +207,7 @@ export function DashboardMobileNav({
     showMyRecordings,
     showCalculators,
     showMessagesAndLeads,
+    showMessagesV2,
   );
 
   const isActiveHref = (href: string): boolean =>
@@ -216,6 +235,7 @@ export function DashboardMobileNav({
               <MyLeadsNavBadge
                 initialCount={initialAcquisitionBadge}
                 onRefresh={onRefreshAcquisitionBadge}
+                needsAttention={acquisitionBadgeNeedsAttention}
               />
             )}
           </Link>

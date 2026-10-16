@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   readContext: vi.fn(),
   dispatch: vi.fn(),
   adminRpc: vi.fn(),
+  senderRpc: vi.fn(),
   memberships: vi.fn(),
   provider: {
     providerId: "sendillo",
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   },
 }))
 
-vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }))
+vi.mock("@/lib/supabase/server", () => ({ createClient: () => ({ rpc: mocks.senderRpc }) }))
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ rpc: mocks.adminRpc }) }))
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }))
 vi.mock("@/lib/auth/access-state", () => ({ hasActiveSandraAccess: vi.fn(() => true) }))
@@ -62,6 +63,31 @@ afterEach(() => {
 })
 
 describe("rep SMS sender inventory diagnostics", () => {
+  it.each(["18164876899", "+18164876899"])("normalizes catalog and assignment number %s before the owner RPC", async (number) => {
+    mocks.provider.listPurchasedNumbers.mockResolvedValue([{
+      phoneE164: number,
+      providerAccountId: "account-9",
+      providerNumberId: "number-9",
+      status: "active",
+      messagingStatus: "active",
+      raw: {},
+    }])
+    mocks.senderRpc.mockResolvedValue({ data: "assignment-1", error: null })
+    const inventory = await loadRepSmsNumbers("org-1")
+    expect(inventory).toEqual({ ok: true, data: [{
+      number: "+18164876899", ownerName: "Sendillo", ownerType: "sendillo", status: "active",
+    }] })
+    const result = await saveRepSmsSender({
+      orgId: "org-1", userId: "rep-1", number, label: "Sendillo", isDefault: true, active: true,
+    })
+    expect(result).toEqual({ ok: true, data: "assignment-1" })
+    expect(mocks.senderRpc).toHaveBeenCalledWith("fn_set_rep_sms_sender", {
+      p_org_id: "org-1", p_user_id: "rep-1", p_provider: "sendillo", p_phone: "+18164876899",
+      p_provider_account_id: "account-9", p_provider_sender_id: "number-9", p_label: "Sendillo",
+      p_default: true, p_active: true,
+    })
+  })
+
   it("returns eligible options plus precise nonsecret reasons for every ineligible Sendillo number", async () => {
     mocks.provider.listPurchasedNumbers.mockResolvedValue([
       {
@@ -357,5 +383,83 @@ describe("resumed rep SMS obligations", () => {
     expect(result.ok).toBe(true)
     expect(result.ok && result.data.outcome.status).toBe(expected)
     expect(result.ok && result.data.outcome.status).not.toBe("sent")
+  })
+})
+
+describe("rep SMS inbound reply stamp threading", () => {
+  const INBOUND = "33333333-3333-4333-8333-333333333333"
+  const baseInput = { propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "key-1", composition }
+
+  it("passes the stamp through a generic send and ignores forged internal fields", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms({ ...baseInput, inboundMessageId: INBOUND, obligationFence: { forged: true } } as never)
+    const sent = mocks.dispatch.mock.calls[0][0]
+    expect(sent.inboundMessageId).toBe(INBOUND)
+    expect(sent).not.toHaveProperty("obligationFence")
+  })
+
+  it("leaves the stamp undefined when the browser sends none", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms(baseInput)
+    expect(mocks.dispatch.mock.calls[0][0].inboundMessageId).toBeUndefined()
+  })
+
+  it("keeps the original stamp when resuming a saved obligation", async () => {
+    mocks.readContext.mockResolvedValue(baseContext("required"))
+    mocks.adminRpc.mockImplementation(async (name: string) =>
+      name === "fn_claim_authorize_rep_sms_obligation"
+        ? { data: { ok: true, state: "sending", claimToken: "t", claimGeneration: 2, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null }
+        : { data: { ok: true, state: "accepted" }, error: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    await sendRepSms({ ...baseInput, obligationId: "obligation-1", inboundMessageId: INBOUND })
+    const sent = mocks.dispatch.mock.calls[0][0]
+    expect(sent.obligationFence.claimGeneration).toBe(2)
+    expect(sent.inboundMessageId).toBe(INBOUND)
+  })
+})
+
+describe("replacing a verified definitive failure", () => {
+  const target = (over: Record<string, unknown> = {}) => ({ sourceKind: "ledger", refId: "led-1", disposition: "replace", state: "delivery_failed", submissionKey: "key-old", body: "b", composition: null, assignmentId: "sender-1", from: null, to: null, reason: null, ...over })
+  const payload = { propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "key-new", composition, replaceFailed: { sourceKind: "ledger" as const, refId: "led-1" } }
+
+  it("dispatches under the NEW key with the server-only replacement flag after re-reading that exact record", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target() })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "m1", externalId: "e1" })
+    const result = await sendRepSms(payload)
+    expect(result.ok).toBe(true)
+    expect(mocks.readContext).toHaveBeenCalledWith("property-1", { sourceKind: "ledger", refId: "led-1" })
+    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "key-new", replacingFailedSend: true }))
+  })
+
+  it("refuses when the record is no longer a definitive failure (now unverified) and never dispatches", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target({ disposition: "check", state: "unknown" }) })
+    const result = await sendRepSms(payload)
+    expect(result.ok).toBe(false)
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("refuses to reuse the failed receipt's own key", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), target: target() })
+    const result = await sendRepSms({ ...payload, idempotencyKey: "key-old" })
+    expect(result.ok).toBe(false)
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("ignores a forged replacingFailedSend flag on a normal send", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed") })
+    mocks.dispatch.mockResolvedValue({ status: "sent" })
+    await sendRepSms({ propertyId: "property-1", assignmentId: "sender-1", idempotencyKey: "k", composition, replacingFailedSend: true } as never)
+    // The normal path stops at the lead's saved follow-up before dispatch.
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it("acknowledges a chosen (non-newest) receipt only when that receipt owns the key", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("delivery_failed"), obligation: null, submission: { key: "newest" }, target: target({ disposition: "check", submissionKey: "key-chosen" }) })
+    const ok = await acknowledgeRepSmsSubmission({ propertyId: "property-1", idempotencyKey: "key-chosen", target: { sourceKind: "ledger", refId: "led-1" } })
+    expect(ok.ok).toBe(true)
+    const bad = await acknowledgeRepSmsSubmission({ propertyId: "property-1", idempotencyKey: "someone-else", target: { sourceKind: "ledger", refId: "led-1" } })
+    expect(bad.ok).toBe(false)
   })
 })

@@ -17,7 +17,7 @@ const SIGN_IN_MESSAGE = 'Sign in with an active organization to use Dialpad.';
 
 // Org and rep are derived here from the authenticated session; no action
 // accepts either from the browser.
-async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; email: string | null; emailConfirmed: boolean } | null> {
+async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; acquisitions: boolean; email: string | null; emailConfirmed: boolean } | null> {
   try {
     const viewer = await myLeadsViewer();
     const { data } = await viewer.client.auth.getUser();
@@ -25,6 +25,7 @@ async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; 
     return {
       actor: { orgId: viewer.orgId, userId: viewer.userId },
       db: createSupabaseDialpadDispatchDb(createAdminClient()),
+      acquisitions: viewer.acquisitions === true,
       email: data.user.email ?? null,
       emailConfirmed: typeof data.user.email_confirmed_at === 'string' && data.user.email_confirmed_at.length > 0,
     };
@@ -46,6 +47,8 @@ export type DialLeadInput = { propertyId: unknown; contactId: unknown; phoneSlot
 export async function dialLeadAction(input: DialLeadInput): Promise<DialpadApiDialOutcome> {
   const s = await session();
   if (!s) return unauthenticated;
+  // Same rule as the routing: Dialpad is for Acquisitions callers; anyone else is sent down the softphone branch.
+  if (!s.acquisitions) return { ok: false, code: 'not_configured', message: 'Dialpad click-to-dial is not enabled for this organization.' };
   const [enabled, ready] = await Promise.all([getMyLeadsFlag(s.actor.orgId, 'click_to_dial'), schemaReady('api_dial')]);
   if (!enabled || !ready) return { ok: false, code: 'not_configured', message: 'Dialpad click-to-dial is not enabled for this organization.' };
   const outcome = await startDialpadApiCall(s.db, createDialpadDialer(process.env), s.actor, {

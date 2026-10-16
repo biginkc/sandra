@@ -29,6 +29,20 @@ export const NORMA_OUTCOMES = [
 ] as const;
 export type NormaOutcome = (typeof NORMA_OUTCOMES)[number];
 
+/**
+ * The stored outcome a rep sets with "Mark reviewed". Never produced by a
+ * call: the webhook / reconcile path only knows NORMA_OUTCOMES.
+ */
+export const NORMA_REVIEWED_OUTCOME = "reviewed" as const;
+export type NormaStoredOutcome = NormaOutcome | typeof NORMA_REVIEWED_OUTCOME;
+
+/** What the mark-reviewed RPC answers. */
+export type NormaMarkReviewedRpcResult =
+  | { result: "reviewed"; status: "completed"; task_closed: boolean; drips_kept_paused: number }
+  | { result: "already_reviewed"; status: "completed" }
+  | { result: "invalid_state"; status: string }
+  | { result: "not_found" | "not_authorized" };
+
 /** Reasons `fn_norma_eligibility` / `fn_norma_create_request` can block a call. */
 export type NormaBlockReason =
   | "invalid_request"
@@ -37,6 +51,8 @@ export type NormaBlockReason =
   | "dnc_locked"
   | "dnc_contact"
   | "global_dnc_registry"
+  | "sms_opted_out"
+  | "sms_phone_suppressed"
   | "wrong_number_flagged"
   | "contact_not_on_property"
   | "phone_not_on_contact"
@@ -64,13 +80,24 @@ export type NormaCompletionPayload = {
 };
 
 export type NormaCompleteResult =
-  | { result: "applied"; status: "completed" | "needs_review"; outcome: NormaOutcome; taskId?: string | null; released?: number; converted?: number }
+  | {
+      result: "applied";
+      /** `requested`: attempt 1 was confirmed not answered and the retry (attempt 2) is waiting to be dialled. */
+      status: "completed" | "needs_review" | "requested";
+      outcome: NormaOutcome;
+      /** True exactly once per request: the caller must now run dispatchNormaCall for the second attempt. */
+      retry?: boolean;
+      taskId?: string | null;
+      released?: number;
+      converted?: number;
+    }
   | { result: "replayed"; status: string; outcome?: string | null }
-  | { result: "call_id_mismatch" | "invalid_state" | "not_found" | "call_id_required" | "call_id_conflict"; status?: string };
+  | { result: "call_id_mismatch" | "invalid_state" | "not_found" | "call_id_required" | "call_id_conflict" | "stale_attempt"; status?: string };
 
 export type NormaBindResult =
   | "bound"
   | "already_completed"
+  | "stale_attempt"
   | "call_id_conflict"
   | "invalid_state"
   | "invalid_call_id"

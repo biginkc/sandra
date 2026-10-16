@@ -82,6 +82,9 @@ jobs:
           });
           NODE
 
+      - name: Verify Hugo browser session isolation
+        run: npx vitest run --config vitest.hugo-browser.config.ts
+
       - name: Run Playwright E2E suite
         run: |
           # Keep real thread-detail loading and read receipts on a fresh
@@ -255,6 +258,70 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261005120500_fn_create_next_step.integration.test.ts
 
+      - name: My Leads work queue classifier (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261015010000_my_leads_work_queue_classifier.integration.test.ts
+
+      - name: My Leads classifier A1.2 shipped body vs A1 + B1 oracle suites (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261015030000_my_leads_work_classified_perf.integration.test.ts
+
+      - name: My Leads approved snooze and multi-house text rules, plus A1 + B1 oracle suites on that body (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261015040000_my_leads_approved_snooze_multi_house.integration.test.ts
+
+      - name: "Hot sellers: full dispatch with new_lead switch on (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts
+
+      - name: "Hot sellers: hand-off assignment and fail-closed (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/hot-handoff.db.integration.test.ts
+
+      - name: "Hot sellers: acceptance matrix (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts
+
+      - name: "Hot sellers: delayed-reply path, responder off writes no hold (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/delayed-path-responder-off.db.integration.test.ts
+
+      - name: "Hot sellers: atomic hourly cap and claim (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hold-alerts/claim-with-cap.db.integration.test.ts
+
       - name: My Leads next-step read model (disposable DB)
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
@@ -319,13 +386,21 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts
 
+      - name: "My Leads call facts - claim/complete job, accept, RLS, rollback (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007190000_call_facts.integration.test.ts
+
       - name: "My Leads retire follow_up/callback reject trigger (disposable DB)"
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008100000_retire_follow_up_callback_types.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261016090000_retire_follow_up_callback_types.integration.test.ts
 
       - name: "My Leads next-step KPI snapshot, historical windows unchanged (disposable DB)"
         env:
@@ -360,6 +435,10 @@ jobs:
             fi
             # A harness/setup crash is not a kill: require real failing assertions.
             sed 's/\x1b\[[0-9;]*m//g' "mutation-$m.log" > "mutation-$m.plain.log"
+            # The DB isolation guard refusing the env is never a kill (it would be a false green).
+            if grep -q "IsolatedDbEnvError" "mutation-$m.plain.log"; then
+              echo "::error::mutation $m: the DB isolation guard refused the env; nothing ran"; tail -30 "mutation-$m.log"; exit 1
+            fi
             if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.plain.log"; then
               echo "::error::mutation $m crashed the harness instead of failing tests"; tail -30 "mutation-$m.log"; exit 1
             fi
@@ -396,7 +475,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts supabase/migrations/20261007200000_contact_phone_numbers_batched_backfill.integration.test.ts
 
       - name: My Leads Dialpad native matching (disposable DB)
         env:
@@ -454,6 +533,22 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150200_dialpad_unmatched_event_redaction.integration.test.ts
 
+      - name: Dialpad CTI custom_data OAuthApp wrapper (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008110000_dialpad_cti_custom_data_oauthapp.integration.test.ts
+
+      - name: Dialpad call audio (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008130000_dialpad_call_audio.integration.test.ts
+
       - name: My Leads callbacks due (disposable DB)
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
@@ -461,6 +556,103 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts
+
+      - name: Dialpad queue waits for outcome (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts
+
+      - name: My Leads finalize single-shot per attempt (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008090000_finalize_single_shot_per_attempt.integration.test.ts
+
+      - name: Messages v2 auto-reply templates approval and outcome mapping (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts
+
+      - name: Messages v2 wrong-number and hostile reply mapping keys (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts
+
+      - name: Messages v2 nurture auto-drip switch (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts
+
+      - name: Messages v2 nurture auto-drip enrolment idempotency (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts
+
+      - name: Messages v2 number-source reply mapping key (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts
+
+      - name: Messages v2 template stale-claim sweeper (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/ai-responder/template-claims.integration.test.ts
+
+      - name: Rep SMS reply-stamp bind RPC (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261014130000_rep_sms_inbound_stamp.integration.test.ts
+
+      # Last on purpose (defense in depth): the race lanes commit rows (and delete them again); nothing after them shares the database.
+      # Keeps the stress harness itself green (1 repeat, 3 families, one rep of each lane). The full volume run is manual:
+      # e2e/stress/my-leads-queue/README.md. It never runs against anything but this disposable database.
+      - name: My Leads queue stress harness smoke (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DISPOSABLE_DB: "1"
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts e2e/stress/my-leads-queue/smoke.integration.test.ts
+
+      - name: "My Leads queue stress: dispatchRepSms race lanes, fake provider (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DISPOSABLE_DB: "1"
+          MYLEADS_STRESS_DISPATCH_REPS: "4"
+          MYLEADS_STRESS_OUT_DIR: ${{ runner.temp }}/my-leads-queue-stress
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts e2e/stress/my-leads-queue/race.dispatch.integration.test.ts
 
       - name: Destroy disposable database
         if: always() && env.E2E_LOCAL_WORKDIR != ''

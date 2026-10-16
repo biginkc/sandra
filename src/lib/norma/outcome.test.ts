@@ -53,6 +53,7 @@ describe("outcome mapping table (live pathway v3)", () => {
   it.each([
     ["no-answer status", { completed: true, status: "no-answer", answered_by: null, variables: {} }],
     ["no-answer answered_by", { completed: true, status: "completed", answered_by: "no-answer", variables: {} }],
+    ["busy status", { completed: true, status: "busy", variables: {} }],
   ])("Bland-confirmed %s -> no_answer even without a pathway outcome", (_n, call) => {
     expect(map(call).outcome).toBe("no_answer");
   });
@@ -75,7 +76,6 @@ describe("outcome mapping table (live pathway v3)", () => {
     ["unrecognised token", human({ call_outcome: "banana split" })],
     ["missing outcome", human({})],
     ["not completed", { ...human({ call_outcome: "callback_requested" }), completed: false }],
-    ["busy", { completed: true, status: "busy", variables: {} }],
     ["failed", { completed: true, status: "failed", variables: {} }],
     ["answered_by unknown", { ...human({ call_outcome: "human_requested" }), answered_by: "unknown" }],
     ["no-answer contradicts outcome", { completed: true, status: "no-answer", variables: { call_outcome: "callback_requested" } }],

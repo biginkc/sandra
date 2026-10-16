@@ -80,6 +80,8 @@ export interface DialpadDispatchDb {
    */
   loadUnresolvedIntent(orgId: string, userId: string, propertyId: string, nowIso: string): Promise<{ intentId: string; idempotencyKey: string } | null>;
   loadCallSlots(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadCallSlot[]>;
+  /** The property's state (drives the lead-local calling window). `found: false` when the property is not visible; callers fail closed. */
+  loadPropertyState(orgId: string, propertyId: string): Promise<{ found: boolean; state: string | null }>;
   claimBinding(orgId: string, userId: string, dialpadUserId: string): Promise<Json>;
   verifyBinding(bindingId: string, kind: 'provider_directory', ref: string): Promise<Json>;
   prepareIntent(args: {
@@ -245,6 +247,11 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
       }
       return slots;
     },
+    async loadPropertyState(orgId, propertyId) {
+      const { data, error } = await client.from('properties').select('state').eq('id', propertyId).eq('org_id', orgId).is('deleted_at', null).maybeSingle();
+      if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
+      return data ? { found: true, state: typeof data.state === 'string' ? data.state : null } : { found: false, state: null };
+    },
     async claimBinding(orgId, userId, dialpadUserId) {
       return unwrap(await client.rpc('fn_claim_dialpad_member_binding', { p_org_id: orgId, p_user_id: userId, p_dialpad_user_id: dialpadUserId }));
     },
@@ -306,6 +313,8 @@ const DENIAL_MESSAGES: Record<DialpadDenialDetail, string> = {
   revoker_not_owner: 'Only an owner can revoke caller IDs.',
   dialpad_user_already_bound: 'That Dialpad account is already connected to another user.',
   intent_already_matched: 'This call is already in progress.',
+  // Same wording as the softphone path (src/lib/dialer/actions.ts).
+  outside_calling_hours: 'Calling is unavailable during quiet hours.',
 };
 
 export function dialpadDenialMessage(detail: DialpadDenialDetail | null): string {
@@ -547,6 +556,10 @@ export type DialpadStartCallResult =
 export interface DialpadStartCallOptions {
   /** The server-side dialer renders ids as exact JSON integer text, so ids beyond 2^53 are fine there. */
   allowLargeIdentityIds?: boolean;
+  /** Re-checked immediately before preparing the intent; `false` refuses and nothing is created. */
+  beforePrepare?: () => boolean;
+  /** Re-checked immediately before authorization; `false` cancels the prepared intent and refuses (nothing is authorized). */
+  beforeAuthorize?: () => boolean;
 }
 
 /**
@@ -570,6 +583,10 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
     const binding = await db.loadLiveBinding(actor.orgId, actor.userId);
     if (!binding || binding.status !== 'verified') return fail('not_bound', dialpadDenialMessage('binding_not_verified'), 'binding_not_verified');
 
+    if (options.beforePrepare && !options.beforePrepare()) {
+      return fail('denied', dialpadDenialMessage('outside_calling_hours'), 'outside_calling_hours');
+    }
+
     const prepared = parsePreparedDialpadCallIntent(await db.prepareIntent({
       orgId: actor.orgId,
       userId: actor.userId,
@@ -583,6 +600,11 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
       // The browser protocol carries identity_id as a JSON number; an id beyond 2^53 cannot be sent exactly.
       await db.cancelIntent(actor.orgId, actor.userId, prepared.intentId);
       return fail('unsupported_caller_identity', 'That caller ID cannot be used from the browser dialer.');
+    }
+
+    if (options.beforeAuthorize && !options.beforeAuthorize()) {
+      await db.cancelIntent(actor.orgId, actor.userId, prepared.intentId);
+      return fail('denied', dialpadDenialMessage('outside_calling_hours'), 'outside_calling_hours');
     }
 
     const authorization = parseDialpadDispatchAuthorization(await db.authorizeDispatch(actor.orgId, actor.userId, prepared.intentId));

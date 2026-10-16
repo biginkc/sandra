@@ -67,14 +67,16 @@ export function computeConsentState(
 }
 
 /**
- * Read the latest consent state for a (contact, channel). Queries the
- * indexed `(contact_id, channel, occurred_at desc)` path.
+ * Read the latest consent state, distinguishing a failed lookup from "no
+ * consent". `getConsentState` collapses a DB error into `no_consent` (right
+ * for send guards that only ever need to refuse); callers that must FAIL
+ * CLOSED on an unreadable state (the AI responder, Q8 rule 7) use this.
  */
-export async function getConsentState(
+export async function getConsentStateStrict(
   supabase: SupabaseClient<Database>,
   contactId: string,
   channel: ConsentChannel,
-): Promise<ConsentState> {
+): Promise<{ ok: true; state: ConsentState } | { ok: false; error: string }> {
   const { data, error } = await supabase
     .from("consent_events")
     .select("event_type, occurred_at")
@@ -82,12 +84,22 @@ export async function getConsentState(
     .eq("channel", channel)
     .order("occurred_at", { ascending: false })
     .limit(20);
-  if (error) {
-    // Conservative default — without state, treat as no consent. Caller
-    // presents a clear UI message; data issues never cause silent sends.
-    return "no_consent";
-  }
-  return computeConsentState(data ?? []);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, state: computeConsentState(data ?? []) };
+}
+
+/**
+ * Read the latest consent state for a (contact, channel). Queries the
+ * indexed `(contact_id, channel, occurred_at desc)` path. A lookup error is
+ * conservatively `no_consent`; see `getConsentStateStrict` for fail-closed use.
+ */
+export async function getConsentState(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  channel: ConsentChannel,
+): Promise<ConsentState> {
+  const result = await getConsentStateStrict(supabase, contactId, channel);
+  return result.ok ? result.state : "no_consent";
 }
 
 /**

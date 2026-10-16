@@ -11,8 +11,12 @@ type Artifacts = {
   summaryStatus: string; summary: string | null;
 };
 
-/** Only mounted for expanded lead details. Refresh metadata without replacing a playing audio element. */
-export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string }) {
+/**
+ * Only mounted for expanded lead details. Refresh metadata without replacing a playing audio element.
+ * `recordingOnly` (Dialpad calls): the player appears only when Sandra holds an authorized copy of the audio;
+ * every other state renders nothing, so the pasted link beside it stays the whole story.
+ */
+export function MyLeadCallArtifacts({ callActivityId, recordingOnly = false }: { callActivityId: string; recordingOnly?: boolean }) {
   const reported = useRef(new Set<string>());
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
   const [error, setError] = useState(false);
@@ -30,6 +34,7 @@ export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string
         const data: Artifacts = await response.json();
         if (!disposed) {
           for (const [kind, status] of [["recording", data.recordingStatus], ["transcript", data.transcriptStatus], ["summary", data.summaryStatus]] as const) {
+            if (recordingOnly && kind !== "recording") continue;
             if (status !== "failed" || reported.current.has(kind)) continue;
             reported.current.add(kind);
             const diagnostic = new Error("Call artifact processing failed");
@@ -48,7 +53,13 @@ export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string
     window.addEventListener("focus", foreground);
     document.addEventListener("visibilitychange", foreground);
     return () => { disposed = true; controller.abort(); window.clearInterval(timer); window.removeEventListener("focus", foreground); document.removeEventListener("visibilitychange", foreground); };
-  }, [callActivityId, revision]);
+  }, [callActivityId, revision, recordingOnly]);
+
+  if (recordingOnly) {
+    return artifacts?.recordingStatus === "available"
+      ? <div className="col-span-full min-w-0 whitespace-normal" data-testid="dialpad-call-recording"><SandraRecordingPlayer key={callActivityId} callActivityId={callActivityId} durationSeconds={artifacts.durationSeconds ?? undefined} /></div>
+      : null;
+  }
 
   return <div className="col-span-full min-w-0 space-y-2 whitespace-normal" aria-label="Call artifacts">
     {error && <p role="status">Call details could not be refreshed. Try again.</p>}

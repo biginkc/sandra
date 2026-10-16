@@ -149,12 +149,16 @@ export default defineConfig({
   testIgnore: [
     // Requires the four-principal loopback fixture, never the shared CI project.
     "**/my-leads.local.spec.ts",
+    // Runs only via playwright.jev-local.config.ts against local Supabase (127.0.0.1:54329).
+    "**/jev-decision-workflow.local.spec.ts",
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
     "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
     // Vitest unit tests that live beside the fixtures; Playwright would load them as specs and crash.
     "**/support/**/*.test.ts",
+    // Opt-in chaos-day stress harness (e2e/stress): runs only through playwright.stress.config.ts, never the default lanes.
+    "**/stress/**",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.

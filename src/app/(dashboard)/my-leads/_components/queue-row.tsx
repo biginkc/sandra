@@ -1,4 +1,5 @@
 import { formatPhoneDisplay } from "@/lib/phone-format";
+import { useCoachCall } from "./coach-call-context";
 import {
   AlertTriangle,
   ArrowRight,
@@ -195,6 +196,7 @@ export function MyLeadQueueRow({
   onStageAction,
 }: MyLeadQueueRowProps) {
   const domId = `${row.propertyId}${idSuffix}`;
+  const coachCall = useCoachCall();
   const temperature = row.motivation.temperature;
   const motivationLabel =
     row.motivation.motivationResponseKind === "provided"
@@ -598,6 +600,23 @@ export function MyLeadQueueRow({
                   onDetailChanged?.();
                 }}
               />
+              {coachCall && actions.some((item) => item.action === "start-call") && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={coachCall.disabled}
+                  className="border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border"
+                  data-testid={`queue-row-call-with-coach-${row.propertyId}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    coachCall.call(row.propertyId);
+                  }}
+                >
+                  <Phone className="size-[13px]" aria-hidden="true" />
+                  Call with coach
+                </Button>
+              )}
               {secondaryActions.map(({ action, label, danger }) => (
                 <Button
                   key={action}

@@ -71,6 +71,22 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
+const unifiedMocks = vi.hoisted(() => ({
+  enabled: vi.fn(),
+  getWorkPage: vi.fn(),
+  getWorkFacts: vi.fn(),
+  getNeedsAttentionTopTen: vi.fn(),
+  enqueueStripComps: vi.fn(),
+  afterTasks: [] as Array<() => unknown>,
+}));
+vi.mock("@/lib/my-leads/unified-queue", () => ({ unifiedQueueEnabled: unifiedMocks.enabled }));
+vi.mock("@/lib/my-leads/work-queue", () => ({
+  getWorkPage: unifiedMocks.getWorkPage,
+  getWorkFacts: unifiedMocks.getWorkFacts,
+  getNeedsAttentionTopTen: unifiedMocks.getNeedsAttentionTopTen,
+}));
+vi.mock("@/lib/comps/queue", () => ({ enqueueStripComps: unifiedMocks.enqueueStripComps }));
+vi.mock("next/server", () => ({ after: (task: () => unknown) => void unifiedMocks.afterTasks.push(task) }));
 vi.mock("./client", () => ({ MyLeadsClient: mocks.MyLeadsClient }));
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }));
 vi.mock("next/link", () => ({
@@ -140,6 +156,8 @@ beforeEach(() => {
   });
   mocks.loadDialpadCallingBootstrap.mockResolvedValue(null);
   mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: true, autoPrompt: false, callbackAlert: false });
+  unifiedMocks.enabled.mockResolvedValue(false);
+  unifiedMocks.afterTasks.length = 0;
 });
 
 describe("MyLeadsPage availability boundary", () => {
@@ -298,10 +316,38 @@ describe("MyLeadsPage availability boundary", () => {
     },
   );
 
+  it.each([
+    [true, true],
+    [false, false],
+  ])("owner with acquisitions_enabled=%s gets Dialpad=%s", async (enabled, expectDialpad) => {
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner", acquisitions_enabled: enabled },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: { ...viewer, userId: "owner-1", isOwner: true },
+      roster: { ...baseRoster, members: [...baseRoster.members, { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled: enabled, active: true, hasHistory: false }] },
+    });
+    const bootstrap = { connectionId: "c-1", binding: { status: "verified", dialpadUserId: "d-1" }, grants: [] };
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: expectDialpad ? bootstrap : null });
+  });
+
+  it("keeps an unbound acquisitions member on Dialpad (the server's not-verified denial), not Telnyx", async () => {
+    const bootstrap = { connectionId: "c-1", binding: { status: "none" }, grants: [] };
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: bootstrap });
+  });
+
   it("passes the Dialpad calling bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
       connectionId: "c-1",
-      binding: { status: "none" },
+      binding: { status: "verified", dialpadUserId: "d-1" },
       grants: [],
     };
     mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
@@ -682,5 +728,172 @@ describe("MyLeadsPage availability boundary", () => {
         selectedLead: { status: "invalid", reason: "malformed" },
       });
     });
+  });
+});
+
+describe("MyLeadsPage unified work queue", () => {
+  const LEAD = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const workPage = (extra: Record<string, unknown> = {}) => ({
+    rows: [], ids: [], total: 0, page: 1, pageSize: 25,
+    tabCounts: { needs_attention: 0, waiting: 0, all: 0 }, chipCounts: {}, stageCounts: {},
+    revision: "r", nextChangeAt: null, snapshotAt: "2026-10-15T15:00:00Z", ...extra,
+  });
+  const leadFacts = (place: string) => ({
+    propertyId: LEAD, place, row: { propertyId: LEAD, address: "1 Main" },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const clientProps = () => (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, any>]>)[0]?.[0];
+
+  beforeEach(() => {
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage());
+    unifiedMocks.getWorkFacts.mockResolvedValue({ rows: [], missing: [], snapshotAt: "2026-10-15T15:00:00Z" });
+    unifiedMocks.getNeedsAttentionTopTen.mockResolvedValue([LEAD]);
+    unifiedMocks.enqueueStripComps.mockResolvedValue(undefined);
+    mocks.getAcquisitionKpis.mockResolvedValue({ attempts: 2 });
+  });
+
+  it("flag off: reads the old queue exactly as before and sends no unified state", async () => {
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(unifiedMocks.enabled).toHaveBeenCalledWith("org-1");
+    expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
+    expect(mocks.getCallNext).toHaveBeenCalled();
+    expect(mocks.listMyLeadsInDrip).toHaveBeenCalled();
+    expect(unifiedMocks.getWorkPage).not.toHaveBeenCalled();
+    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
+    expect(unifiedMocks.afterTasks).toHaveLength(0);
+    expect(clientProps().unified ?? null).toBeNull();
+  });
+
+  it("flag on: skips the old reads and passes the unified first paint", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage({ total: 7, page: 2 }));
+    renderPage(
+      await MyLeadsPage({
+        searchParams: Promise.resolve({ tab: "waiting", chip: "in_drip", q: "oak", page: "2" }),
+      }),
+    );
+    expect(mocks.getAcquisitionQueue).not.toHaveBeenCalled();
+    expect(mocks.getCallNext).not.toHaveBeenCalled();
+    expect(mocks.listMyLeadsInDrip).not.toHaveBeenCalled();
+    expect(unifiedMocks.getWorkPage).toHaveBeenCalledWith({
+      memberId: "user-1",
+      query: { tab: "waiting", chip: "in_drip", stage: null, search: "oak", page: 2 },
+    });
+    expect(mocks.getAcquisitionKpis).toHaveBeenCalledWith({ memberId: "user-1", period: "today" });
+    const { unified } = clientProps();
+    expect(unified.query).toEqual({ tab: "waiting", chip: "in_drip", stage: null, search: "oak", page: 2 });
+    expect(unified.page.total).toBe(7);
+    expect(unified.error).toBeNull();
+    expect(unified.kpis).toEqual({ attempts: 2 });
+    expect(unified.pinned).toBeNull();
+    expect(clientProps().initialSnapshot).toBeNull();
+  });
+
+  it("flag on but rollout off: stays on the disabled state and reads nothing", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer,
+      roster: { ...baseRoster, settings: { ...baseRoster.settings, enabled: false } },
+    });
+    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(html).toContain("My Leads is disabled for this organization.");
+    expect(unifiedMocks.getWorkPage).not.toHaveBeenCalled();
+  });
+
+  it("flag on: a failed first read becomes page null plus an error, not a blank page", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkPage.mockRejectedValue(new Error("db down"));
+    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(html).toContain("my-leads-client");
+    expect(clientProps().unified.page).toBeNull();
+    expect(clientProps().unified.error).toBe("My Leads could not load. Please retry.");
+    expect(mocks.reportError).toHaveBeenCalled();
+  });
+
+  it("flag on, first paint is Needs attention page 1: comps the first ten ids from it without another read", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    const ids = Array.from({ length: 12 }, (_, i) => `id-${i}`);
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage({ ids }));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
+    expect(unifiedMocks.afterTasks).toHaveLength(1);
+    await unifiedMocks.afterTasks[0]();
+    expect(unifiedMocks.enqueueStripComps).toHaveBeenCalledWith("org-1", ids.slice(0, 10));
+  });
+
+  it("flag on, another filter showing: reads the top ten during render, never inside after()", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ tab: "all", q: "zzz" }) }));
+    expect(unifiedMocks.getNeedsAttentionTopTen).toHaveBeenCalledWith("user-1");
+    unifiedMocks.getNeedsAttentionTopTen.mockClear();
+    expect(unifiedMocks.afterTasks).toHaveLength(1);
+    await unifiedMocks.afterTasks[0]();
+    expect(unifiedMocks.getNeedsAttentionTopTen).not.toHaveBeenCalled();
+    expect(unifiedMocks.enqueueStripComps).toHaveBeenCalledWith("org-1", [LEAD]);
+  });
+
+  it("flag on: a failed top-ten read is reported and the page still renders without scheduling comps", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getNeedsAttentionTopTen.mockRejectedValue(new Error("boom"));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ tab: "waiting" }) }));
+    expect(unifiedMocks.afterTasks).toHaveLength(0);
+    expect(mocks.reportError).toHaveBeenCalled();
+  });
+
+  it("flag on: a comps enqueue failure is reported, never thrown", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkPage.mockResolvedValue(workPage({ ids: [LEAD] }));
+    unifiedMocks.enqueueStripComps.mockRejectedValue(new Error("boom"));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    await expect(unifiedMocks.afterTasks[0]()).resolves.toBeUndefined();
+    expect(mocks.reportError).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["your_move", "needs_attention"],
+    ["their_move", "waiting"],
+    ["neither", "all"],
+  ])("deep link: a lead whose place is %s opens the %s tab with filters cleared and no old lookup", async (place, tab) => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkFacts.mockResolvedValue({ rows: [leadFacts(place)], missing: [], snapshotAt: "2026-10-15T15:00:00Z" });
+    renderPage(
+      await MyLeadsPage({
+        searchParams: Promise.resolve({ lead: LEAD, tab: "all", chip: "x", stage: "contacted", q: "nope", page: "3" }),
+      }),
+    );
+    expect(unifiedMocks.getWorkFacts).toHaveBeenCalledWith("user-1", [LEAD]);
+    expect(mocks.getMyLeadsQueueRow).not.toHaveBeenCalled();
+    expect(unifiedMocks.getWorkPage).toHaveBeenCalledWith({
+      memberId: "user-1",
+      query: { tab, chip: "all", stage: null, search: "", page: 1 },
+    });
+    const props = clientProps();
+    expect(props.unified.query).toEqual({ tab, chip: "all", stage: null, search: "", page: 1 });
+    expect(props.unified.pinned.propertyId).toBe(LEAD);
+    expect(props.focus).toMatchObject({ propertyId: LEAD, notice: null, pin: { propertyId: LEAD } });
+    expect(props.selectedLead).toMatchObject({ status: "found", propertyId: LEAD });
+  });
+
+  it("deep link: a lead missing from the queue keeps the old unavailable handling and the URL's own tab", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkFacts.mockResolvedValue({ rows: [], missing: [LEAD], snapshotAt: "2026-10-15T15:00:00Z" });
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: LEAD, tab: "waiting" }) }));
+    const props = clientProps();
+    expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId: LEAD });
+    expect(props.unified.pinned).toBeNull();
+    expect(props.unified.query.tab).toBe("waiting");
+    expect(props.selectedLead).toMatchObject({ status: "unavailable", propertyId: LEAD });
+    expect(props.focus).toMatchObject({ propertyId: LEAD, pinStatus: "unavailable", pin: null });
+  });
+
+  it("deep link: a failed facts read shows the retryable lead notice but still paints the queue", async () => {
+    unifiedMocks.enabled.mockResolvedValue(true);
+    unifiedMocks.getWorkFacts.mockRejectedValue(new Error("x"));
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: LEAD }) }));
+    const props = clientProps();
+    expect(props.selectedLead).toMatchObject({ status: "error", propertyId: LEAD });
+    expect(props.focus).toMatchObject({ pinStatus: "failed" });
+    expect(props.unified.page).not.toBeNull();
   });
 });

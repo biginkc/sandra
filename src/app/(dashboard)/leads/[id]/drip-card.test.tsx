@@ -79,6 +79,15 @@ describe("DripCard", () => {
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
 
+  it("resumes (not retries) a paused consent_unavailable drip", async () => {
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: null, pauseReason: "consent_unavailable", reason: "Could not confirm texting permission — paused after repeated checks; resume to retry" }} />);
+    expect(screen.getByText(/Could not confirm texting permission/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(resumeEnrollmentAction).toHaveBeenCalledWith("enrollment-1"));
+  });
+
   it("shows the empty state", () => {
     render(<DripCard propertyId="lead-1" initialProgress={null} />);
     expect(screen.getByText("Not in a drip")).toBeInTheDocument();

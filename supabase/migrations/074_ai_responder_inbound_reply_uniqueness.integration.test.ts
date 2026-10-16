@@ -81,4 +81,31 @@ describe("Migration 074 — AI inbound reply uniqueness", () => {
       "idx_messages_ai_responder_inbound_unique",
     );
   });
+
+  it("a refused submission's retired row (generated_by kept, inbound key renamed to aborted_inbound_message_id) never collides with the retry's row", async () => {
+    const { contactId, propertyId } = await seedLead();
+    const inboundMessageId = "99999999-9999-4999-8999-999999999999";
+    const retired = {
+      generated_by: "ai_responder_v1",
+      aborted_inbound_message_id: inboundMessageId,
+      abortedBeforeProvider: true,
+    };
+    const row = (status: string, metadata: Record<string, string | boolean>) => ({
+      channel: "sms",
+      direction: "outbound",
+      status,
+      contact_id: contactId,
+      property_id: propertyId,
+      body: "ai",
+      metadata,
+    });
+    const first = await supabase.from("messages").insert(row("failed", retired));
+    const second = await supabase.from("messages").insert(row("failed", retired));
+    const retry = await supabase
+      .from("messages")
+      .insert(row("sent", { generated_by: "ai_responder_v1", inbound_message_id: inboundMessageId }));
+    expect(first.error).toBeNull();
+    expect(second.error).toBeNull();
+    expect(retry.error).toBeNull();
+  });
 });

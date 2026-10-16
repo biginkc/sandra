@@ -23,6 +23,8 @@ export type RequestNormaCallResult =
   | { ok: false; code: "no_callable_number" }
   | { ok: false; code: "blocked"; reason: string }
   | { ok: false; code: "in_flight"; requestId: string | null }
+  /** The shared dial capacity (or this number's spacing) refused for now; the request stays open and nothing was dialled. */
+  | { ok: false; code: "busy_try_again" }
   | { ok: false; code: "gate_off"; reason: "dispatch_disabled" | "number_not_allowed" }
   | { ok: false; code: "callback_assignee_not_configured" }
   | { ok: false; code: "dispatch_rejected"; reason: string; requestId: string }
@@ -120,6 +122,8 @@ export async function requestNormaCallCore(
       return { ok: true, code: "calling", requestId: created.requestId };
     case "unknown":
       return { ok: true, code: "dispatch_unknown", requestId: created.requestId };
+    case "busy":
+      return { ok: false, code: "busy_try_again" };
     case "rejected":
       return { ok: false, code: "dispatch_rejected", reason: result.reason, requestId: created.requestId };
     default:

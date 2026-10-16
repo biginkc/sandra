@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { computeConsentState, recordConsentEvent } from "./consent";
+import { computeConsentState, getConsentState, getConsentStateStrict, recordConsentEvent } from "./consent";
 
 function ev(event_type: string, occurred_at: string) {
   return { event_type, occurred_at };
@@ -156,5 +156,21 @@ describe("recordConsentEvent", () => {
       }),
     ).rejects.toThrow("recordConsentEvent contact lookup");
     expect(insert).not.toHaveBeenCalled();
+  });
+});
+
+describe("getConsentStateStrict", () => {
+  const client = (result: { data: unknown; error: { message: string } | null }) => {
+    const q: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "order"]) q[m] = () => q;
+    q.limit = async () => result;
+    return { from: () => q } as never;
+  };
+  it("distinguishes a failed lookup from no consent; getConsentState keeps its conservative default", async () => {
+    const failing = client({ data: null, error: { message: "db down" } });
+    expect(await getConsentStateStrict(failing, "c", "sms")).toEqual({ ok: false, error: "db down" });
+    expect(await getConsentState(failing, "c", "sms")).toBe("no_consent");
+    const ok = client({ data: [{ event_type: "opt_out", occurred_at: "2026-04-21T10:00:00Z" }], error: null });
+    expect(await getConsentStateStrict(ok, "c", "sms")).toEqual({ ok: true, state: "opted_out" });
   });
 });

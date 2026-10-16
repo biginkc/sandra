@@ -5,7 +5,12 @@ import {
   type SortDirection,
 } from "@/components/table/use-table-url-state.helpers";
 
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+
 import { listTemplates, listCategories } from "./actions";
+import { listAutoReplySettings } from "./auto-reply-actions";
+import { AutoReplySettingsSection } from "./auto-reply-settings";
 import { NewTemplateButton } from "./new-template-button";
 import { TemplatesList } from "./templates-list";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
@@ -35,11 +40,18 @@ export default async function TemplatesPage({
   // independent. parseTableSearch is the pure helper from .helpers (NOT
   // the hook module) per Plan 01-03's RSC boundary fix — server
   // components must stay outside the 'use client' barrier.
-  const [raw, templatesResult, categoriesResult] = await Promise.all([
+  const [raw, templatesResult, categoriesResult, memberships] = await Promise.all([
     searchParams,
     listTemplates(),
     listCategories(),
+    getCallerMembershipsOrThrow(),
   ]);
+  // Approving a template for automatic replies is owner-only (the database
+  // enforces it; the control is simply not shown to anyone else).
+  const isOwner = memberships.some(
+    (m) => m.role === "owner" && hasActiveSandraAccess(m),
+  );
+  const autoReplySettings = isOwner ? await listAutoReplySettings() : null;
 
   const templates = templatesResult.ok ? templatesResult.data : [];
   const categories = categoriesResult.ok ? categoriesResult.data : [];
@@ -72,11 +84,21 @@ export default async function TemplatesPage({
         </div>
       )}
 
+      {autoReplySettings && !autoReplySettings.ok && (
+        <div className="text-destructive text-sm">
+          Failed to load automatic replies: {autoReplySettings.error.message}
+        </div>
+      )}
+      {autoReplySettings?.ok && autoReplySettings.data && (
+        <AutoReplySettingsSection settings={autoReplySettings.data} templates={templates} />
+      )}
+
       <TemplatesList
         templates={templates}
         categories={categories}
         parsed={parsed}
         senderName={senderName}
+        isOwner={isOwner}
       />
     </Page>
   );

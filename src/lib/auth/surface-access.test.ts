@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Membership } from "./memberships";
 import {
   canAccessMessagesAndLeadsBoard,
+  isAcquisitionsCaller,
   isActiveAcquisitionsMember,
   leadDetailCollection,
   shouldRestrictMessagesAndLeadsBoard,
@@ -103,5 +104,19 @@ describe("lead detail navigation", () => {
   it("keeps the existing collections for other roles", () => {
     expect(leadDetailCollection(false)).toEqual({ href: "/leads", label: "Leads" });
     expect(leadDetailCollection(false, "prospect")).toEqual({ href: "/properties", label: "Search" });
+  });
+});
+
+describe("isAcquisitionsCaller (call routing)", () => {
+  const base = { access_status: "active" as const };
+  it("counts an owner with acquisitions_enabled", () => {
+    expect(isAcquisitionsCaller({ ...base, acquisitions_enabled: true })).toBe(true);
+  });
+  it("excludes an owner without it", () => {
+    expect(isAcquisitionsCaller({ ...base, acquisitions_enabled: false })).toBe(false);
+    expect(isAcquisitionsCaller({ ...base, acquisitions_enabled: null })).toBe(false);
+  });
+  it("excludes anyone without active access", () => {
+    expect(isAcquisitionsCaller({ acquisitions_enabled: true, access_status: "revoked" })).toBe(false);
   });
 });

@@ -3,6 +3,7 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 
+import { applySuppressionForConfirmedReview } from "@/lib/ai-responder/confirm-suppression";
 import { reportError } from "@/lib/errors/report";
 import {
   saveOutreachDispo,
@@ -20,7 +21,7 @@ import {
 export type { OutreachDispo, SetDispoResult };
 
 export type ConfirmAiDispositionReviewResult =
-  | { ok: true; status: "confirmed" | "superseded" }
+  | { ok: true; status: "confirmed" | "superseded"; warning?: string }
   | { ok: false; error: string };
 
 export async function confirmAiDispositionReview(
@@ -53,6 +54,20 @@ export async function confirmAiDispositionReview(
     return { ok: false, error: "Could not confirm Sandra's disposition" };
   }
 
+  // The RPC only flips contacts.sms_opted_out; run full phone-level
+  // suppression for a confirmed opted_out/dnc review. Idempotent, so the
+  // user can retry after a warning.
+  let warning: string | undefined;
+  if (status === "confirmed") {
+    const suppression = await applySuppressionForConfirmedReview(
+      supabase as never,
+      reviewId,
+      user.id,
+      { discharge: true },
+    );
+    if (!suppression.ok) warning = suppression.warning;
+  }
+
   try {
     revalidatePath("/messages");
   } catch (revalidateError) {
@@ -61,7 +76,7 @@ export async function confirmAiDispositionReview(
       extra: { reviewId, status },
     });
   }
-  return { ok: true, status };
+  return warning ? { ok: true, status, warning } : { ok: true, status };
 }
 
 function readReviewResolutionStatus(

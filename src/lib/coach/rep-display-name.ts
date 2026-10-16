@@ -1,6 +1,6 @@
 import type { User } from "@supabase/supabase-js";
 
-const KNOWN_REP_NAMES_BY_EMAIL = new Map<string, string>([
+export const KNOWN_REP_NAMES_BY_EMAIL = new Map<string, string>([
   ["jarrad@bmhgroupkc.com", "Jarrad Henry"],
 ]);
 

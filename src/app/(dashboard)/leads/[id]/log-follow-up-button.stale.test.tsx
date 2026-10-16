@@ -1,3 +1,5 @@
+vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress: vi.fn(async () => []) }))
+vi.mock("@/lib/supabase/client", () => ({ createClient: vi.fn() }))
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -11,7 +13,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }))
-vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn(), changeDripAction: vi.fn() }))
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({
   loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
@@ -121,7 +123,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     await user.click(await screen.findByRole("button", { name: "Refresh" }))
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     expect(mocks.refresh).toHaveBeenCalled()
-    expect(screen.queryByRole("button", { name: "Done without a drip" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Done without changing drip" })).toBeNull()
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
   })
 
@@ -241,7 +243,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
     await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ idempotencyKey: (mocks.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey })
-    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Done without changing drip" })).toBeInTheDocument()
   })
 
   it("timeout, then a late ok is ignored, fields stay locked, and Reconcile flows through the normal result path with one attempt", async () => {
@@ -265,9 +267,9 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     const note = await screen.findByLabelText("Note (optional)")
     expect(note).toBeDisabled()
     expect(note).toHaveValue("Original note")
-    expect(screen.queryByRole("button", { name: "Done without a drip" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Done without changing drip" })).toBeNull()
     await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
-    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Done without changing drip" })).toBeInTheDocument()
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     const calls = mocks.submitMyLeadCommand.mock.calls.map((call) => call[1] as { note?: string })
     expect(calls[1]).toEqual(calls[0])

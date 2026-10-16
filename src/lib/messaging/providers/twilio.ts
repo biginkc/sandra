@@ -1,4 +1,5 @@
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
+import { assertRealProviderAllowed } from "../replay-stub";
 import type {
   MessagingProvider,
   SmsInboundEvent,
@@ -70,6 +71,7 @@ export class TwilioMessagingProvider implements MessagingProvider {
   }
 
   async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
+    assertRealProviderAllowed("twilio", "sendSms");
     const params = new URLSearchParams();
     params.set("To", input.to);
     params.set("Body", input.body);

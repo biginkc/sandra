@@ -1,0 +1,47 @@
+name: Norma inbound ledger
+on:
+  pull_request:
+    paths:
+      - "vitest.norma-recordings.config.ts"
+      - "supabase/migrations/*_norma_outbound_recording_state*"
+      - "tests/integration/norma-followup-fixture.ts"
+      - "supabase/migrations/*_norma_retry_next_step_union_reviewed*"
+      - "src/lib/norma/inbound*"
+      - "src/lib/norma/webhook.ts"
+      - "src/app/(dashboard)/norma/callbacks/**"
+      - "src/app/api/norma/inbound/**"
+      - "src/app/api/cron/norma-inbound-recordings/**"
+      - "src/app/api/webhooks/bland/inbound/**"
+      - "supabase/migrations/*_norma_inbound_call_records*"
+      - "vitest.norma-inbound.config.ts"
+      - ".github/workflows/norma-inbound.yml"
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  packages: read
+jobs:
+  inbound:
+    name: Norma inbound authorization and ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: npm ci
+      - name: Provision disposable Sandra schema
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner
+      - name: Verify inbound identity and authorization
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.norma-inbound.config.ts
+      - name: Stop disposable stack
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

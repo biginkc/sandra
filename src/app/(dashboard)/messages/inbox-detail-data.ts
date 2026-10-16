@@ -45,6 +45,8 @@ export type InboxDetail = {
   contactPhone: string | null;
   /** Saved contact phone that matches the open thread, safe for replying. */
   replyToPhone: string | null;
+  /** Which saved contact phone slot (1-3) the open thread number is, for the Dialpad Call button. */
+  contactPhoneSlot?: 1 | 2 | 3 | null;
   /** Exact saved slot classification for the open thread phone. */
   replyToPhoneLineType: SmsPhoneChoice["lineType"] | null;
   propertyId: string | null;
@@ -255,6 +257,7 @@ export async function fetchInboxDetail(
     contactPhone: parties.customerPhone,
     replyToPhone,
     replyToPhoneLineType: replyPhoneChoice?.lineType ?? null,
+    contactPhoneSlot: replyPhoneChoice?.slot ?? null,
     propertyId,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")

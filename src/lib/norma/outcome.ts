@@ -6,8 +6,10 @@ import type { NormaCompletionPayload, NormaOutcome } from "./types";
  * so they cannot disagree. Anything that does not map cleanly is `unknown`
  * (which parks the request for a human), never a guess.
  *
- * Contract: the LIVE pathway (integer version 3, agent snapshot 0.0.4), read
- * from the Bland account. All extraction variables are strings.
+ * Contract: these extraction names must be verified against the protected
+ * pathway version 27 before release. Runtime passes the configured version and
+ * voice through unchanged. The parser supports an omitted pin, but release policy
+ * requires the protected version 27. All extraction variables are strings.
  *   call_outcome  leading token + a free-text evidence sentence.
  *   follow_up_preference  free text holding any callback time and timezone
  *                         (there is no ISO time).
@@ -153,16 +155,17 @@ export function mapBlandCallToOutcome(call: NormaCallInput, now = Date.now()): N
   const mapped: NormaOutcome | null = token && Object.hasOwn(CALL_OUTCOME_TOKEN_MAP, token) ? CALL_OUTCOME_TOKEN_MAP[token]! : null;
   if (token && !mapped) return unknown("unrecognised_call_outcome", base);
 
-  // Bland-confirmed nobody reached. The pathway may not even have run, so a
+  // Bland-confirmed nobody reached (no answer, voicemail or a busy line: the
+  // seller never spoke to Norma, so the call-twice retry applies). The pathway may not even have run, so a
   // missing call_outcome is fine here; a pathway outcome describing a
   // conversation contradicts it and is a conflict, not a guess.
   const noAnswerByBland =
-    status === "no-answer" || status === "no_answer" || answeredBy === "no-answer" || answeredBy === "no_answer" || answeredBy === "voicemail";
+    status === "no-answer" || status === "no_answer" || status === "busy" || answeredBy === "no-answer" || answeredBy === "no_answer" || answeredBy === "voicemail";
   if (noAnswerByBland) {
     if (mapped && mapped !== "no_answer") return unknown("conflict_no_answer_vs_outcome", base);
     return { outcome: "no_answer", payload: base };
   }
-  if (status === "busy" || status === "failed" || status === "canceled" || status === "cancelled") {
+  if (status === "failed" || status === "canceled" || status === "cancelled") {
     return unknown(`call_${status}`, base);
   }
   if (status && status !== "completed") return unknown("unrecognised_status", base);

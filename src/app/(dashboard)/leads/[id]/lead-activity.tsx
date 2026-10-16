@@ -87,7 +87,7 @@ type Props = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
 
 export function LeadActivityTimeline(props: Props) {
   const {
@@ -338,16 +338,6 @@ export function LeadActivityTimeline(props: Props) {
         </div>
       ) : null}
 
-      {acquisition.page.hasMore && (
-        <Button
-          variant="outline"
-          disabled={acquisition.pending}
-          onClick={acquisition.loadMore}
-          className="mb-3"
-        >
-          Load older outreach and offers
-        </Button>
-      )}
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
           No messages, notes, calls, or activity yet.
@@ -389,9 +379,11 @@ export function LeadActivityTimeline(props: Props) {
               const previous = events[index - 1];
               const next = events[index + 1];
               const isContinuation =
+                index !== activity.trustBoundaryIndex &&
                 previous?.source === "message" &&
                 previous.row.direction === event.row.direction;
               const isLastInGroup =
+                index + 1 === activity.trustBoundaryIndex ||
                 next?.source !== "message" ||
                 next.row.direction !== event.row.direction;
               return (
@@ -474,7 +466,20 @@ export function LeadActivityTimeline(props: Props) {
               </Fragment>
             );
           })}
+          {activity.trustFloor && activity.trustBoundaryIndex === -1 ? (
+            <ActivityTrustFloor timestamp={activity.trustFloor} />
+          ) : null}
         </div>
+      )}
+      {acquisition.page.hasMore && (
+        <Button
+          variant="outline"
+          disabled={acquisition.pending}
+          onClick={acquisition.loadMore}
+          className="mt-3"
+        >
+          Load older outreach and offers
+        </Button>
       )}
     </div>
   );
@@ -567,7 +572,7 @@ export function normalizeLeadActivityEvents(
   };
   return [...deduplicated.values()].sort(
     (a, b) =>
-      compareActivityTimestamps(a.timestamp, b.timestamp) ||
+      compareActivityTimestamps(b.timestamp, a.timestamp) ||
       sourceOrder[a.source] - sourceOrder[b.source] ||
       a.id.localeCompare(b.id),
   );
@@ -644,7 +649,7 @@ export function buildLeadActivitySnapshot(
         ? -1
         : events.findIndex(
             (event) =>
-              compareActivityTimestamps(event.timestamp, trustFloor) >= 0,
+              compareActivityTimestamps(event.timestamp, trustFloor) < 0,
           ),
     failures: sourceOrder.flatMap((source) => {
       const detail = errors[source];

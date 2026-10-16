@@ -1,7 +1,15 @@
-import { buildQuestions, JEV_MODEL, JEV_SCHEMA_VERSION, OUTCOME_CRITERIA } from "../questions";
+import {
+  buildQuestions,
+  JEV_MODEL,
+  JEV_SCHEMA_VERSION,
+  NUMBER_SOURCE_QUESTION_ID,
+  OUTCOME_CRITERIA,
+} from "../questions";
 import type {
   JevEscalationReason,
+  JevListingStatus,
   JevOutcome,
+  JevReadyTimeframe,
   JevReplyIntent,
   JevWrongScope,
   SmsClassificationDecision,
@@ -48,14 +56,28 @@ const ESCALATION_REASON_VALUES: readonly JevEscalationReason[] = [
   "not_applicable",
   "uncertain",
 ];
+const YES_NO_VALUES: readonly ("yes" | "no")[] = ["yes", "no"];
+const READY_TIMEFRAME_VALUES: readonly JevReadyTimeframe[] = [
+  "within_30_days",
+  "one_to_six_months",
+  "six_to_twelve_months",
+  "over_a_year",
+  "not_stated",
+  "uncertain",
+];
+const LISTING_STATUS_VALUES: readonly JevListingStatus[] = [
+  "listed",
+  "not_listed_or_not_stated",
+  "uncertain",
+];
 const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
   "positive",
   "negative",
   "neutral",
 ];
 
-type JevRawAnswer = { choice: string; confidence?: unknown; probabilities?: Record<string, number> };
-type JevRawResponse = {
+export type JevRawAnswer = { choice: string; noul?: unknown; confidence?: unknown; probabilities?: Record<string, number> };
+export type JevRawResponse = {
   answers?: Record<string, JevRawAnswer>;
   model?: string;
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -106,31 +128,30 @@ function readChoice<T extends string>(
   return { value, probabilities: answer.probabilities ?? {} };
 }
 
+export type JevChoiceQuestion = {
+  type: "choice";
+  instructions: string;
+  /** Option name -> description (null for a bare option). */
+  criteria: Record<string, string | null>;
+};
+/** A yes/no question; the answer carries a probability in `noul`. */
+export type JevNoulQuestion = { type: "noul"; instructions: string };
+export type JevAskRequest = {
+  state: unknown;
+  questions: Record<string, JevChoiceQuestion | JevNoulQuestion>;
+};
+export type JevAskResult = JevRawResponse & { latencyMs: number };
+export type JevAskDeps = { fetch: FetchLike; apiKey: string; maxRetries?: number; timeoutMs?: number };
+
 /**
- * One HTTP call per classification — TypeSafe has no batch endpoint.
- * Bounded retry with exponential backoff on 429/5xx only; auth/billing
- * failures are not retried (retrying a bad key wastes the deadline).
+ * The one HTTP client for TypeSafe System One (shared by SMS classification and call facts).
+ * One call per request; bounded retry with exponential backoff on 429/5xx and timeouts only;
+ * auth/billing failures are not retried (retrying a bad key wastes the deadline).
  */
-export async function classifyWithJev(
-  input: JevClassifyInput,
-  deps: {
-    fetch: FetchLike;
-    apiKey: string;
-    maxRetries?: number;
-    timeoutMs?: number;
-  },
-): Promise<SmsClassificationDecision> {
+export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<JevAskResult> {
   const maxRetries = deps.maxRetries ?? 2;
   const timeoutMs = deps.timeoutMs ?? 8000;
-  const questions = buildQuestions(input.includeReplyIntent);
-  const body = JSON.stringify({
-    model: JEV_MODEL,
-    state: {
-      ...input.state,
-      thread: input.thread,
-    },
-    questions,
-  });
+  const body = JSON.stringify({ model: JEV_MODEL, state: request.state, questions: request.questions });
 
   let lastErr: JevProviderError | null = null;
   const startedAt = Date.now();
@@ -163,7 +184,7 @@ export async function classifyWithJev(
       }
 
       const json = (await res.json()) as JevRawResponse;
-      return parseJevResponse(json, input.includeReplyIntent, Date.now() - startedAt);
+      return { ...json, latencyMs: Date.now() - startedAt };
     } catch (e) {
       clearTimeout(timer);
       if (e instanceof JevProviderError) throw e;
@@ -179,6 +200,21 @@ export async function classifyWithJev(
     }
   }
   throw lastErr ?? new JevProviderError("Jev request failed", "server_error");
+}
+
+/** One HTTP call per classification; see askJev for retry rules. */
+export async function classifyWithJev(
+  input: JevClassifyInput,
+  deps: JevAskDeps,
+): Promise<SmsClassificationDecision> {
+  const result = await askJev(
+    {
+      state: { ...input.state, thread: input.thread },
+      questions: buildQuestions(input.includeReplyIntent),
+    },
+    deps,
+  );
+  return parseJevResponse(result, input.includeReplyIntent, result.latencyMs);
 }
 
 function parseJevResponse(
@@ -199,6 +235,9 @@ function parseJevResponse(
     "escalation_reason",
     ESCALATION_REASON_VALUES,
   );
+  const numberSource = readChoice(json.answers, NUMBER_SOURCE_QUESTION_ID, YES_NO_VALUES);
+  const readyTimeframe = readChoice(json.answers, "ready_timeframe", READY_TIMEFRAME_VALUES);
+  const listingStatus = readChoice(json.answers, "listing_status", LISTING_STATUS_VALUES);
   const replyIntent = includeReplyIntent
     ? readChoice(json.answers, "reply_intent", REPLY_INTENT_VALUES)
     : { value: null, probabilities: {} };
@@ -210,6 +249,12 @@ function parseJevResponse(
     probabilities.wrong_scope = wrongScope.probabilities;
   if (Object.keys(escalationReason.probabilities).length)
     probabilities.escalation_reason = escalationReason.probabilities;
+  if (Object.keys(numberSource.probabilities).length)
+    probabilities[NUMBER_SOURCE_QUESTION_ID] = numberSource.probabilities;
+  if (Object.keys(readyTimeframe.probabilities).length)
+    probabilities.ready_timeframe = readyTimeframe.probabilities;
+  if (Object.keys(listingStatus.probabilities).length)
+    probabilities.listing_status = listingStatus.probabilities;
   if (includeReplyIntent && Object.keys(replyIntent.probabilities).length)
     probabilities.reply_intent = replyIntent.probabilities;
 
@@ -219,6 +264,9 @@ function parseJevResponse(
     wrongScope: wrongScope.value,
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
+    askedHowNumberObtained: numberSource.value === null ? null : numberSource.value === "yes",
+    readyTimeframe: readyTimeframe.value,
+    listingStatus: listingStatus.value,
     replyIntentAvailable: includeReplyIntent,
     probabilities,
     provider: "jev",

@@ -15,6 +15,18 @@ describe("MyLeadsNavBadge", () => {
     vi.restoreAllMocks();
   });
 
+  it("labels the count as Not contacted leads while the unified queue is off", () => {
+    render(<MyLeadsNavBadge initialCount={7} />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 Not contacted leads");
+  });
+
+  it("labels the count as leads that need attention while the unified queue is on", () => {
+    const { rerender } = render(<MyLeadsNavBadge initialCount={7} needsAttention />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 leads need attention");
+    rerender(<MyLeadsNavBadge initialCount={1} needsAttention />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "1 lead needs attention");
+  });
+
   it("refreshes on foreground focus at most once per minute", async () => {
     const onRefresh = vi.fn(async () => ({ ok: true as const, count: 8 }));
     render(<MyLeadsNavBadge initialCount={2} onRefresh={onRefresh} />);

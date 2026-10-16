@@ -81,6 +81,7 @@ describe("drip status", () => {
     expect(pauseReasonText("manual")).toMatch(/paused by/i);
     expect(pauseReasonText("template_missing")).toMatch(/template/i);
     expect(pauseReasonText("reconciliation_required")).toMatch(/delivery/i);
+    expect(pauseReasonText("consent_unavailable")).toBe("Could not confirm texting permission — paused after repeated checks; resume to retry");
     expect(pauseReasonText("step_misconfigured")).toMatch(/step/i);
     expect(pauseReasonText("no_phone")).toMatch(/phone/i);
     expect(pauseReasonText("not_interested")).toMatch(/not interested/i);

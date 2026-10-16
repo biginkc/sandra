@@ -4,6 +4,8 @@
  */
 import type { CoachCallContext, ScriptBundle } from "@biginkc/coach";
 
+import type { ProviderData } from "@/lib/comps/provider-data";
+import type { FactField } from "@/lib/call-facts/types";
 import type { CompSale, LeadCompRow, VerifyReason } from "@/lib/comps/types";
 import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
 import type { QueueRow } from "@/lib/my-leads/queries";
@@ -32,7 +34,7 @@ export type CallScreenScript = {
 };
 
 /** `lead_comps` member columns (never `raw`). */
-export type LeadCompPublic = Omit<LeadCompRow, "raw"> & { comps: CompSale[]; verify_reasons: VerifyReason[] };
+export type LeadCompPublic = Omit<LeadCompRow, "raw"> & { comps: CompSale[]; verify_reasons: VerifyReason[]; providerData?: ProviderData | null };
 
 export type CallScreenComps = {
   latest: LeadCompPublic | null;
@@ -76,7 +78,9 @@ export type ContractCardState =
       /** False when the lead has no recorded motivation yet: the card then collects one (the offer needs it). */
       motivationRecorded?: boolean;
     };
-export type LeadCallFactsView = { placeholder: true };
+/** One proposed fact still awaiting a human tap, in display-priority order. */
+export type CallFactChipData = { field: FactField; value: string; evidence: string };
+export type LeadCallFactsView = { factId: string; chips: CallFactChipData[] };
 
 export type CallScreenData = {
   viewer: { userId: string; orgId: string; isOwner: boolean };

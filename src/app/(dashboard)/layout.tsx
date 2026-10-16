@@ -14,6 +14,7 @@ import {
 } from "@/components/dashboard-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
+import { NormaConnectedNotifier } from "@/components/norma-connected-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { ObjectionPromptProvider } from "@/components/coach/objection-prompt-context";
@@ -22,12 +23,16 @@ import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
-import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
-import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { getAcquisitionBadgeState, getAcquisitionRoster } from "@/lib/my-leads/queries";
+import { canAccessMessagesAndLeadsBoard, isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
 import type { CallingConfig } from "@/lib/direct-calling/contract";
+import { CallLockProvider } from "@/components/calls/call-lock-context";
+import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
+import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
+import { canAccessMessagesV2 } from "./messages-v2/access";
 
 export default async function DashboardLayout({
   children,
@@ -48,10 +53,19 @@ export default async function DashboardLayout({
     () => ({ transport: "default" }),
   );
   const recordingAccess = await recordingViewer().catch(() => null);
-  const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
+  const membershipsPromise = getCallerMemberships();
+  // Chained off the memberships read so it runs alongside the roster and badge reads, not after them.
+  const dialpadRoutePromise = membershipsPromise.then(async (all) => {
+    const mine = all.filter((m) => m.user_id === user.id);
+    return mine.length === 1
+      ? await getDialpadCallRoute(mine[0].org_id, user.id, isAcquisitionsCaller(mine[0]))
+      : "softphone";
+  });
+  const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([
     getAcquisitionRoster(),
-    getAcquisitionBadge(),
-    getCallerMemberships(),
+    getAcquisitionBadgeState(),
+    membershipsPromise,
+    dialpadRoutePromise,
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
@@ -63,7 +77,9 @@ export default async function DashboardLayout({
       canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner)),
   );
   const initialAcquisitionBadge =
-    showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
+    showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value.count : null;
+  const acquisitionBadgeNeedsAttention =
+    showMyLeads && badgeResult.status === "fulfilled" && badgeResult.value.needsAttention;
   const showCalculators = Boolean(acquisitionRoster && canViewCalculators(
     acquisitionRoster.roster,
     acquisitionRoster.viewer.userId,
@@ -72,14 +88,23 @@ export default async function DashboardLayout({
   const showMessagesAndLeads =
     surfaceMembershipsResult.status === "fulfilled" &&
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
+  const showMessagesV2 =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    canAccessMessagesV2(surfaceMembershipsResult.value);
+
+  // Where every Call button sends the call: server-derived, never from the browser.
+  const dialpadCallsEnabled = dialpadRouteResult.status === "fulfilled" && dialpadRouteResult.value === "dialpad";
 
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
+    <CallLockProvider>
     <SoftphoneProvider callingConfig={callingConfig}>
+    <DialpadCallProvider enabled={dialpadCallsEnabled}>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
       <JobFailureNotifier />
+      <NormaConnectedNotifier />
 
       <header className="nav-field fixed inset-x-0 top-0 left-0 z-40 flex h-16 items-center justify-between gap-3 border-b border-white/10 px-4 md:left-64 md:px-7">
         <div className="flex min-w-0 items-center gap-3">
@@ -125,11 +150,13 @@ export default async function DashboardLayout({
         <DashboardSidebar
           showCalculators={showCalculators}
           showMessagesAndLeads={showMessagesAndLeads}
+          showMessagesV2={showMessagesV2}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+          acquisitionBadgeNeedsAttention={acquisitionBadgeNeedsAttention}
         />
         <div
           className="mx-6 mt-2 border-t border-white/10 pt-3 text-xs text-white/75"
@@ -143,11 +170,13 @@ export default async function DashboardLayout({
         <DashboardMobileNav
           showCalculators={showCalculators}
           showMessagesAndLeads={showMessagesAndLeads}
+          showMessagesV2={showMessagesV2}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+          acquisitionBadgeNeedsAttention={acquisitionBadgeNeedsAttention}
         />
       </div>
 
@@ -158,7 +187,9 @@ export default async function DashboardLayout({
       </div>
     </div>
     </GlobalSearchProvider>
+    </DialpadCallProvider>
     </SoftphoneProvider>
+    </CallLockProvider>
     </ObjectionPromptProvider>
   );
 }

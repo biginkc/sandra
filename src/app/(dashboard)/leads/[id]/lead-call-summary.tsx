@@ -18,11 +18,14 @@ type CallTranscriptRow =
 
 export type CallActivityRollupRow = {
   id: string;
+  provider: string;
   created_at: string;
   started_at: string | null;
   outcome: string | null;
   disposition: string | null;
   recording_status: "none" | "pending" | "available" | "failed";
+  /** Provider evidence only; this does not establish playable Sandra audio. */
+  provider_recording_url?: string | null;
   transcript_status: "none" | "pending" | "available" | "failed";
   summary_status: "none" | "pending" | "available" | "failed";
   jitter_attempt_id: string;
@@ -34,11 +37,13 @@ export type CallActivityRollupRow = {
 type RealtimeCallActivityRow = Pick<
   CallActivityRollupRow,
   | "id"
+  | "provider"
   | "created_at"
   | "started_at"
   | "outcome"
   | "disposition"
   | "recording_status"
+  | "provider_recording_url"
   | "transcript_status"
   | "summary_status"
   | "jitter_attempt_id"
@@ -52,7 +57,7 @@ export type LeadCallSummaryProps = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
 
 const CHILD_STATUS_FIELDS = [
   "recording_status",
@@ -211,6 +216,13 @@ function RecordingState({
       <p className="text-destructive break-words text-xs" role="status">
         Recording failed
         {recording?.error_message ? `: ${recording.error_message}` : ""}
+      </p>
+    );
+  }
+  if (row.provider_recording_url?.trim()) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        Provider recording reference received. Playback is not available in Sandra.
       </p>
     );
   }
@@ -541,7 +553,9 @@ export function LeadCallSummary({
             {sortedRows.length} {sortedRows.length === 1 ? "call" : "calls"}
           </div>
         </div>
-        {linkButton("Open in Jitter")}
+        {deepLink && sortedRows.some((row) => row.provider === "jitter")
+          ? linkButton("Open in Jitter")
+          : null}
       </div>
 
       <div className="min-w-0 space-y-3" data-testid="call-history">
@@ -593,7 +607,7 @@ export function CallEventCard({
         <time className="text-muted-foreground text-xs" dateTime={timestamp}>
           {formatDistanceToNow(new Date(timestamp), { addSuffix: true })}
         </time>
-        {jitterHref === undefined ? null : jitterHref ? (
+        {row.provider === "jitter" && jitterHref?.trim() ? (
           <a
             href={jitterHref}
             aria-label="Open call in Jitter"
@@ -602,20 +616,7 @@ export function CallEventCard({
             Open in Jitter
             <ExternalLink className="size-3" aria-hidden />
           </a>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled
-            aria-disabled="true"
-            title="Jitter host not configured"
-            className="ml-auto min-h-9"
-          >
-            Open in Jitter
-            <ExternalLink className="size-3" aria-hidden />
-          </Button>
-        )}
+        ) : null}
       </div>
       <CallArtifactStates row={row} />
       {children}

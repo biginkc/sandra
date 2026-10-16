@@ -38,6 +38,8 @@ vi.mock("sonner", () => ({
 // actions / Supabase server bindings that don't load cleanly in jsdom. Stub
 // both — these tests focus on the URL-state surface of TemplatesList, not
 // the row-action dialogs.
+vi.mock("./auto-reply-actions", () => ({ setTemplateAutoSendApproval: vi.fn() }));
+
 vi.mock("./template-dialog", () => ({
   TemplateDialog: () => null,
 }));
@@ -100,6 +102,26 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("<TemplatesList /> automatic-reply approval", () => {
+  it("owners get an approval switch on every row; others do not", () => {
+    const templates = [makeTemplate({ id: "t1" }), makeTemplate({ id: "t2", name: "Second" })];
+    const { unmount } = render(
+      <TemplatesList
+        templates={templates}
+        categories={["General"]}
+        senderName="Mel"
+        isOwner
+        parsed={DEFAULT_PARSED}
+      />,
+    );
+    expect(screen.getAllByRole("switch", { name: /approved for automatic replies/i })).toHaveLength(2);
+    unmount();
+
+    renderTemplates({ templates });
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
 });
 
 describe("<TemplatesList />", () => {

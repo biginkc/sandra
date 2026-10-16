@@ -1,0 +1,694 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import type { Result } from "@/lib/errors/result";
+import { createClient } from "@/lib/supabase/client";
+import { cn } from "@/lib/utils";
+
+import { useThrottledRefresh } from "../messages/use-throttled-refresh";
+import { pageText, undoErrorText } from "./page-text";
+import { appendStep, upsertRun } from "./feed-state";
+import { asWaitingSnapshot, type CompactSnapshot } from "./snapshot-codec";
+import type { HoldActionsApi, LoadOlderHolds, RevalidateHolds, WaitingSnapshot } from "./hold-action-types";
+import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
+import { loadRunLabels } from "./labels";
+import { compareInstants, describeCoverage, type LooseSupabase } from "./queries";
+import type { ReplyGeneration } from "./reply-generation";
+import type { SetReplyGenerationAction } from "./reply-generation-toggle";
+import { RulesPanel } from "./rules-panel";
+import type { UndoControls } from "./run-card";
+import type { ScorecardRow } from "./scorecard";
+import { TapeCard } from "./tape-card";
+import { adoptServerThreads, applyThreads, commitIfCurrent, isCurrent, type Now, type Stamp, type ThreadTable } from "./client-state";
+import { chicagoDayKey, loadRunThreads, previousDayKey, type RunCursor, type RunThread } from "./tape-data";
+import type { TapeDayPage } from "./tape-actions";
+import { WaitingColumn } from "./waiting-column";
+import type {
+  HoldsMeta,
+  ModeBadge,
+  OpenHold,
+  PipelineCoverage,
+  PipelineRun,
+  PipelineRunStep,
+  RunLabel,
+  RunWithSteps,
+} from "./types";
+
+export type MessagesV2ViewProps = {
+  orgId: string;
+  /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
+  isOwner?: boolean;
+  /** Owner-only nurture auto-drip switch; absent = not shown. */
+  nurtureAutoDrip?: NurtureAutoDripState | null;
+  /** The org's "AI drafts" setting; null/absent hides the control. */
+  replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
+  setReplyGeneration?: SetReplyGenerationAction;
+  /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
+  undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
+  findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
+  /** Replay org only: newest replay batch id, shown to owners. */
+  replayBatchId?: string | null;
+  runs: RunWithSteps[];
+  /** Open holds from the server (flag / pending decision / pending review). */
+  holds: OpenHold<RunWithSteps>[];
+  /** Inbound vs run counts for the last hour; null when unavailable. */
+  coverage?: PipelineCoverage | null;
+  /** The coverage query failed: show a degraded indicator, not nothing. */
+  coverageUnavailable?: boolean;
+  holdsMeta?: HoldsMeta;
+  /** All waiting holds (DNC-locked excluded); `holds` is the newest-activity slice of them. */
+  /** The frozen waiting-list order the column pages through (see hold-list.ts buildSnapshot). */
+  holdsSnapshot?: WaitingSnapshot | CompactSnapshot;
+  /** First-page snapshot ids the server dropped in its final check. */
+  holdsMissing?: string[];
+  /** 60-second / tab-focus re-check of rendered cards (properties is not in realtime). */
+  revalidateHolds?: RevalidateHolds;
+  /** [runId, reason] from the snapshot (the reason each card shows), for the tape. */
+  flagReasons?: Array<[string, string | null]>;
+  /** Runs whose thread text failed to load on the server: fetched again in the browser. */
+  threadFailedRunIds?: string[];
+  /** The hold lookup failed (reason): say so, never "nothing is waiting". */
+  holdsError?: string | null;
+  /** Waiting texts hidden because their property (and so its DNC lock) could not be determined. */
+  holdsUnverified?: number;
+  /** "Show older": the next slice of the same latest-activity order. */
+  loadOlderHolds?: LoadOlderHolds;
+  /** Feed window query failed (reason text, already prefixed "Feed unavailable"). */
+  feedError?: string | null;
+  /** Step lookup failed: cards may lack steps. */
+  stepsUnavailable?: boolean;
+  /** Mode badge queries failed (reason text). */
+  badgesError?: string | null;
+  badges: ModeBadge[];
+  /** Scorecard rows (7d) loaded on the server; null means the card loads them itself. */
+  scorecardRows?: ScorecardRow[] | null;
+  /** Server-resolved display labels, as [runId, label] pairs. */
+  labels: Array<[string, RunLabel]>;
+  /** Server-resolved thread text (our last text, Sandra's reply), as [runId, thread] pairs. */
+  threads?: Array<[string, RunThread]>;
+  /** "Show yesterday's tape": loads the 24 hours before the given instant. */
+  loadTapeDay?: (input: { day: string; before?: RunCursor | null }) => Promise<Result<TapeDayPage>>;
+  nowMs: number;
+  /** Hold actions (server actions). Absent = the buttons render disabled. */
+  actions?: HoldActionsApi;
+  /** Opened with ?deadLetter=<id>: that failed reply's lead (null when the id did not resolve). */
+  focusDeadLetter?: { deadLetterId: string; propertyId: string | null } | null;
+  /** That lead's hold when it is beyond the first page (null = no longer eligible). */
+  focusHold?: OpenHold<RunWithSteps> | null;
+  focusHoldErrors?: string[];
+  /** The pinned card's pins from its load (same shape as the page snapshot). */
+  focusSnapshot?: WaitingSnapshot;
+};
+
+/** One header line from the 7-day scorecard: how many texts, and how often Sandra's own calls were confirmed. */
+export function weekSummary(rows: ScorecardRow[] | null | undefined): { texts: number; rightPct: number | null } | null {
+  if (!rows) return null;
+  const texts = rows.reduce((n, r) => n + r.runs, 0);
+  const settled = rows.reduce((n, r) => n + r.auto_settled, 0);
+  const agreed = rows.reduce((n, r) => n + r.auto_agreed, 0);
+  return { texts, rightPct: settled > 0 ? Math.round((agreed / settled) * 100) : null };
+}
+
+/** "Sandra is on" unless every rule is still watch-only. */
+function sandraIsOn(badges: ModeBadge[]): boolean {
+  return badges.length === 0 || badges.some((b) => b.mode === "AUTO" || b.mode === "HELD");
+}
+
+// Fixed zone (America/Chicago) so the server render and the browser agree on which day a card belongs to.
+const dayKey = chicagoDayKey;
+
+function dayLabel(ms: number, nowMs: number): string {
+  const key = dayKey(ms);
+  if (key === dayKey(nowMs)) return "Today";
+  if (key === previousDayKey(dayKey(nowMs))) return "Yesterday";
+  return new Date(ms).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: "America/Chicago" });
+}
+
+export function MessagesV2View(props: MessagesV2ViewProps) {
+  const { badges, orgId, isOwner = false } = props;
+  const router = useRouter();
+  const requestRefresh = useThrottledRefresh();
+
+  const [lastInitial, setLastInitial] = useState(props);
+  const [runs, setRunsState] = useState(props.runs);
+  // Mirror of `runs` so realtime handlers can read-then-write synchronously
+  // (the unknown-run check must not depend on when React runs an updater).
+  const runsRef = useRef(props.runs);
+  const setRuns = useCallback((next: RunWithSteps[]) => {
+    runsRef.current = next;
+    setRunsState(next);
+  }, []);
+  const [labels, setLabels] = useState(() => new Map(props.labels));
+  // Thread text and failures for the current snapshot (`snapshotKey` = a counter bumped on every new snapshot).
+  // Every writer commits through commitIfCurrent + applyThreads (client-state.ts): (snapshot, run id, version).
+  // Server-rendered texts belong to the run versions the server rendered.
+  const serverTextVersions = (p: MessagesV2ViewProps) =>
+    new Map((p.threads ?? []).flatMap(([id]) => {
+      const r = p.runs.find((x) => x.id === id);
+      return r ? [[id, `${r.id}:${r.outbound_message_id ?? ""}`] as const] : [];
+    }));
+  const [threadTable, setThreadTable] = useState<ThreadTable>(() => ({
+    snapshotKey: 0,
+    text: new Map(props.threads ?? []),
+    failed: new Set(props.threadFailedRunIds ?? []),
+    textVersions: serverTextVersions(props),
+  }));
+  /** The current thread snapshot key, for async writers (mirrors threadTable.snapshotKey). */
+  const threadEpoch = useRef<unknown>(0);
+  /** Request order for every thread writer (live fetches and earlier-day loads). */
+  const threadSeq = useRef(0);
+  useEffect(() => {
+    threadEpoch.current = threadTable.snapshotKey;
+  }, [threadTable.snapshotKey]);
+  const threads = threadTable.text;
+  const threadFailed = threadTable.failed;
+  // Earlier days loaded by "Show yesterday's tape"; independent of the live window.
+  const [earlier, setEarlier] = useState<RunWithSteps[]>([]);
+  const earlierRef = useRef<RunWithSteps[]>([]);
+  useEffect(() => {
+    earlierRef.current = earlier;
+  }, [earlier]);
+  const [cursor, setCursor] = useState<{ day: string; before: RunCursor | null } | null>(null);
+  // Busy belongs to the snapshot it was started in: a refresh mid-load leaves the new snapshot not busy.
+  const [earlierBusyFor, setEarlierBusyFor] = useState<unknown>(null);
+  const earlierBusy = earlierBusyFor !== null && earlierBusyFor === threadTable.snapshotKey;
+  const [earlierNote, setEarlierNote] = useState<string | null>(null);
+  const { undoJevAction, findJevUndo } = props;
+  const undoControls = useMemo<UndoControls | undefined>(
+    () =>
+      undoJevAction && findJevUndo
+        ? {
+            find: findJevUndo,
+            undo: async (id) => {
+              const r = await undoJevAction(id);
+              return r.ok ? { ok: true } : { ok: false, message: undoErrorText(r.error.code ?? "") };
+            },
+          }
+        : undefined,
+    [undoJevAction, findJevUndo],
+  );
+  const [nowMs, setNowMs] = useState(props.nowMs);
+  const [live, setLive] = useState(false);
+  if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
+    setLastInitial(props);
+    // Render-phase sync must not write the ref (react-hooks/refs); the
+    // effect below mirrors committed state into it.
+    setRunsState(props.runs);
+    setLabels((curr) => new Map([...curr, ...props.labels]));
+    // New snapshot: adopt the server's thread text and failures (its texts win over anything fetched before).
+    setThreadTable((prev) => {
+      const versions = new Map(props.runs.map((r) => [r.id, `${r.id}:${r.outbound_message_id ?? ""}`] as const));
+      return adoptServerThreads(prev, (prev.snapshotKey as number) + 1, props.threads ?? [], props.threadFailedRunIds ?? [], (id) => versions.get(id));
+    });
+  }
+  useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
+
+  // Waiting cards keep exactly the snapshot data the server ordered them by (run, time, reason). Realtime never
+  // swaps it: a card whose property has newer activity only gets an "Updated" mark until the list is refreshed.
+  const holds = props.holds;
+  const updatedHoldIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const h of props.holds) {
+      if (!h.property_id) continue;
+      const shown = h.run;
+      const newer = runs.some(
+        (r) =>
+          r.property_id === h.property_id &&
+          (!shown || r.id !== shown.id
+            ? !shown || compareInstants(r.started_at, shown.started_at) > 0
+            : r.steps.length > shown.steps.length),
+      );
+      if (newer) out.add(h.id);
+    }
+    return out;
+  }, [runs, props.holds]);
+
+  const meta = props.holdsMeta;
+  const coverage = describeCoverage(props.coverage, props.coverageUnavailable);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // properties (the needs_human_attention flag) is not in the realtime
+  // publication, so a cleared flag is only seen via the published tables below
+  // or this slow poll. The refresh is throttled and skipped while hidden.
+  useEffect(() => {
+    const id = window.setInterval(requestRefresh, 60_000);
+    return () => window.clearInterval(id);
+  }, [requestRefresh]);
+
+  // Fetch display labels for runs that arrive over realtime.
+  const requested = useRef(new Set<string>(props.labels.map(([id]) => id)));
+  useEffect(() => {
+    const missing = runs.filter((r) => !requested.current.has(r.id));
+    if (missing.length === 0) return;
+    for (const r of missing) requested.current.add(r.id);
+    // Keyed by run id and committed through the helper under the snapshot it was requested in; a result from before
+    // a refresh is dropped and those ids may be asked for again.
+    const stamp: Stamp = { snapshotKey: threadEpoch.current };
+    loadRunLabels(createClient() as unknown as LooseSupabase, missing)
+      .then((fetched) => {
+        const applied = commitIfCurrent<Map<string, RunLabel>>(stamp, () => ({ snapshotKey: threadEpoch.current }), setLabels, (curr) => new Map([...curr, ...fetched]));
+        if (!applied) for (const r of missing) requested.current.delete(r.id);
+      })
+      .catch(() => {
+        for (const r of missing) requested.current.delete(r.id);
+      });
+  }, [runs]);
+
+  // Fetch thread text (our last text, Sandra's reply) for runs that arrive over realtime, earlier days, and again
+  // when a run gains its sent reply. A run whose text failed to load is NOT marked fetched: it is retried.
+  const threadKey = (r: Pick<PipelineRun, "id" | "outbound_message_id">) => `${r.id}:${r.outbound_message_id ?? ""}`;
+  const requestedThreads = useRef(
+    new Set<string>(
+      props.runs
+        .filter((r) => (props.threads ?? []).some(([id]) => id === r.id) && !(props.threadFailedRunIds ?? []).includes(r.id))
+        .map(threadKey),
+    ),
+  );
+  const [threadRetry, setThreadRetry] = useState(0);
+  // Pending thread-retry timers, cleared on unmount so none fires after the component (or the test DOM) is gone.
+  const threadRetryTimers = useRef(new Set<number>());
+  const threadsMounted = useRef(true);
+  useEffect(() => {
+    threadsMounted.current = true;
+    const timers = threadRetryTimers.current;
+    return () => {
+      threadsMounted.current = false;
+      for (const id of timers) window.clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
+  // Thread results are keyed to (snapshot, run id, version): on a new snapshot, in-flight results from the previous
+  // one are dropped and the request bookkeeping restarts from the server's threads.
+  const epochFor = useRef<unknown>(lastInitial);
+  useEffect(() => {
+    if (epochFor.current === lastInitial) return;
+    epochFor.current = lastInitial;
+    requestedThreads.current = new Set(
+      lastInitial.runs
+        .filter((r) => (lastInitial.threads ?? []).some(([id]) => id === r.id) && !(lastInitial.threadFailedRunIds ?? []).includes(r.id))
+        .map(threadKey),
+    );
+  }, [lastInitial]);
+  useEffect(() => {
+    const pool = [...runs, ...earlier];
+    const missing = pool.filter((r) => !requestedThreads.current.has(threadKey(r)));
+    if (missing.length === 0) return;
+    for (const r of missing) requestedThreads.current.add(threadKey(r));
+    // Versioned (R-B): every result -- thread text AND the failure / retry bookkeeping -- is committed only for runs
+    // still at the version they were fetched for, so a late result for an older version touches nothing.
+    const stamp: Stamp = { snapshotKey: threadEpoch.current, seq: ++threadSeq.current, versions: new Map(missing.map((r) => [r.id, threadKey(r)])) };
+    const now = (): Now => {
+      const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
+      return { snapshotKey: threadEpoch.current, versionOf: (id) => current.get(id) };
+    };
+    const commit = (fetched: ReadonlyArray<readonly [string, RunThread]>, loadedOk: readonly string[], failedIds: readonly string[]) => {
+      if (!threadsMounted.current) return;
+      const n = now();
+      // Retry only runs still current: a stale failure neither shows a warning nor schedules a retry.
+      const failedNow = failedIds.filter((id) => isCurrent(stamp, n, id));
+      for (const r of missing) if (failedNow.includes(r.id)) requestedThreads.current.delete(threadKey(r));
+      commitIfCurrent<ThreadTable>(stamp, now, setThreadTable, (t) => applyThreads(t, stamp, now(), fetched, loadedOk, failedIds));
+      if (failedNow.length) {
+        const id = window.setTimeout(() => {
+          threadRetryTimers.current.delete(id);
+          commitIfCurrent<number>(stamp, now, setThreadRetry, (k) => k + 1);
+        }, 10_000);
+        threadRetryTimers.current.add(id);
+      }
+    };
+    loadRunThreads(createClient() as unknown as LooseSupabase, orgId, missing)
+      .then(({ threads: fetched, failedRunIds }) =>
+        commit(
+          [...fetched],
+          missing.filter((r) => !failedRunIds.includes(r.id)).map((r) => r.id),
+          failedRunIds,
+        ),
+      )
+      .catch(() => commit([], [], missing.map((r) => r.id)));
+    // threadRetry re-runs this after a failure.
+  }, [runs, earlier, threadRetry, orgId]);
+
+  useEffect(() => {
+    const supabase = createClient();
+    const orgFilter = `org_id=eq.${orgId}`;
+    let mounted = true;
+    let wasDown = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    (async () => {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token ?? null;
+      if (token) supabase.realtime.setAuth(token);
+      if (!mounted) return;
+
+      channel = supabase
+        .channel("messages-v2:feed")
+        .on(
+          // pipeline_* tables are not in the generated Database type yet.
+          "postgres_changes" as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "pipeline_runs",
+            filter: orgFilter,
+          } as never,
+          ((payload: { new: PipelineRun }) => {
+            setRuns(upsertRun(runsRef.current, payload.new));
+          }) as never,
+        )
+        .on(
+          "postgres_changes" as never,
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "pipeline_runs",
+            filter: orgFilter,
+          } as never,
+          ((payload: { new: PipelineRun }) => {
+            setRuns(upsertRun(runsRef.current, payload.new));
+          }) as never,
+        )
+        .on(
+          "postgres_changes" as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "pipeline_run_steps",
+            filter: orgFilter,
+          } as never,
+          ((payload: { new: PipelineRunStep }) => {
+            const res = appendStep(runsRef.current, payload.new);
+            setRuns(res.runs);
+            if (res.unknownRun) requestRefresh();
+          }) as never,
+        )
+        // Hold sources: a pending/resolved disposition review or a new lead
+        // event (human action) means the hold set may have changed.
+        .on(
+          "postgres_changes" as never,
+          {
+            event: "*",
+            schema: "public",
+            table: "ai_disposition_reviews",
+            filter: orgFilter,
+          } as never,
+          (() => requestRefresh()) as never,
+        )
+        .on(
+          "postgres_changes" as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "lead_events",
+            filter: orgFilter,
+          } as never,
+          (() => requestRefresh()) as never,
+        )
+        .subscribe(((status: string) => {
+          if (!mounted) return;
+          if (status === "SUBSCRIBED") {
+            setLive(true);
+            // After a drop, rows may have been missed: backfill from the server.
+            if (wasDown) requestRefresh();
+            wasDown = false;
+          } else if (
+            status === "CHANNEL_ERROR" ||
+            status === "TIMED_OUT" ||
+            status === "CLOSED"
+          ) {
+            setLive(false);
+            wasDown = true;
+          }
+        }) as never);
+    })();
+
+    return () => {
+      mounted = false;
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [requestRefresh, setRuns, orgId]);
+
+  const allRuns = useMemo(() => {
+    const seen = new Set(runs.map((r) => r.id));
+    return [...runs, ...earlier.filter((r) => !seen.has(r.id))].sort(
+      (x, y) => compareInstants(y.started_at, x.started_at) || (x.id < y.id ? 1 : x.id > y.id ? -1 : 0),
+    );
+  }, [runs, earlier]);
+
+  const showEarlier = async () => {
+    if (!props.loadTapeDay || earlierBusy) return;
+    // Start at the Chicago day of the oldest run on screen, only the part older than that run; step back a whole
+    // calendar day at a time, skipping empty days (up to a week) so one click always shows something or says why not.
+    const oldestRun = allRuns[allRuns.length - 1];
+    let next: { day: string; before: RunCursor | null } =
+      cursor ??
+      (oldestRun
+        ? { day: chicagoDayKey(Date.parse(oldestRun.started_at)), before: { at: oldestRun.started_at, id: oldestRun.id } }
+        : { day: chicagoDayKey(nowMs), before: null });
+    const dayEpoch = threadEpoch.current;
+    const daySeq = ++threadSeq.current;
+    // The WHOLE response commits through the helper under the snapshot it was requested in; stale → discarded.
+    const dayKey: Stamp = { snapshotKey: dayEpoch };
+    const snapNow = (): Now => ({ snapshotKey: threadEpoch.current });
+    const commitDay = <S,>(set: (fn: (prev: S) => S) => void, updater: (prev: S) => S) => commitIfCurrent<S>(dayKey, snapNow, set, updater);
+    setEarlierBusyFor(dayEpoch);
+    setEarlierNote(null);
+    try {
+      for (let attempt = 0; attempt < 7; attempt += 1) {
+        const res = await props.loadTapeDay(next);
+        if (!isCurrent(dayKey, snapNow())) return; // refreshed meanwhile: nothing from this response is applied
+        if (!res.ok) {
+          const message = pageText(res.error.message);
+          const at = next;
+          commitDay<string | null>(setEarlierNote, () => message);
+          commitDay<typeof cursor>(setCursor, () => at);
+          return;
+        }
+        const got = res.data.runs;
+        commitDay<RunWithSteps[]>(setEarlier, (curr) => [...curr, ...got]);
+        commitDay<Map<string, RunLabel>>(setLabels, (curr) => new Map([...curr, ...res.data.labels]));
+        commitDay<Array<[string, string]>>(setDayFlagReasons, (curr) => [...curr, ...(res.data.flagReasons ?? [])]);
+        // Thread text: also keyed to run id + version + seq (a run with a newer version meanwhile is not changed).
+        const dayVersion = new Map(got.map((r) => [r.id, threadKey(r)]));
+        const dayStamp: Stamp = { snapshotKey: dayEpoch, seq: daySeq, versions: dayVersion };
+        const dayNow = (): Now => {
+          const current = new Map([...earlierRef.current, ...runsRef.current].map((r) => [r.id, threadKey(r)]));
+          return { snapshotKey: threadEpoch.current, versionOf: (id) => current.get(id) ?? dayVersion.get(id) };
+        };
+        const failedIds = res.data.failedRunIds ?? [];
+        const okIds = got.filter((r) => !failedIds.includes(r.id)).map((r) => r.id);
+        commitIfCurrent<ThreadTable>(dayStamp, dayNow, setThreadTable, (t) => applyThreads(t, dayStamp, dayNow(), res.data.threads, okIds, failedIds));
+        const nowDay = dayNow();
+        const freshDay = res.data.threads.filter(([id]) => isCurrent(dayStamp, nowDay, id));
+        for (const r of got) if (!failedIds.includes(r.id) && freshDay.some(([id]) => id === r.id)) requestedThreads.current.add(threadKey(r));
+        // A full page means this day was cut off: continue the same day from the oldest run returned.
+        // The page is ordered (started_at, id) descending, so its last row is the cursor: runs that share a timestamp are not skipped.
+        const last = got[got.length - 1];
+        next =
+          res.data.hasMore && last
+            ? { day: next.day, before: { at: last.started_at, id: last.id } }
+            : { day: previousDayKey(next.day), before: null };
+        if (got.length > 0) {
+          const at = next;
+          commitDay<typeof cursor>(setCursor, () => at);
+          return;
+        }
+      }
+      const at = next;
+      commitDay<typeof cursor>(setCursor, () => at);
+      commitDay<string | null>(setEarlierNote, () => "No texts came in during the week before that.");
+    } catch {
+      commitDay<string | null>(setEarlierNote, () => "The earlier tape could not be loaded.");
+    } finally {
+      commitDay<unknown>(setEarlierBusyFor, () => null);
+    }
+  };
+
+  // A hold's flag reason applies only to the run the hold is showing, so old runs are never relabelled by a later flag.
+  // Built on the server from the COMPLETE eligible waiting list, so a hold on any "Show older" page, and runs on
+  // earlier days, read the same effective reason on the tape and on the card.
+  // Snapshot reasons win (the tape must match the cards); earlier days add reasons for runs the snapshot does not cover.
+  const [dayFlagReasons, setDayFlagReasons] = useState<Array<[string, string]>>([]);
+  // Snapshot entries (including pinned nulls) are applied last, so day data can never override them.
+  const flagByRun = useMemo(
+    () => new Map<string, string | null>([...dayFlagReasons, ...(props.flagReasons ?? [])]),
+    [dayFlagReasons, props.flagReasons],
+  );
+  const holdsSnapshot = useMemo(() => asWaitingSnapshot(props.holdsSnapshot), [props.holdsSnapshot]);
+  const snapshotRuns = useMemo(() => new Set((props.flagReasons ?? []).map(([runId]) => runId)), [props.flagReasons]);
+
+  const week = weekSummary(props.scorecardRows);
+  const on = sandraIsOn(badges);
+  const statusText = props.badgesError
+    ? "Sandra's status couldn't be checked"
+    : badges.length === 0
+      ? "Rules not loaded"
+      : on
+      ? "Sandra is on"
+      : "Sandra is watching, not acting yet";
+
+  // Day dividers: "Today", "Yesterday", then the date.
+  const tapeItems: Array<{ kind: "day"; label: string } | { kind: "run"; run: RunWithSteps }> = [];
+  let lastDay = "";
+  for (const run of allRuns) {
+    const label = dayLabel(Date.parse(run.started_at), nowMs);
+    if (label !== lastDay) {
+      tapeItems.push({ kind: "day", label });
+      lastDay = label;
+    }
+    tapeItems.push({ kind: "run", run });
+  }
+
+  return (
+    <div className="flex flex-col gap-5" data-testid="messages-v2">
+      <header className="flex flex-wrap items-end gap-x-4 gap-y-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Messages v2</h1>
+          <p className="text-[13px] text-muted-foreground">Sandra is answering seller texts. You are watching her work.</p>
+        </div>
+        {isOwner && props.replayBatchId && (
+          <Badge variant="outline" data-testid="replay-batch-badge" className="bg-amber-100 text-amber-800">
+            Replay batch {props.replayBatchId}
+          </Badge>
+        )}
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <p
+            data-testid="header-status"
+            className="inline-flex items-center gap-2 rounded-full border bg-card px-3.5 py-2 text-[13px]"
+          >
+            <span
+              aria-hidden
+              title={live ? "Live" : "Connecting"}
+              className={cn("size-2 rounded-full", live && on && badges.length > 0 && !props.badgesError ? "bg-emerald-600" : "bg-muted-foreground")}
+            />
+            <span className="font-medium">{statusText}</span>
+            {week && (
+              <span className="text-muted-foreground">
+                · {week.texts.toLocaleString("en-US")} texts this week
+                {week.rightPct !== null ? ` · right ${week.rightPct}% of the time` : ""}
+              </span>
+            )}
+          </p>
+          <RulesPanel
+            orgId={orgId}
+            isOwner={isOwner}
+            badges={badges}
+            badgesError={props.badgesError}
+            nurtureAutoDrip={props.nurtureAutoDrip}
+            replyGeneration={props.replyGeneration}
+            setReplyGeneration={props.setReplyGeneration}
+          />
+        </div>
+        {coverage && (coverage.gap || coverage.degraded) && (
+          <p
+            data-testid="coverage"
+            data-gap={coverage.gap ? "true" : "false"}
+            data-degraded={coverage.degraded ? "true" : "false"}
+            className="basis-full text-xs font-medium text-red-600"
+            title="Fewer runs than inbound texts: some seller texts may not have reached Sandra"
+          >
+            {coverage.text}
+          </p>
+        )}
+      </header>
+
+      <div className="flex flex-wrap items-start gap-6">
+        <section aria-label="Sandra's tape" className="flex min-w-0 flex-[999_1_560px] flex-col gap-3">
+          <div className="flex items-baseline gap-3">
+            <h2 className="text-base font-semibold">Sandra&apos;s tape</h2>
+            <span className="text-[13px] text-muted-foreground">Newest on top</span>
+          </div>
+          {props.feedError && (
+            <p role="alert" data-testid="feed-unavailable" className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">
+              {pageText(props.feedError)}
+            </p>
+          )}
+          {props.stepsUnavailable && (
+            <p role="alert" data-testid="steps-unavailable" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+              Some details are unavailable, so a few cards may read as unfinished.
+            </p>
+          )}
+          {allRuns.length === 0 ? (
+            props.feedError ? null : (
+              <p className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+                No seller texts yet. New ones will appear here as Sandra reads them.
+              </p>
+            )
+          ) : (
+            tapeItems.map((item) =>
+              item.kind === "day" ? (
+                <h3
+                  key={`day-${item.label}`}
+                  data-testid="tape-day"
+                  className="pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  {item.label}
+                </h3>
+              ) : (
+                <TapeCard
+                  key={item.run.id}
+                  run={item.run}
+                  label={labels.get(item.run.id)}
+                  thread={threads.get(item.run.id)}
+                  flagReason={flagByRun.get(item.run.id)}
+                  flagPinned={snapshotRuns.has(item.run.id)}
+                  // Undo is offered on today's texts only; an earlier day is history.
+                  undoControls={dayKey(Date.parse(item.run.started_at)) === dayKey(nowMs) ? undoControls : undefined}
+                />
+              ),
+            )
+          )}
+          {threadFailed.size > 0 && (
+            <p data-testid="threads-retrying" className="text-center text-xs text-amber-700">
+              Some texts couldn&apos;t load. Retrying…
+            </p>
+          )}
+          {earlierNote && (
+            <p data-testid="earlier-note" className="text-center text-xs text-muted-foreground">
+              {earlierNote}
+            </p>
+          )}
+          {props.loadTapeDay && (
+            <div className="flex justify-center">
+              <Button type="button" variant="ghost" size="sm" data-testid="show-earlier" disabled={earlierBusy} onClick={showEarlier}>
+                {earlierBusy ? "Loading…" : cursor === null ? "Show yesterday's tape" : "Show the day before"}
+              </Button>
+            </div>
+          )}
+        </section>
+
+        <div className="flex min-w-0 max-w-[420px] flex-[1_1_340px] flex-col">
+          <WaitingColumn
+            holds={holds}
+            labels={labels}
+            meta={meta}
+            snapshot={holdsSnapshot}
+            initialMissing={props.holdsMissing}
+            revalidate={props.revalidateHolds}
+            error={props.holdsError}
+            unverified={props.holdsUnverified}
+            loadOlder={props.loadOlderHolds}
+            refreshKey={props.holds}
+            updatedIds={updatedHoldIds}
+            actions={props.actions}
+            onReload={() => router.refresh()}
+            focus={props.focusDeadLetter ?? null}
+            focusHold={props.focusHold}
+            focusHoldErrors={props.focusHoldErrors}
+            focusSnapshot={props.focusSnapshot}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}

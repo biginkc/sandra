@@ -54,8 +54,12 @@ export function createStressPool(connectionString: string, max = 48) {
 }
 
 const q = (ident: string) => {
-  if (!/^[a-z_][a-z0-9_]*$/i.test(ident)) throw new Error(`pg-client: unsupported identifier ${ident}`);
-  return `"${ident}"`;
+  // A column, or a PostgREST JSON path such as payload->slack_notice->>lease_token.
+  if (!/^[a-z_][a-z0-9_]*((->>?)[a-z_][a-z0-9_]*)*$/i.test(ident)) throw new Error(`pg-client: unsupported identifier ${ident}`);
+  const [column, ...rest] = ident.split(/(->>?)/);
+  let sql = `"${column}"`;
+  for (let i = 0; i < rest.length; i += 2) sql += `${rest[i]}'${rest[i + 1]}'`;
+  return sql;
 };
 
 type Filter = { sql: (n: number) => string; params: unknown[] };

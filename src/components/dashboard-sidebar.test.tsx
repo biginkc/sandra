@@ -23,6 +23,10 @@ describe("DashboardMobileNav", () => {
     expect(screen.getByRole("link", { name: "Drips" })).toHaveAttribute("href", "/sequences");
   });
 
+  it("hides callbacks with the restricted shared workspace",()=>{
+    render(<DashboardSidebar showMessagesAndLeads={false}/>);
+    expect(screen.queryByRole("link",{name:"Norma callbacks"})).not.toBeInTheDocument();
+  });
   it("keeps disposition display labels on drip wording", () => {
     expect(SOFTPHONE_DISPOSITIONS.find((item) => item.value === "needs_sequence")?.label).toBe("Needs drip");
     expect(OUTREACH_DISPOSITION_LABELS.needs_sequence).toBe("Needs drip");
@@ -35,7 +39,9 @@ describe("DashboardMobileNav", () => {
     expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(12);
+    expect(links).toHaveLength(15); // main's 14 + the Norma queue link
+    expect(screen.getByRole("link", { name: "Norma callbacks" })).toHaveAttribute("href", "/norma/callbacks");
+    expect(screen.getByRole("link", { name: "Norma queue" })).toHaveAttribute("href", "/norma/queue");
     for (const link of links) {
       expect(link.className).toContain("shrink-0");
       expect(link.className).toContain("whitespace-nowrap");
@@ -72,6 +78,10 @@ describe("DashboardMobileNav", () => {
     expect(myLeads).toHaveAttribute("data-active", "true");
     expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("7");
 
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 Not contacted leads");
+    rerender(<DashboardSidebar initialAcquisitionBadge={7} acquisitionBadgeNeedsAttention />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 leads need attention");
+
     rerender(<DashboardSidebar showMyLeads={false} initialAcquisitionBadge={99} />);
     expect(screen.queryByRole("link", { name: "My Leads" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("my-leads-badge")).not.toBeInTheDocument();
@@ -86,5 +96,16 @@ describe("DashboardMobileNav", () => {
       "href",
       "/my-leads",
     );
+  });
+
+  it("shows Messages v2 right after Messages only when granted", () => {
+    const { rerender } = render(<DashboardSidebar />);
+    expect(screen.queryByRole("link", { name: "Messages v2" })).not.toBeInTheDocument();
+
+    rerender(<DashboardSidebar showMessagesV2 />);
+    const v2 = screen.getByRole("link", { name: "Messages v2" });
+    expect(v2).toHaveAttribute("href", "/messages-v2");
+    const links = screen.getAllByRole("link");
+    expect(links[links.indexOf(screen.getByRole("link", { name: "Messages" })) + 1]).toBe(v2);
   });
 });

@@ -1,0 +1,409 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { Client } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+
+/**
+ * 20261008300100: fn_undo_jev_action restores what Jev's auto-applied action
+ * overwrote. Local-only; rolled-back transaction per test.
+ */
+const url = requireLoopbackPostgresUrl(
+  process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+);
+const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008300100_jev_action_undo.sql"), "utf8"));
+
+const db = new Client({ connectionString: url });
+let orgId: string;
+let ownerId: string;
+let outsiderId: string;
+let acqId: string;
+let propertyId: string;
+let messageId: string;
+
+beforeAll(async () => {
+  await db.connect();
+});
+afterAll(async () => {
+  await db.end();
+});
+
+beforeEach(async () => {
+  await db.query("begin");
+  await db.query(MIGRATION);
+  orgId = randomUUID();
+  ownerId = randomUUID();
+  outsiderId = randomUUID();
+  acqId = randomUUID();
+  propertyId = randomUUID();
+  messageId = randomUUID();
+  const conversationId = randomUUID();
+  await db.query("insert into public.organizations (id, name) values ($1, 'undo')", [orgId]);
+  await db.query("set local session_replication_role = replica");
+  for (const id of [ownerId, outsiderId, acqId]) {
+    await db.query(`insert into auth.users (id, email) values ($1, $2)`, [id, `u-${id}@test.local`]);
+  }
+  await db.query(
+    `insert into public.memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active')`,
+    [orgId, ownerId],
+  );
+  await db.query(
+    `insert into public.memberships (org_id, user_id, role, access_status, acquisitions_enabled) values ($1, $2, 'member', 'active', true)`,
+    [orgId, acqId],
+  );
+  await db.query(
+    `insert into public.properties (id, org_id, address, state, status, outreach_dispo, follow_up_at)
+     values ($1, $2, 'Undo St', 'TX', 'prospect', 'wrong_number', null)`,
+    [propertyId, orgId],
+  );
+  await db.query(
+    `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body)
+     values ($1, $2, $3, $4, 'sms', 'inbound', 'wrong number')`,
+    [messageId, orgId, propertyId, conversationId],
+  );
+  await db.query("set local session_replication_role = origin");
+});
+afterEach(async () => {
+  await db.query("rollback");
+});
+
+async function as<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  await db.query("savepoint as_user");
+  await db.query("set local role authenticated");
+  await db.query("select set_config('request.jwt.claim.sub', $1, true)", [userId]);
+  try {
+    const out = await fn();
+    await db.query("reset role");
+    await db.query("release savepoint as_user");
+    return out;
+  } catch (e) {
+    await db.query("rollback to savepoint as_user");
+    await db.query("reset role");
+    throw e;
+  }
+}
+
+async function recordUndo(over: { revision?: number | null; action?: string; appliedFollowUp?: string | null; applied?: string; prior?: string | null; followUp?: string | null; enrollments?: string[] } = {}) {
+  const id = randomUUID();
+  await db.query(
+    `insert into public.jev_action_undo
+       (id, org_id, property_id, source_inbound_message_id, action, applied_dispo,
+        prior_outreach_dispo, prior_follow_up_at, applied_follow_up_at, paused_enrollment_ids, recorded_revision)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [id, orgId, propertyId, messageId, over.action ?? "wrong_number", over.applied ?? "wrong_number", "prior" in over ? over.prior : "nurture", "followUp" in over ? over.followUp : "2026-10-20T00:00:00Z", "appliedFollowUp" in over ? over.appliedFollowUp : null, over.enrollments ?? [], over.revision ?? null],
+  );
+  return id;
+}
+
+const undo = (userId: string, id: string) =>
+  as(userId, async () => (await db.query(`select public.fn_undo_jev_action($1) as r`, [id])).rows[0].r);
+
+describe("fn_undo_jev_action", () => {
+  it("restores the prior disposition and follow-up date, returns the paused enrollment ids, and writes an audit event", async () => {
+    const enrollment = randomUUID();
+    const id = await recordUndo({ enrollments: [enrollment] });
+    const r = await undo(ownerId, id);
+    expect(r).toMatchObject({ status: "undone", enrollmentIds: [enrollment] });
+    const p = (await db.query(`select outreach_dispo, follow_up_at from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("nurture");
+    expect(new Date(p.follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+    const events = (await db.query(`select event_type from public.lead_events where property_id = $1 and event_type = 'jev_action_undone'`, [propertyId])).rows;
+    expect(events).toHaveLength(1);
+    const row = (await db.query(`select undone_by from public.jev_action_undo where id = $1`, [id])).rows[0];
+    expect(row.undone_by).toBe(ownerId);
+  });
+
+  it("is idempotent: a second undo changes nothing and returns no enrollments", async () => {
+    const id = await recordUndo({ enrollments: [randomUUID()] });
+    await undo(ownerId, id);
+    await db.query(`update public.properties set outreach_dispo = 'callback_requested' where id = $1`, [propertyId]);
+    const again = await undo(ownerId, id);
+    expect(again).toEqual({ status: "already_undone", enrollmentIds: [] });
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("callback_requested");
+  });
+
+  it("refuses with STATE_CHANGED when a person changed the disposition since, and changes nothing", async () => {
+    const id = await recordUndo();
+    await db.query(`update public.properties set outreach_dispo = 'not_interested' where id = $1`, [propertyId]);
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("not_interested");
+  });
+
+  it("refuses a user with no access to the org", async () => {
+    const id = await recordUndo();
+    await expect(undo(outsiderId, id)).rejects.toThrow(/FORBIDDEN/);
+  });
+
+  it("restores a null prior state (nothing was set before Jev acted)", async () => {
+    const id = await recordUndo({ prior: null, followUp: null });
+    await undo(ownerId, id);
+    const p = (await db.query(`select outreach_dispo, follow_up_at from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p).toEqual({ outreach_dispo: null, follow_up_at: null });
+  });
+
+  it("refuses with STATE_CHANGED when a person edited the follow-up date since Jev acted", async () => {
+    const id = await recordUndo({ appliedFollowUp: null });
+    await db.query(`update public.properties set follow_up_at = '2026-11-01T00:00:00Z' where id = $1`, [propertyId]);
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("wrong_number");
+  });
+
+  it("undoing a nurture marks its jev_lead_decisions row corrected/undone and writes the correction event the scorecard reads", async () => {
+    await db.query(`update public.properties set outreach_dispo = 'nurture' where id = $1`, [propertyId]);
+    const runId = randomUUID();
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'nurture')`,
+      [runId, orgId, propertyId, randomUUID(), messageId],
+    );
+    const decisionId = randomUUID();
+    await db.query(
+      `insert into public.jev_lead_decisions (id, org_id, property_id, conversation_id, source_inbound_message_id, classification_run_id, proposed_outcome, status, resolved_outcome, resolved_at)
+       values ($1, $2, $3, $4, $5, $6, 'nurture', 'confirmed', 'nurture', now())`,
+      [decisionId, orgId, propertyId, randomUUID(), messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    const id = await recordUndo({ action: "nurture", applied: "nurture", prior: null, followUp: null });
+    await undo(ownerId, id);
+    const d = (await db.query(`select status, resolved_outcome from public.jev_lead_decisions where id = $1`, [decisionId])).rows[0];
+    expect(d).toEqual({ status: "corrected", resolved_outcome: "undone" });
+    const ev = (
+      await db.query(
+        `select payload from public.lead_events where event_type = 'jev_lead_decision_corrected' and payload ->> 'decision_id' = $1`,
+        [decisionId],
+      )
+    ).rows;
+    expect(ev).toHaveLength(1);
+    expect(ev[0].payload.previous_resolved_outcome).toBe("nurture");
+  });
+
+  it("the undone_by CHECK refuses an actor without a timestamp", async () => {
+    const id = await recordUndo();
+    await expect(
+      db.query(`update public.jev_action_undo set undone_by = $2 where id = $1`, [id, ownerId]),
+    ).rejects.toThrow(/jev_action_undo_undone_pair/);
+  });
+
+  it("an acquisitions-only (non-owner) member can undo; a plain member without access cannot", async () => {
+    const id = await recordUndo();
+    await expect(undo(outsiderId, id)).rejects.toThrow(/FORBIDDEN/);
+    await undo(acqId, id);
+    const p = (await db.query(`select outreach_dispo from public.properties where id = $1`, [propertyId])).rows[0];
+    expect(p.outreach_dispo).toBe("nurture");
+  });
+
+  it("refuses (STATE_CHANGED) when a human already confirmed the review", async () => {
+    const id = await recordUndo();
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `insert into public.ai_disposition_reviews (org_id, property_id, conversation_id, source_inbound_message_id, disposition, ai_reason, status, resolved_at, reviewed_by)
+       values ($1, $2, $3, $4, 'wrong_number', 'x', 'confirmed', now(), $5)`,
+      [orgId, propertyId, randomUUID(), messageId, ownerId],
+    );
+    await db.query("set local session_replication_role = origin");
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("does NOT refuse for an auto-accepted review (no human involved)", async () => {
+    const id = await recordUndo();
+    await db.query("set local session_replication_role = replica");
+    const runId = randomUUID();
+    const conv = randomUUID();
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'wrong_number')`,
+      [runId, orgId, propertyId, conv, messageId],
+    );
+    await db.query(
+      `insert into public.ai_disposition_reviews (org_id, property_id, conversation_id, source_inbound_message_id, disposition, ai_reason, status, resolved_at, classification_run_id)
+       values ($1, $2, $3, $4, 'wrong_number', 'x', 'auto_accepted', now(), $5)`,
+      [orgId, propertyId, conv, messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    expect((await undo(ownerId, id)).status).toBe("undone");
+  });
+
+  it("refuses when the homeowner contact is opted out or do-not-contact", async () => {
+    for (const col of ["sms_opted_out", "do_not_contact"]) {
+      const contactId = randomUUID();
+      await db.query("set local session_replication_role = replica");
+      await db.query(`insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`, [
+        contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`,
+      ]);
+      await db.query(`update public.contacts set ${col} = true where id = $1`, [contactId]);
+      await db.query(`update public.properties set homeowner_contact_id = $2 where id = $1`, [propertyId, contactId]);
+      await db.query("set local session_replication_role = origin");
+      await db.query("delete from public.jev_action_undo where property_id = $1", [propertyId]);
+      const id = await recordUndo();
+      await expect(undo(ownerId, id), col).rejects.toThrow(/STATE_CHANGED/);
+    }
+  });
+
+  it("refuses when the texting phone is in sms_phone_suppressions", async () => {
+    const phone = `+1555${Math.floor(1000000 + Math.random() * 8999999)}`;
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.messages set from_address = $2 where id = $1`, [messageId, phone]);
+    await db.query(`insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1, 'sms', $2, 'test')`, [orgId, phone]);
+    await db.query("set local session_replication_role = origin");
+    const id = await recordUndo();
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("refuses when the decision-context revision moved since the action was recorded (e.g. a newer inbound)", async () => {
+    const rev = (await db.query(`select decision_context_revision r from public.properties where id = $1`, [propertyId])).rows[0].r;
+    const id = await recordUndo({ revision: Number(rev) });
+    await db.query(`update public.properties set decision_context_revision = decision_context_revision + 1 where id = $1`, [propertyId]);
+    await expect(undo(ownerId, id)).rejects.toThrow(/STATE_CHANGED/);
+  });
+
+  it("succeeds when the recorded revision is unchanged", async () => {
+    const rev = (await db.query(`select decision_context_revision r from public.properties where id = $1`, [propertyId])).rows[0].r;
+    const id = await recordUndo({ revision: Number(rev) });
+    expect((await undo(ownerId, id)).status).toBe("undone");
+  });
+
+  it("the widened resolved_outcome check keeps opted_out/dnc: a human opted_out correction of a Jev nurture decision still works", async () => {
+    await db.query("set local session_replication_role = replica");
+    const contactId = randomUUID();
+    await db.query(`insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`, [
+      contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`,
+    ]);
+    await db.query(`update public.properties set homeowner_contact_id = $2, outreach_dispo = null where id = $1`, [propertyId, contactId]);
+    const runId = randomUUID();
+    await db.query(
+      `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, schema_version, policy_version, provider, model, decision, resolved_outcome)
+       values ($1, $2, $3, $4, $5, 'h', 1, 1, 'jev', 'm', '{}'::jsonb, 'nurture')`,
+      [runId, orgId, propertyId, randomUUID(), messageId],
+    );
+    const decisionId = randomUUID();
+    await db.query(
+      `insert into public.jev_lead_decisions (id, org_id, property_id, conversation_id, source_inbound_message_id, classification_run_id, proposed_outcome)
+       values ($1, $2, $3, $4, $5, $6, 'nurture')`,
+      [decisionId, orgId, propertyId, randomUUID(), messageId, runId],
+    );
+    await db.query("set local session_replication_role = origin");
+    for (const outcome of ["opted_out", "dnc"]) {
+      const r = await as(ownerId, async () =>
+        (await db.query(`select public.fn_apply_and_record_jev_lead_decision_correction($1, $2, 'human')`, [decisionId, outcome])).rows[0],
+      );
+      expect(JSON.stringify(r)).toMatch(/corrected|resolvedOutcome/);
+    }
+    const d = (await db.query(`select resolved_outcome from public.jev_lead_decisions where id = $1`, [decisionId])).rows[0];
+    expect(d.resolved_outcome).toBe("dnc");
+  });
+
+  describe("the undo record is written inside the apply RPC (no window for a human edit to be captured as 'applied')", () => {
+    async function thread(followUp: string | null = "2026-10-20T00:00:00Z", dispo: string | null = null) {
+      const contactId = randomUUID();
+      const pid = randomUUID();
+      const conv = randomUUID();
+      const mid = randomUUID();
+      const runId = randomUUID();
+      await db.query(
+        `insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'H', $3, 'mobile')`,
+        [contactId, orgId, `+1555${Math.floor(1000000 + Math.random() * 8999999)}`],
+      );
+      await db.query(
+        `insert into public.properties (id, org_id, address, state, status, outreach_dispo, follow_up_at, homeowner_contact_id)
+         values ($1, $2, 'Apply St', 'TX', 'prospect', $3, $4, $5)`,
+        [pid, orgId, dispo, followUp, contactId],
+      );
+      await db.query(
+        `insert into public.message_threads (org_id, channel, contact_id, property_id, conversation_id) values ($1, 'sms', $2, $3, $4)`,
+        [orgId, contactId, pid, conv],
+      );
+      await db.query(
+        `insert into public.messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body) values ($1, $2, $3, $4, $5, 'sms', 'inbound', 'x')`,
+        [mid, orgId, pid, conv, contactId],
+      );
+      await db.query(
+        `insert into public.sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, provider, model, schema_version, policy_version, state_hash, state_version, decision, resolved_outcome)
+         values ($1, $2, $3, $4, $5, 'jev', 'jev-1.13.0', 2, 'p', $6, 1, '{}'::jsonb, $7)`,
+        [runId, orgId, pid, conv, mid, randomUUID(), "wrong_number"],
+      );
+      return { pid, conv, mid, runId };
+    }
+    const svc = async <T,>(fn: () => Promise<T>) => {
+      await db.query("set local role service_role");
+      await db.query("select set_config('request.jwt.claim.role', 'service_role', true)");
+      try {
+        return await fn();
+      } finally {
+        await db.query("select set_config('request.jwt.claim.role', '', true)");
+        await db.query("reset role");
+      }
+    };
+    const rev = async (pid: string) =>
+      (await db.query("select decision_context_revision r from public.properties where id = $1", [pid])).rows[0].r;
+    const undoRow = async (mid: string) =>
+      (await db.query("select * from public.jev_action_undo where source_inbound_message_id = $1", [mid])).rows[0];
+
+    it("wrong_number apply records the exact prior state, applied follow-up and revision in one transaction; a later human edit makes undo refuse", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await svc(async () =>
+        db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'm', $4, 'this_property', $5)`, [
+          t.pid, t.conv, t.mid, await rev(t.pid), t.runId,
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      expect(row).toMatchObject({ action: "wrong_number", applied_dispo: "wrong_number", prior_outreach_dispo: null });
+      expect(new Date(row.prior_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(new Date(row.applied_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(String(row.recorded_revision)).toBe(String(await rev(t.pid)));
+      // a human edits the follow-up date AFTER Jev acted: undo must refuse, not overwrite
+      await db.query(`update public.properties set follow_up_at = '2026-11-05T00:00:00Z' where id = $1`, [t.pid]);
+      await expect(undo(ownerId, row.id)).rejects.toThrow(/STATE_CHANGED/);
+      const p = (await db.query("select outreach_dispo, follow_up_at from public.properties where id = $1", [t.pid])).rows[0];
+      expect(p.outreach_dispo).toBe("wrong_number");
+      expect(new Date(p.follow_up_at).toISOString()).toBe("2026-11-05T00:00:00.000Z");
+    });
+
+    it("no undo record for a non-Jev call (no run id) or when nothing changed", async () => {
+      const t = await thread(null, null);
+      await svc(async () =>
+        db.query(`select public.fn_apply_ai_disposition_with_review($1, $2, $3, 'wrong_number', 'm', $4)`, [t.pid, t.conv, t.mid, await rev(t.pid)]),
+      );
+      expect(await undoRow(t.mid)).toBeUndefined();
+    });
+
+    it("nurture auto-apply records prior state (incl. the cleared follow_up_at) atomically; undo restores it, and a human edit in between makes it refuse", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await db.query(`update public.sms_classification_runs set resolved_outcome = 'nurture' where id = $1`, [t.runId]);
+      await svc(async () =>
+        db.query(`select public.fn_auto_apply_jev_lead_decision($1, $2, $3, $4, 'nurture', 0.99, 0.9, 1, $5)`, [
+          t.pid, t.conv, t.mid, t.runId, await rev(t.pid),
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      expect(row).toMatchObject({ action: "nurture", applied_dispo: "nurture", prior_outreach_dispo: null, applied_follow_up_at: null });
+      expect(new Date(row.prior_follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+      expect(String(row.recorded_revision)).toBe(String(await rev(t.pid)));
+      // happy path restores
+      await undo(ownerId, row.id);
+      const p = (await db.query("select outreach_dispo, follow_up_at from public.properties where id = $1", [t.pid])).rows[0];
+      expect(p.outreach_dispo).toBeNull();
+      expect(new Date(p.follow_up_at).toISOString()).toBe("2026-10-20T00:00:00.000Z");
+    });
+
+    it("nurture: a human sets a follow-up after Jev cleared it -> undo refuses", async () => {
+      const t = await thread("2026-10-20T00:00:00Z", null);
+      await db.query(`update public.sms_classification_runs set resolved_outcome = 'nurture' where id = $1`, [t.runId]);
+      await svc(async () =>
+        db.query(`select public.fn_auto_apply_jev_lead_decision($1, $2, $3, $4, 'nurture', 0.99, 0.9, 1, $5)`, [
+          t.pid, t.conv, t.mid, t.runId, await rev(t.pid),
+        ]),
+      );
+      const row = await undoRow(t.mid);
+      await db.query(`update public.properties set follow_up_at = '2026-12-01T00:00:00Z' where id = $1`, [t.pid]);
+      await expect(undo(ownerId, row.id)).rejects.toThrow(/STATE_CHANGED/);
+    });
+  });
+});

@@ -6,7 +6,7 @@ import {
   hasActiveSandraAccess,
   isMissingHugoAccessColumnError,
 } from "@/lib/auth/access-state";
-import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
+import { hugoSessionCookieName, hugoSessionProofConfigured, verifyHugoSessionProof } from "@/lib/auth/hugo-session-proof";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
 
@@ -124,16 +124,23 @@ export async function updateSession(request: NextRequest) {
     return denyAndClear("domain");
   }
 
-  // Password UI removal is not an authorization boundary. Re-check the
-  // current session's provider proof on every protected request so a legacy
-  // password session or a different OAuth identity cannot enter Sandra.
+  // Verify session-bound provider evidence, never the mutable account-wide
+  // identity timestamps: signing in elsewhere must not invalidate this session.
   if (user && !isPublic && hugoRequired && !allowLocalE2ePasswordSession) {
+    if (!hugoSessionProofConfigured()) {
+      return new NextResponse("Authentication temporarily unavailable", {
+        status: 503, headers: { "Cache-Control": "no-store" },
+      });
+    }
     let hasHugoProof = false;
     try {
       const { data, error } = await supabase.auth.getClaims();
       hasHugoProof =
-        !error &&
-        hasCurrentHugoOAuthProof(data?.claims.amr, user.identities);
+        !error && Boolean(data?.claims) &&
+        await verifyHugoSessionProof(
+          request.cookies.get(hugoSessionCookieName(request))?.value,
+          data!.claims, user.id, request.nextUrl.origin,
+        );
     } catch {
       hasHugoProof = false;
     }

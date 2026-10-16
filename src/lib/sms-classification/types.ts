@@ -24,6 +24,14 @@ export type JevEscalationReason =
   | AiEscalationReason
   | "not_applicable"
   | "uncertain";
+export type JevReadyTimeframe =
+  | "within_30_days"
+  | "one_to_six_months"
+  | "six_to_twelve_months"
+  | "over_a_year"
+  | "not_stated"
+  | "uncertain";
+export type JevListingStatus = "listed" | "not_listed_or_not_stated" | "uncertain";
 export type JevReplyIntent = "positive" | "negative" | "neutral";
 
 /** Validated, provider-independent classification result. */
@@ -34,6 +42,14 @@ export type SmsClassificationDecision = {
   wrongScope: JevWrongScope | null;
   escalationReason: JevEscalationReason | null;
   replyIntent: JevReplyIntent | null;
+  /**
+   * Jev's `asked_how_number_obtained` answer: true = yes, false = no, null/absent
+   * = not answered or unreadable (treated as "no": fail closed).
+   */
+  askedHowNumberObtained?: boolean | null;
+  /** Nurture routing answers; null when the provider did not return a valid choice. */
+  readyTimeframe?: JevReadyTimeframe | null;
+  listingStatus?: JevListingStatus | null;
   replyIntentAvailable: boolean;
   /** Per-question probabilities as returned by the provider, keyed by question id. */
   probabilities: Record<string, Record<string, number>>;

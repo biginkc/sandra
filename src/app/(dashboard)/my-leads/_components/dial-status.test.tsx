@@ -82,13 +82,16 @@ describe("<DialStatus /> in flight", () => {
     expect(p.onLogOutcome).toHaveBeenCalledWith("p1", "ca1");
   });
 
-  it("shows the message and stops polling on {ok:false}", async () => {
-    statusMock.mockResolvedValue({ ok: false, code: "x", message: "Status unavailable." });
+  it("shows the message and keeps polling with backoff on {ok:false}, recovering on a good result", async () => {
+    statusMock.mockResolvedValueOnce({ ok: false, code: "x", message: "Status unavailable." });
+    statusMock.mockResolvedValue({ ok: true, status: mk({ state: "connected" }) });
     setup(flight());
     await tick(0);
     expect(screen.getByTestId("dial-status")).toHaveTextContent("Status unavailable.");
-    await tick(20_000);
     expect(statusMock).toHaveBeenCalledTimes(1);
+    await tick(5_000);
+    expect(statusMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("dial-status")).not.toHaveTextContent("Status unavailable.");
   });
 
   it("dismiss is available on terminal displays", async () => {

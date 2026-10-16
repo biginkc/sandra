@@ -16,6 +16,12 @@ export type TemplateRow = {
   content: string;
   category: string;
   system_managed: boolean;
+  /** Approved by an owner for automatic replies (Messages v2 Phase 4). Always
+   *  set by listTemplates; optional so other readers of this type (sequence
+   *  picker fixtures) need not carry it. Absent means not approved. */
+  approved_for_auto_send?: boolean;
+  approved_at?: string | null;
+  approved_by?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -99,7 +105,9 @@ export async function listTemplates(): Promise<Result<TemplateRow[]>> {
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("sms_templates")
-      .select("id, name, content, category, system_managed, created_at, updated_at")
+      .select(
+        "id, name, content, category, system_managed, approved_for_auto_send, approved_at, approved_by, created_at, updated_at",
+      )
       .is("deleted_at", null)
       .order("updated_at", { ascending: false });
     if (error) {

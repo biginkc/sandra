@@ -38,6 +38,7 @@ import {
 } from "@/components/table/use-table-url-state";
 
 import { type TemplateRow } from "./actions";
+import { AutoSendApproval } from "./auto-send-approval";
 import { DeleteTemplateButton } from "./delete-template-button";
 import {
   type TemplatesFilters,
@@ -50,6 +51,8 @@ type Props = {
   categories: string[];
   parsed: ParsedTableSearch<TemplatesFilters>;
   senderName: string;
+  /** Org owners can approve templates for automatic replies; others see it read-only. */
+  isOwner?: boolean;
 };
 
 const TEMPLATES_SORTABLE_COLUMNS = [
@@ -87,7 +90,7 @@ const BUILD_CONFIG = {
  *   2. Raw <table> → shadcn <Table> for visual continuity with
  *      /properties /lists /jobs.
  */
-export function TemplatesList({ templates, categories, parsed, senderName }: Props) {
+export function TemplatesList({ templates, categories, parsed, senderName, isOwner = false }: Props) {
   const [editingTemplate, setEditingTemplate] = useState<TemplateRow | null>(
     null,
   );
@@ -221,6 +224,7 @@ export function TemplatesList({ templates, categories, parsed, senderName }: Pro
                 Category
               </SortableHeader>
               <TableHead className="hidden md:table-cell">Preview</TableHead>
+              <TableHead>Auto-reply</TableHead>
               <SortableHeader<TemplatesSortableColumn>
                 column="updated_at"
                 current={ts.sort}
@@ -251,6 +255,9 @@ export function TemplatesList({ templates, categories, parsed, senderName }: Pro
                       <Skeleton className="h-4 w-72" />
                     </TableCell>
                     <TableCell>
+                      <Skeleton className="h-4 w-24" />
+                    </TableCell>
+                    <TableCell>
                       <Skeleton className="h-4 w-16" />
                     </TableCell>
                     <TableCell>
@@ -262,7 +269,7 @@ export function TemplatesList({ templates, categories, parsed, senderName }: Pro
             ) : visible.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={6}
                   className="text-muted-foreground py-12 text-center"
                 >
                   {templates.length === 0
@@ -291,6 +298,9 @@ export function TemplatesList({ templates, categories, parsed, senderName }: Pro
                   <TableCell className="text-muted-foreground hidden max-w-[300px] truncate md:table-cell">
                     {t.content.slice(0, 80)}
                     {t.content.length > 80 ? "…" : ""}
+                  </TableCell>
+                  <TableCell>
+                    <AutoSendApproval template={t} isOwner={isOwner} />
                   </TableCell>
                   <TableCell className="text-muted-foreground whitespace-nowrap text-xs">
                     <UpdatedAt iso={t.updated_at} />

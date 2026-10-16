@@ -8,7 +8,7 @@ import { applyMyLeadsChain, chainThrough } from './my-leads-housekeeping-fixture
 // transaction that is rolled back; applyP2 uses the shared applyMyLeadsChain probe/rollback/apply helper.
 
 export type P2Key = 'ledgerKeys' | 'intentTimeout' | 'phoneNumbers' | 'nativeMatching' | 'assignToLead' | 'artifactFetches'
-  | 'ackPrompts' | 'apiDial' | 'redaction' | 'callbacksDue';
+  | 'phoneBatched' | 'ackPrompts' | 'apiDial' | 'redaction' | 'callbacksDue';
 
 // Leaves the open transaction with the whole My Leads chain through `through` applied and nothing newer,
 // whatever the database held before (rolls back the present migrations newest first, then applies).
