@@ -1027,6 +1027,8 @@ export type Database = {
           min_confidence: number
           model: string
           nurture_auto_drip: boolean
+          nine_identity_reply: boolean
+          nine_confirmed_owner_drip: boolean
           nurture_drip_check_in_60_sequence_id: string | null
           nurture_drip_hot_book_appointment_sequence_id: string | null
           nurture_drip_listed_not_selling_sequence_id: string | null
@@ -1054,6 +1056,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           nurture_auto_drip?: boolean
+          nine_identity_reply?: boolean
+          nine_confirmed_owner_drip?: boolean
           nurture_drip_check_in_60_sequence_id?: string | null
           nurture_drip_hot_book_appointment_sequence_id?: string | null
           nurture_drip_listed_not_selling_sequence_id?: string | null
@@ -1081,6 +1085,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           nurture_auto_drip?: boolean
+          nine_identity_reply?: boolean
+          nine_confirmed_owner_drip?: boolean
           nurture_drip_check_in_60_sequence_id?: string | null
           nurture_drip_hot_book_appointment_sequence_id?: string | null
           nurture_drip_listed_not_selling_sequence_id?: string | null
@@ -8213,6 +8219,10 @@ export type Database = {
       // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
       fn_update_jev_automatic_classification: {
         Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
+      fn_set_ai_rule_switch: {
+        Args: { p_config_id: string; p_switch: string; p_value: string }
         Returns: Json
       }
       fn_set_nurture_auto_drip: {

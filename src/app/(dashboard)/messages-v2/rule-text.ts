@@ -17,8 +17,31 @@ export function formatConfidence(value: number): string {
   return three.endsWith("0") ? three.slice(0, -1) : three;
 }
 
+/**
+ * PR 4: the app's old eight-answer label names never reach the screen. Each rule is named
+ * with the plain words already used on the rules panel and the tape.
+ */
+const RULE_TITLES: Record<string, string> = {
+  new_lead: "Open to selling or wants an offer",
+  nurture: "Maybe later",
+  not_interested: "Not interested",
+  wrong_number: "Wrong person",
+  opted_out: "Asked to stop",
+  dnc: "Asked to stop",
+};
+
+/** Plain name for an eight-answer label, or null when the word is not one of them. */
+export function plainOutcome(word: string): string | null {
+  return RULE_TITLES[word] ?? null;
+}
+
+/** Plain name for a rule; "this rule" for anything not named above. */
+export function ruleTitle(outcome: string): string {
+  return RULE_TITLES[outcome] ?? "this rule";
+}
+
 export function formatRuleText(rule: LabelRule): string {
-  return `${rule.outcome}: auto-apply at native confidence ≥ ${formatConfidence(rule.minConfidence)} (${rule.automationEnabled ? "ON" : "OFF"})`;
+  return `${ruleTitle(rule.outcome)}: auto-apply at native confidence ≥ ${formatConfidence(rule.minConfidence)} (${rule.automationEnabled ? "ON" : "OFF"})`;
 }
 
 export type ParsedConfidence =

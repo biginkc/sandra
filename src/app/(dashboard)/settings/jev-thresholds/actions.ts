@@ -113,7 +113,7 @@ export async function setJevThreshold(
     if (!isAdminEmail(user?.email)) {
       return {
         ok: false,
-        error: { code: "FORBIDDEN", message: "Only admins can edit Jev thresholds." },
+        error: { code: "FORBIDDEN", message: "Only admins can edit Sandra's rules." },
       };
     }
 
@@ -128,7 +128,7 @@ export async function setJevThreshold(
       const message = error.message.includes("STALE_STATE")
         ? "Someone else already changed this threshold. Reload and try again."
         : error.message.includes("FORBIDDEN")
-          ? "Only an org owner can edit Jev thresholds."
+          ? "Only an org owner can edit Sandra's rules."
           : error.message;
       return { ok: false, error: { code: "JEV_THRESHOLD_UPDATE_FAILED", message } };
     }

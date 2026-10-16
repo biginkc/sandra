@@ -5,10 +5,10 @@ import { formatConfidence, formatRuleText, parseConfidenceInput } from "./rule-t
 describe("formatRuleText", () => {
   it("renders the outcome, the cutoff and on/off exactly", () => {
     expect(formatRuleText({ outcome: "not_interested", minConfidence: 0.9, automationEnabled: true })).toBe(
-      "not_interested: auto-apply at native confidence ≥ 0.90 (ON)",
+      "Not interested: auto-apply at native confidence ≥ 0.90 (ON)",
     );
     expect(formatRuleText({ outcome: "new_lead", minConfidence: 0.925, automationEnabled: false })).toBe(
-      "new_lead: auto-apply at native confidence ≥ 0.925 (OFF)",
+      "Open to selling or wants an offer: auto-apply at native confidence ≥ 0.925 (OFF)",
     );
   });
 });

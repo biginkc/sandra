@@ -53,7 +53,7 @@ beforeEach(() => {
   hotAssign.assign.mockReset();
   hotAssign.recordFailure.mockReset();
   hotAssign.recordHeld.mockReset();
-  hotAssign.recordHeld.mockResolvedValue(true);
+  hotAssign.recordHeld.mockResolvedValue("recorded");
   hotAssign.recordFailure.mockResolvedValue(true);
   hotAssign.assign.mockResolvedValue({ status: "assigned", assigneeUserId: "owner-jarrad" });
 });
@@ -2492,7 +2492,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_assign_failed");
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-fail", "hot_lead_assign_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-fail", "hot_lead_assign_failed", expect.any(String));
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -2519,7 +2519,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "hot_lead_event_failed" });
       expect(state.property.needs_human_attention).toBe(true);
       expect(state.property.last_ai_escalation_reason).toBe("hot_lead_event_failed");
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-unrecorded", "hot_lead_event_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-unrecorded", "hot_lead_event_failed", expect.any(String));
       expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
@@ -3327,7 +3327,7 @@ describe("dispatchAiResponse debounce", () => {
       expect(result).toEqual({ outcome: "escalated", reason: "jev_new_lead_promotion_failed" });
       expect(state.property.status).not.toBe("new_lead");
       expect(state.property.needs_human_attention).toBe(true);
-      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-new-lead-dnc-locked", "jev_new_lead_promotion_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-new-lead-dnc-locked", "jev_new_lead_promotion_failed", expect.any(String));
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -7652,6 +7652,17 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           } finally { vi.stubGlobal("fetch", originalFetch); }
         };
 
+        it("round 17: held lead, allow-list WITHOUT price phrases + '$150k' (Jev nurture/no escalation): not price-hot, nothing recorded", async () => {
+          const state = createMockState();
+          await heldRun(state, "inbound-r17-held-unlisted", { outcome: "unclear", reason: "not_applicable", body: "I'd take $150k", keywords: ["lawyer"] });
+          expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+        });
+        it("round 17: held lead, allow-list WITH 'price' + '$150k' (Jev unclear/no escalation): price-hot, recorded", async () => {
+          const state = createMockState();
+          await heldRun(state, "inbound-r17-held-listed", { outcome: "unclear", reason: "not_applicable", body: "I'd take $150k", keywords: ["price"] });
+          expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+        });
+
         it("sanity: an ungated held lead is still classified and recorded", async () => {
           const state = createMockState();
           const r = await heldRun(state, "inbound-gate-ok");
@@ -7793,6 +7804,56 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(row.outcome).toBe("skipped");
           });
 
+          // Round 16: a failed hot-text write never marks the inbound done.
+          it("recordHotTextOnHeldLead write_failed: claim released as error (lease expired), not completed", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("write_failed");
+            await heldRun(state, "inbound-r16-wf", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-wf") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.status).toBe("error");
+            expect(row.status).not.toBe("completed");
+            expect(row.error_message).toBe("hot_text_event_not_recorded");
+            expect(row.outcome).toBe("hot_text_write_failed");
+            expect(Date.parse(String(row.lease_expires_at))).toBeLessThanOrEqual(Date.now());
+          });
+          it("recordHotTextOnHeldLead skipped: claim completed with outcome skipped", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("skipped");
+            await heldRun(state, "inbound-r16-skip", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-skip") as Record<string, unknown>;
+            expect(row.status).toBe("completed");
+            expect(row.outcome).toBe("skipped");
+          });
+          it("replay after a released error claim: classified again and recorded, claim completed escalated", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockResolvedValueOnce("write_failed");
+            const first = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(first.classifierCalls).toBe(1);
+            expect((state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-replay") as Record<string, unknown>).status).toBe("error");
+            const second = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(second.classifierCalls).toBe(1);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(2);
+            const rows = state.aiClaims.filter((c) => c.inbound_message_id === "inbound-r16-replay") as Array<Record<string, unknown>>;
+            expect(rows).toHaveLength(1);
+            expect(rows[0].status).toBe("completed");
+            expect(rows[0].outcome).toBe("escalated");
+            // A third replay stops: completed.
+            const third = await heldRun(state, "inbound-r16-replay", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            expect(third.classifierCalls).toBe(0);
+            expect(hotAssign.recordHeld).toHaveBeenCalledTimes(2);
+          });
+          it("an exception thrown inside classify-only: claim released as error, not completed", async () => {
+            const state = createMockState();
+            hotAssign.recordHeld.mockRejectedValueOnce(new Error("boom"));
+            await heldRun(state, "inbound-r16-throw", { body: PRICE, outcome: "unclear", reason: "not_applicable" });
+            const row = state.aiClaims.find((c) => c.inbound_message_id === "inbound-r16-throw") as Record<string, unknown>;
+            expect(row).toBeTruthy();
+            expect(row.status).toBe("error");
+            expect(row.error_message).toBe("hot_text_event_not_recorded");
+            expect(Date.parse(String(row.lease_expires_at))).toBeLessThanOrEqual(Date.now());
+          });
+
           // Round 14: claim pre-check reads status + lease.
           it("expired 'processing' claim: reclaimed, classified once, hot_text recorded", async () => {
             const state = createMockState();
@@ -7911,17 +7972,17 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(state.property.last_ai_escalation_reason).not.toBe("keyword:price_offer");
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
-          it("round 15: 'He died, what's your price' + Jev wrong_number: held as main does (up-front distress keyword)", async () => {
+          it("round 15: 'He died, what's your price' + Jev wrong_number: held for a person under the NON-price reason, classify-only runs, wrong number wins so no hot alert", async () => {
             const state = createMockState();
             const r = await normalRun(state, "inbound-r15-died", { outcome: "wrong_number", body: "He died, what's your price", keywords: ["died", "price"] });
-            // matchEscalationKeyword reports the price tier when both are present; what matters is the UP-FRONT hold (no deferral, no classifier call).
-            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
-            expect(r.classifierCalls).toBe(0);
-            expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.deferred).toBeUndefined();
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:distressed_seller" });
+            expect(r.classifierCalls).toBe(1);
             expect(state.property.needs_human_attention).toBe(true);
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:distressed_seller");
+            expect(hotAssign.recordHeld).not.toHaveBeenCalled();
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
-          it("round 15 (pins current behaviour): property ai_responder_disabled + price text on the normal path: skipped, no Sandra hold, no flag, no reply", async () => {
+it("round 15 (pins current behaviour): property ai_responder_disabled + price text on the normal path: skipped, no Sandra hold, no flag, no reply", async () => {
             const state = createMockState();
             state.property.needs_human_attention = false;
             vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
@@ -7930,6 +7991,101 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
             expect(state.property.needs_human_attention).toBe(false);
             expect(state.property.last_ai_escalation_reason).toBeUndefined();
             expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          describe("round 18/19: only a responder-off property blocks a keyword hold", () => {
+            const BOTH = "How much? My lawyer is involved";
+            const expectNoHold = (state: MockState, r: { result: unknown; steps: Array<{ name: string; result?: string; detail?: Record<string, unknown> }> }) => {
+              expect((r.result as { outcome: string }).outcome).not.toBe("escalated");
+              expect(state.property.needs_human_attention).not.toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBeUndefined();
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+              expect(r.steps.find((x) => x.name === "escalation_keyword")?.result).toBe("skipped");
+            };
+            it("disabled property + price AND lawyer text: no hold, no flag, no alert, no send", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r18-disabled-both", { outcome: "unclear", propertyDisabled: true, body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              expectNoHold(state, r);
+            });
+            it("disabled property + a non-price keyword only (lawyer): no hold", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r18-disabled-lawyer", { outcome: "unclear", propertyDisabled: true, body: "my lawyer is involved", keywords: ["lawyer"] });
+              expectNoHold(state, r);
+            });
+            it("opted-out contact + 'my lawyer is involved' (round 19): keyword hold written as on main, nothing sent", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "no_consent" });
+              const r = await normalRun(state, "inbound-r19-optout-lawyer", { outcome: "unclear", body: "my lawyer is involved", keywords: ["lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.needs_human_attention).toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("responder-off property + 'my lawyer is involved' (round 19): no hold", async () => {
+              const state = createMockState();
+              state.property.needs_human_attention = false;
+              vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+              const r = await normalRun(state, "inbound-r19-off-lawyer", { outcome: "unclear", propertyDisabled: true, body: "my lawyer is involved", keywords: ["lawyer"] });
+              expectNoHold(state, r);
+              expect(r.steps.find((x) => x.name === "escalation_keyword")?.detail?.why).toBe("disabled_per_property");
+            });
+            it("mixed lawyer + price text, Jev unclear (round 19): legal_contract hold AND one hot_text recorded", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r19-mixed", { outcome: "unclear", body: "My lawyer is involved. What's your price?", keywords: ["price", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+              expect(hotAssign.recordHeld).toHaveBeenCalledWith(expect.anything(), PROPERTY_ID, "inbound-r19-mixed", expect.anything());
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("mixed lawyer + price text, Jev opted_out (round 19): legal_contract hold, no hot_text", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r19-mixed-oo", { outcome: "opted_out", body: "My lawyer is involved. What's your price?", keywords: ["price", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("enabled property + price AND lawyer text (Jev unclear): held under the NON-price reason keyword:legal_contract, exactly one hot alert", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r18-enabled-both", { outcome: "unclear", body: BOTH, keywords: ["price", "how much", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(state.property.needs_human_attention).toBe(true);
+              expect(state.property.last_ai_escalation_reason).toBe("keyword:legal_contract");
+              expect(hotAssign.recordHeld).toHaveBeenCalledTimes(1);
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+            it("enabled property + price AND lawyer text (Jev opted_out): held keyword:legal_contract, no hot alert", async () => {
+              const state = createMockState();
+              const r = await normalRun(state, "inbound-r18-enabled-both-oo", { outcome: "opted_out", body: "Stop asking how much. My lawyer is involved.", keywords: ["price", "how much", "lawyer"] });
+              expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+              expect(hotAssign.recordHeld).not.toHaveBeenCalled();
+              expect(sendSmsToContact).not.toHaveBeenCalled();
+            });
+          });
+          it("round 17: allow-list WITHOUT price phrases + '$150k' (Jev unclear): held keyword:numeric_amount (a person sees it), not hot", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r17-num-unlisted", { outcome: "unclear", keywords: ["lawyer", "callback"], body: "I'd take $150k" });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:numeric_amount" });
+            expect(state.property.needs_human_attention).toBe(true);
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:numeric_amount");
+            expect(r.steps.some((x) => x.name === "hot_wins")).toBe(false);
+            expect(r.classifierCalls).toBe(0);
+            expect(sendSmsToContact).not.toHaveBeenCalled();
+          });
+          it("round 17: allow-list WITH 'price' + '$150k' (Jev unclear): hot, held keyword:price_offer", async () => {
+            const state = createMockState();
+            const r = await normalRun(state, "inbound-r17-num-listed", { outcome: "unclear", keywords: ["price"], body: "I'd take $150k" });
+            expect(r.result).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
+            expect(state.property.last_ai_escalation_reason).toBe("keyword:price_offer");
             expect(sendSmsToContact).not.toHaveBeenCalled();
           });
           it("legacy (non-Jev) config keeps the up-front keyword gate", async () => {

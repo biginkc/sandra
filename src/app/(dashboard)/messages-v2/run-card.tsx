@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { chicagoMonthDay } from "./chicago-time";
 
+import { plainOutcome } from "./rule-text";
 import { readJevScores, replyPersona } from "./step-format";
 import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
 
@@ -41,13 +42,13 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           <span aria-hidden className="text-sky-600">
             ●
           </span>
-          <span className="font-medium">Jev</span>
+          <span className="font-medium">Sandra</span>
           {scores.length === 0 ? (
             <span className="text-muted-foreground">{step.name}</span>
           ) : (
             scores.map((s) => (
               <span key={s.label} className="tabular-nums">
-                {s.label} {s.pct}%
+                {stepWord(s.label)} {s.pct}%
               </span>
             ))
           )}
@@ -72,7 +73,7 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           <span aria-hidden className="text-emerald-600">
             ✔
           </span>
-          <span>{step.name}</span>
+          <span>{stepWord(step.name)}</span>
           {step.result !== "applied" && (
             <span className="text-muted-foreground">({step.result})</span>
           )}
@@ -120,7 +121,7 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           className={cn(base, "text-muted-foreground")}
         >
           <span aria-hidden>○</span>
-          <span>would → {step.name}</span>
+          <span>would → {stepWord(step.name)}</span>
         </li>
       );
   }
@@ -143,6 +144,11 @@ export function openThreadHref(
 }
 
 /** Action steps Jev applies on its own that a person can reverse. */
+/** Step and score words: the old eight-answer labels show in plain words (PR 4). */
+function stepWord(word: string): string {
+  return plainOutcome(word) ?? word;
+}
+
 const UNDOABLE_ACTION_STEPS = new Set(["wrong_number", "not_interested", "apply_nurture"]);
 
 export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean {

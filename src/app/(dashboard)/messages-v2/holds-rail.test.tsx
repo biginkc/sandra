@@ -203,7 +203,7 @@ describe("HoldsRail degraded states", () => {
       />,
     );
     expect(screen.getByTestId("holds-unavailable")).toHaveTextContent(
-      "Holds unavailable — Jev decision query failed",
+      "Holds unavailable — Sandra decision query failed",
     );
     expect(screen.queryByText("No open holds.")).toBeNull();
   });

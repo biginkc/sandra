@@ -55,6 +55,11 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/supabase/client", () => ({ createClient: () => mocks.client }));
+const houses = vi.hoisted(() => ({ load: vi.fn(async (_ids: string[]) => ({}) as Record<string, unknown>) }));
+vi.mock("@/lib/leads/homeowner-houses-action", () => ({
+  loadHomeownerHousesAction: (ids: string[]) => houses.load(ids),
+  loadMoreHomeownerHousesAction: async () => ({ ok: false, message: "Not in the test." }),
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: mocks.refresh }),
 }));
@@ -131,6 +136,8 @@ async function mount(p = props()) {
 }
 
 beforeEach(() => {
+  houses.load.mockReset();
+  houses.load.mockImplementation(async () => ({}));
   mocks.handlers.length = 0;
   mocks.refresh.mockClear();
   mocks.client.realtime.setAuth.mockClear();
@@ -173,8 +180,8 @@ describe("MessagesV2View rules panel", () => {
   it("owners get a Change button on switches whose rule is known; others stay read-only", async () => {
     await mount({ ...props(), badges: ruleBadges });
     const panel = await openRules();
-    expect(within(panel).getByRole("button", { name: "Edit rule for nurture" })).toBeInTheDocument();
-    expect(within(panel).queryByRole("button", { name: "Edit rule for wrong_number" })).not.toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Edit rule for Maybe later" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Edit rule for Wrong person" })).not.toBeInTheDocument();
   });
 
   it("Acquisitions members see the switches read-only", async () => {
@@ -1552,5 +1559,39 @@ describe("MessagesV2View", () => {
       render(<MessagesV2View {...props()} />);
       expect(screen.queryByTestId("replay-batch-badge")).toBeNull();
     });
+  });
+});
+
+describe("MessagesV2View Owns N houses", () => {
+  const two = {
+    count: 2,
+    houses: [
+      { propertyId: "p1", address: "1 Main St", assignedUserId: null, isMine: false },
+      { propertyId: "p2", address: "2 Main St", assignedUserId: null, isMine: false },
+    ],
+  };
+
+  it("reads every homeowner on the tape and the waiting pile in one batched call each, never per card", async () => {
+    houses.load.mockImplementation(async (ids: string[]) => (ids.includes("c-multi") ? { "c-multi": two } : {}));
+    const runs = [
+      run("r1", { contact_id: "c-multi" }),
+      run("r2", { contact_id: "c-multi" }),
+      run("r3", { contact_id: "c-one" }),
+    ];
+    await mount(props(runs, [openHold("h1", run("r4", { contact_id: "c-multi" })), openHold("h2", run("r5", { contact_id: "c-two" }))]));
+    await waitFor(() => expect(screen.getAllByTestId("multi-house-badge").length).toBeGreaterThan(0));
+    // Tape: one call with every distinct homeowner; waiting pile: one call with its own.
+    expect(houses.load).toHaveBeenCalledTimes(2);
+    const calls = houses.load.mock.calls.map(([ids]) => [...ids].sort());
+    expect(calls).toContainEqual(["c-multi", "c-one"]);
+    expect(calls).toContainEqual(["c-multi", "c-two"]);
+    for (const badge of screen.getAllByTestId("multi-house-badge")) expect(badge).toHaveTextContent("Owns 2 houses");
+  });
+
+  it("shows no badge when the read fails or the homeowner owns one house", async () => {
+    houses.load.mockRejectedValue(new Error("down"));
+    await mount(props([run("r1", { contact_id: "c-multi" })]));
+    await waitFor(() => expect(houses.load).toHaveBeenCalled());
+    expect(screen.queryByTestId("multi-house-badge")).not.toBeInTheDocument();
   });
 });

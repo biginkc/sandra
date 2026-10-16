@@ -33,6 +33,7 @@ import {
 import { loadReplayBatchId } from "./replay-batch";
 import { loadTapeDayAction } from "./tape-actions";
 import { loadRunThreads } from "./tape-data";
+import { setAiRuleSwitch, type AiRuleSwitchState } from "./threshold-actions";
 import type { NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import type { WaitingSnapshot } from "./hold-list";
 import type { OpenHold, PipelineCoverage, RunWithSteps } from "./types";
@@ -169,6 +170,46 @@ async function loadClassifierEngine(supabase: LooseSupabase, orgId: string): Pro
   }
 }
 
+/** PR 4 switch state (read by every viewer of the page; writes are owner-only); null (hidden) on any failure, so nothing is shown that was not read. */
+async function loadRuleSwitches(supabase: LooseSupabase, orgId: string): Promise<AiRuleSwitchState | null> {
+  try {
+    const { data, error } = await (supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          eq: (c: string, v: unknown) => {
+            eq: (c: string, v: unknown) => {
+              maybeSingle: () => PromiseLike<{ data: Record<string, unknown> | null; error: unknown }>;
+            };
+          };
+        };
+      };
+    })
+      .from("ai_responder_configs")
+      .select("id, nine_identity_reply, nine_confirmed_owner_drip, classifier_engine")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error || !data) return null;
+    const { id, nine_identity_reply, nine_confirmed_owner_drip, classifier_engine } = data;
+    if (
+      typeof id !== "string" ||
+      typeof nine_identity_reply !== "boolean" ||
+      typeof nine_confirmed_owner_drip !== "boolean" ||
+      (classifier_engine !== "outcome_v1" && classifier_engine !== "nine_questions")
+    ) {
+      return null;
+    }
+    return {
+      configId: id,
+      nineIdentityReply: nine_identity_reply,
+      nineConfirmedOwnerDrip: nine_confirmed_owner_drip,
+      classifierEngine: classifier_engine,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** 7-day scorecard for first paint; null lets the client card load/retry itself. */
 async function loadScorecard(
   supabase: LooseSupabase,
@@ -230,7 +271,7 @@ export default async function MessagesV2Page({
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
-  const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip, classifierEngine] = await Promise.all([
+  const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip, classifierEngine, ruleSwitches] = await Promise.all([
     loadMessagesV2Page(supabase, orgId),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
@@ -238,6 +279,8 @@ export default async function MessagesV2Page({
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
     loadClassifierEngine(supabase, orgId),
+    // Read-only for non-owners (the panel shows the state; only owners get buttons and the engine row).
+    loadRuleSwitches(supabase, orgId),
   ]);
   const data = loaded;
   // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.
@@ -272,6 +315,8 @@ export default async function MessagesV2Page({
         isOwner={isOwner}
         replyGeneration={replySetting}
         classifierEngine={classifierEngine}
+        ruleSwitches={ruleSwitches}
+        setRuleSwitch={setAiRuleSwitch}
         setReplyGeneration={setReplyGenerationAction}
         undoJevAction={undoJevAppliedAction}
         findJevUndo={findJevUndoAction}

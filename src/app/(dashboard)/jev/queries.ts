@@ -398,6 +398,8 @@ export async function getReviewJevData(page = 0): Promise<ReviewJevData> {
       )
       .eq("provider", "jev")
       .or("fallback_reason.not.is.null,resolved_outcome.in.(unclear,bad_number)")
+      // Nine-question failures are not eight-answer reviews (they wait on /messages-v2). NOT NULL column.
+      .neq("schema_version", "nine_questions_v1")
       .order("created_at", { ascending: false })
       .range(from, to),
   ]);

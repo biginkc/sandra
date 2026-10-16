@@ -73,6 +73,38 @@ describe("dispatch evidence steps", () => {
     }
   });
 
+  describe("jevAutomatic keyword escalation", () => {
+    const kws = ["price", "how much", "lawyer"];
+    it("price-only text writes nothing and traces a deferred pass", async () => {
+      const result = await applyKeywordEscalation(updateClient(), {
+        propertyId: "p-1", inboundBody: "How much?", escalationKeywords: kws, runContext: ctx, jevAutomatic: true,
+      });
+      expect(result).toEqual({ escalated: false });
+      expect(recordLeadEvent).not.toHaveBeenCalled();
+      expect(stepsOf().map((s) => `${s.kind}:${s.name}:${s.result}`)).toEqual(["gate:escalation_keyword:pass"]);
+      expect(stepsOf()[0].detail).toMatchObject({ deferred: "shared_hot_decision" });
+    });
+    it("mixed price + legal text holds under the NON-price reason, never keyword:price_offer", async () => {
+      const result = await applyKeywordEscalation(updateClient(), {
+        propertyId: "p-1", inboundBody: "How much? My lawyer is involved", escalationKeywords: kws, runContext: ctx, jevAutomatic: true,
+      });
+      expect(result).toEqual({ escalated: true, reason: "keyword:legal_contract" });
+      expect(recordLeadEvent).toHaveBeenCalledTimes(1);
+    });
+    it("non-Jev: the same mixed text keeps the up-front price hold", async () => {
+      const result = await applyKeywordEscalation(updateClient(), {
+        propertyId: "p-1", inboundBody: "How much? My lawyer is involved", escalationKeywords: kws, runContext: ctx,
+      });
+      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer" });
+    });
+    it("non-Jev: price-only still holds keyword:price_offer", async () => {
+      const result = await applyKeywordEscalation(updateClient(), {
+        propertyId: "p-1", inboundBody: "How much?", escalationKeywords: kws, runContext: ctx,
+      });
+      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer" });
+    });
+  });
+
   it("records a pass gate when no keyword matches", async () => {
     const result = await applyKeywordEscalation(updateClient(), {
       propertyId: "p-1",

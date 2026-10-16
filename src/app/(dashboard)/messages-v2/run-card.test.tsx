@@ -51,7 +51,7 @@ describe("RunCard", () => {
     expect(screen.getByText("not interested, please stop")).toBeInTheDocument();
   });
 
-  it("renders the Jev judgment with its top scores", () => {
+  it("renders the Sandra judgment with its top scores", () => {
     const run = baseRun({
       steps: [
         step(1, {
@@ -66,8 +66,8 @@ describe("RunCard", () => {
     });
     render(<RunCard run={run} label={label} />);
     const line = screen.getByTestId("step-jev");
-    expect(within(line).getByText(/nurture 91%/)).toBeInTheDocument();
-    expect(within(line).getByText(/not_interested 6%/)).toBeInTheDocument();
+    expect(within(line).getByText(/Maybe later 91%/)).toBeInTheDocument();
+    expect(within(line).getByText(/Not interested 6%/)).toBeInTheDocument();
   });
 
   it("renders applied actions, a sent reply with persona, and blocked gates", () => {

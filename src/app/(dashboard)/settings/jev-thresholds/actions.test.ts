@@ -90,7 +90,7 @@ describe("setJevThreshold", () => {
     });
     expect(result).toEqual({
       ok: false,
-      error: { code: "FORBIDDEN", message: "Only admins can edit Jev thresholds." },
+      error: { code: "FORBIDDEN", message: "Only admins can edit Sandra's rules." },
     });
     expect(mocks.rpcCalls).toHaveLength(0);
   });

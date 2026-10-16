@@ -14,6 +14,8 @@ export type ReplyDelayConfig = {
   delayMaxSeconds: number;
   escalationKeywords: string[];
   propertyState: string | null;
+  /** Jev automatic (classifier_provider 'jev', classifier_mode 'automatic'). */
+  jevAutomatic?: boolean;
 };
 
 export type ComputeReplyDelayInput = {
@@ -62,7 +64,7 @@ export async function loadAiReplyDelayConfig(
   const { data: config, error: configError } = await supabase
     .from("ai_responder_configs")
     .select(
-      "reply_delay_min_seconds, reply_delay_max_seconds, escalation_keywords",
+      "reply_delay_min_seconds, reply_delay_max_seconds, escalation_keywords, classifier_provider, classifier_mode",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -74,6 +76,7 @@ export async function loadAiReplyDelayConfig(
     delayMaxSeconds: config.reply_delay_max_seconds,
     escalationKeywords: config.escalation_keywords,
     propertyState: property.state,
+    jevAutomatic: config.classifier_provider === "jev" && config.classifier_mode === "automatic",
   };
 }
 

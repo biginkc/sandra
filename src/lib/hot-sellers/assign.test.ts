@@ -10,7 +10,7 @@ vi.mock("@/lib/events", () => ({
 }));
 vi.mock("@/app/(dashboard)/leads/assignment-safety", () => ({ validateActiveAssigneeForProperties: vi.fn() }));
 
-import { recordHotTextOnHeldLead } from "./assign";
+import { recordHotFailure, recordHotTextOnHeldLead } from "./assign";
 import { hotFlagKey } from "./hot";
 
 const ORG = "org-1";
@@ -63,13 +63,13 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
 
   it("sent to the current owner: covered", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m1", "price_or_offer", {})).toBe(true);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m1", "price_or_offer", {})).toBe("recorded");
     expect(covered()).toBe(true);
   });
 
   it("sent to a PREVIOUS owner only (owner changed to B, B has no rows yet) and the hold will alert B (flag after alerts_since, within 7 days): covered", async () => {
     const db = makeDb({ owners: [OWNER_B], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m2", "price_or_offer", {})).toBe(true);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m2", "price_or_offer", {})).toBe("recorded");
     expect(covered()).toBe(true);
     expect(events.rows.at(-1)?.payload.to).toBe(OWNER_B);
   });
@@ -138,13 +138,63 @@ describe("isCoveredByHotHold via recordHotTextOnHeldLead: covered only by a sent
 
   it("owner unresolved (two active owners, no pick): nothing recorded, never covered", async () => {
     const db = makeDb({ owners: [OWNER_A, OWNER_B], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m4", "price_or_offer", {})).toBe(false);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m4", "price_or_offer", {})).toBe("skipped");
     expect(events.rows).toHaveLength(0);
   });
 
   it("explicit pick naming a non-owner (owner null): nothing recorded", async () => {
     const db = makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }] });
-    expect(await recordHotTextOnHeldLead(db, PROP, "m5", "price_or_offer", { HOT_LEAD_ASSIGNEE_USER_ID: "someone-else" })).toBe(false);
+    expect(await recordHotTextOnHeldLead(db, PROP, "m5", "price_or_offer", { HOT_LEAD_ASSIGNEE_USER_ID: "someone-else" })).toBe("skipped");
     expect(events.rows).toHaveLength(0);
+  });
+});
+
+describe("recordHotFailure: shares the hold's hot_flag key only when THIS failure set the flag", () => {
+  const REASON = "hot_lead_assign_failed";
+  const flagged = { last_ai_escalation_reason: REASON };
+  const flagAtOf = () => events.rows.at(-1)?.payload.flag_at;
+
+  beforeEach(() => {
+    events.rows.length = 0;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("ourFlagAt equals the stored flag time: the event carries flag_at (shares hot_flag:<property>:<flagAt>)", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [], property: flagged }), PROP, "in-1", REASON, FLAG_AT);
+    expect(flagAtOf()).toBe(FLAG_AT);
+    expect(events.rows.at(-1)?.payload.covered_by_hold).toBe(false);
+  });
+
+  it("same instant in a different textual form still counts as ours", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [], property: { ...flagged, last_ai_escalation_at: "2026-10-15T10:00:00+00:00" } }), PROP, "in-1b", REASON, FLAG_AT);
+    expect(flagAtOf()).toBe("2026-10-15T10:00:00+00:00");
+  });
+
+  it("ourFlagAt null (the flag was already set by something else): own event, no flag_at", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [], property: flagged }), PROP, "in-2", REASON, null);
+    expect(flagAtOf()).toBeNull();
+  });
+
+  it("ourFlagAt omitted: own event, no flag_at", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [], property: flagged }), PROP, "in-3", REASON);
+    expect(flagAtOf()).toBeNull();
+  });
+
+  it("another inbound's flag with the SAME reason but a different time never lends its key", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [], property: flagged }), PROP, "in-4", REASON, "2026-10-15T09:00:00.000Z");
+    expect(flagAtOf()).toBeNull();
+  });
+
+  it("not ours but the other hold's alert was SENT to the owner: covered_by_hold true", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "sent", recipient_user_id: OWNER_A }], property: flagged }), PROP, "in-5", REASON, null);
+    expect(flagAtOf()).toBeNull();
+    expect(events.rows.at(-1)?.payload.covered_by_hold).toBe(true);
+  });
+
+  it("not ours and the other hold's alert is only pending: NOT covered", async () => {
+    await recordHotFailure(makeDb({ owners: [OWNER_A], deliveries: [{ hold_key: KEY, status: "pending", recipient_user_id: OWNER_A }], property: flagged }), PROP, "in-6", REASON, null);
+    expect(events.rows.at(-1)?.payload.covered_by_hold).toBe(false);
   });
 });
