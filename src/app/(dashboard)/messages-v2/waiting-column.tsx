@@ -14,6 +14,7 @@ import {
   applyResults,
   cardFlags,
   commitIfCurrent,
+  isCurrent,
   loadedCard,
   type CardRecord,
   type CardTable,
@@ -311,6 +312,10 @@ export function WaitingColumn({
     }
     if (!h) return undefined;
     // No snapshot entry (tests without a snapshot, or a pinned card outside it): pinned to the card as it loaded.
+    return cardPins(h);
+  };
+  /** A card's pins as its own body shows them. */
+  const cardPins = (h: OpenHold<RunWithSteps>): Pinned => {
     return {
       pinnedDraft: h.draft?.id ?? null,
       pinnedDraftSendable: h.draft?.sendable === true,
@@ -388,6 +393,38 @@ export function WaitingColumn({
   const hiddenUnverified = older.unverified ?? unverified ?? 0;
   const canLoadMore = !!loadOlder && notLoadedYet > 0;
 
+  /**
+   * A slice that finished after a refresh: keep each card only if the CURRENT snapshot still lists it below the
+   * first page and its own body matches that entry's pins (else it stays "not shown yet" and is fetched again).
+   * Kept cards start "checking" (actions off) and are re-checked now, exactly like revealed cards.
+   */
+  const landLateSlice = (data: { holds: OpenHold<RunWithSteps>[]; labels: Array<[string, RunLabel]> }) => {
+    const L = latestRef.current;
+    if (!L) return;
+    const accepted = data.holds.filter((h) => {
+      const now = L.inSnapshot(h.id) && !L.firstPage.has(h.id) ? L.pinsOf(h.id, h) : undefined;
+      return !!now && PIN_KEYS.every((k) => L.cardPins(h)[k] === now[k]);
+    });
+    if (!accepted.length) return;
+    const key = refreshKeyRef.current;
+    const stamp: Stamp = { snapshotKey: key, seq: ++cardCheckSeq.current };
+    const byId = new Map(accepted.map((h) => [h.id, h] as const));
+    commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) =>
+      prev.forKey !== key
+        ? prev
+        : {
+            ...prev,
+            cards: new Map([...prev.cards, ...accepted.filter((h) => !prev.missing.has(h.id)).map((h) => [h.id, h] as const)]),
+            labels: new Map([...prev.labels, ...data.labels.filter(([id]) => byId.has(id))]),
+          },
+    );
+    commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) =>
+      applyResults(t, stamp, accepted.map((h) => [h.id, "checking"] as const), (id) => L.pinsOf(id, byId.get(id))),
+    );
+    commitIfCurrent<number>(stamp, nowState, setVisible, (v) => v + PAGE);
+    checkNowRef.current?.([...byId.keys()]);
+  };
+
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
       // R-A on reveal: cards going hidden -> shown start "checking" (actions off) and are re-checked right now;
@@ -408,7 +445,12 @@ export function WaitingColumn({
       const sliceSeq = ++cardCheckSeq.current;
       const stamp: Stamp = { snapshotKey: requestKey, seq: sliceSeq };
       const res = await loadOlder({ ids });
-      if (res.ok) {
+      if (res.ok && !isCurrent(stamp, nowState())) {
+        // A refresh landed while this slice was in flight (server calls queue one at a time, so a slow slice can
+        // outlive its snapshot). Discarding it lost the click and left Show older doing nothing until clicked
+        // again. Land it in the CURRENT snapshot instead, under the same rule a refresh uses to keep a card.
+        landLateSlice(res.data);
+      } else if (res.ok) {
         // Functional and monotonic: merge into the LATEST state (a re-check may have removed cards meanwhile);
         // `missing` only grows within a snapshot, so a removed card is never brought back by a later slice.
         commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) => {
@@ -458,12 +500,20 @@ export function WaitingColumn({
   /** Runs an immediate re-check of exactly these ids (set by the re-check effect). */
   const checkNowRef = useRef<((ids: readonly string[]) => void) | null>(null);
   const olderRef = useRef(older);
+  /** This render's snapshot view, for a slice that lands after a refresh (its closure holds the old snapshot). */
+  const latestRef = useRef<{
+    pinsOf: typeof pinsOf;
+    cardPins: typeof cardPins;
+    inSnapshot: (id: string) => boolean;
+    firstPage: Set<string>;
+  } | null>(null);
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
     liveRef.current = live;
     // The pinned My Leads card is always re-checked too, whether or not it is in the snapshot.
     shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])];
     tableRef.current = table;
+    latestRef.current = { pinsOf, cardPins, inSnapshot: (id) => entryById.has(id), firstPage: new Set(holds.map((h) => h.id)) };
     olderRef.current = older;
     refreshKeyRef.current = refreshKey;
   });
@@ -522,7 +572,9 @@ export function WaitingColumn({
     };
     const id = window.setInterval(check, 60_000);
     // Older cards kept across a refresh are paused: re-check the shown ones now rather than in 60 seconds.
-    const kept = shownIdsRef.current.filter((cardId) => olderRef.current.cards.has(cardId));
+    // At most ONE server call (100 ids): server calls queue one at a time, and re-checking thousands of kept cards
+    // at once would hold a Show older click behind them. The rest are covered by the 60-second re-check.
+    const kept = shownIdsRef.current.filter((cardId) => olderRef.current.cards.has(cardId)).slice(0, 100);
     if (kept.length) void check(kept);
     const onFocus = () => void check();
     window.addEventListener("focus", onFocus);
