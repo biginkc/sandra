@@ -1,24 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense } from "react";
 import Link from "next/link";
 
 import type { LeadMediaPresentation } from "./lead-media";
+import {
+  LeadMediaImage,
+  LeadMediaImagePlaceholder,
+} from "./lead-media-image";
 
 const actionFocusClasses =
   "[&_button]:focus-visible:ring-white [&_button]:focus-visible:ring-offset-2 [&_button]:focus-visible:ring-offset-slate-950 [&_a]:rounded-md [&_a]:outline-none [&_a]:focus-visible:ring-2 [&_a]:focus-visible:ring-white [&_a]:focus-visible:ring-offset-2 [&_a]:focus-visible:ring-offset-slate-950 [&>span]:focus-within:overflow-visible";
 
-export function LeadMediaHero({
-  media,
-  address,
-  locationLine,
-  homeownerName,
-  ownerBadge,
-  collectionHref = "/leads",
-  collectionLabel = "Leads",
-  actions,
-}: {
-  media: LeadMediaPresentation;
+type LeadMediaHeroProps = {
+  /** Kept for callers that already resolved media before rendering the hero. */
+  media?: LeadMediaPresentation;
+  /** Server-resolved imagery can stream into this stable client shell. */
+  mediaSlot?: React.ReactNode;
   address: string;
   locationLine: string;
   homeownerName: string | null;
@@ -27,55 +25,22 @@ export function LeadMediaHero({
   collectionHref?: "/leads" | "/properties" | "/my-leads";
   collectionLabel?: "Leads" | "Search" | "My Leads";
   actions: React.ReactNode;
-}) {
+};
+
+export function LeadMediaHero({
+  media,
+  mediaSlot,
+  address,
+  locationLine,
+  homeownerName,
+  ownerBadge,
+  collectionHref = "/leads",
+  collectionLabel = "Leads",
+  actions,
+}: LeadMediaHeroProps) {
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");
-  const mediaIdentity =
-    media.kind === "flat" ? `flat:${media.reason}` : media.images.small;
-  const [failureState, setFailureState] = useState<{
-    mediaIdentity: string;
-    failedImage: "streetView" | "aerial" | null;
-  }>({ mediaIdentity, failedImage: null });
-  const failedImage =
-    failureState.mediaIdentity === mediaIdentity
-      ? failureState.failedImage
-      : null;
 
-  const renderedKind =
-    media.kind === "flat"
-      ? "flat"
-      : media.kind === "streetView" && failedImage === null
-        ? "streetView"
-        : failedImage === "aerial"
-          ? "flat"
-          : "aerial";
-  const imageRef = useRef<HTMLImageElement | null>(null);
-  const reconcileImageFailure = useCallback(() => {
-    setFailureState((current) => {
-      const failedImageForCurrentRender =
-        renderedKind === "streetView" ? "streetView" : "aerial";
-
-      if (
-        current.mediaIdentity === mediaIdentity &&
-        current.failedImage === failedImageForCurrentRender
-      ) {
-        return current;
-      }
-
-      return {
-        mediaIdentity,
-        failedImage: failedImageForCurrentRender,
-      };
-    });
-  }, [mediaIdentity, renderedKind]);
-
-  useEffect(() => {
-    const image = imageRef.current;
-    if (image?.complete && image.naturalWidth === 0) {
-      reconcileImageFailure();
-    }
-  }, [mediaIdentity, reconcileImageFailure, renderedKind]);
-
-  if (renderedKind === "flat") {
+  if (media?.kind === "flat" && !mediaSlot) {
     return (
       <section
         className="border-border bg-card border-b px-4 py-3.5 md:px-6"
@@ -100,100 +65,46 @@ export function LeadMediaHero({
             </h1>
             <p className="text-muted-foreground mt-1 text-[13px] break-words">
               {description || "—"}
-              {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
+              {ownerBadge ? (
+                <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span>
+              ) : null}
               {" "}· Street View unavailable
             </p>
           </div>
-          <div
-            className={`flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_:is(button,a)]:min-h-9 ${actionFocusClasses}`}
-            data-testid="lead-media-actions"
-            role="group"
-            aria-label="Lead actions"
-          >
-            {actions}
-          </div>
+          <HeroActions
+            actions={actions}
+            variant="flat"
+            className="[&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white"
+          />
         </div>
       </section>
     );
   }
 
-  const renderedImages =
-    renderedKind === "streetView"
-      ? media.kind === "streetView"
-        ? media.images
-        : null
-      : media.kind === "streetView"
-        ? media.aerialImages
-        : media.kind === "aerial"
-          ? media.images
-          : null;
-  if (!renderedImages) return null;
+  const mediaContent = mediaSlot ? (
+    <Suspense fallback={<LeadMediaImagePlaceholder />}>
+      {mediaSlot}
+    </Suspense>
+  ) : media ? (
+    <LeadMediaImage media={media} address={address} />
+  ) : (
+    <LeadMediaImagePlaceholder />
+  );
 
   const mediaLabel =
-    renderedKind === "streetView"
+    media?.kind === "streetView"
       ? `Street View of ${address}`
-      : `Aerial view of ${address}`;
+      : media?.kind === "aerial"
+        ? `Aerial view of ${address}`
+        : `Lead media for ${address}`;
 
   return (
     <section
       className="relative isolate overflow-hidden border-b border-white/10 bg-slate-900"
-      data-testid={`lead-media-${renderedKind === "streetView" ? "street-view" : "aerial"}`}
-      data-media-fallback-reason={
-        renderedKind === "aerial"
-          ? media.kind === "aerial"
-            ? media.fallbackReason
-            : "street-image-error"
-          : undefined
-      }
+      data-testid="lead-media-hero"
       aria-label={mediaLabel}
     >
-      <div
-        className="relative h-[210px] overflow-hidden bg-slate-900 sm:h-[230px] lg:h-[250px]"
-        data-testid="lead-media-image-frame"
-      >
-        <picture className="block h-full bg-slate-900" data-testid="lead-media-picture">
-        <source media="(min-width: 1792px)" srcSet={renderedImages.ultra} />
-        <source
-          media="(min-width: 1536px)"
-          srcSet={renderedImages.extraLarge}
-        />
-        <source media="(min-width: 1440px)" srcSet={renderedImages.large} />
-        <source media="(min-width: 1280px)" srcSet={renderedImages.wide} />
-        <source media="(min-width: 1024px)" srcSet={renderedImages.desktop} />
-        <source media="(min-width: 768px)" srcSet={renderedImages.tablet} />
-        <source
-          media="(min-width: 640px)"
-          srcSet={renderedImages.smallTablet}
-        />
-        <source media="(min-width: 390px)" srcSet={renderedImages.mobile} />
-        {/* Responsive sources are intentionally taller than this frame. Keep
-            the image bottom-aligned so full-bleed trimming affects only the
-            top of the scene, never Google's bottom attribution edges. */}
-        <img
-          ref={imageRef}
-          src={renderedImages.small}
-          alt=""
-          className="pointer-events-none absolute inset-0 h-full w-full bg-slate-900 object-cover object-bottom"
-          loading="eager"
-          fetchPriority="high"
-          referrerPolicy="strict-origin-when-cross-origin"
-          draggable={false}
-          data-testid="lead-media-image"
-          onError={reconcileImageFailure}
-        />
-        </picture>
-      </div>
-      {process.env.VERCEL_ENV === "preview" &&
-      media.kind === "aerial" &&
-      media.fallbackReason === "metadata-failure" ? (
-        <p
-          className="absolute top-2 left-2 z-20 max-w-[calc(100%-1rem)] rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-950 shadow"
-          role="status"
-          data-testid="lead-media-preview-misconfiguration"
-        >
-          Street View metadata unavailable — check preview configuration.
-        </p>
-      ) : null}
+      {mediaContent}
       <div
         className="relative z-10 flex flex-col gap-3 bg-gradient-to-b from-slate-900 to-slate-950 px-4 py-3.5 text-white sm:px-6 lg:flex-row lg:items-end lg:justify-between"
         data-testid="lead-media-overlay"
@@ -219,18 +130,39 @@ export function LeadMediaHero({
           </h1>
           <p className="mt-1 text-sm break-words text-white/80">
             {description || "—"}
-            {ownerBadge ? <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span> : null}
+            {ownerBadge ? (
+              <span className="ml-1.5 inline-flex align-middle">{ownerBadge}</span>
+            ) : null}
           </p>
         </div>
-        <div
-          className={`flex min-w-0 flex-wrap items-center gap-2 [&_:is(button,a)]:min-h-9 [&_:is(button,a)]:border-white/80 [&_:is(button,a)]:bg-white/95 [&_:is(button,a)]:dark:bg-white/95 [&_:is(button,a)]:text-slate-950 [&_:is(button,a)]:hover:text-slate-950 [&_:is(button,a)]:aria-expanded:text-slate-950 [&_:is(button,a)]:aria-expanded:bg-white [&_:is(button,a)]:shadow-sm [&_:is(button,a)]:hover:bg-white [&_:is(button,a)]:dark:hover:bg-white ${actionFocusClasses}`}
-          data-testid="lead-media-actions"
-          role="group"
-          aria-label="Lead actions"
-        >
-          {actions}
-        </div>
+        <HeroActions actions={actions} variant="image" />
       </div>
     </section>
+  );
+}
+
+function HeroActions({
+  actions,
+  variant,
+  className = "",
+}: {
+  actions: React.ReactNode;
+  variant: "flat" | "image";
+  className?: string;
+}) {
+  const imageClasses =
+    variant === "image"
+      ? "[&_:is(button,a)]:border-white/80 [&_:is(button,a)]:bg-white/95 [&_:is(button,a)]:dark:bg-white/95 [&_:is(button,a)]:text-slate-950 [&_:is(button,a)]:hover:text-slate-950 [&_:is(button,a)]:aria-expanded:text-slate-950 [&_:is(button,a)]:aria-expanded:bg-white [&_:is(button,a)]:shadow-sm [&_:is(button,a)]:hover:bg-white [&_:is(button,a)]:dark:hover:bg-white"
+      : "";
+
+  return (
+    <div
+      className={`flex min-w-0 flex-wrap items-center gap-2 [&_:is(button,a)]:min-h-9 ${imageClasses} ${className} ${actionFocusClasses}`}
+      data-testid="lead-media-actions"
+      role="group"
+      aria-label="Lead actions"
+    >
+      {actions}
+    </div>
   );
 }

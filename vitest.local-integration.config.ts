@@ -2,10 +2,10 @@ import path from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-import { requireLoopbackPostgresUrl } from "./src/lib/testing/loopback-postgres-url";
-
-const defaultLocalDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
-const dbUrl = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? defaultLocalDbUrl);
+// No defaults: every value must point at a stack you own. The isolation guard
+// (src/lib/testing/isolated-db-env.ts) runs as globalSetup, before any test
+// file loads or connects, and refuses shared/hosted targets.
+const dbUrl = process.env.TEST_SUPABASE_DB_URL ?? "";
 
 export default defineConfig({
   test: {
@@ -64,6 +64,7 @@ export default defineConfig({
       "supabase/migrations/20261015020200_my_leads_work_facts_zip_signed_touch.integration.test.ts",
       "supabase/migrations/20261015030000_my_leads_work_classified_perf.integration.test.ts",
       "supabase/migrations/20261015040000_my_leads_approved_snooze_multi_house.integration.test.ts",
+      "supabase/migrations/20261016040000_homeowner_houses_first_page.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
       "supabase/migrations/20261005180000_dialpad_hangup_link_capture.integration.test.ts",
@@ -143,16 +144,16 @@ export default defineConfig({
       "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
     ],
     environment: "node",
+    globalSetup: ["./src/lib/testing/isolated-db-env.global-setup.ts"],
     reporters: ["default"],
     testTimeout: 30_000,
     fileParallelism: false,
     env: {
       TEST_SUPABASE_DB_URL: dbUrl,
-      // Local stack API (loopback only; suites call assertLocalOnlyTestEnv).
-      // Keys default to the public Supabase CLI demo keys, never hosted ones.
-      TEST_SUPABASE_URL: process.env.LOCAL_SUPABASE_URL ?? "http://127.0.0.1:54331",
-      TEST_SUPABASE_ANON_KEY: process.env.LOCAL_SUPABASE_ANON_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0",
-      TEST_SUPABASE_SERVICE_ROLE_KEY: process.env.LOCAL_SUPABASE_SERVICE_ROLE_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
+      // Local stack API (loopback only, checked by the globalSetup guard).
+      TEST_SUPABASE_URL: process.env.LOCAL_SUPABASE_URL ?? "",
+      TEST_SUPABASE_ANON_KEY: process.env.LOCAL_SUPABASE_ANON_KEY ?? "",
+      TEST_SUPABASE_SERVICE_ROLE_KEY: process.env.LOCAL_SUPABASE_SERVICE_ROLE_KEY ?? "",
     },
   },
   resolve: {

@@ -34,21 +34,21 @@ const leadEvent = {
 } as LeadEvent;
 
 describe("normalizeLeadActivityEvents", () => {
-  it("normalizes all sources into ascending chat order", () => {
+  it("normalizes all sources into newest-first timeline order", () => {
     expect(
       normalizeLeadActivityEvents([message], [note], [call], [leadEvent]),
     ).toMatchObject([
-      { source: "note", id: "note-a" },
-      { source: "event", id: "event-d" },
-      { source: "message", id: "message-b" },
       { source: "call", id: "call-c" },
+      { source: "message", id: "message-b" },
+      { source: "event", id: "event-d" },
+      { source: "note", id: "note-a" },
     ]);
   });
 
   it("uses call created_at when started_at is missing", () => {
     const fallbackCall = { ...call, started_at: null };
     expect(
-      normalizeLeadActivityEvents([message], [note], [fallbackCall], [])[0],
+      normalizeLeadActivityEvents([message], [note], [fallbackCall], []).at(-1),
     ).toMatchObject({ source: "call", timestamp: call.created_at });
   });
 
@@ -85,7 +85,7 @@ describe("normalizeLeadActivityEvents", () => {
       normalizeLeadActivityEvents([later, earlier], [], [], []).map(
         (event) => event.id,
       ),
-    ).toEqual(["microsecond-earlier", "microsecond-later"]);
+    ).toEqual(["microsecond-later", "microsecond-earlier"]);
   });
 
   it("treats equivalent Z and +00:00 timestamps as the same instant", () => {
@@ -115,7 +115,7 @@ describe("normalizeLeadActivityEvents", () => {
       normalizeLeadActivityEvents([], [], [], [later, earlier]).map(
         (event) => event.id,
       ),
-    ).toEqual(["mixed-earlier", "mixed-later"]);
+    ).toEqual(["mixed-later", "mixed-earlier"]);
   });
 
   it("deduplicates duplicate source rows by id", () => {
@@ -146,9 +146,9 @@ describe("buildLeadActivitySnapshot", () => {
     );
 
     expect(snapshot.events.map((event) => event.source)).toEqual([
-      "note",
-      "event",
       "message",
+      "event",
+      "note",
     ]);
     expect(snapshot.failures).toEqual([
       { source: "call", detail: "Call history timed out" },
@@ -184,7 +184,20 @@ describe("buildLeadActivitySnapshot", () => {
     });
 
     expect(snapshot.trustFloor).toBe(messages[0].created_at);
-    expect(snapshot.trustBoundaryIndex).toBeGreaterThanOrEqual(0);
+    expect(snapshot.trustBoundaryIndex).toBe(-1);
+  });
+
+  it("places the completeness boundary before older rows, after rows at the floor", () => {
+    const snapshot = buildLeadActivitySnapshot(
+      [message], [note], [call], [], {},
+      [{ kind: "offer", id: "floor", at: message.created_at } as AcquisitionHistoryFact],
+      true,
+    );
+    expect(snapshot.events.map((row) => row.id)).toEqual([
+      "call-c", "message-b", "offer:floor", "note-a",
+    ]);
+    expect(snapshot.trustBoundaryIndex).toBe(3);
+    expect(snapshot.events[snapshot.trustBoundaryIndex].timestamp).toBe(note.created_at);
   });
 
   it("includes the bounded lead-event window in the trust floor", () => {
@@ -282,8 +295,8 @@ describe("canonical acquisition history projection", () => {
     );
     expect(result.map((x) => x.source)).toEqual(["acquisition", "acquisition"]);
     expect(result.map((x) => x.timestamp)).toEqual([
-      projectedAttempt.at,
       projectedOffer.at,
+      projectedAttempt.at,
     ]);
     expect(normalizeLeadActivityEvents([], [], [], [generic], [])).toHaveLength(
       1,

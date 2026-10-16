@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 
-import { assertEnvLooksLocal, resolveDbUrl } from "./guards";
+import { integrationEnv } from "./guards";
 import { lastMigrationDefining, loadClassifierMigration } from "./migration";
 import { preflightCommitLanes, laneStampedSendVsInbound, sqlSendDriver, unstampedSendDriver } from "./races";
 import { FAMILIES } from "./families";
@@ -10,8 +10,8 @@ import { runFamilies } from "./runner";
 // Smoke run of the My Leads queue stress harness: 1 repeat, 3 families, one rep of each rolled-back lane. It proves the harness still
 // runs end to end against the classifier in this checkout and that it can still tell a broken classifier from a good one. The volume
 // run (31 families x 20 repeats, race lanes, scale) is manual: see e2e/stress/my-leads-queue/README.md.
-const env = { ...process.env, MYLEADS_STRESS_DB_URL: process.env.MYLEADS_STRESS_DB_URL ?? process.env.TEST_SUPABASE_DB_URL };
-const url = (() => { assertEnvLooksLocal(env); return resolveDbUrl(env); })();
+const env = integrationEnv(process.env);
+const url = env.MYLEADS_STRESS_DB_URL;
 
 describe("my-leads queue stress harness smoke", () => {
   it("passes against the classifier in this checkout (1 repeat, 3 families, refresh + bind-failure lanes)", async () => {

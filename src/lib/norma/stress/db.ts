@@ -21,7 +21,7 @@ import { createStressPool } from "./pg-client";
  * ever read from. Loopback only.
  */
 const SOURCE_URL = requireLoopbackPostgresUrl(
-  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+  process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "",
 );
 
 // Every Norma migration, found by name so a new one can never be forgotten, then the My Leads classifier migrations

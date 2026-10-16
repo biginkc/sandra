@@ -95,7 +95,7 @@ import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero } from "./lead-media-hero";
-import { resolveLeadMediaPresentation } from "./lead-media";
+import { LeadMediaImageSlot } from "./lead-media-image-slot";
 import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
@@ -115,6 +115,7 @@ import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
 import { LeadCalculationsSection } from "./lead-calculations-section";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
+import { loadAfterReadAcknowledgement } from "./lead-detail-loading";
 import {
   downloadLeadFileAction,
   confirmContractNotSentAction,
@@ -236,11 +237,14 @@ export default async function LeadDetailPage({
     // stage-aware destination remains for the locked DNC detail below.
     isAcquisitionMember && lead.status === "prospect" ? "prospect" : "lead",
   );
-  const acquisitionHistory=await loadLeadAcquisitionHistory(lead.id);
   const training = lead.is_training;
-  const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
-    ? { blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null }
-    : await loadLeadEsignPageModel(lead.id);
+  const acquisitionHistoryPromise = loadLeadAcquisitionHistory(lead.id);
+  // Training leads intentionally bypass the e-sign model. Keep this branch
+  // synchronous from the caller's point of view while allowing normal leads
+  // to fetch their model alongside the rest of the detail reads.
+  const esignPromise: Promise<Awaited<ReturnType<typeof loadLeadEsignPageModel>>> = training
+    ? Promise.resolve({ blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null })
+    : loadLeadEsignPageModel(lead.id);
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
   const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
   const homeownerContactId = lead.homeowner?.id ?? null;
@@ -286,14 +290,16 @@ export default async function LeadDetailPage({
   // Load both so the page does not infer "OK to text" from the mere presence
   // of a phone number or conflate a channel opt-out with permanent DNC.
   const smsConsentEventsPromise = homeownerContactId
-    ? supabase
+    ? Promise.resolve(
+        supabase
         .from("consent_events")
         .select("event_type, occurred_at")
         .eq("contact_id", homeownerContactId)
         .eq("channel", "sms")
         .order("occurred_at", { ascending: false })
-        .limit(20)
-    : null;
+        .limit(20),
+      )
+    : Promise.resolve({ data: [], error: null });
   const smsPhoneSuppressionPromise = homeownerSmsPhone
     ? isSmsPhoneSuppressed(supabase, homeownerSmsPhone, lead.org_id)
         .then((value) => ({ ok: true as const, value }))
@@ -333,93 +339,251 @@ export default async function LeadDetailPage({
         .catch(() => null)
     : Promise.resolve(null);
 
-  const { prevId, nextId } = await getPropertyNeighbors(
+  const neighborsPromise = getPropertyNeighbors(
     id,
     lead.status === "prospect" ? "prospect" : "lead",
   );
 
   // Current user — for "me" labeling in assignee + note-author displays.
-  const {
-    data: { user: sessionUser },
-  } = await supabase.auth.getUser();
+  const sessionUserResultPromise = supabase.auth.getUser();
+  const sessionUserPromise = sessionUserResultPromise.then(
+    ({ data: { user } }) => user,
+  );
 
-  // "Owns N houses": started now, awaited where the header is built, so it runs alongside the reads below.
-  const homeownerHousesPromise = loadLeadOwnerHouses(supabase, {
-    orgId: lead.org_id,
-    viewerId: sessionUser?.id ?? null,
-    contactId: lead.homeowner?.id ?? null,
-  });
+  // "Owns N houses" and the viewer's timezone need the session user, but
+  // their work can begin as soon as auth resolves instead of waiting for the
+  // other detail reads below.
+  const homeownerHousesPromise = sessionUserPromise.then((sessionUser) =>
+    loadLeadOwnerHouses(supabase, {
+      orgId: lead.org_id,
+      viewerId: sessionUser?.id ?? null,
+      contactId: lead.homeowner?.id ?? null,
+    }),
+  );
+  const viewerPrefsPromise = sessionUserPromise.then((sessionUser) =>
+    sessionUser
+      ? loadIntegrationPrefs(supabase, sessionUser.id)
+      : null,
+  );
 
   // Outcome bar: hidden for Acquisitions members (no Messages access) and
   // contacts flagged do-not-contact. A failed drip read is "unknown", never "none".
   const showOutcomeBar =
     !isAcquisitionMember && !lead.homeowner?.do_not_contact;
-  let outcomeDrip = NO_ACTIVE_DRIP;
-  let outcomeDripUnknown = false;
-  if (showOutcomeBar) {
-    try {
-      const [progress] = await listDripProgress(supabase, [lead.id]);
-      outcomeDrip = toOutcomeBarDrip(progress);
-    } catch (error) {
-      console.error("[leads] drip progress read failed for outcome bar", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      outcomeDripUnknown = true;
-    }
-  }
+  const outcomePromise = showOutcomeBar
+    ? (async () => {
+        let outcomeDrip = NO_ACTIVE_DRIP;
+        let outcomeDripUnknown = false;
+        try {
+          const [progress] = await listDripProgress(supabase, [lead.id]);
+          outcomeDrip = toOutcomeBarDrip(progress);
+        } catch (error) {
+          console.error("[leads] drip progress read failed for outcome bar", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          outcomeDripUnknown = true;
+        }
+        return { outcomeDrip, outcomeDripUnknown };
+      })()
+    : Promise.resolve({ outcomeDrip: NO_ACTIVE_DRIP, outcomeDripUnknown: false });
 
-  // Viewer's own saved timezone (same user_integration_prefs.timezone
-  // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
-  // needs this to format appointment times without silently falling back
-  // to the render environment's device zone (loadIntegrationPrefs already
-  // falls back to "America/Chicago" when unset).
-  const viewerPrefs = sessionUser
-    ? await loadIntegrationPrefs(supabase, sessionUser.id)
-    : null;
-  const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
-
-  // Opening a lead acknowledges unread inbound SMS before the bounded thread
-  // snapshot is read. Awaiting prevents the client from missing a fast
-  // Realtime UPDATE and indefinitely rendering an already-read row as unread.
-  const markReadResult = await markMessagesReadForProperty(lead.id);
-  if (!markReadResult.ok) {
-    console.error("[leads] mark messages read failed", {
-      code: markReadResult.error.code,
-    });
-  }
-
-  // Fetch existing SMS thread — messages linked either to the property
-  // directly or to the homeowner (catches inbound that lands pre-linkage).
-  const orFilter = homeownerContactId
-    ? `property_id.eq.${lead.id},and(contact_id.eq.${homeownerContactId},property_id.is.null)`
-    : `property_id.eq.${lead.id}`;
-  const { data: threadRaw, error: threadError } = await supabase
-    .from("messages")
+  // Notes, events, Norma state, tags, calls, templates, and the roster are
+  // independent of one another. Build every lazy Supabase query before the
+  // Promise.all so thenables are assimilated and their rejections observed.
+  const notesPromise = supabase
+    .from("lead_notes")
     .select("*")
-    .or(orFilter)
-    // Fetch the newest bounded window first. Ordering oldest-first before
-    // LIMIT silently returns the first 200 messages ever sent and hides the
-    // live end of long-running conversations.
+    .eq("property_id", lead.id)
     .order("created_at", { ascending: false })
     .limit(200);
-  const initialMessages = [...((threadRaw ?? []) as MessageRow[])].reverse();
-  let latestInboundSenderQuery = supabase
-    .from("messages")
-    .select("to_address")
-    .eq("channel", "sms")
-    .eq("direction", "inbound")
+  const leadEventsPromise = supabase
+    .from("lead_events")
+    .select(
+      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
+    )
     .eq("property_id", lead.id)
-    .not("to_address", "is", null)
     .order("created_at", { ascending: false })
-    .limit(1);
-  if (lead.homeowner?.id) {
-    latestInboundSenderQuery = latestInboundSenderQuery.eq(
-      "contact_id",
-      lead.homeowner.id,
-    );
-  }
-  const { data: latestInboundSender } =
-    await latestInboundSenderQuery.maybeSingle();
+    .order("id", { ascending: false })
+    .limit(200);
+  const normaRequestsPromise = supabase
+    .from("norma_call_requests")
+    .select(NORMA_REQUEST_VIEW_COLUMNS)
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  type LooseTable = {
+    select: (columns: string, options?: { count: "exact"; head: true }) => LooseTable;
+    eq: (column: string, value: string) => LooseTable;
+    order: (column: string, options: { ascending: boolean }) => LooseTable;
+    limit: (n: number) => PromiseLike<{ data: unknown; count?: number | null }> & LooseTable;
+  };
+  const looseFrom = (table: string) => (supabase as unknown as { from: (t: string) => LooseTable }).from(table);
+  const normaQueuePromise = (async () => {
+    let normaQueueEntry: NormaQueueChipEntry | null = null;
+    let normaQueueReassignment: { kind: string; status: string } | null = null;
+    try {
+      const { data: queueRows } = await looseFrom("norma_queue_entries")
+        .select("id, status, pause_reason, next_attempt_at, display_tz")
+        .eq("property_id", lead.id)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      const queueRow = ((queueRows ?? []) as Array<{ id: string; status: string; pause_reason: string | null; next_attempt_at: string | null; display_tz: string | null }>)[0];
+      if (queueRow) {
+        const { count } = await looseFrom("norma_queue_attempts").select("id", { count: "exact", head: true }).eq("entry_id", queueRow.id).limit(1);
+        normaQueueEntry = {
+          id: queueRow.id,
+          status: queueRow.status,
+          pauseReason: queueRow.pause_reason,
+          nextAttemptAt: queueRow.next_attempt_at,
+          displayTz: queueRow.display_tz,
+          attemptCount: count ?? 0,
+        };
+      }
+      const { data: reassignRows } = await looseFrom("norma_followup_reassignments")
+        .select("kind, status")
+        .eq("property_id", lead.id)
+        .eq("status", "open")
+        .limit(1);
+      const reassignRow = ((reassignRows ?? []) as Array<{ kind: string; status: string }>)[0];
+      if (reassignRow) normaQueueReassignment = { kind: reassignRow.kind, status: reassignRow.status };
+    } catch {
+      normaQueueEntry = null;
+    }
+    return { normaQueueEntry, normaQueueReassignment };
+  })();
+
+  const tagsPromise = supabase
+    .from("property_tags")
+    .select(
+      "tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)",
+    )
+    .eq("property_id", lead.id);
+
+  const usersPromise = loadOrgTeamMembers(lead.org_id, {
+    includeInactiveMembers: true,
+    historicalAssigneeIds: lead.assigned_user_id
+      ? [lead.assigned_user_id]
+      : [],
+    allowMissingIdentityLabels: true,
+  }).catch(() => []);
+
+  // Fetch the newest bounded window from each call subgroup, then merge the
+  // exact logical top 20 after both reads settle.
+  const callSelection =
+    "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
+  const callRowsPromise = Promise.all([
+    supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .not("started_at", "is", null)
+      .order("started_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20),
+    supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .is("started_at", null)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20),
+  ]);
+
+  const templatesPromise = listTemplates();
+  const templateOptionsPromise = templatesPromise.then(async (templatesResult) => {
+    if (!templatesResult.ok || templatesResult.data.length === 0) return [];
+    const vars = await loadTemplateVars(supabase, {
+      propertyId: lead.id,
+      contactId: homeownerContactId,
+    });
+    return templatesResult.data.map((t) => ({
+      id: t.id,
+      name: t.name,
+      body: renderTemplate(t.content, vars),
+    }));
+  });
+
+  const coreReadsPromise = Promise.all([
+    acquisitionHistoryPromise,
+    esignPromise,
+    neighborsPromise,
+    sessionUserPromise,
+    openWorkPromise,
+    liveAppointmentsPromise,
+    appointmentHistoryPromise,
+    assignmentEpisodesPromise,
+    smsConsentEventsPromise,
+    smsPhoneSuppressionPromise,
+    outcomePromise,
+    notesPromise,
+    leadEventsPromise,
+    normaRequestsPromise,
+    normaQueuePromise,
+    tagsPromise,
+    usersPromise,
+    callRowsPromise,
+    templateOptionsPromise,
+    homeownerHousesPromise,
+    viewerPrefsPromise,
+  ]);
+
+  const {
+    independent: settledCoreReads,
+    snapshot: [
+      { data: threadRaw, error: threadError },
+      { data: latestInboundSender },
+    ],
+  } = await loadAfterReadAcknowledgement(
+    coreReadsPromise,
+    // Opening a lead acknowledges unread inbound SMS before the bounded
+    // thread snapshot is read. Awaiting prevents the client from missing a
+    // fast Realtime UPDATE and indefinitely rendering an already-read row as
+    // unread.
+    async () => {
+      const result = await markMessagesReadForProperty(lead.id);
+      if (!result.ok) {
+        console.error("[leads] mark messages read failed", {
+          code: result.error.code,
+        });
+      }
+      return result;
+    },
+    async () => {
+      // Fetch existing SMS thread — messages linked either to the property
+      // directly or to the homeowner (catches inbound that lands pre-linkage).
+      const orFilter = homeownerContactId
+        ? `property_id.eq.${lead.id},and(contact_id.eq.${homeownerContactId},property_id.is.null)`
+        : `property_id.eq.${lead.id}`;
+      const threadPromise = supabase
+        .from("messages")
+        .select("*")
+        .or(orFilter)
+        // Fetch the newest bounded window first. Ordering oldest-first before
+        // LIMIT silently returns the first 200 messages ever sent and hides
+        // the live end of long-running conversations.
+        .order("created_at", { ascending: false })
+        .limit(200);
+      const latestInboundSenderPromise = (() => {
+        let query = supabase
+          .from("messages")
+          .select("to_address")
+          .eq("channel", "sms")
+          .eq("direction", "inbound")
+          .eq("property_id", lead.id)
+          .not("to_address", "is", null)
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (lead.homeowner?.id) {
+          query = query.eq("contact_id", lead.homeowner.id);
+        }
+        return query.maybeSingle();
+      })();
+      return Promise.all([threadPromise, latestInboundSenderPromise]);
+    },
+  );
+  const initialMessages = [...((threadRaw ?? []) as MessageRow[])].reverse();
   // Leads with no prior inbound message have no "sticky" sender to reply
   // from. Fall back to the configured provider's default number (e.g.
   // Sendillo's single SENDILLO_FROM_NUMBER) so the composer and inline
@@ -495,113 +659,58 @@ export default async function LeadDetailPage({
       : smsPhoneSuppressionPromise
     : Promise.resolve({ ok: true as const, value: false });
 
+  const [
+    acquisitionHistory,
+    esign,
+    { prevId, nextId },
+    sessionUser,
+    openWorkResult,
+    liveAppointmentsResult,
+    appointmentHistory,
+    assignmentEpisodes,
+    smsConsentEventsResult,
+    phoneSuppressionResult,
+    { outcomeDrip, outcomeDripUnknown },
+    notesResult,
+    leadEventsResult,
+    normaRowsResult,
+    { normaQueueEntry, normaQueueReassignment },
+    tagRowsResult,
+    assigneeUsers,
+    [startedCallsResult, unstartedCallsResult],
+    templateOptions,
+    homeownerHouses,
+    viewerPrefs,
+  ] = settledCoreReads;
+  const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
+  // loadIntegrationPrefs supplies the persisted timezone when available and
+  // keeps the historical Chicago fallback for unset or invalid preferences.
+  const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
+
   // Notes — newest first for the feed component.
-  const { data: notesRaw, error: notesError } = await supabase
-    .from("lead_notes")
-    .select("*")
-    .eq("property_id", lead.id)
-    .order("created_at", { ascending: false })
-    .limit(200);
+  const { data: notesRaw, error: notesError } = notesResult;
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
 
   // Append-only lead activity — newest bounded window, merged client-side
   // with canonical messages, notes, and calls.
-  const { data: leadEventsRaw, error: leadEventsError } = await supabase
-    .from("lead_events")
-    .select(
-      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
-    )
-    .eq("property_id", lead.id)
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(200);
+  const { data: leadEventsRaw, error: leadEventsError } = leadEventsResult;
   const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
   // Norma call requests for this lead (members can read them). A read failure
   // (for example the table not existing yet) just hides the in-flight state;
   // the request action re-checks everything server-side.
-  const { data: normaRowsRaw } = await supabase
-    .from("norma_call_requests")
-    .select(NORMA_REQUEST_VIEW_COLUMNS)
-    .eq("property_id", lead.id)
-    .order("created_at", { ascending: false })
-    .limit(20);
+  const { data: normaRowsRaw } = normaRowsResult;
   const normaRequests = (normaRowsRaw ?? []) as NormaRequestView[];
   const openNormaRequest = findOpenNormaRequest(normaRequests);
   const lastNormaResult = findLastCompletedNormaRequest(normaRequests);
 
-  // Norma call queue state for this lead (members can read it). A read failure just hides the chip's state; enqueue and
-  // every control re-check server-side.
-  type LooseTable = {
-    select: (columns: string, options?: { count: "exact"; head: true }) => LooseTable;
-    eq: (column: string, value: string) => LooseTable;
-    order: (column: string, options: { ascending: boolean }) => LooseTable;
-    limit: (n: number) => PromiseLike<{ data: unknown; count?: number | null }> & LooseTable;
-  };
-  const looseFrom = (table: string) => (supabase as unknown as { from: (t: string) => LooseTable }).from(table);
-  let normaQueueEntry: NormaQueueChipEntry | null = null;
-  let normaQueueReassignment: { kind: string; status: string } | null = null;
-  try {
-    const { data: queueRows } = await looseFrom("norma_queue_entries")
-      .select("id, status, pause_reason, next_attempt_at, display_tz")
-      .eq("property_id", lead.id)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    const queueRow = ((queueRows ?? []) as Array<{ id: string; status: string; pause_reason: string | null; next_attempt_at: string | null; display_tz: string | null }>)[0];
-    if (queueRow) {
-      const { count } = await looseFrom("norma_queue_attempts").select("id", { count: "exact", head: true }).eq("entry_id", queueRow.id).limit(1);
-      normaQueueEntry = {
-        id: queueRow.id,
-        status: queueRow.status,
-        pauseReason: queueRow.pause_reason,
-        nextAttemptAt: queueRow.next_attempt_at,
-        displayTz: queueRow.display_tz,
-        attemptCount: count ?? 0,
-      };
-    }
-    const { data: reassignRows } = await looseFrom("norma_followup_reassignments")
-      .select("kind, status")
-      .eq("property_id", lead.id)
-      .eq("status", "open")
-      .limit(1);
-    const reassignRow = ((reassignRows ?? []) as Array<{ kind: string; status: string }>)[0];
-    if (reassignRow) normaQueueReassignment = { kind: reassignRow.kind, status: reassignRow.status };
-  } catch {
-    normaQueueEntry = null;
+  const { data: tagRowsRaw, error: tagRowsError } = tagRowsResult;
+  const initialTags: TagRow[] = [];
+  for (const r of tagRowsRaw ?? []) {
+    const t = (r as { tags: TagRow | null }).tags;
+    if (t) initialTags.push(t);
   }
 
-  const usersPromise = loadOrgTeamMembers(lead.org_id, {
-    includeInactiveMembers: true,
-    historicalAssigneeIds: lead.assigned_user_id
-      ? [lead.assigned_user_id]
-      : [],
-    allowMissingIdentityLabels: true,
-  }).catch(() => []);
-
-  // PostgREST cannot order by COALESCE(started_at, created_at). Fetch the top
-  // 20 from each disjoint subgroup, then deterministically merge to the
-  // logical top 20. A row below rank 20 in either subgroup cannot enter the
-  // combined top 20, so this remains exact without an unbounded read.
-  const callSelection =
-    "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
-  const [startedCallsResult, unstartedCallsResult] = await Promise.all([
-    supabase
-      .from("call_activities")
-      .select(callSelection)
-      .eq("property_id", lead.id)
-      .not("started_at", "is", null)
-      .order("started_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(20),
-    supabase
-      .from("call_activities")
-      .select(callSelection)
-      .eq("property_id", lead.id)
-      .is("started_at", null)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(20),
-  ]);
   const callRollupError =
     startedCallsResult.error ?? unstartedCallsResult.error;
   const initialCallRows = callRollupError
@@ -613,7 +722,7 @@ export default async function LeadDetailPage({
           []) as unknown as CallActivityRollupRow[]),
       ]);
 
-  const { data: openWorkRaw, error: openWorkError } = await openWorkPromise;
+  const { data: openWorkRaw, error: openWorkError } = openWorkResult;
   if (openWorkError) {
     console.error("[leads] open work fetch failed", {
       message: openWorkError.message,
@@ -629,21 +738,14 @@ export default async function LeadDetailPage({
     type: string;
   }>;
   const { data: liveAppointmentsRaw, error: liveAppointmentsError } =
-    await liveAppointmentsPromise;
+    liveAppointmentsResult;
   const liveAppointments = (liveAppointmentsRaw ??
     []) as unknown as LeadAppointmentRow[];
-  const appointmentHistory = await appointmentHistoryPromise;
-  const assignmentEpisodes = await assignmentEpisodesPromise;
   // The database result is already due-date ordered. Appointments and plain
   // tasks compete in one timeline; filtering first could show a 3 PM callback
   // while hiding the real 9 AM appointment.
   const nextTask = (openWork[0] ?? null) as LeadNextTask | null;
 
-  const smsConsentEventsResult = smsConsentEventsPromise
-    ? await smsConsentEventsPromise
-    : { data: [], error: null };
-  const phoneSuppressionResult = await smsPhoneSuppressionPromise;
-  const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
   const consentState: ConsentState | null = smsConsentEventsResult.error
     ? null
     : computeConsentState(smsConsentEventsResult.data ?? []);
@@ -691,40 +793,10 @@ export default async function LeadDetailPage({
     ? inlineSmsPresentation
     : smsPresentation;
 
-  // Tags attached to this property, with the tag row joined inline.
-  const { data: tagRowsRaw, error: tagRowsError } = await supabase
-    .from("property_tags")
-    .select(
-      "tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)",
-    )
-    .eq("property_id", lead.id);
-  const initialTags: TagRow[] = [];
-  for (const r of tagRowsRaw ?? []) {
-    const t = (r as { tags: TagRow | null }).tags;
-    if (t) initialTags.push(t);
-  }
-
-  // Fetch SMS templates and pre-render them with this property's vars so the
-  // composer picker can just do a straight body injection on selection.
-  const templatesResult = await listTemplates();
-  let templateOptions: Array<{ id: string; name: string; body: string }> = [];
-  if (templatesResult.ok && templatesResult.data.length > 0) {
-    const vars = await loadTemplateVars(supabase, {
-      propertyId: lead.id,
-      contactId: homeownerContactId,
-    });
-    templateOptions = templatesResult.data.map((t) => ({
-      id: t.id,
-      name: t.name,
-      body: renderTemplate(t.content, vars),
-    }));
-  }
-
   // Resolve both active and former organization members. Former owners and
   // note authors remain named for audit history but are excluded from pickers.
   const authorEmails: Record<string, string> = {};
   let assigneeEmail: string | null = null;
-  const assigneeUsers = await usersPromise;
   for (const member of assigneeUsers) {
     const label = teamMemberPrimaryLabel(member, sessionUser?.id ?? null);
     if (label) authorEmails[member.id] = label;
@@ -734,14 +806,6 @@ export default async function LeadDetailPage({
   }
 
   const zillowHref = zillowUrl({
-    address: lead.address,
-    city: lead.city,
-    state: lead.state,
-    zip: lead.zip,
-  });
-  const mediaPresentation = await resolveLeadMediaPresentation({
-    lat: lead.lat,
-    lon: lead.lon,
     address: lead.address,
     city: lead.city,
     state: lead.state,
@@ -791,7 +855,6 @@ export default async function LeadDetailPage({
       ? null
       : MY_LEAD_ROW_REASON_COPY.other_rep;
 
-  const homeownerHouses = await homeownerHousesPromise;
   const ownerBadge = (
     <MultiHouseBadge houses={homeownerHouses} contactId={lead.homeowner?.id ?? null} ownerName={homeownerName} currentPropertyId={lead.id} testId="lead-houses" />
   );
@@ -920,7 +983,7 @@ export default async function LeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
-      {/* Above the hero: the hero re-parents its actions when its image falls back, which remounts them. */}
+      {/* Keep follow-up state above the hero and its independently streamed imagery. */}
       <LogFollowUpProvider
         propertyId={lead.id}
         propertyLabel={lead.address}
@@ -930,14 +993,26 @@ export default async function LeadDetailPage({
       >
       <LeadOutcomeProvider>
       <LeadMediaHero
-        media={mediaPresentation}
+        actions={heroActions}
+        mediaSlot={
+          <LeadMediaImageSlot
+            address={lead.address}
+            location={{
+              lat: lead.lat,
+              lon: lead.lon,
+              address: lead.address,
+              city: lead.city,
+              state: lead.state,
+              zip: lead.zip,
+            }}
+          />
+        }
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
         ownerBadge={ownerBadge}
         collectionHref={collection.href}
         collectionLabel={collection.label}
-        actions={heroActions}
       />
       <DealSnapshotStrip lead={lead} />
       {training ? <Badge variant="secondary">Internal training · Fictional homeowner</Badge> : null}
