@@ -606,6 +606,17 @@ export async function dispatchAiResponse(
   return result;
 }
 
+export const NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED = "nine_close_wrong_person_context_changed";
+
+/**
+ * The revision a wrong-person close may act on after our own reply: the evaluation
+ * revision plus the one bump our outbound SMS causes. Anything else moved = null (abort).
+ */
+export function wrongPersonCloseRevision(evaluationRevision: number, currentRevision: number): number | null {
+  const expected = evaluationRevision + 1;
+  return currentRevision === expected ? expected : null;
+}
+
 async function dispatchAiResponseCore(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -634,12 +645,15 @@ async function dispatchAiResponseCore(
   // Any read problem = the eight-answer engine.
   const engineRead =
     config?.classifier_provider === "jev" ? await readClassifierEngine(supabase, property.org_id) : "outcome_v1";
-  if (engineRead === "unreadable") {
+  // A responder-off property (a person's takeover switch) is checked FIRST: it runs no
+  // engine and writes no hold either way, so an unreadable switch there changes nothing
+  // (it falls through to the silent responder-off skip below).
+  if (engineRead === "unreadable" && property.ai_responder_disabled !== true) {
     // The switch state is unknown: run neither engine, a person looks (not a hot hold).
     await markPropertyNeedsAttention(supabase, input.propertyId, CLASSIFIER_ENGINE_UNREADABLE, deps.runContext);
     return { outcome: "escalated", reason: CLASSIFIER_ENGINE_UNREADABLE };
   }
-  const classifierEngine = engineRead;
+  const classifierEngine = engineRead === "unreadable" ? "outcome_v1" : engineRead;
   if (config) (config as { classifier_engine?: string }).classifier_engine = classifierEngine;
 
   if (deps.runContext) {
@@ -7782,9 +7796,10 @@ export async function runNineQuestionsStep(
       return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
     }
     const messageId: string | null = wrongStep.outboundMessageId;
-    // Our own reply is an outbound message, which moves decision_context_revision. The
-    // revision guard is for someone ELSE changing the lead while Jev was reading, so
-    // after a send, re-baseline on the revision our own reply produced.
+    // Our own reply is ONE outbound SMS row, which moves decision_context_revision by
+    // exactly one (trg_messages_bump_decision_context_revision). Account for that and
+    // nothing else: any further movement (a person texting, a takeover, an assignment)
+    // means someone else changed the lead, so a person looks and nothing is closed.
     let closeRevision = cls.evaluationRevision;
     if (messageId) {
       const { data: current } = await supabase
@@ -7793,7 +7808,11 @@ export async function runNineQuestionsStep(
         .eq("id", input.propertyId)
         .maybeSingle();
       if (!current) return nineHoldAndComplete(supabase, a, "nine_close_wrong_person_unreadable", messageId);
-      closeRevision = current.decision_context_revision;
+      const expectedAfterOwnReply = wrongPersonCloseRevision(cls.evaluationRevision, current.decision_context_revision);
+      if (expectedAfterOwnReply === null) {
+        return nineHoldAndComplete(supabase, a, NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED, messageId);
+      }
+      closeRevision = expectedAfterOwnReply;
     }
     const closed = await applyWrongNumber(supabase, {
       runContext: runCtx,
