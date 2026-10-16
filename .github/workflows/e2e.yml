@@ -307,6 +307,14 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts
 
+      - name: "Hot sellers: delayed-reply path, responder off writes no hold (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/hot-sellers/delayed-path-responder-off.db.integration.test.ts
+
       - name: "Hot sellers: atomic hourly cap and claim (disposable DB)"
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
