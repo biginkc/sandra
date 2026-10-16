@@ -1,5 +1,7 @@
 "use client"
 
+import { savedFollowUpGuidance } from "@/lib/my-leads/follow-up-recovery"
+
 import { useMemo } from "react"
 
 import { Input } from "@/components/ui/input"
@@ -36,6 +38,7 @@ export function smsInfo(text: string) {
 export type FollowUpState = {
   status: "required" | "draft" | "sending" | "accepted" | "delivered" | "delivery_failed" | "blocked" | "failed_not_dispatched" | "unknown"
   message?: string | null
+  obligationId?: string | null
 }
 
 export type FollowUpFields = {
@@ -218,7 +221,7 @@ export function NoAnswerFollowUp({
       )}
       {attemptRecorded && state?.status !== "accepted" && state?.status !== "delivered" && (
         <p className="text-xs text-muted-foreground">
-          This attempt is already recorded. Close this dialog and use the lead&apos;s Text lead action to resume the saved follow-up.
+          {savedFollowUpGuidance(state)}
         </p>
       )}
     </section>
