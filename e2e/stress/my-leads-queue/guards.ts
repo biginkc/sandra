@@ -96,6 +96,16 @@ export function assertCommitLaneAllowed(env: Env = process.env): void {
     throw new GuardRefusal("DISPOSABLE_DB_NOT_ACKNOWLEDGED", "set MYLEADS_STRESS_DISPOSABLE_DB=1 to confirm this database is a disposable local one before a lane that commits rows (the race lanes).");
 }
 
+/**
+ * The foreign-lead check before a committing lane may be skipped ONLY on the CI provisioner's disposable database, whose
+ * earlier steps leave their own rows. The E2E_DISPOSABLE_DATABASE=1 marker alone is not enough: a local operator can set it,
+ * so the skip also requires a real GitHub Actions runner (GITHUB_ACTIONS=true and CI=true). Everywhere else the check runs.
+ */
+export function foreignLeadCheckRequired(env: Env = process.env): boolean {
+  const ciDisposable = env.E2E_DISPOSABLE_DATABASE === "1" && env.GITHUB_ACTIONS === "true" && env.CI === "true";
+  return !ciDisposable;
+}
+
 /** The race lanes commit; refuse a database that holds any lead this harness did not create. */
 export function assertOnlyHarnessLeads(counts: { properties: number; foreign: number }): void {
   if (counts.foreign > 0)

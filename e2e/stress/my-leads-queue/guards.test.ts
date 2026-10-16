@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { GuardRefusal, resolveIntegrationApiUrl, resolveIntegrationDbUrl, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
+import { GuardRefusal, foreignLeadCheckRequired, resolveIntegrationApiUrl, resolveIntegrationDbUrl, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
 
 describe("my-leads stress guards", () => {
   it("refuses to run without an explicit database URL and accepts loopback hosts", () => {
@@ -16,6 +16,20 @@ describe("my-leads stress guards", () => {
     "not a url",
   ])("refuses %s", (url) => {
     expect(() => resolveDbUrl({ MYLEADS_STRESS_DB_URL: url })).toThrow(GuardRefusal);
+  });
+  it("keeps the foreign-lead check on for local runs even when E2E_DISPOSABLE_DATABASE=1 is set by hand", () => {
+    // The exact local combination: an operator points at another app's persistent stack (e.g. :54322) and sets both acks.
+    const local = { MYLEADS_STRESS_DB_URL: "postgresql://postgres:postgres@127.0.0.1:54322/postgres", MYLEADS_STRESS_DISPOSABLE_DB: "1", E2E_DISPOSABLE_DATABASE: "1" };
+    expect(foreignLeadCheckRequired(local)).toBe(true);
+    expect(foreignLeadCheckRequired({ ...local, GITHUB_ACTIONS: "true" })).toBe(true);
+    expect(foreignLeadCheckRequired({ ...local, CI: "true" })).toBe(true);
+    expect(foreignLeadCheckRequired({ ...local, GITHUB_ACTIONS: "1", CI: "true" })).toBe(true);
+    expect(() => assertOnlyHarnessLeads({ properties: 5, foreign: 5 })).toThrow(/NON_HARNESS_DATA/);
+  });
+  it("skips the foreign-lead check only on the CI provisioner's database on a GitHub Actions runner", () => {
+    expect(foreignLeadCheckRequired({ E2E_DISPOSABLE_DATABASE: "1", GITHUB_ACTIONS: "true", CI: "true" })).toBe(false);
+    expect(foreignLeadCheckRequired({ GITHUB_ACTIONS: "true", CI: "true" })).toBe(true);
+    expect(foreignLeadCheckRequired({})).toBe(true);
   });
   it("refuses the shared local stack even when it is selected explicitly", () => {
     for (const shared of ["postgresql://postgres:postgres@127.0.0.1:54329/postgres", "postgresql://postgres:postgres@localhost:54329/postgres"]) {

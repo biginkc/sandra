@@ -62,3 +62,11 @@ describe.each([
     expect(src).not.toMatch(/54331/);
   });
 });
+
+describe("races.ts commit preflight", () => {
+  const src = code("races.ts");
+  it("decides the foreign-lead check only through foreignLeadCheckRequired, never the bare CI marker", () => {
+    expect(src).toMatch(/if \(foreignLeadCheckRequired\(process\.env\)\) assertOnlyHarnessLeads\(counts\);/);
+    expect(src).not.toMatch(/E2E_DISPOSABLE_DATABASE/);
+  });
+});
