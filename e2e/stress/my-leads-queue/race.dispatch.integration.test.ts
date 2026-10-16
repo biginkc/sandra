@@ -24,7 +24,7 @@ import { createRng } from "../prng";
  * `sendSmsToContact` (replaced by a fake that writes the same `pending` -> `sent` message rows with the metadata dispatchRepSms built, after
  * a fake provider latency). No provider is called and no message leaves the machine.
  *
- * Needs the PostgREST API of the disposable stack (LOCAL_SUPABASE_URL, default http://127.0.0.1:54331) and
+ * Needs the PostgREST API of the disposable stack (LOCAL_SUPABASE_URL, required; there is no default so the shared local stack is never used by accident) and
  * MYLEADS_STRESS_DISPOSABLE_DB=1. Reps: MYLEADS_STRESS_DISPATCH_REPS (default 6; the manual volume run uses 200).
  * Writes `dispatch-lanes.json` to MYLEADS_STRESS_OUT_DIR (default test-results/my-leads-queue-stress) for the main report.
  */
@@ -45,7 +45,8 @@ const REPS = parsePositiveInt(process.env.MYLEADS_STRESS_DISPATCH_REPS, 6, "MYLE
 const BIND_REPS = Math.min(REPS, 20);
 const OUT = process.env.MYLEADS_STRESS_OUT_DIR ?? path.resolve("test-results/my-leads-queue-stress");
 const JWT_SECRET = process.env.LOCAL_SUPABASE_JWT_SECRET ?? "super-secret-jwt-token-with-at-least-32-characters-long";
-const API = process.env.LOCAL_SUPABASE_URL ?? "http://127.0.0.1:54331";
+const API = process.env.LOCAL_SUPABASE_URL ?? "";
+if (!API) throw new Error("LOCAL_SUPABASE_URL is required: point it at your own disposable stack's API (no default, so the shared local stack is never used by accident).");
 const ANON = process.env.LOCAL_SUPABASE_ANON_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
 
 function isLoopbackHttp(raw: string): boolean {

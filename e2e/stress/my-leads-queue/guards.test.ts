@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_LOCAL_DB_URL, GuardRefusal, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
+import { GuardRefusal, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
 
 describe("my-leads stress guards", () => {
-  it("defaults to the local stack and accepts loopback hosts", () => {
-    expect(resolveDbUrl({})).toBe(DEFAULT_LOCAL_DB_URL);
+  it("refuses to run without an explicit database URL and accepts loopback hosts", () => {
+    expect(() => resolveDbUrl({})).toThrow(/DB_URL_UNSET/);
     for (const url of ["postgresql://u:p@127.0.0.1:5432/db", "postgresql://u:p@localhost:5432/db", "postgres://u:p@[::1]:5432/db"])
       expect(resolveDbUrl({ MYLEADS_STRESS_DB_URL: url })).toBe(url);
   });
