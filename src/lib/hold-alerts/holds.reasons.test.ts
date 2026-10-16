@@ -11,6 +11,9 @@ const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 /** Every reason literal the responder / inbound pipeline writes as a flag or run reason. */
 function emittedReasons(source: string): string[] {
   const out = new Set<string>();
+  // `nine_questions:<answer>` is the run OUTCOME reason (and the review's ai_reason), never a
+  // hold: it is written beside `outcome: "auto_closed"` / to the disposition review. Leave it out.
+  source = source.replace(/"nine_questions:[a-z_]*"|`nine_questions:\$\{[^`]*\}`/g, '""');
   const literal = /(?:\breason\s*=|\breason:|\bflagReason:)\s*"([a-z][a-z0-9_:]*)"/g;
   for (const m of source.matchAll(literal)) out.add(m[1]!);
   // Template reasons: the fixed prefix before `${` is what must be recognised.
@@ -19,6 +22,9 @@ function emittedReasons(source: string): string[] {
   // Third argument of markPropertyNeedsAttention(supabase, id, "literal"...).
   const flagCall = /markPropertyNeedsAttention\(\s*[\w.]+,\s*[\w.]+,\s*"([a-z][a-z0-9_:]*)"/g;
   for (const m of source.matchAll(flagCall)) out.add(m[1]!);
+  // Reasons handed to the nine-question engine's hold helper: nineHoldAndComplete(supabase, a, <reason>).
+  const nineHold = /nineHoldAndComplete\(\s*[\w.]+,\s*[\w.]+,\s*(?:"([a-z][a-z0-9_:]*)"|`([a-z][a-z0-9_:]*)\$\{)/g;
+  for (const m of source.matchAll(nineHold)) out.add(m[1] ?? `${m[2]}x`);
   return [...out];
 }
 

@@ -143,6 +143,32 @@ async function loadReplyGeneration(
   }
 }
 
+/** The org's classifier engine switch; null on any failure or a missing column (= old engine). */
+async function loadClassifierEngine(supabase: LooseSupabase, orgId: string): Promise<string | null> {
+  try {
+    const { data, error } = await (supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          eq: (c: string, v: unknown) => {
+            eq: (c: string, v: unknown) => {
+              maybeSingle: () => PromiseLike<{ data: { classifier_engine?: string | null } | null; error: unknown }>;
+            };
+          };
+        };
+      };
+    })
+      .from("ai_responder_configs")
+      .select("classifier_engine")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error || !data) return null;
+    return typeof data.classifier_engine === "string" ? data.classifier_engine : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 7-day scorecard for first paint; null lets the client card load/retry itself. */
 async function loadScorecard(
   supabase: LooseSupabase,
@@ -204,13 +230,14 @@ export default async function MessagesV2Page({
   // First load fixes the New / Backlog cutover at now() (never moved after);
   // it must exist before the hold classification runs.
   await ensureMessagesV2Settings(createAdminClient() as unknown as LooseSupabase, orgId);
-  const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip] = await Promise.all([
+  const [loaded, coverage, scorecardRows, replayBatchId, replySetting, nurtureAutoDrip, classifierEngine] = await Promise.all([
     loadMessagesV2Page(supabase, orgId),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
     loadReplyGeneration(supabase, orgId),
     isOwner ? loadNurtureAutoDrip(supabase, orgId) : Promise.resolve(null),
+    loadClassifierEngine(supabase, orgId),
   ]);
   const data = loaded;
   // A failed reply opened from My Leads whose hold is beyond the first page: load it by id and pin it on top.
@@ -244,6 +271,7 @@ export default async function MessagesV2Page({
         orgId={orgId}
         isOwner={isOwner}
         replyGeneration={replySetting}
+        classifierEngine={classifierEngine}
         setReplyGeneration={setReplyGenerationAction}
         undoJevAction={undoJevAppliedAction}
         findJevUndo={findJevUndoAction}

@@ -6,6 +6,7 @@
  * decides anything and never surfaces step names such as `claim` or
  * `resolve_threshold`.
  */
+import { nineTapeTag } from "./nine-tape";
 import { chicagoClock } from "./chicago-time";
 import { dripEnrollmentSummary } from "./run-card";
 import type { PipelineRunStep, RunWithSteps } from "./types";
@@ -60,13 +61,20 @@ export function tapeTagForWord(word: string | null | undefined): TapeTag | null 
     case "jev_unclear_no_action":
     case "low_confidence":
       return TAGS.unclear;
+    case "nine_asked_stop":
+      return TAGS.stop;
+    case "nine_needs_person":
+      return TAGS.unclear;
+    case "nine_reply_not_sent":
+    case "reply_text_not_approved":
+      return NEUTRAL_TAG;
     default:
       return null;
   }
 }
 
 /** Reason formats whose SECOND part is the word that matters (`<prefix>:<outcome or kind>`). */
-const WORD_AFTER_PREFIX = new Set(["model", "keyword", "jev_below_threshold", "automation_disabled", "human_only_outcome", "not_applicable"]);
+const WORD_AFTER_PREFIX = new Set(["nine_automation_disabled", "model", "keyword", "jev_below_threshold", "automation_disabled", "human_only_outcome", "not_applicable"]);
 
 /**
  * The word that matters in an engine reason, for every format the engine writes:
@@ -90,7 +98,7 @@ const hasStep = (steps: readonly PipelineRunStep[], name: string, result?: Pipel
   steps.some((s) => s.name === name && (result === undefined || s.result === result));
 
 function classifyOutcome(steps: readonly PipelineRunStep[]): string | null {
-  const step = steps.find((s) => s.kind === "jev" && s.name === "classify");
+  const step = steps.find((s) => s.kind === "jev" && s.name === "classify" && !(s.detail && "shadow_engine" in s.detail));
   const outcome = step?.detail?.outcome;
   return typeof outcome === "string" ? outcome : null;
 }
@@ -101,9 +109,14 @@ export function tapeTagForRun(run: Pick<RunWithSteps, "reason" | "steps">, pinne
   const pinned = pinnedReason ? tapeTagForWord(reasonWord(pinnedReason)) : null;
   if (pinned) return pinned;
   const word = reasonWord(run.reason);
-  if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm") {
+  // A hostile or hot hold says what the text IS, whichever engine ran: it beats the nine-question answer
+  // (so a hostile-held text is never tagged "Maybe later").
+  if (word === "price_or_offer" || word === "price_offer" || word === "hot_lead" || word === "call_request" || word === "hostile_needs_confirm" || word === "hostile") {
     return tapeTagForWord(word);
   }
+  // Nine-question engine: its answer is the tag (old-engine runs fall through to the mapping below).
+  const nine = nineTapeTag(run.steps);
+  if (nine) return nine;
   const fromClassifier = tapeTagForWord(classifyOutcome(run.steps));
   if (fromClassifier) return fromClassifier;
   const fromReason = tapeTagForWord(word);
@@ -295,6 +308,8 @@ export function holdReasonSentence(
   const tag = pinned ? null : run ? tapeTagForRun(run) : null;
   const word = reasonWord(flagReason);
   const t = tag ?? tapeTagForWord(word);
+  if (word === "nine_reply_not_sent") return "The reply was not sent. A person should take a look.";
+  if (word === "reply_text_not_approved") return "There is no approved reply for this one. A person should take a look.";
   switch (t?.label) {
     case "Asked to stop":
       return `${who} asked to stop. Nothing sent.`;
