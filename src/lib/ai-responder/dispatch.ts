@@ -99,6 +99,7 @@ import {
   enrollNineDrip,
   CLASSIFIER_ENGINE_UNREADABLE,
   readClassifierEngine,
+  readNineRuleSwitch,
   runNineClassification,
   type NineDripResult,
 } from "./nine-questions-engine";
@@ -7713,8 +7714,8 @@ export async function runNineQuestionsStep(
 
   if (action.kind === "drip_only") {
     // PR 4: the owner's "Confirmed owner" drip switch. Off is a choice, not a failure (as the
-    // nurture switch): nothing enrolled, no hold. Any read problem counts as OFF.
-    if (!(await nineRuleSwitchOn(supabase, property.org_id, "nine_confirmed_owner_drip"))) {
+    // nurture switch): nothing enrolled, no hold. See readNineRuleSwitch for read errors.
+    if (!(await readNineRuleSwitch(supabase, property.org_id, "nine_confirmed_owner_drip"))) {
       await trace(supabase, {
         kind: "action",
         name: "drip_enrolled",
@@ -7823,8 +7824,8 @@ export async function runNineQuestionsStep(
 
   let messageId: string | null = null;
   if (action.reply === "identity") {
-    // PR 4: the owner's identity-reply switch. Off (or unreadable) = a person answers.
-    if (!(await nineRuleSwitchOn(supabase, property.org_id, "nine_identity_reply"))) {
+    // PR 4: the owner's identity-reply switch. Off (or unreadable) = a person answers; see readNineRuleSwitch.
+    if (!(await readNineRuleSwitch(supabase, property.org_id, "nine_identity_reply"))) {
       await trace(supabase, {
         kind: "hold",
         name: "nine_identity_reply",
@@ -7919,21 +7920,6 @@ export async function runNineQuestionsStep(
   return dripResult.status === "refused"
     ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
     : { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
-}
-
-/** PR 4 owner switches on `ai_responder_configs`; any read problem counts as OFF (fail closed). */
-async function nineRuleSwitchOn(
-  supabase: SupabaseClient<Database>,
-  orgId: string,
-  column: "nine_identity_reply" | "nine_confirmed_owner_drip",
-): Promise<boolean> {
-  const { data, error } = await supabase
-    .from("ai_responder_configs")
-    .select(column)
-    .eq("org_id", orgId)
-    .eq("active", true)
-    .maybeSingle();
-  return !error && (data as Record<string, unknown> | null)?.[column] === true;
 }
 
 /** `ai_responder_configs.nurture_auto_drip`; any read problem counts as OFF (no enrolment). */

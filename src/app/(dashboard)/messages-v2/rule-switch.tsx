@@ -35,7 +35,8 @@ export function RuleSwitch({
   offValue: string;
   isOwner: boolean;
   action?: SetAiRuleSwitchAction;
-  onChange: (next: AiRuleSwitchState) => void;
+  /** Gets an updater that changes ONLY this switch, so an older reply for another switch cannot undo a newer one. */
+  onChange: (update: (prev: AiRuleSwitchState) => AiRuleSwitchState) => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +54,16 @@ export function RuleSwitch({
     setError(null);
     try {
       const result = await action({ configId: state.configId, switch: name, value: on ? offValue : onValue });
-      if (result.ok) onChange(result.data);
+      if (result.ok) {
+        const confirmed = result.data;
+        onChange((prev) =>
+          name === "nine_identity_reply"
+            ? { ...prev, nineIdentityReply: confirmed.nineIdentityReply }
+            : name === "nine_confirmed_owner_drip"
+              ? { ...prev, nineConfirmedOwnerDrip: confirmed.nineConfirmedOwnerDrip }
+              : { ...prev, classifierEngine: confirmed.classifierEngine },
+        );
+      }
       else setError(pageText(result.error.message));
     } catch {
       setError("Could not change this. Nothing was changed.");

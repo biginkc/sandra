@@ -202,10 +202,12 @@ export function RulesPanel({
     setSyncedSwitches(ruleSwitches ?? null);
     setSwitches(ruleSwitches ?? null);
   }
+  const patchSwitch = (update: (prev: AiRuleSwitchState) => AiRuleSwitchState) =>
+    setSwitches((prev) => (prev ? update(prev) : prev));
   const engine = switches?.classifierEngine ?? classifierEngine;
   const renderSwitch = (name: "nine_identity_reply" | "nine_confirmed_owner_drip") =>
     switches ? (
-      <RuleSwitch state={switches} name={name} onValue="true" offValue="false" isOwner={isOwner} action={setRuleSwitch} onChange={setSwitches} />
+      <RuleSwitch state={switches} name={name} onValue="true" offValue="false" isOwner={isOwner} action={setRuleSwitch} onChange={patchSwitch} />
     ) : (
       <span className="rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap">Not set up</span>
     );
@@ -289,7 +291,7 @@ export function RulesPanel({
                     offValue="outcome_v1"
                     isOwner={isOwner}
                     action={setRuleSwitch}
-                    onChange={setSwitches}
+                    onChange={patchSwitch}
                   />
                 </Row>
               </section>

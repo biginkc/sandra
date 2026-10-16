@@ -62,3 +62,24 @@ describe("rules panel owner switches (PR 4)", () => {
     expect(panel.textContent).not.toMatch(/Jev/);
   });
 });
+
+describe("concurrent toggles", () => {
+  it("a slower, older reply for one switch does not undo a newer change to another", async () => {
+    // Identity's reply is slow and was built before the drip change: it reports the drip as still ON.
+    let releaseIdentity: (v: unknown) => void = () => {};
+    const action = vi.fn((input: { switch: string }) =>
+      input.switch === "nine_identity_reply"
+        ? new Promise((resolve) => {
+            releaseIdentity = resolve;
+          })
+        : Promise.resolve({ ok: true, data: state({ nineConfirmedOwnerDrip: false }) }),
+    );
+    const panel = await open({ ruleSwitches: state(), setRuleSwitch: action as never });
+    await userEvent.click(within(panel).getByTestId("rule-switch-nine_identity_reply"));
+    await userEvent.click(within(panel).getByTestId("rule-switch-nine_confirmed_owner_drip"));
+    await waitFor(() => expect(within(panel).getByTestId("rule-switch-state-nine_confirmed_owner_drip")).toHaveTextContent("Off"));
+    releaseIdentity({ ok: true, data: state({ nineIdentityReply: false, nineConfirmedOwnerDrip: true }) });
+    await waitFor(() => expect(within(panel).getByTestId("rule-switch-state-nine_identity_reply")).toHaveTextContent("Off"));
+    expect(within(panel).getByTestId("rule-switch-state-nine_confirmed_owner_drip")).toHaveTextContent("Off");
+  });
+});
