@@ -1,7 +1,7 @@
 /**
  * Every house a homeowner owns in the org ("Owns N houses" badge). One query per call, so a page of queue
- * rows costs one round trip; only when that query hits its row ceiling does it fall back to one exact query
- * per homeowner (in parallel). Runs on the caller's own Supabase client: RLS keeps it inside the caller's
+ * rows costs one round trip; only when that query hits its row ceiling does it add ONE batched exact-count
+ * call (fn_homeowner_house_counts), so a page never costs more than two round trips. Runs on the caller's own Supabase client: RLS keeps it inside the caller's
  * org, and the explicit org filter keeps a multi-org member to the org being viewed. Never use a
  * service-role client.
  */
@@ -38,8 +38,14 @@ type HousesQuery = {
   range(from: number, to: number): PromiseLike<HousesResult>;
 };
 
+type HouseCountRow = { homeowner_contact_id: string | null; house_count: number | string | null };
+
 export type HousesClient = {
   from(table: "properties"): { select(columns: string, options?: { count: "exact" }): HousesQuery };
+  rpc(
+    fn: "fn_homeowner_house_counts",
+    args: { p_org_id: string; p_contact_ids: string[] },
+  ): PromiseLike<{ data: HouseCountRow[] | null; error: { message?: string } | null }>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -90,31 +96,27 @@ export async function loadHomeownerHouses(
   const rows = data ?? [];
 
   const result: Record<string, HomeownerHouses> = {};
-  if (rows.length < MAX_PAGE_ROWS) {
-    for (const row of rows) {
-      const contactId = row.homeowner_contact_id;
-      if (!contactId) continue;
-      const entry = (result[contactId] ??= { count: 0, houses: [] });
-      entry.count += 1;
-      if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
-    }
-    return result;
+  for (const row of rows) {
+    const contactId = row.homeowner_contact_id;
+    if (!contactId) continue;
+    const entry = (result[contactId] ??= { count: 0, houses: [] });
+    entry.count += 1;
+    if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
   }
+  if (rows.length < MAX_PAGE_ROWS) return result;
 
-  // The page query was cut off, so its rows can't be trusted for any homeowner: read each one exactly.
-  const perOwner = await Promise.all(
-    ids.map(async (contactId) => {
-      const owner = await base({ count: "exact" })
-        .eq("homeowner_contact_id", contactId)
-        .order("address", { ascending: true })
-        .order("id", { ascending: true })
-        .limit(MAX_LISTED_HOUSES);
-      if (owner.error) throw readFailed(owner.error);
-      const houses = (owner.data ?? []).map((row) => toHouse(row, input.viewerId));
-      return [contactId, { count: Math.max(owner.count ?? 0, houses.length), houses }] as const;
-    }),
-  );
-  for (const [contactId, entry] of perOwner) if (entry.count > 0) result[contactId] = entry;
+  // The page read was cut off, so its per-owner counts may be short. Rows come back in one global
+  // (address, id) order, so each owner's listed houses are still the start of that owner's own list and
+  // "Show more" continues from there; only the counts need one exact batched read.
+  const counts = await client.rpc("fn_homeowner_house_counts", { p_org_id: input.orgId, p_contact_ids: ids });
+  if (counts.error) throw readFailed(counts.error);
+  for (const countRow of counts.data ?? []) {
+    const contactId = countRow.homeowner_contact_id;
+    const exact = Number(countRow.house_count ?? 0);
+    if (!contactId || !ids.includes(contactId) || !(exact > 0)) continue;
+    const entry = (result[contactId] ??= { count: 0, houses: [] });
+    entry.count = Math.max(exact, entry.houses.length);
+  }
   return result;
 }
 

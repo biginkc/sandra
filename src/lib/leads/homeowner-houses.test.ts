@@ -27,10 +27,21 @@ const row = (id: string, contact: string, extra: Partial<Row> = {}): Row => ({
 
 /** A properties table that applies the filters the way PostgREST would, and records every call. */
 function fakeClient(table: Row[], error: { message: string } | null = null) {
-  const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][] } = {
-    from: 0, filters: [], counted: 0, orders: [],
+  const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][]; rpc: unknown[] } = {
+    from: 0, filters: [], counted: 0, orders: [], rpc: [],
   };
   const client = {
+    // fn_homeowner_house_counts as the database runs it: org filter, deleted excluded, grouped exact counts.
+    rpc: vi.fn(async (fn: string, args: { p_org_id: string; p_contact_ids: string[] }) => {
+      calls.rpc.push([fn, args]);
+      if (error) return { data: null, error };
+      if (args.p_contact_ids.length > 100) return { data: null, error: { message: "Too many homeowners in one read" } };
+      const counts = new Map<string, number>();
+      for (const r of table)
+        if (r.org_id === args.p_org_id && r.deleted_at === null && r.homeowner_contact_id && args.p_contact_ids.includes(r.homeowner_contact_id))
+          counts.set(r.homeowner_contact_id, (counts.get(r.homeowner_contact_id) ?? 0) + 1);
+      return { data: [...counts].map(([homeowner_contact_id, n]) => ({ homeowner_contact_id, house_count: String(n) })), error: null };
+    }),
     from: vi.fn(() => {
       calls.from += 1;
       let rows = [...table];
@@ -136,33 +147,61 @@ describe("loadHomeownerHouses", () => {
     expect(result[C2]).toMatchObject({ count: 1 });
   });
 
-  it("stays exact for every owner on the page when the combined rows pass the page ceiling", async () => {
-    // C1's 1,100 houses sort first ("a…"), so the single page read would hide C2 and C3 entirely.
+  it("stays exact for every owner on the page when the combined rows pass the page ceiling, in one extra call", async () => {
+    // C1's 1,100 houses sort first ("a…"), so the single page read hides C2 and C3; the batched count keeps them exact.
     const { client, calls } = fakeClient([...many(C1, 1100, "a"), row("m1", C2), row("m2", C2), row("m3", C3)]);
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2, C3] });
-    expect(calls.from).toBe(4);
-    expect(calls.counted).toBe(3);
+    expect(calls.from).toBe(1);
+    expect(calls.counted).toBe(0);
+    expect(calls.rpc).toEqual([["fn_homeowner_house_counts", { p_org_id: ORG, p_contact_ids: [C1, C2, C3] }]]);
     expect(result[C1].count).toBe(1100);
     expect(result[C1].houses).toHaveLength(MAX_LISTED_HOUSES);
-    expect(result[C2]).toMatchObject({ count: 2, houses: [{ propertyId: "m1" }, { propertyId: "m2" }] });
-    expect(result[C3]).toMatchObject({ count: 1, houses: [{ propertyId: "m3" }] });
+    expect(result[C2]).toMatchObject({ count: 2, houses: [] });
+    expect(result[C3]).toMatchObject({ count: 1, houses: [] });
   });
 
-  it("orders the ceiling fallback's tied addresses by id", async () => {
-    // Past the page ceiling each owner is re-read on its own; six of C2's houses share one address, so only the id tie-break
-    // fixes their order (the fake returns tied rows in a different order on every query, as Postgres may).
-    const tied = ["t6", "t2", "t5", "t1", "t4", "t3"].map((id) => row(id, C2, { address: "9 Same St" }));
-    const { client, calls } = fakeClient([...many(C1, 1100, "a"), ...tied]);
+  it("lists each owner's houses as the start of that owner's own Show more order past the ceiling", async () => {
+    const table = [...many(C1, 990, "a"), ...many(C2, 30, "b")];
+    const { client } = fakeClient(table);
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2] });
-    expect(calls.from).toBe(3);
-    expect(calls.orders.slice(1)).toEqual([["address", "id"], ["address", "id"]]);
-    expect(result[C2].houses.map((h) => h.propertyId)).toEqual(["t1", "t2", "t3", "t4", "t5", "t6"]);
+    expect(result[C2].count).toBe(30);
+    const listed = result[C2].houses.map((h) => h.propertyId);
+    expect(listed).toEqual(table.filter((r) => r.homeowner_contact_id === C2).slice(0, listed.length).map((r) => r.id));
+    const rest = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: C2, offset: listed.length });
+    expect([...listed, ...rest.houses.map((h) => h.propertyId)]).toHaveLength(30);
+  });
+
+  it("keeps 100 owners past the ceiling to at most 2 calls, exact, deleted and other-org houses excluded", async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    const table = ids.flatMap((id, i) => [
+      ...many(id, 11, `h${String(i).padStart(3, "0")}-`),
+      row(`del${i}`, id, { deleted_at: "2026-10-01T00:00:00Z" }),
+      row(`other${i}`, id, { org_id: "org-2" }),
+    ]);
+    const { client, calls } = fakeClient(table);
+    const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: ids });
+    expect(calls.from + calls.rpc.length).toBeLessThanOrEqual(2);
+    for (const id of ids) expect(result[id].count).toBe(11);
+  });
+
+  it("returns nothing for ids that only have houses in another org", async () => {
+    const { client } = fakeClient([...many(C1, 1000, "a"), row("x1", C2, { org_id: "org-2" })]);
+    const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2] });
+    expect(result[C2]).toBeUndefined();
+    expect(result[C1].count).toBe(1000);
+  });
+
+  it("throws when the batched count fails", async () => {
+    const { client } = fakeClient(many(C1, 1000, "a"));
+    (client as unknown as { rpc: () => unknown }).rpc = async () => ({ data: null, error: { message: "count boom" } });
+    await expect(loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] })).rejects.toThrow(/count boom/);
   });
 
   it("does not fall back below the page ceiling", async () => {
     const { client, calls } = fakeClient(many(C1, MAX_PAGE_ROWS - 1, "a"));
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
     expect(calls.from).toBe(1);
+    expect(calls.rpc).toHaveLength(0);
     expect(result[C1].count).toBe(MAX_PAGE_ROWS - 1);
   });
 });
