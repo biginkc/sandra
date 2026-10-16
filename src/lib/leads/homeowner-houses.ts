@@ -1,7 +1,7 @@
 /**
  * Every house a homeowner owns in the org ("Owns N houses" badge). One query per call, so a page of queue
  * rows costs one round trip; only when that query hits its row ceiling does it add ONE batched exact-count
- * call (fn_homeowner_house_counts), so a page never costs more than two round trips. Runs on the caller's own Supabase client: RLS keeps it inside the caller's
+ * call (fn_homeowner_houses_first_page), so a page never costs more than two round trips. Runs on the caller's own Supabase client: RLS keeps it inside the caller's
  * org, and the explicit org filter keeps a multi-org member to the org being viewed. Never use a
  * service-role client.
  */
