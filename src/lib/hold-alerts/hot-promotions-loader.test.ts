@@ -408,7 +408,7 @@ describe("hot promotions through the alert pass", () => {
 
     t.store.watermarks.set(ORG, "2026-10-13T00:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(10); // cap
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(301); // backlog + newest, all under the runaway cap
     const newestRows = t.store.rows.filter((r) => r.holdKey === "hot_handoff:in-newest");
     expect(newestRows.map((r) => [r.channel, r.status]).sort()).toEqual([["slack", "sent"], ["sms", "sent"]]);
   });

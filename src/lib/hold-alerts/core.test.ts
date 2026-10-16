@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { reportError } from "@/lib/errors/report";
 
-import { runHoldAlertsForOrg } from "./core";
+import { MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "./core";
 import { ACQ, hold, makeDeps as baseMakeDeps, ORG, OWNER } from "./test-support";
 
 /** Only HOT holds alert (PR 2), so the default hold here is hot. Tests that need a cold hold pass holds explicitly. */
@@ -131,9 +131,9 @@ describe("hot-hold SMS", () => {
 });
 
 describe("caps", () => {
-  it("skips a DM past 20 per recipient per rolling hour with a visible reason", async () => {
+  it("skips a DM past the cap per recipient per rolling hour with a visible reason", async () => {
     const t = makeDeps({ recipients: [OWNER] });
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < MAX_DMS_PER_RECIPIENT_PER_HOUR; i++) {
       t.store.rows.push({
         id: `old${i}`,
         orgId: ORG,
@@ -159,7 +159,7 @@ describe("caps", () => {
 
   it("counts in-flight (sending) deliveries toward the DM cap", async () => {
     const t = makeDeps({ recipients: [OWNER] });
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < MAX_DMS_PER_RECIPIENT_PER_HOUR; i++) {
       t.store.rows.push({
         id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: OWNER.userId,
         channel: "slack", stage: "first", status: "sending", attempts: 1, lastError: null,
@@ -173,7 +173,7 @@ describe("caps", () => {
 
   it("delivers a capped row on a later run once the hour has rolled", async () => {
     const t = makeDeps({ recipients: [OWNER] });
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < MAX_DMS_PER_RECIPIENT_PER_HOUR; i++) {
       t.store.rows.push({
         id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: OWNER.userId,
         channel: "slack", stage: "first", status: "sent", attempts: 1, lastError: null,
@@ -190,7 +190,7 @@ describe("caps", () => {
 
   it("counts only the last hour toward the DM cap", async () => {
     const t = makeDeps({ recipients: [OWNER] });
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < MAX_DMS_PER_RECIPIENT_PER_HOUR; i++) {
       t.store.rows.push({
         id: `old${i}`,
         orgId: ORG,
@@ -210,9 +210,9 @@ describe("caps", () => {
     expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
   });
 
-  it("skips SMS past 10 per hour for the org", async () => {
+  it("skips SMS past the cap per hour for the org", async () => {
     const t = makeDeps({ holds: [hold({ hot: true })], recipients: [OWNER] });
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < MAX_SMS_PER_HOUR; i++) {
       t.store.rows.push({
         id: `sms${i}`,
         orgId: ORG,

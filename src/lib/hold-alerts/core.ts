@@ -16,8 +16,8 @@ import {
 
 const HOUR_MS = 60 * 60 * 1000;
 /** PLAN 4.7 caps. */
-export const MAX_DMS_PER_RECIPIENT_PER_HOUR = 20;
-export const MAX_SMS_PER_HOUR = 10;
+export const MAX_DMS_PER_RECIPIENT_PER_HOUR = 500;
+export const MAX_SMS_PER_HOUR = 500;
 export const DEFAULT_BUDGET_MS = 50_000;
 export { HOT_ALERTS_START_ISO };
 
