@@ -316,6 +316,44 @@ describe("MessagesV2View", () => {
     }
   });
 
+  it("after a refresh brings new holds to the top, the displaced first-page cards are reachable via Show older", async () => {
+    const old = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m + 10) }));
+    let server = old;
+    const loadOlderHolds = byIdsServer(() => server);
+    const p = { ...props([], old.slice(0, 3)), holdsSnapshot: buildSnapshot(old), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
+    // Refresh: two new holds arrive at the top; the first page is now n1, n2, h1.
+    server = [{ ...openHold("n1"), ...at(1) }, { ...openHold("n2"), ...at(2) }, ...old];
+    rerender(<MessagesV2View {...p} holds={server.slice(0, 3)} holdsSnapshot={buildSnapshot(server)} />);
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6)); // n1, n2, h1 + kept h4..h6
+    expect(screen.getByTestId("waiting-count")).toHaveTextContent("8");
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(8));
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ ids: ["h2", "h3"] });
+    expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("a kept card whose draft changed in the new snapshot is not kept with its old body; it is fetched fresh", async () => {
+    const draft = (id: string, body: string) => ({ draft: { id, inbound_message_id: null, body, sendable: true }, draft_held: true });
+    const old = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m), ...(m === 5 ? draft("d1", "old body") : {}) }));
+    let server = old;
+    const loadOlderHolds = byIdsServer(() => server);
+    const p = { ...props([], old.slice(0, 3)), holdsSnapshot: buildSnapshot(old), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
+    expect(screen.getByText("old body")).toBeInTheDocument();
+    server = old.map((h) => (h.id === "h5" ? { ...h, ...draft("d2", "new body") } : h));
+    rerender(<MessagesV2View {...p} holds={server.slice(0, 3).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(server)} />);
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4)); // h4 kept, h5 dropped for reload
+    expect(screen.queryByText("old body")).toBeNull();
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getByText("new body")).toBeInTheDocument());
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ ids: ["h5"] });
+  });
+
   it("holds handled since the snapshot come back missing: not rendered, counted out, with a note", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = byIdsServer(() => all.filter((h) => h.id !== "h5"));
