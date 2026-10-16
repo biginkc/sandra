@@ -19,6 +19,11 @@ const HOUR_MS = 60 * 60 * 1000;
 export const MAX_DMS_PER_RECIPIENT_PER_HOUR = 500;
 export const MAX_SMS_PER_HOUR = 500;
 export const DEFAULT_BUDGET_MS = 50_000;
+/**
+ * No new task starts once fewer than this many ms of the budget remain: a task started late could run past
+ * the route's 60s limit and die mid-send as failed:interrupted, silently losing a hot alert.
+ */
+export const TASK_START_RESERVE_MS = 15_000;
 export { HOT_ALERTS_START_ISO };
 
 type Task = {
@@ -285,7 +290,7 @@ export async function runHoldAlertsForOrg(
   }
 
   for (const task of tasks) {
-    if (deps.now().getTime() - startMs >= budgetMs) {
+    if (deps.now().getTime() - startMs >= budgetMs - TASK_START_RESERVE_MS) {
       summary.budgetExhausted = true;
       break;
     }

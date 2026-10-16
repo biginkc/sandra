@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { reportError } from "@/lib/errors/report";
 
-import { MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "./core";
+import { DEFAULT_BUDGET_MS, MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg, TASK_START_RESERVE_MS } from "./core";
 import { ACQ, hold, makeDeps as baseMakeDeps, ORG, OWNER } from "./test-support";
 
 /** Only HOT holds alert (PR 2), so the default hold here is hot. Tests that need a cold hold pass holds explicitly. */
@@ -463,6 +463,33 @@ describe("durability and idempotency", () => {
     t.deps.now = () => new Date(base().getTime() + calls++ * HOUR);
     const summary = await runHoldAlertsForOrg(t.deps, ORG, { budgetMs: 1 });
     expect(summary.budgetExhausted).toBe(true);
+  });
+});
+
+describe("task start reserve", () => {
+  it("does not start a new task once less than TASK_START_RESERVE_MS of the budget remains", async () => {
+    const t = makeDeps({ holds: [hold({ hot: true }), hold({ hot: true, holdKey: "prop-2:x", propertyId: "prop-2" })] });
+    const base = t.deps.now().getTime();
+    let elapsed = 0;
+    t.deps.now = () => new Date(base + elapsed);
+    const realSend = t.deps.sendSlack;
+    t.deps.sendSlack = async (...args) => {
+      elapsed = DEFAULT_BUDGET_MS - TASK_START_RESERVE_MS + 100; // the first task ran long
+      return realSend(...args);
+    };
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(summary.budgetExhausted).toBe(true);
+    expect(t.sent).toHaveLength(1);
+    // Everything not started stays pending (no attempt spent) for the next run; nothing is interrupted.
+    expect(t.store.rows.filter((r) => r.status === "sending" || r.lastError === "interrupted")).toEqual([]);
+  });
+
+  it("still starts tasks just inside the reserve cutoff", async () => {
+    const t = makeDeps({ holds: [hold({ hot: true })] });
+    const base = t.deps.now().getTime();
+    t.deps.now = () => new Date(base + DEFAULT_BUDGET_MS - TASK_START_RESERVE_MS - 1);
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(summary.budgetExhausted).toBe(false);
   });
 });
 
