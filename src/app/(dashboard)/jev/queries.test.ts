@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
    *  can assert the `model.provider = 'jev'` legacy-exclusion filter is
    *  actually applied, not merely that the code compiles. */
   aiDispositionReviewEqCalls: [] as [string, unknown][],
+  /** `.neq(column, value)` calls on the sms_classification_runs query. */
+  classificationRunNeqCalls: [] as [string, unknown][],
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -64,6 +66,10 @@ vi.mock("@/lib/supabase/server", () => ({
             eq: () => ({
               order: () => Promise.resolve({ data: mocks.jevLeadDecisions, error: null }),
             }),
+            // getReviewJevData reads every decision, newest first, one page.
+            order: () => ({
+              range: () => Promise.resolve({ data: mocks.jevLeadDecisions, error: null }),
+            }),
           }),
         };
       }
@@ -82,9 +88,14 @@ vi.mock("@/lib/supabase/server", () => ({
           select: () => ({
             eq: () => ({
               or: () => ({
-                order: () => ({
-                  range: () => Promise.resolve({ data: mocks.classificationRuns, error: null }),
-                }),
+                neq: (col: string, val: unknown) => {
+                  mocks.classificationRunNeqCalls.push([col, val]);
+                  return {
+                    order: () => ({
+                      range: () => Promise.resolve({ data: mocks.classificationRuns, error: null }),
+                    }),
+                  };
+                },
               }),
             }),
           }),
@@ -95,7 +106,7 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-import { getCorrectionHistory, getNeedsDecisionQueue, summarize, type JevQueueItem } from "./queries";
+import { getCorrectionHistory, getNeedsDecisionQueue, getReviewJevData, summarize, type JevQueueItem } from "./queries";
 
 beforeEach(() => {
   mocks.aiDispositionReviews = [];
@@ -385,5 +396,13 @@ describe("getCorrectionHistory — root final-review P2 (full sequential correct
     const { entries, error } = await getCorrectionHistory("prop-1", "ai_disposition_review", "review-1");
     expect(error).toBeNull();
     expect(entries).toEqual([]);
+  });
+});
+
+describe("getReviewJevData — nine-question runs are not Review Jev rows", () => {
+  it("excludes schema_version nine_questions_v1 from the classifier-failure query", async () => {
+    mocks.classificationRunNeqCalls.length = 0;
+    await getReviewJevData(0);
+    expect(mocks.classificationRunNeqCalls).toEqual([["schema_version", "nine_questions_v1"]]);
   });
 });

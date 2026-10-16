@@ -53,7 +53,6 @@ export async function loadBacklogHoldsAction(input: {
   const limit = Math.max(1, clampInt(input?.limit, BACKLOG_PAGE, MAX_PAGE));
   const supabase = (await createClient()) as unknown as LooseSupabase;
   const page = await loadBacklogHolds(supabase, orgId, offset, limit, undefined, {
-    includeLuna: false, // Luna suggestions are no longer rendered on the page
     bucket: "backlog",
   });
   if (!page || page.failed) {

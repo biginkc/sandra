@@ -13,7 +13,10 @@ import { pageText } from "./page-text";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
 import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
 import { formatModeBadge } from "./queries";
+import { ruleTitle } from "./rule-text";
 import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
+import { RuleSwitch, type SetAiRuleSwitchAction } from "./rule-switch";
+import type { AiRuleSwitchState } from "./threshold-actions";
 import type { ReplyGeneration } from "./reply-generation";
 import type { ModeBadge } from "./types";
 
@@ -92,7 +95,19 @@ const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
   asked_stop: "opted_out",
 };
 
-function NineRules({ renderState }: { renderState: (outcome: string | undefined) => React.ReactNode }) {
+/** Nine-question answers whose own owner switch lives on ai_responder_configs (PR 4). */
+const NINE_OWN_SWITCH: Partial<Record<NineQuestionId, "nine_identity_reply" | "nine_confirmed_owner_drip">> = {
+  asked_who: "nine_identity_reply",
+  confirmed_owner: "nine_confirmed_owner_drip",
+};
+
+function NineRules({
+  renderState,
+  renderSwitch,
+}: {
+  renderState: (outcome: string | undefined) => React.ReactNode;
+  renderSwitch: (name: "nine_identity_reply" | "nine_confirmed_owner_drip") => React.ReactNode;
+}) {
   return (
     <div data-testid="nine-rules" className="flex flex-col gap-2">
       {NINE_GROUPS.map((g) => (
@@ -101,7 +116,9 @@ function NineRules({ renderState }: { renderState: (outcome: string | undefined)
           {g.ids
             .filter((id) => NINE_ANSWER_GROUP[id] === g.group)
             .map((id) => (
-              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{renderState(NINE_BADGE[id])}</Row>
+              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>
+                {NINE_OWN_SWITCH[id] ? renderSwitch(NINE_OWN_SWITCH[id]!) : renderState(NINE_BADGE[id])}
+              </Row>
             ))}
         </section>
       ))}
@@ -157,6 +174,8 @@ export function RulesPanel({
   replyGeneration,
   setReplyGeneration,
   classifierEngine,
+  ruleSwitches,
+  setRuleSwitch,
 }: {
   orgId: string;
   isOwner: boolean;
@@ -167,8 +186,26 @@ export function RulesPanel({
   setReplyGeneration?: SetReplyGenerationAction;
   /** ai_responder_configs.classifier_engine; 'nine_questions' swaps in the nine-row panel. */
   classifierEngine?: string | null;
+  /** Owner switches on ai_responder_configs (PR 4); null hides them. */
+  ruleSwitches?: AiRuleSwitchState | null;
+  setRuleSwitch?: SetAiRuleSwitchAction;
 }) {
   const [open, setOpen] = useState(false);
+  const [switches, setSwitches] = useState(ruleSwitches ?? null);
+  const [syncedSwitches, setSyncedSwitches] = useState(ruleSwitches ?? null);
+  if (syncedSwitches !== (ruleSwitches ?? null)) {
+    setSyncedSwitches(ruleSwitches ?? null);
+    setSwitches(ruleSwitches ?? null);
+  }
+  const patchSwitch = (update: (prev: AiRuleSwitchState) => AiRuleSwitchState) =>
+    setSwitches((prev) => (prev ? update(prev) : prev));
+  const engine = switches?.classifierEngine ?? classifierEngine;
+  const renderSwitch = (name: "nine_identity_reply" | "nine_confirmed_owner_drip") =>
+    switches ? (
+      <RuleSwitch state={switches} name={name} onValue="true" offValue="false" isOwner={isOwner} action={setRuleSwitch} onChange={patchSwitch} />
+    ) : (
+      <span className="rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap">Not set up</span>
+    );
   const byOutcome = new Map(badges.map((b) => [b.label, b]));
 
   return (
@@ -193,7 +230,8 @@ export function RulesPanel({
                 {pageText(badgesError)}
               </p>
             )}
-            {classifierEngine === "nine_questions" && <NineRules
+            {engine === "nine_questions" && <NineRules
+                renderSwitch={renderSwitch}
                 renderState={(outcome) => {
                   const badge = outcome ? byOutcome.get(outcome) : undefined;
                   if (!outcome) return null;
@@ -202,13 +240,13 @@ export function RulesPanel({
                     <>
                       <span className={cn("rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap", TONE[st.tone])}>{st.text}</span>
                       {isOwner && badge && isEditableBadge(badge) && (
-                        <LabelRuleEditor orgId={orgId} badge={badge} text={`${badge.label} [${formatModeBadge(badge)}]`} trigger="button" />
+                        <LabelRuleEditor orgId={orgId} badge={badge} text={`${ruleTitle(badge.label)} [${formatModeBadge(badge)}]`} trigger="button" />
                       )}
                     </>
                   );
                 }}
               />}
-            {classifierEngine !== "nine_questions" && GROUPS.map((group) => (
+            {engine !== "nine_questions" && GROUPS.map((group) => (
               <section key={group.heading} aria-label={group.heading} className="flex flex-col gap-2">
                 <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group.heading}</h3>
                 {group.rows.map((row) => {
@@ -223,7 +261,7 @@ export function RulesPanel({
                         <LabelRuleEditor
                           orgId={orgId}
                           badge={badge}
-                          text={`${badge.label} [${formatModeBadge(badge)}]`}
+                          text={`${ruleTitle(badge.label)} [${formatModeBadge(badge)}]`}
                           trigger="button"
                         />
                       )}
@@ -232,6 +270,27 @@ export function RulesPanel({
                 })}
               </section>
             ))}
+
+            {switches && isOwner && (
+              <section aria-label="Which questions Sandra uses" className="flex flex-col gap-2">
+                {/* PLACEHOLDER — needs Jarrad's verbatim approval before merge (heading, title, detail) */}
+                <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">Which questions Sandra uses</h3>
+                <Row
+                  title="Use the nine yes/no questions"
+                  detail="When this is off, Sandra uses the older eight answers."
+                >
+                  <RuleSwitch
+                    state={switches}
+                    name="classifier_engine"
+                    onValue="nine_questions"
+                    offValue="outcome_v1"
+                    isOwner={isOwner}
+                    action={setRuleSwitch}
+                    onChange={patchSwitch}
+                  />
+                </Row>
+              </section>
+            )}
 
             <section aria-label="Drips and drafts" className="flex flex-col gap-2">
               <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">Drips and drafts</h3>

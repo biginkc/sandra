@@ -62,6 +62,40 @@ export async function readClassifierEngine(
   return engine === "nine_questions" || engine === "outcome_v1" ? engine : "unreadable";
 }
 
+export type NineRuleSwitchColumn = "nine_identity_reply" | "nine_confirmed_owner_drip";
+
+/** A verified "this column does not exist yet" error for one PR 4 switch column (pre-migration). */
+export function isMissingSwitchColumnError(
+  error: { code?: string | null; message?: string | null },
+  column: NineRuleSwitchColumn,
+): boolean {
+  // Only when the error names THIS column: a 42703 about any other column fails closed.
+  const m = error.message ?? "";
+  return m.includes(column) && (error.code === "42703" || /(does not exist|could not find|schema cache)/i.test(m));
+}
+
+/**
+ * PR 4 owner switch on the active config: "on", "off" or "unreadable". Deploy-order safe: before
+ * migration 20261016050200 the column is missing, which means the column default (on), i.e. PR 3
+ * behaviour. Any OTHER read error, no active row, or a non-boolean value is "unreadable": the caller
+ * holds for a person (an unknown switch state is neither on nor off).
+ */
+export async function readNineRuleSwitch(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  column: NineRuleSwitchColumn,
+): Promise<"on" | "off" | "unreadable"> {
+  const { data, error } = await supabase
+    .from("ai_responder_configs")
+    .select(column)
+    .eq("org_id", orgId)
+    .eq("active", true)
+    .maybeSingle();
+  if (error) return isMissingSwitchColumnError(error, column) ? "on" : "unreadable";
+  const value = (data as Record<string, unknown> | null)?.[column];
+  return value === true ? "on" : value === false ? "off" : "unreadable";
+}
+
 /** What the tape / audit rows carry so the UI can tell the engines apart. */
 /**
  * `shadowMode` records under `shadow_engine` instead of `engine`, so the tape

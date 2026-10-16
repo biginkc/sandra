@@ -21,7 +21,7 @@ export default async function JevThresholdsSettingsPage() {
     return (
       <Page>
         <div className="text-destructive text-sm">
-          Failed to load Jev thresholds: {result.error.message}
+          Failed to load Sandra&apos;s rules: {result.error.message}
         </div>
       </Page>
     );
@@ -31,8 +31,8 @@ export default async function JevThresholdsSettingsPage() {
     return (
       <Page>
         <PageHeader
-          breadcrumb={[{ label: "Settings" }, { label: "Jev thresholds" }]}
-          title="Jev thresholds"
+          breadcrumb={[{ label: "Settings" }, { label: "Sandra's rules" }]}
+          title="Sandra's rules"
           description="No organization found."
         />
       </Page>
@@ -42,9 +42,9 @@ export default async function JevThresholdsSettingsPage() {
   return (
     <Page>
       <PageHeader
-        breadcrumb={[{ label: "Settings" }, { label: "Jev thresholds" }]}
-        title="Jev thresholds"
-        description="Per-outcome native-confidence cutoffs for automatic Jev application."
+        breadcrumb={[{ label: "Settings" }, { label: "Sandra's rules" }]}
+        title="Sandra's rules"
+        description="Per-outcome native-confidence cutoffs for automatic Sandra application."
       />
       <JevThresholdsForm orgId={result.data.orgId} initialRows={result.data.rows} />
     </Page>

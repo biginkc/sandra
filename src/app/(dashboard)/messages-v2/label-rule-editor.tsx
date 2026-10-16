@@ -22,7 +22,7 @@ import {
 } from "@/lib/sms-classification/thresholds";
 
 import { isNeverAuto, NEVER_AUTO_NOTE, NEW_LEAD_AUTO_NOTE } from "./rule-policy";
-import { formatConfidence, formatRuleText, parseConfidenceInput } from "./rule-text";
+import { formatConfidence, formatRuleText, parseConfidenceInput, ruleTitle } from "./rule-text";
 import { setLabelRule } from "./threshold-actions";
 import type { ModeBadge } from "./types";
 
@@ -108,7 +108,7 @@ export function LabelRuleEditor({ orgId, badge, text, className, trigger = "badg
           type="button"
           size="xs"
           variant="outline"
-          aria-label={`Edit rule for ${badge.label}`}
+          aria-label={`Edit rule for ${ruleTitle(badge.label)}`}
           data-testid={`edit-rule-${badge.label}`}
           onClick={() => {
             reset();
@@ -120,7 +120,7 @@ export function LabelRuleEditor({ orgId, badge, text, className, trigger = "badg
       ) : (
         <button
           type="button"
-          aria-label={`Edit rule for ${badge.label}`}
+          aria-label={`Edit rule for ${ruleTitle(badge.label)}`}
           data-testid={`edit-rule-${badge.label}`}
           className="cursor-pointer rounded-full focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => {
@@ -137,7 +137,7 @@ export function LabelRuleEditor({ orgId, badge, text, className, trigger = "badg
       <Dialog open={open} onOpenChange={(o) => !pending && setOpen(o)}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Rule for {badge.label}</DialogTitle>
+            <DialogTitle>Rule for {ruleTitle(badge.label)}</DialogTitle>
             <DialogDescription>
               Applies to the next inbound text. Every change is recorded with who made it.
             </DialogDescription>
@@ -146,11 +146,11 @@ export function LabelRuleEditor({ orgId, badge, text, className, trigger = "badg
           <div className="flex flex-col gap-1">
             <span className="text-muted-foreground text-xs">Current rule</span>
             <code data-testid="current-rule-text" className="rounded bg-muted px-2 py-1 text-sm">
-              {current ?? `${badge.label}: not fully known (set both below)`}
+              {current ?? `${ruleTitle(badge.label)}: not fully known (set both below)`}
             </code>
           </div>
 
-          <fieldset className="flex items-center gap-4" aria-label={`Automation for ${badge.label}`}>
+          <fieldset className="flex items-center gap-4" aria-label={`Automation for ${ruleTitle(badge.label)}`}>
             <legend className="sr-only">Automation</legend>
             <label className="flex items-center gap-1.5 text-sm">
               <input

@@ -26,7 +26,7 @@ function setup(b = badge()) {
 }
 
 const open = (user: ReturnType<typeof userEvent.setup>) =>
-  user.click(screen.getByRole("button", { name: "Edit rule for nurture" }));
+  user.click(screen.getByRole("button", { name: "Edit rule for Maybe later" }));
 
 beforeEach(() => {
   setLabelRule.mockReset();
@@ -40,7 +40,7 @@ describe("<LabelRuleEditor />", () => {
     expect(screen.getByText("nurture [AUTO ≥0.95]")).toBeVisible();
     await open(user);
     expect(screen.getByTestId("current-rule-text")).toHaveTextContent(
-      "nurture: auto-apply at native confidence ≥ 0.95 (ON)",
+      "Maybe later: auto-apply at native confidence ≥ 0.95 (ON)",
     );
     expect(screen.getByRole("radio", { name: "On" })).toBeChecked();
     expect(screen.getByTestId("rule-cutoff-input")).toHaveValue("0.95");
@@ -52,7 +52,7 @@ describe("<LabelRuleEditor />", () => {
     await user.click(screen.getByRole("radio", { name: "Off" }));
 
     expect(screen.getByTestId("new-rule-text")).toHaveTextContent(
-      "nurture: auto-apply at native confidence ≥ 0.95 (OFF)",
+      "Maybe later: auto-apply at native confidence ≥ 0.95 (OFF)",
     );
     expect(setLabelRule).not.toHaveBeenCalled();
   });
@@ -64,7 +64,7 @@ describe("<LabelRuleEditor />", () => {
     await user.clear(input);
     await user.type(input, "0.925");
     expect(screen.getByTestId("new-rule-text")).toHaveTextContent(
-      "nurture: auto-apply at native confidence ≥ 0.925 (ON)",
+      "Maybe later: auto-apply at native confidence ≥ 0.925 (ON)",
     );
     await user.click(screen.getByTestId("apply-rule"));
 
@@ -140,7 +140,7 @@ describe("<LabelRuleEditor />", () => {
     const b = badge({ label: "opted_out" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
     render(<LabelRuleEditor orgId="org-1" badge={b} text="opted_out [HELD]" />);
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Edit rule for opted_out" }));
+    await user.click(screen.getByRole("button", { name: "Edit rule for Asked to stop" }));
     expect(screen.getByRole("radio", { name: "On" })).toBeDisabled();
     expect(screen.getByTestId("never-auto-note")).toHaveTextContent("Held for a person by policy");
     const input = screen.getByTestId("rule-cutoff-input");
@@ -158,7 +158,7 @@ describe("<LabelRuleEditor />", () => {
     const b = badge({ label: "new_lead" as never, rule: { minConfidence: 0.95, automationEnabled: false, version: 4 } }) as never;
     render(<LabelRuleEditor orgId="org-1" badge={b} text="new_lead [HELD]" />);
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Edit rule for new_lead" }));
+    await user.click(screen.getByRole("button", { name: "Edit rule for Open to selling or wants an offer" }));
     expect(screen.queryByTestId("new-lead-auto-note")).toBeNull();
     await user.click(screen.getByRole("radio", { name: "On" }));
     expect(screen.getByTestId("new-lead-auto-note")).toHaveTextContent("Sandra will promote leads automatically");
