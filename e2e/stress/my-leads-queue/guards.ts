@@ -37,7 +37,11 @@ export function resolveDbUrl(env: Env = process.env): string {
   } catch {
     throw new GuardRefusal("DB_NOT_LOOPBACK", "the stress harness only runs against a loopback Postgres (127.0.0.1 / localhost / [::1]) with no query string.");
   }
-  if (new URL(url).port === SHARED_STACK_DB_PORT) {
+  const port = new URL(url).port;
+  if (!port) {
+    throw new GuardRefusal("DB_PORT_UNSET", "the database URL must name its port explicitly; without one, the Postgres client falls back to PGPORT, which could point at the shared local stack.");
+  }
+  if (port === SHARED_STACK_DB_PORT) {
     throw new GuardRefusal("DB_SHARED_STACK", `port ${SHARED_STACK_DB_PORT} is the shared local stack; point the harness at your own disposable stack.`);
   }
   return url;

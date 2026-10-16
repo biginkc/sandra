@@ -7,7 +7,7 @@ import { createClient as createSupabase } from "@supabase/supabase-js";
 import { Client } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { integrationEnv, resolveIntegrationApiUrl } from "./guards";
+import { SHARED_STACK_API_PORT, integrationEnv, resolveIntegrationApiUrl } from "./guards";
 import { HARNESS_ADDRESS_PREFIX } from "./guards";
 import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { HOUR, emptyLead, SEC } from "./model";
@@ -123,6 +123,7 @@ describe("dispatchRepSms race lanes (fake provider, disposable database)", async
   const url = env.MYLEADS_STRESS_DB_URL;
   for (const [name, value] of [["LOCAL_SUPABASE_URL", API], ["TEST_SUPABASE_URL", process.env.TEST_SUPABASE_URL ?? API]] as const) {
     if (!isLoopbackHttp(value)) throw new Error(`${name} must be a loopback http(s) URL; refusing ${value}`);
+    if (new URL(value).port === SHARED_STACK_API_PORT) throw new Error(`${name} points at the shared local stack's API (port ${SHARED_STACK_API_PORT}); refusing ${value}`);
   }
   const skip = await preflightCommitLanes(url).catch((error: Error) => error.message);
   // Acknowledged disposable database but the lanes cannot run: that is a failure, not a green skip.

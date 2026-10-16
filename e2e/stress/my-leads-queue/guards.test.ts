@@ -24,6 +24,7 @@ describe("my-leads stress guards", () => {
       expect(() => resolveDbUrl({ TEST_SUPABASE_DB_URL: shared })).toThrow(/DB_SHARED_STACK/);
     }
     expect(() => resolveIntegrationApiUrl({ LOCAL_SUPABASE_URL: "http://127.0.0.1:54331" })).toThrow(/API_SHARED_STACK/);
+    expect(() => resolveDbUrl({ MYLEADS_STRESS_DB_URL: "postgresql://postgres:postgres@127.0.0.1/postgres" })).toThrow(/DB_PORT_UNSET/);
     expect(() => resolveIntegrationApiUrl({ LOCAL_SUPABASE_URL: "not a url" })).toThrow(/API_URL_INVALID/);
   });
   it("integration lanes ignore a config-injected TEST_SUPABASE_DB_URL and need MYLEADS_STRESS_DB_URL", () => {
