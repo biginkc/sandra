@@ -23,12 +23,16 @@ describe("my-leads stress guards", () => {
     expect(foreignLeadCheckRequired(local)).toBe(true);
     expect(foreignLeadCheckRequired({ ...local, GITHUB_ACTIONS: "true" })).toBe(true);
     expect(foreignLeadCheckRequired({ ...local, CI: "true" })).toBe(true);
-    expect(foreignLeadCheckRequired({ ...local, GITHUB_ACTIONS: "1", CI: "true" })).toBe(true);
+    expect(foreignLeadCheckRequired({ ...local, CI: "1", GITHUB_ACTIONS: "true", RUNNER_TEMP: "/tmp/r" })).toBe(true);
+    expect(foreignLeadCheckRequired({ ...local, GITHUB_ACTIONS: "1", RUNNER_TEMP: "/tmp/r", GITHUB_ENV: "/tmp/e" })).toBe(true);
     expect(() => assertOnlyHarnessLeads({ properties: 5, foreign: 5 })).toThrow(/NON_HARNESS_DATA/);
   });
   it("skips the foreign-lead check only on the CI provisioner's database on a GitHub Actions runner", () => {
-    expect(foreignLeadCheckRequired({ E2E_DISPOSABLE_DATABASE: "1", GITHUB_ACTIONS: "true", CI: "true" })).toBe(false);
-    expect(foreignLeadCheckRequired({ GITHUB_ACTIONS: "true", CI: "true" })).toBe(true);
+    // e2e.yml's own step env: CI=1 (not "true"), plus the runner's GITHUB_ACTIONS / RUNNER_TEMP / GITHUB_ENV.
+    const ci = { E2E_DISPOSABLE_DATABASE: "1", CI: "1", GITHUB_ACTIONS: "true", RUNNER_TEMP: "/home/runner/work/_temp", GITHUB_ENV: "/home/runner/work/_temp/_runner_file_commands/set_env" };
+    expect(foreignLeadCheckRequired(ci)).toBe(false);
+    expect(foreignLeadCheckRequired({ ...ci, CI: "true" })).toBe(false);
+    expect(foreignLeadCheckRequired({ ...ci, E2E_DISPOSABLE_DATABASE: undefined })).toBe(true);
     expect(foreignLeadCheckRequired({})).toBe(true);
   });
   it("refuses the shared local stack even when it is selected explicitly", () => {

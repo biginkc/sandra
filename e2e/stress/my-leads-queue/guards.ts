@@ -99,10 +99,12 @@ export function assertCommitLaneAllowed(env: Env = process.env): void {
 /**
  * The foreign-lead check before a committing lane may be skipped ONLY on the CI provisioner's disposable database, whose
  * earlier steps leave their own rows. The E2E_DISPOSABLE_DATABASE=1 marker alone is not enough: a local operator can set it,
- * so the skip also requires a real GitHub Actions runner (GITHUB_ACTIONS=true and CI=true). Everywhere else the check runs.
+ * so the skip also requires the same runner signals the provisioner itself demands (scripts/provision-e2e-local-database.mjs):
+ * GITHUB_ACTIONS=true with RUNNER_TEMP and GITHUB_ENV present. (CI is not used: e2e.yml sets CI=1, not "true".) Everywhere
+ * else the check runs.
  */
 export function foreignLeadCheckRequired(env: Env = process.env): boolean {
-  const ciDisposable = env.E2E_DISPOSABLE_DATABASE === "1" && env.GITHUB_ACTIONS === "true" && env.CI === "true";
+  const ciDisposable = env.E2E_DISPOSABLE_DATABASE === "1" && env.GITHUB_ACTIONS === "true" && Boolean(env.RUNNER_TEMP) && Boolean(env.GITHUB_ENV);
   return !ciDisposable;
 }
 
