@@ -148,6 +148,17 @@ describe("loadHomeownerHouses", () => {
     expect(result[C3]).toMatchObject({ count: 1, houses: [{ propertyId: "m3" }] });
   });
 
+  it("orders the ceiling fallback's tied addresses by id", async () => {
+    // Past the page ceiling each owner is re-read on its own; six of C2's houses share one address, so only the id tie-break
+    // fixes their order (the fake returns tied rows in a different order on every query, as Postgres may).
+    const tied = ["t6", "t2", "t5", "t1", "t4", "t3"].map((id) => row(id, C2, { address: "9 Same St" }));
+    const { client, calls } = fakeClient([...many(C1, 1100, "a"), ...tied]);
+    const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2] });
+    expect(calls.from).toBe(3);
+    expect(calls.orders.slice(1)).toEqual([["address", "id"], ["address", "id"]]);
+    expect(result[C2].houses.map((h) => h.propertyId)).toEqual(["t1", "t2", "t3", "t4", "t5", "t6"]);
+  });
+
   it("does not fall back below the page ceiling", async () => {
     const { client, calls } = fakeClient(many(C1, MAX_PAGE_ROWS - 1, "a"));
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
