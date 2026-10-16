@@ -7,7 +7,7 @@ vi.mock("@/components/dialpad/dialpad-call-provider", () => ({ DialpadCallProvid
 vi.mock("@/lib/direct-calling/actions", () => ({ getCallingConfigForCurrentUser: mocks.callingConfig }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ auth: { getUser: async () => ({ data: { user: { id: "rep", email: "rep@example.test" } } }) } }) }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.memberships }));
-vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.roster, getAcquisitionBadge: async () => null }));
+vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.roster, getAcquisitionBadgeState: async () => ({ count: 0, needsAttention: false }) }));
 vi.mock("@/lib/recordings/data", () => ({ recordingViewer: async () => null }));
 vi.mock("@/lib/auth/allowlist", () => ({ isAdminEmail: () => false }));
 vi.mock("./my-leads/nav-actions", () => ({ refreshMyLeadsBadge: vi.fn() }));

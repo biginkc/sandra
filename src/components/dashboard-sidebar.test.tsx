@@ -78,6 +78,10 @@ describe("DashboardMobileNav", () => {
     expect(myLeads).toHaveAttribute("data-active", "true");
     expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("7");
 
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 Not contacted leads");
+    rerender(<DashboardSidebar initialAcquisitionBadge={7} acquisitionBadgeNeedsAttention />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveAttribute("title", "7 leads need attention");
+
     rerender(<DashboardSidebar showMyLeads={false} initialAcquisitionBadge={99} />);
     expect(screen.queryByRole("link", { name: "My Leads" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("my-leads-badge")).not.toBeInTheDocument();

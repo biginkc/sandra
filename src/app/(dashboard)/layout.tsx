@@ -23,7 +23,7 @@ import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
-import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
+import { getAcquisitionBadgeState, getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { canAccessMessagesAndLeadsBoard, isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
@@ -63,7 +63,7 @@ export default async function DashboardLayout({
   });
   const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([
     getAcquisitionRoster(),
-    getAcquisitionBadge(),
+    getAcquisitionBadgeState(),
     membershipsPromise,
     dialpadRoutePromise,
   ]);
@@ -77,7 +77,8 @@ export default async function DashboardLayout({
       canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner)),
   );
   const initialAcquisitionBadge =
-    showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
+    showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value.count : null;
+  const acquisitionBadgeNeedsAttention = badgeResult.status === "fulfilled" && badgeResult.value.needsAttention;
   const showCalculators = Boolean(acquisitionRoster && canViewCalculators(
     acquisitionRoster.roster,
     acquisitionRoster.viewer.userId,
@@ -154,6 +155,7 @@ export default async function DashboardLayout({
           showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+          acquisitionBadgeNeedsAttention={acquisitionBadgeNeedsAttention}
         />
         <div
           className="mx-6 mt-2 border-t border-white/10 pt-3 text-xs text-white/75"
@@ -173,6 +175,7 @@ export default async function DashboardLayout({
           showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+          acquisitionBadgeNeedsAttention={acquisitionBadgeNeedsAttention}
         />
       </div>
 

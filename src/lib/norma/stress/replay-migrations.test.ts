@@ -13,16 +13,19 @@ function sqlLanguageBodies(sql: string): string[] {
   const out: string[] = [];
   const re = /create\s+(?:or\s+replace\s+)?function\b([\s\S]*?)\bas\s+(\$[A-Za-z_]*\$)([\s\S]*?)\2([^;]*);/gi;
   for (let m = re.exec(sql); m; m = re.exec(sql)) {
-    if (/\blanguage\s+sql\b/i.test(`${m[1]} ${m[4]}`)) out.push(m[3]!);
+    if (/\blanguage\s+(?:sql\b|'sql')/i.test(`${m[1]} ${m[4]}`)) out.push(m[3]!);
   }
   return out;
 }
+
+/** What only the Norma migrations create, matched case-insensitively (SQL identifiers are case-folded). */
+const NORMA_ONLY = /\bsource_key\b|\bnorma_call_requests\b|\bfn_norma_/i;
 
 /** Migrations NOT replayed by the gate whose SQL-language function bodies read what only the Norma migrations create. */
 function unreplayedNormaReaders(patterns: readonly string[]): string[] {
   return MIGRATIONS.filter((f) => !matchesReplayPattern(f, patterns))
     .filter((f) => sqlLanguageBodies(readFileSync(path.join(ROOT, "supabase/migrations", f), "utf8"))
-      .some((body) => /\bsource_key\b|\bnorma_call_requests\b|\bfn_norma_/.test(body)));
+      .some((body) => NORMA_ONLY.test(body)));
 }
 
 describe("Norma stress gate migration replay", () => {
@@ -45,6 +48,16 @@ describe("Norma stress gate migration replay", () => {
     expect(sqlLanguageBodies("create function a() returns int language plpgsql as $$ begin return 1; end $$;")).toEqual([]);
     expect(sqlLanguageBodies("create or replace function b() returns int language sql as $$ select 1 $$;")).toEqual([" select 1 "]);
     expect(sqlLanguageBodies("create function c() returns int as $f$ select 2 $f$ language sql stable;")).toEqual([" select 2 "]);
+    // quoted language name and upper case, as some migrations write it
+    expect(sqlLanguageBodies("CREATE OR REPLACE FUNCTION d() RETURNS int LANGUAGE 'sql' AS $$ SELECT 3 $$;")).toEqual([" SELECT 3 "]);
+    expect(sqlLanguageBodies("create function e() returns int as $$ select 4 $$ language 'plpgsql';")).toEqual([]);
+  });
+
+  it("matches Norma-only references in any case", () => {
+    const body = sqlLanguageBodies("CREATE FUNCTION f() RETURNS text LANGUAGE 'sql' AS $$ SELECT T.SOURCE_KEY FROM PUBLIC.TASKS T $$;");
+    expect(body.some((b) => NORMA_ONLY.test(b))).toBe(true);
+    expect(["select * from Norma_Call_Requests", "select public.FN_NORMA_claim()"].every((b) => NORMA_ONLY.test(b))).toBe(true);
+    expect(NORMA_ONLY.test("select resource_keys from x")).toBe(false);
   });
 
   it("replays every Norma file first, then the classifier files, each in version order", () => {
