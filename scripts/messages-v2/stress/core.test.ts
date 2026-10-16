@@ -1,3 +1,4 @@
+import { isHostileInbound } from "../../../src/lib/ai-responder/hostile";
 import { describe, expect, it } from "vitest";
 
 import { NINE_QUESTIONS, decideNineQuestions } from "../../../src/lib/sms-classification/nine-questions";
@@ -21,9 +22,16 @@ const corpus = loadCorpus();
 const byId = (id: string) => corpus.find((s) => s.id === id)!;
 
 describe("corpus", () => {
-  it("is 34 scenarios x 10 wordings, every id distinct", () => {
-    expect(corpus).toHaveLength(34);
+  it("is 35 scenarios x 10 wordings, every id distinct", () => {
+    expect(corpus).toHaveLength(35);
     for (const s of corpus) expect(s.wordings).toHaveLength(10);
+  });
+
+  it("REPORTED-NOT-GATED hostile_matcher_substring: under the CURRENT approved substring rule every wording is hostile (rule change pending Jarrad approval; see branch claude/messages-v2-hostile-matcher-proposal)", () => {
+    const s = byId("hostile_matcher_substring");
+    expect(s.review).toMatch(/REPORTED-NOT-GATED/);
+    expect(s.review).toMatch(/claude\/messages-v2-hostile-matcher-proposal/);
+    for (const w of s.wordings) expect(isHostileInbound(w), w).toBe(true);
   });
 
   it("carries the plan's required shapes", () => {

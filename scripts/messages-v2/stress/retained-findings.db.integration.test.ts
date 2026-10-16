@@ -20,9 +20,8 @@ import { assertStressDbEnv } from "./core";
 /**
  * Retained review findings against the Messages v2 candidate (PR 4 candidate 729a282b, which
  * contains PR 2 4d50e19a and PR 3 2cc9d675), as REAL regression tests on a disposable stack.
- * Each asserts the DESIRED behaviour. A product defect shows as an expected failure (`it.fails`,
- * labelled [KNOWN DEFECT]): the suite stays green while the defect exists, and turns RED the day
- * the product is fixed, so the marker must then be removed. Nothing here is a todo.
+ * (a), (c), (d) and (e) were fixed in PR 4 candidate 392dadc0 (with PR 3 302ef7e9, PR 2 5de9c55b)
+ * and are now plain passing regression tests. Nothing here is a todo or an expected failure.
  *
  * Same fail-closed rails as the dispatch lane (core.ts assertStressDbEnv): explicit loopback
  * bindings off the dev-stack ports, MV2_STRESS_DISPOSABLE_DB=1, no provider credential, mock SMS
@@ -49,12 +48,6 @@ vi.mock("workflow/api", async (importOriginal) => ({
     return { runId: `stress-${randomUUID()}` };
   },
 }));
-
-/**
- * Expected-failure marker. MV2_RETAINED_STRICT=1 runs the same tests as plain `it` so the real
- * assertion message of each defect is visible (the run is then red while the defect exists).
- */
-const knownDefect = process.env.MV2_RETAINED_STRICT === "1" ? it : it.fails;
 
 const NO_ANTHROPIC: AnthropicLike = {
   messages: {
@@ -326,8 +319,8 @@ describe("Messages v2 retained findings (real regression tests, disposable stack
     expect(outcome).toEqual({ outcome: "auto_closed", reason: "nine_questions:confirmed_owner" });
   });
 
-  knownDefect(
-    "[KNOWN DEFECT] (a) PR 892: confirmed-owner drip-switch READ ERROR must hold for a person (today: silent close, no hold)",
+  it(
+    "[FIXED REGRESSION] (a) PR 892: confirmed-owner drip-switch READ ERROR holds for a person",
     async () => {
       stubAnswer = "confirmed_owner";
       const lead = await seedLead();
@@ -349,8 +342,8 @@ describe("Messages v2 retained findings (real regression tests, disposable stack
     expect((await propertyRow(lead.propertyId)).outreach_dispo).toBe("wrong_number");
   });
 
-  knownDefect(
-    "[KNOWN DEFECT] (c) PR 889: wrong-person close after a concurrent human takeover must not absorb the takeover's revision (today: closes anyway)",
+  it(
+    "[FIXED REGRESSION] (c) PR 889: wrong-person close after a concurrent human takeover does not absorb the takeover's revision",
     async () => {
       stubAnswer = "wrong_person";
       const lead = await seedLead();
@@ -382,8 +375,8 @@ describe("Messages v2 retained findings (real regression tests, disposable stack
     expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
   });
 
-  knownDefect(
-    "[KNOWN DEFECT] (d) PR 889: unreadable engine switch on a responder-off property must write no hold (today: classifier_engine_unreadable hold)",
+  it(
+    "[FIXED REGRESSION] (d) PR 889: unreadable engine switch on a responder-off property writes no hold",
     async () => {
       stubAnswer = "confirmed_owner";
       const lead = await seedLead({ disabled: true });
@@ -423,8 +416,8 @@ describe("Messages v2 retained findings (real regression tests, disposable stack
       expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
     });
 
-    knownDefect(
-      "[KNOWN DEFECT] (e) PR 882: delayed-reply path, responder-off property + non-hot keyword must write no hold (today: keyword hold)",
+    it(
+      "[FIXED REGRESSION] (e) PR 882: delayed-reply path, responder-off property + non-hot keyword writes no hold",
       async () => {
         const lead = await seedLead({ disabled: true });
         const res = await webhook(lead.phone, "You can talk to my lawyer about it");

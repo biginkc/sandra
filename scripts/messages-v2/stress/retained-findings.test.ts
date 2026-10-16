@@ -8,8 +8,10 @@ import { loadHomeownerHouses, MAX_HOMEOWNER_IDS, MAX_PAGE_ROWS, type HousesClien
  * behaviour. A product defect is an expected failure (`it.fails`, labelled [KNOWN DEFECT]): green
  * while the defect exists, RED the day it is fixed (then remove the marker). No todos.
  *
- * Only the DB-free finding lives here. The four that need the real dispatch / webhook path run on a
- * disposable stack in retained-findings.db.integration.test.ts (npm run stress:messages-v2:db):
+ * Only the DB-free finding, (b), lives here; it is still a [KNOWN DEFECT] at PR 4 candidate 392dadc0
+ * (My Leads' fix pending). The four that need the real dispatch / webhook path were FIXED in
+ * 392dadc0 and are plain passing regression tests in retained-findings.db.integration.test.ts
+ * (npm run stress:messages-v2:db):
  *   (a) PR 892 confirmed-owner drip-switch read error -> hold for a person
  *   (c) PR 889 wrong-person close under a concurrent human takeover -> no revision absorption
  *   (d) PR 889 unreadable engine switch on a responder-off property -> no hold

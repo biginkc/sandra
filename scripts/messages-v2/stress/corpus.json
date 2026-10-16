@@ -674,6 +674,26 @@
         "Fuck off",
         "Talk to my lawyer"
       ]
+    },
+    {
+      "id": "hostile_matcher_substring",
+      "title": "Hostile matcher substring hits (REPORTED-NOT-GATED: rule change pending Jarrad approval)",
+      "opener": "E",
+      "expected_answers": ["hostile", "asked_stop", "talked_price", "asked_who", "not_interested", "open_to_selling"],
+      "expected_buckets": ["stop_person"],
+      "review": "REPORTED-NOT-GATED. Rule change pending Jarrad approval; see branch claude/messages-v2-hostile-matcher-proposal. Under the CURRENT approved rule (src/lib/ai-responder/hostile.ts: case-insensitive substring match, no word boundaries) the first three wordings contain 'f off' and are therefore hostile (stop_person); the other seven are true-hostile controls. The expected bucket encodes the current rule only; the rule is not changed here.",
+      "wordings": [
+        "What kind of offer?",
+        "half off",
+        "pf offer",
+        "Fuck off",
+        "This is a scam",
+        "Leave me alone",
+        "Stop texting me",
+        "F off",
+        "Go to hell",
+        "Quit texting me"
+      ]
     }
   ]
 }
