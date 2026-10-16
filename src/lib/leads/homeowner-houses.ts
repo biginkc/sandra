@@ -38,14 +38,14 @@ type HousesQuery = {
   range(from: number, to: number): PromiseLike<HousesResult>;
 };
 
-type HouseCountRow = { homeowner_contact_id: string | null; house_count: number | string | null };
+type FirstPageRow = HouseRow & { house_count: number | string | null };
 
 export type HousesClient = {
   from(table: "properties"): { select(columns: string, options?: { count: "exact" }): HousesQuery };
   rpc(
-    fn: "fn_homeowner_house_counts",
+    fn: "fn_homeowner_houses_first_page",
     args: { p_org_id: string; p_contact_ids: string[] },
-  ): PromiseLike<{ data: HouseCountRow[] | null; error: { message?: string } | null }>;
+  ): PromiseLike<{ data: FirstPageRow[] | null; error: { message?: string } | null }>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,26 +96,27 @@ export async function loadHomeownerHouses(
   const rows = data ?? [];
 
   const result: Record<string, HomeownerHouses> = {};
-  for (const row of rows) {
-    const contactId = row.homeowner_contact_id;
-    if (!contactId) continue;
-    const entry = (result[contactId] ??= { count: 0, houses: [] });
-    entry.count += 1;
-    if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
+  if (rows.length < MAX_PAGE_ROWS) {
+    for (const row of rows) {
+      const contactId = row.homeowner_contact_id;
+      if (!contactId) continue;
+      const entry = (result[contactId] ??= { count: 0, houses: [] });
+      entry.count += 1;
+      if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
+    }
+    return result;
   }
-  if (rows.length < MAX_PAGE_ROWS) return result;
 
-  // The page read was cut off, so its per-owner counts may be short. Rows come back in one global
-  // (address, id) order, so each owner's listed houses are still the start of that owner's own list and
-  // "Show more" continues from there; only the counts need one exact batched read.
-  const counts = await client.rpc("fn_homeowner_house_counts", { p_org_id: input.orgId, p_contact_ids: ids });
-  if (counts.error) throw readFailed(counts.error);
-  for (const countRow of counts.data ?? []) {
-    const contactId = countRow.homeowner_contact_id;
-    const exact = Number(countRow.house_count ?? 0);
-    if (!contactId || !ids.includes(contactId) || !(exact > 0)) continue;
+  // The page read was cut off, so its rows can't be trusted for any homeowner. One batched call returns every
+  // owner's exact count and first MAX_LISTED_HOUSES houses in (address, id) order, already sorted by the database.
+  const firstPages = await client.rpc("fn_homeowner_houses_first_page", { p_org_id: input.orgId, p_contact_ids: ids });
+  if (firstPages.error) throw readFailed(firstPages.error);
+  for (const row of firstPages.data ?? []) {
+    const contactId = row.homeowner_contact_id;
+    if (!contactId || !ids.includes(contactId)) continue;
     const entry = (result[contactId] ??= { count: 0, houses: [] });
-    entry.count = Math.max(exact, entry.houses.length);
+    if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
+    entry.count = Math.max(Number(row.house_count ?? 0), entry.houses.length);
   }
   return result;
 }
