@@ -156,26 +156,33 @@ describe("archiveClosed with a full window of open holds", () => {
     await db.query("delete from public.hold_alert_deliveries where org_id = $1", [orgId]);
   });
 
-  it("a hold that closes and re-opens alerts again", async () => {
-    const property = await newProperty();
+  // Since PR #882 only hot holds send per-hold DMs, and hot keys are stored with
+  // property_id null, so archive-on-clear never re-fires them (one alert per hot event).
+  const cycle = async (h: ReturnType<typeof hold>) => {
     const store = createSupabaseDeliveryStore(admin());
-    const h = hold({ propertyId: property, holdKey: `${property}:draft_held` });
     const recipient = { userId, role: "owner" as const };
     const pass = (holds: ReturnType<typeof hold>[]) => {
-      const t = makeDeps({ store: store as never, holds, recipients: [recipient], nowIso: new Date().toISOString() });
+      const t = makeDeps({ store: store as never, holds, recipients: [recipient], hotOwner: userId, loadPropertyAssignee: async () => userId, nowIso: new Date().toISOString() });
       return runHoldAlertsForOrg(t.deps, orgId).then((s) => ({ s, t }));
     };
+    return { first: await pass([h]), again: await pass([h]), closed: await pass([]), reopened: await pass([h]) };
+  };
 
-    const first = await pass([h]);
-    expect(first.t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
-    const again = await pass([h]);
-    expect(again.t.sent).toHaveLength(0);
+  it("a cold hold sends no per-hold DM, including after it closes and re-opens", async () => {
+    const property = await newProperty();
+    const r = await cycle(hold({ propertyId: property, holdKey: `${property}:draft_held` }));
+    expect(r.first.t.sent).toHaveLength(0);
+    expect(r.again.t.sent).toHaveLength(0);
+    expect(r.reopened.t.sent).toHaveLength(0);
+  });
 
-    const closed = await pass([]);
-    expect(closed.s.archived).toBeGreaterThanOrEqual(1);
-
-    const reopened = await pass([h]);
-    expect(reopened.t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
+  it("a hot hold alerts once and does not re-alert when the same hot event re-opens", async () => {
+    const property = await newProperty();
+    const at = new Date().toISOString();
+    const r = await cycle(hold({ propertyId: property, holdKey: `${property}:draft_held`, hot: true, startedAt: at, since: at }));
+    expect(r.first.t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
+    expect(r.again.t.sent).toHaveLength(0);
+    expect(r.reopened.t.sent).toHaveLength(0);
   });
 });
 
