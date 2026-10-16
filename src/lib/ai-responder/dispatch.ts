@@ -642,7 +642,8 @@ async function dispatchAiResponseCore(
     .maybeSingle();
 
   // Messages v2 PR 3: the org's engine, read ONCE per inbound and carried on `config`.
-  // Any read problem = the eight-answer engine.
+  // Only a missing engine column (a database before the migration) falls back to the
+  // eight-answer engine; any other read problem is `unreadable` and holds.
   const engineRead =
     config?.classifier_provider === "jev" ? await readClassifierEngine(supabase, property.org_id) : "outcome_v1";
   // A responder-off property (a person's takeover switch) is checked FIRST: it runs no
@@ -7723,7 +7724,9 @@ export async function runNineQuestionsStep(
   }
 
   if (action.kind === "wait_for_person") {
-    return nineHoldAndComplete(supabase, a, `nine_${action.reason}`);
+    // Spelled out so the hold-reason registry test sees each literal. Hostile never gets
+    // here (held for confirmation above); anything else unreadable waits as needs_person.
+    return nineHoldAndComplete(supabase, a, action.reason === "asked_stop" ? "nine_asked_stop" : "nine_needs_person");
   }
 
   if (action.kind === "drip_only") {
