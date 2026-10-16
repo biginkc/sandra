@@ -6,8 +6,8 @@
  * entry unless a human approved that exact text; `hostile.test.ts` pins the
  * list byte for byte.
  *
- * Matching: case-insensitive, anywhere in the inbound text (substring, no
- * word boundaries), exactly as approved.
+ * PROPOSAL (awaiting Jarrad's verbatim approval; NOT active on PR #882):
+ * Matching: case-insensitive; a phrase matches only where it starts at the beginning of a word (it may run on into a longer word, e.g. "fucking", "harassing"), so "f off" no longer matches inside "kind of offer", "half off" or "pf offer".
  */
 export const HOSTILE_PHRASES = [
   "fuck",
@@ -29,10 +29,16 @@ export const HOSTILE_PHRASES = [
   "harass",
 ] as const;
 
+const escapeRegExp = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Each approved phrase, anchored at the start of a word (no letter or digit just before it). */
+const HOSTILE_PHRASE_PATTERNS: readonly RegExp[] = HOSTILE_PHRASES.map(
+  (phrase) => new RegExp(`(?<![a-z0-9])${escapeRegExp(phrase)}`),
+);
+
 export function isHostileInbound(body: string | null | undefined): boolean {
   if (typeof body !== "string" || body.length === 0) return false;
   const text = body.toLowerCase();
-  return HOSTILE_PHRASES.some((phrase) => text.includes(phrase));
+  return HOSTILE_PHRASE_PATTERNS.some((re) => re.test(text));
 }
 
 /**

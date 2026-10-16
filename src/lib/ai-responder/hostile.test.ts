@@ -31,7 +31,7 @@ describe("isHostileInbound", () => {
     expect(isHostileInbound(`prefix ${phrase} suffix`)).toBe(true);
   });
 
-  it("is case-insensitive and matches anywhere in the inbound", () => {
+  it("is case-insensitive and matches at the start of a word anywhere in the inbound", () => {
     expect(isHostileInbound("THIS IS A SCAM")).toBe(true);
     expect(isHostileInbound("Please LEAVE ME ALONE!!")).toBe(true);
     expect(isHostileInbound("you keep texting me, stop texting")).toBe(true);
@@ -40,10 +40,23 @@ describe("isHostileInbound", () => {
     expect(isHostileInbound("scammers")).toBe(true);
   });
 
-  it("is a plain substring match by approval, so innocent text can match (documented, list unchanged)", () => {
-    // Known false matches, e.g. "f off" inside "half off". Only Jarrad can change the list.
-    expect(isHostileInbound("we can take half off the price")).toBe(true);
-    expect(isHostileInbound("it is on the scampi menu")).toBe(true);
+  it("PROPOSAL: a phrase must start at the beginning of a word (it may run on into a longer word)", () => {
+    // Positives: exact phrase, any case, with punctuation around it.
+    for (const body of ["F off!", "f off.", "just f off", "F OFF", "(f off)", "FUCKING stop", "harassing me", "harassment", "scammers"]) {
+      expect(isHostileInbound(body), body).toBe(true);
+    }
+    // Negatives: the phrase only appears inside another word.
+    for (const body of [
+      "What kind of offer?",
+      "kind of offer",
+      "of offer",
+      "half off the price",
+      "pf offer",
+      "a beanstalk",
+      "Mississippi",
+    ]) {
+      expect(isHostileInbound(body), body).toBe(false);
+    }
   });
 
   it("does not match ordinary replies", () => {
