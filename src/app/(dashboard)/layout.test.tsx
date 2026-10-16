@@ -39,6 +39,7 @@ beforeEach(() => {
   mocks.callingConfig.mockResolvedValue({ transport: "default" });
   mocks.dialpadRoute.mockResolvedValue("softphone");
   mocks.badgeState.mockResolvedValue({ count: 0, needsAttention: false });
+  mocks.roster.mockReset();
   mocks.memberships.mockResolvedValue([{ user_id: "rep", org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
 });
 
