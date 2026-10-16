@@ -308,9 +308,7 @@ export function holdReasonSentence(
   const tag = pinned ? null : run ? tapeTagForRun(run) : null;
   const word = reasonWord(flagReason);
   const t = tag ?? tapeTagForWord(word);
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   if (word === "nine_reply_not_sent") return "The reply was not sent. A person should take a look.";
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   if (word === "reply_text_not_approved") return "There is no approved reply for this one. A person should take a look.";
   switch (t?.label) {
     case "Asked to stop":
