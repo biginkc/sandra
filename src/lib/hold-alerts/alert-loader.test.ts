@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fakePostgrest } from "@/app/(dashboard)/messages-v2/fake-postgrest.test-util";
 import { loadMessagesV2Data as pageLoader } from "@/app/(dashboard)/messages-v2/queries";
@@ -89,14 +89,13 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
   });
 
   it("end to end through the cron's own deps (createHoldAlertDeps -> toAlertHolds -> isHotHold): the hold is NOT hot", async () => {
-    const env = { HOLD_ALERT_HOT_REASONS: "model:hot_lead" };
-    const deps = createHoldAlertDeps(db(fixture()) as never, env);
+    const deps = createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:hot_lead" });
     const res = await deps.loadHolds("org", at(7 * 24 * 60));
     expect(res.complete).toBe(true);
     expect(res.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: false }]);
-    // Positive control: the same path DOES mark the hold hot when its actual reason is listed.
-    const control = await createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:unclear" }).loadHolds("org", at(7 * 24 * 60));
-    expect(control.holds.map((h) => ({ id: h.propertyId, hot: h.hot }))).toEqual([{ id: u(1), hot: true }]);
+    // The env list is gone: setting it changes nothing.
+    const withEnv = await createHoldAlertDeps(db(fixture()) as never, { HOLD_ALERT_HOT_REASONS: "model:unclear" }).loadHolds("org", at(7 * 24 * 60));
+    expect(withEnv.holds.map((h) => h.hot)).toEqual([false]);
   });
 
   /**
@@ -113,7 +112,7 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     deps.loadHolds = loader === "cron" ? real.loadHolds : async (orgId, since) => {
       const { toAlertHolds } = await import("./holds");
       const data = await pageLoader(db(fixture()), orgId, NOW, { alertsSince: since });
-      return { holds: toAlertHolds(data.holds, new Map(), ["model:hot_lead"]), complete: true };
+      return { holds: toAlertHolds(data.holds, new Map()), complete: true };
     };
     deps.loadHeldPropertyIds = real.loadHeldPropertyIds;
     await runHoldAlertsForOrg(deps, "org");
@@ -123,16 +122,53 @@ describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
     };
   };
 
-  it("the full alert pass makes exactly the parent's (84ddabdd6) delivery decisions", async () => {
-    expect(await decisions("cron")).toEqual(FROZEN_PARENT_DECISIONS);
-    expect(await decisions("page")).not.toEqual(FROZEN_PARENT_DECISIONS);
+  it("the full alert pass under the PR 2 rules (only hot holds alert): the parent loader's hold is not hot, so nothing goes out; the page loader's would", async () => {
+    expect(await decisions("cron")).toEqual(PR2_HOT_ALERT_DECISIONS);
+    expect(await decisions("page")).toEqual(PR2_PAGE_LOADER_DECISIONS);
+    // The old behaviour is kept below as a record, and PR 2 deliberately differs from it.
+    expect(await decisions("cron")).not.toEqual(FROZEN_PARENT_DECISIONS);
+  });
+
+  /**
+   * The frozen loader only looks back 7 days from "now" whatever the watermark says (ALERT_LOOKBACK_MS). A hot hold
+   * flagged AFTER the 2026-10-15 cutoff but more than 7 days ago is therefore never loaded and never alerts: a
+   * documented limit of leaving alert-loader.ts untouched, pinned here so nobody mistakes it for a bug.
+   */
+  describe("frozen loader 7-day window", () => {
+    afterEach(() => vi.useRealTimers());
+    const FLAG = "2026-10-17T12:00:00.000Z";
+    const hotHoldTables = (): Record<string, Row[]> => ({
+      properties: [
+        { id: u(1), org_id: "org", needs_human_attention: true, is_dnc_locked: false, last_ai_escalation_at: FLAG, last_ai_escalation_reason: "model:hot_lead", updated_at: FLAG, needs_human_attention_since: FLAG },
+      ],
+      pipeline_runs: [
+        { id: u(1, 5), org_id: "org", inbound_message_id: "in-1", property_id: u(1), contact_id: null, conversation_id: u(1, 2), status: "held", mode: "automatic", final_outcome: null, reason: "model:hot_lead", classification_run_id: null, claim_id: null, outbound_message_id: null, inbound_preview: "x", started_at: FLAG, completed_at: null },
+      ],
+      pipeline_run_steps: [], ai_reply_drafts: [], jev_lead_decisions: [], ai_disposition_reviews: [], messages: [],
+    });
+    const load = async (nowIso: string) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(nowIso));
+      return createHoldAlertDeps(db(hotHoldTables()) as never, {}).loadHolds("org", "2026-10-15T00:00:00.000Z");
+    };
+
+    it("a post-cutoff hot hold flagged 8 days ago is NOT loaded, so it is not alerted", async () => {
+      const res = await load("2026-10-25T12:00:00.000Z");
+      expect(res.holds).toEqual([]);
+    });
+
+    it("the same hold flagged 5 days ago IS loaded, hot, with its flag time", async () => {
+      const res = await load("2026-10-22T12:00:00.000Z");
+      expect(res.holds.map((h) => [h.propertyId, h.hot, h.flagAt])).toEqual([[u(1), true, FLAG]]);
+    });
   });
 });
 
-// FROZEN_PARENT_* below are the parent (84ddabdd6) behaviour for this fixture. They never move: a change to them
-// is an alert-behaviour change and needs its own review, not a test update.
+// FROZEN_PARENT_DECISIONS: the parent (84ddabdd6) delivery decisions for this fixture (Slack to owner and acquisitions
+// member, no SMS), when every open hold alerted every recipient. They never move: a change to them is an alert-behaviour
+// change and needs its own review, not a test update. PR 2 (only hot holds ping, only the hot owner) intentionally no
+// longer produces them; its output is pinned separately below.
 const P1 = "00000000-0000-4000-8000-000000000001";
-/** Captured from the full pass over the parent's loader (see the comment on `decisions`): Slack only, no SMS. */
 const FROZEN_PARENT_DECISIONS = {
   deliveries: [
     { channel: "slack", property: P1, recipient: "owner-1", stage: "first", status: "sent" },
@@ -141,5 +177,23 @@ const FROZEN_PARENT_DECISIONS = {
   sent: [
     { channel: "slack", userId: "owner-1" },
     { channel: "slack", userId: "acq-1" },
+  ],
+};
+
+/** What the current core does with the same frozen holds: the hold is model:unclear (not hot), so it sends nothing. */
+const PR2_HOT_ALERT_DECISIONS = {
+  deliveries: [] as Array<{ property: string | null; recipient: string; channel: string; stage: string; status: string }>,
+  sent: [] as Array<{ channel: string; userId: string }>,
+};
+
+/** The page loader resolves the draft's newer run (model:hot_lead): hot, so one Slack + one SMS to the hot owner, one key, no property id. */
+const PR2_PAGE_LOADER_DECISIONS = {
+  deliveries: [
+    { channel: "slack", property: null, recipient: "owner-1", stage: "first", status: "sent" },
+    { channel: "sms", property: null, recipient: "owner-1", stage: "first", status: "sent" },
+  ],
+  sent: [
+    { channel: "slack", userId: "owner-1" },
+    { channel: "sms", userId: "owner-1" },
   ],
 };

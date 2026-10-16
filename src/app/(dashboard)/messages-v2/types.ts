@@ -62,7 +62,11 @@ export type PipelineRunStep = {
 };
 
 /** A run with its ordered steps, as rendered by the feed. */
-export type RunWithSteps = PipelineRun & { steps: PipelineRunStep[] };
+export type RunWithSteps = PipelineRun & {
+  steps: PipelineRunStep[];
+  /** Hot hand-off only: when Jarrad's Slack and text both went out (display). */
+  hotAlertSentAt?: string | null;
+};
 
 /** Display-only context for a run's seller. */
 export type RunLabel = {

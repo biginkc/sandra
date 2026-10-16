@@ -1,12 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { OpenHold, PipelineRun } from "@/app/(dashboard)/messages-v2/types";
 
 import { runHoldAlertsForOrg } from "./core";
 import {
-  HOT_HOLD_REASONS,
   holdKeyFor,
-  parseHotHoldReasons,
   holdReasonKey,
   isHotHold,
   isInformationalHold,
@@ -54,30 +52,6 @@ function openHold(over: Partial<OpenHold<PipelineRun>> = {}): OpenHold<PipelineR
 
 const labels = new Map([["prop-1", { name: "Dana", address: "12 Oak St, Kansas City" }]]);
 
-describe("HOT_HOLD_REASONS", () => {
-  it("is empty by default: no hold is hot until reasons are configured", () => {
-    expect([...HOT_HOLD_REASONS]).toEqual([]);
-  });
-});
-
-describe("parseHotHoldReasons (HOLD_ALERT_HOT_REASONS)", () => {
-  it("is empty when the env var is unset or blank", () => {
-    expect(parseHotHoldReasons({})).toEqual([]);
-    expect(parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: "  " })).toEqual([]);
-  });
-  it("reads a comma-separated list of known hold reasons, trimmed and de-duplicated", () => {
-    expect(
-      parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: " price_or_offer, distress ,price_or_offer,jev_below_threshold:new_lead" }),
-    ).toEqual(["price_or_offer", "distress", "jev_below_threshold:new_lead"]);
-  });
-  it("ignores unknown values with a warning", () => {
-    const warn = vi.fn();
-    expect(parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: "distress,made_up,PRICE_OR_OFFER" }, warn)).toEqual(["distress"]);
-    expect(warn).toHaveBeenCalledTimes(2);
-    expect(warn.mock.calls.flat().join(" ")).toContain("made_up");
-  });
-});
-
 describe("holdKeyFor", () => {
   it("keys on property and reason only; the hold's start time is not in it", () => {
     expect(holdKeyFor("p", "draft_held")).toBe("p:draft_held");
@@ -92,26 +66,42 @@ describe("holdKeyFor", () => {
 });
 
 describe("isHotHold", () => {
-  const HOT = ["jev_below_threshold:new_lead", "price_or_offer", "distress"];
-  it("is never hot with no configured reasons", () => {
-    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(false);
-  });
-  it("matches only an exact reason from HOT_HOLD_REASONS: flag reason, run outcome or run reason", () => {
-    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }), HOT)).toBe(true);
-    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }), HOT)).toBe(true);
-    expect(isHotHold(openHold({ run: run({ final_outcome: "distress" }) }), HOT)).toBe(true);
-    expect(isHotHold(openHold({ run: run({ reason: "price_or_offer" }) }), HOT)).toBe(true);
+  it("is exactly the shared hot definition: flag reason, run outcome or run reason", () => {
+    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "model:hot_lead" }))).toBe(true);
+    expect(isHotHold(openHold({ run: run({ reason: "model:hot_lead" }) }))).toBe(true);
+    expect(isHotHold(openHold({ run: run({ final_outcome: "new_lead" }) }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "draft_held" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "price_quoted" }))).toBe(false);
   });
   it("does not match substrings, other casing, composite hold text or other reasons", () => {
-    expect(isHotHold(openHold({ flag_reason: "price_quoted" }), HOT)).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "distressed_seller" }), HOT)).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:not_interested" }), HOT)).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "PRICE_OR_OFFER" }), HOT)).toBe(false);
-    expect(isHotHold(openHold({ reason: "Needs attention (price_or_offer, distress)" }), HOT)).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "distressed_seller" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:not_interested" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "PRICE_OR_OFFER" }))).toBe(false);
+    expect(isHotHold(openHold({ reason: "Needs attention (price_or_offer, distress)" }))).toBe(false);
+  });
+  it("a configured HOLD_ALERT_HOT_REASONS=distress has no effect: a distress hold is not hot and nothing is sent", async () => {
+    const prev = process.env.HOLD_ALERT_HOT_REASONS;
+    process.env.HOLD_ALERT_HOT_REASONS = "distress";
+    try {
+      expect(isHotHold(openHold({ flag_reason: "distress" }))).toBe(false);
+      expect(isHotHold(openHold({ run: run({ final_outcome: "distress" }) }))).toBe(false);
+      const holds = toAlertHolds([openHold({ flag_reason: "distress", since: "2026-10-15T10:00:00.000Z", alert_since: "2026-10-15T10:00:00.000Z" })], labels);
+      expect(holds[0]!.hot).toBe(false);
+      const t = makeDeps({ holds });
+      t.setNow("2026-10-15T12:00:00.000Z");
+      await runHoldAlertsForOrg(t.deps, ORG);
+      expect(t.sent).toEqual([]);
+      expect(t.store.rows).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env.HOLD_ALERT_HOT_REASONS;
+      else process.env.HOLD_ALERT_HOT_REASONS = prev;
+    }
   });
   it("never reads the inbound preview", () => {
-    expect(isHotHold(openHold({ run: run({ inbound_preview: "price_or_offer distress" }) }), HOT)).toBe(false);
-    expect(isHotHold(openHold(), HOT)).toBe(false);
+    expect(isHotHold(openHold({ run: run({ inbound_preview: "price_or_offer distress" }) }))).toBe(false);
+    expect(isHotHold(openHold())).toBe(false);
   });
 });
 
@@ -146,6 +136,12 @@ describe("toAlertHolds", () => {
       startedAt: "2026-10-08T10:00:00.000Z",
       name: "Dana",
       hot: false,
+      reasonKey: "jev_decision",
+      flagHot: false,
+      runHot: false,
+      runInbound: "msg-1",
+      runReason: null,
+      runStartedAt: "2026-10-08T10:00:00.000Z",
     });
   });
 
@@ -162,10 +158,11 @@ describe("toAlertHolds", () => {
 
 describe("payloads never carry seller message text", () => {
   it("no channel's text contains the run's inbound_preview", async () => {
-    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer" })], labels, ["price_or_offer"]);
+    // The loader adds the flag time for hot holds; stand in for it here.
+    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer", since: "2026-10-15T10:00:00.000Z", alert_since: "2026-10-15T10:00:00.000Z" })], labels).map((h) => ({ ...h, flagAt: "2026-10-15T10:00:00.000Z" }));
     expect(JSON.stringify(holds)).not.toContain("SELLER SAID");
     const t = makeDeps({ holds, emailEnabled: true });
-    t.setNow("2026-10-08T12:00:00.000Z");
+    t.setNow("2026-10-15T12:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     const channels = new Set(t.sent.map((s) => s.channel));
     expect(channels).toEqual(new Set(["slack", "sms", "email"]));
@@ -191,7 +188,7 @@ describe("nurture auto-drip hold reasons are known", () => {
   });
 });
 
-import { holdReasonLabel, leadLink, slackNudgeText } from "./messages";
+import { holdReasonLabel, leadLink, slackFirstText } from "./messages";
 import { hold as mkHold } from "./test-support";
 
 describe("alert labels and links", () => {
@@ -200,8 +197,8 @@ describe("alert labels and links", () => {
     expect(holdReasonLabel("call_request")).toBe("call request");
     expect(holdReasonLabel("weird+unknown")).toBe("needs review");
   });
-  it("nudge links the lead and keeps the label", () => {
-    const text = slackNudgeText(mkHold({ propertyId: "p-7", reasonLabel: "call request" }), "https://x.test/");
+  it("first DM links the lead and keeps the label", () => {
+    const text = slackFirstText(mkHold({ propertyId: "p-7", reasonLabel: "call request" }), "https://x.test/");
     expect(text).toContain("https://x.test/leads/p-7");
     expect(text).toContain("call request");
     expect(leadLink("https://x.test/", "a b")).toBe("https://x.test/leads/a%20b");

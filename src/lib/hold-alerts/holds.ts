@@ -1,19 +1,12 @@
 import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages-v2/types";
 
+import { isHotReason } from "@/lib/hot-sellers/hot";
+
 import { holdReasonLabel } from "./messages";
 import type { HoldInfo } from "./types";
 
 /**
- * A hold is HOT (SMS to the owner) when one of its reasons is EXACTLY one of the
- * configured values (or matches a `prefix:*` / `*:backed` wildcard entry). Not substring: `price_quoted` or
- * `distressed_seller` are not hot. The default is EMPTY: no hold is hot until
- * reasons are named in `HOLD_ALERT_HOT_REASONS` (comma-separated).
- */
-export const HOT_HOLD_REASONS: readonly string[] = [];
-
-/**
- * Hold reasons the system can produce; `HOLD_ALERT_HOT_REASONS` entries are
- * validated against these. Derived from what the code emits (properties'
+ * Hold reasons the system can produce. Derived from what the code emits (properties'
  * last_ai_escalation_reason via markPropertyNeedsAttention, pipeline run
  * outcome/reason); `holds.reasons.test.ts` fails when an emitted literal is
  * missing here.
@@ -48,6 +41,8 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "workflow_start_and_fallback_failed",
   "jev_unexpected_send_route",
   "jev_new_lead_promotion_failed",
+  "hot_lead_assign_failed",
+  "hot_lead_event_failed",
   "jev_unclear_no_action",
   // Model judgments about opt-out / DNC / phone-wide wrong number never act
   // on their own (Jarrad 2026-10-07); a human confirms each one.
@@ -136,47 +131,15 @@ export function isKnownHoldReason(v: string): boolean {
 }
 
 /**
- * A `HOLD_ALERT_HOT_REASONS` entry may be a wildcard: `dead_letter_failed:*`
- * (a known prefix family) or `*:backed` (the backed suffix). Anything else is exact.
+ * Hot = exactly the shared hot-seller definition (lib/hot-sellers/hot.ts) on
+ * any reason the hold carries (flag reason, run outcome, run reason). There is
+ * no extra configurable list: nothing outside that definition pages Jarrad.
  */
-export function isKnownHotEntry(entry: string): boolean {
-  if (entry.endsWith("*")) return KNOWN_HOLD_REASON_PREFIXES.includes(entry.slice(0, -1));
-  if (entry.startsWith("*")) return entry.slice(1) === BACKED_SUFFIX;
-  return isKnownHoldReason(entry);
-}
-
-function matchesHotEntry(reason: string, entry: string): boolean {
-  if (entry.endsWith("*")) return reason.startsWith(entry.slice(0, -1));
-  if (entry.startsWith("*")) return reason.endsWith(entry.slice(1));
-  return reason === entry;
-}
-
-/** Reads `HOLD_ALERT_HOT_REASONS`: unknown values are dropped with a warning. */
-export function parseHotHoldReasons(
-  env: Record<string, string | undefined> = process.env,
-  warn: (message: string) => void = (m) => console.warn(m),
-): readonly string[] {
-  const raw = env.HOLD_ALERT_HOT_REASONS;
-  if (!raw || !raw.trim()) return HOT_HOLD_REASONS;
-  const out: string[] = [];
-  for (const part of raw.split(",")) {
-    const value = part.trim();
-    if (!value) continue;
-    if (!isKnownHotEntry(value)) {
-      warn(`HOLD_ALERT_HOT_REASONS: ignoring unknown hold reason "${value}"`);
-      continue;
-    }
-    if (!out.includes(value)) out.push(value);
-  }
-  return out;
-}
-
-/** The reasons a hold carries, each compared whole against `hotReasons`: flag reason, run outcome, run reason. */
-export function isHotHold(hold: OpenHold<PipelineRun>, hotReasons: readonly string[] = HOT_HOLD_REASONS): boolean {
+export function isHotHold(hold: OpenHold<PipelineRun>): boolean {
   const reasons = [hold.flag_reason, hold.run?.final_outcome, hold.run?.reason].filter(
     (v): v is string => typeof v === "string",
   );
-  return reasons.some((reason) => hotReasons.some((entry) => matchesHotEntry(reason, entry)));
+  return reasons.some(isHotReason);
 }
 
 /** What the hold is about, stable while the hold is: its flag reason, else the sources that opened it. */
@@ -206,7 +169,6 @@ export function isInformationalHold(hold: OpenHold<PipelineRun>): boolean {
 export function toAlertHolds(
   holds: readonly OpenHold<PipelineRun>[],
   labels: ReadonlyMap<string, RunLabel>,
-  hotReasons: readonly string[] = HOT_HOLD_REASONS,
 ): HoldInfo[] {
   const out: HoldInfo[] = [];
   for (const hold of holds) {
@@ -220,7 +182,13 @@ export function toAlertHolds(
       startedAt: hold.alert_since ?? null,
       name: label?.name ?? "Unknown sender",
       reasonLabel: holdReasonLabel(holdReasonKey(hold)),
-      hot: isHotHold(hold, hotReasons),
+      hot: isHotHold(hold),
+      reasonKey: holdReasonKey(hold),
+      flagHot: isHotReason(hold.flag_reason),
+      runHot: [hold.run?.final_outcome, hold.run?.reason].some((v) => typeof v === "string" && isHotReason(v)),
+      runInbound: hold.run?.inbound_message_id ?? null,
+      runReason: hold.run?.reason ?? null,
+      runStartedAt: hold.run?.started_at ?? null,
     });
   }
   return out;

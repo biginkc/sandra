@@ -19,11 +19,44 @@ export type HoldInfo = {
   name: string;
   /** Short human reason for the hold ("price talk"); never message text. */
   reasonLabel: string;
-  /** One of the hold's reasons is in the configured hot list (HOLD_ALERT_HOT_REASONS, exact match). */
+  /** Hot seller (lib/hot-sellers/hot.ts), nothing else. Only hot holds ping. */
   hot: boolean;
+  /** The flag reason itself is hot. */
+  flagHot?: boolean;
+  /** The hold's run (latest) is hot by its own outcome/reason. */
+  runHot?: boolean;
+  runInbound?: string | null;
+  /** The hold's run reason (to recognise a failed hand-off whose flag write no-oped). */
+  runReason?: string | null;
+  runStartedAt?: string | null;
+  /** The hold's reason key (its flag reason, else its sources). */
+  reasonKey?: string;
+  /** When the hold's flag was set (properties.last_ai_escalation_at): the hot hold's alert key and cutoff time. */
+  flagAt?: string | null;
 };
 
 export type Recipient = { userId: string; role: "owner" | "member" };
+
+/** A hot seller handed to Jarrad on My Leads (lead_events 'assigned', source hot_seller_handoff). */
+export type HotPromotion = {
+  propertyId: string;
+  /** Who the lead was assigned to: the one recipient of this promotion's alerts. */
+  assigneeUserId: string;
+  /** First name (or "Unknown sender"); never message text or address. */
+  name: string;
+  /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
+  assignedAt: string;
+  /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
+  kind?: "handoff" | "hot_text" | "hot_failed";
+  /** hot_text on a lead that already needs a person: may be unassigned. */
+  heldLead?: boolean;
+  /** hot_failed: the hold reason it carries (for the existing hold alert copy). */
+  reason?: string;
+  /** Property address (record data, never seller text); used by the hot_text alert. */
+  address?: string | null;
+  /** Delivery key: hot_handoff:<inbound> or hot_text:<inbound>. */
+  key: string;
+};
 
 export type DeliveryRow = {
   id: string;
@@ -54,6 +87,16 @@ export type ChannelResult =
   /** `terminal`: delivery is ambiguous (may have been transmitted); never retry. */
   | { status: "failed"; error: string; terminal?: boolean };
 
+/** One hourly cap bucket: Slack per recipient, SMS per org. */
+export type CapBucket = {
+  orgId: string;
+  channel: AlertChannel;
+  /** null = the whole org (SMS). */
+  recipientUserId: string | null;
+  cap: number;
+  sinceIso: string;
+};
+
 export interface DeliveryStore {
   /**
    * The org's alert watermark. Inserts `alerts_since = nowIso` when the org has
@@ -71,6 +114,12 @@ export interface DeliveryStore {
    * there first or the row is no longer claimable.
    */
   claim(row: DeliveryRow): Promise<boolean>;
+  /**
+   * Atomic cap reservation + claim (hold_alert_claim_with_cap): counts sent +
+   * sending rows in the bucket under a per-bucket lock and claims only if
+   * under the cap. 'capped' leaves the row untouched.
+   */
+  claimWithCap(row: DeliveryRow, cap: CapBucket): Promise<"claimed" | "capped" | "lost">;
   /**
    * Rows stuck in 'sending' since before `cutoffIso` (the run died mid-send)
    * become terminal failed:interrupted. They are never resent: the provider may
@@ -95,6 +144,8 @@ export interface DeliveryStore {
    * be used to decide anything closed.
    */
   deliveredPropertyIds(orgId: string): Promise<{ ids: string[]; complete: boolean }>;
+  /** Undo a claim that went over a cap: 'sending' → 'pending', attempts - 1. */
+  release(id: string): Promise<void>;
   markSent(id: string): Promise<void>;
   markSkipped(id: string, reason: string): Promise<void>;
   /** attempts was already incremented by claim(); `terminal` pins attempts at the max. */
@@ -127,6 +178,15 @@ export interface HoldAlertDeps {
    * nothing may be treated as closed.
    */
   loadHeldPropertyIds(orgId: string, propertyIds: readonly string[]): Promise<Set<string> | null>;
+  /**
+   * Hot promotions (lead handed to Jarrad) at/after `alertsSince`. `complete`
+   * false when the lookup failed or was capped.
+   */
+  loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
+  loadHotOwner(orgId: string): Promise<string | null>;
+  /** Send-time check: who the property is assigned to right now (null = nobody). */
+  loadPropertyAssignee(orgId: string, propertyId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**
@@ -154,6 +214,8 @@ export type OrgAlertSummary = {
   archived: number;
   /** Ran out of the time budget; remaining rows are picked up next run. */
   budgetExhausted: boolean;
+  /** Hot holds or promotions existed but Jarrad could not be identified: none were sent (fail closed). */
+  hotOwnerUnknown: boolean;
 };
 
 /**
