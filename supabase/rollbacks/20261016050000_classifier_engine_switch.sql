@@ -1,4 +1,4 @@
--- Rollback for 20261016020000_classifier_engine_switch. Drops the switch column and its
+-- Rollback for 20261016050000_classifier_engine_switch. Drops the switch column and its
 -- constraint; every org falls back to the eight-answer path. Idempotent.
 begin;
 

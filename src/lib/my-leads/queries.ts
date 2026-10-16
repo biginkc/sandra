@@ -111,10 +111,15 @@ export async function readBadgeV2(client: unknown): Promise<number> {
   return count;
 }
 export async function getAcquisitionBadge(): Promise<number> {
+  return (await getAcquisitionBadgeState()).count;
+}
+
+/** The badge count and what it counts: with unified_queue on, leads that need attention (Due + New reply + Broken). */
+export async function getAcquisitionBadgeState(): Promise<{count:number;needsAttention:boolean}> {
   const viewer=await myLeadsViewer();
   const unified=await unifiedQueueEnabled(viewer.orgId);
-  try { return unified?await readBadgeV2(viewer.client):await readRpc<number>(viewer.client,'fn_get_acquisition_badge',{p_org_id:viewer.orgId}); }
-  catch(error) { if(error instanceof MyLeadsReadError&&error.code==='FEATURE_DISABLED') return 0; throw error; }
+  try { return {count:unified?await readBadgeV2(viewer.client):await readRpc<number>(viewer.client,'fn_get_acquisition_badge',{p_org_id:viewer.orgId}),needsAttention:unified}; }
+  catch(error) { if(error instanceof MyLeadsReadError&&error.code==='FEATURE_DISABLED') return {count:0,needsAttention:unified}; throw error; }
 }
 
 /** Who sent an outbound text when it was not a person: a drip step, a campaign, or Sandra's AI reply. */

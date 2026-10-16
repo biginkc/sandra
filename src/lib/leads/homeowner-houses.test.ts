@@ -25,12 +25,36 @@ const row = (id: string, contact: string, extra: Partial<Row> = {}): Row => ({
   assigned_user_id: ME, homeowner_contact_id: contact, ...extra,
 });
 
+/** PostgREST's max-rows: no single response carries more rows than this. */
+const RESPONSE_CAP = 1000;
+
 /** A properties table that applies the filters the way PostgREST would, and records every call. */
 function fakeClient(table: Row[], error: { message: string } | null = null) {
-  const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][] } = {
-    from: 0, filters: [], counted: 0, orders: [],
+  const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][]; rpc: unknown[] } = {
+    from: 0, filters: [], counted: 0, orders: [], rpc: [],
   };
   const client = {
+    // fn_homeowner_houses_first_page as the database runs it: org filter, deleted excluded, exact count per owner,
+    // first 50 per owner by (address, id).
+    rpc: vi.fn(async (fn: string, args: { p_org_id: string; p_contact_ids: string[] }) => {
+      calls.rpc.push([fn, args]);
+      if (error) return { data: null, error };
+      if (args.p_contact_ids.length > 100) return { data: null, error: { message: "Too many homeowners in one read" } };
+      const byOwner = new Map<string, Row[]>();
+      for (const r of table)
+        if (r.org_id === args.p_org_id && r.deleted_at === null && r.homeowner_contact_id && args.p_contact_ids.includes(r.homeowner_contact_id))
+          byOwner.set(r.homeowner_contact_id, [...(byOwner.get(r.homeowner_contact_id) ?? []), r]);
+      const data = [...byOwner].map(([homeowner_contact_id, owned]) => ({
+        homeowner_contact_id,
+        house_count: String(owned.length),
+        houses: [...owned]
+          .sort((x, y) => x.address.localeCompare(y.address) || x.id.localeCompare(y.id))
+          .slice(0, 50)
+          .map(({ id, address, city, state, assigned_user_id }) => ({ id, address, city, state, assigned_user_id })),
+      }));
+      if (data.length > RESPONSE_CAP) return { data: data.slice(0, RESPONSE_CAP), error: null };
+      return { data, error: null };
+    }),
     from: vi.fn(() => {
       calls.from += 1;
       let rows = [...table];
@@ -59,9 +83,9 @@ function fakeClient(table: Row[], error: { message: string } | null = null) {
         is(column: string, value: null) { calls.filters.push(["is", column, value]); rows = rows.filter((r) => r[column as keyof Row] === value); return query; },
         order(column: string) { sorts.push(column); return query; },
         limit: async (count: number) =>
-          error ? { data: null, error } : { data: sorted().slice(0, count), error: null, count: counted ? rows.length : null },
+          error ? { data: null, error } : { data: sorted().slice(0, Math.min(count, RESPONSE_CAP)), error: null, count: counted ? rows.length : null },
         range: async (from: number, to: number) =>
-          error ? { data: null, error } : { data: sorted().slice(from, to + 1), error: null, count: counted ? rows.length : null },
+          error ? { data: null, error } : { data: sorted().slice(from, Math.min(to + 1, from + RESPONSE_CAP)), error: null, count: counted ? rows.length : null },
       };
       return {
         select: (_columns: string, options?: { count: "exact" }) => {
@@ -136,22 +160,71 @@ describe("loadHomeownerHouses", () => {
     expect(result[C2]).toMatchObject({ count: 1 });
   });
 
-  it("stays exact for every owner on the page when the combined rows pass the page ceiling", async () => {
-    // C1's 1,100 houses sort first ("a…"), so the single page read would hide C2 and C3 entirely.
+  it("stays exact for every owner on the page when the combined rows pass the page ceiling, in one extra call", async () => {
+    // C1's 1,100 houses sort first ("a…"), so the single page read hides C2 and C3; the batched first page restores them.
     const { client, calls } = fakeClient([...many(C1, 1100, "a"), row("m1", C2), row("m2", C2), row("m3", C3)]);
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2, C3] });
-    expect(calls.from).toBe(4);
-    expect(calls.counted).toBe(3);
+    expect(calls.from).toBe(1);
+    expect(calls.counted).toBe(0);
+    expect(calls.rpc).toEqual([["fn_homeowner_houses_first_page", { p_org_id: ORG, p_contact_ids: [C1, C2, C3] }]]);
     expect(result[C1].count).toBe(1100);
     expect(result[C1].houses).toHaveLength(MAX_LISTED_HOUSES);
     expect(result[C2]).toMatchObject({ count: 2, houses: [{ propertyId: "m1" }, { propertyId: "m2" }] });
     expect(result[C3]).toMatchObject({ count: 1, houses: [{ propertyId: "m3" }] });
   });
 
+  it("past the ceiling, first paint equals the old per-owner read, tied addresses included, and Show more continues at 50", async () => {
+    // Six of C2's houses share one address (only the id tie-break orders them); C3 has 60 houses, all crowded out.
+    const tied = ["t6", "t2", "t5", "t1", "t4", "t3"].map((id) => row(id, C2, { address: "9 Same St" }));
+    const table = [...many(C1, 1100, "a"), ...tied, ...many(C3, 60, "z")];
+    const result = await loadHomeownerHouses(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2, C3] });
+    for (const owner of [C1, C2, C3]) {
+      // What the old fallback returned for this owner: one exact read, first 50 by (address, id).
+      const old = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: owner, offset: 0 });
+      expect(result[owner]).toEqual({ count: old.count, houses: old.houses });
+    }
+    expect(result[C2].houses.map((h) => h.propertyId)).toEqual(["t1", "t2", "t3", "t4", "t5", "t6"]);
+    const more = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: C3, offset: result[C3].houses.length });
+    expect(result[C3].houses.length).toBe(MAX_LISTED_HOUSES);
+    expect([...result[C3].houses, ...more.houses].map((h) => h.propertyId)).toEqual(table.filter((r) => r.homeowner_contact_id === C3).map((r) => r.id));
+  });
+
+  it("keeps 100 owners past the ceiling to at most 2 calls, exact, deleted and other-org houses excluded", async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    const table = ids.flatMap((id, i) => [
+      ...many(id, 11, `h${String(i).padStart(3, "0")}-`),
+      row(`del${i}`, id, { deleted_at: "2026-10-01T00:00:00Z" }),
+      row(`other${i}`, id, { org_id: "org-2" }),
+    ]);
+    const { client, calls } = fakeClient(table);
+    const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: ids });
+    expect(calls.from + calls.rpc.length).toBeLessThanOrEqual(2);
+    expect(Object.keys(result)).toHaveLength(100);
+    for (const id of ids) {
+      expect(result[id].count).toBe(11);
+      const old = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: id, offset: 0 });
+      expect(result[id].houses).toEqual(old.houses);
+    }
+  });
+
+  it("returns nothing for ids that only have houses in another org", async () => {
+    const { client } = fakeClient([...many(C1, 1000, "a"), row("x1", C2, { org_id: "org-2" })]);
+    const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1, C2] });
+    expect(result[C2]).toBeUndefined();
+    expect(result[C1].count).toBe(1000);
+  });
+
+  it("throws when the batched first page fails", async () => {
+    const { client } = fakeClient(many(C1, 1000, "a"));
+    (client as unknown as { rpc: () => unknown }).rpc = async () => ({ data: null, error: { message: "first page boom" } });
+    await expect(loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] })).rejects.toThrow(/first page boom/);
+  });
+
   it("does not fall back below the page ceiling", async () => {
     const { client, calls } = fakeClient(many(C1, MAX_PAGE_ROWS - 1, "a"));
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: [C1] });
     expect(calls.from).toBe(1);
+    expect(calls.rpc).toHaveLength(0);
     expect(result[C1].count).toBe(MAX_PAGE_ROWS - 1);
   });
 });
