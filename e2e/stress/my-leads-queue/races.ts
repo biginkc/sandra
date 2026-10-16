@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 
 import { createRng, type Rng } from "../prng";
-import { assertCommitLaneAllowed, assertOnlyHarnessLeads, HARNESS_ADDRESS_PREFIX } from "./guards";
+import { assertCommitLaneAllowed, assertOnlyHarnessLeads, foreignLeadCheckRequired, HARNESS_ADDRESS_PREFIX } from "./guards";
 import { fromChicagoLocal } from "./oracle";
 import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { loadClassifierMigration } from "./migration";
@@ -278,9 +278,9 @@ export async function preflightCommitLanes(url: string): Promise<string | null> 
     const have = await c.query("select to_regprocedure('public.my_leads_work_classified(uuid,uuid,timestamptz)') as f");
     if (!have.rows[0].f) return "the classifier migration (20261015010000) is not applied to this database; the committed race lanes need it applied";
     const counts = (await c.query("select count(*)::int as properties, count(*) filter (where address not like $1)::int as foreign from public.properties", [`${HARNESS_ADDRESS_PREFIX}%`])).rows[0];
-    // The CI provisioner's disposable database (E2E_DISPOSABLE_DATABASE=1, set only by scripts/provision-e2e-local-database.mjs on a GitHub
-    // runner) is shared by earlier steps; there the exact footprint check (race:cleanup / the dispatch suite) is the guarantee instead.
-    if (process.env.E2E_DISPOSABLE_DATABASE !== "1") assertOnlyHarnessLeads(counts);
+    // Only the CI provisioner's disposable database on a real GitHub Actions runner skips this (earlier steps share it; the exact
+    // footprint check is the guarantee there). Locally the check always runs, even if E2E_DISPOSABLE_DATABASE=1 is set by hand.
+    if (foreignLeadCheckRequired(process.env)) assertOnlyHarnessLeads(counts);
     return null;
   } finally {
     await c.end();
