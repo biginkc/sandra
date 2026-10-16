@@ -22,6 +22,9 @@ function emittedReasons(source: string): string[] {
   // Third argument of markPropertyNeedsAttention(supabase, id, "literal"...).
   const flagCall = /markPropertyNeedsAttention\(\s*[\w.]+,\s*[\w.]+,\s*"([a-z][a-z0-9_:]*)"/g;
   for (const m of source.matchAll(flagCall)) out.add(m[1]!);
+  // Reasons handed to the nine-question engine's hold helper: nineHoldAndComplete(supabase, a, <reason>).
+  const nineHold = /nineHoldAndComplete\(\s*[\w.]+,\s*[\w.]+,\s*(?:"([a-z][a-z0-9_:]*)"|`([a-z][a-z0-9_:]*)\$\{)/g;
+  for (const m of source.matchAll(nineHold)) out.add(m[1] ?? `${m[2]}x`);
   return [...out];
 }
 

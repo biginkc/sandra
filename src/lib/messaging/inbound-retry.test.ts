@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   listAdmins: vi.fn(async () => []),
   loadDelayConfig: vi.fn(async () => null as unknown),
   computeDelay: vi.fn(() => 0),
-  preGates: vi.fn(async () => ({ ok: true }) as unknown),
+  preGates: vi.fn(async () => ({ ok: true, property: { ai_responder_disabled: false } }) as unknown),
   dispatchAi: vi.fn(async () => ({
     outcome: "skipped" as const,
     reason: "no_config",
@@ -498,7 +498,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     // delay workflow, where the dispatch step runs, never from the request.
     mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
     mocks.computeDelay.mockReturnValueOnce(0);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     const response = await runWebhook();
     expect(response.status).toBe(200);
     expect(mocks.dispatchAi).not.toHaveBeenCalled();
@@ -510,7 +510,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
   it("a non-zero computed delay is scheduled on the workflow with that delay and no webhook dispatch", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
     mocks.computeDelay.mockReturnValueOnce(31);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     await runWebhook();
     expect(mocks.dispatchAi).not.toHaveBeenCalled();
     const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
@@ -520,7 +520,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
   it("Jev automatic + mixed price/legal text: held under the NON-price reason and the hot check runs once; nothing scheduled", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
     mocks.computeDelay.mockReturnValueOnce(10);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract" });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: true }));
@@ -532,7 +532,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
   it("Jev automatic + price-only text: no up-front hold, no hot check here, the delayed dispatch is scheduled", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price"], jevAutomatic: true });
     mocks.computeDelay.mockReturnValueOnce(10);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     mocks.applyKeyword.mockResolvedValueOnce({ escalated: false });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: true }));
@@ -543,10 +543,19 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
   it("non-Jev config: a keyword hold does not run the hot check", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
     mocks.computeDelay.mockReturnValueOnce(10);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer" });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: false }));
+    expect(mocks.checkHot).not.toHaveBeenCalled();
+  });
+
+  it("responder turned off on the property: the delayed path writes no keyword hold and no alert", async () => {
+    mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["lawyer"], jevAutomatic: true });
+    mocks.computeDelay.mockReturnValueOnce(10);
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: true } });
+    await runWebhook();
+    expect(mocks.applyKeyword).not.toHaveBeenCalled();
     expect(mocks.checkHot).not.toHaveBeenCalled();
   });
 
@@ -562,7 +571,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
   it("when the delay workflow cannot start, the inline fallback dispatches with replyDelayBypassed so no template goes out instantly", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce(delayConfig(45));
     mocks.computeDelay.mockReturnValueOnce(20);
-    mocks.preGates.mockResolvedValueOnce({ ok: true });
+    mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
     mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
     mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
     await runWebhook();

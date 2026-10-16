@@ -213,7 +213,40 @@ async function hotTextRecords(propertyId: string): Promise<number> {
   return rows[0].n as number;
 }
 
-async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>) {
+/** The real client, except a read selecting exactly `failColumn` returns a timeout error (PR 4 switch reads). */
+function failingColumnRead(failColumn: string): typeof supabase {
+  return new Proxy(supabase, {
+    get(target, key) {
+      if (key !== "from") {
+        const v = (target as unknown as Record<string | symbol, unknown>)[key];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+      return (table: string) => {
+        const builder = target.from(table as never) as unknown as Record<string | symbol, unknown>;
+        return new Proxy(builder, {
+          get(bt, bk) {
+            if (bk === "select") {
+              return (cols: string, opts?: unknown) => {
+                if (cols !== failColumn) return (bt.select as (c: string, o?: unknown) => unknown).call(bt, cols, opts);
+                const failed = { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+                const chain: Record<string, unknown> = {
+                  eq: () => chain,
+                  maybeSingle: async () => failed,
+                  then: (r: (v: unknown) => unknown) => Promise.resolve(failed).then(r),
+                };
+                return chain;
+              };
+            }
+            const v = bt[bk];
+            return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(bt) : v;
+          },
+        });
+      };
+    },
+  }) as typeof supabase;
+}
+
+async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>, client: typeof supabase = supabase) {
   const l = lead ?? (await seedLead());
   jevProbabilities = answer;
   const inbound = await seedThread(l, reply);
@@ -226,7 +259,7 @@ async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok"
     inboundFromPhone: l.phone,
     inboundToPhone: MOCK_SENDER_PRIMARY,
   };
-  const outcome = await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+  const outcome = await dispatchAiResponse(client, input, { anthropic: NO_ANTHROPIC });
   return { lead: l, inbound, input, outcome };
 }
 
@@ -527,6 +560,25 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
   });
 
+  it("PR 4 Confirmed owner drip switch READ ERROR: held for a person, no drip, no silent close", async () => {
+    await seedOrg();
+    const { lead, outcome } = await run({ confirmed_owner: 0.9 }, "yes its me", undefined, failingColumnRead("nine_confirmed_owner_drip"));
+    expect(outcome.outcome).toBe("escalated");
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect(await propertyRow(lead.propertyId)).toMatchObject({
+      needs_human_attention: true,
+      last_ai_escalation_reason: "nine_switch_unreadable:confirmed_owner",
+    });
+  });
+
+  it("PR 4 identity switch READ ERROR: nothing sent, held for a person", async () => {
+    await seedOrg();
+    const { lead, outcome } = await run({ asked_who: 0.9 }, "who is this", undefined, failingColumnRead("nine_identity_reply"));
+    expect(outcome.outcome).toBe("escalated");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("nine_switch_unreadable:asked_who");
+  });
+
   it("PR 4 switches do not govern each other (identity off: Confirmed owner still enrols)", async () => {
     await seedOrg({ identityReply: false });
     const { lead } = await run({ confirmed_owner: 0.9 }, "yes its me");
@@ -735,6 +787,74 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(jevCalls).toHaveLength(0);
     expect(await outboundBodies(lead.propertyId)).toEqual([]);
     expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("classifier_engine_unreadable");
+  });
+
+  it("engine switch unreadable on a responder-off property: no hold, nothing sent, Jev never asked", async () => {
+    await seedOrg();
+    const lead = await seedLead({ responderDisabled: true });
+    const inbound = await seedThread(lead, "maybe later");
+    const outcome = await dispatchAiResponse(
+      withEngineReadError({ code: "57014", message: "statement timeout" }),
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "maybe later", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect((outcome as { reason?: string }).reason).not.toBe("classifier_engine_unreadable");
+    expect(jevCalls).toHaveLength(0);
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    const row = await propertyRow(lead.propertyId);
+    expect(row.needs_human_attention).toBe(false);
+    expect(row.last_ai_escalation_reason).not.toBe("classifier_engine_unreadable");
+  });
+
+  it("wrong_person close after a person texts between our reply and the close: held for a person, NOT closed", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    jevProbabilities = { wrong_person: 0.9 };
+    const inbound = await seedThread(lead, "wrong number");
+    let reads = 0;
+    const client = new Proxy(supabase, {
+      get(target, prop, receiver) {
+        if (prop !== "from") return Reflect.get(target, prop, receiver);
+        return (table: string) => {
+          const builder = target.from(table as never) as unknown as { select: (...a: unknown[]) => unknown };
+          if (table !== "properties") return builder;
+          return new Proxy(builder, {
+            get(b, p2) {
+              if (p2 !== "select") return Reflect.get(b, p2);
+              return (cols: unknown, ...rest: unknown[]) => {
+                if (cols !== "decision_context_revision") return b.select(cols, ...rest);
+                reads += 1;
+                if (reads !== 2) return b.select(cols, ...rest);
+                // Read 2 is the post-send re-baseline: a person texts the seller first.
+                const chain: Record<string, unknown> = {};
+                const eqs: [string, unknown][] = [];
+                chain.eq = (c: string, v: unknown) => (eqs.push([c, v]), chain);
+                chain.maybeSingle = async () => {
+                  await pg.query(
+                    "insert into public.messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body) values ($1, 'sms', 'outbound', 'sent', $2, $3, $4, $5, 'NINE rep text: I will take it from here')",
+                    [orgId, lead.propertyId, lead.contactId, MOCK_SENDER_PRIMARY, lead.phone],
+                  );
+                  let q = (b.select as (c: unknown) => { eq: (c: string, v: unknown) => unknown })(cols) as { eq: (c: string, v: unknown) => unknown; maybeSingle: () => Promise<unknown> };
+                  for (const [c, v] of eqs) q = q.eq(c, v) as typeof q;
+                  return q.maybeSingle();
+                };
+                return chain;
+              };
+            },
+          });
+        };
+      },
+    });
+    const outcome = await dispatchAiResponse(
+      client,
+      { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id, inboundBody: "wrong number", inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+      { anthropic: NO_ANTHROPIC },
+    );
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(outcome).toEqual({ outcome: "escalated", reason: "nine_close_wrong_person_context_changed" });
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).not.toBe("wrong_number");
+    expect(row.needs_human_attention).toBe(true);
   });
 
   it("engine column missing (pre-migration): today's path, no hold for it, nine never asked", async () => {

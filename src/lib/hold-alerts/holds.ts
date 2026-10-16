@@ -15,6 +15,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   // Flags set by the responder, Jev and the sequences engine.
   "nine_asked_stop",
   "nine_needs_person",
+  "nine_close_wrong_person_context_changed",
   "nine_close_wrong_person_unreadable",
   "reply_text_not_approved",
   "classifier_engine_unreadable",
@@ -123,6 +124,7 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   // Nine-question engine (Messages v2 PR 3).
   "nine_reply_not_sent:",
   "nine_automation_disabled:",
+  "nine_switch_unreadable:",
   "model:",
   "already_flagged:",
 ];
