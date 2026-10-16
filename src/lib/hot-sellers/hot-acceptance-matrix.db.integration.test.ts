@@ -8,7 +8,7 @@ import { attachHotAlertTimes } from "@/app/(dashboard)/messages-v2/hot-alert-tim
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { deriveTape } from "@/app/(dashboard)/messages-v2/tape";
 import type { PipelineRun, PipelineRunStep, RunWithSteps } from "@/app/(dashboard)/messages-v2/types";
-import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
+import { applyKeywordEscalation, checkHotTextAfterKeywordHold, dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { createHoldAlertDeps } from "@/lib/hold-alerts";
 import { runHoldAlertsForOrg } from "@/lib/hold-alerts/core";
@@ -1584,14 +1584,16 @@ const ROWS: Row[] = [
   },
   {
     id: "61",
-    name: "round 15: \"He died, what's your price\" and Jev says wrong_number (normal path): the up-front keyword hold runs as on main (a person sees it), no deferral, no classifier call",
-    expect: { slack: 1, sms: 1, assigned: 0 },
+    name: "round 15/20: \"He died, what's your price\" and Jev says wrong_number (normal path): held under the NON-price reason keyword:distressed_seller, classify-only runs once, wrong number wins - 0 Slack, 0 SMS, no hot_text event",
+    expect: { slack: 0, sms: 0, assigned: 0 },
     run: async (h) => {
       const a = await h.newInbound("He died, what's your price");
-      expect(await h.dispatch(a, "wrong_number", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:price_offer" });
-      expect(jevCalls).toBe(0);
+      expect(await h.dispatch(a, "wrong_number", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:distressed_seller" });
+      expect(jevCalls).toBe(1);
       expect(await hotWinsCount(a)).toBe(0);
-      await expectHotHeld(h, a);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
     },
   },
   {
@@ -1611,7 +1613,328 @@ const ROWS: Row[] = [
       expect(await h.deliveryKeys()).toEqual([]);
     },
   },
+  {
+    id: "63",
+    name: "round 16: held lead + hot text, the hot_seller_text ledger write fails ONCE (real dispatch): no alert and the claim is released as error; a replay classifies again (2 Jev calls), writes the event, alerts exactly once (1 Slack + 1 SMS); a further replay does nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("What's your price?");
+      const unblock = await h.blockLeadEvents(HOT_TEXT_SOURCE_TYPE);
+      try {
+        expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      } finally {
+        await unblock();
+      }
+      expect(jevCalls).toBe(1);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      const claims = await pg.query("select status, outcome, error_message, lease_expires_at <= now() as released from public.ai_response_claims where inbound_message_id = $1", [a]);
+      expect(claims.rows).toHaveLength(1);
+      expect(claims.rows[0]).toMatchObject({ status: "error", error_message: "hot_text_event_not_recorded", released: true });
+      // Replay: classified again, the event is written, the alert goes out once.
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(jevCalls).toBe(2);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      const done = await pg.query("select status from public.ai_response_claims where inbound_message_id = $1", [a]);
+      expect(done.rows.map((r) => r.status)).toEqual(["completed"]);
+      // A further replay: nothing more (completed claim).
+      await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(jevCalls).toBe(2);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "64",
+    name: "round 17: UNFLAGGED lead, org allow-list WITHOUT price phrases, \"$150k\" and Jev non-hot (normal path): held keyword:numeric_amount (a person sees it), NOT hot - 0 Slack, 0 SMS, no hot_wins",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["lawyer", "callback"]);
+      const a = await h.newInbound("I'd take $150k");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:numeric_amount" });
+      expect(await h.runOf(a)).toEqual({ final_outcome: "escalated", reason: "keyword:numeric_amount" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason, assigned_user_id").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:numeric_amount", assigned_user_id: null });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "65",
+    name: "round 17: HELD lead, org allow-list WITHOUT price phrases, \"$150k\" and Jev non-hot, through real dispatch: not price-hot - no hot_text event, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["lawyer", "callback"]);
+      await h.flag("draft_held", new Date().toISOString());
+      const a = await h.newInbound("I'd take $150k");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "66",
+    name: "round 17: TWO CONCURRENT failed hand-offs (two hot inbounds, one unassigned property, assignment blocked) with the caps full: only the call that set the flag shares the hold's hot_flag key; the other failure event has no flag_at (own event, deemed covered because the hold is guaranteed to alert); after the cap clears the hold alert goes out exactly once (1 Slack + 1 SMS) and nothing is re-sent",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.useUpCaps();
+      const a = await h.newInbound("yes I might sell, what could you pay for it?");
+      const b = await h.newInbound("call me, I want to sell");
+      const unblock = await h.blockAssignment();
+      let results;
+      try {
+        results = await Promise.all([h.dispatch(a, "new_lead", HOT_ESC), h.dispatch(b, "new_lead", HOT_ESC)]);
+      } finally {
+        await unblock();
+      }
+      expect(results.every((r) => r.outcome === "escalated")).toBe(true);
+      const fk = await h.flagKey();
+      const { rows: failures } = await pg.query(
+        "select source_id, payload from public.lead_events where property_id = $1 and source_type = 'hot_seller_failed'",
+        [h.propertyId],
+      );
+      // Both failures are recorded; exactly one (the call that set the flag) carries the flag time.
+      expect(failures.map((f) => f.source_id).sort()).toEqual([a, b].sort());
+      const withFlag = failures.filter((f) => f.payload.flag_at !== null);
+      expect(withFlag).toHaveLength(1);
+      expect(`hot_flag:${h.propertyId}:${withFlag[0].payload.flag_at}`).toBe(fk);
+      // Caps full: nothing goes out yet.
+      expect((await h.alertPass()).sent).toBe(0);
+      const later = { now: () => new Date(Date.now() + 61 * 60 * 1000) };
+      expect((await h.alertPass(later)).sent).toBe(2);
+      expect(await h.deliveryRows(fk)).toEqual([["slack", "sent"], ["sms", "sent"]]);
+      expect((await h.alertPass(later)).sent).toBe(0);
+    },
+  },
+  {
+    id: "67",
+    name: "round 18: property with ai_responder_disabled + \"How much? My lawyer is involved\" (real dispatch): the responder-off gate runs before the keyword hold - skipped, no hold, no flag, no hot_wins, 0 Slack, 0 SMS, nothing sent",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      await pg.query("update public.properties set ai_responder_disabled = true where id = $1", [h.propertyId]);
+      const a = await h.newInbound("How much? My lawyer is involved");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).toMatchObject({ outcome: "skipped" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop?.needs_human_attention).toBe(false);
+      expect(prop?.last_ai_escalation_reason).toBeNull();
+      expect(await hotWinsCount(a)).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "68",
+    name: "round 18/20: ENABLED property + \"How much? My lawyer is involved\" with Jev unclear (real dispatch): held under the NON-price reason keyword:legal_contract, then the held-lead hot check alerts once (exactly one Slack + one SMS), no hot_wins step, nothing sent to the seller",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      const a = await h.newInbound("How much? My lawyer is involved");
+      const result = await h.dispatch(a, "unclear", NON_HOT_ESC);
+      expect(result).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect(await hotWinsCount(a)).toBe(0);
+      expect(await h.hotTextEvents()).toBe(1);
+      const pass = await h.alertPass();
+      expect(pass).toMatchObject({ sent: 2 });
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "69",
+    name: "round 19: opted-out contact + \"my lawyer is involved\" (real dispatch): the keyword hold is written as on main (keyword:legal_contract), non-hot so 0 Slack, 0 SMS, nothing sent",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      await pg.query("update public.contacts set sms_opted_out = true where id = (select homeowner_contact_id from public.properties where id = $1)", [h.propertyId]);
+      const a = await h.newInbound("my lawyer is involved");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "70",
+    name: "round 19: responder-off property + \"my lawyer is involved\" (real dispatch): no hold, no flag, 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      await pg.query("update public.properties set ai_responder_disabled = true where id = $1", [h.propertyId]);
+      const a = await h.newInbound("my lawyer is involved");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toMatchObject({ outcome: "skipped" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop?.needs_human_attention).toBe(false);
+      expect(prop?.last_ai_escalation_reason).toBeNull();
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "71",
+    name: "round 19: \"My lawyer is involved. What's your price?\" + Jev unclear (real dispatch): the up-front hold is keyword:legal_contract (unchanged reason) AND the price signal is hot - exactly one Slack + one SMS, one hot_text event",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      const a = await h.newInbound("My lawyer is involved. What's your price?");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
+  {
+    id: "72",
+    name: "round 19: same mixed text + Jev wrong_number (real dispatch): legal_contract hold stays, wrong number wins over hot - 0 Slack, 0 SMS, no hot_text event",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      const a = await h.newInbound("My lawyer is involved. What's your price?");
+      expect(await h.dispatch(a, "wrong_number", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "73",
+    name: "round 20: an UNASSIGNED hot_failed hand-off event, owner A's rows end skipped (A is replaced at send time), then B becomes the single owner: B gets exactly one Slack + one SMS, a further pass nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const a = await h.newInbound();
+      const unblock = await h.blockAssignment();
+      try {
+        expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "escalated", reason: "hot_lead_assign_failed" });
+      } finally {
+        await unblock();
+      }
+      const fk = await h.flagKey();
+      expect(await hotFailedEvents(h)).toBe(1);
+      await ownerSkippedThenReplaced(h, fk);
+    },
+  },
+  {
+    id: "73b",
+    name: "round 20: a held-lead hot_text event, owner A's rows end skipped, then B becomes the single owner: B gets exactly one Slack + one SMS, a further pass nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      await h.flag("send_blocked:blocked_provider_off", "2026-10-14T12:00:00.000Z");
+      await pg.query("update public.properties set outreach_dispo = 'nurture' where id = $1", [h.propertyId]);
+      const a = await h.newInbound("yes, what would you pay?");
+      expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+      expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+      await ownerSkippedThenReplaced(h, `hot_text:${a}`);
+    },
+  },
+  {
+    id: "74",
+    name: "round 20: \"Stop asking how much. My lawyer is involved.\" (allow-list incl. price, how much, lawyer; Jev opted_out), real dispatch: held keyword:legal_contract, stop wins over hot - 0 Slack, 0 SMS, no hot_text event, nothing sent",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      const a = await h.newInbound("Stop asking how much. My lawyer is involved.");
+      expect(await h.dispatch(a, "opted_out", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "75",
+    name: "round 20: opted-out contact + \"How much? My lawyer is involved\" (real dispatch): held keyword:legal_contract, the opt-out gate keeps the hot check silent - 0 Slack, 0 SMS",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await setKeywords(h, ["price", "how much", "lawyer"]);
+      await pg.query("update public.contacts set sms_opted_out = true where id = (select homeowner_contact_id from public.properties where id = $1)", [h.propertyId]);
+      const a = await h.newInbound("How much? My lawyer is involved");
+      expect(await h.dispatch(a, "unclear", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "keyword:legal_contract" });
+      const { data: prop } = await admin.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", h.propertyId).single();
+      expect(prop).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+      expect(await h.deliveryKeys()).toEqual([]);
+    },
+  },
+  {
+    id: "76",
+    name: "round 20 (delayed-reply path: the same two calls inbound.ts makes with Jev automatic): \"How much? My lawyer is involved\" + Jev unclear -> held keyword:legal_contract, then one hot_text alert - exactly 1 Slack + 1 SMS; a replay of the check adds nothing",
+    expect: { slack: 1, sms: 1, assigned: 0 },
+    run: async (h) => {
+      const kws = ["price", "how much", "lawyer"];
+      await setKeywords(h, kws);
+      const body = "How much? My lawyer is involved";
+      const a = await h.newInbound(body);
+      jevOutcome = "unclear";
+      jevEscalation = NON_HOT_ESC;
+      const input = { propertyId: h.propertyId, contactId: (await admin.from("properties").select("homeowner_contact_id").eq("id", h.propertyId).single()).data!.homeowner_contact_id!, conversationId: (await admin.from("messages").select("conversation_id").eq("id", a).single()).data!.conversation_id!, inboundMessageId: a, inboundBody: body };
+      const kw = await applyKeywordEscalation(admin, { propertyId: h.propertyId, inboundBody: body, escalationKeywords: kws, jevAutomatic: true });
+      expect(kw).toEqual({ escalated: true, reason: "keyword:legal_contract" });
+      await checkHotTextAfterKeywordHold(admin, input as never, kw.escalated ? kw.reason : "", kws, null);
+      await checkHotTextAfterKeywordHold(admin, input as never, "keyword:legal_contract", kws, null);
+      expect(await h.hotTextEvents()).toBe(1);
+      expect((await h.alertPass()).sent).toBe(2);
+      expect((await h.alertPass()).sent).toBe(0);
+      await h.expectOneAlertTotal();
+    },
+  },
 ];
+
+async function hotFailedEvents(h: Harness): Promise<number> {
+  const { rows } = await pg.query("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [h.propertyId, HOT_FAILED_SOURCE_TYPE]);
+  return rows[0].n;
+}
+
+/**
+ * Shared tail of rows 73/73b. Pass 1: A is the owner when the pass selects the alert, but the send-time re-check
+ * sees a different owner, so both of A's rows end "skipped" and nothing is sent. Then A loses the owner role and B
+ * becomes the single active owner: the finished-check must look at B's rows only, so B is alerted exactly once.
+ */
+async function ownerSkippedThenReplaced(h: Harness, key: string): Promise<void> {
+  const real = h.baseDeps.loadHotOwner;
+  let calls = 0;
+  const first = await h.alertPass({
+    loadHotOwner: async (org) => {
+      calls += 1;
+      return calls === 1 ? real(org) : "00000000-0000-0000-0000-00000000dead";
+    },
+  });
+  expect(first.sent).toBe(0);
+  expect(h.sent).toEqual([]);
+  expect(await h.deliveryRows(key)).toEqual([["slack", "skipped"], ["sms", "skipped"]]);
+  const { rows: before } = await pg.query("select recipient_user_id from public.hold_alert_deliveries where org_id = $1 and hold_key = $2", [h.orgId, key]);
+  expect(before.every((r) => r.recipient_user_id === h.owner)).toBe(true);
+
+  const b = await createMember(h.orgId, "owner");
+  await pg.query("update public.memberships set role = 'member' where org_id = $1 and user_id = $2", [h.orgId, h.owner]);
+  h.extra.recipient = b;
+  expect((await h.alertPass()).sent).toBe(2);
+  expect(h.slack()).toBe(1);
+  expect(h.sms()).toBe(1);
+  expect(h.sent.every((x) => x.userId === b)).toBe(true);
+  const { rows: forB } = await pg.query(
+    "select channel, status from public.hold_alert_deliveries where org_id = $1 and hold_key = $2 and recipient_user_id = $3 order by channel",
+    [h.orgId, key, b],
+  );
+  expect(forB.map((r) => [r.channel, r.status])).toEqual([["slack", "sent"], ["sms", "sent"]]);
+  expect((await h.alertPass()).sent).toBe(0);
+  expect(h.sent).toHaveLength(2);
+}
 
 /** Set the org's escalation allow-list (ai_responder_configs.escalation_keywords) for this harness org. */
 async function setKeywords(h: Harness, phrases: string[]): Promise<void> {

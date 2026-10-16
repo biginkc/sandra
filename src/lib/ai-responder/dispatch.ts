@@ -104,7 +104,7 @@ import {
 } from "./nine-questions-engine";
 import { actionForNineAnswer, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
-import { hasNonPriceEscalationPhrase, matchEscalationKeyword } from "./keywords";
+import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
   NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
   NUMBER_SOURCE_AWAITING_ANSWER_REASON,
@@ -372,11 +372,41 @@ export async function applyKeywordEscalation(
     inboundBody: string;
     escalationKeywords?: ReadonlyArray<string> | null;
     runContext?: MaybeRunContext;
+    /**
+     * Jev automatic: a price signal never writes a HOT hold up front (before
+     * consent checks and classification). A price-only text writes nothing
+     * here (the shared hot decision handles it after the gates); a mixed text
+     * keeps a person-review hold under its NON-price reason, which can only be
+     * alerted by the later classify-only check if stop / DNC / wrong / bad
+     * number does not win.
+     */
+    jevAutomatic?: boolean;
   },
 ): Promise<{ escalated: true; reason: string } | { escalated: false }> {
   const keywordMatch = matchEscalationKeyword(args.inboundBody, {
     allowedPhrases: args.escalationKeywords ?? undefined,
   });
+  if (args.jevAutomatic && keywordMatch && hasAllowedPriceSignal(args.inboundBody, args.escalationKeywords ?? null)) {
+    const otherTier = nonPriceTier(args.inboundBody, args.escalationKeywords ?? null);
+    if (!otherTier) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "escalation_keyword",
+        result: "pass",
+        detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
+      }, args.runContext);
+      return { escalated: false };
+    }
+    const mixedReason = `keyword:${otherTier}`;
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "block",
+      detail: { tier: otherTier, alsoPrice: true },
+    }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.propertyId, mixedReason, args.runContext);
+    return { escalated: true, reason: mixedReason };
+  }
   if (!keywordMatch) {
     await trace(
       supabase,
@@ -386,7 +416,11 @@ export async function applyKeywordEscalation(
     return { escalated: false };
   }
 
-  const reason = `keyword:${keywordMatch.tier}`;
+  // A numeric amount the org's allow-list does not cover is still held (as on
+  // main) but under a non-hot reason: it never drives a hot alert.
+  const unlistedNumeric =
+    keywordMatch.tier === "price_offer" && !priceSignalAllowed(keywordMatch, args.escalationKeywords ?? null);
+  const reason = unlistedNumeric ? "keyword:numeric_amount" : `keyword:${keywordMatch.tier}`;
   await trace(
     supabase,
     {
@@ -651,16 +685,40 @@ async function dispatchAiResponseCore(
       detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
     }, deps.runContext);
   }
-  const keywordEscalation = deferPriceKeyword
+  // PR 2: a person turned the responder OFF for this property (their
+  // takeover switch): Sandra writes no keyword hold and sends no alert,
+  // whatever the phrase. Everything else (opted-out / DNC contacts, phone
+  // suppression, no active config) keeps main's behaviour: a keyword still
+  // writes its hold so a person sees it. Nothing is ever texted either way.
+  // (Held / human-takeover properties never reach this point.)
+  const keywordHit =
+    !deferPriceKeyword &&
+    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config?.escalation_keywords ?? undefined }) !== null;
+  const keywordGated = keywordHit && property.ai_responder_disabled === true;
+  if (keywordGated) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "skipped",
+      detail: { why: "disabled_per_property" },
+    }, deps.runContext);
+  }
+  const keywordEscalation = deferPriceKeyword || keywordGated
     ? ({ escalated: false } as const)
     : await applyKeywordEscalation(supabase, {
         propertyId: input.propertyId,
         inboundBody: input.inboundBody,
         escalationKeywords: config?.escalation_keywords ?? null,
         runContext: deps.runContext,
+        jevAutomatic: !!config && config.active === true && isJevAutomatic(config),
       });
 
   if (keywordEscalation.escalated) {
+    // The up-front hold keeps main's (non-price) reason so a person sees it.
+    // If the text ALSO carries an allowed price signal, the lead is now held:
+    // run the held-lead classify-only check, which alerts Jarrad once only if
+    // stop / DNC / wrong / bad number does not win (and its own gates pass).
+    await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
     return { outcome: "escalated", reason: keywordEscalation.reason };
   }
 
@@ -1665,8 +1723,11 @@ async function classifyAndHandleNonRouteOutcomes(
       result: "error",
       detail: { status: applyResult.status },
     }, runCtx);
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
-    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
+    let ourFlagAt: string | null = null;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx, NO_GUARD, (at) => {
+      ourFlagAt = at;
+    });
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason, ourFlagAt);
     await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -3062,11 +3123,12 @@ async function classifyOnlyForHotText(
       .eq("inbound_message_id", inboundId)
       .limit(1);
     if (claimError) return;
-    // Handled, or another run holds a live lease: stop. An expired
-    // 'processing' claim (a crashed run) is reclaimed below; the
-    // classification-run check still prevents a second paid Jev call.
     const prior = (claim ?? [])[0] as { status: string; lease_expires_at: string | null } | undefined;
-    if (prior && (prior.status !== "processing" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
+    // Done ('completed') or another run's live lease: stop. A released
+    // 'error' claim (an earlier hot-text write failed) or an expired
+    // 'processing' claim (a crashed run) is retried.
+    if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
+    const retryOfFailedWrite = prior?.status === "error";
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode, escalation_keywords")
@@ -3086,7 +3148,9 @@ async function classifyOnlyForHotText(
       .select("id")
       .eq("source_inbound_message_id", inboundId)
       .limit(1);
-    if (seenError || (seen ?? []).length > 0) return;
+    // (A retry of a failed hot-text write classifies again: one extra call
+    // beats a lost alert.)
+    if (seenError || ((seen ?? []).length > 0 && !retryOfFailedWrite)) return;
     // Claim the inbound atomically (the response-claim table's unique key)
     // before classifying: concurrent runs of the same held inbound cannot both
     // call Jev or both act. No real claim row → do nothing (fail closed).
@@ -3098,17 +3162,68 @@ async function classifyOnlyForHotText(
       conversationId: input.conversationId ?? null,
     });
     if (!claim2.claimed || !claim2.claimId) return;
-    let classifyOnlyOutcome = "skipped";
+    let classifyOnlyOutcome: "escalated" | "skipped" | "write_failed" = "write_failed";
     try {
       classifyOnlyOutcome = engine === "nine_questions"
         ? await classifyOnlyClaimedNine(supabase, input, orgId, escalationKeywords, runCtx)
         : await classifyOnlyClaimed(supabase, input, orgId, runCtx, escalationKeywords);
     } finally {
-      await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+      if (classifyOnlyOutcome === "write_failed") {
+        // The hot text's event (or the run itself) failed: never mark the
+        // inbound done. Release the claim (error, lease expired) so a replay
+        // classifies and writes again.
+        reportError(new Error("hot text on held lead not recorded; claim released for retry"), {
+          tags: { surface: "hot_text_on_held_lead" },
+          extra: { propertyId: input.propertyId, inboundMessageId: inboundId },
+        });
+        await completeAiResponseClaim(supabase, {
+          claimId: claim2.claimId,
+          outcome: "hot_text_write_failed",
+          errorMessage: "hot_text_event_not_recorded",
+          releaseLease: true,
+        });
+      } else {
+        await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+      }
     }
   } catch (error) {
     reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
   }
+}
+
+/**
+ * After a person-review keyword hold whose reason is NOT the hot price
+ * reason: if the text also carries an allowed price signal, run the held-lead
+ * classify-only check (its own gates, atomic claim, one classification,
+ * stop / DNC / wrong / bad number precedence). Used by the normal dispatch and
+ * the delayed-reply inbound path.
+ */
+export async function checkHotTextAfterKeywordHold(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  holdReason: string,
+  escalationKeywords: ReadonlyArray<string> | null,
+  runCtx: MaybeRunContext,
+  knownProperty?: GateProperty & { last_ai_escalation_reason?: string | null },
+): Promise<void> {
+  if (holdReason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) || !input.inboundMessageId) return;
+  if (!isPriceKeyword(input.inboundBody, escalationKeywords)) return;
+  let property = knownProperty ?? null;
+  if (!property) {
+    const { data } = await supabase
+      .from("properties")
+      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention, last_ai_escalation_reason")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (!data) return;
+    property = data as GateProperty & { last_ai_escalation_reason?: string | null };
+  }
+  await classifyOnlyForHotText(
+    supabase,
+    input,
+    { ...property, needs_human_attention: true, last_ai_escalation_reason: holdReason },
+    runCtx,
+  );
 }
 
 /**
@@ -3122,7 +3237,7 @@ async function classifyOnlyClaimedNine(
   orgId: string,
   escalationKeywords: ReadonlyArray<string> | null,
   runCtx: MaybeRunContext,
-): Promise<string> {
+): Promise<"escalated" | "skipped" | "write_failed"> {
   const cls = await runNineClassification(
     supabase,
     {
@@ -3146,10 +3261,10 @@ async function classifyOnlyClaimedNine(
   await trace(supabase, {
     kind: "action",
     name: "hot_text_on_held_lead",
-    result: recorded ? "applied" : "skipped",
+    result: recorded === "recorded" ? "applied" : recorded === "write_failed" ? "error" : "skipped",
     detail: { engine: "nine_questions", answer },
   }, runCtx);
-  return recorded ? "escalated" : "skipped";
+  return recorded === "recorded" ? "escalated" : recorded;
 }
 
 /** The classify-only work, under its claim. Returns the claim outcome. */
@@ -3159,7 +3274,7 @@ async function classifyOnlyClaimed(
   orgId: string,
   runCtx: MaybeRunContext,
   escalationKeywords: ReadonlyArray<string> | null,
-): Promise<string> {
+): Promise<"escalated" | "skipped" | "write_failed"> {
   {
     const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
     if (!(await isHotRouting(supabase, orgId, c, input.inboundBody, escalationKeywords))) return "skipped";
@@ -3168,10 +3283,10 @@ async function classifyOnlyClaimed(
     await trace(supabase, {
       kind: "action",
       name: "hot_text_on_held_lead",
-      result: recorded ? "applied" : "skipped",
+      result: recorded === "recorded" ? "applied" : recorded === "write_failed" ? "error" : "skipped",
       detail: { escalation: escalation ?? null },
     }, runCtx);
-    return recorded ? "escalated" : "skipped";
+    return recorded === "recorded" ? "escalated" : recorded;
   }
 }
 
@@ -3240,7 +3355,7 @@ function hotWinsOver(c: ClassificationBridgeResult): boolean {
 
 /** The price_offer keyword, matched against the ORG's configured phrases on every path. */
 function isPriceKeyword(body: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
-  return matchEscalationKeyword(body, { allowedPhrases: escalationKeywords ?? undefined })?.tier === HOT_KEYWORD_TIER;
+  return hasAllowedPriceSignal(body, escalationKeywords);
 }
 
 /** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */
@@ -7160,6 +7275,8 @@ export async function markPropertyNeedsAttention(
    * awaits, so the attempt can expire in between). Not an attempt = no guard.
    */
   guard: Guard = NO_GUARD,
+  /** Called with the flag time only when THIS call set the flag (not when it was already set). */
+  onSet?: (flagAt: string) => void,
 ): Promise<boolean> {
   // Evidence first: the hold is recorded whether or not the flag write wins.
   guard();
@@ -7207,6 +7324,7 @@ export async function markPropertyNeedsAttention(
     }
     return exists;
   }
+  onSet?.(now);
   // Reconciliation of a SUCCESSFUL flag: the lead-event ledger entry is
   // evidence about a flag that already exists. A failure here must never turn
   // a persisted flag into a failed one (nor propagate), so it is reported and
@@ -7525,8 +7643,11 @@ async function routeNineHot(
     }
     const reason = "jev_new_lead_promotion_failed";
     await trace(supabase, { kind: "action", name: "promote_new_lead", result: "error", detail: { status: applyResult.status, engine: "nine_questions" } }, a.runCtx);
-    const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, reason, a.runCtx);
-    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason);
+    let ourFlagAt: string | null = null;
+    const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, reason, a.runCtx, NO_GUARD, (at) => {
+      ourFlagAt = at;
+    });
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason, ourFlagAt);
     await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: applyResult.status, flagOk });
     return { outcome: "escalated", reason };
   }
@@ -7817,9 +7938,12 @@ async function handOffHotLead(
   if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded") return null;
   // assigned_unrecorded: the lead IS on My Leads, but its note did not save; the hold keeps a person in the loop.
   const reason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
-  const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx);
-  // After the flag, so the event shares the hold's alert key when the flag is ours.
-  await recordHotFailure(supabase, propertyId, inboundMessageId, reason);
+  let ourFlagAt: string | null = null;
+  const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx, NO_GUARD, (at) => {
+    ourFlagAt = at;
+  });
+  // Shares the hold's alert key only when THIS call set the flag; otherwise its own key.
+  await recordHotFailure(supabase, propertyId, inboundMessageId, reason, ourFlagAt);
   await completeClaim(supabase, propertyId, {
     claimId: claim.claimId,
     outcome: "escalated",

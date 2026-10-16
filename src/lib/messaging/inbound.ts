@@ -16,6 +16,7 @@ import {
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import {
   applyKeywordEscalation,
+  checkHotTextAfterKeywordHold,
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
   flagAndDeadLetter,
@@ -1245,9 +1246,22 @@ export async function handleInboundWebhook(
                 inboundBody: ev.body,
                 escalationKeywords: delayConfig!.escalationKeywords,
                 runContext: runCtx,
+                jevAutomatic: delayConfig!.jevAutomatic === true,
               });
 
               if (keywordEscalation.escalated) {
+                // A mixed price + non-price text was held for a person under
+                // its non-price reason; let the shared hot decision alert it
+                // once if stop / DNC / wrong / bad number does not win.
+                if (delayConfig!.jevAutomatic === true) {
+                  await checkHotTextAfterKeywordHold(
+                    supabase,
+                    dispatchInput,
+                    keywordEscalation.reason,
+                    delayConfig!.escalationKeywords,
+                    runCtx,
+                  );
+                }
                 await stampAiResponderTerminalOutcome(supabase, {
                   messageId: insertOutcome.messageId,
                   conversationId: insertOutcome.conversationId,

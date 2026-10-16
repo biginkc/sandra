@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { matchEscalationKeyword } from "./keywords";
+import { hasAllowedPriceSignal, matchEscalationKeyword, priceSignalAllowed } from "./keywords";
 
 describe("matchEscalationKeyword — tier A (handoff request)", () => {
   it("matches 'can I talk to a human?'", () => {
@@ -161,5 +161,54 @@ describe("matchEscalationKeyword — allowedPhrases override", () => {
         allowedPhrases: ["hello"], // dollar regex still wins
       }),
     ).toMatchObject({ tier: "price_offer", phrase: "numeric-amount" });
+  });
+});
+
+describe("priceSignalAllowed", () => {
+  const numeric = () => matchEscalationKeyword("I want $150k");
+  const word = () => matchEscalationKeyword("what's your price?");
+
+  it("null and non-price tiers are never a price signal", () => {
+    expect(priceSignalAllowed(null)).toBe(false);
+    expect(priceSignalAllowed(matchEscalationKeyword("my lawyer said"))).toBe(false);
+  });
+  it("a numeric amount with no allow-list (null / undefined) counts", () => {
+    expect(priceSignalAllowed(numeric())).toBe(true);
+    expect(priceSignalAllowed(numeric(), null)).toBe(true);
+  });
+  it("a numeric amount counts when the allow-list includes a price-tier phrase (case-insensitive)", () => {
+    expect(priceSignalAllowed(numeric(), ["price"])).toBe(true);
+    expect(priceSignalAllowed(numeric(), ["How Much"])).toBe(true);
+  });
+  it("a numeric amount does NOT count when the allow-list has no price-tier phrase (including an empty list)", () => {
+    expect(priceSignalAllowed(numeric(), ["hello"])).toBe(false);
+    expect(priceSignalAllowed(numeric(), ["lawyer", "callback"])).toBe(false);
+    expect(priceSignalAllowed(numeric(), [])).toBe(false);
+  });
+  it("a phrase-based price match counts (it already passed the allow-list inside matchEscalationKeyword)", () => {
+    expect(priceSignalAllowed(word(), ["price"])).toBe(true);
+    expect(priceSignalAllowed(word())).toBe(true);
+  });
+});
+
+describe("hasAllowedPriceSignal", () => {
+  it("empty / non-price text is false", () => {
+    expect(hasAllowedPriceSignal("")).toBe(false);
+    expect(hasAllowedPriceSignal("my lawyer is involved")).toBe(false);
+  });
+  it("a price phrase anywhere counts even when another tier wins the match", () => {
+    expect(hasAllowedPriceSignal("My lawyer is involved. What's your price?")).toBe(true);
+    expect(hasAllowedPriceSignal("My lawyer is involved. What's your price?", ["price", "lawyer"])).toBe(true);
+  });
+  it("a price phrase the org did not list does not count", () => {
+    expect(hasAllowedPriceSignal("What's your price?", ["lawyer"])).toBe(false);
+    expect(hasAllowedPriceSignal("How much? my lawyer", ["how much"])).toBe(true);
+  });
+  it("a numeric amount counts with no list or a list containing a price phrase, not otherwise", () => {
+    expect(hasAllowedPriceSignal("I'd take $150k")).toBe(true);
+    expect(hasAllowedPriceSignal("I'd take $150k", null)).toBe(true);
+    expect(hasAllowedPriceSignal("I'd take $150k", ["price"])).toBe(true);
+    expect(hasAllowedPriceSignal("I'd take $150k", ["lawyer", "callback"])).toBe(false);
+    expect(hasAllowedPriceSignal("I'd take $150k", [])).toBe(false);
   });
 });
