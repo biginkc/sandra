@@ -7,7 +7,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
-import { runApprovedTemplateStep, dispatchAiResponse, flagConfirmDncHold, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning } from "./dispatch";
+import { runApprovedTemplateStep, dispatchAiResponse, flagConfirmDncHold, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning, wrongPersonCloseRevision } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
@@ -791,7 +791,7 @@ function createMockSupabase(state: MockState) {
           return Promise.resolve({ data: null, error: null });
         }
         return Promise.resolve({
-          data: state.config,
+          data: { classifier_engine: "outcome_v1", ...state.config }, // the column is NOT NULL default outcome_v1
           error: null,
         });
       },
@@ -10016,5 +10016,16 @@ describe("flagConfirmDncHold (real persistence against an already-flagged proper
     state.property.last_ai_escalation_reason = "hostile_needs_confirm:msg-1";
     await flagConfirmDncHold(createMockSupabase(state) as never, PROPERTY_ID, "hostile_needs_confirm:msg-2");
     expect(state.property.last_ai_escalation_reason).toBe("hostile_needs_confirm:msg-2");
+  });
+});
+
+describe("wrongPersonCloseRevision (nine-question wrong-person close)", () => {
+  it("accepts only the one bump our own reply caused", () => {
+    expect(wrongPersonCloseRevision(4, 5)).toBe(5);
+  });
+  it("aborts when anything else also moved the lead", () => {
+    expect(wrongPersonCloseRevision(4, 6)).toBeNull();
+    expect(wrongPersonCloseRevision(4, 4)).toBeNull();
+    expect(wrongPersonCloseRevision(4, 3)).toBeNull();
   });
 });

@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
+import { NINE_ANSWER_GROUP, NINE_ANSWER_LABELS, NINE_QUESTION_CUTOFF, type NineQuestionId } from "@/lib/sms-classification/nine-questions";
+
 import { pageText } from "./page-text";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
 import { NurtureAutoDripSwitch, type NurtureAutoDripState } from "./nurture-auto-drip-switch";
@@ -55,12 +57,65 @@ const GROUPS: RuleGroup[] = [
   },
 ];
 
-function stateText(badge: ModeBadge | undefined): { text: string; tone: "on" | "off" | "watch" | "unknown" } {
+// Same sentence as the PR 2 "Open to selling" row. Approved by Jarrad 2026-10-16.
+const HOT_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.";
+
+/**
+ * Nine-question rows. All wording approved verbatim by Jarrad 2026-10-16 (PR #889).
+ */
+const NINE_DETAIL: Record<NineQuestionId, string> = {
+  open_to_selling: HOT_DETAIL,
+  talked_price: HOT_DETAIL,
+  maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
+  not_interested: "When this is on, Sandra sends the approved reply and starts the Not interested drip.",
+  wrong_person: "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.",
+  asked_who: "Sandra answers who is texting and why.",
+  confirmed_owner: "Sandra starts the Confirmed owner drip. She doesn't reply first.",
+  asked_stop: "Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.",
+  hostile: "Sandra sends nothing. A person reads it.",
+};
+
+// Group headings approved verbatim by Jarrad 2026-10-16 (PR #889).
+const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
+  { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
+  { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
+  { heading: "Waits for a person", group: "person", ids: ["asked_stop", "hostile"] },
+];
+
+/** Nine-question answer -> the per-label switch that still gates it. */
+const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
+  open_to_selling: "new_lead",
+  talked_price: "new_lead",
+  maybe_later: "nurture",
+  not_interested: "not_interested",
+  wrong_person: "wrong_number",
+  asked_stop: "opted_out",
+};
+
+function NineRules({ renderState }: { renderState: (outcome: string | undefined) => React.ReactNode }) {
+  return (
+    <div data-testid="nine-rules" className="flex flex-col gap-2">
+      {NINE_GROUPS.map((g) => (
+        <section key={g.heading} aria-label={g.heading} className="flex flex-col gap-2">
+          <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{g.heading}</h3>
+          {g.ids
+            .filter((id) => NINE_ANSWER_GROUP[id] === g.group)
+            .map((id) => (
+              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{renderState(NINE_BADGE[id])}</Row>
+            ))}
+        </section>
+      ))}
+      <Row title={sureOrMore(NINE_QUESTION_CUTOFF)} detail="">{null}</Row>
+    </div>
+  );
+}
+
+function stateText(badge: ModeBadge | undefined, hideCutoff = false): { text: string; tone: "on" | "off" | "watch" | "unknown" } {
   if (!badge) return { text: "Not set up", tone: "unknown" };
   switch (badge.mode) {
     case "AUTO":
       return {
-        text: badge.minConfidence != null ? `On · ${sureOrMore(badge.minConfidence)}` : "On",
+        text: !hideCutoff && badge.minConfidence != null ? `On · ${sureOrMore(badge.minConfidence)}` : "On",
         tone: "on",
       };
     case "HELD":
@@ -85,7 +140,7 @@ function Row({ title, detail, children }: { title: string; detail: string; child
     <div data-testid="rule-row" className="flex items-center gap-3 rounded-2xl border px-3.5 py-3">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <b className="font-semibold">{title}</b>
-        <span className="text-[13px] text-muted-foreground">{detail}</span>
+        {detail && <span className="text-[13px] text-muted-foreground">{detail}</span>}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1.5">{children}</div>
     </div>
@@ -101,6 +156,7 @@ export function RulesPanel({
   nurtureAutoDrip,
   replyGeneration,
   setReplyGeneration,
+  classifierEngine,
 }: {
   orgId: string;
   isOwner: boolean;
@@ -109,6 +165,8 @@ export function RulesPanel({
   nurtureAutoDrip?: NurtureAutoDripState | null;
   replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
   setReplyGeneration?: SetReplyGenerationAction;
+  /** ai_responder_configs.classifier_engine; 'nine_questions' swaps in the nine-row panel. */
+  classifierEngine?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const byOutcome = new Map(badges.map((b) => [b.label, b]));
@@ -135,7 +193,22 @@ export function RulesPanel({
                 {pageText(badgesError)}
               </p>
             )}
-            {GROUPS.map((group) => (
+            {classifierEngine === "nine_questions" && <NineRules
+                renderState={(outcome) => {
+                  const badge = outcome ? byOutcome.get(outcome) : undefined;
+                  if (!outcome) return null;
+                  const st = stateText(badge, true); // nine-question mode: the one 60% row is the cutoff
+                  return (
+                    <>
+                      <span className={cn("rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap", TONE[st.tone])}>{st.text}</span>
+                      {isOwner && badge && isEditableBadge(badge) && (
+                        <LabelRuleEditor orgId={orgId} badge={badge} text={`${badge.label} [${formatModeBadge(badge)}]`} trigger="button" />
+                      )}
+                    </>
+                  );
+                }}
+              />}
+            {classifierEngine !== "nine_questions" && GROUPS.map((group) => (
               <section key={group.heading} aria-label={group.heading} className="flex flex-col gap-2">
                 <h3 className="pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group.heading}</h3>
                 {group.rows.map((row) => {

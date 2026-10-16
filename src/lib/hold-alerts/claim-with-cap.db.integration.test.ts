@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
-import { MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "./core";
+import { MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "./core";
 import { createSupabaseDeliveryStore } from "./store";
 import { hold, makeDeps } from "./test-support";
 import type { CapBucket, DeliveryRow } from "./types";
@@ -56,13 +56,11 @@ afterAll(async () => {
 const reset = () => pg.query("delete from public.hold_alert_deliveries where org_id = $1", [orgId]);
 
 async function seedSent(channel: "sms" | "slack", n: number, recipient: string, ageMinutes: number, label = "seed") {
-  for (let i = 0; i < n; i += 1) {
-    await pg.query(
-      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
-       values ($1, null, $2, $3, $4, 'first', 'sent', 1, now() - ($5 || ' minutes')::interval)`,
-      [orgId, `${label}-${channel}-${recipient}-${i}-${randomUUID()}`, recipient, channel, String(ageMinutes)],
-    );
-  }
+  await pg.query(
+    `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
+     select $1, null, $2 || '-' || g, $3, $4, 'first', 'sent', 1, now() - ($5 || ' minutes')::interval from generate_series(1, $6::int) g`,
+    [orgId, `${label}-${channel}-${recipient}-${randomUUID()}`, recipient, channel, String(ageMinutes), n],
+  );
 }
 
 async function pendingRow(channel: "sms" | "slack", recipient: string, key = randomUUID()): Promise<DeliveryRow> {
@@ -172,12 +170,12 @@ describe("hold_alert_claim_with_cap: single-call semantics", () => {
     expect([rows[0].status, rows[0].attempts, rows[0].sending_at]).toEqual(["pending", 0, null]);
   });
 
-  it("Slack is capped per recipient: another recipient's 20 DMs do not block this one, and the bucket does not mix with SMS", async () => {
+  it("Slack is capped per recipient: another recipient's full DM cap do not block this one, and the bucket does not mix with SMS", async () => {
     await reset();
     const store = createSupabaseDeliveryStore(admin());
-    await seedSent("slack", 20, otherUserId, 5);
+    await seedSent("slack", MAX_DMS_PER_RECIPIENT_PER_HOUR, otherUserId, 5);
     await seedSent("sms", MAX_SMS_PER_HOUR, otherUserId, 5);
-    const slack = (recipient: string): CapBucket => ({ orgId, channel: "slack", recipientUserId: recipient, cap: 20, sinceIso: sinceIso() });
+    const slack = (recipient: string): CapBucket => ({ orgId, channel: "slack", recipientUserId: recipient, cap: MAX_DMS_PER_RECIPIENT_PER_HOUR, sinceIso: sinceIso() });
     expect(await store.claimWithCap(await pendingRow("slack", otherUserId), slack(otherUserId))).toBe("capped");
     expect(await store.claimWithCap(await pendingRow("slack", userId), slack(userId))).toBe("claimed");
   });

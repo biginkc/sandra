@@ -1,0 +1,1533 @@
+{
+ "_synthetic": "SYNTHETIC FIXTURE: authored by hand, NOT a live Jev recording. Probabilities are plausible values chosen to exercise the approved tie-breaker (cutoff 0.6, group order). Replace with real recordings from scripts/messages-v2/replay when available.",
+ "_count": 90,
+ "entries": [
+  {
+   "scenario": "open_to_selling_plain",
+   "our_last_text": "Hi, are you interested in selling 123 Oak St?",
+   "homeowner_reply": "Yes, make me an offer",
+   "probabilities": {
+    "open_to_selling": 0.93,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "open_to_selling_plain",
+   "our_last_text": "Hi, are you interested in selling 123 Oak St?",
+   "homeowner_reply": "yeah im open to it",
+   "probabilities": {
+    "open_to_selling": 0.88,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "open_to_selling_plain",
+   "our_last_text": "Hi, are you interested in selling 123 Oak St?",
+   "homeowner_reply": "Sure, what can you do for the house?",
+   "probabilities": {
+    "open_to_selling": 0.81,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "talked_price_asks",
+   "our_last_text": "Would you consider a cash offer?",
+   "homeowner_reply": "How much would you pay?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.92
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "talked_price_asks",
+   "our_last_text": "Would you consider a cash offer?",
+   "homeowner_reply": "what's your number",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.85
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "talked_price_asks",
+   "our_last_text": "Would you consider a cash offer?",
+   "homeowner_reply": "I'd need at least 250k",
+   "probabilities": {
+    "open_to_selling": 0.55,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.9
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "price_beats_open",
+   "our_last_text": "Would you sell if the price was right?",
+   "homeowner_reply": "Yes if it's 300k",
+   "probabilities": {
+    "open_to_selling": 0.86,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.9
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "price_beats_open",
+   "our_last_text": "Would you sell if the price was right?",
+   "homeowner_reply": "sure for 275",
+   "probabilities": {
+    "open_to_selling": 0.95,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.7
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "price_beats_open",
+   "our_last_text": "Would you sell if the price was right?",
+   "homeowner_reply": "depends on the number, I'm open",
+   "probabilities": {
+    "open_to_selling": 0.9,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.62
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "maybe_later",
+   "our_last_text": "Are you looking to sell?",
+   "homeowner_reply": "Maybe next year, not now",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.9,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later",
+   "our_last_text": "Are you looking to sell?",
+   "homeowner_reply": "Not right now, check back in the spring",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.84,
+    "asked_who": 0.03,
+    "not_interested": 0.3,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later",
+   "our_last_text": "Are you looking to sell?",
+   "homeowner_reply": "might sell down the road",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.77,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later_beats_not_interested",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "Not now, maybe later",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.8,
+    "asked_who": 0.03,
+    "not_interested": 0.75,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later_beats_not_interested",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "no thanks for now, ask me in a year",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.65,
+    "asked_who": 0.03,
+    "not_interested": 0.88,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later_beats_not_interested",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "not at this time but maybe someday",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.71,
+    "asked_who": 0.03,
+    "not_interested": 0.6,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "not_interested",
+   "our_last_text": "Would you consider selling?",
+   "homeowner_reply": "No thanks, not interested",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.95,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "not_interested",
+   "our_last_text": "Would you consider selling?",
+   "homeowner_reply": "not selling",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.9,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "not_interested",
+   "our_last_text": "Would you consider selling?",
+   "homeowner_reply": "We're good, no.",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.72,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "asked_who",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "Who is this?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.96,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "asked_who",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "who dis",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.9,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "asked_who",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "Who are you and how did you get my number",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.85,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "asked_who_beats_confirmed",
+   "our_last_text": "Hi John, is this the owner of 5 Elm?",
+   "homeowner_reply": "Yes it is, who is this?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.8,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.9,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "asked_who_beats_confirmed",
+   "our_last_text": "Hi John, is this the owner of 5 Elm?",
+   "homeowner_reply": "this is john, who's asking",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.75,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.86,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "asked_who_beats_confirmed",
+   "our_last_text": "Hi John, is this the owner of 5 Elm?",
+   "homeowner_reply": "Yes. Who wants to know?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.66,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.93,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "wrong_person",
+   "our_last_text": "Hi Maria, are you the owner of 9 Pine Rd?",
+   "homeowner_reply": "Wrong number",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.95,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "wrong_person",
+   "our_last_text": "Hi Maria, are you the owner of 9 Pine Rd?",
+   "homeowner_reply": "I don't own that house",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.92,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "wrong_person",
+   "our_last_text": "Hi Maria, are you the owner of 9 Pine Rd?",
+   "homeowner_reply": "You have the wrong person",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.9,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.1,
+    "talked_price": 0.03
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "wrong_person_beats_price",
+   "our_last_text": "Would you sell 9 Pine Rd?",
+   "homeowner_reply": "Wrong person but the owner would take 200k",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.7,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.8
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "wrong_person_beats_price",
+   "our_last_text": "Would you sell 9 Pine Rd?",
+   "homeowner_reply": "not my house, ask the owner how much he wants",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.62,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.7
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "wrong_person_beats_price",
+   "our_last_text": "Would you sell 9 Pine Rd?",
+   "homeowner_reply": "I don't own it, it sold for 180k",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.85,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.9
+   },
+   "expected_answer": "wrong_person"
+  },
+  {
+   "scenario": "asked_stop",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "Stop texting me",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.97,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "asked_stop",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "please remove me from your list",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.9,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "asked_stop",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "do not text this number again",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.93,
+    "hostile": 0.2,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "hostile",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "Go away you scammers",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.9,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "quit bothering me idiots",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.85,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "this is harassment, f off",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.4,
+    "hostile": 0.88,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "stop_beats_wrong_person",
+   "our_last_text": "Hi Maria?",
+   "homeowner_reply": "Wrong number, stop texting me",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.95,
+    "asked_stop": 0.9,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_beats_wrong_person",
+   "our_last_text": "Hi Maria?",
+   "homeowner_reply": "not me. remove me",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.9,
+    "asked_stop": 0.7,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_beats_wrong_person",
+   "our_last_text": "Hi Maria?",
+   "homeowner_reply": "stop. wrong person",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.8,
+    "asked_stop": 0.65,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "hostile_beats_price",
+   "our_last_text": "Would you sell?",
+   "homeowner_reply": "F you, not for any price",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.9,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.7
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile_beats_price",
+   "our_last_text": "Would you sell?",
+   "homeowner_reply": "go to hell, I'd never sell to you for 500k",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.85,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.8
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile_beats_price",
+   "our_last_text": "Would you sell?",
+   "homeowner_reply": "you vultures. no amount",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.77,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.65
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "stop_hostile_tie_goes_to_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "Leave me alone you jerks, stop",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.8,
+    "hostile": 0.8,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_hostile_tie_goes_to_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "stop texting, you idiots",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.75,
+    "hostile": 0.75,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_hostile_tie_goes_to_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "remove me you creeps",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.6,
+    "hostile": 0.6,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "hostile_higher_than_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "you're scum, stop",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.7,
+    "hostile": 0.9,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile_higher_than_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "screw you, take me off",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.62,
+    "hostile": 0.85,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "hostile_higher_than_stop",
+   "our_last_text": "Hi?",
+   "homeowner_reply": "jerks. stop it",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.65,
+    "hostile": 0.8,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "hostile"
+  },
+  {
+   "scenario": "stop_beats_open",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "Yes but please stop texting me",
+   "probabilities": {
+    "open_to_selling": 0.9,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.8,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_beats_open",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "I might sell, stop messaging me though",
+   "probabilities": {
+    "open_to_selling": 0.85,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.65,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "stop_beats_open",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "open to offers. don't text again",
+   "probabilities": {
+    "open_to_selling": 0.9,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.7,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_stop"
+  },
+  {
+   "scenario": "confirmed_owner_only",
+   "our_last_text": "Hi John, am I speaking with the owner of 5 Elm St?",
+   "homeowner_reply": "Yes this is John",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.94,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "confirmed_owner_only",
+   "our_last_text": "Hi John, am I speaking with the owner of 5 Elm St?",
+   "homeowner_reply": "Speaking",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.88,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "confirmed_owner_only",
+   "our_last_text": "Hi John, am I speaking with the owner of 5 Elm St?",
+   "homeowner_reply": "yep thats me",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.9,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "gave_time_to_call",
+   "our_last_text": "Can we call you about your property?",
+   "homeowner_reply": "Anytime",
+   "probabilities": {
+    "open_to_selling": 0.78,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "gave_time_to_call",
+   "our_last_text": "Can we call you about your property?",
+   "homeowner_reply": "noon is best",
+   "probabilities": {
+    "open_to_selling": 0.7,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "gave_time_to_call",
+   "our_last_text": "Can we call you about your property?",
+   "homeowner_reply": "Call me after 5",
+   "probabilities": {
+    "open_to_selling": 0.66,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "open_beats_maybe_later",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "Open to it but not this month",
+   "probabilities": {
+    "open_to_selling": 0.75,
+    "maybe_later": 0.8,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "open_beats_maybe_later",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "yes, maybe in a few months though",
+   "probabilities": {
+    "open_to_selling": 0.64,
+    "maybe_later": 0.9,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "open_beats_maybe_later",
+   "our_last_text": "Interested in an offer?",
+   "homeowner_reply": "could sell, not right away",
+   "probabilities": {
+    "open_to_selling": 0.7,
+    "maybe_later": 0.72,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "needs_person_unclear",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "ok",
+   "probabilities": {
+    "open_to_selling": 0.25,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.3,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "needs_person_unclear",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "hmm",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.2,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "needs_person_unclear",
+   "our_last_text": "Hi, are you interested in selling?",
+   "homeowner_reply": "?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.4,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "needs_person_just_below_cutoff",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "I guess",
+   "probabilities": {
+    "open_to_selling": 0.5999,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "needs_person_just_below_cutoff",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "we'll see",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.59,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "needs_person_just_below_cutoff",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "don't know",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.5999999,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "cutoff_exact",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "yes please",
+   "probabilities": {
+    "open_to_selling": 0.6,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "open_to_selling"
+  },
+  {
+   "scenario": "cutoff_exact",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "not now",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.6,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "cutoff_exact",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "who is this",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.6,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "asked_who"
+  },
+  {
+   "scenario": "all_low",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "lol",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.1,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "all_low",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "\ud83d\udc4d",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.45,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "all_low",
+   "our_last_text": "Interested in selling?",
+   "homeowner_reply": "what",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.5,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "not_interested_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "No. Who is this anyway?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.9,
+    "not_interested": 0.85,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "not_interested_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "not interested, who are you",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.8,
+    "not_interested": 0.7,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "not_interested_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "no thanks. who's this?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.7,
+    "not_interested": 0.9,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "not_interested"
+  },
+  {
+   "scenario": "maybe_later_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "Maybe later. who is this?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.7,
+    "asked_who": 0.9,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "not now, who are you",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.62,
+    "asked_who": 0.88,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "maybe_later_beats_asked_who",
+   "our_last_text": "Hi, selling your house?",
+   "homeowner_reply": "later on perhaps, whos this",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.8,
+    "asked_who": 0.6,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "maybe_later"
+  },
+  {
+   "scenario": "price_only_no_open",
+   "our_last_text": "Hi, any interest in an offer?",
+   "homeowner_reply": "What is it worth to you",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.7
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "price_only_no_open",
+   "our_last_text": "Hi, any interest in an offer?",
+   "homeowner_reply": "how much?",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.95
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "price_only_no_open",
+   "our_last_text": "Hi, any interest in an offer?",
+   "homeowner_reply": "what would you give me for it",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.82
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "confirmed_owner_with_low_noise",
+   "our_last_text": "Is this the owner of 7 Birch?",
+   "homeowner_reply": "Yes",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.1,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.02,
+    "confirmed_owner": 0.97,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "confirmed_owner_with_low_noise",
+   "our_last_text": "Is this the owner of 7 Birch?",
+   "homeowner_reply": "yes it's me",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.1,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.9,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "confirmed_owner_with_low_noise",
+   "our_last_text": "Is this the owner of 7 Birch?",
+   "homeowner_reply": "Owner here",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.2,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.82,
+    "talked_price": 0.03
+   },
+   "expected_answer": "confirmed_owner"
+  },
+  {
+   "scenario": "invalid_values_never_yes",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "yes sure",
+   "probabilities": {
+    "open_to_selling": 1.4,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "invalid_values_never_yes",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "sure",
+   "probabilities": {
+    "open_to_selling": -0.2,
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "invalid_values_never_yes",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "yes",
+   "probabilities": {
+    "open_to_selling": "NaN_STRING",
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "missing_questions_fail_closed",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "yes please",
+   "probabilities": {
+    "maybe_later": 0.03,
+    "asked_who": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.9
+   },
+   "expected_answer": "talked_price"
+  },
+  {
+   "scenario": "missing_questions_fail_closed",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "no thanks",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.1,
+    "asked_who": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  },
+  {
+   "scenario": "missing_questions_fail_closed",
+   "our_last_text": "Interested?",
+   "homeowner_reply": "who is this",
+   "probabilities": {
+    "open_to_selling": 0.03,
+    "maybe_later": 0.03,
+    "not_interested": 0.03,
+    "wrong_person": 0.03,
+    "asked_stop": 0.03,
+    "hostile": 0.03,
+    "confirmed_owner": 0.03,
+    "talked_price": 0.03
+   },
+   "expected_answer": "needs_person"
+  }
+ ]
+}
