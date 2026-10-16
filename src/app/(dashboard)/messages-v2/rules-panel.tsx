@@ -60,30 +60,25 @@ const GROUPS: RuleGroup[] = [
   },
 ];
 
-// Same sentence as the PR 2 "Open to selling" row; its approval status is whatever PR 2 gives it.
+// Same sentence as the PR 2 "Open to selling" row. Approved by Jarrad 2026-10-16.
 const HOT_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.";
 
 /**
- * Nine-question rows. Reused sentences carry no marker; every row marked PLACEHOLDER is new text.
+ * Nine-question rows. All wording approved verbatim by Jarrad 2026-10-16 (PR #889).
  */
 const NINE_DETAIL: Record<NineQuestionId, string> = {
   open_to_selling: HOT_DETAIL,
   talked_price: HOT_DETAIL,
   maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   not_interested: "When this is on, Sandra sends the approved reply and starts the Not interested drip.",
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   wrong_person: "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.",
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   asked_who: "Sandra answers who is texting and why.",
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
-  confirmed_owner: "Sandra notes that this is the owner.",
+  confirmed_owner: "Sandra starts the Confirmed owner drip. She doesn't reply first.",
   asked_stop: "Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.",
-  // PLACEHOLDER — needs Jarrad's verbatim approval before merge
   hostile: "Sandra sends nothing. A person reads it.",
 };
 
-// PLACEHOLDER — needs Jarrad's verbatim approval before merge (group headings; "Goes to Jarrad" is the only new one, the other two reuse today's)
+// Group headings approved verbatim by Jarrad 2026-10-16 (PR #889).
 const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
   { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
   { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
