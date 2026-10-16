@@ -1,6 +1,6 @@
 import { isHotReason } from "../../../src/lib/hot-sellers/hot";
 import { isHostileInbound } from "../../../src/lib/ai-responder/hostile";
-import { hasNonPriceEscalationPhrase, matchEscalationKeyword } from "../../../src/lib/ai-responder/keywords";
+import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase } from "../../../src/lib/ai-responder/keywords";
 import {
   actionForNineAnswer,
   decideNineQuestions,
@@ -74,16 +74,18 @@ export function upFrontKeywordBucket(text: string, allowedPhrases?: readonly str
   // Step 2 of dispatch: with Jev automatic the price keyword is deferred UNLESS a non-price
   // escalation phrase is also present, in which case main's up-front hold runs first.
   if (!hasNonPriceEscalationPhrase(text, { allowedPhrases: allowedPhrases ?? undefined })) return null;
-  const match = matchEscalationKeyword(text, { allowedPhrases: allowedPhrases ?? undefined });
-  if (!match) return null;
-  return match.tier === "price_offer" ? "hot" : "keyword_hold";
+  // Candidate 729a282b (applyKeywordEscalation, jevAutomatic): a mixed price + non-price text is
+  // held under the NON-price reason, so the bucket is keyword_hold; a hot alert, if any, comes
+  // later from the classify-only check and is not part of the bucket.
+  return "keyword_hold";
 }
 
 export function predictBucket(answer: NineAnswer, text: string, allowedPhrases?: readonly string[] | null): Bucket {
   const upFront = upFrontKeywordBucket(text, allowedPhrases);
   if (upFront) return upFront;
   if (isHostileInbound(text) || answer === "hostile") return "stop_person";
-  const isPrice = matchEscalationKeyword(text, { allowedPhrases: allowedPhrases ?? undefined })?.tier === "price_offer";
+  // Candidate 729a282b isPriceKeyword: a numeric amount counts only when the allow-list has a price phrase.
+  const isPrice = hasAllowedPriceSignal(text, allowedPhrases ?? null);
   if (NINE_YIELDS_TO_HOT.has(answer) && isPrice) return "hot";
   const action = actionForNineAnswer(answer);
   switch (action.kind) {

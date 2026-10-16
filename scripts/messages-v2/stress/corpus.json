@@ -1,6 +1,6 @@
 {
   "_about": "Messages v2 Stage 5 wording corpus: 30 seller situations x 10 wordings. Seller wordings are TEST DATA authored for the harness (they are what a homeowner might text, not Sandra's words). The openers (our_last_text) are the synthetic fixture openers from src/lib/sms-classification/__fixtures__/nine-questions-matrix.json and real masked openers from .planning/messages-v2/REPLAY-NINE-QUESTIONS.md with [name]/[address] filled in. No question text, reply text or drip text is defined here: the harness imports those from the product.",
-  "_expected_rule": "expected_buckets follow the precedence in code: up-front non-price keyword gate (dispatch.ts step 2) > hostile wording or hostile answer > asked_stop > wrong_person > hot (talked_price / open_to_selling, or any other answer yielding to a price keyword) > maybe_later > not_interested > asked_who > confirmed_owner > needs_person; responder off for the property = nothing at all. Group order and cutoff come from src/lib/sms-classification/nine-questions.ts (Jarrad, memory note jev-approved-questions).",
+  "_expected_rule": "expected_buckets follow the precedence in code: up-front non-price keyword gate (dispatch.ts step 2) > hostile wording or hostile answer > asked_stop > wrong_person > hot (talked_price / open_to_selling, or any other answer yielding to a price keyword) > maybe_later > not_interested > asked_who > confirmed_owner > needs_person; responder off for the property = nothing at all. Group order and cutoff come from src/lib/sms-classification/nine-questions.ts (Jarrad, memory note jev-approved-questions). Updated 2026-10-15 for candidate 729a282b (PR 2 decided rules): stop / opted_out, DNC, wrong_number and bad_number beat hot; hot beats nurture, not_interested and unclear; under Jev automatic a mixed price + non-price text is held under the NON-price keyword reason (bucket keyword_hold) and any hot alert comes only from the later classify-only check when precedence allows (alerts are not part of the bucket); responder off for the property = no hold and no alert (silent_off). Not yet covered by any scenario: DNC / bad_number beating hot, org keyword allow-list, numeric amount under an allow-list without a price phrase. Ownership-does-not-change-treatment is design-only (not built) and is deliberately not encoded.",
   "openers": {
     "A": "Hi, are you interested in selling 123 Oak St?",
     "B": "Would you consider a cash offer?",
@@ -394,10 +394,11 @@
     },
     {
       "id": "lawyer_plus_price",
-      "title": "Lawyer plus price (up-front keyword hold, hot alert)",
+      "title": "Lawyer plus price (held under the lawyer reason; alert only if precedence allows)",
+      "rule": "Changed 2026-10-15 from hot to keyword_hold. PR 2 decided rule: under Jev automatic, mixed price + non-price text holds under the non-price reason and alerts only if precedence allows (dispatch.ts applyKeywordEscalation, candidate 729a282b).",
       "opener": "E",
       "expected_answers": null,
-      "expected_buckets": ["hot"],
+      "expected_buckets": ["keyword_hold"],
       "wordings": [
         "Talk to my lawyer. Offer has to be over $300k",
         "My attorney handles it, anything under 250k is a no",

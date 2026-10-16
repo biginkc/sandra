@@ -85,7 +85,7 @@ describe("precedence mirror", () => {
 
   it("up-front non-price keywords hold before Jev is consulted; with an amount they are hot", () => {
     expect(upFrontKeywordBucket("My attorney handles all of that")).toBe("keyword_hold");
-    expect(upFrontKeywordBucket("Talk to my lawyer. Offer has to be over $300k")).toBe("hot");
+    expect(upFrontKeywordBucket("Talk to my lawyer. Offer has to be over $300k")).toBe("keyword_hold");
     expect(upFrontKeywordBucket("Is this a real person?")).toBe("keyword_hold");
     expect(upFrontKeywordBucket("Not interested")).toBeNull();
     // Documented fragility: without an amount, the longer phrase wins the tier.
