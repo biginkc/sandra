@@ -213,7 +213,40 @@ async function hotTextRecords(propertyId: string): Promise<number> {
   return rows[0].n as number;
 }
 
-async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>) {
+/** The real client, except a read selecting exactly `failColumn` returns a timeout error (PR 4 switch reads). */
+function failingColumnRead(failColumn: string): typeof supabase {
+  return new Proxy(supabase, {
+    get(target, key) {
+      if (key !== "from") {
+        const v = (target as unknown as Record<string | symbol, unknown>)[key];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+      return (table: string) => {
+        const builder = target.from(table as never) as unknown as Record<string | symbol, unknown>;
+        return new Proxy(builder, {
+          get(bt, bk) {
+            if (bk === "select") {
+              return (cols: string, opts?: unknown) => {
+                if (cols !== failColumn) return (bt.select as (c: string, o?: unknown) => unknown).call(bt, cols, opts);
+                const failed = { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+                const chain: Record<string, unknown> = {
+                  eq: () => chain,
+                  maybeSingle: async () => failed,
+                  then: (r: (v: unknown) => unknown) => Promise.resolve(failed).then(r),
+                };
+                return chain;
+              };
+            }
+            const v = bt[bk];
+            return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(bt) : v;
+          },
+        });
+      };
+    },
+  }) as typeof supabase;
+}
+
+async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>, client: typeof supabase = supabase) {
   const l = lead ?? (await seedLead());
   jevProbabilities = answer;
   const inbound = await seedThread(l, reply);
@@ -226,7 +259,7 @@ async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok"
     inboundFromPhone: l.phone,
     inboundToPhone: MOCK_SENDER_PRIMARY,
   };
-  const outcome = await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+  const outcome = await dispatchAiResponse(client, input, { anthropic: NO_ANTHROPIC });
   return { lead: l, inbound, input, outcome };
 }
 
@@ -525,6 +558,25 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(await outboundBodies(lead.propertyId)).toEqual([]);
     expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
     expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
+  });
+
+  it("PR 4 Confirmed owner drip switch READ ERROR: held for a person, no drip, no silent close", async () => {
+    await seedOrg();
+    const { lead, outcome } = await run({ confirmed_owner: 0.9 }, "yes its me", undefined, failingColumnRead("nine_confirmed_owner_drip"));
+    expect(outcome.outcome).toBe("escalated");
+    expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
+    expect(await propertyRow(lead.propertyId)).toMatchObject({
+      needs_human_attention: true,
+      last_ai_escalation_reason: "nine_switch_unreadable:confirmed_owner",
+    });
+  });
+
+  it("PR 4 identity switch READ ERROR: nothing sent, held for a person", async () => {
+    await seedOrg();
+    const { lead, outcome } = await run({ asked_who: 0.9 }, "who is this", undefined, failingColumnRead("nine_identity_reply"));
+    expect(outcome.outcome).toBe("escalated");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("nine_switch_unreadable:asked_who");
   });
 
   it("PR 4 switches do not govern each other (identity off: Confirmed owner still enrols)", async () => {

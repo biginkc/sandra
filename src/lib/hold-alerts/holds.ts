@@ -123,6 +123,7 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   // Nine-question engine (Messages v2 PR 3).
   "nine_reply_not_sent:",
   "nine_automation_disabled:",
+  "nine_switch_unreadable:",
   "model:",
   "already_flagged:",
 ];

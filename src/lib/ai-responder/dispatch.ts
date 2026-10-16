@@ -7715,7 +7715,18 @@ export async function runNineQuestionsStep(
   if (action.kind === "drip_only") {
     // PR 4: the owner's "Confirmed owner" drip switch. Off is a choice, not a failure (as the
     // nurture switch): nothing enrolled, no hold. See readNineRuleSwitch for read errors.
-    if (!(await readNineRuleSwitch(supabase, property.org_id, "nine_confirmed_owner_drip"))) {
+    const dripSwitch = await readNineRuleSwitch(supabase, property.org_id, "nine_confirmed_owner_drip");
+    if (dripSwitch === "unreadable") {
+      // Unknown switch state is not "off": a person looks (no drip, no silent close).
+      await trace(supabase, {
+        kind: "hold",
+        name: "nine_confirmed_owner_drip",
+        result: "held",
+        detail: { why: "switch_unreadable", engine: "nine_questions" },
+      }, runCtx);
+      return nineHoldAndComplete(supabase, a, "nine_switch_unreadable:confirmed_owner");
+    }
+    if (dripSwitch === "off") {
       await trace(supabase, {
         kind: "action",
         name: "drip_enrolled",
@@ -7825,14 +7836,19 @@ export async function runNineQuestionsStep(
   let messageId: string | null = null;
   if (action.reply === "identity") {
     // PR 4: the owner's identity-reply switch. Off (or unreadable) = a person answers; see readNineRuleSwitch.
-    if (!(await readNineRuleSwitch(supabase, property.org_id, "nine_identity_reply"))) {
+    const identitySwitch = await readNineRuleSwitch(supabase, property.org_id, "nine_identity_reply");
+    if (identitySwitch !== "on") {
       await trace(supabase, {
         kind: "hold",
         name: "nine_identity_reply",
         result: "held",
-        detail: { why: "switch_off", engine: "nine_questions" },
+        detail: { why: identitySwitch === "off" ? "switch_off" : "switch_unreadable", engine: "nine_questions" },
       }, runCtx);
-      return nineHoldAndComplete(supabase, a, "nine_automation_disabled:asked_who");
+      return nineHoldAndComplete(
+        supabase,
+        a,
+        identitySwitch === "off" ? "nine_automation_disabled:asked_who" : "nine_switch_unreadable:asked_who",
+      );
     }
     if (input.replyDelayBypassed) return noReply(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
