@@ -573,6 +573,7 @@ jobs:
       - name: My Leads queue stress harness smoke (disposable DB)
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
           MYLEADS_STRESS_DISPOSABLE_DB: "1"
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
@@ -582,6 +583,7 @@ jobs:
       - name: "My Leads queue stress: dispatchRepSms race lanes, fake provider (disposable DB)"
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          MYLEADS_STRESS_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
           MYLEADS_STRESS_DISPOSABLE_DB: "1"
           MYLEADS_STRESS_DISPATCH_REPS: "4"
           MYLEADS_STRESS_OUT_DIR: ${{ runner.temp }}/my-leads-queue-stress
