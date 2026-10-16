@@ -1,24 +1,13 @@
 "use client";
 
-import {
-  CalendarClockIcon,
-  CheckIcon,
-  ChevronDownIcon,
-  ClockIcon,
-  RotateCcwIcon,
-} from "lucide-react";
+import { CalendarClockIcon, CheckIcon, RotateCcwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 
-import { completeTaskAction, snoozeTaskAction } from "../../tasks/actions";
+import { completeTaskAction } from "../../tasks/actions";
 
 export type LeadNextTask = {
   id: string;
@@ -27,20 +16,12 @@ export type LeadNextTask = {
   type: string;
 };
 
-type TaskOperation =
-  | { kind: "complete"; taskId: string }
-  | { kind: "snooze"; taskId: string; until: string };
+type TaskOperation = { kind: "complete"; taskId: string };
 
 type TaskFailure = {
   message: string;
   operation: TaskOperation;
 };
-
-const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
-  { label: "1 day", days: 1 },
-  { label: "3 days", days: 3 },
-  { label: "1 week", days: 7 },
-];
 
 export function NextActionCard({
   task,
@@ -59,10 +40,7 @@ export function NextActionCard({
     (operation: TaskOperation) => {
       setFailure(null);
       startTransition(async () => {
-        const result =
-          operation.kind === "complete"
-            ? await completeTaskAction(operation.taskId)
-            : await snoozeTaskAction(operation.taskId, operation.until);
+        const result = await completeTaskAction(operation.taskId);
         if (!result.ok) {
           setFailure({ message: result.error.message, operation });
           return;
@@ -75,11 +53,6 @@ export function NextActionCard({
   );
 
   const complete = () => run({ kind: "complete", taskId: task!.id });
-  const snooze = (days: number) => {
-    const until = new Date();
-    until.setDate(until.getDate() + days);
-    run({ kind: "snooze", taskId: task!.id, until: until.toISOString() });
-  };
 
   if (!task) {
     if (compact) {
@@ -170,36 +143,6 @@ export function NextActionCard({
                 <CheckIcon className="size-3" />
                 Done
               </Button>
-              <Popover>
-                <PopoverTrigger
-                  render={
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      disabled={pending}
-                      data-testid={`lead-task-snooze-${task.id}`}
-                      className="min-h-9 rounded-full px-3 sm:min-h-6"
-                    >
-                      Snooze
-                      <ChevronDownIcon className="size-3" />
-                    </Button>
-                  }
-                />
-                <PopoverContent className="w-36 p-1" align="end">
-                  {SNOOZE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => snooze(preset.days)}
-                      disabled={pending}
-                      className="hover:bg-muted flex min-h-9 w-full items-center rounded-md px-2 py-1.5 text-left text-xs font-medium disabled:opacity-50"
-                      data-testid={`lead-task-snooze-${preset.days}d-${task.id}`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </PopoverContent>
-              </Popover>
             </>
           )}
         </div>
@@ -269,37 +212,6 @@ export function NextActionCard({
               <CheckIcon className="size-3.5" />
               Done
             </Button>
-            <Popover>
-              <PopoverTrigger
-                render={
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={pending}
-                    data-testid={`lead-task-snooze-${task.id}`}
-                    className="min-h-11 flex-1 sm:min-h-8 sm:flex-none"
-                  >
-                    <ClockIcon className="size-3.5" />
-                    Snooze
-                    <ChevronDownIcon className="size-3" />
-                  </Button>
-                }
-              />
-              <PopoverContent className="w-36 p-1" align="end">
-                {SNOOZE_PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    onClick={() => snooze(preset.days)}
-                    disabled={pending}
-                    className="hover:bg-muted flex min-h-11 w-full items-center rounded-md px-2 py-1.5 text-left text-xs font-medium disabled:opacity-50 sm:min-h-8"
-                    data-testid={`lead-task-snooze-${preset.days}d-${task.id}`}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </PopoverContent>
-            </Popover>
           </div>
         )}
       </div>

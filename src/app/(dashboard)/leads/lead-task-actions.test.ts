@@ -21,9 +21,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/dnc/property-lock", () => ({ assertPropertyDncUnlocked }));
-vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
 vi.mock("@/lib/next-steps", () => ({ createNextStep }));
-vi.mock("./actions", () => ({ createLeadTaskAction: createLegacy }));
 
 import { createLeadTaskAction } from "./lead-task-actions";
 
@@ -67,7 +65,6 @@ const property = { id: "prop-1", org_id: "org-1", address: "123 Main" };
 describe("createLeadTaskAction (lead page next step)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    schemaReady.mockResolvedValue(true);
     assertPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
     createClient.mockResolvedValue(supabaseFor({ property, actorMembership: { user_id: "actor-1" } }));
     createAdminClient.mockReturnValue(adminFor({ user_id: "assignee-1" }));
@@ -86,31 +83,13 @@ describe("createLeadTaskAction (lead page next step)", () => {
       if (!r.ok) codes.push(r.error.code);
     }
     expect(codes).toEqual(["INVALID_TASK_TYPE", "TITLE_REQUIRED", "INVALID_DUE_AT", "ASSIGNEE_REQUIRED"]);
-    expect(schemaReady).not.toHaveBeenCalled();
     expect(createClient).not.toHaveBeenCalled();
-  });
-
-  it("runs the original follow-up/callback action unchanged until the schema is ready", async () => {
-    schemaReady.mockResolvedValue(false);
-    createLegacy.mockResolvedValue({ ok: true, data: { id: "legacy-1" } });
-    const appt = await createLeadTaskAction("prop-1", { ...base, kind: "appointment", mode: "in_person", durationMinutes: 60 });
-    expect(createLegacy).toHaveBeenLastCalledWith("prop-1", { type: "callback", ...base });
-    expect(appt).toEqual({ ok: true, data: { id: "legacy-1", kind: "appointment", mode: "phone", calendarChainId: null } });
-    await createLeadTaskAction("prop-1", { ...base, kind: "task", title: "x" });
-    expect(createLegacy).toHaveBeenLastCalledWith("prop-1", { type: "follow_up", ...base });
-    expect(createNextStep).not.toHaveBeenCalled();
-    expect(createClient).not.toHaveBeenCalled();
-
-    createLegacy.mockResolvedValue({ ok: false, error: { code: "ASSIGNEE_NOT_IN_ORG", message: "m" } });
-    const failed = await createLeadTaskAction("prop-1", { ...base, kind: "appointment" });
-    expect(failed.ok).toBe(false);
   });
 
   it("writes through createNextStep once ready: a phone appointment defaults its title, a task keeps its own", async () => {
     createNextStep.mockResolvedValue({ ok: true, data: { taskId: "task-7", calendarChainId: "chain-7", kind: "appointment", mode: "phone" } });
     const result = await createLeadTaskAction("prop-1", { ...base, kind: "appointment" });
     expect(result).toEqual({ ok: true, data: { id: "task-7", kind: "appointment", mode: "phone", calendarChainId: "chain-7" } });
-    expect(createLegacy).not.toHaveBeenCalled();
     expect(createNextStep).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "appointment", mode: "phone", title: "Call 123 Main", propertyId: "prop-1", assigneeId: "assignee-1", dueAt: base.dueAt, origin: "app" }),
     );

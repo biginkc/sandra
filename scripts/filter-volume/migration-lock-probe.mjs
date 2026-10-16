@@ -48,7 +48,7 @@ async function extra(name, c, sql, params, cleanupSql, cleanupParams) {
   }
 }
 const extraLoops = [
-  extra("tasks.insert", wTasks, "insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1,$2,$2,$3,'follow_up','completed','probe', now())", [ORG, userId, pid0]),
+  extra("tasks.insert", wTasks, "insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1,$2,$2,$3,'custom','completed','probe', now())", [ORG, userId, pid0]),
   extra("property_lists.insert", wLists, "insert into public.property_lists (org_id, property_id, list_id) values ($1,$2,$3)", [ORG, pid0, probeList], "delete from public.property_lists where property_id=$1 and list_id=$2", [pid0, probeList]),
   extra("property_tags.insert", wTags, "insert into public.property_tags (org_id, property_id, tag_id) values ($1,$2,$3)", [ORG, pid0, probeTag], "delete from public.property_tags where property_id=$1 and tag_id=$2", [pid0, probeTag]),
   extra("properties.update", wProps, "update public.properties set city = 'probe' || floor(random()*1000)::int where id = $1", [pid0]),

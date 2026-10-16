@@ -260,7 +260,7 @@ async function ensureFallbackData(
     org_id: DEFAULT_ORG_ID,
     assignee_id: testUserId,
     related_property_id: seeded![2].id,
-    type: "follow_up",
+    type: "custom",
     status: "open",
     title: `${ORACLE_PREFIX} open task`,
     due_at: new Date(now + 86_400_000).toISOString(),

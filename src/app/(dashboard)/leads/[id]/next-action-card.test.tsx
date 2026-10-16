@@ -2,10 +2,9 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { completeTaskAction, snoozeTaskAction, refreshMock } = vi.hoisted(
+const { completeTaskAction, refreshMock } = vi.hoisted(
   () => ({
     completeTaskAction: vi.fn(),
-    snoozeTaskAction: vi.fn(),
     refreshMock: vi.fn(),
   }),
 );
@@ -16,7 +15,6 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("../../tasks/actions", () => ({
   completeTaskAction,
-  snoozeTaskAction,
 }));
 
 import { NextActionCard } from "./next-action-card";
@@ -34,13 +32,13 @@ describe("<NextActionCard />", () => {
     completeTaskAction.mockResolvedValue({ ok: true, data: task });
   });
 
-  it("shows the nearest dated task with current Done and Snooze controls", () => {
+  it("shows the nearest dated task with a Done control and no Snooze", () => {
     render(<NextActionCard task={task} timezone="America/Chicago" />);
     expect(screen.getByTestId("lead-next-action")).toHaveTextContent(
       "Call homeowner",
     );
     expect(screen.getByRole("button", { name: /Done/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Snooze/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Snooze/ })).toBeNull();
   });
 
   it("shows No next action when no dated work is open", () => {
@@ -130,9 +128,7 @@ describe("<NextActionCard />", () => {
     render(<NextActionCard task={task} timezone="America/Chicago" compact />);
 
     const done = screen.getByRole("button", { name: /Done/ });
-    const snooze = screen.getByRole("button", { name: /Snooze/ });
     expect(done).toHaveClass("min-h-9", "sm:min-h-6");
-    expect(snooze).toHaveClass("min-h-9", "sm:min-h-6");
 
     await user.click(done);
     expect(await screen.findByRole("button", { name: "Retry" })).toHaveClass(

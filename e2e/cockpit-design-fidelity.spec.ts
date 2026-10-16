@@ -162,7 +162,7 @@ async function seedDesignThread(
     org_id: DEFAULT_ORG_ID,
     assignee_id: testUserId,
     related_property_id: prop.id,
-    type: "follow_up",
+    type: "custom",
     status: "open",
     title: "Call homeowner",
     due_at: new Date(baseTime + 86_400_000).toISOString(),
@@ -329,7 +329,7 @@ test.describe("Messages cockpit — design fidelity", () => {
       "compact",
     );
     await expect(page.getByRole("button", { name: /Done/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Snooze/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Snooze/ })).toHaveCount(0);
     await expect(timeline).toHaveAttribute(
       "data-presentation",
       "open-timeline",

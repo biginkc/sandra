@@ -113,7 +113,7 @@ async function insertTask(
 ): Promise<{ data: { id: string } | null; error: { message: string; code?: string } | null }> {
   const base = {
     org_id: BMH_ORG_ID,
-    type: "follow_up",
+    type: "custom",
     status: "open",
     title: "Test task",
     due_at: new Date(Date.now() + 3600_000).toISOString(),
@@ -1495,7 +1495,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
       const propertyId = await insertProperty();
       const { data: task, error: taskError } = await insertTask({
-        type: "follow_up",
+        type: "custom",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
         related_property_id: propertyId,
@@ -2566,7 +2566,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
       expect((data as { contact_id: string | null } | null)?.contact_id).toBe(contactId);
     });
 
-    it("accepts a legacy follow_up insert shaped like createTask's pre-appointments payload (no chain id)", async () => {
+    it("accepts a generic (non-appointment) insert shaped like the pre-appointments payload (no chain id)", async () => {
       const self = await createUserForOrg(BMH_ORG_ID);
       const propertyId = await insertProperty();
       const dueAt = new Date(Date.now() + 3600_000).toISOString();
@@ -2581,7 +2581,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
           assignee_id: self.userId,
           related_property_id: propertyId,
           contact_id: null,
-          type: "follow_up",
+          type: "custom",
           title: "Call back next week",
           description: null,
           due_at: dueAt,
@@ -2669,7 +2669,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
           assignee_id: self.userId,
           related_property_id: propertyId,
           contact_id: null,
-          type: "follow_up",
+          type: "custom",
           title: "Follow up with an end_at it shouldn't have",
           description: null,
           due_at: dueAt,
