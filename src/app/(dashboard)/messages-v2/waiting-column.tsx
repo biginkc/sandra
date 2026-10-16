@@ -278,7 +278,26 @@ export function WaitingColumn({
   // Busy belongs to the snapshot it was started in (a refresh mid-load leaves the new snapshot not busy).
   const [busyFor, setBusyFor] = useState<{ key: unknown } | null>(null);
   const busy = busyFor !== null && busyFor.key === refreshKey;
-  const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
+  /**
+   * A new snapshot (the 60-second page refresh) keeps the older cards already loaded through "Show older" that
+   * are still in the new snapshot; only cards that left the list are dropped. Kept cards start paused (actions off)
+   * and become actionable only when a re-check in the NEW snapshot succeeds for them (see the live re-check).
+   * Without a snapshot nothing can be verified, so nothing is kept.
+   */
+  const carry = (prev: OlderState): OlderState => {
+    const base = fresh();
+    if (!snapshot) return base;
+    const pos = new Map(entries.map((e, i) => [e.id, i] as const));
+    const firstPage = new Set(holds.map((h) => h.id));
+    const cards = new Map(
+      [...prev.cards].filter(([id]) => pos.has(id) && !firstPage.has(id) && !base.missing.has(id)),
+    );
+    const lastPos = Math.max(-1, ...[...cards.keys()].map((id) => pos.get(id)!));
+    return { ...base, cards, labels: new Map([...prev.labels].filter(([id]) => cards.has(id))), nextPos: Math.max(base.nextPos, lastPos + 1) };
+  };
+  const older: OlderState = stored.forKey === refreshKey ? stored : carry(stored);
+  // Persist the carried state for the new snapshot (adjusting state while rendering, React's documented pattern).
+  if (stored.forKey !== refreshKey) setOlder(older);
 
   const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
 
@@ -329,6 +348,11 @@ export function WaitingColumn({
     const firstOk = !meta?.contextErrors.includes(SEEN_CHECK_FAILED);
     for (const h of holds) cards.set(h.id, loadedCard(refreshKey, pinsOf(h.id, h)!, firstOk));
     if (focusHold) cards.set(focusHold.id, loadedCard(refreshKey, pinsOf(focusHold.id, focusHold)!, !focusHoldErrors?.includes(SEEN_CHECK_FAILED)));
+    // Older cards kept across a refresh: pinned to the NEW snapshot's entry, paused until re-checked.
+    for (const [id, h] of older.cards) {
+      const pins = pinsOf(id, h);
+      if (pins && !cards.has(id)) cards.set(id, loadedCard(refreshKey, pins, false));
+    }
     return { snapshotKey: refreshKey, cards };
   };
   const [storedTable, setTable] = useState<CardTable>(initialTable);
@@ -487,6 +511,9 @@ export function WaitingColumn({
       commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, results));
     };
     const id = window.setInterval(check, 60_000);
+    // Older cards kept across a refresh are paused: re-check the shown ones now rather than in 60 seconds.
+    const kept = shownIdsRef.current.filter((cardId) => olderRef.current.cards.has(cardId));
+    if (kept.length) void check(kept);
     const onFocus = () => void check();
     window.addEventListener("focus", onFocus);
     checkNowRef.current = (ids) => void check(ids);

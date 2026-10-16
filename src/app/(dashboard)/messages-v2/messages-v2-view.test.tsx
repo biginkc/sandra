@@ -286,6 +286,36 @@ describe("MessagesV2View", () => {
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
+  it("the 60-second refresh keeps older cards loaded through Show older; only cards that left are dropped, none duplicated", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = Array.from({ length: 63 }, (_, i) => ({ ...openHold(`h${i + 1}`), ...at(i + 1) }));
+      const loadOlderHolds = byIdsServer(() => all);
+      const p = { ...props([], all.slice(0, 3)), holdsSnapshot: buildSnapshot(all), loadOlderHolds };
+      const { rerender } = render(<MessagesV2View {...p} />);
+      await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+      // Page through to the end: load 50, reveal the rest of that slice, load the last 10.
+      for (const shown of [40, 53, 63]) {
+        await userEvent.click(screen.getByTestId("show-older"));
+        await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(shown));
+      }
+      expect(loadOlderHolds).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        vi.advanceTimersByTime(61_000);
+      });
+      // The refresh delivers a NEW snapshot: h30 was resolved meanwhile; the first page is the same three.
+      const remaining = all.filter((h) => h.id !== "h30");
+      rerender(<MessagesV2View {...p} holds={remaining.slice(0, 3).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(remaining)} />);
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(62));
+      const ids = screen.getAllByTestId("waiting-card").map((c) => c.textContent);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(loadOlderHolds).toHaveBeenCalledTimes(2); // nothing re-fetched
+      expect(screen.queryByTestId("show-older")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("holds handled since the snapshot come back missing: not rendered, counted out, with a note", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = byIdsServer(() => all.filter((h) => h.id !== "h5"));
