@@ -11,7 +11,7 @@ import type { PipelineRun, PipelineRunStep, RunWithSteps } from "@/app/(dashboar
 import { applyKeywordEscalation, checkHotTextAfterKeywordHold, dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { createHoldAlertDeps } from "@/lib/hold-alerts";
-import { runHoldAlertsForOrg } from "@/lib/hold-alerts/core";
+import { MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "@/lib/hold-alerts/core";
 import type { HoldAlertDeps } from "@/lib/hold-alerts/types";
 import { finishRunFromOutcome } from "@/lib/pipeline-runs/outcome";
 import { startRun } from "@/lib/pipeline-runs/record";
@@ -20,6 +20,17 @@ import type { Database } from "@/lib/supabase/types";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
 import { assignHotLeadToOwner, HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "./assign";
+
+/** Seed this hour's caps as fully used: one insert per channel via generate_series. */
+async function seedCapRows(pg: Client, orgId: string, owner: string): Promise<void> {
+  for (const [channel, n, label] of [["slack", MAX_DMS_PER_RECIPIENT_PER_HOUR, "dm"], ["sms", MAX_SMS_PER_HOUR, "sms"]] as const) {
+    await pg.query(
+      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
+       select $1, null, 'seed-' || $2 || '-' || (g - 1), $3, $4, 'first', 'sent', 1, now() from generate_series(1, $5::int) g`,
+      [orgId, label, owner, channel, n],
+    );
+  }
+}
 
 /**
  * Hot-seller acceptance matrix (Messages v2 PR 2, "Alert and hand-off model") on a DISPOSABLE database that has
@@ -407,17 +418,9 @@ async function makeHarness(opts: { assigned?: "owner" | "rep" } = {}) {
     }
   };
 
-  /** Seed this hour's DM and SMS caps as already used (20 Slack DMs, 10 SMS). */
+  /** Seed this hour's DM and SMS caps as already used (MAX_DMS_PER_RECIPIENT_PER_HOUR Slack DMs, MAX_SMS_PER_HOUR SMS). */
   const useUpCaps = async () => {
-    for (const [channel, n, label] of [["slack", 20, "dm"], ["sms", 10, "sms"]] as const) {
-      for (let i = 0; i < n; i++) {
-        await pg.query(
-          `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
-           values ($1, null, $2, $3, $4, 'first', 'sent', 1, now())`,
-          [orgId, `seed-${label}-${i}`, owner, channel],
-        );
-      }
-    }
+    await seedCapRows(pg, orgId, owner);
   };
 
   /** The alert key of the property's CURRENT open flag: hot_flag:<property>:<flagAt>. */
@@ -749,23 +752,10 @@ const ROWS: Row[] = [
   },
   {
     id: "14",
-    name: "caps: with 20 DMs and 10 SMS already sent this hour a new hot event waits, goes out once next hour, never twice",
+    name: "caps: with the DM and SMS caps (MAX_DMS_PER_RECIPIENT_PER_HOUR / MAX_SMS_PER_HOUR) already used this hour a new hot event waits, goes out once next hour, never twice",
     expect: { slack: 1, sms: 1, assigned: 1 },
     run: async (h) => {
-      for (let i = 0; i < 20; i++) {
-        await pg.query(
-          `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
-           values ($1, null, $2, $3, 'slack', 'first', 'sent', 1, now())`,
-          [h.orgId, `seed-dm-${i}`, h.owner],
-        );
-      }
-      for (let i = 0; i < 10; i++) {
-        await pg.query(
-          `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, sent_at)
-           values ($1, null, $2, $3, 'sms', 'first', 'sent', 1, now())`,
-          [h.orgId, `seed-sms-${i}`, h.owner],
-        );
-      }
+      await seedCapRows(pg, h.orgId, h.owner);
       const a = await h.newInbound();
       await h.dispatch(a, "new_lead", HOT_ESC);
       // This hour: held back, nothing sent, the rows wait as pending.
@@ -885,7 +875,7 @@ const ROWS: Row[] = [
       // The cap allows next hour: the later event alerts (and the held-back failure goes out, once each).
       const later = { now: () => new Date(Date.now() + 61 * 60 * 1000) };
       expect((await h.alertPass(later)).sent).toBe(4);
-      expect(await h.deliveryKeys()).toEqual([`${fk}`, `hot_text:${b}`, ...Array.from({ length: 20 }, (_, i) => `seed-dm-${i}`), ...Array.from({ length: 10 }, (_, i) => `seed-sms-${i}`)].sort());
+      expect(await h.deliveryKeys()).toEqual([`${fk}`, `hot_text:${b}`, ...Array.from({ length: MAX_DMS_PER_RECIPIENT_PER_HOUR }, (_, i) => `seed-dm-${i}`), ...Array.from({ length: MAX_SMS_PER_HOUR }, (_, i) => `seed-sms-${i}`)].sort());
       expect((await h.alertPass(later)).sent).toBe(0);
     },
   },

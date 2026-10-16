@@ -67,30 +67,30 @@ describe("hot decisions (frozen fixture)", () => {
     expect(t.sent).toEqual([]);
   });
 
-  it("(4) the SMS cap (10/hr) and DM cap (20/hr) hold: excess stays pending and goes out the next hour", async () => {
-    const holds = Array.from({ length: 12 }, (_, i) => hold({ hot: true, holdKey: `p${i}:hot_lead`, propertyId: `p${i}`, startedAt: "2026-10-15T11:00:00.000Z" }));
+  it("(4) the SMS cap (500/hr) and DM cap (500/hr) runaway guards hold: excess stays pending and goes out the next hour", async () => {
+    const holds = Array.from({ length: MAX_SMS_PER_HOUR + 2 }, (_, i) => hold({ hot: true, holdKey: `p${i}:hot_lead`, propertyId: `p${i}`, startedAt: "2026-10-15T11:00:00.000Z" }));
     const t = setup({ holds });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(MAX_SMS_PER_HOUR).toBe(10);
-    expect(by(t, "sms")).toHaveLength(10);
-    expect(by(t, "slack")).toHaveLength(12);
+    expect(MAX_SMS_PER_HOUR).toBe(500);
+    expect(by(t, "sms")).toHaveLength(MAX_SMS_PER_HOUR);
+    expect(by(t, "slack")).toHaveLength(MAX_DMS_PER_RECIPIENT_PER_HOUR);
     expect(t.store.rows.filter((r) => r.channel === "sms" && r.status === "pending")).toHaveLength(2);
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(by(t, "sms")).toHaveLength(10);
+    expect(by(t, "sms")).toHaveLength(MAX_SMS_PER_HOUR);
 
     t.setNow("2026-10-15T13:05:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(by(t, "sms")).toHaveLength(12);
+    expect(by(t, "sms")).toHaveLength(MAX_SMS_PER_HOUR + 2);
     expect(t.store.rows.filter((r) => r.status === "pending")).toEqual([]);
 
-    const dm = setup({ holds: Array.from({ length: 22 }, (_, i) => hold({ hot: true, holdKey: `d${i}:hot_lead`, propertyId: `d${i}`, startedAt: "2026-10-15T11:00:00.000Z" })) });
+    const dm = setup({ holds: Array.from({ length: MAX_DMS_PER_RECIPIENT_PER_HOUR + 2 }, (_, i) => hold({ hot: true, holdKey: `d${i}:hot_lead`, propertyId: `d${i}`, startedAt: "2026-10-15T11:00:00.000Z" })) });
     seedSent(dm, "sms", 0, OWNER.userId, NOW);
     await runHoldAlertsForOrg(dm.deps, ORG);
-    expect(MAX_DMS_PER_RECIPIENT_PER_HOUR).toBe(20);
-    expect(by(dm, "slack")).toHaveLength(20);
+    expect(MAX_DMS_PER_RECIPIENT_PER_HOUR).toBe(500);
+    expect(by(dm, "slack")).toHaveLength(MAX_DMS_PER_RECIPIENT_PER_HOUR);
     dm.setNow("2026-10-15T13:05:00.000Z");
     await runHoldAlertsForOrg(dm.deps, ORG);
-    expect(by(dm, "slack")).toHaveLength(22);
+    expect(by(dm, "slack")).toHaveLength(MAX_DMS_PER_RECIPIENT_PER_HOUR + 2);
   });
 
   it("(5) re-running the pass never duplicates a send, also after a failed-then-retried send", async () => {
@@ -170,10 +170,10 @@ describe("hot decisions (frozen fixture)", () => {
     expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["hot_handoff:in-9", "hot_flag:prop-1:2026-10-15T11:00:00.000Z"]));
   });
 
-  it("(9) two overlapping passes never push SMS past 10 in the hour", async () => {
+  it("(9) two overlapping passes never push SMS past the cap in the hour", async () => {
     const holds = [0, 1, 2].map((i) => hold({ hot: true, holdKey: `c${i}:hot_lead`, propertyId: `c${i}`, startedAt: "2026-10-15T11:00:00.000Z" }));
     const t = setup({ holds });
-    seedSent(t, "sms", 9, OWNER.userId, "2026-10-15T11:45:00.000Z");
+    seedSent(t, "sms", MAX_SMS_PER_HOUR - 1, OWNER.userId, "2026-10-15T11:45:00.000Z");
     // Force the race: both passes reach claimWithCap before either finishes it, and they go for different rows.
     // claimWithCap is the atomic count+claim, so the second one in must see the first's 'sending' row.
     const realClaim = t.store.claimWithCap.bind(t.store);
