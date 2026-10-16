@@ -125,6 +125,7 @@ export default defineConfig({
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
       "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",
       "src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts",
+      "src/lib/hot-sellers/delayed-path-responder-off.db.integration.test.ts",
       "src/lib/hold-alerts/claim-with-cap.db.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
