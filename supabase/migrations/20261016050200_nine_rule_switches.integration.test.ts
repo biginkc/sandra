@@ -8,15 +8,15 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * PR 4 rules-panel switches (20261016030000). Local-only; each test runs in a transaction that is
+ * PR 4 rules-panel switches (20261016050200). Local-only; each test runs in a transaction that is
  * rolled back. The migration (and its rollback) is applied inside the test.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "").replace(/^\s*set local (lock|statement)_timeout.*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261016030000_nine_rule_switches.sql"), "utf8"));
-const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261016030000_nine_rule_switches.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261016050200_nine_rule_switches.sql"), "utf8"));
+const ROLLBACK = strip(readFileSync(path.join(__dirname, "../rollbacks/20261016050200_nine_rule_switches.sql"), "utf8"));
 
 const db = new Client({ connectionString: url });
 let orgId: string;

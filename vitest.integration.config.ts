@@ -146,7 +146,7 @@ export default defineConfig({
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
       "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
-      "supabase/migrations/20261016030000_nine_rule_switches.integration.test.ts",
+      "supabase/migrations/20261016050200_nine_rule_switches.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",

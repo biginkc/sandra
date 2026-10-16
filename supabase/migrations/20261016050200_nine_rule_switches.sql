@@ -10,7 +10,7 @@
 -- reply_generation is logged with who/when in ai_rule_switch_events by a trigger, so the
 -- existing RPCs (fn_set_nurture_auto_drip, fn_set_ai_reply_generation) stay unchanged.
 --
--- Additive. Rollback: supabase/rollbacks/20261016030000_nine_rule_switches.sql
+-- Additive. Rollback: supabase/rollbacks/20261016050200_nine_rule_switches.sql
 begin;
 
 set local lock_timeout = '5s';

@@ -1,4 +1,4 @@
--- Rollback for 20261016030000_nine_rule_switches. Drops the setter, the log trigger, the
+-- Rollback for 20261016050200_nine_rule_switches. Drops the setter, the log trigger, the
 -- log table and the two switch columns; the engine then always sends the identity reply
 -- and starts the Confirmed owner drip (PR 3 behaviour). Idempotent.
 begin;

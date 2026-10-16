@@ -76,7 +76,7 @@ export function isMissingSwitchColumnError(
 
 /**
  * PR 4 owner switch on the active config: "on", "off" or "unreadable". Deploy-order safe: before
- * migration 20261016030000 the column is missing, which means the column default (on), i.e. PR 3
+ * migration 20261016050200 the column is missing, which means the column default (on), i.e. PR 3
  * behaviour. Any OTHER read error, no active row, or a non-boolean value is "unreadable": the caller
  * holds for a person (an unknown switch state is neither on nor off).
  */
