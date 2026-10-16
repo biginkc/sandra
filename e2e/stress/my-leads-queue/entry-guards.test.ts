@@ -47,6 +47,10 @@ describe.each([
     for (const callee of whole) expect(["integrationEnv", "resolveIntegrationApiUrl"]).toContain(callee);
     expect(src).not.toMatch(/,\s*process\.env\s*\)/);
   });
+  it("takes its database url only from the guarded env", () => {
+    expect(src).toMatch(/const url = env\.MYLEADS_STRESS_DB_URL;/);
+    expect([...src.matchAll(/\bconst url\s*=/g)].length).toBe(1);
+  });
   it("opens connections only with the guarded url", () => {
     for (const m of src.matchAll(/connectionString:\s*([^,}\s]+)/g)) expect(m[1]).toBe("url");
   });

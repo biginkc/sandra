@@ -54,10 +54,10 @@ export function resolveIntegrationDbUrl(env: Env = process.env): string {
  * resolveIntegrationDbUrl (MYLEADS_STRESS_DB_URL only), and the config-injected TEST_SUPABASE_DB_URL is removed so no
  * downstream resolveDbUrl fallback can ever pick the shared local stack.
  */
-export function integrationEnv(env: Env = process.env): Record<string, string | undefined> {
+export function integrationEnv(env: Env = process.env): Record<string, string | undefined> & { MYLEADS_STRESS_DB_URL: string } {
   assertEnvLooksLocal(env);
   const url = resolveIntegrationDbUrl(env);
-  const out: Record<string, string | undefined> = { ...env, MYLEADS_STRESS_DB_URL: url };
+  const out: Record<string, string | undefined> & { MYLEADS_STRESS_DB_URL: string } = { ...env, MYLEADS_STRESS_DB_URL: url };
   delete out.TEST_SUPABASE_DB_URL;
   return out;
 }

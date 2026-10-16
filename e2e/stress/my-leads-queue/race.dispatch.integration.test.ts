@@ -120,7 +120,7 @@ function useFakeProvider(url: string, ctx: OrgCtx, latencyMs: number, rep: strin
 const lanes: LaneResult[] = [];
 
 describe("dispatchRepSms race lanes (fake provider, disposable database)", async () => {
-  const url = env.MYLEADS_STRESS_DB_URL!;
+  const url = env.MYLEADS_STRESS_DB_URL;
   for (const [name, value] of [["LOCAL_SUPABASE_URL", API], ["TEST_SUPABASE_URL", process.env.TEST_SUPABASE_URL ?? API]] as const) {
     if (!isLoopbackHttp(value)) throw new Error(`${name} must be a loopback http(s) URL; refusing ${value}`);
   }

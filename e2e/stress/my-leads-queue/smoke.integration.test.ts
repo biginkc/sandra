@@ -11,7 +11,7 @@ import { runFamilies } from "./runner";
 // runs end to end against the classifier in this checkout and that it can still tell a broken classifier from a good one. The volume
 // run (31 families x 20 repeats, race lanes, scale) is manual: see e2e/stress/my-leads-queue/README.md.
 const env = integrationEnv(process.env);
-const url = env.MYLEADS_STRESS_DB_URL!;
+const url = env.MYLEADS_STRESS_DB_URL;
 
 describe("my-leads queue stress harness smoke", () => {
   it("passes against the classifier in this checkout (1 repeat, 3 families, refresh + bind-failure lanes)", async () => {
