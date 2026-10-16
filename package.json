@@ -66,6 +66,10 @@
     "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs",
     "stress:messages-v2": "tsx scripts/messages-v2/stress/cli.ts",
     "stress:messages-v2:db": "vitest run --config vitest.messages-v2-stress.config.ts",
+    "stress:messages-v2:kill-switch": "vitest run --config vitest.messages-v2-stress.config.ts scripts/messages-v2/stress/kill-switch.stress.integration.test.ts",
+    "stress:messages-v2:load-seed": "tsx scripts/messages-v2/stress/load-seed.ts",
+    "stress:messages-v2:cleanup": "tsx scripts/messages-v2/stress/cleanup-cli.ts",
+    "stress:messages-v2:ui-load": "playwright test --config playwright.messages-v2-stress.config.ts",
     "test:messages-v2-stress-unit": "vitest run scripts/messages-v2/stress/core.test.ts"
   },
   "dependencies": {
