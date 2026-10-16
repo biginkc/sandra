@@ -7,7 +7,7 @@ import { createClient as createSupabase } from "@supabase/supabase-js";
 import { Client } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { assertEnvLooksLocal, resolveIntegrationApiUrl, resolveIntegrationDbUrl } from "./guards";
+import { integrationEnv, resolveIntegrationApiUrl } from "./guards";
 import { HARNESS_ADDRESS_PREFIX } from "./guards";
 import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { HOUR, emptyLead, SEC } from "./model";
@@ -38,7 +38,7 @@ vi.mock("@/lib/messaging/send", () => ({ sendSmsToContact: (client: unknown, inp
 
 import { dispatchRepSms } from "@/lib/messaging/rep-sms";
 
-const env = { ...process.env };
+const env = integrationEnv(process.env);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Validated before any database access: 0 / -1 / NaN must fail the suite, never execute zero reps and pass.
 const REPS = parsePositiveInt(process.env.MYLEADS_STRESS_DISPATCH_REPS, 6, "MYLEADS_STRESS_DISPATCH_REPS");
@@ -120,8 +120,7 @@ function useFakeProvider(url: string, ctx: OrgCtx, latencyMs: number, rep: strin
 const lanes: LaneResult[] = [];
 
 describe("dispatchRepSms race lanes (fake provider, disposable database)", async () => {
-  assertEnvLooksLocal(env);
-  const url = resolveIntegrationDbUrl(env);
+  const url = env.MYLEADS_STRESS_DB_URL!;
   for (const [name, value] of [["LOCAL_SUPABASE_URL", API], ["TEST_SUPABASE_URL", process.env.TEST_SUPABASE_URL ?? API]] as const) {
     if (!isLoopbackHttp(value)) throw new Error(`${name} must be a loopback http(s) URL; refusing ${value}`);
   }

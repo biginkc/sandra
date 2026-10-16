@@ -49,6 +49,19 @@ export function resolveIntegrationDbUrl(env: Env = process.env): string {
   return resolveDbUrl({ MYLEADS_STRESS_DB_URL: env.MYLEADS_STRESS_DB_URL });
 }
 
+/**
+ * The environment the vitest integration lanes pass to everything they call: the database is resolved through
+ * resolveIntegrationDbUrl (MYLEADS_STRESS_DB_URL only), and the config-injected TEST_SUPABASE_DB_URL is removed so no
+ * downstream resolveDbUrl fallback can ever pick the shared local stack.
+ */
+export function integrationEnv(env: Env = process.env): Record<string, string | undefined> {
+  assertEnvLooksLocal(env);
+  const url = resolveIntegrationDbUrl(env);
+  const out: Record<string, string | undefined> = { ...env, MYLEADS_STRESS_DB_URL: url };
+  delete out.TEST_SUPABASE_DB_URL;
+  return out;
+}
+
 /** The dispatch race lanes need the disposable stack's API; there is no default. */
 export function resolveIntegrationApiUrl(env: Env = process.env): string {
   const url = env.LOCAL_SUPABASE_URL;
