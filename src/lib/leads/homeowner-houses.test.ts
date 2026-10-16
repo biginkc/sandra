@@ -25,6 +25,9 @@ const row = (id: string, contact: string, extra: Partial<Row> = {}): Row => ({
   assigned_user_id: ME, homeowner_contact_id: contact, ...extra,
 });
 
+/** PostgREST's max-rows: no single response carries more rows than this. */
+const RESPONSE_CAP = 1000;
+
 /** A properties table that applies the filters the way PostgREST would, and records every call. */
 function fakeClient(table: Row[], error: { message: string } | null = null) {
   const calls: { from: number; filters: unknown[][]; counted: number; orders: string[][]; rpc: unknown[] } = {
@@ -41,12 +44,15 @@ function fakeClient(table: Row[], error: { message: string } | null = null) {
       for (const r of table)
         if (r.org_id === args.p_org_id && r.deleted_at === null && r.homeowner_contact_id && args.p_contact_ids.includes(r.homeowner_contact_id))
           byOwner.set(r.homeowner_contact_id, [...(byOwner.get(r.homeowner_contact_id) ?? []), r]);
-      const data = [...byOwner].flatMap(([, owned]) =>
-        [...owned]
+      const data = [...byOwner].map(([homeowner_contact_id, owned]) => ({
+        homeowner_contact_id,
+        house_count: String(owned.length),
+        houses: [...owned]
           .sort((x, y) => x.address.localeCompare(y.address) || x.id.localeCompare(y.id))
           .slice(0, 50)
-          .map((r) => ({ ...r, house_count: String(owned.length) })),
-      );
+          .map(({ id, address, city, state, assigned_user_id }) => ({ id, address, city, state, assigned_user_id })),
+      }));
+      if (data.length > RESPONSE_CAP) return { data: data.slice(0, RESPONSE_CAP), error: null };
       return { data, error: null };
     }),
     from: vi.fn(() => {
@@ -77,9 +83,9 @@ function fakeClient(table: Row[], error: { message: string } | null = null) {
         is(column: string, value: null) { calls.filters.push(["is", column, value]); rows = rows.filter((r) => r[column as keyof Row] === value); return query; },
         order(column: string) { sorts.push(column); return query; },
         limit: async (count: number) =>
-          error ? { data: null, error } : { data: sorted().slice(0, count), error: null, count: counted ? rows.length : null },
+          error ? { data: null, error } : { data: sorted().slice(0, Math.min(count, RESPONSE_CAP)), error: null, count: counted ? rows.length : null },
         range: async (from: number, to: number) =>
-          error ? { data: null, error } : { data: sorted().slice(from, to + 1), error: null, count: counted ? rows.length : null },
+          error ? { data: null, error } : { data: sorted().slice(from, Math.min(to + 1, from + RESPONSE_CAP)), error: null, count: counted ? rows.length : null },
       };
       return {
         select: (_columns: string, options?: { count: "exact" }) => {
@@ -193,7 +199,12 @@ describe("loadHomeownerHouses", () => {
     const { client, calls } = fakeClient(table);
     const result = await loadHomeownerHouses(client, { orgId: ORG, viewerId: ME, contactIds: ids });
     expect(calls.from + calls.rpc.length).toBeLessThanOrEqual(2);
-    for (const id of ids) expect(result[id].count).toBe(11);
+    expect(Object.keys(result)).toHaveLength(100);
+    for (const id of ids) {
+      expect(result[id].count).toBe(11);
+      const old = await loadHomeownerHousesPage(fakeClient(table).client, { orgId: ORG, viewerId: ME, contactId: id, offset: 0 });
+      expect(result[id].houses).toEqual(old.houses);
+    }
   });
 
   it("returns nothing for ids that only have houses in another org", async () => {

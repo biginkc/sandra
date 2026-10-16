@@ -38,7 +38,12 @@ type HousesQuery = {
   range(from: number, to: number): PromiseLike<HousesResult>;
 };
 
-type FirstPageRow = HouseRow & { house_count: number | string | null };
+/** One row per owner (at most 100, under the API's 1,000-row response cap); houses is the first page as a jsonb array. */
+type FirstPageRow = {
+  homeowner_contact_id: string | null;
+  house_count: number | string | null;
+  houses: Omit<HouseRow, "homeowner_contact_id">[] | null;
+};
 
 export type HousesClient = {
   from(table: "properties"): { select(columns: string, options?: { count: "exact" }): HousesQuery };
@@ -114,9 +119,11 @@ export async function loadHomeownerHouses(
   for (const row of firstPages.data ?? []) {
     const contactId = row.homeowner_contact_id;
     if (!contactId || !ids.includes(contactId)) continue;
-    const entry = (result[contactId] ??= { count: 0, houses: [] });
-    if (entry.houses.length < MAX_LISTED_HOUSES) entry.houses.push(toHouse(row, input.viewerId));
-    entry.count = Math.max(Number(row.house_count ?? 0), entry.houses.length);
+    const houses = (Array.isArray(row.houses) ? row.houses : [])
+      .slice(0, MAX_LISTED_HOUSES)
+      .map((house) => toHouse({ ...house, homeowner_contact_id: contactId }, input.viewerId));
+    const count = Math.max(Number(row.house_count ?? 0), houses.length);
+    if (count > 0) result[contactId] = { count, houses };
   }
   return result;
 }

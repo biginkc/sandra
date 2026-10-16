@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { describe, expect, it } from "vitest";
+import { createClient } from "@supabase/supabase-js";
+import { afterAll, describe, expect, it } from "vitest";
+import { loadHomeownerHouses, type HousesClient } from "@/lib/leads/homeowner-houses";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 // 20261016040000 adds fn_homeowner_houses_first_page: each homeowner's exact house count and first 50 houses by (address, id),
@@ -57,6 +59,9 @@ const firstPage = async (db: Client, org: string, ids: string[]) =>
   (await db.query("select * from public.fn_homeowner_houses_first_page($1,$2::uuid[])", [org, ids])).rows;
 const counts = async (db: Client, org: string, ids: string[]) =>
   Object.fromEntries((await firstPage(db, org, ids)).map((r) => [r.homeowner_contact_id, Number(r.house_count)]));
+type HouseJson = { id: string; address: string };
+const housesOf = async (db: Client, org: string, ids: string[], owner: string) =>
+  ((await firstPage(db, org, ids)).find((r) => r.homeowner_contact_id === owner)?.houses ?? []) as HouseJson[];
 
 describe("fn_homeowner_houses_first_page", () => {
   it("counts exactly per homeowner and leaves out deleted houses", async () => {
@@ -77,9 +82,12 @@ describe("fn_homeowner_houses_first_page", () => {
       );
       await db.query("insert into public.properties(org_id,homeowner_contact_id,address,state) select $1,$2,'A Same St','MO' from generate_series(1,10)", [w.a, w.c1]);
       await asMember(db, w.member);
-      const rows = (await firstPage(db, w.a, [w.c1, w.c2])).filter((r) => r.homeowner_contact_id === w.c1);
+      const all = await firstPage(db, w.a, [w.c1, w.c2]);
+      expect(all).toHaveLength(2); // one row per owner
+      expect(Number(all.find((r) => r.homeowner_contact_id === w.c1).house_count)).toBe(63);
+      const rows = await housesOf(db, w.a, [w.c1, w.c2], w.c1);
       expect(rows).toHaveLength(50);
-      expect(new Set(rows.map((r) => Number(r.house_count)))).toEqual(new Set([63]));
+      expect(Object.keys(rows[0]).sort()).toEqual(["address", "assigned_user_id", "city", "id", "state"]);
       await db.query("reset role");
       const expected = (await db.query(
         "select id from public.properties where org_id=$1 and homeowner_contact_id=$2 and deleted_at is null order by address, id limit 50",
@@ -131,5 +139,68 @@ describe("fn_homeowner_houses_first_page", () => {
       await asMember(db, w.member);
       expect(await counts(db, w.a, [w.c1])).toEqual({ [w.c1]: 3 });
     });
+  });
+});
+
+// Through PostgREST as a signed-in member: the API caps every response at 1,000 rows, so this proves a page of 100 owners
+// with more than 1,000 houses in total still comes back whole.
+describe("fn_homeowner_houses_first_page through the API", () => {
+  const apiUrl = process.env.TEST_SUPABASE_URL!;
+  const anonKey = process.env.TEST_SUPABASE_ANON_KEY!;
+  const service = createClient(apiUrl, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false } });
+  const cleanup: (() => Promise<unknown>)[] = [];
+  afterAll(async () => {
+    for (const step of cleanup.reverse()) await step().catch(() => {});
+  });
+
+  it("returns all 100 owners and their exact first pages past 1,000 houses", async () => {
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):/.test(apiUrl)) throw new Error("local stack only");
+    const db = new Client({ connectionString: url });
+    await db.connect();
+    cleanup.push(() => db.end());
+    const org = randomUUID();
+    const email = `houses-${randomUUID()}@example.invalid`;
+    const password = `Houses-${randomUUID()}`;
+    const { data: created, error: createError } = await service.auth.admin.createUser({ email, password, email_confirm: true });
+    if (createError || !created.user) throw new Error(createError?.message ?? "no user");
+    const userId = created.user.id;
+    cleanup.push(() => service.auth.admin.deleteUser(userId));
+    await db.query("insert into public.organizations(id,name) values ($1,'Houses API')", [org]);
+    cleanup.push(() => db.query("delete from public.organizations where id=$1", [org]));
+    cleanup.push(() => db.query("delete from public.properties where org_id=$1", [org]));
+    cleanup.push(() => db.query("delete from public.contacts where org_id=$1", [org]));
+    cleanup.push(() => db.query("delete from public.memberships where org_id=$1", [org]));
+    await db.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'owner','active')", [userId, org]);
+    const owners = (await db.query("insert into public.contacts(org_id,first_name) select $1,'O'||g from generate_series(1,100) g returning id", [org])).rows.map((r) => r.id as string);
+    // 12 houses each = 1,200 houses; two per owner share an address so the id tie-break matters.
+    await db.query(
+      `insert into public.properties(org_id,homeowner_contact_id,address,state)
+       select $1, o, case when g <= 2 then 'Same St' else 'H'||lpad(g::text,2,'0') end, 'MO'
+       from unnest($2::uuid[]) o cross join generate_series(1,12) g`,
+      [org, owners],
+    );
+
+    const anon = createClient(apiUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+    const { data: session, error: signInError } = await anon.auth.signInWithPassword({ email, password });
+    if (signInError || !session.session) throw new Error(signInError?.message ?? "no session");
+    const user = createClient(apiUrl, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${session.session.access_token}` } },
+    });
+
+    const direct = await user.rpc("fn_homeowner_houses_first_page", { p_org_id: org, p_contact_ids: owners });
+    expect(direct.error).toBeNull();
+    expect(direct.data).toHaveLength(100);
+
+    const result = await loadHomeownerHouses(user as unknown as HousesClient, { orgId: org, viewerId: userId, contactIds: owners });
+    expect(Object.keys(result)).toHaveLength(100);
+    for (const owner of owners) {
+      const expected = (await db.query(
+        "select id from public.properties where org_id=$1 and homeowner_contact_id=$2 and deleted_at is null order by address, id",
+        [org, owner],
+      )).rows.map((r) => r.id);
+      expect(result[owner].count).toBe(12);
+      expect(result[owner].houses.map((h) => h.propertyId)).toEqual(expected);
+    }
   });
 });
