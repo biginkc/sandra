@@ -37,6 +37,25 @@ export function resolveDbUrl(env: Env = process.env): string {
   return url;
 }
 
+/**
+ * The vitest integration lanes (smoke, dispatch races) run under vitest.local-integration.config.ts, which injects a
+ * TEST_SUPABASE_DB_URL default pointing at the shared local stack. So these lanes accept ONLY MYLEADS_STRESS_DB_URL and never
+ * fall back to TEST_SUPABASE_DB_URL: a config default can never select the database.
+ */
+export function resolveIntegrationDbUrl(env: Env = process.env): string {
+  if (!env.MYLEADS_STRESS_DB_URL) {
+    throw new GuardRefusal("DB_URL_UNSET", "set MYLEADS_STRESS_DB_URL to your own disposable stack; the integration lanes ignore TEST_SUPABASE_DB_URL because the vitest config defaults it to the shared local stack.");
+  }
+  return resolveDbUrl({ MYLEADS_STRESS_DB_URL: env.MYLEADS_STRESS_DB_URL });
+}
+
+/** The dispatch race lanes need the disposable stack's API; there is no default. */
+export function resolveIntegrationApiUrl(env: Env = process.env): string {
+  const url = env.LOCAL_SUPABASE_URL;
+  if (!url) throw new GuardRefusal("API_URL_UNSET", "set LOCAL_SUPABASE_URL to your own disposable stack's API; there is no default.");
+  return url;
+}
+
 export function assertEnvLooksLocal(env: Env = process.env): void {
   for (const [key, value] of Object.entries(env)) {
     if (!value || !/^(MYLEADS_STRESS_.*|TEST_SUPABASE_.*|NEXT_PUBLIC_SUPABASE_URL|SUPABASE_URL|DATABASE_URL|E2E_CI_SUPABASE_DB_URL)$/.test(key)) continue;

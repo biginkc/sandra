@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { GuardRefusal, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
+import { GuardRefusal, resolveIntegrationApiUrl, resolveIntegrationDbUrl, assertCommitLaneAllowed, assertEnvLooksLocal, assertOnlyHarnessLeads, resolveDbUrl } from "./guards";
 
 describe("my-leads stress guards", () => {
   it("refuses to run without an explicit database URL and accepts loopback hosts", () => {
@@ -16,6 +16,13 @@ describe("my-leads stress guards", () => {
     "not a url",
   ])("refuses %s", (url) => {
     expect(() => resolveDbUrl({ MYLEADS_STRESS_DB_URL: url })).toThrow(GuardRefusal);
+  });
+  it("integration lanes ignore a config-injected TEST_SUPABASE_DB_URL and need MYLEADS_STRESS_DB_URL", () => {
+    const shared = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
+    expect(() => resolveIntegrationDbUrl({ TEST_SUPABASE_DB_URL: shared })).toThrow(/DB_URL_UNSET/);
+    expect(resolveIntegrationDbUrl({ MYLEADS_STRESS_DB_URL: "postgresql://u:p@127.0.0.1:55722/postgres", TEST_SUPABASE_DB_URL: shared })).toBe("postgresql://u:p@127.0.0.1:55722/postgres");
+    expect(() => resolveIntegrationApiUrl({})).toThrow(/API_URL_UNSET/);
+    expect(resolveIntegrationApiUrl({ LOCAL_SUPABASE_URL: "http://127.0.0.1:55721" })).toBe("http://127.0.0.1:55721");
   });
   it("falls back to TEST_SUPABASE_DB_URL only when it is loopback too", () => {
     expect(() => resolveDbUrl({ TEST_SUPABASE_DB_URL: "postgresql://x:y@db.example.com/p" })).toThrow(GuardRefusal);

@@ -7,7 +7,7 @@ import { createClient as createSupabase } from "@supabase/supabase-js";
 import { Client } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { assertEnvLooksLocal, resolveDbUrl } from "./guards";
+import { assertEnvLooksLocal, resolveIntegrationApiUrl, resolveIntegrationDbUrl } from "./guards";
 import { HARNESS_ADDRESS_PREFIX } from "./guards";
 import { footprint, materializeWorld, purgeOrg, setupOrg, type OrgCtx } from "./materialize";
 import { HOUR, emptyLead, SEC } from "./model";
@@ -38,15 +38,14 @@ vi.mock("@/lib/messaging/send", () => ({ sendSmsToContact: (client: unknown, inp
 
 import { dispatchRepSms } from "@/lib/messaging/rep-sms";
 
-const env = { ...process.env, MYLEADS_STRESS_DB_URL: process.env.MYLEADS_STRESS_DB_URL ?? process.env.TEST_SUPABASE_DB_URL };
+const env = { ...process.env };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Validated before any database access: 0 / -1 / NaN must fail the suite, never execute zero reps and pass.
 const REPS = parsePositiveInt(process.env.MYLEADS_STRESS_DISPATCH_REPS, 6, "MYLEADS_STRESS_DISPATCH_REPS");
 const BIND_REPS = Math.min(REPS, 20);
 const OUT = process.env.MYLEADS_STRESS_OUT_DIR ?? path.resolve("test-results/my-leads-queue-stress");
 const JWT_SECRET = process.env.LOCAL_SUPABASE_JWT_SECRET ?? "super-secret-jwt-token-with-at-least-32-characters-long";
-const API = process.env.LOCAL_SUPABASE_URL ?? "";
-if (!API) throw new Error("LOCAL_SUPABASE_URL is required: point it at your own disposable stack's API (no default, so the shared local stack is never used by accident).");
+const API = resolveIntegrationApiUrl(process.env);
 const ANON = process.env.LOCAL_SUPABASE_ANON_KEY ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
 
 function isLoopbackHttp(raw: string): boolean {
@@ -122,7 +121,7 @@ const lanes: LaneResult[] = [];
 
 describe("dispatchRepSms race lanes (fake provider, disposable database)", async () => {
   assertEnvLooksLocal(env);
-  const url = resolveDbUrl(env);
+  const url = resolveIntegrationDbUrl(env);
   for (const [name, value] of [["LOCAL_SUPABASE_URL", API], ["TEST_SUPABASE_URL", process.env.TEST_SUPABASE_URL ?? API]] as const) {
     if (!isLoopbackHttp(value)) throw new Error(`${name} must be a loopback http(s) URL; refusing ${value}`);
   }
