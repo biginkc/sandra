@@ -54,18 +54,28 @@ test file loads or connects, and refuses to start unless:
 - every URL is loopback, has no query string, and is not a hosted Supabase host;
 - no URL uses the shared dev-stack ports **54321, 54322, 54329, 54331**.
 
-Start a private stack on unused ports (for example API 54961 / DB 54962, via
-`scripts/ci/provision-disposable-stack.mjs --api-port 54961 --db-port 54962`),
-then:
+Start a private throwaway stack on unused ports with
+`e2e/stress/provision-stack.mjs` (local-safe: refuses the shared ports, the
+repo root, and any workdir it did not create). It prints `API_URL`, `DB_URL`,
+`ANON_KEY` and `SERVICE_ROLE_KEY` as JSON and writes `<workdir>/stress-env.json`:
+
+```bash
+node e2e/stress/provision-stack.mjs --workdir "$(mktemp -d)/sandra-stack" --api-port 54961 --db-port 54962
+```
+
+(`scripts/ci/provision-disposable-stack.mjs` is CI-only: it refuses to run
+outside a GitHub runner.) Then:
 
 ```bash
 export LOCAL_SUPABASE_URL=http://127.0.0.1:54961
-export LOCAL_SUPABASE_ANON_KEY=<anon key from `supabase status`>
-export LOCAL_SUPABASE_SERVICE_ROLE_KEY=<service role key from `supabase status`>
+export LOCAL_SUPABASE_ANON_KEY=<ANON_KEY from the JSON>
+export LOCAL_SUPABASE_SERVICE_ROLE_KEY=<SERVICE_ROLE_KEY from the JSON>
 export TEST_SUPABASE_URL=$LOCAL_SUPABASE_URL
 export TEST_SUPABASE_SERVICE_ROLE_KEY=$LOCAL_SUPABASE_SERVICE_ROLE_KEY
 export TEST_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54962/postgres
 npx vitest run --config vitest.local-integration.config.ts <suite>
+# when done:
+node e2e/stress/provision-stack.mjs --workdir <same workdir> --stop
 ```
 
 CI exception: the E2E workflow's per-job throwaway stack
