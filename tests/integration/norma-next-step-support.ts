@@ -15,7 +15,7 @@ import { applyMyLeadsChain } from "@tests/integration/my-leads-housekeeping-fixt
 
 const dir = `${path.join(process.cwd(), "supabase/migrations")}/`;
 export const url = requireLoopbackPostgresUrl(
-  process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+  process.env.TEST_SUPABASE_DB_URL ?? "",
 );
 export const load = (file: string, base = dir) =>
   readFileSync(`${base}${file}`, "utf8").replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");

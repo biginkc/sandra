@@ -1,10 +1,15 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import localConfig from "../../../vitest.local-integration.config";
-import { assertIsolatedDbEnv, assertIsolatedDbUrl } from "./isolated-db-env";
+import {
+  assertIsolatedDbEnv,
+  assertIsolatedDbUrl,
+  assertIsolatedNormaStressEnv,
+  assertIsolatedSlackLocalEnv,
+} from "./isolated-db-env";
 
 const API = "http://127.0.0.1:54961";
 const DB = "postgresql://postgres:postgres@127.0.0.1:54962/postgres";
@@ -96,6 +101,60 @@ describe("assertIsolatedDbUrl", () => {
     expect(() => assertIsolatedDbUrl({})).toThrow(/must be set explicitly/);
     expect(() => assertIsolatedDbUrl({ TEST_SUPABASE_DB_URL: "postgresql://postgres:postgres@127.0.0.1:54329/postgres" })).toThrow();
     expect(() => assertIsolatedDbUrl({ TEST_SUPABASE_DB_URL: "postgresql://postgres:postgres@127.0.0.1:55422/postgres" })).not.toThrow();
+  });
+});
+
+describe("assertIsolatedNormaStressEnv", () => {
+  const ok = "postgresql://postgres:postgres@127.0.0.1:55422/postgres";
+  const shared = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
+  it("requires a source and checks every one that is set", () => {
+    expect(() => assertIsolatedNormaStressEnv({})).toThrow(/must be set explicitly/);
+    expect(() => assertIsolatedNormaStressEnv({ NORMA_STRESS_SOURCE_DB_URL: shared })).toThrow(/shared dev-stack port/);
+    expect(() => assertIsolatedNormaStressEnv({ NORMA_STRESS_SOURCE_DB_URL: ok, TEST_SUPABASE_DB_URL: shared })).toThrow();
+    expect(() => assertIsolatedNormaStressEnv({ NORMA_STRESS_SOURCE_DB_URL: "postgresql://u:p@db.abc.supabase.co:5432/postgres" })).toThrow(/hosted/);
+    expect(() => assertIsolatedNormaStressEnv({ NORMA_STRESS_SOURCE_DB_URL: ok })).not.toThrow();
+    expect(() => assertIsolatedNormaStressEnv({ TEST_SUPABASE_DB_URL: ok })).not.toThrow();
+  });
+});
+
+describe("assertIsolatedSlackLocalEnv", () => {
+  const good = { SLACK_LOCAL_API_URL: API, SLACK_LOCAL_SERVICE_KEY: KEY, SLACK_LOCAL_DB_URL: DB };
+  it("requires explicit, isolated SLACK_LOCAL_* values", () => {
+    expect(() => assertIsolatedSlackLocalEnv({})).toThrow(/must be set explicitly/);
+    expect(() => assertIsolatedSlackLocalEnv({ ...good, SLACK_LOCAL_API_URL: "http://127.0.0.1:54331" })).toThrow(/shared dev-stack port/);
+    expect(() => assertIsolatedSlackLocalEnv({ ...good, SLACK_LOCAL_DB_URL: "postgresql://postgres:postgres@127.0.0.1:54329/postgres" })).toThrow(/shared dev-stack port/);
+    expect(() => assertIsolatedSlackLocalEnv(good)).not.toThrow();
+  });
+});
+
+// Source scan: no vitest config, and no DB helper fixed in this change, may fall
+// back to a shared dev-stack port. Configs that used to default to the shared
+// stack may not default to the demo keys either.
+const root = path.resolve(__dirname, "../../..");
+const vitestConfigs = readdirSync(root).filter((f) => /^vitest\..*\.ts$/.test(f));
+const helpers = ["src/lib/norma/stress/db.ts", "tests/integration/norma-next-step-support.ts"];
+const SHARED_PORT_DEFAULT = /\?\?\s*["'`][^"'`]*:(54321|54322|54329|54331)\b/;
+const DEMO_KEY_DEFAULT = /\?\?\s*["'`]eyJ/;
+const formerSharedStackConfigs = [
+  "vitest.local-integration.config.ts",
+  "vitest.slack-local.config.ts",
+  "vitest.norma-queue.config.ts",
+  "vitest.norma-stress.config.ts",
+  "vitest.norma-inbound.config.ts",
+  "vitest.norma-recordings.config.ts",
+];
+
+describe("no silent shared-stack defaults", () => {
+  it("finds the vitest configs", () => {
+    expect(vitestConfigs.length).toBeGreaterThan(10);
+  });
+  it.each([...vitestConfigs, ...helpers])("%s has no shared-port default", (file) => {
+    expect(readFileSync(path.join(root, file), "utf8")).not.toMatch(SHARED_PORT_DEFAULT);
+  });
+  it.each(formerSharedStackConfigs)("%s has no demo-key default and runs a guard globalSetup", (file) => {
+    const source = readFileSync(path.join(root, file), "utf8");
+    expect(source).not.toMatch(DEMO_KEY_DEFAULT);
+    expect(source).toMatch(/globalSetup: \[".\/src\/lib\/testing\/isolated-[a-z-]+\.global-setup\.ts"\]/);
   });
 });
 

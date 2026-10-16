@@ -380,6 +380,10 @@ jobs:
             fi
             # A harness/setup crash is not a kill: require real failing assertions.
             sed 's/\x1b\[[0-9;]*m//g' "mutation-$m.log" > "mutation-$m.plain.log"
+            # The DB isolation guard refusing the env is never a kill (it would be a false green).
+            if grep -q "IsolatedDbEnvError" "mutation-$m.plain.log"; then
+              echo "::error::mutation $m: the DB isolation guard refused the env; nothing ran"; tail -30 "mutation-$m.log"; exit 1
+            fi
             if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.plain.log"; then
               echo "::error::mutation $m crashed the harness instead of failing tests"; tail -30 "mutation-$m.log"; exit 1
             fi

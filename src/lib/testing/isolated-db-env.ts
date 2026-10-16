@@ -80,10 +80,37 @@ function requireSet(env: Env, key: string): string {
 }
 
 /** DB-only suites (raw Postgres, no API). */
-export function assertIsolatedDbUrl(env: Env): void {
-  const db = requireSet(env, "TEST_SUPABASE_DB_URL");
-  checkUrl("TEST_SUPABASE_DB_URL", db, env);
-  requireLoopbackPostgresUrl(db);
+export function assertIsolatedDbUrl(env: Env, key = "TEST_SUPABASE_DB_URL"): void {
+  const db = requireSet(env, key);
+  checkUrl(key, db, env);
+  try {
+    requireLoopbackPostgresUrl(db);
+  } catch {
+    throw new IsolatedDbEnvError(`${key} is not a loopback postgres URL.`);
+  }
+}
+
+/**
+ * Norma stress gate: clones schema from NORMA_STRESS_SOURCE_DB_URL (falling back
+ * to TEST_SUPABASE_DB_URL). One of them must be set; every one that is set is checked.
+ */
+export function assertIsolatedNormaStressEnv(env: Env): void {
+  const keys = ["NORMA_STRESS_SOURCE_DB_URL", "TEST_SUPABASE_DB_URL"].filter((k) => (env[k] ?? "").trim() !== "");
+  if (keys.length === 0) throw new IsolatedDbEnvError("NORMA_STRESS_SOURCE_DB_URL (or TEST_SUPABASE_DB_URL) must be set explicitly (no defaults).");
+  for (const key of keys) assertIsolatedDbUrl(env, key);
+}
+
+/** Slack local suites read SLACK_LOCAL_* and map them onto TEST_SUPABASE_*. */
+export function assertIsolatedSlackLocalEnv(env: Env): void {
+  for (const key of ["SLACK_LOCAL_API_URL", "SLACK_LOCAL_SERVICE_KEY", "SLACK_LOCAL_DB_URL"]) requireSet(env, key);
+  assertIsolatedDbEnv({
+    ...env,
+    LOCAL_SUPABASE_URL: env.SLACK_LOCAL_API_URL,
+    TEST_SUPABASE_URL: env.SLACK_LOCAL_API_URL,
+    LOCAL_SUPABASE_SERVICE_ROLE_KEY: env.SLACK_LOCAL_SERVICE_KEY,
+    TEST_SUPABASE_SERVICE_ROLE_KEY: env.SLACK_LOCAL_SERVICE_KEY,
+    TEST_SUPABASE_DB_URL: env.SLACK_LOCAL_DB_URL,
+  });
 }
 
 /** Suites that use both the API (service role) and Postgres. */
@@ -97,6 +124,6 @@ export function assertIsolatedDbEnv(env: Env): void {
   }
   const apiPort = checkUrl("LOCAL_SUPABASE_URL", env.LOCAL_SUPABASE_URL!, env);
   const dbPort = checkUrl("TEST_SUPABASE_DB_URL", env.TEST_SUPABASE_DB_URL!, env);
-  requireLoopbackPostgresUrl(env.TEST_SUPABASE_DB_URL!);
+  assertIsolatedDbUrl(env);
   if (apiPort === dbPort) throw new IsolatedDbEnvError("API and database URLs use the same port.");
 }

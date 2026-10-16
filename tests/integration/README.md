@@ -37,7 +37,9 @@ IPv6-only; prefer the pooler URI above.
 
 ## Run against your own stack (local-integration and Norma configs)
 
-`vitest.local-integration.config.ts`, `vitest.norma-inbound.config.ts` and
+`vitest.local-integration.config.ts`, `vitest.slack-local.config.ts`,
+`vitest.norma-queue*.config.ts`, `vitest.norma-stress.config.ts` (and
+`vitest.norma-queue-stress*`), `vitest.norma-inbound.config.ts` and
 `vitest.norma-recordings.config.ts` run destructive suites (seed, mutate,
 delete). They have **no defaults**. A guard
 (`src/lib/testing/isolated-db-env.ts`) runs as vitest `globalSetup`, before any
@@ -45,7 +47,9 @@ test file loads or connects, and refuses to start unless:
 
 - `LOCAL_SUPABASE_URL`, `LOCAL_SUPABASE_SERVICE_ROLE_KEY`, `TEST_SUPABASE_URL`,
   `TEST_SUPABASE_SERVICE_ROLE_KEY` and `TEST_SUPABASE_DB_URL` are all set
-  (Norma configs need only `TEST_SUPABASE_DB_URL`);
+  (Norma configs need only `TEST_SUPABASE_DB_URL`; Norma stress needs
+  `NORMA_STRESS_SOURCE_DB_URL` or `TEST_SUPABASE_DB_URL`; slack-local needs
+  `SLACK_LOCAL_API_URL`, `SLACK_LOCAL_SERVICE_KEY`, `SLACK_LOCAL_DB_URL`);
 - `TEST_SUPABASE_URL` equals `LOCAL_SUPABASE_URL`, and the two service-role keys match;
 - every URL is loopback, has no query string, and is not a hosted Supabase host;
 - no URL uses the shared dev-stack ports **54321, 54322, 54329, 54331**.
