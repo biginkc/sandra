@@ -483,6 +483,14 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(row.last_ai_escalation_reason).toBe("nine_reply_not_sent:template_already_sent");
   });
 
+  it("asked_who a second time: the identity reply is not sent twice; held as template_already_sent", async () => {
+    await seedOrg();
+    const first = await run({ asked_who: 0.9 }, "who is this");
+    await run({ asked_who: 0.9 }, "who is this??", first.lead);
+    expect(await outboundBodies(first.lead.propertyId)).toEqual([IDENTITY_REPLY_BODY]);
+    expect((await propertyRow(first.lead.propertyId)).last_ai_escalation_reason).toBe("nine_reply_not_sent:template_already_sent");
+  });
+
   it("not_interested with an edited template: nothing sent, held as reply_text_not_approved", async () => {
     await seedOrg({ templateText: { not_interested: "Sounds good." } });
     const { lead } = await run({ not_interested: 0.85 });
