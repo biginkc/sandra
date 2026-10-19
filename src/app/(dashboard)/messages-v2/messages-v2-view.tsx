@@ -20,6 +20,9 @@ import { compareInstants, describeCoverage, type LooseSupabase } from "./queries
 import type { ReplyGeneration } from "./reply-generation";
 import type { SetReplyGenerationAction } from "./reply-generation-toggle";
 import { RulesPanel } from "./rules-panel";
+import { useHomeownerHouses } from "./homeowner-houses";
+import type { SetAiRuleSwitchAction } from "./rule-switch";
+import type { AiRuleSwitchState } from "./threshold-actions";
 import type { UndoControls } from "./run-card";
 import type { ScorecardRow } from "./scorecard";
 import { TapeCard } from "./tape-card";
@@ -49,6 +52,9 @@ export type MessagesV2ViewProps = {
   setReplyGeneration?: SetReplyGenerationAction;
   /** ai_responder_configs.classifier_engine (null/absent = old engine). */
   classifierEngine?: string | null;
+  /** PR 4 owner switches (identity reply, Confirmed owner drip, engine); null hides them. */
+  ruleSwitches?: AiRuleSwitchState | null;
+  setRuleSwitch?: SetAiRuleSwitchAction;
   /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
   undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
   findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
@@ -530,6 +536,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const snapshotRuns = useMemo(() => new Set((props.flagReasons ?? []).map(([runId]) => runId)), [props.flagReasons]);
 
   const week = weekSummary(props.scorecardRows);
+  // One batched "Owns N houses" read for every homeowner on the tape (each added day asks only for new ones).
+  const tapeHouses = useHomeownerHouses(allRuns.map((r) => r.contact_id));
   const on = sandraIsOn(badges);
   const statusText = props.badgesError
     ? "Sandra's status couldn't be checked"
@@ -590,6 +598,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             replyGeneration={props.replyGeneration}
             setReplyGeneration={props.setReplyGeneration}
             classifierEngine={props.classifierEngine}
+            ruleSwitches={props.ruleSwitches}
+            setRuleSwitch={props.setRuleSwitch}
           />
         </div>
         {coverage && (coverage.gap || coverage.degraded) && (
@@ -643,6 +653,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   run={item.run}
                   label={labels.get(item.run.id)}
                   thread={threads.get(item.run.id)}
+                  houses={item.run.contact_id ? tapeHouses.get(item.run.contact_id) ?? null : null}
                   flagReason={flagByRun.get(item.run.id)}
                   flagPinned={snapshotRuns.has(item.run.id)}
                   // Undo is offered on today's texts only; an earlier day is history.

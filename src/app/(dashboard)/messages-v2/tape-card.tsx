@@ -1,5 +1,7 @@
 "use client";
 
+import { MultiHouseBadge } from "@/components/leads/multi-house-badge";
+import type { HomeownerHouses } from "@/lib/leads/homeowner-houses";
 import { cn } from "@/lib/utils";
 
 import { chicagoClock } from "./chicago-time";
@@ -25,13 +27,19 @@ export function sellerWho(label: RunLabel | undefined): string {
   return !name || name.startsWith("Unknown") ? "They" : name;
 }
 
-function Meta({ run, label }: { run: RunWithSteps; label: RunLabel | undefined }) {
+function Meta({ run, label, houses }: { run: RunWithSteps; label: RunLabel | undefined; houses?: HomeownerHouses | null }) {
   return (
     <>
       <time dateTime={run.started_at} className="font-semibold text-foreground tabular-nums">
         {chicagoClock(run.started_at)}
       </time>
       <span className="font-semibold text-foreground">{label?.name ?? "Unknown sender"}</span>
+      <MultiHouseBadge
+        houses={houses}
+        contactId={run.contact_id}
+        ownerName={label?.name}
+        currentPropertyId={run.property_id ?? undefined}
+      />
       {label?.address && <span>· {label.address}</span>}
     </>
   );
@@ -67,9 +75,12 @@ export function TapeCard({
   flagReason,
   flagPinned,
   undoControls,
+  houses,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
+  /** "Owns N houses" for this run's homeowner, from the tape's one batched read. */
+  houses?: HomeownerHouses | null;
   thread?: RunThread;
   /** True when flagReason is the waiting-list snapshot's reason: it then wins over the run's own reason and outcome. */
   flagPinned?: boolean;
@@ -87,7 +98,7 @@ export function TapeCard({
         className={cn("flex flex-col gap-2 rounded-2xl border bg-card/60 px-5 py-3 text-sm", ENTER)}
       >
         <div className="flex flex-wrap items-center gap-2.5 text-[13px] text-muted-foreground">
-          <Meta run={run} label={label} />
+          <Meta run={run} label={label} houses={houses} />
         </div>
         {run.inbound_preview && <p className="text-muted-foreground">{run.inbound_preview}</p>}
         <p data-testid="tape-quiet" className="text-[13px] text-muted-foreground">
@@ -111,7 +122,7 @@ export function TapeCard({
       )}
     >
       <div className="flex flex-wrap items-center gap-2.5 text-[13px] text-muted-foreground">
-        <Meta run={run} label={label} />
+        <Meta run={run} label={label} houses={houses} />
         {reading && (
           <span data-testid="tape-reading" className="ml-auto inline-flex items-center gap-1.5 font-medium text-status-new-fg">
             <span aria-hidden className="size-2 animate-pulse rounded-full bg-status-new-fg" />

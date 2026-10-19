@@ -6,7 +6,6 @@ import type {
   HoldsMeta,
   HoldsSplit,
   HoldSource,
-  LunaHoldSuggestion,
   ModeBadge,
   OpenHold,
   PipelineCoverage,
@@ -62,7 +61,7 @@ export const HOLDS_COUNT_CAP = 2000;
 
 const SOURCE_LABEL: Record<HoldSource, string> = {
   needs_attention: "Needs attention",
-  jev_decision: "Jev decision pending",
+  jev_decision: "Sandra decision pending",
   disposition_review: "Disposition review pending",
   pending_draft: "Claude draft held",
 };
@@ -453,14 +452,6 @@ export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
     : `${openCount} holds`;
 }
 
-const LUNA_SUGGESTION_OUTCOMES = [
-  "new_lead",
-  "nurture",
-  "not_interested",
-  "wrong_number",
-  "opted_out",
-  "dnc",
-] as const;
 const STEP_CHUNK = 40;
 const PROPERTY_RPC_CHUNK = 200;
 /** Explicit row limit for the chunked .in() lookups (>= chunk size); hitting it counts as failed. */
@@ -500,8 +491,6 @@ export type LoadOptions = {
    * with activity at/after it, found directly rather than through HOLD_LIMIT.
    */
   alertsSince?: string;
-  /** Attach Luna's pending suggestion to jev/disposition holds. Off = zero extra queries. */
-  includeLuna?: boolean;
 };
 
 type QueryRes = { data: unknown; error: unknown };
@@ -1010,7 +999,6 @@ export async function loadMessagesV2Data(
     !res.error && Array.isArray(res.data) && res.data.length > HOLDS_COUNT_CAP;
 
   const enriched = await enrichHoldCards(supabase, orgId, openHolds, {
-    includeLuna: opts.includeLuna,
     decisions,
     reviews,
   });
@@ -1079,19 +1067,17 @@ export async function loadMessagesV2Data(
 }
 
 /**
- * Card annotations for holds that are about to render: dead-letter markers, latest alert status and (page only)
- * Luna's suggestion. None of these affect which holds exist or their order, so a failure here is reported as a
+ * Card annotations for holds that are about to render: dead-letter markers, and latest alert status. None of these affect which holds exist or their order, so a failure here is reported as a
  * context error (an amber note), never as a missing hold. Shared by the page loader and the waiting list.
  */
 export async function enrichHoldCards<R extends PipelineRun>(
   supabase: LooseSupabase,
   orgId: string,
   openHolds: OpenHold<R>[],
-  opts: { includeLuna?: boolean; decisions?: readonly HoldDecisionRow[]; reviews?: readonly HoldReviewRow[] } = {},
+  // Unused since PR 4 removed the Luna lookup (the only reader); kept so callers need not change.
+  _opts: { decisions?: readonly HoldDecisionRow[]; reviews?: readonly HoldReviewRow[] } = {},
 ): Promise<{ holds: OpenHold<R>[]; contextErrors: string[]; deadLetterUnavailable: boolean }> {
   const contextErrors: string[] = [];
-  const decisions = opts.decisions ?? [];
-  const reviews = opts.reviews ?? [];
   // Dead letters: ids and reason only (never the saved reply text). A missing table is
   // treated as "none"; any other error is surfaced as unavailable.
   const runIds = new Set<string>();
@@ -1229,64 +1215,6 @@ export async function enrichHoldCards<R extends PipelineRun>(
       }
     }
   }
-  // Luna's pending suggestion per hold (page only; the alert cron never asks).
-  const lunaByHold = new Map<string, LunaHoldSuggestion>();
-  if (opts.includeLuna) {
-    const eligible = openHolds.filter(
-      (h) => h.sources.includes("jev_decision") || h.sources.includes("disposition_review"),
-    );
-    // Only inbound messages that still have a pending decision / review count:
-    // after a dismiss, takeover or fn_resolve_hold the suggestion is stale and
-    // must not show (Apply would fail with "nothing is waiting").
-    const pendingMsgsByProperty = new Map<string, Set<string>>();
-    for (const r of [...decisions, ...reviews]) {
-      if (!r.property_id || !r.source_inbound_message_id) continue;
-      const set = pendingMsgsByProperty.get(r.property_id) ?? new Set<string>();
-      set.add(r.source_inbound_message_id);
-      pendingMsgsByProperty.set(r.property_id, set);
-    }
-    const idsFor = (h: OpenHold<PipelineRun>) =>
-      h.property_id ? [...(pendingMsgsByProperty.get(h.property_id) ?? [])] : [];
-    const allIds = [...new Set(eligible.flatMap(idsFor))];
-    if (allIds.length > 0) {
-      const rows: Array<LunaHoldSuggestion & { created_at: string }> = [];
-      const lunaResults = await Promise.all(
-        chunked(allIds, PROPERTY_RPC_CHUNK).map((ids) =>
-          supabase
-            .from("luna_suggestions")
-            .select("id, outcome, confidence, inbound_message_id, created_at")
-            .eq("org_id", orgId)
-            .is("accepted_at", null)
-            .is("rejected_at", null)
-            .is("applied_outcome", null)
-            .in("outcome", [...LUNA_SUGGESTION_OUTCOMES])
-            .in("inbound_message_id", ids)
-            .limit(BY_IDS_LIMIT),
-        ),
-      );
-      let failed = false;
-      for (const res of lunaResults) {
-        if (res.error) failed = true;
-        else rows.push(...((res.data ?? []) as typeof rows));
-      }
-      if (failed) contextErrors.push("luna lookup");
-      else {
-        for (const h of eligible) {
-          const mine = new Set(idsFor(h));
-          const best = rows
-            .filter((r) => mine.has(r.inbound_message_id))
-            .sort((a, b) => compareInstants(b.created_at, a.created_at))[0];
-          if (best)
-            lunaByHold.set(h.id, {
-              id: best.id,
-              outcome: best.outcome,
-              confidence: Number(best.confidence),
-              inbound_message_id: best.inbound_message_id,
-            });
-        }
-      }
-    }
-  }
   const deadLettersFor = (h: OpenHold<R>): DeadLetterInfo[] =>
     groups
       .filter(
@@ -1306,7 +1234,6 @@ export async function enrichHoldCards<R extends PipelineRun>(
         ...(isDead(h) ? { dead_letter: true } : {}),
         ...(dls.some((d) => d.late) ? { dead_letter_late: true } : {}),
         ...(dls.length ? { dead_letters: dls } : {}),
-        ...(lunaByHold.has(h.id) ? { luna: lunaByHold.get(h.id) } : {}),
         ...(h.property_id && alertByProperty.has(h.property_id)
           ? { alert: alertByProperty.get(h.property_id) }
           : {}),
@@ -1375,7 +1302,7 @@ export async function loadMessagesV2Split(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
-  opts: Pick<LoadOptions, "includeDraftBody" | "includeLuna"> = {},
+  opts: Pick<LoadOptions, "includeDraftBody"> = {},
 ): Promise<MessagesV2Data & { split: HoldsSplit }> {
   const buckets = await loadHoldBuckets(supabase, orgId, "new", NEW_HOLD_CAP);
   if (!buckets) {
@@ -1429,7 +1356,7 @@ export async function loadBacklogHolds(
   offset: number,
   limit: number,
   nowMs: number = Date.now(),
-  opts: Pick<LoadOptions, "includeLuna"> & { bucket?: HoldBucket } = {},
+  opts: { bucket?: HoldBucket } = {},
 ): Promise<{
   holds: OpenHold<RunWithSteps>[];
   /** Total for the requested bucket (Backlog by default). */
@@ -1454,7 +1381,6 @@ export async function loadBacklogHolds(
   }
   const data = await loadMessagesV2Data(supabase, orgId, nowMs, {
     includeDraftBody: true,
-    includeLuna: opts.includeLuna,
     holdsOnly: true,
     scope: { propertyIds: buckets.propertyIds, noPropertyDrafts: false },
   });

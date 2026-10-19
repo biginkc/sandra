@@ -21,6 +21,10 @@ const NINE_REASONS: Array<[string, boolean]> = [
   ["classifier_engine_unreadable", false],
   ["nine_reply_not_sent:quiet_hours_recipient:x", false],
   ["nine_automation_disabled:wrong_number", false],
+  ["nine_automation_disabled:asked_who", false], // PR 4 identity-reply switch off
+  ["nine_close_wrong_person_unreadable", false],
+  ["nine_switch_unreadable:confirmed_owner", false], // PR 4 switch state unknown
+  ["nine_switch_unreadable:asked_who", false],
   ["drip_enroll_failed:drip_not_found", false],
   ["drip_paused", false],
   ["jev_automatic_failed:auth", false],
