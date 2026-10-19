@@ -1272,6 +1272,41 @@ const ROWS: Row[] = [
       expect(await h.assignee()).toBe(h.rep);
     },
   },
+  ...(["nurture", "callback_requested", "booked_appointment"] as const).map(
+    (dispo): Row => ({
+      id: `42-${dispo}`,
+      name: `NOT flagged, outreach_dispo='${dispo}', owned by a rep + a hot text: classify-only look, one hot_text alert to Jarrad, nothing sent to the seller, dispo and assignee unchanged`,
+      setup: { assigned: "rep" },
+      expect: { slack: 1, sms: 1, assigned: 0 },
+      run: async (h) => {
+        await pg.query("update public.properties set outreach_dispo = $2, needs_human_attention = false where id = $1", [h.propertyId, dispo]);
+        const a = await h.newInbound("yes, what would you pay?");
+        expect(await h.dispatch(a, "new_lead", HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
+        expect(jevCalls).toBe(1);
+        expect(await h.hotTextPayload(a)).toMatchObject({ held_lead: true, to: h.owner });
+        expect((await h.alertPass()).sent).toBe(2);
+        expect((await h.alertPass()).sent).toBe(0);
+        expect(await h.assignee()).toBe(h.rep);
+        const { rows } = await pg.query("select outreach_dispo from public.properties where id = $1", [h.propertyId]);
+        expect(rows[0].outreach_dispo).toBe(dispo);
+        const out = await pg.query("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [h.propertyId]);
+        expect(out.rows[0].n).toBe(0);
+      },
+    }),
+  ),
+  {
+    id: "42-wrong",
+    name: "NOT flagged, outreach_dispo='wrong_number' + a hot text: true suppression wins, never classified, no alert",
+    expect: { slack: 0, sms: 0, assigned: 0 },
+    run: async (h) => {
+      await pg.query("update public.properties set outreach_dispo = 'wrong_number', needs_human_attention = false where id = $1", [h.propertyId]);
+      const a = await h.newInbound("yes, what would you pay?");
+      await h.dispatch(a, "new_lead", HOT_ESC);
+      expect(jevCalls).toBe(0);
+      expect(await h.hotTextEvents()).toBe(0);
+      expect((await h.alertPass()).sent).toBe(0);
+    },
+  },
   {
     id: "43",
     name: "hot hold already alerted (sent), then a NON-hot number-source answer arrives through real dispatch: the hold is refreshed but its flag time and reason are unchanged, so no second alert",

@@ -35,6 +35,8 @@ export const NINE_REPLY_TEXT_NOT_APPROVED = "reply_text_not_approved";
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
 /** Hold reason when the lead is on My Leads under Jarrad but its 'assigned' event did not save (hot). */
 const HOT_LEAD_EVENT_FAILED_REASON = "hot_lead_event_failed";
+/** A hot text on a lead someone else owns whose alert event could not be saved (the lead was NOT moved to Jarrad). */
+const HOT_ALERT_EVENT_FAILED_REASON = "hot_alert_event_failed";
 
 import {
   recordStep,
@@ -498,11 +500,14 @@ export async function checkAiResponderDispatchPreGates(
     }
   }
   if (isTerminalAiResponderProperty(property)) {
-    // PR 2: a lead that already needs a person still gets ONE classify-only
-    // look so a new hot text reaches Jarrad: no reply, no drip, no
-    // disposition, no assignment change; non-hot exits exactly as before.
+    // PR 2: a lead that already needs a person, or carries a human-owned
+    // disposition (nurture / callback / booked), still gets ONE classify-only
+    // look so a new hot text reaches Jarrad (owner rule 2026-10-19: every hot
+    // reply alerts him): no reply, no drip, no disposition, no assignment
+    // change; non-hot exits exactly as before. True suppression (wrong / bad
+    // number, DNC, opted out) is refused inside classifyOnlyForHotText, and
     // DNC-locked leads are never classified.
-    if (property.needs_human_attention && !property.is_dnc_locked && input.inboundMessageId) {
+    if (!property.is_dnc_locked && input.inboundMessageId) {
       await classifyOnlyForHotText(supabase, input, property, runCtx);
     }
     await blocked("already_terminal");
@@ -7953,13 +7958,19 @@ async function handOffHotLead(
       ? { status: handoff.status, reason: handoff.reason }
       : handoff.status === "owned_by_someone_else"
         ? { status: handoff.status, owner_user_id: handoff.ownerUserId }
+        : handoff.status === "owned_by_someone_else_unrecorded"
+          ? { status: handoff.status, owner_user_id: handoff.ownerUserId, note: handoff.detail }
         : handoff.status === "assigned_unrecorded"
           ? { status: handoff.status, assignee_user_id: handoff.assigneeUserId, note: handoff.detail }
           : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
   }, runCtx);
-  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded") return null;
+  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded" && handoff.status !== "owned_by_someone_else_unrecorded") return null;
   // assigned_unrecorded: the lead IS on My Leads, but its note did not save; the hold keeps a person in the loop.
-  const reason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
+  const reason = handoff.status === "failed"
+    ? HOT_LEAD_ASSIGN_FAILED_REASON
+    : handoff.status === "owned_by_someone_else_unrecorded"
+      ? HOT_ALERT_EVENT_FAILED_REASON
+      : HOT_LEAD_EVENT_FAILED_REASON;
   let ourFlagAt: string | null = null;
   const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx, NO_GUARD, (at) => {
     ourFlagAt = at;

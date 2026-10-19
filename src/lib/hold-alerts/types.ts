@@ -185,8 +185,6 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
-  /** Send-time check: who the property is assigned to right now (null = nobody). */
-  loadPropertyAssignee(orgId: string, propertyId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

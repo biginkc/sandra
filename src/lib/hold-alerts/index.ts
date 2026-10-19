@@ -209,7 +209,6 @@ export async function loadHotPromotions(
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
   const addresses = new Map<string, string>();
-  const assignees = new Map<string, string | null>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
       .from("properties")
@@ -217,7 +216,6 @@ export async function loadHotPromotions(
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
     for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; assigned_user_id: string | null; contacts: { first_name: string | null } | null }>) {
-      assignees.set(p.id, p.assigned_user_id);
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
       const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
@@ -269,16 +267,6 @@ export function createHoldAlertDeps(
       return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
-    async loadPropertyAssignee(orgId, propertyId) {
-      const { data, error } = await db
-        .from("properties")
-        .select("assigned_user_id")
-        .eq("org_id", orgId)
-        .eq("id", propertyId)
-        .maybeSingle();
-      if (error) throw new Error(`assignment re-check failed: ${error.message}`);
-      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id ?? null;
-    },
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")

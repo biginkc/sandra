@@ -51,6 +51,8 @@ export type HotAssignResult =
   | { status: "assigned_unrecorded"; assigneeUserId: string; detail: string }
   /** A rep already owns the lead: left with them (not reassigned); Jarrad still gets one hot alert. */
   | { status: "owned_by_someone_else"; ownerUserId: string }
+  /** A rep owns the lead (left with them), but Jarrad's hot-text alert event could not be saved. */
+  | { status: "owned_by_someone_else_unrecorded"; ownerUserId: string; detail: string }
   | { status: "failed"; reason: "no_hot_owner" | "not_found" | "dnc_locked" | "db_error"; detail?: string };
 
 type MembershipRow = {
@@ -215,7 +217,7 @@ async function hotTextOnOthersLead(
   });
   return ok
     ? { status: "owned_by_someone_else", ownerUserId: leadOwner }
-    : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
+    : { status: "owned_by_someone_else_unrecorded", ownerUserId: leadOwner, detail: "hot text event not recorded" };
 }
 
 async function findBySource(db: SupabaseClient<Database>, sourceType: string, sourceId: string): Promise<boolean | "error"> {
