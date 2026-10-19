@@ -231,8 +231,7 @@ export async function loadHotPromotions(
     if (!to && !failed) continue;
     // An open hot hold already pinged Jarrad about this lead.
     if (r.payload?.covered_by_hold === true) continue;
-    // A hand-off counts only while the lead really is assigned to that person.
-    if (r.source_type === HOT_HANDOFF_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
+    // Assignment never gates a hot alert (owner decision 2026-10-19): Jarrad gets it whoever has the lead.
     promotions.push({
       propertyId: r.property_id,
       assigneeUserId: to ?? "",

@@ -46,73 +46,45 @@ describe("promotions need the resolved hot owner, like holds", () => {
     expect(reportError).toHaveBeenCalled();
   });
 
-  it("a promotion assigned to someone other than the resolved owner sends nothing", async () => {
+  it("a promotion recorded for another user still alerts the resolved hot owner (Jarrad gets every hot alert)", async () => {
     const t = setup({ promotions: [{ ...promotion, assigneeUserId: "owner-2" }] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(t.store.rows).toEqual([]);
+    expect(chans(t).map((s) => [s.channel, s.userId])).toEqual([["slack", OWNER.userId], ["sms", OWNER.userId]]);
   });
 
-  it("a rep owns it at send time: both rows skipped 'owned_by_someone_else' (final), nothing sent, and a later pass sends nothing", async () => {
-    const asked: Array<[string, string]> = [];
-    const t = setup({
-      promotions: [promotion],
-      loadPropertyAssignee: async (org, property) => {
-        asked.push([org, property]);
-        return "rep-1";
-      },
-    });
+  it("a rep owns the lead at send time: Jarrad is still alerted once, and a later pass sends nothing more", async () => {
+    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => "rep-1" });
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(summary.skipped).toBe(2);
-    expect(t.store.rows.map((r) => [r.channel, r.status, r.lastError])).toEqual([
-      ["slack", "skipped", "owned_by_someone_else"],
-      ["sms", "skipped", "owned_by_someone_else"],
-    ]);
-    expect(asked[0]).toEqual([ORG, "prop-9"]);
+    expect(summary.sent).toBe(2);
+    expect(chans(t).map((s) => [s.channel, s.userId])).toEqual([["slack", OWNER.userId], ["sms", OWNER.userId]]);
     t.setNow("2026-10-15T14:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
+    expect(chans(t)).toHaveLength(2);
   });
 
-  it("loadPropertyAssignee throws: both rows failed but retryable (not terminal), nothing sent, delivered on a later pass", async () => {
-    let broken = true;
+  it("the assignee lookup is never needed to send: a broken lookup does not block the alert", async () => {
     const t = setup({
       promotions: [promotion],
       loadPropertyAssignee: async () => {
-        if (broken) throw new Error("re-check down");
-        return OWNER.userId;
+        throw new Error("re-check down");
       },
     });
     const first = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(first.failed).toBe(2);
-    expect(t.store.rows.map((r) => [r.channel, r.status, r.attempts, r.lastError])).toEqual([
-      ["slack", "failed", 1, "re-check down"],
-      ["sms", "failed", 1, "re-check down"],
-    ]);
-    broken = false;
-    t.setNow("2026-10-15T12:05:00.000Z");
-    const second = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(second.sent).toBe(2);
+    expect(first.sent).toBe(2);
     expect(t.sent.map((s) => s.channel)).toEqual(["slack", "sms"]);
-    expect(t.store.rows.every((r) => r.status === "sent" && r.attempts === 2)).toBe(true);
-    // And never again.
-    t.setNow("2026-10-15T12:10:00.000Z");
-    await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toHaveLength(2);
   });
 
   it("the owner re-check runs before any provider call", async () => {
     const order: string[] = [];
     const t = setup({
       promotions: [promotion],
-      loadPropertyAssignee: async () => (order.push("recheck"), OWNER.userId),
       sendSlack: async () => (order.push("slack"), { status: "sent" }),
       sendSms: async () => (order.push("sms"), { status: "sent" }),
     });
+    const owner = t.deps.loadHotOwner;
+    t.deps.loadHotOwner = async (org) => (order.push("owner"), owner(org));
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(order).toEqual(["recheck", "slack", "recheck", "sms"]);
+    expect(order).toEqual(["owner", "owner", "slack", "owner", "sms"]);
   });
 });
 
@@ -318,23 +290,18 @@ describe("one alert per hot event", () => {
     expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(2);
   });
 
-  it("a promotion whose lead was unassigned since: skipped not_assigned (final), nothing sent, never retried", async () => {
-    let assignee: string | null = null;
-    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => assignee });
+  it("a promotion whose lead is unassigned still alerts Jarrad once", async () => {
+    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => null });
     const first = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["skipped", "not_assigned"], ["skipped", "not_assigned"]]);
-    expect(first.failed).toBe(0);
-    assignee = OWNER.userId;
+    expect(first.sent).toBe(2);
     t.setNow("2026-10-15T12:05:00.000Z");
     expect((await runHoldAlertsForOrg(t.deps, ORG)).sent).toBe(0);
   });
 
-  it("a hot HOLD on a rep-owned property is skipped owned_by_someone_else: nothing sent", async () => {
+  it("a hot HOLD on a rep-owned property still alerts Jarrad", async () => {
     const t = setup({ holds: [hotHold("2026-10-15T11:00:00.000Z")], loadPropertyAssignee: async () => "rep-1" });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(t.store.rows.map((r) => [r.status, r.lastError])).toEqual([["skipped", "owned_by_someone_else"], ["skipped", "owned_by_someone_else"]]);
+    expect(chans(t).map((s) => [s.channel, s.userId])).toEqual([["slack", OWNER.userId], ["sms", OWNER.userId]]);
   });
 });
 
@@ -349,11 +316,10 @@ describe("design B hot holds and failed hand-offs", () => {
     expect(keys(t)).toEqual(["hot_failed:in-1"]);
   });
 
-  it("a failed hand-off on a rep-owned lead is skipped owned_by_someone_else", async () => {
+  it("a failed hand-off on a rep-owned lead still alerts Jarrad", async () => {
     const t = setup({ promotions: [failedPromo], loadPropertyAssignee: async () => "rep-1" });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(chans(t)).toEqual([]);
-    expect(t.store.rows.map((r) => r.lastError)).toEqual(["owned_by_someone_else", "owned_by_someone_else"]);
+    expect(chans(t).map((s) => s.channel).sort()).toEqual(["slack", "sms"]);
   });
 
   it("a failed hand-off whose FLAG is the failure is a normal hot flag hold: hot_flag:<property>:<flagAt>, even with a later run for another text", async () => {
