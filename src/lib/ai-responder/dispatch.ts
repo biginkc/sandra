@@ -3105,11 +3105,16 @@ export async function runApprovedTemplateStep(
 }
 
 /**
- * Classify-only for an inbound on a property that already needs a person.
+ * Classify-only for an inbound on a property Sandra will not reply to: one that
+ * already needs a person, OR one with a human-owned disposition (nurture,
+ * callback_requested, booked_appointment) even when it is not flagged.
+ * True suppression (wrong_number, bad_number, dnc, opted_out) never gets here.
  * With Jev automatic, one classification and the shared hot routing decision;
- * hot → one hot_text event (alerted to Jarrad by the cron, subject to the
- * usual cover / owner / cap / cutoff rules). Never sends, enrols, disposes or
- * assigns. Any failure here changes nothing (the lead is already held).
+ * hot → one hot_text event (alerted to Jarrad by the cron, whoever owns the
+ * lead, subject to the usual cover / cap / cutoff rules). Never sends, enrols,
+ * disposes or assigns. A failed write releases the claim; on a held lead the
+ * hold keeps a person in the loop, but on an UNFLAGGED lead nothing else
+ * records it, so it is only retried if the same inbound is replayed.
  */
 async function classifyOnlyForHotText(
   supabase: SupabaseClient<Database>,
