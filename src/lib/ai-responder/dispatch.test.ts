@@ -387,7 +387,10 @@ function createMockSupabase(state: MockState) {
       if (!predicate(row)) return false;
     }
     for (const [field, value] of filters.eq) {
-      if (row[field as keyof MessageRow] !== value) {
+      const actual = field.startsWith("metadata->>")
+        ? (row.metadata ?? {})[field.slice("metadata->>".length)]
+        : row[field as keyof MessageRow];
+      if (actual !== value) {
         return false;
       }
     }
@@ -9333,6 +9336,70 @@ describe("approved number-source reply (asked_how_number_obtained)", () => {
       };
       expect(await mkStep("number_source")).toMatchObject({ kind: "continue", replyKey: "number_source", hold: "number_source_awaiting_answer" });
       expect(await mkStep("nurture")).toMatchObject({ kind: "continue", replyKey: "nurture", hold: null });
+    });
+
+    describe("never repeats an approved template on the same property", () => {
+      const notInterestedStep = async (prior: { templateId: string; body: string; propertyId: string } | null) => {
+        const state = createMockState();
+        installSendMock(state);
+        bothMapped("not_interested");
+        vi.mocked(sendSmsToContact).mockClear();
+        state.config.classifier_provider = "jev";
+        const supabase = createMockSupabase(state);
+        if (prior) {
+          state.messages.push({
+            id: "earlier-template-reply",
+            body: prior.body,
+            channel: "sms",
+            contact_id: CONTACT_ID,
+            conversation_id: CONVERSATION_ID,
+            created_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+            direction: "outbound",
+            metadata: { reply_source: "approved_template", template_id: prior.templateId, reply_key: "not_interested" },
+            property_id: prior.propertyId,
+            sent_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+            status: "sent",
+          });
+        }
+        seedInboundMessage(state, { id: "inbound-repeat", body: "It's not for sale and won't be." });
+        const step = await runApprovedTemplateStep(supabase as never, {
+          input: { contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "It's not for sale and won't be.", inboundMessageId: "inbound-repeat", propertyId: PROPERTY_ID },
+          property: { id: PROPERTY_ID, org_id: "org-1" } as never,
+          ctx: { model: "m", outboundMode: "send", currentTurn: 1, claimStartedAt: null },
+          claim: { claimId: null },
+          outcome: "not_interested",
+          nativeConfidence: 0.97,
+          escalationReason: "not_applicable",
+          decidedBy: "nine_questions",
+        });
+        return { step, state };
+      };
+
+      it("the second not_interested on the same property: nothing sent, held as template_already_sent", async () => {
+        const { step, state } = await notInterestedStep({ templateId: "tpl-not_interested", body: OUTCOME_BODY, propertyId: PROPERTY_ID });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.messages.filter((m) => m.direction === "outbound")).toHaveLength(1);
+        expect(step).toMatchObject({ kind: "continue", outboundMessageId: null, notSentReason: "template_already_sent", hold: "reply_skipped:template_already_sent" });
+      });
+
+      it("the same text under another template id on the same property: nothing sent", async () => {
+        const { step } = await notInterestedStep({ templateId: "tpl-other", body: OUTCOME_BODY, propertyId: PROPERTY_ID });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(step).toMatchObject({ outboundMessageId: null, notSentReason: "template_already_sent" });
+      });
+
+      it("a different template on the same property: still sends", async () => {
+        const { step } = await notInterestedStep({ templateId: "tpl-nurture", body: "Some other approved text.", propertyId: PROPERTY_ID });
+        expect(sentBodies()).toEqual([OUTCOME_BODY]);
+        expect(step).toMatchObject({ kind: "continue", replyKey: "not_interested" });
+        expect((step as { outboundMessageId: string | null }).outboundMessageId).not.toBeNull();
+      });
+
+      it("the same template on a different property: sends", async () => {
+        const { step } = await notInterestedStep({ templateId: "tpl-not_interested", body: OUTCOME_BODY, propertyId: "other-property" });
+        expect(sentBodies()).toEqual([OUTCOME_BODY]);
+        expect((step as { outboundMessageId: string | null }).outboundMessageId).not.toBeNull();
+      });
     });
   });
 

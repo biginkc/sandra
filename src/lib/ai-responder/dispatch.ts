@@ -2870,6 +2870,41 @@ const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
+/** Not-sent reason: this approved template (or its exact text) already went to this property. */
+export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
+const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
+
+/**
+ * "yes" when an outbound on this property already carried this template id or this exact
+ * body, "no" when none did, "error" when either lookup failed (callers fail closed).
+ */
+async function templateAlreadySentToProperty(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  templateId: string,
+  body: string,
+): Promise<"yes" | "no" | "error"> {
+  const byTemplate = await supabase
+    .from("messages")
+    .select("id")
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .eq("metadata->>template_id", templateId)
+    .limit(1);
+  if (byTemplate.error || !Array.isArray(byTemplate.data)) return "error";
+  if (byTemplate.data.length > 0) return "yes";
+  const byBody = await supabase
+    .from("messages")
+    .select("id")
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .eq("body", body)
+    .limit(1);
+  if (byBody.error || !Array.isArray(byBody.data)) return "error";
+  return byBody.data.length > 0 ? "yes" : "no";
+}
+
 export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
@@ -3008,6 +3043,32 @@ export async function runApprovedTemplateStep(
     return alreadySent === "error"
       ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable"), notSentReason: "claim_unreadable" }
       : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
+  }
+
+  // Never repeat an approved template on the same property (owner rule): when this
+  // template, or the same text, already went out here, nothing is sent and a person
+  // looks. An unreadable history fails closed the same way.
+  const repeat = await templateAlreadySentToProperty(supabase, input.propertyId, resolved.templateId, resolved.body);
+  if (repeat !== "no") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: TEMPLATE_ALREADY_SENT,
+        ...(repeat === "error" ? { lookup: "failed" } : {}),
+      },
+    }, runCtx);
+    return {
+      kind: "continue",
+      outboundMessageId: null,
+      replyKey: null,
+      hold: notSent(TEMPLATE_ALREADY_SENT) ?? TEMPLATE_ALREADY_SENT_HOLD,
+      notSentReason: TEMPLATE_ALREADY_SENT,
+    };
   }
 
   let recorded = true;
