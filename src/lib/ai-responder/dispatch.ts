@@ -992,6 +992,17 @@ async function dispatchAiResponseCore(
     const numberSource = identityDelayDrop ? null : identityLookup.template;
     const identityNotSentReason = identityDelayDrop ?? identityLookup.askedNotSentReason;
     if (numberSource) {
+      const nsRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, numberSource.templateId, numberSource.body);
+      if (nsRepeat !== "no") {
+        return holdRepeatedReply(supabase, {
+          input,
+          claimId: responseClaim.claimId,
+          holdReason: `${NUMBER_SOURCE_NOT_SENT_PREFIX}${TEMPLATE_ALREADY_SENT}`,
+          lookup: nsRepeat,
+          detail: { templateId: numberSource.templateId, mappingId: numberSource.mappingId, replyKey: numberSource.key, via: "identity_interceptor" },
+          runCtx: deps.runContext,
+        });
+      }
       const sent = await sendResponderMessage(supabase, {
         runContext: deps.runContext,
         input,
@@ -1069,6 +1080,17 @@ async function dispatchAiResponseCore(
         flagOk: flagOk1,
       });
       return { outcome: "escalated", reason };
+    }
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      return holdRepeatedReply(supabase, {
+        input,
+        claimId: responseClaim.claimId,
+        holdReason: TEMPLATE_ALREADY_SENT_HOLD,
+        lookup: identityRepeat,
+        detail: { replyKind: "identity" },
+        runCtx: deps.runContext,
+      });
     }
     const outcome = await sendResponderMessage(supabase, {
       runContext: deps.runContext,
@@ -2098,6 +2120,7 @@ async function resolveAndApplyRoute(
     }
     case "auto_close_wrong_number":
       let wrongNumberTemplateMessageId: string | null = null;
+      let wrongNumberStepHold: string | null = null;
       // The seller asked how we got the number AND is the wrong contact: the
       // wrong-number reply is not sent (it would not answer the question, and
       // the number-source reply is never sent to a wrong contact); a person looks.
@@ -2128,6 +2151,7 @@ async function resolveAndApplyRoute(
         });
         if (step.kind === "stop") return step.outcome;
         wrongNumberTemplateMessageId = step.outboundMessageId;
+        wrongNumberStepHold = step.hold;
       }
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
@@ -2176,8 +2200,11 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      const wrongNumberHoldOk = wrongNumberNumberSourceAsked
-        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`, runCtx)
+      const wrongNumberHoldReason = wrongNumberNumberSourceAsked
+        ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`
+        : wrongNumberStepHold;
+      const wrongNumberHoldOk = wrongNumberHoldReason
+        ? await holdWithRetry(supabase, input.propertyId, wrongNumberHoldReason, runCtx)
         : true;
       const wrongNumberClaimError = dispositionClaimError(wrongNumberResult);
       await completeClaim(supabase, input.propertyId, {
@@ -2870,6 +2897,68 @@ const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
+/** Not-sent reason: this approved template (or its exact text) already went to this property. */
+export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
+const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
+
+/**
+ * "yes" when an outbound on this property already carried this template id or this exact
+ * body, "no" when none did, "error" when either lookup failed (callers fail closed).
+ * A row that failed before reaching the provider (status failed, no external id) never
+ * went out and does not count; pending / unknown / sent rows do.
+ */
+async function templateAlreadySentToProperty(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+  templateId: string | null,
+  body: string,
+): Promise<"yes" | "no" | "error"> {
+  const neverSent = (r: { status: string | null; external_id: string | null }) => r.status === "failed" && !r.external_id;
+  const base = () =>
+    supabase
+      .from("messages")
+      .select("id, status, external_id")
+      .eq("org_id", orgId)
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound");
+  if (templateId) {
+    const byTemplate = await base().eq("metadata->>template_id", templateId);
+    if (byTemplate.error || !Array.isArray(byTemplate.data)) return "error";
+    if (byTemplate.data.some((r) => !neverSent(r))) return "yes";
+  }
+  const byBody = await base().eq("body", body);
+  if (byBody.error || !Array.isArray(byBody.data)) return "error";
+  return byBody.data.some((r) => !neverSent(r)) ? "yes" : "no";
+}
+
+/**
+ * A fixed reply (template or identity text) this property already received: send nothing,
+ * trace the skip, hold for a person, settle the claim as escalated.
+ */
+async function holdRepeatedReply(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    claimId: string | null;
+    holdReason: string;
+    lookup: "yes" | "error";
+    detail: Record<string, unknown>;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "reply",
+    name: "template_reply",
+    result: "skipped",
+    detail: { ...a.detail, reason: TEMPLATE_ALREADY_SENT, ...(a.lookup === "error" ? { lookup: "failed" } : {}) },
+  }, a.runCtx);
+  const flagOk = await holdWithRetry(supabase, a.input.propertyId, a.holdReason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claimId, outcome: "escalated", flagOk });
+  return { outcome: "escalated", reason: a.holdReason };
+}
+
 export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
@@ -3008,6 +3097,32 @@ export async function runApprovedTemplateStep(
     return alreadySent === "error"
       ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable"), notSentReason: "claim_unreadable" }
       : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
+  }
+
+  // Never repeat an approved template on the same property (owner rule): when this
+  // template, or the same text, already went out here, nothing is sent and a person
+  // looks. An unreadable history fails closed the same way.
+  const repeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, resolved.templateId, resolved.body);
+  if (repeat !== "no") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: TEMPLATE_ALREADY_SENT,
+        ...(repeat === "error" ? { lookup: "failed" } : {}),
+      },
+    }, runCtx);
+    return {
+      kind: "continue",
+      outboundMessageId: null,
+      replyKey: null,
+      hold: notSent(TEMPLATE_ALREADY_SENT) ?? TEMPLATE_ALREADY_SENT_HOLD,
+      notSentReason: TEMPLATE_ALREADY_SENT,
+    };
   }
 
   let recorded = true;
@@ -7836,6 +7951,16 @@ export async function runNineQuestionsStep(
     if (input.replyDelayBypassed) return noReply(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) return noReply(`safety:${safety.reason}`);
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "skipped",
+        detail: { replyKind: "identity", reason: TEMPLATE_ALREADY_SENT, ...(identityRepeat === "error" ? { lookup: "failed" } : {}) },
+      }, runCtx);
+      return noReply(TEMPLATE_ALREADY_SENT);
+    }
     const sent = await sendResponderMessage(supabase, {
       runContext: runCtx,
       input,
