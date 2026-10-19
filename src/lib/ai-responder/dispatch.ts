@@ -3121,8 +3121,8 @@ async function classifyOnlyForHotText(
     // if the lead were not held. Any failed lookup or any gate → nothing.
     // Alert-only (nothing is sent), so only TRUE suppression blocks it
     // (wrong_number / bad_number / dnc / opted_out dispositions); human-owned
-    // dispositions (nurture, callback, booked) do not. The alert's send-time
-    // owner check keeps a rep's lead silent.
+    // dispositions (nurture, callback, booked) do not. A rep's lead still
+    // alerts Jarrad (owner decision 2026-10-19); the assignment is untouched.
     if (isSuppressed({ outreachDispo: property.outreach_dispo })) return;
     const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false, outreach_dispo: null });
     if (!silent.ok || silent.reason) return;

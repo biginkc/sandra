@@ -223,11 +223,8 @@ export async function runHoldAlertsForOrg(
     // Same fail-closed rule as holds: only to the resolved hot owner, who must be
     // the promotion's assignee AND still own the property when the send happens.
     if (hotOwner === null) continue;
-    // A failed hand-off has no assignee: it goes to the resolved hot owner.
-    // A failed hand-off, or a hot text on a lead that already needs a person,
-    // may be unassigned: it goes to the resolved hot owner.
-    const failedHandoff = p.kind === "hot_failed" || p.heldLead === true;
-    if (!failedHandoff && p.assigneeUserId !== hotOwner) continue;
+    // Owner decision 2026-10-19: every hot alert goes to Jarrad, whoever the
+    // lead is assigned to (or unassigned). Assignment never gates the alert.
     if (!hotRecipients.some((r) => r.userId === hotOwner)) continue;
     const owner = hotOwner;
     for (const channel of ["slack", "sms"] as const) {
@@ -237,16 +234,6 @@ export async function runHoldAlertsForOrg(
           // Before any provider call, so a failed check is cleanly retryable.
           const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
           if (ownerCheck) return ownerCheck;
-          let assignee: string | null;
-          try {
-            assignee = await deps.loadPropertyAssignee(orgId, p.propertyId);
-          } catch (error) {
-            return { status: "failed", error: error instanceof Error ? error.message : String(error) };
-          }
-          // A rep has it now: final, no alert to Jarrad.
-          if (assignee !== null && assignee !== owner) return { status: "skipped", reason: "owned_by_someone_else" };
-          // Unassigned since: nothing to tell him (final). A failed hand-off is unassigned by design.
-          if (assignee === null && !failedHandoff) return { status: "skipped", reason: "not_assigned" };
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
@@ -263,14 +250,7 @@ export async function runHoldAlertsForOrg(
           send: async () => {
             const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
             if (ownerCheck) return ownerCheck;
-            // A lead a rep owns never pings Jarrad, for any hot kind.
-            let assignee: string | null;
-            try {
-              assignee = await deps.loadPropertyAssignee(orgId, hold.propertyId);
-            } catch (error) {
-              return { status: "failed", error: error instanceof Error ? error.message : String(error) };
-            }
-            if (assignee !== null && assignee !== r.userId) return { status: "skipped", reason: "owned_by_someone_else" };
+            // Every hot hold pings Jarrad, whoever has the lead (owner decision 2026-10-19).
             return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
           },
           requireOwner: true,

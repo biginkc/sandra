@@ -49,7 +49,7 @@ export type HotAssignResult =
   | { status: "already_owned"; assigneeUserId: string }
   /** The lead IS on My Leads under Jarrad, but the 'assigned' event could not be saved. */
   | { status: "assigned_unrecorded"; assigneeUserId: string; detail: string }
-  /** A rep already owns the lead: left with them, no hold, no alert to Jarrad. */
+  /** A rep already owns the lead: left with them (not reassigned); Jarrad still gets one hot alert. */
   | { status: "owned_by_someone_else"; ownerUserId: string }
   | { status: "failed"; reason: "no_hot_owner" | "not_found" | "dnc_locked" | "db_error"; detail?: string };
 
@@ -126,8 +126,9 @@ export async function assignHotLeadToOwner(
 
     const previous = property.assigned_user_id;
     if (previous === owner) return hotTextOn(db, propertyId, owner, inbound, coveredByHold);
-    // A rep owns it: leave it with them. Not a failure, no hold, no alert to Jarrad.
-    if (previous !== null) return { status: "owned_by_someone_else", ownerUserId: previous };
+    // A rep owns it: leave it with them (never reassigned), but Jarrad is still
+    // alerted (owner decision 2026-10-19: every hot text alerts him, whoever has the lead).
+    if (previous !== null) return hotTextOnOthersLead(db, propertyId, owner, previous, inbound, coveredByHold);
 
     // Guarded assignment; the `assigned` event ONLY when THIS update made it.
     const { data: saved, error } = await db
@@ -154,7 +155,7 @@ export async function assignHotLeadToOwner(
         return hotTextOn(db, propertyId, owner, inbound, coveredByHold);
       }
       return now?.assigned_user_id
-        ? { status: "owned_by_someone_else", ownerUserId: now.assigned_user_id }
+        ? hotTextOnOthersLead(db, propertyId, owner, now.assigned_user_id, inbound, coveredByHold)
         : { status: "failed", reason: "db_error", detail: "assignment lost" };
     }
     const ok = await recordOnce(db, {
@@ -189,6 +190,31 @@ async function hotTextOn(
   });
   return ok
     ? { status: "already_owned", assigneeUserId: owner }
+    : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
+}
+
+/**
+ * A hot text on a lead someone else owns: the assignment is left alone, and one
+ * hot_text event (alert recipient = Jarrad) is recorded, unless an open hot hold
+ * already pinged him. held_lead lets the alert go out although he is not the assignee.
+ */
+async function hotTextOnOthersLead(
+  db: SupabaseClient<Database>,
+  propertyId: string,
+  owner: string,
+  leadOwner: string,
+  inbound: string,
+  coveredByHold: boolean,
+): Promise<HotAssignResult> {
+  const ok = await recordOnce(db, {
+    propertyId,
+    eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+    payload: { to: owner, reason: "hot_seller_text", covered_by_hold: coveredByHold, held_lead: true, lead_owner: leadOwner },
+    sourceType: HOT_TEXT_SOURCE_TYPE,
+    sourceId: inbound,
+  });
+  return ok
+    ? { status: "owned_by_someone_else", ownerUserId: leadOwner }
     : { status: "assigned_unrecorded", assigneeUserId: owner, detail: "hot text event not recorded" };
 }
 
@@ -305,8 +331,9 @@ async function isCoveredByHotHold(
 /**
  * A hot text on a lead that already needs a person (dispatch's classify-only
  * step). One `hot_seller_text` event per inbound, flagged `held_lead`, to the
- * resolved hot owner; nothing is assigned. A rep's or DNC-locked lead, or an
- * unresolved owner, records nothing ("skipped"); a failed ledger write is
+ * resolved hot owner; nothing is assigned. Whoever owns the lead, Jarrad is
+ * alerted (owner decision 2026-10-19). A DNC-locked lead or an unresolved
+ * owner records nothing ("skipped"); a failed ledger write is
  * "write_failed" so the caller keeps the inbound retryable.
  */
 export async function recordHotTextOnHeldLead(
@@ -325,7 +352,6 @@ export async function recordHotTextOnHeldLead(
   if (!property || property.deleted_at || property.is_dnc_locked) return "skipped";
   const owner = await resolveHotOwner(db, property.org_id, env).catch(() => null);
   if (!owner) return "skipped";
-  if (property.assigned_user_id && property.assigned_user_id !== owner) return "skipped";
   const coveredByHold = await isCoveredByHotHold(db, property, owner);
   const ok = await recordOnce(db, {
     propertyId,

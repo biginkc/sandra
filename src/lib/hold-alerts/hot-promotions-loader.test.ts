@@ -319,12 +319,12 @@ describe("loadHotPromotions: keys and assignee guard", () => {
     expect(promotions.map((p) => p.key)).toEqual(["hot_handoff:in-1"]);
   });
 
-  it("drops a hand-off whose property is now assigned to someone else (or nobody); hot texts are not dropped", async () => {
+  it("keeps a hand-off whose property is now assigned to someone else (or nobody): assignment never gates a hot alert", async () => {
     const hand = events(3);
     const text = events(1, { sourceType: HOT_TEXT_SOURCE_TYPE }).map((e) => ({ ...e, id: "t0", property_id: "prop-t", source_id: "in-t" }));
     const { db } = fakeDb([...hand, ...text], { assignees: { "prop-0": "rep-1", "prop-1": null, "prop-t": "rep-1" } });
     const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
-    expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-2", "prop-t"]);
+    expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-0", "prop-1", "prop-2", "prop-t"]);
   });
 });
 

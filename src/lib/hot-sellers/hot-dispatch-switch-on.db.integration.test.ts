@@ -655,7 +655,7 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     expect(await count("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [s.propertyId])).toBe(0);
   }, 120_000);
 
-  it("a lead a rep owns: a hot text (model:hot_lead hold) pings nobody and texts the seller nothing", async () => {
+  it("a lead a rep owns: a hot text (model:hot_lead hold) pings Jarrad once, leaves the rep assigned, texts the seller nothing", async () => {
     resetMockState();
     installFakeJev();
     const s = await seedScenario({ repAssigned: true });
@@ -664,9 +664,10 @@ describe("hot seller: full dispatch with the new_lead switch on (real database, 
     await dispatchWith(s, s.inboundMessageId, s.body);
     expect((await admin.from("properties").select("assigned_user_id").eq("id", s.propertyId).single()).data?.assigned_user_id).toBe(s.member);
     const alerts = await runHoldAlertsForOrg(deps, s.orgId);
-    expect(alerts.sent).toBe(0);
-    expect(sent).toEqual([]);
+    expect(alerts.sent).toBe(2);
+    expect(sent.map((x) => x.channel).sort()).toEqual(["slack", "sms"]);
     expect(await count("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound'", [s.propertyId])).toBe(0);
-    expect(await count("select count(*)::int as n from public.hold_alert_deliveries where org_id = $1 and status = 'sent'", [s.orgId])).toBe(0);
+    expect(await count("select count(*)::int as n from public.hold_alert_deliveries where org_id = $1 and status = 'sent'", [s.orgId])).toBe(2);
+    expect((await runHoldAlertsForOrg(deps, s.orgId)).sent).toBe(0);
   }, 120_000);
 });
