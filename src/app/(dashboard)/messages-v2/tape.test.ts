@@ -130,6 +130,14 @@ describe("deriveTape", () => {
     expect(v.kind === "decided" && v.did).not.toContain("On My Leads under Jarrad, but");
   });
 
+  it("a rep's lead whose alert note did not save never claims it is under Jarrad or handed off", () => {
+    const steps = [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "applied", { status: "owned_by_someone_else_unrecorded", owner_user_id: "rep", note: "hot text event not recorded" })];
+    const v = deriveTape(run({ status: "escalated", steps }), "Sue");
+    expect(v.kind === "decided" && v.did).toContain("Hot reply on someone else's lead. Jarrad was alerted, but the note didn't save. A person should take a look.");
+    expect(v.kind === "decided" && v.did).not.toContain("under Jarrad");
+    expect(v.kind === "decided" && v.did).not.toContain("Handed to Jarrad");
+  });
+
   it("a failed hand-off says so", () => {
     const v = deriveTape(
       run({ status: "escalated", steps: [step(1, "jev", "classify", "pass", { outcome: "new_lead" }), step(2, "action", "promote_new_lead", "applied"), step(3, "action", "assign_hot_lead", "error")] }),

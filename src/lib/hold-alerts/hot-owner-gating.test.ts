@@ -53,25 +53,13 @@ describe("promotions need the resolved hot owner, like holds", () => {
   });
 
   it("a rep owns the lead at send time: Jarrad is still alerted once, and a later pass sends nothing more", async () => {
-    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => "rep-1" });
+    const t = setup({ promotions: [promotion] });
     const summary = await runHoldAlertsForOrg(t.deps, ORG);
     expect(summary.sent).toBe(2);
     expect(chans(t).map((s) => [s.channel, s.userId])).toEqual([["slack", OWNER.userId], ["sms", OWNER.userId]]);
     t.setNow("2026-10-15T14:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t)).toHaveLength(2);
-  });
-
-  it("the assignee lookup is never needed to send: a broken lookup does not block the alert", async () => {
-    const t = setup({
-      promotions: [promotion],
-      loadPropertyAssignee: async () => {
-        throw new Error("re-check down");
-      },
-    });
-    const first = await runHoldAlertsForOrg(t.deps, ORG);
-    expect(first.sent).toBe(2);
-    expect(t.sent.map((s) => s.channel)).toEqual(["slack", "sms"]);
   });
 
   it("the owner re-check runs before any provider call", async () => {
@@ -291,7 +279,7 @@ describe("one alert per hot event", () => {
   });
 
   it("a promotion whose lead is unassigned still alerts Jarrad once", async () => {
-    const t = setup({ promotions: [promotion], loadPropertyAssignee: async () => null });
+    const t = setup({ promotions: [promotion] });
     const first = await runHoldAlertsForOrg(t.deps, ORG);
     expect(first.sent).toBe(2);
     t.setNow("2026-10-15T12:05:00.000Z");
@@ -299,7 +287,7 @@ describe("one alert per hot event", () => {
   });
 
   it("a hot HOLD on a rep-owned property still alerts Jarrad", async () => {
-    const t = setup({ holds: [hotHold("2026-10-15T11:00:00.000Z")], loadPropertyAssignee: async () => "rep-1" });
+    const t = setup({ holds: [hotHold("2026-10-15T11:00:00.000Z")] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t).map((s) => [s.channel, s.userId])).toEqual([["slack", OWNER.userId], ["sms", OWNER.userId]]);
   });
@@ -310,14 +298,14 @@ describe("design B hot holds and failed hand-offs", () => {
   const keys = (t: ReturnType<typeof setup>) => [...new Set(t.store.rows.map((r) => r.holdKey))].sort();
 
   it("a failed hand-off alerts the resolved hot owner (no assignee), one Slack + one SMS", async () => {
-    const t = setup({ promotions: [failedPromo], loadPropertyAssignee: async () => null });
+    const t = setup({ promotions: [failedPromo] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t).map((s) => s.channel).sort()).toEqual(["slack", "sms"]);
     expect(keys(t)).toEqual(["hot_failed:in-1"]);
   });
 
   it("a failed hand-off on a rep-owned lead still alerts Jarrad", async () => {
-    const t = setup({ promotions: [failedPromo], loadPropertyAssignee: async () => "rep-1" });
+    const t = setup({ promotions: [failedPromo] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(chans(t).map((s) => s.channel).sort()).toEqual(["slack", "sms"]);
   });

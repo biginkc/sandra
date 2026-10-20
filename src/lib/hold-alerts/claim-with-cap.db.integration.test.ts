@@ -218,7 +218,6 @@ describe("two concurrent runHoldAlertsForOrg passes with 9 SMS already sent", ()
           recipients: [{ userId, role: "owner" }],
           nowIso: new Date().toISOString(),
           hotOwner: userId,
-          loadPropertyAssignee: async () => userId,
         });
       const a = make(holds);
       const b = make([...holds].reverse());

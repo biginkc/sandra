@@ -220,8 +220,8 @@ export async function runHoldAlertsForOrg(
   // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
   // property_id null so archive-on-clear never re-fires a key.
   for (const p of promotions) {
-    // Same fail-closed rule as holds: only to the resolved hot owner, who must be
-    // the promotion's assignee AND still own the property when the send happens.
+    // Same fail-closed rule as holds: only to the resolved hot owner (re-checked
+    // before each send). Who the lead is assigned to never matters.
     if (hotOwner === null) continue;
     // Owner decision 2026-10-19: every hot alert goes to Jarrad, whoever the
     // lead is assigned to (or unassigned). Assignment never gates the alert.

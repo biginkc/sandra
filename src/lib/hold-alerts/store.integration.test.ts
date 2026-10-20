@@ -162,7 +162,7 @@ describe("archiveClosed with a full window of open holds", () => {
     const store = createSupabaseDeliveryStore(admin());
     const recipient = { userId, role: "owner" as const };
     const pass = (holds: ReturnType<typeof hold>[]) => {
-      const t = makeDeps({ store: store as never, holds, recipients: [recipient], hotOwner: userId, loadPropertyAssignee: async () => userId, nowIso: new Date().toISOString() });
+      const t = makeDeps({ store: store as never, holds, recipients: [recipient], hotOwner: userId, nowIso: new Date().toISOString() });
       return runHoldAlertsForOrg(t.deps, orgId).then((s) => ({ s, t }));
     };
     return { first: await pass([h]), again: await pass([h]), closed: await pass([]), reopened: await pass([h]) };

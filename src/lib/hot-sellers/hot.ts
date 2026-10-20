@@ -17,6 +17,7 @@ export const HOT_HANDOFF_FAILED_REASONS: readonly string[] = [
   "jev_new_lead_promotion_failed",
   "hot_lead_assign_failed",
   "hot_lead_event_failed",
+  "hot_alert_event_failed",
 ];
 
 /**

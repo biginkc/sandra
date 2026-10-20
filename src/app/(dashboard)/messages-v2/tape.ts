@@ -171,6 +171,9 @@ function didLine(run: RunWithSteps, stage: TapeStage, replySent: boolean): strin
         ? `Already on My Leads under Jarrad · Slack and text sent ${chicagoClock(run.hotAlertSentAt)}`
         : "Already on My Leads under Jarrad",
     );
+  } else if (handoffStatus === "owned_by_someone_else_unrecorded") {
+    // Owner-approved copy (Jarrad 2026-10-20).
+    parts.push("Hot reply on someone else's lead. Jarrad was alerted, but the note didn't save. A person should take a look.");
   } else if (handoffStatus === "assigned_unrecorded") {
     const note = (handoff?.detail as { note?: string } | null | undefined)?.note ?? "";
     parts.push(

@@ -2532,6 +2532,33 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
+  it("hot seller: a rep owns the lead and Jarrad's alert event did not save -> held with its own reason hot_alert_event_failed (never claims the lead is under Jarrad), no reply", async () => {
+    hotAssign.assign.mockResolvedValue({ status: "owned_by_someone_else_unrecorded", ownerUserId: "rep-1", detail: "hot text event not recorded" });
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-hot-rep-unrecorded", body: "Make me an offer" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "price_or_offer" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "Make me an offer",
+        inboundMessageId: "inbound-hot-rep-unrecorded", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "hot_alert_event_failed" });
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.last_ai_escalation_reason).toBe("hot_alert_event_failed");
+      expect(hotAssign.recordFailure).toHaveBeenCalledWith(supabase, PROPERTY_ID, "inbound-hot-rep-unrecorded", "hot_alert_event_failed", expect.any(String));
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
   it("hot seller: a lead Jarrad already owned (already_owned) is handed off quietly -> auto_closed, no reply, not held", async () => {
     hotAssign.assign.mockResolvedValue({ status: "already_owned", assigneeUserId: "owner-jarrad" });
     const state = createMockState();
