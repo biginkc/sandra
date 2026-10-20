@@ -3025,6 +3025,13 @@ export async function runApprovedTemplateStep(
      * byte for byte or nothing is sent (`reply_text_not_approved`).
      */
     requiredBody?: string;
+    /**
+     * Nine-question reply_and_drip only: a refusal ONLY because a send window is closed
+     * (property quiet hours in the send pipeline, recipient window in the send path or at
+     * the provider fence) comes back as `skipped:${NINE_WINDOW_CLOSED}` with no flag or
+     * dead letter, so the caller can defer it. Florida cap / unknown state still hold.
+     */
+    windowDeferrable?: boolean;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
@@ -3171,6 +3178,7 @@ export async function runApprovedTemplateStep(
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
+    ...(a.windowDeferrable ? { windowDeferrable: true } : {}),
     body: resolved.body,
     model: ctx.model,
     confidence: a.nativeConfidence ?? 1,
@@ -4501,6 +4509,8 @@ type ResponderSendArgs = {
    * Must not throw.
    */
   onProviderAccepted?: (messageId: string) => Promise<void>;
+  /** See runApprovedTemplateStep `windowDeferrable`; also makes the recipient window apply to an identity (llm) send. */
+  windowDeferrable?: boolean;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -5012,6 +5022,8 @@ type SendAttempt = {
   fenceRefusal: null | "lost" | "error" | "abandoned" | "revalidate";
   /** Why the fence's live re-validation refused (`fence:suppressed`, ...). */
   fenceReason?: string;
+  /** The recipient-window verdict's reason when the fence refused on it (`outside_window`, `florida_cap`, ...). */
+  fenceWindowWhy?: string;
 };
 
 class AttemptAbandoned extends Error {
@@ -5198,7 +5210,7 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
-  if (args.source === "approved_template") {
+  if (args.source === "approved_template" || args.windowDeferrable) {
     // The last word before the provider, AFTER every preflight read in
     // sendSmsToContact: the owner may have revoked / edited / deleted the
     // template and the recipient's window (or the Florida cap) may have
@@ -5210,8 +5222,12 @@ async function fenceProviderSubmit(
       attempt.fenceRefusal = "abandoned";
       return false;
     }
-    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
-    const approved = await templateStillApproved(supabase, args);
+    if (!window.ok) {
+      attempt.fenceWindowWhy = window.why;
+      return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    }
+    // An identity (llm) send has no library template to re-check.
+    const approved = args.source === "approved_template" ? await templateStillApproved(supabase, args) : true;
     if (pastDeadline()) {
       attempt.abandoned = true;
       attempt.fenceRefusal = "abandoned";
@@ -5382,6 +5398,8 @@ async function refuseOutsideRecipientWindow(
     result: "block",
     detail: { reason: verdict.why, state: verdict.state, localTime: verdict.localTime },
   }, args.runContext);
+  // Window-only refusal of a deferrable nine reply: nothing flagged, the caller defers.
+  if (args.windowDeferrable && verdict.why === "outside_window") return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
   await flagAndDeadLetterFor(supabase, args, "quiet_hours_recipient");
   return { outcome: "escalated", reason: "quiet_hours_recipient" };
 }
@@ -5505,7 +5523,7 @@ async function sendResponderMessageInner(
   // Template auto-sends are also gated on the RECIPIENT's local time (8am-9pm,
   // Florida 8am-8pm + 3 texts per 24h): the property's state is not where the
   // seller is. A refusal is a rule 7 exit (flag a human, text dead-lettered).
-  if (args.source === "approved_template") {
+  if (args.source === "approved_template" || args.windowDeferrable) {
     const refused = await refuseOutsideRecipientWindow(supabase, args);
     if (refused) return refused;
   }
@@ -6383,6 +6401,14 @@ async function deliverResponderMessage(
         result: "block",
         detail: { reason: attempt.fenceReason },
       }, args.runContext);
+      if (
+        args.windowDeferrable &&
+        attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT &&
+        attempt.fenceWindowWhy === "outside_window"
+      ) {
+        // At the fence this attempt's pending row already exists (and moved the revision once).
+        return { outcome: "skipped", reason: NINE_WINDOW_CLOSED_AT_FENCE };
+      }
       return {
         outcome: "skipped",
         reason:
@@ -6494,6 +6520,13 @@ async function deliverResponderMessage(
     return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
 
+  if (sendResult.status === "blocked_quiet_hours" && args.windowDeferrable) {
+    // The property's own window (checked inside the send, before any row is written):
+    // window-only, so a deferrable nine reply is deferred instead of flagged.
+    guard();
+    await trace(supabase, { kind: "gate", name: "quiet_hours", result: "block", detail: { deferrable: true } }, args.runContext);
+    return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
+  }
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     const reason = `send_blocked:${sendResult.status}`;
     await flagAndDeadLetterFor(supabase, args, reason, { guard });
@@ -7732,8 +7765,21 @@ const NINE_DEFER_HORIZON_SECONDS = 48 * 60 * 60;
  */
 export function isNineDeferrableNotSent(why: string, replyIneligibleReason?: string): boolean {
   if (why === "reply_ineligible") return replyIneligibleReason === "outside_business_hours";
-  return why === "quiet_hours_recipient:outside_window" || why === "delay_not_applied";
+  return (
+    why === "quiet_hours_recipient:outside_window" ||
+    why === "delay_not_applied" ||
+    // Late, window-only refusals from inside the send path / the provider fence.
+    why === NINE_WINDOW_CLOSED ||
+    why === `skipped:${NINE_WINDOW_CLOSED}` ||
+    why === NINE_WINDOW_CLOSED_AT_FENCE ||
+    why === `skipped:${NINE_WINDOW_CLOSED_AT_FENCE}`
+  );
 }
+
+/** A send refused ONLY because a send window is closed (see runApprovedTemplateStep `windowDeferrable`). */
+export const NINE_WINDOW_CLOSED = "nine_window_closed";
+/** The same, refused at the provider fence: this attempt's own pending row was written first. */
+export const NINE_WINDOW_CLOSED_AT_FENCE = "nine_window_closed_at_fence";
 
 /**
  * Seconds from `now` until both the property's business-hours window and the
@@ -7925,6 +7971,15 @@ async function maybeDeferNineReply(
   if (!a.input.inboundMessageId) return null;
   const count = a.input.nineDeferral?.count ?? 0;
   if (count >= NINE_DEFER_MAX) return null;
+  // The revision the deferred run must find. Our own refused pending row (fence refusal only)
+  // moved it exactly once; anything else moving it means the lead changed: hold, don't defer.
+  const ownRowBumps = why.endsWith(NINE_WINDOW_CLOSED_AT_FENCE) ? 1 : 0;
+  const { data: liveRev, error: liveRevError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", a.input.propertyId)
+    .maybeSingle();
+  if (liveRevError || !liveRev || liveRev.decision_context_revision !== decision.evaluationRevision + ownRowBumps) return null;
   const phone = await resolveSendDestinationPhone(supabase, a.input);
   const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
   if (delaySeconds === null) return null;
@@ -7961,7 +8016,7 @@ async function maybeDeferNineReply(
     delaySeconds,
     nineDeferral: {
       count: count + 1,
-      revision: decision.evaluationRevision,
+      revision: liveRev.decision_context_revision,
       result: decision.result,
       classificationRunId: decision.classificationRunId,
     },
@@ -8292,7 +8347,13 @@ export async function runNineQuestionsStep(
       claimStartedAt: templateCtx.claimStartedAt,
       outboundMode: templateCtx.outboundMode,
       replyKind: "identity",
+      // Recipient window re-checked in the send path and at the provider fence; a
+      // window-only refusal comes back unflagged so it can be deferred below.
+      windowDeferrable: true,
     });
+    if (sent.outcome === "skipped" && (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE)) {
+      return noReply(sent.reason);
+    }
     if (sent.outcome === "retry") {
       return settleClaimForSendOutcome(supabase, claim.claimId, { ...sent, reply: undefined }, {
         orgId: property.org_id,
@@ -8325,6 +8386,7 @@ export async function runNineQuestionsStep(
       escalationReason: "not_applicable",
       decidedBy: "nine_questions",
       requiredBody: APPROVED_REPLY_TEXTS[label],
+      windowDeferrable: true,
       runCtx,
     });
     if (step.kind === "stop") return step.outcome;

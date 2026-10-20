@@ -32,7 +32,15 @@ import type { AiRetryOutcome } from "./retry";
  * `npx vitest run --config vitest.local-integration.config.ts <this file>`.
  */
 // Windows are open unless a test closes one until a given moment (deferral tests).
-const windows = vi.hoisted(() => ({ businessClosedUntil: null as Date | null, recipientClosedUntil: null as Date | null }));
+const windows = vi.hoisted(() => ({
+  businessClosedUntil: null as Date | null,
+  recipientClosedUntil: null as Date | null,
+  /** "Window closes during preflight": the first N live recipient checks (no `at`) see it open. */
+  recipientOpenCalls: null as number | null,
+  recipientCalls: 0,
+  recipientUnknown: false,
+  floridaCapped: false,
+}));
 const openAt = (closedUntil: Date | null, at?: Date) => !closedUntil || (at ?? new Date()).getTime() >= closedUntil.getTime();
 vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
@@ -43,10 +51,18 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
 }));
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
-  checkRecipientQuietHours: (_phone: unknown, at?: Date) =>
-    openAt(windows.recipientClosedUntil, at)
+  checkRecipientQuietHours: (_phone: unknown, at?: Date) => {
+    if (windows.recipientUnknown) return { ok: false, reason: "unknown_recipient_state", state: null, localTime: null };
+    if (!at && windows.recipientOpenCalls !== null && ++windows.recipientCalls <= windows.recipientOpenCalls) {
+      return { ok: true, state: "MO", localTime: "20:59", florida: false };
+    }
+    if (windows.floridaCapped) return { ok: true, state: "FL", localTime: "12:00", florida: true };
+    return openAt(windows.recipientClosedUntil, at)
       ? { ok: true, state: "MO", localTime: "12:00", florida: false }
-      : { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" },
+      : { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" };
+  },
+  checkFloridaCap: (n: number | null) =>
+    windows.floridaCapped ? { ok: false, reason: "florida_cap", sentLast24h: n ?? 3 } : { ok: true },
 }));
 
 const supabase = createTestClient();
@@ -293,6 +309,10 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     jevOmit = [];
     windows.businessClosedUntil = null;
     windows.recipientClosedUntil = null;
+    windows.recipientOpenCalls = null;
+    windows.recipientCalls = 0;
+    windows.recipientUnknown = false;
+    windows.floridaCapped = false;
     // A schema-only throwaway database has no tenant rows: make sure the canonical org exists.
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (nine questions test)" });
     expect(orgError).toBeNull();
@@ -699,6 +719,96 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(last).toEqual({ outcome: "escalated", reason: "nine_reply_not_sent:reply_ineligible" });
     expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
     expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(true);
+  });
+
+  // ---- Send-window acceptance matrix (see the PR body). Every row: nothing reaches the provider.
+  const TEMPLATE = { not_interested: 0.85 } as const;
+  const IDENTITY = { asked_who: 0.9 } as const;
+  async function providerSends(propertyId: string) {
+    const { rows } = await pg.query("select count(*)::int as n from public.messages where property_id = $1 and direction = 'outbound' and external_id is not null", [propertyId]);
+    return (rows[0].n as number) + getMockMessageLog().length;
+  }
+  async function expectWindowDeferred(outcome: unknown, propertyId: string) {
+    const o = outcome as AiRetryOutcome;
+    expect(o.outcome).toBe("retry");
+    expect(o.reason).toBe("nine_reply_deferred");
+    expect(await providerSends(propertyId)).toBe(0);
+    const row = await propertyRow(propertyId);
+    expect(row.needs_human_attention).toBe(false);
+    const { rows } = await pg.query("select count(*)::int as n from public.ai_reply_dead_letters where property_id = $1", [propertyId]);
+    expect(rows[0].n).toBe(0);
+  }
+  async function expectWindowHeld(outcome: unknown, propertyId: string) {
+    expect((outcome as { outcome: string }).outcome).toBe("escalated");
+    expect(await providerSends(propertyId)).toBe(0);
+    expect((await propertyRow(propertyId)).needs_human_attention).toBe(true);
+  }
+  const answers = [["template", TEMPLATE, "No"], ["identity", IDENTITY, "who is this"]] as const;
+
+  it.each(answers)("matrix business hours (%s): deferred", async (_k, probs, text) => {
+    await seedOrg({ businessHoursOnly: true });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+  });
+
+  it.each(answers)("matrix early recipient window (%s): deferred", async (_k, probs, text) => {
+    await seedOrg();
+    windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+  });
+
+  it.each(answers)("matrix delay clamp delay_not_applied (%s): deferred", async (_k, probs, text) => {
+    await seedOrg();
+    const lead = await seedLead();
+    jevProbabilities = { ...probs };
+    const inbound = await seedThread(lead, text);
+    const outcome = await dispatchAiResponse(supabase, {
+      propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound.conversationId, inboundMessageId: inbound.id,
+      inboundBody: text, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY,
+      replyDelayBypassed: true, replyDelayBypassReason: "delay_not_applied",
+    }, { anthropic: NO_ANTHROPIC });
+    await expectWindowDeferred(outcome, lead.propertyId);
+  });
+
+  it.each(answers)("matrix property quiet hours inside the send pipeline, business_hours_only off (%s): deferred", async (_k, probs, text) => {
+    await seedOrg({ businessHoursOnly: false });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+  });
+
+  it.each(answers)("matrix recipient window closes during preflight, send-path check (%s): deferred", async (_k, probs, text) => {
+    await seedOrg();
+    windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    windows.recipientOpenCalls = 1; // the early check passes; the send path's check sees it closed
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+    expect(windows.recipientCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(answers)("matrix recipient window closes during preflight, provider fence (%s): deferred", async (_k, probs, text) => {
+    await seedOrg();
+    windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    windows.recipientOpenCalls = 2; // early + send-path checks pass; the fence sees it closed
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+    expect(windows.recipientCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each(answers)("matrix Florida cap (%s): held, never deferred", async (_k, probs, text) => {
+    await seedOrg();
+    windows.floridaCapped = true;
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowHeld(outcome, lead.propertyId);
+  });
+
+  it.each(answers)("matrix unknown recipient state (%s): held, never deferred", async (_k, probs, text) => {
+    await seedOrg();
+    windows.recipientUnknown = true;
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowHeld(outcome, lead.propertyId);
   });
 
   it("not a window problem (no delay configured): still held exactly as before", async () => {

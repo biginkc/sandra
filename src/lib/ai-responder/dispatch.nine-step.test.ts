@@ -97,7 +97,7 @@ beforeEach(() => {
 
 describe("nine-question deferral (mocked)", () => {
   it("outside business hours: a retry until the window opens, carrying the decision", async () => {
-    const { client } = fakeSupabase({ messages: [] });
+    const { client } = fakeSupabase({ messages: [], properties: [{ decision_context_revision: 7 }] });
     const out = (await runNineQuestionsStep(client, args())) as { outcome: string; reason: string; delaySeconds: number; nineDeferral: { count: number; revision: number; classificationRunId: string } };
     expect(out.outcome).toBe("retry");
     expect(out.reason).toBe("nine_reply_deferred");
