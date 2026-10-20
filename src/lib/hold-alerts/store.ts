@@ -89,6 +89,17 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return { alertsSince: (data as { alerts_since: string }).alerts_since, created: false };
     },
 
+    async getOrInitLeadRepliesSince(orgId, nowIso) {
+      // The alerts_since row exists already (getOrInitAlertsSince runs first in every pass).
+      const settings = () => db.from("hold_alert_settings");
+      const set = await settings().update({ lead_replies_since: nowIso }).eq("org_id", orgId).is("lead_replies_since", null).select("lead_replies_since");
+      if (set.error) fail("lead-reply watermark init", set.error);
+      const { data, error } = await settings().select("lead_replies_since").eq("org_id", orgId).single();
+      const value = (data as { lead_replies_since: string | null } | null)?.lead_replies_since;
+      if (error || !value) fail("lead-reply watermark select", error);
+      return value as string;
+    },
+
     async claim(row) {
       const { data, error } = await table()
         .update({ attempts: row.attempts + 1, status: "sending", sending_at: new Date().toISOString() })

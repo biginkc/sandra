@@ -64,3 +64,7 @@ export const hotFailedKey = (inboundMessageId: string): string => `hot_failed:${
  * the hot definition on does not page about weeks-old holds.
  */
 export const HOT_ALERTS_START_ISO = "2026-10-15T00:00:00.000Z";
+
+/** lead_reply:<inbound>  any text from a seller already on My Leads (owner decision 2026-10-20). */
+export const leadReplyKey = (inboundMessageId: string): string => `lead_reply:${inboundMessageId}`;
+

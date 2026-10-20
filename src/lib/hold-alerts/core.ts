@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -11,6 +11,7 @@ import {
   type HoldAlertDeps,
   type CapBucket,
   type HoldInfo,
+  type HotPromotion,
   type OrgAlertSummary,
 } from "./types";
 
@@ -188,7 +189,47 @@ export async function runHoldAlertsForOrg(
     });
   }
   const hotHolds = hotAlerts.filter((a) => isNewHold({ startedAt: a.at }, hotStartMs));
-  if (hotHolds.length === 0 && promotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
+  // Owner decision 2026-10-20: every text from a seller on My Leads alerts Jarrad,
+  // keyed lead_reply:<inbound>. A text that already alerts this pass as hot
+  // (hot_text / hot_handoff / hot_failed on the same inbound) sends only that one.
+  // Lead replies have their own watermark, set to now on the first pass that runs them: no deploy burst.
+  // A failure here (e.g. the column not migrated yet) skips lead replies for this
+  // pass only; hot alerts carry on.
+  let leadSince: string | null = null;
+  let leadWatermarkFailed = false;
+  if (deps.loadLeadReplies) {
+    try {
+      leadSince = await deps.store.getOrInitLeadRepliesSince(orgId, nowIso);
+    } catch (error) {
+      leadWatermarkFailed = true;
+      reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "lead_replies_since" } });
+    }
+  }
+  const leadLoaded =
+    deps.loadLeadReplies && leadSince
+      ? await deps.loadLeadReplies(orgId, Date.parse(leadSince) > alertsSinceMs ? leadSince : mark.alertsSince)
+      : { promotions: [], complete: !leadWatermarkFailed };
+  if (!leadLoaded.complete) {
+    reportError(new Error("hold alerts: lead-reply load incomplete; some lead texts may not have alerted yet"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+  }
+  const hotKeysThisPass = new Set([...promotions.map((p) => p.key), ...hotHolds.map((h) => h.key)]);
+  const leadStartMs = leadSince ? Date.parse(leadSince) : Number.NaN;
+  // A hot hold this pass covers a text that came at/before its hot flag on the
+  // same property, or the text its hot_text/hot_failed key names (the key check below).
+  const coveredByHotFlag = (p: HotPromotion) =>
+    hotHolds.some((h) => h.hold.propertyId === p.propertyId && !!h.hold.flagAt && Date.parse(h.hold.flagAt) >= Date.parse(p.assignedAt));
+  const leadReplies = leadLoaded.promotions.filter(
+    (p) =>
+      !!p.inboundId &&
+      isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) &&
+      isNewHold({ startedAt: p.assignedAt }, leadStartMs) &&
+      !coveredByHotFlag(p) &&
+      ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId)].some((k) => hotKeysThisPass.has(k)),
+  );
+  const alertPromotions = [...promotions, ...leadReplies];
+  if (hotHolds.length === 0 && alertPromotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
   const link = deps.baseUrl;
@@ -208,24 +249,24 @@ export async function runHoldAlertsForOrg(
   } catch (error) {
     reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "hot_owner" } });
   }
-  if (hotOwner === null && (hotHolds.length > 0 || promotions.length > 0)) {
+  if (hotOwner === null && (hotHolds.length > 0 || alertPromotions.length > 0)) {
     summary.hotOwnerUnknown = true;
     if (shouldReportOwnerUnknown(orgId, startMs)) reportError(new Error("hold alerts: couldn't tell who to alert for hot sellers; none sent"), {
       tags: { surface: "hold_alerts", orgId },
-      extra: { hotHolds: hotHolds.length, promotions: promotions.length },
+      extra: { hotHolds: hotHolds.length, promotions: alertPromotions.length },
     });
   }
   const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
   // One alert per hot EVENT (see "Alert and hand-off model" in PR #882):
   // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
   // property_id null so archive-on-clear never re-fires a key.
-  for (const p of promotions) {
+  const pushPromotion = (p: HotPromotion) => {
     // Same fail-closed rule as holds: only to the resolved hot owner (re-checked
     // before each send). Who the lead is assigned to never matters.
-    if (hotOwner === null) continue;
+    if (hotOwner === null) return;
     // Owner decision 2026-10-19: every hot alert goes to Jarrad, whoever the
     // lead is assigned to (or unassigned). Assignment never gates the alert.
-    if (!hotRecipients.some((r) => r.userId === hotOwner)) continue;
+    if (!hotRecipients.some((r) => r.userId === hotOwner)) return;
     const owner = hotOwner;
     for (const channel of ["slack", "sms"] as const) {
       tasks.push({
@@ -241,7 +282,9 @@ export async function runHoldAlertsForOrg(
         requireOwner: true,
       });
     }
-  }
+  };
+  // Hot alerts are queued first, so a backlog of lead replies can never delay one.
+  for (const p of promotions) pushPromotion(p);
   for (const { hold, key } of hotHolds) {
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
@@ -258,6 +301,7 @@ export async function runHoldAlertsForOrg(
       }
     }
   }
+  for (const p of leadReplies) pushPromotion(p);
   if (deps.emailEnabled && holds.length > 0) {
     const hourKey = `digest:${orgId}:${new Date(nowMs).toISOString().slice(0, 13)}`;
     const message: EmailMessage = digestMessage(holds, nowMs, link);
