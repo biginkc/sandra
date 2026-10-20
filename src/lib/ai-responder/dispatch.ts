@@ -3957,9 +3957,25 @@ export function resolveOutboundPolicy(args: {
   return { hold: false };
 }
 
-/** The identity reply is fixed approved text only when both its kind and its exact body match. */
-export function isApprovedFixedText(args: { replyKind?: string | null; body: string }): boolean {
-  return args.replyKind === "identity" && args.body === IDENTITY_REPLY_BODY;
+/**
+ * The nine-question identity send is fixed approved text only when the caller
+ * opted in explicitly AND it runs with the recipient-window/Florida-cap guards
+ * (windowDeferrable) AND both its kind and its exact body match. The legacy
+ * identity interceptor and carried retries never opt in, so they stay governed
+ * by the LLM-autosend switch.
+ */
+export function isApprovedFixedText(args: {
+  approvedFixedText?: boolean;
+  windowDeferrable?: boolean;
+  replyKind?: string | null;
+  body: string;
+}): boolean {
+  return (
+    args.approvedFixedText === true &&
+    args.windowDeferrable === true &&
+    args.replyKind === "identity" &&
+    args.body === IDENTITY_REPLY_BODY
+  );
 }
 
 /**
@@ -4524,6 +4540,12 @@ type ResponderSendArgs = {
   onProviderAccepted?: (messageId: string) => Promise<void>;
   /** See runApprovedTemplateStep `windowDeferrable`; also makes the recipient window apply to an identity (llm) send. */
   windowDeferrable?: boolean;
+  /**
+   * Nine-question identity send only: the body is the fixed human-approved
+   * IDENTITY_REPLY_BODY, so the LLM-autosend switch does not hold it (see
+   * isApprovedFixedText). Every other guard still applies.
+   */
+  approvedFixedText?: boolean;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -8455,6 +8477,8 @@ export async function runNineQuestionsStep(
       // Recipient window re-checked in the send path and at the provider fence; a
       // window-only refusal comes back unflagged so it can be deferred below.
       windowDeferrable: true,
+      // Fixed approved text, not model-written: exempt from AI_RESPONDER_LLM_AUTOSEND=0 only.
+      approvedFixedText: true,
     });
     if (
       sent.outcome === "skipped" &&

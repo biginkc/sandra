@@ -9727,10 +9727,13 @@ describe("resolveOutboundPolicy", () => {
     expect(resolveOutboundPolicy({ source: "llm", approvedFixedText: true })).toEqual({ hold: true, reason: "outbound_mode_hold" });
   });
 
-  it("isApprovedFixedText needs the identity kind AND the exact approved body", () => {
-    expect(isApprovedFixedText({ replyKind: "identity", body: IDENTITY_REPLY_BODY })).toBe(true);
-    expect(isApprovedFixedText({ replyKind: "identity", body: `${IDENTITY_REPLY_BODY} ` })).toBe(false);
-    expect(isApprovedFixedText({ replyKind: "send_reply", body: IDENTITY_REPLY_BODY })).toBe(false);
+  it("isApprovedFixedText needs the explicit opt-in, the window guards, the identity kind AND the exact approved body", () => {
+    const ok = { approvedFixedText: true, windowDeferrable: true, replyKind: "identity", body: IDENTITY_REPLY_BODY };
+    expect(isApprovedFixedText(ok)).toBe(true);
+    expect(isApprovedFixedText({ ...ok, approvedFixedText: undefined })).toBe(false);
+    expect(isApprovedFixedText({ ...ok, windowDeferrable: undefined })).toBe(false);
+    expect(isApprovedFixedText({ ...ok, body: `${IDENTITY_REPLY_BODY} ` })).toBe(false);
+    expect(isApprovedFixedText({ ...ok, replyKind: "send_reply" })).toBe(false);
   });
 
   it("LLM_AUTOSEND=0 holds only llm", () => {
@@ -10048,16 +10051,13 @@ describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", (
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
     });
 
-    it("asked_who still sends the approved identity reply when AI_RESPONDER_LLM_AUTOSEND=0 (fixed text, not model-written)", async () => {
+    it("the legacy identity interceptor (no recipient-window guards) is still held by AI_RESPONDER_LLM_AUTOSEND=0", async () => {
       const state = createMockState();
       installSendMock(state);
       vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
       try {
-        const result = await run(state, "in-id-autosend-off", "who is this?", { outcome: "unclear", confidence: 0.99 });
-        expect(JSON.stringify(result)).not.toMatch(/nine_reply_not_sent|draft_held/);
-        expect(sendSmsToContact).toHaveBeenCalledTimes(1);
-        expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
-        expect(state.aiReplyDrafts ?? []).toEqual([]);
+        await run(state, "in-id-autosend-off", "who is this?", { outcome: "unclear", confidence: 0.99 });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
       } finally {
         vi.unstubAllEnvs();
       }
