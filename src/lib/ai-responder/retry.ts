@@ -4,6 +4,8 @@ import { reportError } from "@/lib/errors/report";
 import { recordStep, type MaybeRunContext } from "@/lib/pipeline-runs";
 import type { Database } from "@/lib/supabase/types";
 
+import type { NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+
 import type { AiMessageMetadata } from "./types";
 
 /** Seconds before a contended / failed-to-persist reply is re-dispatched. */
@@ -38,7 +40,31 @@ export type RetryReason =
   | "send_lease_lost"
   | "send_preflight_timeout"
   | "reply_pending"
-  | "draft_persist_failed";
+  | "draft_persist_failed"
+  /**
+   * Nine-question reply_and_drip only: the approved reply could not go out
+   * only because the send window (business hours / recipient quiet hours /
+   * the delay clamp at the window's edge) was closed. The same inbound is
+   * dispatched again when the window next opens; it does not use up a retry
+   * attempt (see `NineDeferral`).
+   */
+  | "nine_reply_deferred";
+
+/**
+ * Carried on a `nine_reply_deferred` retry. `revision` is the property's
+ * decision_context_revision the deferring run decided on: the deferred run
+ * holds for a person when it moved (a new text, a takeover, a dispo change).
+ * `count` bounds how many times one inbound is deferred.
+ */
+export type NineDeferral = {
+  count: number;
+  revision: number;
+  /** The deferring run's decision, reused as-is (the revision check proves nothing changed): no second Jev call. */
+  result: NineQuestionResult;
+  classificationRunId: string;
+  /** Set when the provider fence refused because the lead changed: the next run decides from scratch. */
+  fresh?: boolean;
+};
 
 /**
  * The already-generated, already-safety-checked reply carried across a retry
@@ -70,6 +96,8 @@ export type AiRetryOutcome = {
   attempt: number;
   delaySeconds: number;
   reply?: RetryReply;
+  /** Present only for `nine_reply_deferred`. */
+  nineDeferral?: NineDeferral;
 };
 
 export function isRetryOutcome(value: { outcome: string }): value is AiRetryOutcome {

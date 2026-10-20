@@ -10,6 +10,7 @@ import {
   isRetryOutcome,
   recordRetryScheduled,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReply,
 } from "@/lib/ai-responder/retry";
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
@@ -32,6 +33,8 @@ export type AiReplyDelayParams = {
   retryAttempt?: number;
   /** The reply the previous attempt generated, re-sent verbatim (never logged). */
   retryReply?: RetryReply;
+  /** A nine-question reply deferred until the send window opens (never logged). */
+  nineDeferral?: NineDeferral;
 };
 
 async function dispatchStep(
@@ -61,6 +64,7 @@ async function dispatchStep(
         : {}),
       ...(params.retryAttempt ? { retryAttempt: params.retryAttempt } : {}),
       ...(params.retryReply ? { retryReply: params.retryReply } : {}),
+      ...(params.nineDeferral ? { nineDeferral: params.nineDeferral } : {}),
     },
     {
       anthropic: new Anthropic(),
@@ -102,16 +106,25 @@ export async function aiReplyDelayWorkflow(
   if (params.delaySeconds > 0) {
     await sleep(`${params.delaySeconds}s`);
   }
-  let outcome = await dispatchStep(params);
+  let current = params;
+  let outcome = await dispatchStep(current);
   // Bounded: dispatch itself returns a terminal outcome once retryAttempt
-  // reaches REPLY_RETRY_MAX (dead-letter + flag), so this loop always ends.
+  // reaches REPLY_RETRY_MAX (dead-letter + flag), and a nine-question deferral
+  // at most NINE_DEFER_MAX times, so this loop always ends.
   while (isRetryOutcome(outcome)) {
     await sleep(`${outcome.delaySeconds}s`);
-    outcome = await dispatchStep({
-      ...params,
+    current = {
+      // `current`, not the original params: a deferral (its count and its wait,
+      // which was the reply's delay, so the run is not a zero-delay send) carries
+      // forward through any ordinary retry that follows it.
+      ...current,
       retryAttempt: outcome.attempt,
       ...(outcome.reply ? { retryReply: outcome.reply } : {}),
-    });
+      ...(outcome.nineDeferral
+        ? { nineDeferral: outcome.nineDeferral, delaySeconds: outcome.delaySeconds }
+        : {}),
+    };
+    outcome = await dispatchStep(current);
   }
   return outcome;
 }

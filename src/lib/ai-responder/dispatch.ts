@@ -84,6 +84,7 @@ import {
   REPLY_RETRY_MAX,
   writeReplyDeadLetter,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReason,
   type RetryReply,
 } from "./retry";
@@ -104,7 +105,7 @@ import {
   runNineClassification,
   type NineDripResult,
 } from "./nine-questions-engine";
-import { actionForNineAnswer, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+import { actionForNineAnswer, NINE_REPEAT_NOT_INTERESTED_RULE, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
 import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
@@ -310,6 +311,10 @@ export type AiDispatchInput = {
   replyDelayBypassed?: boolean;
   /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
   replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
+  /** A nine-question reply deferred until the send window opened (see ./retry NineDeferral). */
+  nineDeferral?: NineDeferral;
+  /** A deferred run re-deciding from scratch: how many deferrals came before (loop bound only). */
+  nineDeferCount?: number;
 };
 
 export type AiDispatchOptions = {
@@ -833,6 +838,7 @@ async function dispatchAiResponseCore(
         config,
         currentTurn,
         deps.runContext,
+        decision.reason,
       );
       if (outcome) return outcome;
       // use_legacy — Jev had nothing actionable to apply (jev_no_action
@@ -1235,6 +1241,8 @@ async function classifyAndApplyDespiteReplyIneligibility(
   },
   currentTurn: number,
   runCtx?: MaybeRunContext,
+  /** Why no reply may be sent (the skip classifier's reason), e.g. `outside_business_hours`. */
+  replyIneligibleReason?: string,
 ): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
@@ -1256,6 +1264,9 @@ async function classifyAndApplyDespiteReplyIneligibility(
     config,
     responseClaim,
     runCtx,
+    undefined,
+    undefined,
+    replyIneligibleReason,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -1334,6 +1345,8 @@ async function classifyAndHandleNonRouteOutcomes(
   templateCtx?: TemplateStepContext,
   /** The identity check's classification of this same inbound: reused, never recomputed. */
   precomputed?: ClassificationBridgeResult | null,
+  /** Reply-ineligible path only: why no reply may be sent now. */
+  replyIneligibleReason?: string,
 ): Promise<
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
@@ -1343,7 +1356,15 @@ async function classifyAndHandleNonRouteOutcomes(
     if (config.classifier_mode === "automatic") {
       return {
         handled: true,
-        outcome: await runNineQuestionsStep(supabase, { input, property, claim: responseClaim, runCtx, templateCtx, escalationKeywords: config.escalation_keywords ?? null }),
+        outcome: await runNineQuestionsStep(supabase, {
+          input,
+          property,
+          claim: responseClaim,
+          runCtx,
+          templateCtx,
+          escalationKeywords: config.escalation_keywords ?? null,
+          ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+        }),
       };
     }
     // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
@@ -2913,6 +2934,23 @@ const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
  * A row that failed before reaching the provider (status failed, no external id) never
  * went out and does not count; pending / unknown / sent rows do.
  */
+/** The approved not-interested text went out to this property and the provider accepted it. */
+async function notInterestedReplyAccepted(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<"yes" | "no" | "error"> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, status, external_id")
+    .eq("org_id", orgId)
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .eq("body", APPROVED_REPLY_TEXTS.not_interested);
+  if (error || !Array.isArray(data)) return "error";
+  return data.some((r) => !!r.external_id && (r.status === "sent" || r.status === "delivered")) ? "yes" : "no";
+}
+
 async function templateAlreadySentToProperty(
   supabase: SupabaseClient<Database>,
   orgId: string,
@@ -2989,6 +3027,13 @@ export async function runApprovedTemplateStep(
      * byte for byte or nothing is sent (`reply_text_not_approved`).
      */
     requiredBody?: string;
+    /**
+     * Nine-question reply_and_drip only: a refusal ONLY because a send window is closed
+     * (property quiet hours in the send pipeline, recipient window in the send path or at
+     * the provider fence) comes back as `skipped:${NINE_WINDOW_CLOSED}` with no flag or
+     * dead letter, so the caller can defer it. Florida cap / unknown state still hold.
+     */
+    windowDeferrable?: boolean;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
@@ -3135,6 +3180,7 @@ export async function runApprovedTemplateStep(
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
+    ...(a.windowDeferrable ? { windowDeferrable: true } : {}),
     body: resolved.body,
     model: ctx.model,
     confidence: a.nativeConfidence ?? 1,
@@ -4465,6 +4511,8 @@ type ResponderSendArgs = {
    * Must not throw.
    */
   onProviderAccepted?: (messageId: string) => Promise<void>;
+  /** See runApprovedTemplateStep `windowDeferrable`; also makes the recipient window apply to an identity (llm) send. */
+  windowDeferrable?: boolean;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -4976,6 +5024,8 @@ type SendAttempt = {
   fenceRefusal: null | "lost" | "error" | "abandoned" | "revalidate";
   /** Why the fence's live re-validation refused (`fence:suppressed`, ...). */
   fenceReason?: string;
+  /** The recipient-window verdict's reason when the fence refused on it (`outside_window`, `florida_cap`, ...). */
+  fenceWindowWhy?: string;
 };
 
 class AttemptAbandoned extends Error {
@@ -5104,6 +5154,8 @@ async function renewSend(
  */
 const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
 const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+const FENCE_NINE_CONTEXT_CHANGED = "fence:nine_deferred_context_changed";
+const FENCE_PROPERTY_WINDOW = "fence:property_window";
 
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
@@ -5161,7 +5213,27 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
-  if (args.source === "approved_template") {
+  if (args.windowDeferrable) {
+    // The property's own window (business hours / quiet hours: the same checkQuietHours rule
+    // sendSmsToContact applies at its step 4, which runs BEFORE several awaits). Re-checked
+    // here so a deferrable nine reply cannot reach the provider after it closes.
+    const { data: prop, error: propError } = await supabase
+      .from("properties")
+      .select("state")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const propertyWindow = propError || !prop ? null : checkQuietHours(prop.state);
+    if (!propertyWindow || !propertyWindow.ok) {
+      attempt.fenceWindowWhy = propertyWindow && !propertyWindow.ok ? propertyWindow.reason : "unreadable";
+      return refuse(FENCE_PROPERTY_WINDOW);
+    }
+  }
+  if (args.source === "approved_template" || args.windowDeferrable) {
     // The last word before the provider, AFTER every preflight read in
     // sendSmsToContact: the owner may have revoked / edited / deleted the
     // template and the recipient's window (or the Florida cap) may have
@@ -5173,14 +5245,35 @@ async function fenceProviderSubmit(
       attempt.fenceRefusal = "abandoned";
       return false;
     }
-    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
-    const approved = await templateStillApproved(supabase, args);
+    if (!window.ok) {
+      attempt.fenceWindowWhy = window.why;
+      return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    }
+    // An identity (llm) send has no library template to re-check.
+    const approved = args.source === "approved_template" ? await templateStillApproved(supabase, args) : true;
     if (pastDeadline()) {
       attempt.abandoned = true;
       attempt.fenceRefusal = "abandoned";
       return false;
     }
     if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
+  const deferral = args.input.nineDeferral;
+  if (deferral) {
+    // A deferred nine-question reply acts only on the lead it decided on: compare the live
+    // revision, allowing exactly the one bump this attempt's own pending message row causes.
+    const { data: live, error: liveError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const expected = deferral.revision + (ctx.messageId ? 1 : 0);
+    if (liveError || !live || live.decision_context_revision !== expected) return refuse(FENCE_NINE_CONTEXT_CHANGED);
   }
   attempt.providerStarted = true;
   return true;
@@ -5328,6 +5421,8 @@ async function refuseOutsideRecipientWindow(
     result: "block",
     detail: { reason: verdict.why, state: verdict.state, localTime: verdict.localTime },
   }, args.runContext);
+  // Window-only refusal of a deferrable nine reply: nothing flagged, the caller defers.
+  if (args.windowDeferrable && verdict.why === "outside_window") return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
   await flagAndDeadLetterFor(supabase, args, "quiet_hours_recipient");
   return { outcome: "escalated", reason: "quiet_hours_recipient" };
 }
@@ -5451,7 +5546,7 @@ async function sendResponderMessageInner(
   // Template auto-sends are also gated on the RECIPIENT's local time (8am-9pm,
   // Florida 8am-8pm + 3 texts per 24h): the property's state is not where the
   // seller is. A refusal is a rule 7 exit (flag a human, text dead-lettered).
-  if (args.source === "approved_template") {
+  if (args.source === "approved_template" || args.windowDeferrable) {
     const refused = await refuseOutsideRecipientWindow(supabase, args);
     if (refused) return refused;
   }
@@ -6316,7 +6411,10 @@ async function deliverResponderMessage(
     }
     if (
       attempt.fenceRefusal === "revalidate" &&
-      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED ||
+        attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT ||
+        attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED ||
+        attempt.fenceReason === FENCE_PROPERTY_WINDOW)
     ) {
       // The template must not go out now. Nothing was sent; drop it silently
       // (the outcome still applies, same as the earlier pre-send drops).
@@ -6327,12 +6425,22 @@ async function deliverResponderMessage(
         result: "block",
         detail: { reason: attempt.fenceReason },
       }, args.runContext);
+      if (
+        args.windowDeferrable &&
+        (attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT || attempt.fenceReason === FENCE_PROPERTY_WINDOW) &&
+        attempt.fenceWindowWhy === "outside_window"
+      ) {
+        // At the fence this attempt's pending row already exists (and moved the revision once).
+        return { outcome: "skipped", reason: NINE_WINDOW_CLOSED_AT_FENCE };
+      }
       return {
         outcome: "skipped",
         reason:
           attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
             ? TEMPLATE_APPROVAL_CHANGED
-            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+            : attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED
+              ? NINE_DEFERRED_CONTEXT_CHANGED
+              : TEMPLATE_QUIET_HOURS_RECIPIENT,
       };
     }
     if (attempt.fenceRefusal === "error") {
@@ -6436,6 +6544,13 @@ async function deliverResponderMessage(
     return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
 
+  if (sendResult.status === "blocked_quiet_hours" && args.windowDeferrable) {
+    // The property's own window (checked inside the send, before any row is written):
+    // window-only, so a deferrable nine reply is deferred instead of flagged.
+    guard();
+    await trace(supabase, { kind: "gate", name: "quiet_hours", result: "block", detail: { deferrable: true } }, args.runContext);
+    return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
+  }
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     const reason = `send_blocked:${sendResult.status}`;
     await flagAndDeadLetterFor(supabase, args, reason, { guard });
@@ -7647,7 +7762,68 @@ type NineStepArgs = {
   templateCtx?: TemplateStepContext;
   /** The org's escalation phrases (the same list PR 2's price-keyword decision reads). */
   escalationKeywords?: ReadonlyArray<string> | null;
+  /** Reply-ineligible path only: the skip classifier's reason (e.g. `outside_business_hours`). */
+  replyIneligibleReason?: string;
+  /** Test seam: the clock the deferral reads. */
+  now?: Date;
 };
+
+/** A deferred nine-question reply whose lead changed while it waited: a person looks. */
+export const NINE_DEFERRED_CONTEXT_CHANGED = "nine_deferred_context_changed";
+/** The repeat-no rule could not stop the drip after marking the lead not interested. */
+export const NINE_REPEAT_NO_DRIP_STOP_FAILED = "nine_repeat_no_drip_stop_failed";
+const NINE_REPEAT_NO_PAUSE_REASON = "status_terminal" as const;
+/** Loop bound only (one inbound is deferred at most this many times), not a send cap. */
+export const NINE_DEFER_MAX = 3;
+/** Wait this long past the moment both windows open before re-dispatching. */
+const NINE_DEFER_BUFFER_SECONDS = 5 * 60;
+const NINE_DEFER_STEP_SECONDS = 15 * 60;
+const NINE_DEFER_HORIZON_SECONDS = 48 * 60 * 60;
+
+/**
+ * Why a nine-question reply was not sent, when the ONLY reason is a closed send
+ * window: business hours (the reply-ineligible skip), the recipient's local
+ * window, or the reply delay clamped to 0 at the window's edge (delay.ts clamps
+ * to 0 whenever the window is closed or about to close). Anything else (Florida
+ * cap, draft-only mode, a repeat, a gate) is not deferrable.
+ */
+export function isNineDeferrableNotSent(why: string, replyIneligibleReason?: string): boolean {
+  if (why === "reply_ineligible") return replyIneligibleReason === "outside_business_hours";
+  return (
+    why === "quiet_hours_recipient:outside_window" ||
+    why === "delay_not_applied" ||
+    // Late, window-only refusals from inside the send path / the provider fence.
+    why === NINE_WINDOW_CLOSED ||
+    why === `skipped:${NINE_WINDOW_CLOSED}` ||
+    why === NINE_WINDOW_CLOSED_AT_FENCE ||
+    why === `skipped:${NINE_WINDOW_CLOSED_AT_FENCE}`
+  );
+}
+
+/** A send refused ONLY because a send window is closed (see runApprovedTemplateStep `windowDeferrable`). */
+export const NINE_WINDOW_CLOSED = "nine_window_closed";
+/** The same, refused at the provider fence: this attempt's own pending row was written first. */
+export const NINE_WINDOW_CLOSED_AT_FENCE = "nine_window_closed_at_fence";
+
+/**
+ * Seconds from `now` until both the property's business-hours window and the
+ * recipient's local window are open (plus a small buffer), or null when they
+ * never are within 48 hours (unknown state / area code). Steps in 15-minute
+ * increments so DST and multi-zone area codes need no date math.
+ */
+export function secondsUntilNineSendWindow(
+  propertyState: string | null | undefined,
+  recipientPhone: string | null | undefined,
+  now: Date,
+): number | null {
+  for (let t = NINE_DEFER_STEP_SECONDS; t <= NINE_DEFER_HORIZON_SECONDS; t += NINE_DEFER_STEP_SECONDS) {
+    const at = new Date(now.getTime() + t * 1000);
+    if (checkQuietHours(propertyState, at).ok && checkRecipientQuietHours(recipientPhone, at).ok) {
+      return t + NINE_DEFER_BUFFER_SECONDS;
+    }
+  }
+  return null;
+}
 
 /**
  * Held for Jarrad exactly as the eight-answer path holds a price keyword: a hot hold
@@ -7797,23 +7973,254 @@ async function routeNineHot(
   return nineHoldAndComplete(supabase, a, "hot_lead");
 }
 
+/**
+ * A nine-question reply that could not go out only because the send window was
+ * closed (see isNineDeferrableNotSent): instead of holding for a person, release
+ * the claim and ask the caller to dispatch the same inbound again when both the
+ * business-hours and the recipient's windows are open. The deferred run re-checks
+ * the lead's decision_context_revision first (runNineQuestionsStep). Returns null
+ * when it cannot be deferred (other reason, no computable window, loop bound hit):
+ * the caller then holds exactly as before.
+ */
+async function maybeDeferNineReply(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  why: string,
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+): Promise<AiRetryOutcome | null> {
+  if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
+  // A dispatch running without the reply delay (none configured, lookup failed, workflow
+  // could not start) never sends an approved template: only the clamp-to-0 case may wait.
+  if (a.input.replyDelayBypassed && a.input.replyDelayBypassReason !== "delay_not_applied") return null;
+  if (!a.input.inboundMessageId) return null;
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
+  if (count >= NINE_DEFER_MAX) return null;
+  // The revision the deferred run must find. Our own refused pending row (fence refusal only)
+  // moved it exactly once; anything else moving it means the lead changed: hold, don't defer.
+  const ownRowBumps = why.endsWith(NINE_WINDOW_CLOSED_AT_FENCE) ? 1 : 0;
+  const { data: liveRev, error: liveRevError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", a.input.propertyId)
+    .maybeSingle();
+  if (liveRevError || !liveRev || liveRev.decision_context_revision !== decision.evaluationRevision + ownRowBumps) return null;
+  const phone = await resolveSendDestinationPhone(supabase, a.input);
+  const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
+  if (delaySeconds === null) return null;
+  // Released so the deferred re-dispatch of this same inbound can claim it again. As the
+  // other retry paths: a lease that cannot be released means the retry could never run, so
+  // nothing is scheduled and the caller holds for a person.
+  const errorMessage = `nine_reply_deferred:${why}`;
+  let released = await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "skipped",
+    errorMessage,
+    releaseLease: true,
+  });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "retry_unschedulable",
+      result: "error",
+      detail: { engine: "nine_questions", why: "nine_reply_deferred" },
+    }, a.runCtx);
+    return null;
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "applied",
+    detail: { engine: "nine_questions", why, delaySeconds, deferral: count + 1 },
+  }, a.runCtx);
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds,
+    nineDeferral: {
+      count: count + 1,
+      revision: liveRev.decision_context_revision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+    },
+  };
+}
+
+/**
+ * Jarrad's rule, approved verbatim 2026-10-20:
+ * "If the homeowner says no again after already getting our not-interested reply, stop their drip, mark them Not interested, and send nothing."
+ *
+ * Runs only for a `not_interested` answer (at or above the cutoff: the engine's own
+ * pick, never a keyword) after hostile / stop / price precedence. Returns null when
+ * the property has not had the approved not-interested reply yet (the first no), or
+ * its history is unreadable (the existing repeat guard then fails closed).
+ */
+async function routeNineRepeatNotInterested(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  r: { classificationRunId: string; evaluationRevision: number },
+): Promise<AiDispatchOutcome | null> {
+  const { input, property, claim, runCtx } = a;
+  // Proof the first reply was RECEIVED: the provider accepted it. Anything less (none, only
+  // pending / queued / failed rows, an unreadable history) is not this rule: the existing path
+  // runs, and its repeat guard holds for a person whenever any copy might have gone out.
+  if ((await notInterestedReplyAccepted(supabase, property.org_id, input.propertyId)) !== "yes") return null;
+  const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+  if (thresholds.not_interested?.automationEnabled !== true) {
+    return nineHoldAndComplete(supabase, a, "nine_automation_disabled:not_interested");
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_repeat_not_interested",
+    result: "applied",
+    detail: { engine: "nine_questions", rule: NINE_REPEAT_NOT_INTERESTED_RULE },
+  }, runCtx);
+  const reason = "nine_questions:not_interested_again";
+  // The sanctioned disposition path (DNC lock, opt-out and stale-revision guards in the RPC).
+  const closed = await setResponderDispo(supabase, {
+    runContext: runCtx,
+    propertyId: input.propertyId,
+    conversationId: input.conversationId ?? null,
+    inboundMessageId: input.inboundMessageId ?? null,
+    dispo: "not_interested",
+    reason,
+    expectedRevision: r.evaluationRevision,
+    undo: { orgId: property.org_id, classificationRunId: r.classificationRunId },
+  });
+  await traceDisposition(supabase, "not_interested", closed, false, runCtx);
+  if (closed.updated && input.inboundMessageId) {
+    await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, r.classificationRunId);
+  }
+  const outcome = closeOutcome(closed, reason);
+  if (closed.updated || (!closed.updated && closed.reason === "already_terminal")) {
+    // Stop the drip for good (the paused "Not interested" enrolment included); the
+    // helper records the lead event.
+    try {
+      const stopped = await pausePropertyEnrollments(supabase, {
+        propertyId: input.propertyId,
+        // An enrolment pause reason (sequences/pause-rules), not a hold reason.
+        reason: NINE_REPEAT_NO_PAUSE_REASON,
+        permanent: true,
+      });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "applied",
+        detail: { engine: "nine_questions", stopped: stopped.paused },
+      }, runCtx);
+    } catch (error) {
+      reportError(error, { tags: { surface: "nine_repeat_not_interested_drip_stop" }, extra: { propertyId: input.propertyId } });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "error",
+        detail: { engine: "nine_questions" },
+      }, runCtx);
+      return nineHoldAndComplete(supabase, a, NINE_REPEAT_NO_DRIP_STOP_FAILED);
+    }
+  }
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: claimOutcomeOf(outcome),
+    errorMessage: dispositionClaimError(closed),
+  });
+  return outcome;
+}
+
+/**
+ * Refused at the provider fence because the lead changed after a deferral: never send the
+ * stale decision and never drop it silently. Release the claim and re-dispatch the same
+ * inbound shortly as a FRESH decision (the next run re-classifies and every gate applies).
+ * Past the loop bound, or if the lease cannot be released, a person looks.
+ */
+async function redispatchNineFresh(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
+  if (count >= NINE_DEFER_MAX || !a.input.inboundMessageId) {
+    return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+  }
+  const errorMessage = "nine_reply_deferred:redispatch_fresh";
+  let released = await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage, releaseLease: true });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "applied",
+    detail: { engine: "nine_questions", why: "context_changed_at_fence", redispatch: "fresh", deferral: count + 1 },
+  }, a.runCtx);
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds: REPLY_RETRY_DELAY_SECONDS,
+    nineDeferral: {
+      count: count + 1,
+      revision: decision.evaluationRevision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+      fresh: true,
+    },
+  };
+}
+
 export async function runNineQuestionsStep(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const { input, property, claim, runCtx, templateCtx } = a;
-  const cls = await runNineClassification(
-    supabase,
-    {
-      orgId: property.org_id,
-      propertyId: input.propertyId,
-      contactId: input.contactId,
-      conversationId: input.conversationId ?? null,
-      inboundMessageId: input.inboundMessageId ?? null,
-      inboundBody: input.inboundBody,
-    },
-    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
-  );
+  if (input.nineDeferral) {
+    // A deferred reply: act only if nothing about the lead changed while it waited
+    // (a new text, a takeover, a status / dispo change all move the revision).
+    const { data: current, error: revisionError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (revisionError || !current) {
+      // Unreadable: we cannot tell who owns the thread, so a person looks.
+      return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+    }
+    if (input.nineDeferral.fresh || current.decision_context_revision !== input.nineDeferral.revision) {
+      // The lead's revision moves on many things that do NOT end the conversation (a campaign
+      // text, a same-value re-import, an assignment...). So never drop the reply: discard the
+      // carried decision and decide again from scratch. The normal gates then exit silently
+      // when a newer inbound / a person's terminal dispo / an opt-out owns the thread.
+      await trace(supabase, {
+        kind: "action",
+        name: "nine_reply_deferred",
+        result: "applied",
+        detail: { engine: "nine_questions", why: "context_changed", redispatch: "fresh" },
+      }, runCtx);
+      const count = input.nineDeferral.count;
+      return runNineQuestionsStep(supabase, { ...a, input: { ...input, nineDeferral: undefined, nineDeferCount: count } });
+    }
+  }
+  // A deferred run reuses the deferring run's decision: the revision check above proved the
+  // lead did not change, so Jev is not asked again.
+  const cls = input.nineDeferral
+    ? {
+        kind: "ok" as const,
+        result: input.nineDeferral.result,
+        classificationRunId: input.nineDeferral.classificationRunId,
+        evaluationRevision: input.nineDeferral.revision,
+      }
+    : await runNineClassification(
+        supabase,
+        {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId: input.inboundMessageId ?? null,
+          inboundBody: input.inboundBody,
+        },
+        { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+      );
   if (cls.kind === "failed") {
     // Never falls back to the other engine: no trusted decision, so a person looks. A price
     // keyword still makes it a hot hold (alert only), as in the eight-answer path, but hostile
@@ -7845,6 +8252,14 @@ export async function runNineQuestionsStep(
 
   if (action.kind === "hot") {
     return routeNineHot(supabase, a, { classificationRunId: cls.classificationRunId, evaluationRevision: cls.evaluationRevision, result });
+  }
+
+  if (result.answer === "not_interested") {
+    const repeatNo = await routeNineRepeatNotInterested(supabase, a, {
+      classificationRunId: cls.classificationRunId,
+      evaluationRevision: cls.evaluationRevision,
+    });
+    if (repeatNo) return repeatNo;
   }
 
   if (action.kind === "wait_for_person") {
@@ -7945,7 +8360,34 @@ export async function runNineQuestionsStep(
   }
 
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.
-  const noReply = async (why: string): Promise<AiDispatchOutcome> => {
+  const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // Refused at the provider fence because the lead changed after a deferral: silent exit.
+    // The send gate found a newer inbound (Q8 rule 1): that inbound's own run owns the thread.
+    // Not sent and no extra nine hold: the gate already flagged a person if its table says so.
+    if (why === "skipped:superseded_before_send" || why === "skipped:superseded_by_newer_inbound") {
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_enrolled",
+        result: "skipped",
+        detail: { why: "superseded", route: action.drip, engine: "nine_questions" },
+      }, runCtx);
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: why });
+      return { outcome: "skipped", reason: why.slice("skipped:".length) };
+    }
+    if (input.nineDeferral && why.endsWith(NINE_DEFERRED_CONTEXT_CHANGED)) {
+      return redispatchNineFresh(supabase, a, {
+        evaluationRevision: cls.evaluationRevision,
+        classificationRunId: cls.classificationRunId,
+        result,
+      });
+    }
+    // Only a closed send window: wait for it to open instead of holding (A/B/C).
+    const deferred = await maybeDeferNineReply(supabase, a, why, {
+      evaluationRevision: cls.evaluationRevision,
+      classificationRunId: cls.classificationRunId,
+      result,
+    });
+    if (deferred) return deferred;
     await trace(supabase, {
       kind: "action",
       name: "drip_enrolled",
@@ -7971,6 +8413,19 @@ export async function runNineQuestionsStep(
       }, runCtx);
       return noReply(TEMPLATE_ALREADY_SENT);
     }
+    // The identity text is not a library template, so the send path's recipient-window
+    // guards (approved_template only) would not stop it: check the recipient's clock here.
+    // A closed window waits for it to open (see maybeDeferNineReply), as a template does.
+    const identityWindow = await evaluateRecipientWindow(supabase, input);
+    if (!identityWindow.ok) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "held",
+        detail: { replyKind: "identity", window: identityWindow.why },
+      }, runCtx);
+      return noReply(`quiet_hours_recipient:${identityWindow.why}`);
+    }
     const sent = await sendResponderMessage(supabase, {
       runContext: runCtx,
       input,
@@ -7985,7 +8440,16 @@ export async function runNineQuestionsStep(
       claimStartedAt: templateCtx.claimStartedAt,
       outboundMode: templateCtx.outboundMode,
       replyKind: "identity",
+      // Recipient window re-checked in the send path and at the provider fence; a
+      // window-only refusal comes back unflagged so it can be deferred below.
+      windowDeferrable: true,
     });
+    if (
+      sent.outcome === "skipped" &&
+      (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE || sent.reason === NINE_DEFERRED_CONTEXT_CHANGED)
+    ) {
+      return noReply(sent.reason);
+    }
     if (sent.outcome === "retry") {
       return settleClaimForSendOutcome(supabase, claim.claimId, { ...sent, reply: undefined }, {
         orgId: property.org_id,
@@ -8018,6 +8482,7 @@ export async function runNineQuestionsStep(
       escalationReason: "not_applicable",
       decidedBy: "nine_questions",
       requiredBody: APPROVED_REPLY_TEXTS[label],
+      windowDeferrable: true,
       runCtx,
     });
     if (step.kind === "stop") return step.outcome;

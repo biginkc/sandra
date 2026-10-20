@@ -7,7 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-import { NINE_ANSWER_GROUP, NINE_ANSWER_LABELS, NINE_QUESTION_CUTOFF, type NineQuestionId } from "@/lib/sms-classification/nine-questions";
+import {
+  NINE_ANSWER_GROUP,
+  NINE_ANSWER_LABELS,
+  NINE_QUESTION_CUTOFF,
+  NINE_REPEAT_NOT_INTERESTED_RULE,
+  type NineQuestionId,
+} from "@/lib/sms-classification/nine-questions";
 
 import { pageText } from "./page-text";
 import { isEditableBadge, LabelRuleEditor } from "./label-rule-editor";
@@ -75,6 +81,11 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
   hostile: "Sandra sends nothing. A person reads it.",
 };
 
+/** Extra rules shown under a row; each text approved verbatim by Jarrad (repeat-no: 2026-10-20). */
+const NINE_EXTRA_RULE: Partial<Record<NineQuestionId, string>> = {
+  not_interested: NINE_REPEAT_NOT_INTERESTED_RULE,
+};
+
 // Group headings approved verbatim by Jarrad 2026-10-16 (PR #889).
 const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
   { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
@@ -101,7 +112,7 @@ function NineRules({ renderState }: { renderState: (outcome: string | undefined)
           {g.ids
             .filter((id) => NINE_ANSWER_GROUP[id] === g.group)
             .map((id) => (
-              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]}>{renderState(NINE_BADGE[id])}</Row>
+              <Row key={id} title={NINE_ANSWER_LABELS[id]} detail={NINE_DETAIL[id]} extra={NINE_EXTRA_RULE[id]}>{renderState(NINE_BADGE[id])}</Row>
             ))}
         </section>
       ))}
@@ -135,12 +146,13 @@ const TONE: Record<"on" | "off" | "watch" | "unknown", string> = {
   unknown: "bg-status-replying-bg text-status-replying-fg border-status-replying-border",
 };
 
-function Row({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) {
+function Row({ title, detail, extra, children }: { title: string; detail: string; extra?: string; children: React.ReactNode }) {
   return (
     <div data-testid="rule-row" className="flex items-center gap-3 rounded-2xl border px-3.5 py-3">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <b className="font-semibold">{title}</b>
         {detail && <span className="text-[13px] text-muted-foreground">{detail}</span>}
+        {extra && <span data-testid="rule-extra" className="text-[13px] text-muted-foreground">{extra}</span>}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1.5">{children}</div>
     </div>
