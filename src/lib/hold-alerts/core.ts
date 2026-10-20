@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, LEAD_REPLY_ALERTS_START_ISO, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -11,6 +11,7 @@ import {
   type HoldAlertDeps,
   type CapBucket,
   type HoldInfo,
+  type HotPromotion,
   type OrgAlertSummary,
 } from "./types";
 
@@ -191,19 +192,31 @@ export async function runHoldAlertsForOrg(
   // Owner decision 2026-10-20: every text from a seller on My Leads alerts Jarrad,
   // keyed lead_reply:<inbound>. A text that already alerts this pass as hot
   // (hot_text / hot_handoff / hot_failed on the same inbound) sends only that one.
-  const leadLoaded = deps.loadLeadReplies ? await deps.loadLeadReplies(orgId, mark.alertsSince) : { promotions: [], complete: true };
+  // Lead replies have their own watermark, set to now on the first pass that runs them: no deploy burst.
+  const leadSince = deps.loadLeadReplies ? await deps.store.getOrInitLeadRepliesSince(orgId, nowIso) : null;
+  const leadLoaded =
+    deps.loadLeadReplies && leadSince
+      ? await deps.loadLeadReplies(orgId, Date.parse(leadSince) > alertsSinceMs ? leadSince : mark.alertsSince)
+      : { promotions: [], complete: true };
   if (!leadLoaded.complete) {
     reportError(new Error("hold alerts: lead-reply load incomplete; some lead texts may not have alerted yet"), {
       tags: { surface: "hold_alerts", orgId },
     });
   }
   const hotKeysThisPass = new Set([...promotions.map((p) => p.key), ...hotHolds.map((h) => h.key)]);
-  const leadStartMs = Date.parse(LEAD_REPLY_ALERTS_START_ISO);
+  const leadStartMs = leadSince ? Date.parse(leadSince) : Number.NaN;
+  // A hot hold this pass covers a text it was started by (runInbound) or that
+  // came at/before its hot flag on the same property: that text alerts as hot only.
+  const hotRunInbounds = new Set(hotHolds.map((h) => h.hold.runInbound).filter((x): x is string => !!x));
+  const coveredByHotFlag = (p: HotPromotion) =>
+    hotHolds.some((h) => h.hold.propertyId === p.propertyId && !!h.hold.flagAt && Date.parse(h.hold.flagAt) >= Date.parse(p.assignedAt));
   const leadReplies = leadLoaded.promotions.filter(
     (p) =>
       !!p.inboundId &&
       isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) &&
       isNewHold({ startedAt: p.assignedAt }, leadStartMs) &&
+      !hotRunInbounds.has(p.inboundId) &&
+      !coveredByHotFlag(p) &&
       ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId)].some((k) => hotKeysThisPass.has(k)),
   );
   const alertPromotions = [...promotions, ...leadReplies];
@@ -238,13 +251,13 @@ export async function runHoldAlertsForOrg(
   // One alert per hot EVENT (see "Alert and hand-off model" in PR #882):
   // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
   // property_id null so archive-on-clear never re-fires a key.
-  for (const p of alertPromotions) {
+  const pushPromotion = (p: HotPromotion) => {
     // Same fail-closed rule as holds: only to the resolved hot owner (re-checked
     // before each send). Who the lead is assigned to never matters.
-    if (hotOwner === null) continue;
+    if (hotOwner === null) return;
     // Owner decision 2026-10-19: every hot alert goes to Jarrad, whoever the
     // lead is assigned to (or unassigned). Assignment never gates the alert.
-    if (!hotRecipients.some((r) => r.userId === hotOwner)) continue;
+    if (!hotRecipients.some((r) => r.userId === hotOwner)) return;
     const owner = hotOwner;
     for (const channel of ["slack", "sms"] as const) {
       tasks.push({
@@ -260,7 +273,9 @@ export async function runHoldAlertsForOrg(
         requireOwner: true,
       });
     }
-  }
+  };
+  // Hot alerts are queued first, so a backlog of lead replies can never delay one.
+  for (const p of promotions) pushPromotion(p);
   for (const { hold, key } of hotHolds) {
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
@@ -277,6 +292,7 @@ export async function runHoldAlertsForOrg(
       }
     }
   }
+  for (const p of leadReplies) pushPromotion(p);
   if (deps.emailEnabled && holds.length > 0) {
     const hourKey = `digest:${orgId}:${new Date(nowMs).toISOString().slice(0, 13)}`;
     const message: EmailMessage = digestMessage(holds, nowMs, link);

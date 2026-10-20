@@ -68,8 +68,3 @@ export const HOT_ALERTS_START_ISO = "2026-10-15T00:00:00.000Z";
 /** lead_reply:<inbound>  any text from a seller already on My Leads (owner decision 2026-10-20). */
 export const leadReplyKey = (inboundMessageId: string): string => `lead_reply:${inboundMessageId}`;
 
-/**
- * Lead-reply alerts start here. Inbound texts before this stay silent so the
- * deploy does not page about old replies. SET AT DEPLOY TIME to the deploy moment.
- */
-export const LEAD_REPLY_ALERTS_START_ISO = "2026-10-21T00:00:00.000Z";

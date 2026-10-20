@@ -1,12 +1,25 @@
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
-import { LEAD_REPLY_ALERTS_START_ISO, hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
+import { hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
 import type { HotPromotion } from "./types";
 import { MAX_ATTEMPTS } from "./types";
 
 const PAGE = 200;
 export const LEAD_REPLY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * A lead reply waits until AI dispatch is done with the text (its response
+ * claim completed, or processing.aiResponder.completedAt stamped), because the
+ * hot event for it can land minutes later. Past this age it alerts anyway.
+ */
+export const LEAD_REPLY_SETTLE_MS = 30 * 60 * 1000;
+
+type ProcessingMeta = { processing?: { aiResponder?: { completedAt?: unknown } | null } | null } | null;
+export function dispatchDone(meta: ProcessingMeta, claimCompleted: boolean, createdAt: string, nowMs: number): boolean {
+  if (claimCompleted) return true;
+  if (typeof meta?.processing?.aiResponder?.completedAt === "string") return true;
+  return nowMs - Date.parse(createdAt) >= LEAD_REPLY_SETTLE_MS;
+}
 
 /**
  * Owner decision 2026-10-20 ("Should every new text from a seller already on
@@ -23,16 +36,16 @@ export async function loadLeadReplies(
   nowMs: number = Date.now(),
   currentOwner: string | null = null,
 ): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
-  const sinceMs = Math.max(Date.parse(alertsSince) || 0, Date.parse(LEAD_REPLY_ALERTS_START_ISO), nowMs - LEAD_REPLY_LOOKBACK_MS);
+  const sinceMs = Math.max(Date.parse(alertsSince) || 0, nowMs - LEAD_REPLY_LOOKBACK_MS);
   const since = new Date(sinceMs).toISOString();
-  type Msg = { id: string; property_id: string | null; created_at: string };
+  type Msg = { id: string; property_id: string | null; created_at: string; metadata: ProcessingMeta };
   const msgs: Msg[] = [];
   let complete = true;
   let before: { at: string; id: string } | null = null;
   for (;;) {
     let q = db
       .from("messages")
-      .select("id, property_id, created_at")
+      .select("id, property_id, created_at, metadata")
       .eq("org_id", orgId)
       .eq("direction", "inbound")
       .eq("channel", "sms")
@@ -98,6 +111,11 @@ export async function loadLeadReplies(
   const ids = leadMsgs.map((m) => m.id);
   for (let i = 0; i < ids.length; i += PAGE) {
     const batch = ids.slice(i, i + PAGE);
+    const cl = await db
+      .from("ai_response_claims")
+      .select("inbound_message_id, status")
+      .eq("org_id", orgId)
+      .in("inbound_message_id", batch);
     const ev = await db
       .from("lead_events")
       .select("source_id, payload")
@@ -110,11 +128,15 @@ export async function loadLeadReplies(
       .select("hold_key, channel, status, attempts, recipient_user_id")
       .eq("org_id", orgId)
       .in("hold_key", keys);
-    if (ev.error || dl.error) {
+    if (ev.error || dl.error || cl.error) {
       complete = false;
       for (const id of batch) skip.add(id);
       continue;
     }
+    const completed = new Set(
+      ((cl.data ?? []) as Array<{ inbound_message_id: string; status: string }>).filter((c) => c.status === "completed").map((c) => c.inbound_message_id),
+    );
+    for (const m of leadMsgs) if (batch.includes(m.id) && !dispatchDone(m.metadata, completed.has(m.id), m.created_at, nowMs)) skip.add(m.id);
     for (const r of (ev.data ?? []) as Array<{ source_id: string; payload: { covered_by_hold?: unknown } | null }>) {
       if (r.payload?.covered_by_hold !== true) skip.add(r.source_id);
     }

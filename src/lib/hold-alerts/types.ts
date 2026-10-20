@@ -106,6 +106,12 @@ export interface DeliveryStore {
    * run that inserted it; that run sends nothing.
    */
   getOrInitAlertsSince(orgId: string, nowIso: string): Promise<{ alertsSince: string; created: boolean }>;
+  /**
+   * The org's lead-reply watermark (hold_alert_settings.lead_replies_since).
+   * Set to nowIso by the first pass that runs lead-reply alerts (only if still
+   * null), so turning the feature on never sends a burst of old texts.
+   */
+  getOrInitLeadRepliesSince(orgId: string, nowIso: string): Promise<string>;
   /** insert ... on conflict do nothing, then return the row for the unique key. */
   ensure(input: EnsureInput): Promise<DeliveryRow>;
   /**

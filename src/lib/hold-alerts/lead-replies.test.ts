@@ -4,8 +4,9 @@ import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers
 import { hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
 import { runHoldAlertsForOrg } from "./core";
+import { loadHotPromotions } from "./index";
 import { loadLeadReplies } from "./lead-replies";
-import { makeDeps, ORG, OWNER } from "./test-support";
+import { hold, makeDeps, ORG, OWNER } from "./test-support";
 import type { HoldAlertDeps, HotPromotion } from "./types";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -56,9 +57,12 @@ function depsWith(tables: Tables, extra: Parameters<typeof makeDeps>[0] = {}) {
   const t = makeDeps({
     nowIso: NOW,
     holds: [],
-    loadLeadReplies: (org, since) => loadLeadReplies(db, org, since, Date.parse(NOW), OWNER.userId),
+    loadLeadReplies: (org, since) => loadLeadReplies(db, org, since, t.deps.now().getTime(), OWNER.userId),
+    loadHotPromotions: (org, since) => loadHotPromotions(db, org, since, t.deps.now().getTime(), OWNER.userId),
     ...extra,
   });
+  // An org where lead replies were switched on before these texts arrived.
+  t.store.leadWatermarks.set(ORG, "2026-10-21T00:00:00.000Z");
   return t;
 }
 
@@ -80,7 +84,7 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
 
   it("a hot follow-up that alerts as hot_text sends exactly one alert, not two", async () => {
     const hot: HotPromotion = { propertyId: "p1", assigneeUserId: OWNER.userId, name: "Dana", assignedAt: AT, kind: "hot_text", key: hotTextKey("in-1") };
-    const t = depsWith({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] }, { promotions: [hot] });
+    const t = depsWith({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] }, { loadHotPromotions: async () => ({ promotions: [hot], complete: true }) });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(2);
     expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set([hotTextKey("in-1")]));
@@ -130,7 +134,78 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
     expect(t.sent).toHaveLength(2);
   });
 
-  it("texts before the lead-reply cutoff stay silent (no deploy burst)", async () => {
+  it("the first pass sets the lead-reply watermark to now: earlier texts stay silent (no deploy burst)", async () => {
+    const t = depsWith({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] });
+    t.store.leadWatermarks.clear();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    expect(t.store.leadWatermarks.get(ORG)).toBe(NOW);
+  });
+
+  it("waits for AI dispatch: a fresh text with no finished claim does not alert; the hot event that lands later sends the only alert", async () => {
+    const fresh = "2026-10-21T11:55:00.000Z";
+    const tables: Tables = {
+      messages: [{ ...msg("in-1", "p1", fresh), metadata: null }],
+      properties: [prop("p1", "new_lead")],
+      lead_events: [],
+      ai_response_claims: [{ org_id: ORG, inbound_message_id: "in-1", status: "processing" }],
+    };
+    const t = depsWith(tables);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    // Dispatch finishes minutes later and writes the hot event.
+    tables.lead_events!.push({ id: "e1", org_id: ORG, property_id: "p1", source_type: HOT_TEXT_SOURCE_TYPE, source_id: "in-1", created_at: "2026-10-21T12:03:00.000Z", payload: { to: OWNER.userId, covered_by_hold: false } });
+    tables.ai_response_claims![0]!.status = "completed";
+    t.setNow("2026-10-21T12:05:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    t.setNow("2026-10-21T13:00:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set([hotTextKey("in-1")]));
+  });
+
+  it("a fresh text whose dispatch completed (completedAt stamp) alerts right away", async () => {
+    const t = depsWith({
+      messages: [{ ...msg("in-1", "p1", "2026-10-21T11:58:00.000Z"), metadata: { processing: { aiResponder: { completedAt: "2026-10-21T11:58:30.000Z" } } } }],
+      properties: [prop("p1", "new_lead")],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+  });
+
+  it("symmetric: once lead_reply:<X> went out, a late hot_text for X sends nothing more", async () => {
+    const tables: Tables = { messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")], lead_events: [] };
+    const t = depsWith(tables);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+    tables.lead_events!.push({ id: "e1", org_id: ORG, property_id: "p1", source_type: HOT_TEXT_SOURCE_TYPE, source_id: "in-1", created_at: "2026-10-21T11:59:00.000Z", payload: { to: OWNER.userId, covered_by_hold: false } });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+  });
+
+  it("a text covered by a hot hold this pass (its run inbound, or before its hot flag) alerts only as hot", async () => {
+    const t = depsWith(
+      { messages: [msg("in-1", "p1"), msg("in-2", "p2")], properties: [prop("p1", "new_lead"), prop("p2", "new_lead")] },
+      {
+        holds: [
+          hold({ propertyId: "p1", holdKey: "p1:x", hot: true, flagHot: false, runHot: true, runInbound: "in-1", runStartedAt: AT, startedAt: AT }),
+          hold({ propertyId: "p2", holdKey: "p2:x", hot: true, startedAt: AT, flagAt: "2026-10-21T11:30:00.000Z" }),
+        ],
+      },
+    );
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.some((r) => r.holdKey.startsWith("lead_reply:"))).toBe(false);
+    expect(t.sent).toHaveLength(4);
+  });
+
+  it("hot alerts are queued before lead replies", async () => {
+    const hot: HotPromotion = { propertyId: "p9", assigneeUserId: OWNER.userId, name: "Hot", assignedAt: AT, kind: "hot_text", key: hotTextKey("in-9") };
+    const t = depsWith({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] }, { loadHotPromotions: async () => ({ promotions: [hot], complete: true }) });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.map((r) => r.holdKey)).toEqual([hotTextKey("in-9"), hotTextKey("in-9"), leadReplyKey("in-1"), leadReplyKey("in-1")]);
+  });
+
+  it("texts before the lead-reply watermark stay silent", async () => {
     const t = depsWith({ messages: [msg("in-old", "p1", "2026-10-20T10:00:00.000Z")], properties: [prop("p1", "new_lead")] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toEqual([]);

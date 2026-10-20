@@ -19,7 +19,7 @@ import type {
   Recipient,
 } from "./types";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
 import { loadLeadReplies } from "./lead-replies";
 
@@ -187,7 +187,25 @@ export async function loadHotPromotions(
     }
     for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
   }
-  const todo0 = rows.filter((r) => !done.has(keyOf(r)));
+  // Exactly one alert per inbound: a text that already alerted (or is alerting)
+  // as lead_reply:<inbound> never sends a second, hot, alert.
+  const leadReplied = new Set<string>();
+  const srcIds = [...new Set(rows.map((r) => r.source_id))];
+  for (let i = 0; i < srcIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("hold_key")
+      .eq("org_id", orgId)
+      .in("hold_key", srcIds.slice(i, i + HOT_PROMOTION_PAGE).map(leadReplyKey));
+    if (error) {
+      // Unknown → hold the hot alert back this pass rather than risk two.
+      complete = false;
+      for (const id of srcIds.slice(i, i + HOT_PROMOTION_PAGE)) leadReplied.add(id);
+      continue;
+    }
+    for (const d of (data ?? []) as Array<{ hold_key: string }>) leadReplied.add(d.hold_key.slice("lead_reply:".length));
+  }
+  const todo0 = rows.filter((r) => !done.has(keyOf(r)) && !leadReplied.has(r.source_id));
   // A hot event's moment is its INBOUND text's arrival, never when the event
   // row was written (a pre-cutoff text retried later must not page). Every
   // event's source_id is that inbound; no verifiable time → dropped (fail closed).
