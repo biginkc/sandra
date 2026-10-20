@@ -205,9 +205,8 @@ export async function runHoldAlertsForOrg(
   }
   const hotKeysThisPass = new Set([...promotions.map((p) => p.key), ...hotHolds.map((h) => h.key)]);
   const leadStartMs = leadSince ? Date.parse(leadSince) : Number.NaN;
-  // A hot hold this pass covers a text it was started by (runInbound) or that
-  // came at/before its hot flag on the same property: that text alerts as hot only.
-  const hotRunInbounds = new Set(hotHolds.map((h) => h.hold.runInbound).filter((x): x is string => !!x));
+  // A hot hold this pass covers a text that came at/before its hot flag on the
+  // same property, or the text its hot_text/hot_failed key names (the key check below).
   const coveredByHotFlag = (p: HotPromotion) =>
     hotHolds.some((h) => h.hold.propertyId === p.propertyId && !!h.hold.flagAt && Date.parse(h.hold.flagAt) >= Date.parse(p.assignedAt));
   const leadReplies = leadLoaded.promotions.filter(
@@ -215,7 +214,6 @@ export async function runHoldAlertsForOrg(
       !!p.inboundId &&
       isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) &&
       isNewHold({ startedAt: p.assignedAt }, leadStartMs) &&
-      !hotRunInbounds.has(p.inboundId) &&
       !coveredByHotFlag(p) &&
       ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId)].some((k) => hotKeysThisPass.has(k)),
   );

@@ -121,7 +121,27 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
     const t = depsWith({
       messages: [msg("in-2", "p1")],
       properties: [prop("p1", "prospect")],
-      lead_events: [{ org_id: ORG, property_id: "p1", source_type: HOT_HANDOFF_SOURCE_TYPE, source_id: "in-0", payload: {} }],
+      lead_events: [{ org_id: ORG, property_id: "p1", source_type: HOT_HANDOFF_SOURCE_TYPE, source_id: "in-0", created_at: "2026-10-21T10:00:00.000Z", payload: {} }],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+  });
+
+  it("an event lead: a text from before the hand-off does not alert; one from after does", async () => {
+    const t = depsWith({
+      messages: [msg("in-early", "p1", "2026-10-21T10:00:00.000Z"), msg("in-late", "p1", "2026-10-21T11:00:00.000Z")],
+      properties: [prop("p1", "prospect")],
+      lead_events: [{ org_id: ORG, property_id: "p1", source_type: HOT_HANDOFF_SOURCE_TYPE, source_id: "in-x", created_at: "2026-10-21T10:30:00.000Z", payload: {} }],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set([leadReplyKey("in-late")]));
+  });
+
+  it("a fresh text whose pipeline run finished alerts right away", async () => {
+    const t = depsWith({
+      messages: [msg("in-1", "p1", "2026-10-21T11:58:00.000Z")],
+      properties: [prop("p1", "new_lead")],
+      pipeline_runs: [{ org_id: ORG, inbound_message_id: "in-1", final_outcome: "skipped" }],
     });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(2);

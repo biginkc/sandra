@@ -9,7 +9,8 @@ const PAGE = 200;
 export const LEAD_REPLY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * A lead reply waits until AI dispatch is done with the text (its response
- * claim completed, or processing.aiResponder.completedAt stamped), because the
+ * claim completed, its pipeline run finished, or processing.aiResponder.completedAt
+ * stamped), because the
  * hot event for it can land minutes later. Past this age it alerts anyway.
  */
 export const LEAD_REPLY_SETTLE_MS = 30 * 60 * 1000;
@@ -87,11 +88,12 @@ export async function loadLeadReplies(
       if (addr) addresses.set(p.id, addr);
     }
   }
+  const leadEvents = new Map<string, Array<{ source_id: string; created_at: string }>>();
   const unsure = propIds.filter((id) => known.has(id) && !isLead.has(id));
   for (let i = 0; i < unsure.length; i += PAGE) {
     const { data, error } = await db
       .from("lead_events")
-      .select("property_id")
+      .select("property_id, source_id, created_at")
       .eq("org_id", orgId)
       .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE])
       .in("property_id", unsure.slice(i, i + PAGE));
@@ -99,9 +101,19 @@ export async function loadLeadReplies(
       complete = false;
       continue;
     }
-    for (const r of (data ?? []) as Array<{ property_id: string }>) isLead.add(r.property_id);
+    for (const r of (data ?? []) as Array<{ property_id: string; source_id: string; created_at: string }>) {
+      const list = leadEvents.get(r.property_id) ?? [];
+      list.push(r);
+      leadEvents.set(r.property_id, list);
+    }
   }
-  const leadMsgs = withProp.filter((m) => isLead.has(m.property_id));
+  // A status lead: every text. An event lead: only texts from the hand-off on (the
+  // text that made it a lead, or later), never an earlier text on a then-prospect.
+  const leadMsgs = withProp.filter(
+    (m) =>
+      isLead.has(m.property_id) ||
+      (leadEvents.get(m.property_id) ?? []).some((e) => e.source_id === m.id || Date.parse(e.created_at) <= Date.parse(m.created_at)),
+  );
   if (leadMsgs.length === 0) return { promotions: [], complete };
 
   // Skip a text that has its own hot alert: an uncovered hot event on it, or any
@@ -116,6 +128,11 @@ export async function loadLeadReplies(
       .select("inbound_message_id, status")
       .eq("org_id", orgId)
       .in("inbound_message_id", batch);
+    const runs = await db
+      .from("pipeline_runs")
+      .select("inbound_message_id, final_outcome")
+      .eq("org_id", orgId)
+      .in("inbound_message_id", batch);
     const ev = await db
       .from("lead_events")
       .select("source_id, payload")
@@ -128,7 +145,7 @@ export async function loadLeadReplies(
       .select("hold_key, channel, status, attempts, recipient_user_id")
       .eq("org_id", orgId)
       .in("hold_key", keys);
-    if (ev.error || dl.error || cl.error) {
+    if (ev.error || dl.error || cl.error || runs.error) {
       complete = false;
       for (const id of batch) skip.add(id);
       continue;
@@ -136,6 +153,7 @@ export async function loadLeadReplies(
     const completed = new Set(
       ((cl.data ?? []) as Array<{ inbound_message_id: string; status: string }>).filter((c) => c.status === "completed").map((c) => c.inbound_message_id),
     );
+    for (const r of (runs.data ?? []) as Array<{ inbound_message_id: string; final_outcome: string | null }>) if (r.final_outcome) completed.add(r.inbound_message_id);
     for (const m of leadMsgs) if (batch.includes(m.id) && !dispatchDone(m.metadata, completed.has(m.id), m.created_at, nowMs)) skip.add(m.id);
     for (const r of (ev.data ?? []) as Array<{ source_id: string; payload: { covered_by_hold?: unknown } | null }>) {
       if (r.payload?.covered_by_hold !== true) skip.add(r.source_id);

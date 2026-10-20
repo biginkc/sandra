@@ -529,8 +529,8 @@ const ROWS: Row[] = [
   },
   {
     id: "4",
-    name: "hot text leaves an OPEN failed-hand-off hold: one alert (hot_flag:<property>:<flagAt>); a non-hot text and a later hot text through real dispatch (covered by that alerted hold) add nothing",
-    expect: { slack: 1, sms: 1, assigned: 0 },
+    name: "hot text leaves an OPEN failed-hand-off hold: one alert (hot_flag:<property>:<flagAt>); the property is now new_lead, so a non-hot text and a later hot text covered by that hold each alert once as lead_reply (owner decision 2026-10-20)",
+    expect: { slack: 3, sms: 3, assigned: 0 },
     run: async (h) => {
       const a = await h.newInbound();
       const unblock = await h.blockAssignment();
@@ -548,8 +548,9 @@ const ROWS: Row[] = [
       // The flagged lead is not dispatched again: the run records a skip, not a new classification.
       expect(await h.dispatch(b, "nurture", NON_HOT_ESC)).toEqual({ outcome: "skipped", reason: "already_terminal" });
       expect(await h.runOf(b)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
-      expect((await h.alertPass()).sent).toBe(0);
-      expect(await h.deliveryKeys()).toEqual([`${fk}`]);
+      // Owner decision 2026-10-20: every text on a lead alerts once, as lead_reply:<inbound>.
+      expect((await h.alertPass()).sent).toBe(2);
+      expect(await h.deliveryKeys()).toEqual([`${fk}`, `lead_reply:${b}`].sort());
       expect(await h.hotTextEvents()).toBe(0);
       // Hold still open: a later HOT text goes through real dispatch. The flagged lead is classified once and a
       // held-lead hot_text is recorded, covered by the alerted hold: no new ping, no hand-off.
@@ -558,8 +559,10 @@ const ROWS: Row[] = [
       expect(await h.runOf(c)).toEqual({ final_outcome: "skipped", reason: "already_terminal" });
       expect(await h.hotTextPayload(c)).toMatchObject({ held_lead: true, covered_by_hold: true, to: h.owner });
       expect(await h.assignee()).toBeNull();
+      // Owner decision 2026-10-20: a covered hot follow-up on a lead still alerts, once, as lead_reply:<inbound>.
+      expect((await h.alertPass()).sent).toBe(2);
+      expect(await h.deliveryKeys()).toEqual([`${fk}`, `lead_reply:${b}`, `lead_reply:${c}`].sort());
       expect((await h.alertPass()).sent).toBe(0);
-      await h.expectOneAlertTotal();
     },
   },
   {
@@ -820,8 +823,8 @@ const ROWS: Row[] = [
   },
   {
     id: "18",
-    name: "an open pre-cutoff NON-hot review hold does not hide a later hot call_request text: handed off, one Slack + SMS (hot_handoff key); a following non-hot text adds nothing",
-    expect: { slack: 1, sms: 1, assigned: 1 },
+    name: "an open pre-cutoff NON-hot review hold does not hide a later hot call_request text: handed off, one Slack + SMS (hot_handoff key); a following non-hot text on the lead alerts once as lead_reply (owner decision 2026-10-20)",
+    expect: { slack: 2, sms: 2, assigned: 1 },
     run: async (h) => {
       await h.preCutoffReviewHold();
       const a = await h.newInbound("sure, call me at 3pm tomorrow");
@@ -833,8 +836,9 @@ const ROWS: Row[] = [
       const b = await h.newInbound("who is this?");
       expect(await h.dispatch(b, "nurture", NON_HOT_ESC)).toEqual({ outcome: "escalated", reason: "send_blocked:blocked_provider_off" });
       expect(await h.runOf(b)).toEqual({ final_outcome: "escalated", reason: "send_blocked:blocked_provider_off" });
+      expect((await h.alertPass()).sent).toBe(2);
+      expect(await h.deliveryKeys()).toEqual([`hot_handoff:${a}`, `lead_reply:${b}`].sort());
       expect((await h.alertPass()).sent).toBe(0);
-      await h.expectOneAlertTotal();
     },
   },
   {
