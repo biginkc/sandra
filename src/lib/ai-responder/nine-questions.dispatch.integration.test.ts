@@ -587,6 +587,47 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
       expect(getMockMessageLog()).toHaveLength(0);
     });
 
+    it("first deferral, a person reassigned the lead during the window check: the text is dropped, not deferred", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      let bumped = false;
+      let leadId = "";
+      windows.onRecipientCheck = () => {
+        if (bumped || !leadId) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${leadId}'`]);
+      };
+      const lead = await seedLead();
+      leadId = lead.propertyId;
+      const first = await run({ asked_offer: 0.9 }, "What's your offer?", lead);
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      expect(first.outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      expect(await hotHandoffRecords(lead.propertyId)).toBe(1);
+    });
+
+    it("a person acts on the lead between the hand-off and the send: the text is dropped", async () => {
+      await seedOrg();
+      await seedOwner();
+      let bumped = false;
+      let leadId = "";
+      windows.onRecipientCheck = () => {
+        if (bumped || !leadId) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${leadId}'`]);
+      };
+      const lead = await seedLead();
+      leadId = lead.propertyId;
+      const first = await run({ named_price: 0.9 }, "Would you consider $450,000?", lead);
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      expect(first.outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(getMockMessageLog()).toHaveLength(0);
+      expect((await propertyRow(lead.propertyId)).status).toBe("new_lead");
+    });
+
     it("outbound hold mode: no text goes out, the lead is still promoted and alerted", async () => {
       await seedOrg({ outboundMode: "hold" });
       await seedOwner();

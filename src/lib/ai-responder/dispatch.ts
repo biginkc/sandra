@@ -7807,6 +7807,8 @@ type NineStepArgs = {
   now?: Date;
 };
 
+/** A hot reply whose lead changed after the hand-off (someone acted on it): the text is dropped. */
+const NINE_HOT_REPLY_CONTEXT_CHANGED = "nine_hot_reply_context_changed";
 /** A deferred nine-question reply whose lead changed while it waited: a person looks. */
 export const NINE_DEFERRED_CONTEXT_CHANGED = "nine_deferred_context_changed";
 /** The repeat-no rule could not stop the drip after marking the lead not interested. */
@@ -8008,14 +8010,20 @@ async function routeNineHot(
         applyResult.status !== "already_qualified" &&
         handoffStatus !== "owned_by_someone_else"
       ) {
-        return sendNineHotReply(supabase, a, action.reply, r);
+        // The baseline every later check compares against: read right after the hand-off.
+        const { data: afterHandoff } = await supabase
+          .from("properties")
+          .select("decision_context_revision")
+          .eq("id", input.propertyId)
+          .maybeSingle();
+        if (afterHandoff) return sendNineHotReply(supabase, a, action.reply, r, afterHandoff.decision_context_revision);
       }
       if (action.kind === "hot" && action.reply) {
         await trace(supabase, {
           kind: "reply",
           name: "nine_hot_reply",
           result: "skipped",
-          detail: { engine: "nine_questions", reply: action.reply, why: applyResult.status === "already_qualified" ? "already_a_lead" : "owned_by_someone_else" },
+          detail: { engine: "nine_questions", reply: action.reply, why: applyResult.status === "already_qualified" ? "already_a_lead" : handoffStatus === "owned_by_someone_else" ? "owned_by_someone_else" : "revision_unreadable" },
         }, a.runCtx);
       }
       await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
@@ -8051,7 +8059,8 @@ async function maybeDeferNineReply(
   a: NineStepArgs,
   why: string,
   decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
-  opts: { hotReply?: boolean } = {},
+  /** Hot reply only: the revision verified right after the hand-off (or carried by the hot deferral). */
+  opts: { hotBaseline?: number } = {},
 ): Promise<AiRetryOutcome | null> {
   if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
   // A dispatch running without the reply delay (none configured, lookup failed, workflow
@@ -8071,12 +8080,12 @@ async function maybeDeferNineReply(
   if (liveRevError || !liveRev) return null;
   // A hot reply waits AFTER the promotion / hand-off, which move the revision themselves:
   // the deferred run instead requires the revision read here to be unchanged.
-  if (!opts.hotReply && liveRev.decision_context_revision !== decision.evaluationRevision + ownRowBumps) return null;
-  // A hot reply deferred AGAIN: promotion and hand-off finished long ago, so only this attempt's
-  // own refused pending row may have moved the revision since the deferral it carries. Anything
-  // else (a reassignment, a person texting) drops the text instead of becoming the new baseline.
-  const priorHot = opts.hotReply && a.input.nineDeferral?.hotReply ? a.input.nineDeferral : null;
-  if (priorHot && liveRev.decision_context_revision !== priorHot.revision + ownRowBumps) return null;
+  // A hot reply: promotion and hand-off already moved the revision, so the baseline is the one
+  // read right after the hand-off (or carried by the previous hot deferral). Only this attempt's
+  // own refused pending row may have moved it since; anything else (a reassignment, a person
+  // texting) drops the text instead of becoming the new baseline.
+  const expected = opts.hotBaseline !== undefined ? opts.hotBaseline : decision.evaluationRevision;
+  if (liveRev.decision_context_revision !== expected + ownRowBumps) return null;
   const phone = await resolveSendDestinationPhone(supabase, a.input);
   const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
   if (delaySeconds === null) return null;
@@ -8116,7 +8125,7 @@ async function maybeDeferNineReply(
       revision: liveRev.decision_context_revision,
       result: decision.result,
       classificationRunId: decision.classificationRunId,
-      ...(opts.hotReply ? { hotReply: true } : {}),
+      ...(opts.hotBaseline !== undefined ? { hotReply: true } : {}),
     },
   };
 }
@@ -8139,14 +8148,16 @@ async function sendNineHotReply(
   a: NineStepArgs,
   key: NineHotReply,
   r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
+  /** The lead's revision right after the hot hand-off (or carried by the hot deferral). */
+  baseline: number,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const { input, property, claim, runCtx, templateCtx } = a;
   const body = NINE_HOT_REPLY_TEXTS[key];
   const promoted: AiDispatchOutcome = { outcome: "auto_closed", reason: "model:new_lead_promoted" };
   const notSent = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
     // A deferred run whose lead changed at the fence: someone acted on the lead, so drop the text.
-    if (!(input.nineDeferral?.hotReply && why === NINE_DEFERRED_CONTEXT_CHANGED)) {
-      const deferred = await maybeDeferNineReply(supabase, a, why, r, { hotReply: true });
+    if (why !== NINE_DEFERRED_CONTEXT_CHANGED && why !== NINE_HOT_REPLY_CONTEXT_CHANGED) {
+      const deferred = await maybeDeferNineReply(supabase, a, why, r, { hotBaseline: baseline });
       if (deferred) return deferred;
     }
     await trace(supabase, {
@@ -8169,6 +8180,14 @@ async function sendNineHotReply(
   // (the send path and the provider fence check them again).
   const window = await evaluateRecipientWindow(supabase, input);
   if (!window.ok) return notSent(`quiet_hours_recipient:${window.why}`);
+  // Last look before sending: anyone who touched the lead since the hand-off (a reassignment,
+  // a person texting) owns the conversation now, so the text is dropped.
+  const { data: live, error: liveError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (liveError || !live || live.decision_context_revision !== baseline) return notSent(NINE_HOT_REPLY_CONTEXT_CHANGED);
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
@@ -8355,14 +8374,14 @@ export async function runNineQuestionsStep(
         result: "skipped",
         detail: { engine: "nine_questions", why: "context_changed" },
       }, runCtx);
-      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "nine_hot_reply_context_changed" });
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: NINE_HOT_REPLY_CONTEXT_CHANGED });
       return { outcome: "skipped", reason: "nine_hot_reply_context_changed" };
     }
     return sendNineHotReply(supabase, a, action.reply, {
       classificationRunId: deferral.classificationRunId,
       evaluationRevision: deferral.revision,
       result: deferral.result,
-    });
+    }, deferral.revision);
   }
   if (input.nineDeferral) {
     // A deferred reply: act only if nothing about the lead changed while it waited
