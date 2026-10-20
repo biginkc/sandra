@@ -1,14 +1,10 @@
 "use server";
 
 import { err, ok, type Result } from "@/lib/errors/result";
-import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createNextStep } from "@/lib/next-steps";
 import { wallTimeToUtc } from "@/lib/time/zoned";
 
-import {
-  bookAppointment,
-  type BookAppointmentResult,
-} from "./book-appointment-action";
+import type { BookAppointmentResult } from "./book-appointment-action";
 
 export type CreateNextStepActionInput = {
   /** Property this next step links to, if any. */
@@ -36,30 +32,13 @@ export type CreateNextStepActionInput = {
 /**
  * "use server" wrapper over `createNextStep` for client components (they cannot import the lib
  * directly). It takes the same wall-clock fields the booking popover already collects and
- * converts them server-side. Until `schemaReady('next_step_write')` it runs today's booking
- * path unchanged (`bookAppointment`, which applies the booking effects itself), so the window between
- * a deploy and its migration cannot break scheduling. The result keeps the booking shape.
+ * converts them server-side. The result keeps the booking shape.
  */
 export async function createNextStepAction(
   input: CreateNextStepActionInput,
 ): Promise<Result<BookAppointmentResult>> {
   const mode = input.mode ?? "phone";
   const durationMinutes = mode === "phone" ? 15 : input.durationMinutes;
-
-  if (!(await schemaReady("next_step_write"))) {
-    return bookAppointment({
-      propertyId: input.propertyId,
-      contactId: input.contactId,
-      assigneeId: input.assigneeId,
-      date: input.date,
-      time: input.time,
-      timeZone: input.timeZone,
-      durationMinutes: durationMinutes ?? 30,
-      title: input.title,
-      note: input.note,
-      idempotencyKey: input.idempotencyKey,
-    });
-  }
 
   const converted = wallTimeToUtc({
     date: input.date,

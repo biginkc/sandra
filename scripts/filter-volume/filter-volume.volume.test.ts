@@ -97,7 +97,7 @@ async function seedInner() {
   for (let i = 0; i < 10; i++)
     await pg.query(`insert into public.property_lists (org_id, property_id, list_id) select '${ORG}', p.id, '${ids.lists[i]}' from vp p where p.n % ${i + 2} = 0`);
   await pg.query(`insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at)
-    select '${ORG}', '${userId}', '${userId}', p.id, 'follow_up', case when p.n % 6 = 0 then 'open' else 'completed' end, 't', now() from vp p where p.n % 6 = 0 or p.n % 9 = 0`);
+    select '${ORG}', '${userId}', '${userId}', p.id, 'custom', case when p.n % 6 = 0 then 'open' else 'completed' end, 't', now() from vp p where p.n % 6 = 0 or p.n % 9 = 0`);
   await pg.query(`update public.properties set outreach_dispo = case when n_ % 40 = 0 then 'opted_out' when n_ % 53 = 0 then 'dnc' when n_ % 11 = 0 then 'nurture' end
     from (select id, n n_ from vp) v where properties.id = v.id and (n_ % 40 = 0 or n_ % 53 = 0 or n_ % 11 = 0)`);
   await pg.query(`set session_replication_role = origin`);

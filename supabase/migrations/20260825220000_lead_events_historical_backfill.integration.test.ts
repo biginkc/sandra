@@ -165,7 +165,7 @@ describe("Migration 20260825220000 — lead event historical backfill", () => {
         org_id: BMH_ORG_ID,
         assignee_id: actorId,
         related_property_id: propertyId,
-        type: "follow_up",
+        type: "custom",
         status: "completed",
         title: "Private task title",
         due_at: "2026-01-05T17:00:00.000Z",
@@ -182,7 +182,7 @@ describe("Migration 20260825220000 — lead event historical backfill", () => {
       .update({
         assignee_id: ownerId,
         due_at: "2026-02-05T17:00:00.000Z",
-        type: "callback",
+        type: "custom",
       })
       .eq("id", task.id);
     if (mutableTaskUpdateError) throw mutableTaskUpdateError;
@@ -588,7 +588,7 @@ describe("Migration 20260825220000 — lead event historical backfill", () => {
         org_id: BMH_ORG_ID,
         assignee_id: actorId,
         related_property_id: propertyId,
-        type: "callback",
+        type: "custom",
         status: "completed",
         title: "Live completion guard",
         due_at: "2026-02-03T17:00:00.000Z",

@@ -1,14 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 
-const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone, workspaceGate, schemaReady, createNextStep } = vi.hoisted(() => ({
-  schemaReady: vi.fn(async () => false),
+const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, getMemberTimezone, workspaceGate, createNextStep } = vi.hoisted(() => ({
   createNextStep: vi.fn(),
   createClient: vi.fn(),
   pausePropertyEnrollments: vi.fn(),
   resumeByProperty: vi.fn(),
   setOutreachDispo: vi.fn(),
-  bookAppointment: vi.fn(),
   getMemberTimezone: vi.fn(),
   workspaceGate: vi.fn(async () => { throw new Error("Messages workspace access is unavailable."); }),
 }));
@@ -72,10 +70,8 @@ vi.mock("@/lib/sequences/enrollment", () => ({
   resumeByProperty,
 }));
 vi.mock("@/components/appointments/book-appointment-action", () => ({
-  bookAppointment,
   getMemberTimezone,
 }));
-vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
 vi.mock("@/lib/next-steps", () => ({ createNextStep }));
 vi.mock("@/lib/leads/outreach-dispo", () => ({ saveOutreachDispo: setOutreachDispo }));
 // The dialer must reach the shared saver directly: acquisition reps dial from
@@ -103,11 +99,8 @@ describe("prepareManualCall", () => {
     pausePropertyEnrollments.mockReset();
     resumeByProperty.mockReset();
     setOutreachDispo.mockReset();
-    bookAppointment.mockReset();
     getMemberTimezone.mockReset();
     createNextStep.mockReset();
-    schemaReady.mockReset();
-    schemaReady.mockResolvedValue(false);
   });
 
   it("refuses the exact phone number of a DNC lead before creating a manual call", async () => {
@@ -410,7 +403,7 @@ describe("prepareManualCall", () => {
     const activityUpserts: Array<Record<string, unknown>> = [];
     setOutreachDispo.mockImplementation(async () => { order.push("disposition"); return { ok: true }; });
     getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
-    bookAppointment.mockImplementation(async () => { order.push("booking"); return { ok: true, data: { taskId: "task-1" } }; });
+    createNextStep.mockImplementation(async () => { order.push("booking"); return { ok: true, data: { taskId: "task-1" } }; });
     resumeByProperty.mockImplementation(async () => { order.push("resume"); return { resumed: 1 }; });
     createClient.mockResolvedValue(makeActionClient(order, undefined, undefined, undefined, undefined, activityUpserts));
 
@@ -440,14 +433,13 @@ describe("prepareManualCall", () => {
       wrap_token: "11111111-1111-4111-8111-111111111111",
       provider: "sandra_softphone",
     });
-    expect(bookAppointment).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "11111111-1111-4111-8111-111111111111" }));
+    expect(createNextStep).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "11111111-1111-4111-8111-111111111111" }));
   });
 
-  it("books the wrap-up callback as a 15-minute phone next step with booking effects once the schema is ready", async () => {
+  it("books the wrap-up callback as a 15-minute phone next step with booking effects", async () => {
     const order: string[] = [];
     setOutreachDispo.mockImplementation(async () => { order.push("disposition"); return { ok: true }; });
     getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
-    schemaReady.mockResolvedValue(true);
     createNextStep.mockImplementation(async () => { order.push("booking"); return { ok: true, data: { taskId: "task-9", alreadyQualified: false, calendarChainId: "chain-9", duplicate: false } }; });
     resumeByProperty.mockImplementation(async () => { order.push("resume"); return { resumed: 1 }; });
     createClient.mockResolvedValue(makeActionClient(order, undefined, undefined, undefined, undefined, []));
@@ -462,7 +454,6 @@ describe("prepareManualCall", () => {
       callback: { date: "2026-08-22", time: "09:00", timeZone: "America/Chicago" },
     };
     await expect(completeSoftphoneCall(input)).resolves.toMatchObject({ ok: true, data: { callbackTaskId: "task-9" } });
-    expect(bookAppointment).not.toHaveBeenCalled();
     expect(createNextStep).toHaveBeenCalledWith({
       kind: "appointment", mode: "phone", assigneeId: expect.any(String), title: "Call back 1 Main St",
       dueAt: "2026-08-22T14:00:00.000Z", propertyId: "property-1", contactId: "contact-1",
@@ -664,7 +655,6 @@ describe("prepareManualCall", () => {
       notes: "DNC race",
       wrapToken: "22222222-2222-4222-8222-222222222222",
     })).resolves.toEqual({ ok: false, error: "This lead is permanently read-only" });
-    expect(bookAppointment).not.toHaveBeenCalled();
     expect(resumeByProperty).not.toHaveBeenCalled();
   });
 
@@ -677,7 +667,7 @@ describe("prepareManualCall", () => {
       return { ok: true };
     });
     getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
-    bookAppointment.mockImplementation(async (input: { idempotencyKey?: string }) => {
+    createNextStep.mockImplementation(async (input: { idempotencyKey?: string }) => {
       const key = input.idempotencyKey!;
       const duplicate = appointmentRows.has(key);
       if (!duplicate) {
@@ -718,9 +708,9 @@ describe("prepareManualCall", () => {
     expect(appointmentRows.size).toBe(1);
     expect(propertyDisposition).toBe("booked_appointment");
     expect(setOutreachDispo).toHaveBeenCalledTimes(1);
-    expect(bookAppointment).toHaveBeenCalledTimes(2);
-    expect(bookAppointment).toHaveBeenNthCalledWith(1, expect.objectContaining({ idempotencyKey: input.wrapToken }));
-    expect(bookAppointment).toHaveBeenNthCalledWith(2, expect.objectContaining({ idempotencyKey: input.wrapToken }));
+    expect(createNextStep).toHaveBeenCalledTimes(2);
+    expect(createNextStep).toHaveBeenNthCalledWith(1, expect.objectContaining({ idempotencyKey: input.wrapToken }));
+    expect(createNextStep).toHaveBeenNthCalledWith(2, expect.objectContaining({ idempotencyKey: input.wrapToken }));
   });
 
   it("preserves booked_appointment across concurrent same-token retries", async () => {
@@ -744,7 +734,7 @@ describe("prepareManualCall", () => {
       return { ok: true };
     });
     getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
-    bookAppointment.mockImplementation(async (input: { idempotencyKey?: string }) => {
+    createNextStep.mockImplementation(async (input: { idempotencyKey?: string }) => {
       const key = input.idempotencyKey!;
       const duplicate = appointmentRows.has(key);
       if (!duplicate) {
@@ -808,7 +798,7 @@ describe("prepareManualCall", () => {
     let propertyDisposition = "nurture";
 
     getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
-    bookAppointment.mockImplementation(async (input: { idempotencyKey?: string }) => ({
+    createNextStep.mockImplementation(async (input: { idempotencyKey?: string }) => ({
       ok: true,
       data: {
         taskId: appointmentRows.get(input.idempotencyKey!),
