@@ -62,6 +62,8 @@ export type NineDeferral = {
   /** The deferring run's decision, reused as-is (the revision check proves nothing changed): no second Jev call. */
   result: NineQuestionResult;
   classificationRunId: string;
+  /** Set when the provider fence refused because the lead changed: the next run decides from scratch. */
+  fresh?: boolean;
 };
 
 /**

@@ -554,7 +554,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
-  it("deferred run: the lead changes after the early check but before the provider: refused at the fence, nothing sent, silent exit", async () => {
+  it("deferred run: the lead changes after the early check but before the provider: refused at the fence, nothing sent, re-dispatched fresh", async () => {
     await seedOrg({ businessHoursOnly: true });
     windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
     const first = await run({ not_interested: 0.85 }, "No");
@@ -571,8 +571,9 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
         return new;
       end $$`);
     await pg.query("create trigger test_nine_bump_extra after insert on public.messages for each row execute function public.test_nine_bump_extra()");
+    let fenced: unknown;
     try {
-      await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      fenced = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
     } finally {
       await pg.query("drop trigger if exists test_nine_bump_extra on public.messages");
       await pg.query("drop function if exists public.test_nine_bump_extra()");
@@ -580,7 +581,16 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(getMockMessageLog()).toHaveLength(0);
     const row = await propertyRow(first.lead.propertyId);
     expect(row.needs_human_attention).toBe(false);
-    expect(await enrollmentsFor(first.lead.propertyId)).toEqual([]);
+    const f = fenced as AiRetryOutcome;
+    expect(f.outcome).toBe("retry");
+    expect(f.nineDeferral?.fresh).toBe(true);
+    // The fresh re-dispatch re-classifies and, with nothing else changed, sends once.
+    const jevBefore = jevCalls.length;
+    const fresh = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: f.nineDeferral }, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+    expect(fresh).toEqual({ outcome: "auto_closed", reason: "nine_questions:not_interested" });
+    expect(jevCalls.length).toBe(jevBefore + 1);
+    expect(getMockMessageLog()).toHaveLength(1);
+    expect(await enrollmentsFor(first.lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
   });
 
   it("a second not_interested with the not_interested switch off: still held for a person, nothing changed", async () => {
@@ -646,7 +656,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(await enrollmentsFor(first.lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
   });
 
-  it("A: a deferred reply whose lead changed while it waited exits silently: nothing sent, no hold", async () => {
+  it("A: a deferred reply whose lead changed (status) while it waited is decided afresh and still sent in-window", async () => {
     await seedOrg({ businessHoursOnly: true });
     windows.businessClosedUntil = new Date(Date.now() + 2 * HOURS);
     const first = await run({ not_interested: 0.85 }, "No");
@@ -654,8 +664,8 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     windows.businessClosedUntil = null;
     await pg.query("update public.properties set status = 'contacted' where id = $1", [first.lead.propertyId]);
     const again = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
-    expect(again).toEqual({ outcome: "skipped", reason: "nine_deferred_context_changed" });
-    expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
+    expect(again).toEqual({ outcome: "auto_closed", reason: "nine_questions:not_interested" });
+    expect(await outboundBodies(first.lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.not_interested]);
     expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(false);
   });
 
@@ -840,9 +850,13 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
   it("deferred run, a newer HANDLED inbound owns the thread: exits silently, sends nothing, no hold, terminal", async () => {
     const { first, deferred } = await deferOnce();
     const newer = await newerInbound(first);
-    // The newer inbound's own run finished (terminal stamp), so it owns the thread.
-    await markInboundMessageState(supabase, newer, { aiResponder: { outcome: "auto_closed", reason: "nine_questions:confirmed_owner", completedAt: new Date().toISOString() } as never });
+    // The newer inbound's own run handles it (here: confirmed owner, drip only, no reply).
+    jevProbabilities = { confirmed_owner: 0.9 };
+    const newerOut = await dispatchAiResponse(supabase, { ...first.input, inboundMessageId: newer, inboundBody: "also, call me" }, { anthropic: NO_ANTHROPIC });
+    expect(newerOut).toEqual({ outcome: "auto_closed", reason: "nine_questions:confirmed_owner" });
+    await markInboundMessageState(supabase, newer, { aiResponder: { ...newerOut, completedAt: new Date().toISOString() } as never });
     const out = await redispatch(first, deferred);
+    expect(out).toEqual({ outcome: "skipped", reason: "superseded_by_newer_inbound" });
     expect(out.outcome).not.toBe("retry");
     expect(out.outcome).not.toBe("sent");
     await expectNothingSent(first.lead.propertyId);
@@ -853,6 +867,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { first, deferred } = await deferOnce();
     await newerInbound(first);
     const out = await redispatch(first, deferred);
+    expect(out).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
     expect(out.outcome).not.toBe("retry");
     expect(out.outcome).not.toBe("sent");
     await expectNothingSent(first.lead.propertyId);
@@ -862,6 +877,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { first, deferred } = await deferOnce();
     await pg.query("update public.properties set outreach_dispo = 'nurture' where id = $1", [first.lead.propertyId]);
     const out = await redispatch(first, deferred);
+    expect(out).toEqual({ outcome: "skipped", reason: "already_terminal" });
     expect(out.outcome).not.toBe("retry");
     expect(out.outcome).not.toBe("sent");
     await expectNothingSent(first.lead.propertyId);
@@ -872,12 +888,41 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { first, deferred } = await deferOnce();
     await supabase.from("consent_events").insert({ contact_id: first.lead.contactId, channel: "sms", event_type: "opt_out", source: "nine-test", org_id: orgId });
     const out = await redispatch(first, deferred);
+    expect(out).toEqual({ outcome: "skipped", reason: "no_consent" });
     expect(out.outcome).not.toBe("retry");
     expect(out.outcome).not.toBe("sent");
     await expectNothingSent(first.lead.propertyId);
     const { rows } = await pg.query("select event_type from public.consent_events where contact_id = $1 order by created_at desc limit 1", [first.lead.contactId]);
     expect(rows[0].event_type).toBe("opt_out");
     expect(await enrollmentsFor(first.lead.propertyId)).toEqual([]);
+  });
+
+  it.each([
+    ["a same-value assignment update", "update public.properties set assigned_user_id = assigned_user_id where id = $1"],
+    ["a same-value re-import (homeowner_contact_id)", "update public.properties set homeowner_contact_id = homeowner_contact_id where id = $1"],
+    ["an outbound text to a different phone of the org (dialer / other thread)", "insert into public.messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body, created_at) select org_id, 'sms', 'outbound', 'delivered', id, homeowner_contact_id, '" + MOCK_SENDER_PRIMARY + "', '+10000000000', 'earlier note', now() - interval '2 hours' from public.properties where id = $1"],
+  ])("deferred run after %s during the wait: decided afresh, the reply still goes out in-window, never silently skipped", async (_n, sql) => {
+    const { first, deferred } = await deferOnce();
+    await pg.query(sql, [first.lead.propertyId]);
+    const jevBefore = jevCalls.length;
+    const out = await redispatch(first, deferred);
+    expect(out).toEqual({ outcome: "auto_closed", reason: "nine_questions:not_interested" });
+    expect(jevCalls.length).toBe(jevBefore + 1);
+    expect(getMockMessageLog()).toHaveLength(1);
+    expect((await outboundBodies(first.lead.propertyId)).filter((b) => b === APPROVED_REPLY_TEXTS.not_interested)).toHaveLength(1);
+    expect(await enrollmentsFor(first.lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
+  });
+
+  it("deferred run after an automated broadcast (drip step) went to the seller during the wait: existing Q8 rule 5 applies (not sent, no flag)", async () => {
+    // Pinned, not changed: the send gate's rule 5 says an automated broadcast submitted since the
+    // seller's inbound means no AI reply. Reported to the coordinator as a rule question.
+    const { first, deferred } = await deferOnce();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: first.lead.propertyId, contact_id: first.lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: first.lead.phone, body: "drip step", external_id: "ext-drip", metadata: { generated_by: "sequence_tick" } });
+    const out = await redispatch(first, deferred);
+    expect(out.outcome).not.toBe("retry");
+    expect(getMockMessageLog()).toHaveLength(0);
+    expect(out).toEqual({ outcome: "skipped", reason: "superseded_by_broadcast" });
+    expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(false);
   });
 
   it.each(answers)("matrix Florida cap (%s): held, never deferred", async (_k, probs, text) => {

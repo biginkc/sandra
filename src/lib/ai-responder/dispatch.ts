@@ -313,6 +313,8 @@ export type AiDispatchInput = {
   replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
   /** A nine-question reply deferred until the send window opened (see ./retry NineDeferral). */
   nineDeferral?: NineDeferral;
+  /** A deferred run re-deciding from scratch: how many deferrals came before (loop bound only). */
+  nineDeferCount?: number;
 };
 
 export type AiDispatchOptions = {
@@ -7991,7 +7993,7 @@ async function maybeDeferNineReply(
   // could not start) never sends an approved template: only the clamp-to-0 case may wait.
   if (a.input.replyDelayBypassed && a.input.replyDelayBypassReason !== "delay_not_applied") return null;
   if (!a.input.inboundMessageId) return null;
-  const count = a.input.nineDeferral?.count ?? 0;
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
   if (count >= NINE_DEFER_MAX) return null;
   // The revision the deferred run must find. Our own refused pending row (fence refusal only)
   // moved it exactly once; anything else moving it means the lead changed: hold, don't defer.
@@ -8127,24 +8129,43 @@ async function routeNineRepeatNotInterested(
 }
 
 /**
- * A deferred reply whose lead changed while it waited (a newer text, a person's dispo /
- * status change): that newer event owns the thread. Intended behaviour: exit silently,
- * WITHOUT sending and without a hold (a hold would only add noise; the newer event has its
- * own run or a person already acted). Recorded as a silent handled exit for this inbound.
+ * Refused at the provider fence because the lead changed after a deferral: never send the
+ * stale decision and never drop it silently. Release the claim and re-dispatch the same
+ * inbound shortly as a FRESH decision (the next run re-classifies and every gate applies).
+ * Past the loop bound, or if the lease cannot be released, a person looks.
  */
-async function nineDeferredOwnedElsewhere(
+async function redispatchNineFresh(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
-): Promise<AiDispatchOutcome> {
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
+  if (count >= NINE_DEFER_MAX || !a.input.inboundMessageId) {
+    return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+  }
+  const errorMessage = "nine_reply_deferred:redispatch_fresh";
+  let released = await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage, releaseLease: true });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
   await trace(supabase, {
     kind: "action",
     name: "nine_reply_deferred",
-    result: "skipped",
-    detail: { engine: "nine_questions", why: "context_changed" },
+    result: "applied",
+    detail: { engine: "nine_questions", why: "context_changed_at_fence", redispatch: "fresh", deferral: count + 1 },
   }, a.runCtx);
-  const outcome = silentSkip(NINE_DEFERRED_CONTEXT_CHANGED, 0);
-  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: claimOutcomeOf(outcome) });
-  return outcome;
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds: REPLY_RETRY_DELAY_SECONDS,
+    nineDeferral: {
+      count: count + 1,
+      revision: decision.evaluationRevision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+      fresh: true,
+    },
+  };
 }
 
 export async function runNineQuestionsStep(
@@ -8164,8 +8185,19 @@ export async function runNineQuestionsStep(
       // Unreadable: we cannot tell who owns the thread, so a person looks.
       return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
     }
-    if (current.decision_context_revision !== input.nineDeferral.revision) {
-      return nineDeferredOwnedElsewhere(supabase, a);
+    if (input.nineDeferral.fresh || current.decision_context_revision !== input.nineDeferral.revision) {
+      // The lead's revision moves on many things that do NOT end the conversation (a campaign
+      // text, a same-value re-import, an assignment...). So never drop the reply: discard the
+      // carried decision and decide again from scratch. The normal gates then exit silently
+      // when a newer inbound / a person's terminal dispo / an opt-out owns the thread.
+      await trace(supabase, {
+        kind: "action",
+        name: "nine_reply_deferred",
+        result: "applied",
+        detail: { engine: "nine_questions", why: "context_changed", redispatch: "fresh" },
+      }, runCtx);
+      const count = input.nineDeferral.count;
+      return runNineQuestionsStep(supabase, { ...a, input: { ...input, nineDeferral: undefined, nineDeferCount: count } });
     }
   }
   // A deferred run reuses the deferring run's decision: the revision check above proved the
@@ -8330,7 +8362,25 @@ export async function runNineQuestionsStep(
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.
   const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
     // Refused at the provider fence because the lead changed after a deferral: silent exit.
-    if (input.nineDeferral && why.endsWith(NINE_DEFERRED_CONTEXT_CHANGED)) return nineDeferredOwnedElsewhere(supabase, a);
+    // The send gate found a newer inbound (Q8 rule 1): that inbound's own run owns the thread.
+    // Not sent and no extra nine hold: the gate already flagged a person if its table says so.
+    if (why === "skipped:superseded_before_send" || why === "skipped:superseded_by_newer_inbound") {
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_enrolled",
+        result: "skipped",
+        detail: { why: "superseded", route: action.drip, engine: "nine_questions" },
+      }, runCtx);
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: why });
+      return { outcome: "skipped", reason: why.slice("skipped:".length) };
+    }
+    if (input.nineDeferral && why.endsWith(NINE_DEFERRED_CONTEXT_CHANGED)) {
+      return redispatchNineFresh(supabase, a, {
+        evaluationRevision: cls.evaluationRevision,
+        classificationRunId: cls.classificationRunId,
+        result,
+      });
+    }
     // Only a closed send window: wait for it to open instead of holding (A/B/C).
     const deferred = await maybeDeferNineReply(supabase, a, why, {
       evaluationRevision: cls.evaluationRevision,

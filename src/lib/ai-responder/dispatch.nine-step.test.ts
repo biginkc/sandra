@@ -115,7 +115,13 @@ describe("nine-question deferral (mocked)", () => {
     const deferral = { count: 1, revision: 7, result: NOT_INTERESTED, classificationRunId: "run1" };
     const input = { propertyId: "p1", contactId: "c1", conversationId: "conv1", inboundMessageId: "in1", inboundBody: "No", nineDeferral: deferral };
     const moved = fakeSupabase({ messages: [], properties: [{ decision_context_revision: 8 }] });
-    expect(await runNineQuestionsStep(moved.client, args({ input }))).toEqual({ outcome: "skipped", reason: "nine_deferred_context_changed" });
+    h.classify.mockResolvedValueOnce({ kind: "ok", result: NOT_INTERESTED, classificationRunId: "run2", evaluationRevision: 8, ourLastText: null });
+    // Moved: the carried decision is dropped and Jev is asked again (here the window is still closed: re-deferred).
+    const movedOut = (await runNineQuestionsStep(moved.client, args({ input }))) as { outcome: string; nineDeferral: { count: number } };
+    expect(h.classify).toHaveBeenCalledTimes(1);
+    expect(movedOut.outcome).toBe("retry");
+    expect(movedOut.nineDeferral.count).toBe(2);
+    h.classify.mockClear();
     const same = fakeSupabase({ messages: [], properties: [{ decision_context_revision: 7 }] });
     const out = (await runNineQuestionsStep(same.client, args({ input }))) as { outcome: string; nineDeferral: { count: number } };
     expect(out.outcome).toBe("retry");
