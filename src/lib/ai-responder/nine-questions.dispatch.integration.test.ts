@@ -15,11 +15,12 @@ import {
 
 import { startRun } from "@/lib/pipeline-runs";
 import { HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
-import { dispatchAiResponse } from "./dispatch";
+import { dispatchAiResponse, NINE_DEFER_MAX } from "./dispatch";
 import { enrollNineDrip } from "./nine-questions-engine";
 import type { AnthropicLike } from "./generate";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
+import type { AiRetryOutcome } from "./retry";
 
 /**
  * Messages v2 PR 3 (nine questions), end to end through `dispatchAiResponse` on a
@@ -540,7 +541,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
   // Reply can't go out ONLY because the send window is closed: wait, don't hold (A/B/C).
   const HOURS = 3600_000;
   async function expectDeferred(outcome: unknown, minSeconds: number) {
-    const o = outcome as { outcome: string; reason: string; delaySeconds: number; nineDeferral?: { count: number; revision: number } };
+    const o = outcome as AiRetryOutcome;
     expect(o.outcome).toBe("retry");
     expect(o.reason).toBe("nine_reply_deferred");
     expect(o.delaySeconds).toBeGreaterThanOrEqual(minSeconds);
@@ -558,8 +559,11 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(false);
     // The window opened: the workflow re-dispatches the same inbound with the deferral.
     windows.businessClosedUntil = null;
+    const jevCallsBefore = jevCalls.length;
     const again = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
     expect(again).toEqual({ outcome: "auto_closed", reason: "nine_questions:not_interested" });
+    // The deferring run's decision is reused: Jev is not asked again.
+    expect(jevCalls.length).toBe(jevCallsBefore);
     expect(await outboundBodies(first.lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.not_interested]);
     expect(await enrollmentsFor(first.lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
   });
@@ -605,6 +609,44 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     await expectDeferred(outcome, 60);
     expect(await outboundBodies(lead.propertyId)).toEqual([]);
     expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
+  });
+
+  it("outside business hours with NO reply delay configured: never deferred into a send; held as before", async () => {
+    await seedOrg({ businessHoursOnly: true });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * HOURS);
+    const lead = await seedLead();
+    jevProbabilities = { not_interested: 0.85 };
+    const inbound = await seedThread(lead, "No");
+    const outcome = await dispatchAiResponse(supabase, {
+      propertyId: lead.propertyId,
+      contactId: lead.contactId,
+      conversationId: inbound.conversationId,
+      inboundMessageId: inbound.id,
+      inboundBody: "No",
+      inboundFromPhone: lead.phone,
+      inboundToPhone: MOCK_SENDER_PRIMARY,
+      replyDelayBypassed: true,
+      replyDelayBypassReason: "delay_not_configured",
+    }, { anthropic: NO_ANTHROPIC });
+    expect(outcome).toEqual({ outcome: "escalated", reason: "nine_reply_not_sent:reply_ineligible" });
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+  });
+
+  it("a reply already deferred NINE_DEFER_MAX times is held for a person, not deferred again", async () => {
+    await seedOrg({ businessHoursOnly: true });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * HOURS);
+    const first = await run({ not_interested: 0.85 }, "No");
+    let deferred = await expectDeferred(first.outcome, 2 * 3600);
+    for (let n = 2; n <= NINE_DEFER_MAX; n += 1) {
+      const next = (await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC })) as AiRetryOutcome;
+      expect(next.outcome).toBe("retry");
+      expect(next.nineDeferral?.count).toBe(n);
+      deferred = next;
+    }
+    const last = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
+    expect(last).toEqual({ outcome: "escalated", reason: "nine_reply_not_sent:reply_ineligible" });
+    expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
+    expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(true);
   });
 
   it("not a window problem (no delay configured): still held exactly as before", async () => {

@@ -7877,34 +7877,55 @@ async function maybeDeferNineReply(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
   why: string,
-  evaluationRevision: number,
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
 ): Promise<AiRetryOutcome | null> {
   if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
+  // A dispatch running without the reply delay (none configured, lookup failed, workflow
+  // could not start) never sends an approved template: only the clamp-to-0 case may wait.
+  if (a.input.replyDelayBypassed && a.input.replyDelayBypassReason !== "delay_not_applied") return null;
   if (!a.input.inboundMessageId) return null;
   const count = a.input.nineDeferral?.count ?? 0;
   if (count >= NINE_DEFER_MAX) return null;
   const phone = await resolveSendDestinationPhone(supabase, a.input);
   const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
   if (delaySeconds === null) return null;
+  // Released so the deferred re-dispatch of this same inbound can claim it again. As the
+  // other retry paths: a lease that cannot be released means the retry could never run, so
+  // nothing is scheduled and the caller holds for a person.
+  const errorMessage = `nine_reply_deferred:${why}`;
+  let released = await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "skipped",
+    errorMessage,
+    releaseLease: true,
+  });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "retry_unschedulable",
+      result: "error",
+      detail: { engine: "nine_questions", why: "nine_reply_deferred" },
+    }, a.runCtx);
+    return null;
+  }
   await trace(supabase, {
     kind: "action",
     name: "nine_reply_deferred",
     result: "applied",
     detail: { engine: "nine_questions", why, delaySeconds, deferral: count + 1 },
   }, a.runCtx);
-  // Released so the deferred re-dispatch of this same inbound can claim it again.
-  await completeClaim(supabase, a.input.propertyId, {
-    claimId: a.claim.claimId,
-    outcome: "skipped",
-    errorMessage: `nine_reply_deferred:${why}`,
-    releaseLease: true,
-  });
   return {
     outcome: "retry",
     reason: "nine_reply_deferred",
     attempt: a.input.retryAttempt ?? 0,
     delaySeconds,
-    nineDeferral: { count: count + 1, revision: evaluationRevision },
+    nineDeferral: {
+      count: count + 1,
+      revision: decision.evaluationRevision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+    },
   };
 }
 
@@ -8016,18 +8037,27 @@ export async function runNineQuestionsStep(
       return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
     }
   }
-  const cls = await runNineClassification(
-    supabase,
-    {
-      orgId: property.org_id,
-      propertyId: input.propertyId,
-      contactId: input.contactId,
-      conversationId: input.conversationId ?? null,
-      inboundMessageId: input.inboundMessageId ?? null,
-      inboundBody: input.inboundBody,
-    },
-    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
-  );
+  // A deferred run reuses the deferring run's decision: the revision check above proved the
+  // lead did not change, so Jev is not asked again.
+  const cls = input.nineDeferral
+    ? {
+        kind: "ok" as const,
+        result: input.nineDeferral.result,
+        classificationRunId: input.nineDeferral.classificationRunId,
+        evaluationRevision: input.nineDeferral.revision,
+      }
+    : await runNineClassification(
+        supabase,
+        {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId: input.inboundMessageId ?? null,
+          inboundBody: input.inboundBody,
+        },
+        { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+      );
   if (cls.kind === "failed") {
     // Never falls back to the other engine: no trusted decision, so a person looks. A price
     // keyword still makes it a hot hold (alert only), as in the eight-answer path, but hostile
@@ -8169,7 +8199,11 @@ export async function runNineQuestionsStep(
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.
   const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
     // Only a closed send window: wait for it to open instead of holding (A/B/C).
-    const deferred = await maybeDeferNineReply(supabase, a, why, cls.evaluationRevision);
+    const deferred = await maybeDeferNineReply(supabase, a, why, {
+      evaluationRevision: cls.evaluationRevision,
+      classificationRunId: cls.classificationRunId,
+      result,
+    });
     if (deferred) return deferred;
     await trace(supabase, {
       kind: "action",

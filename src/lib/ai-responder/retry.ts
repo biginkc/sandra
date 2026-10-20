@@ -4,6 +4,8 @@ import { reportError } from "@/lib/errors/report";
 import { recordStep, type MaybeRunContext } from "@/lib/pipeline-runs";
 import type { Database } from "@/lib/supabase/types";
 
+import type { NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+
 import type { AiMessageMetadata } from "./types";
 
 /** Seconds before a contended / failed-to-persist reply is re-dispatched. */
@@ -54,7 +56,13 @@ export type RetryReason =
  * holds for a person when it moved (a new text, a takeover, a dispo change).
  * `count` bounds how many times one inbound is deferred.
  */
-export type NineDeferral = { count: number; revision: number };
+export type NineDeferral = {
+  count: number;
+  revision: number;
+  /** The deferring run's decision, reused as-is (the revision check proves nothing changed): no second Jev call. */
+  result: NineQuestionResult;
+  classificationRunId: string;
+};
 
 /**
  * The already-generated, already-safety-checked reply carried across a retry
