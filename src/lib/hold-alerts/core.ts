@@ -1,5 +1,5 @@
 import { reportError } from "@/lib/errors/report";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, LEAD_REPLY_ALERTS_START_ISO, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 
 import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
 import {
@@ -188,7 +188,26 @@ export async function runHoldAlertsForOrg(
     });
   }
   const hotHolds = hotAlerts.filter((a) => isNewHold({ startedAt: a.at }, hotStartMs));
-  if (hotHolds.length === 0 && promotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
+  // Owner decision 2026-10-20: every text from a seller on My Leads alerts Jarrad,
+  // keyed lead_reply:<inbound>. A text that already alerts this pass as hot
+  // (hot_text / hot_handoff / hot_failed on the same inbound) sends only that one.
+  const leadLoaded = deps.loadLeadReplies ? await deps.loadLeadReplies(orgId, mark.alertsSince) : { promotions: [], complete: true };
+  if (!leadLoaded.complete) {
+    reportError(new Error("hold alerts: lead-reply load incomplete; some lead texts may not have alerted yet"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+  }
+  const hotKeysThisPass = new Set([...promotions.map((p) => p.key), ...hotHolds.map((h) => h.key)]);
+  const leadStartMs = Date.parse(LEAD_REPLY_ALERTS_START_ISO);
+  const leadReplies = leadLoaded.promotions.filter(
+    (p) =>
+      !!p.inboundId &&
+      isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) &&
+      isNewHold({ startedAt: p.assignedAt }, leadStartMs) &&
+      ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId)].some((k) => hotKeysThisPass.has(k)),
+  );
+  const alertPromotions = [...promotions, ...leadReplies];
+  if (hotHolds.length === 0 && alertPromotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
   const link = deps.baseUrl;
@@ -208,18 +227,18 @@ export async function runHoldAlertsForOrg(
   } catch (error) {
     reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "hot_owner" } });
   }
-  if (hotOwner === null && (hotHolds.length > 0 || promotions.length > 0)) {
+  if (hotOwner === null && (hotHolds.length > 0 || alertPromotions.length > 0)) {
     summary.hotOwnerUnknown = true;
     if (shouldReportOwnerUnknown(orgId, startMs)) reportError(new Error("hold alerts: couldn't tell who to alert for hot sellers; none sent"), {
       tags: { surface: "hold_alerts", orgId },
-      extra: { hotHolds: hotHolds.length, promotions: promotions.length },
+      extra: { hotHolds: hotHolds.length, promotions: alertPromotions.length },
     });
   }
   const hotRecipients = recipients.filter((r) => r.role === "owner" && r.userId === hotOwner);
   // One alert per hot EVENT (see "Alert and hand-off model" in PR #882):
   // hot_handoff:<inbound>, hot_text:<inbound>, hot_flag:<property>:<flagAt>.
   // property_id null so archive-on-clear never re-fires a key.
-  for (const p of promotions) {
+  for (const p of alertPromotions) {
     // Same fail-closed rule as holds: only to the resolved hot owner (re-checked
     // before each send). Who the lead is assigned to never matters.
     if (hotOwner === null) continue;

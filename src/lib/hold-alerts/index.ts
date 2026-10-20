@@ -21,6 +21,7 @@ import type {
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
 import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
+import { loadLeadReplies } from "./lead-replies";
 
 export { runHoldAlertsForOrg } from "./core";
 
@@ -265,6 +266,10 @@ export function createHoldAlertDeps(
     async loadHotPromotions(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
       return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+    },
+    async loadLeadReplies(orgId, alertsSince) {
+      const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+      return loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     async loadRecipients(orgId): Promise<Recipient[]> {
