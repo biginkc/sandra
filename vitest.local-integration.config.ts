@@ -64,6 +64,7 @@ export default defineConfig({
       "supabase/migrations/20261015020200_my_leads_work_facts_zip_signed_touch.integration.test.ts",
       "supabase/migrations/20261015030000_my_leads_work_classified_perf.integration.test.ts",
       "supabase/migrations/20261015040000_my_leads_approved_snooze_multi_house.integration.test.ts",
+      "supabase/migrations/20261020130000_my_leads_work_new_lead_in_drip.integration.test.ts",
       "supabase/migrations/20261016040000_homeowner_houses_first_page.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
