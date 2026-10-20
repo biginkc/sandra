@@ -8072,6 +8072,11 @@ async function maybeDeferNineReply(
   // A hot reply waits AFTER the promotion / hand-off, which move the revision themselves:
   // the deferred run instead requires the revision read here to be unchanged.
   if (!opts.hotReply && liveRev.decision_context_revision !== decision.evaluationRevision + ownRowBumps) return null;
+  // A hot reply deferred AGAIN: promotion and hand-off finished long ago, so only this attempt's
+  // own refused pending row may have moved the revision since the deferral it carries. Anything
+  // else (a reassignment, a person texting) drops the text instead of becoming the new baseline.
+  const priorHot = opts.hotReply && a.input.nineDeferral?.hotReply ? a.input.nineDeferral : null;
+  if (priorHot && liveRev.decision_context_revision !== priorHot.revision + ownRowBumps) return null;
   const phone = await resolveSendDestinationPhone(supabase, a.input);
   const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
   if (delaySeconds === null) return null;

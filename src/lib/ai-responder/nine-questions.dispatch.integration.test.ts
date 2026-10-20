@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -45,6 +46,8 @@ const windows = vi.hoisted(() => ({
   /** The same for the property window: the first N live checks (no `at`) see it open. */
   businessOpenCalls: null as number | null,
   businessCalls: 0,
+  /** Side effect run on each live recipient-window check (a person acting in that instant). */
+  onRecipientCheck: null as (() => void) | null,
 }));
 const openAt = (closedUntil: Date | null, at?: Date) => !closedUntil || (at ?? new Date()).getTime() >= closedUntil.getTime();
 vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
@@ -58,6 +61,7 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
   checkRecipientQuietHours: (_phone: unknown, at?: Date) => {
+    if (!at && windows.onRecipientCheck) windows.onRecipientCheck();
     if (windows.recipientUnknown) return { ok: false, reason: "unknown_recipient_state", state: null, localTime: null };
     if (!at && windows.recipientOpenCalls !== null && ++windows.recipientCalls <= windows.recipientOpenCalls) {
       return { ok: true, state: "MO", localTime: "20:59", florida: false };
@@ -326,6 +330,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     windows.floridaCapped = false;
     windows.businessOpenCalls = null;
     windows.businessCalls = 0;
+    windows.onRecipientCheck = null;
     // A schema-only throwaway database has no tenant rows: make sure the canonical org exists.
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (nine questions test)" });
     expect(orgError).toBeNull();
@@ -555,6 +560,31 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
       await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o.nineDeferral }, { anthropic: NO_ANTHROPIC });
       expect(await outboundBodies(first.lead.propertyId)).toEqual(["Hi, Jarrad here"]);
       expect((await propertyRow(first.lead.propertyId)).status).toBe("new_lead");
+    });
+
+    it("deferred twice, a person reassigned the lead in between: the text is dropped, never re-based", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      const first = await run({ named_price: 0.9 }, "Would you consider $450,000?");
+      const o1 = first.outcome as AiRetryOutcome;
+      expect(o1.nineDeferral?.hotReply).toBe(true);
+      // The deferred run passes its early revision check; at the recipient-window check (still
+      // closed) a person reassigns the lead, which moves its revision.
+      // Synchronous (the window check is synchronous), so the change has landed before the run goes on.
+      let bumped = false;
+      windows.onRecipientCheck = () => {
+        if (bumped) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${first.lead.propertyId}'`]);
+      };
+      const second = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o1.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      // Not deferred again on top of the person's change: the text is dropped.
+      expect(second).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
+      expect(getMockMessageLog()).toHaveLength(0);
     });
 
     it("outbound hold mode: no text goes out, the lead is still promoted and alerted", async () => {
