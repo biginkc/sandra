@@ -5,15 +5,15 @@ import { describe, expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 
-// 20261019010000 replaces my_leads_work_classified to carry one rule Jarrad approved word for word on 2026-10-19:
+// 20261020130000 replaces my_leads_work_classified to carry one rule Jarrad approved word for word on 2026-10-19:
 //
 // "A lead that has never been called, but is in a working drip, goes to Waiting on them · In drip. If the drip stops or breaks,
 //  it comes back to Needs attention."
 //
-// Part 1 re-runs the A1 and B1 decision-table suites, unchanged, with the migration chain extended through 20261019010000, so the
+// Part 1 re-runs the A1 and B1 decision-table suites, unchanged, with the migration chain extended through 20261020130000, so the
 // shipped body is what they test. Part 2 covers the rule and its boundaries.
-const A1_THEN = '20261015020200_my_leads_work_facts_zip_signed_touch.sql,20261015030000_my_leads_work_classified_perf.sql,20261015040000_my_leads_approved_snooze_multi_house.sql,20261019010000_my_leads_work_new_lead_in_drip.sql';
-const B1_THEN = '20261015030000_my_leads_work_classified_perf.sql,20261015040000_my_leads_approved_snooze_multi_house.sql,20261019010000_my_leads_work_new_lead_in_drip.sql';
+const A1_THEN = '20261015020200_my_leads_work_facts_zip_signed_touch.sql,20261015030000_my_leads_work_classified_perf.sql,20261015040000_my_leads_approved_snooze_multi_house.sql,20261020130000_my_leads_work_new_lead_in_drip.sql';
+const B1_THEN = '20261015030000_my_leads_work_classified_perf.sql,20261015040000_my_leads_approved_snooze_multi_house.sql,20261020130000_my_leads_work_new_lead_in_drip.sql';
 
 process.env.MY_LEADS_CLASSIFIER_EXTRA_MIGRATIONS = A1_THEN;
 await import('./20261015010000_my_leads_work_queue_classifier.integration.test');
@@ -22,7 +22,7 @@ await import('./20261015020200_my_leads_work_facts_zip_signed_touch.integration.
 delete process.env.MY_LEADS_CLASSIFIER_EXTRA_MIGRATIONS;
 
 const strip = (t: string) => t.replace(/^[\s\S]*?\bbegin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
-const migration = strip(readFileSync(new URL('./20261019010000_my_leads_work_new_lead_in_drip.sql', import.meta.url), 'utf8'));
+const migration = strip(readFileSync(new URL('./20261020130000_my_leads_work_new_lead_in_drip.sql', import.meta.url), 'utf8'));
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;
 const HOUR = 60 * MIN;

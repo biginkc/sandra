@@ -1,5 +1,13 @@
--- Roll back 20261019010000: restores my_leads_work_classified exactly as defined in
--- 20261015040000_my_leads_approved_snooze_multi_house.sql (byte for byte from its begin; to its commit;).
+-- My Leads unified queue: one business rule Jarrad approved word for word on 2026-10-19. Replaces only the body of
+-- my_leads_work_classified (20261015040000); everything not named below is unchanged, row for row.
+--
+-- Approved text (character for character):
+-- A lead that has never been called, but is in a working drip, goes to Waiting on them · In drip. If the drip stops or breaks, it comes back to Needs attention.
+--
+-- Change: row '3' (New lead) no longer fires when fe.drip_healthy (the enrollment-health flag; NOT automation_ok, which also counts
+-- campaigns). Such a lead falls through the ladder: rows 4-9 (due task, unhandled reply, broken, ...) still outrank row '10'
+-- (Waiting on them · In drip). When the drip is no longer healthy (stopped, paused, stuck), drip_healthy is false and row '3' fires again.
+-- Rollback: supabase/rollbacks/20261020130000_my_leads_work_new_lead_in_drip.sql.
 begin;
 
 create or replace function public.my_leads_work_classified(p_org uuid, p_member uuid, p_at timestamptz)
@@ -461,7 +469,7 @@ language sql stable security definer set search_path = '' as $$
       case
         when fe.stage = 'under_contract' and fe.any_min is null then '1'
         when fe.pinned then '2'
-        when fe.stage = 'not_contacted' and fe.attempts_count = 0 then '3'
+        when fe.stage = 'not_contacted' and fe.attempts_count = 0 and not coalesce(fe.drip_healthy, false) then '3'
         when fe.due_min is not null then '4'
         when fe.unhandled then '5'
         when fe.broken_n > 0 then '6'
