@@ -47,7 +47,9 @@ export type HotPromotion = {
   /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text" | "hot_failed";
+  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply";
+  /** lead_reply: the inbound text this alert is about (dedupes against hot alerts on the same text). */
+  inboundId?: string;
   /** hot_text on a lead that already needs a person: may be unassigned. */
   heldLead?: boolean;
   /** hot_failed: the hold reason it carries (for the existing hold alert copy). */
@@ -104,6 +106,12 @@ export interface DeliveryStore {
    * run that inserted it; that run sends nothing.
    */
   getOrInitAlertsSince(orgId: string, nowIso: string): Promise<{ alertsSince: string; created: boolean }>;
+  /**
+   * The org's lead-reply watermark (hold_alert_settings.lead_replies_since).
+   * Set to nowIso by the first pass that runs lead-reply alerts (only if still
+   * null), so turning the feature on never sends a burst of old texts.
+   */
+  getOrInitLeadRepliesSince(orgId: string, nowIso: string): Promise<string>;
   /** insert ... on conflict do nothing, then return the row for the unique key. */
   ensure(input: EnsureInput): Promise<DeliveryRow>;
   /**
@@ -183,10 +191,10 @@ export interface HoldAlertDeps {
    * false when the lookup failed or was capped.
    */
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /** Every inbound text on a My Leads lead (kind lead_reply). Optional: absent → none. */
+  loadLeadReplies?(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
-  /** Send-time check: who the property is assigned to right now (null = nobody). */
-  loadPropertyAssignee(orgId: string, propertyId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

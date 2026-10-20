@@ -35,6 +35,8 @@ export const NINE_REPLY_TEXT_NOT_APPROVED = "reply_text_not_approved";
 const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
 /** Hold reason when the lead is on My Leads under Jarrad but its 'assigned' event did not save (hot). */
 const HOT_LEAD_EVENT_FAILED_REASON = "hot_lead_event_failed";
+/** A hot text on a lead someone else owns whose alert event could not be saved (the lead was NOT moved to Jarrad). */
+const HOT_ALERT_EVENT_FAILED_REASON = "hot_alert_event_failed";
 
 import {
   recordStep,
@@ -498,11 +500,14 @@ export async function checkAiResponderDispatchPreGates(
     }
   }
   if (isTerminalAiResponderProperty(property)) {
-    // PR 2: a lead that already needs a person still gets ONE classify-only
-    // look so a new hot text reaches Jarrad: no reply, no drip, no
-    // disposition, no assignment change; non-hot exits exactly as before.
+    // PR 2: a lead that already needs a person, or carries a human-owned
+    // disposition (nurture / callback / booked), still gets ONE classify-only
+    // look so a new hot text reaches Jarrad (owner rule 2026-10-19: every hot
+    // reply alerts him): no reply, no drip, no disposition, no assignment
+    // change; non-hot exits exactly as before. True suppression (wrong / bad
+    // number, DNC, opted out) is refused inside classifyOnlyForHotText, and
     // DNC-locked leads are never classified.
-    if (property.needs_human_attention && !property.is_dnc_locked && input.inboundMessageId) {
+    if (!property.is_dnc_locked && input.inboundMessageId) {
       await classifyOnlyForHotText(supabase, input, property, runCtx);
     }
     await blocked("already_terminal");
@@ -992,6 +997,17 @@ async function dispatchAiResponseCore(
     const numberSource = identityDelayDrop ? null : identityLookup.template;
     const identityNotSentReason = identityDelayDrop ?? identityLookup.askedNotSentReason;
     if (numberSource) {
+      const nsRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, numberSource.templateId, numberSource.body);
+      if (nsRepeat !== "no") {
+        return holdRepeatedReply(supabase, {
+          input,
+          claimId: responseClaim.claimId,
+          holdReason: `${NUMBER_SOURCE_NOT_SENT_PREFIX}${TEMPLATE_ALREADY_SENT}`,
+          lookup: nsRepeat,
+          detail: { templateId: numberSource.templateId, mappingId: numberSource.mappingId, replyKey: numberSource.key, via: "identity_interceptor" },
+          runCtx: deps.runContext,
+        });
+      }
       const sent = await sendResponderMessage(supabase, {
         runContext: deps.runContext,
         input,
@@ -1069,6 +1085,17 @@ async function dispatchAiResponseCore(
         flagOk: flagOk1,
       });
       return { outcome: "escalated", reason };
+    }
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      return holdRepeatedReply(supabase, {
+        input,
+        claimId: responseClaim.claimId,
+        holdReason: TEMPLATE_ALREADY_SENT_HOLD,
+        lookup: identityRepeat,
+        detail: { replyKind: "identity" },
+        runCtx: deps.runContext,
+      });
     }
     const outcome = await sendResponderMessage(supabase, {
       runContext: deps.runContext,
@@ -2098,6 +2125,7 @@ async function resolveAndApplyRoute(
     }
     case "auto_close_wrong_number":
       let wrongNumberTemplateMessageId: string | null = null;
+      let wrongNumberStepHold: string | null = null;
       // The seller asked how we got the number AND is the wrong contact: the
       // wrong-number reply is not sent (it would not answer the question, and
       // the number-source reply is never sent to a wrong contact); a person looks.
@@ -2128,6 +2156,7 @@ async function resolveAndApplyRoute(
         });
         if (step.kind === "stop") return step.outcome;
         wrongNumberTemplateMessageId = step.outboundMessageId;
+        wrongNumberStepHold = step.hold;
       }
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
@@ -2176,8 +2205,11 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
-      const wrongNumberHoldOk = wrongNumberNumberSourceAsked
-        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`, runCtx)
+      const wrongNumberHoldReason = wrongNumberNumberSourceAsked
+        ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`
+        : wrongNumberStepHold;
+      const wrongNumberHoldOk = wrongNumberHoldReason
+        ? await holdWithRetry(supabase, input.propertyId, wrongNumberHoldReason, runCtx)
         : true;
       const wrongNumberClaimError = dispositionClaimError(wrongNumberResult);
       await completeClaim(supabase, input.propertyId, {
@@ -2870,6 +2902,68 @@ const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
+/** Not-sent reason: this approved template (or its exact text) already went to this property. */
+export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
+const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
+
+/**
+ * "yes" when an outbound on this property already carried this template id or this exact
+ * body, "no" when none did, "error" when either lookup failed (callers fail closed).
+ * A row that failed before reaching the provider (status failed, no external id) never
+ * went out and does not count; pending / unknown / sent rows do.
+ */
+async function templateAlreadySentToProperty(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+  templateId: string | null,
+  body: string,
+): Promise<"yes" | "no" | "error"> {
+  const neverSent = (r: { status: string | null; external_id: string | null }) => r.status === "failed" && !r.external_id;
+  const base = () =>
+    supabase
+      .from("messages")
+      .select("id, status, external_id")
+      .eq("org_id", orgId)
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound");
+  if (templateId) {
+    const byTemplate = await base().eq("metadata->>template_id", templateId);
+    if (byTemplate.error || !Array.isArray(byTemplate.data)) return "error";
+    if (byTemplate.data.some((r) => !neverSent(r))) return "yes";
+  }
+  const byBody = await base().eq("body", body);
+  if (byBody.error || !Array.isArray(byBody.data)) return "error";
+  return byBody.data.some((r) => !neverSent(r)) ? "yes" : "no";
+}
+
+/**
+ * A fixed reply (template or identity text) this property already received: send nothing,
+ * trace the skip, hold for a person, settle the claim as escalated.
+ */
+async function holdRepeatedReply(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    claimId: string | null;
+    holdReason: string;
+    lookup: "yes" | "error";
+    detail: Record<string, unknown>;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "reply",
+    name: "template_reply",
+    result: "skipped",
+    detail: { ...a.detail, reason: TEMPLATE_ALREADY_SENT, ...(a.lookup === "error" ? { lookup: "failed" } : {}) },
+  }, a.runCtx);
+  const flagOk = await holdWithRetry(supabase, a.input.propertyId, a.holdReason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claimId, outcome: "escalated", flagOk });
+  return { outcome: "escalated", reason: a.holdReason };
+}
+
 export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
@@ -3010,6 +3104,32 @@ export async function runApprovedTemplateStep(
       : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
   }
 
+  // Never repeat an approved template on the same property (owner rule): when this
+  // template, or the same text, already went out here, nothing is sent and a person
+  // looks. An unreadable history fails closed the same way.
+  const repeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, resolved.templateId, resolved.body);
+  if (repeat !== "no") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: TEMPLATE_ALREADY_SENT,
+        ...(repeat === "error" ? { lookup: "failed" } : {}),
+      },
+    }, runCtx);
+    return {
+      kind: "continue",
+      outboundMessageId: null,
+      replyKey: null,
+      hold: notSent(TEMPLATE_ALREADY_SENT) ?? TEMPLATE_ALREADY_SENT_HOLD,
+      notSentReason: TEMPLATE_ALREADY_SENT,
+    };
+  }
+
   let recorded = true;
   let markerWrites = 0;
   const sent = await sendResponderMessage(supabase, {
@@ -3100,11 +3220,16 @@ export async function runApprovedTemplateStep(
 }
 
 /**
- * Classify-only for an inbound on a property that already needs a person.
+ * Classify-only for an inbound on a property Sandra will not reply to: one that
+ * already needs a person, OR one with a human-owned disposition (nurture,
+ * callback_requested, booked_appointment) even when it is not flagged.
+ * True suppression (wrong_number, bad_number, dnc, opted_out) never gets here.
  * With Jev automatic, one classification and the shared hot routing decision;
- * hot → one hot_text event (alerted to Jarrad by the cron, subject to the
- * usual cover / owner / cap / cutoff rules). Never sends, enrols, disposes or
- * assigns. Any failure here changes nothing (the lead is already held).
+ * hot → one hot_text event (alerted to Jarrad by the cron, whoever owns the
+ * lead, subject to the usual cover / cap / cutoff rules). Never sends, enrols,
+ * disposes or assigns. A failed write releases the claim; on a held lead the
+ * hold keeps a person in the loop, but on an UNFLAGGED lead nothing else
+ * records it, so it is only retried if the same inbound is replayed.
  */
 async function classifyOnlyForHotText(
   supabase: SupabaseClient<Database>,
@@ -3121,8 +3246,8 @@ async function classifyOnlyForHotText(
     // if the lead were not held. Any failed lookup or any gate → nothing.
     // Alert-only (nothing is sent), so only TRUE suppression blocks it
     // (wrong_number / bad_number / dnc / opted_out dispositions); human-owned
-    // dispositions (nurture, callback, booked) do not. The alert's send-time
-    // owner check keeps a rep's lead silent.
+    // dispositions (nurture, callback, booked) do not. A rep's lead still
+    // alerts Jarrad (owner decision 2026-10-19); the assignment is untouched.
     if (isSuppressed({ outreachDispo: property.outreach_dispo })) return;
     const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false, outreach_dispo: null });
     if (!silent.ok || silent.reason) return;
@@ -7836,6 +7961,16 @@ export async function runNineQuestionsStep(
     if (input.replyDelayBypassed) return noReply(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) return noReply(`safety:${safety.reason}`);
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "skipped",
+        detail: { replyKind: "identity", reason: TEMPLATE_ALREADY_SENT, ...(identityRepeat === "error" ? { lookup: "failed" } : {}) },
+      }, runCtx);
+      return noReply(TEMPLATE_ALREADY_SENT);
+    }
     const sent = await sendResponderMessage(supabase, {
       runContext: runCtx,
       input,
@@ -7953,13 +8088,19 @@ async function handOffHotLead(
       ? { status: handoff.status, reason: handoff.reason }
       : handoff.status === "owned_by_someone_else"
         ? { status: handoff.status, owner_user_id: handoff.ownerUserId }
+        : handoff.status === "owned_by_someone_else_unrecorded"
+          ? { status: handoff.status, owner_user_id: handoff.ownerUserId, note: handoff.detail }
         : handoff.status === "assigned_unrecorded"
           ? { status: handoff.status, assignee_user_id: handoff.assigneeUserId, note: handoff.detail }
           : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
   }, runCtx);
-  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded") return null;
+  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded" && handoff.status !== "owned_by_someone_else_unrecorded") return null;
   // assigned_unrecorded: the lead IS on My Leads, but its note did not save; the hold keeps a person in the loop.
-  const reason = handoff.status === "failed" ? HOT_LEAD_ASSIGN_FAILED_REASON : HOT_LEAD_EVENT_FAILED_REASON;
+  const reason = handoff.status === "failed"
+    ? HOT_LEAD_ASSIGN_FAILED_REASON
+    : handoff.status === "owned_by_someone_else_unrecorded"
+      ? HOT_ALERT_EVENT_FAILED_REASON
+      : HOT_LEAD_EVENT_FAILED_REASON;
   let ourFlagAt: string | null = null;
   const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx, NO_GUARD, (at) => {
     ourFlagAt = at;

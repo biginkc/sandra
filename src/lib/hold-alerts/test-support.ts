@@ -24,6 +24,14 @@ export class FakeStore implements DeliveryStore {
     return { alertsSince: nowIso, created: true };
   }
 
+  leadWatermarks = new Map<string, string>();
+  async getOrInitLeadRepliesSince(orgId: string, nowIso: string) {
+    const existing = this.leadWatermarks.get(orgId);
+    if (existing) return existing;
+    this.leadWatermarks.set(orgId, nowIso);
+    return nowIso;
+  }
+
   async ensure(input: EnsureInput): Promise<DeliveryRow> {
     const existing = this.rows.find(
       (r) =>
@@ -203,7 +211,6 @@ export function makeDeps(
       return new Set(ids.filter((id) => held.has(id)));
     },
     loadHotPromotions: async () => ({ promotions: over.promotions ?? [], complete: true }),
-    loadPropertyAssignee: async () => OWNER.userId,
     loadHotOwner: async () => (over.hotOwner === undefined ? OWNER.userId : over.hotOwner),
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,

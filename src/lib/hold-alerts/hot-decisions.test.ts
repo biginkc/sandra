@@ -61,10 +61,10 @@ describe("hot decisions (frozen fixture)", () => {
     expect(t.store.rows.every((r) => r.propertyId === null && r.holdKey === "hot_handoff:in-9")).toBe(true);
   });
 
-  it("(3b) a promotion whose assignee is not an owner recipient sends nothing", async () => {
+  it("(3b) a promotion recorded for a non-owner still goes to the hot owner only", async () => {
     const t = setup({ holds: [], promotions: [{ ...promotion, assigneeUserId: ACQ.userId }] });
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent).toEqual([]);
+    expect(t.sent.map((s) => [s.channel, s.userId])).toEqual([["slack", "owner-1"], ["sms", "owner-1"]]);
   });
 
   it("(4) the SMS cap (500/hr) and DM cap (500/hr) runaway guards hold: excess stays pending and goes out the next hour", async () => {
