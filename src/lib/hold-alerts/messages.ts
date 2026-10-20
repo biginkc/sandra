@@ -65,7 +65,7 @@ export function hotTextHeadline(p: HotPromotion): string {
 }
 
 /**
- * PLACEHOLDER — needs Jarrad's verbatim approval (listed in the lead-reply PR).
+ * Approved verbatim by Jarrad 2026-10-20 (PR #906).
  * Same shape as the hot-text alert; address is record data, never seller text.
  */
 export function leadReplyHeadline(p: HotPromotion): string {
