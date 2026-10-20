@@ -7,7 +7,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
-import { runApprovedTemplateStep, dispatchAiResponse, flagConfirmDncHold, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning, wrongPersonCloseRevision } from "./dispatch";
+import { runApprovedTemplateStep, dispatchAiResponse, flagConfirmDncHold, isApprovedFixedText, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning, wrongPersonCloseRevision } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
@@ -9718,6 +9718,21 @@ describe("resolveOutboundPolicy", () => {
     }
   });
 
+  it("approvedFixedText is exempt from LLM_AUTOSEND=0 only, never from an outbound-mode hold", () => {
+    vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
+    expect(resolveOutboundPolicy({ source: "llm", approvedFixedText: true })).toEqual({ hold: false });
+    expect(resolveOutboundPolicy({ source: "llm", approvedFixedText: false })).toEqual({ hold: true, reason: "llm_autosend_off" });
+    expect(resolveOutboundPolicy({ source: "llm", approvedFixedText: true, dbMode: "hold" })).toEqual({ hold: true, reason: "outbound_mode_hold" });
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "hold");
+    expect(resolveOutboundPolicy({ source: "llm", approvedFixedText: true })).toEqual({ hold: true, reason: "outbound_mode_hold" });
+  });
+
+  it("isApprovedFixedText needs the identity kind AND the exact approved body", () => {
+    expect(isApprovedFixedText({ replyKind: "identity", body: IDENTITY_REPLY_BODY })).toBe(true);
+    expect(isApprovedFixedText({ replyKind: "identity", body: `${IDENTITY_REPLY_BODY} ` })).toBe(false);
+    expect(isApprovedFixedText({ replyKind: "send_reply", body: IDENTITY_REPLY_BODY })).toBe(false);
+  });
+
   it("LLM_AUTOSEND=0 holds only llm", () => {
     vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
     expect(resolveOutboundPolicy({ source: "llm" })).toEqual({ hold: true, reason: "llm_autosend_off" });
@@ -10031,6 +10046,21 @@ describe("hostile holds, sold, and approved wrong-number reply (Messages v2)", (
       installSendMock(state);
       await run(state, "in-id-ok", "who is this?", { outcome: "unclear", confidence: 0.99 });
       expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
+    });
+
+    it("asked_who still sends the approved identity reply when AI_RESPONDER_LLM_AUTOSEND=0 (fixed text, not model-written)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
+      try {
+        const result = await run(state, "in-id-autosend-off", "who is this?", { outcome: "unclear", confidence: 0.99 });
+        expect(JSON.stringify(result)).not.toMatch(/nine_reply_not_sent|draft_held/);
+        expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+        expect(sendSmsToContact).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: IDENTITY_REPLY_BODY }));
+        expect(state.aiReplyDrafts ?? []).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it("opt-out PHRASE wording ('stop texting me') that Jev labels opted_out is HELD, never auto-suppressed (Jarrad: no auto DNC)", async () => {
