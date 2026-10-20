@@ -193,11 +193,22 @@ export async function runHoldAlertsForOrg(
   // keyed lead_reply:<inbound>. A text that already alerts this pass as hot
   // (hot_text / hot_handoff / hot_failed on the same inbound) sends only that one.
   // Lead replies have their own watermark, set to now on the first pass that runs them: no deploy burst.
-  const leadSince = deps.loadLeadReplies ? await deps.store.getOrInitLeadRepliesSince(orgId, nowIso) : null;
+  // A failure here (e.g. the column not migrated yet) skips lead replies for this
+  // pass only; hot alerts carry on.
+  let leadSince: string | null = null;
+  let leadWatermarkFailed = false;
+  if (deps.loadLeadReplies) {
+    try {
+      leadSince = await deps.store.getOrInitLeadRepliesSince(orgId, nowIso);
+    } catch (error) {
+      leadWatermarkFailed = true;
+      reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "lead_replies_since" } });
+    }
+  }
   const leadLoaded =
     deps.loadLeadReplies && leadSince
       ? await deps.loadLeadReplies(orgId, Date.parse(leadSince) > alertsSinceMs ? leadSince : mark.alertsSince)
-      : { promotions: [], complete: true };
+      : { promotions: [], complete: !leadWatermarkFailed };
   if (!leadLoaded.complete) {
     reportError(new Error("hold alerts: lead-reply load incomplete; some lead texts may not have alerted yet"), {
       tags: { surface: "hold_alerts", orgId },

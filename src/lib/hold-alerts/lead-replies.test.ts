@@ -225,6 +225,31 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
     expect(t.store.rows.map((r) => r.holdKey)).toEqual([hotTextKey("in-9"), hotTextKey("in-9"), leadReplyKey("in-1"), leadReplyKey("in-1")]);
   });
 
+  it("a failing lead-reply watermark skips lead replies for the pass; hot alerts still send", async () => {
+    const hot: HotPromotion = { propertyId: "p9", assigneeUserId: OWNER.userId, name: "Hot", assignedAt: AT, kind: "hot_text", key: hotTextKey("in-9") };
+    const t = depsWith({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] }, { loadHotPromotions: async () => ({ promotions: [hot], complete: true }) });
+    t.store.getOrInitLeadRepliesSince = async () => {
+      throw new Error("column lead_replies_since does not exist");
+    };
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.map((r) => r.holdKey)).toEqual([hotTextKey("in-9"), hotTextKey("in-9")]);
+    expect(summary.sent).toBe(2);
+  });
+
+  it("a skipped or terminally failed lead_reply does not swallow the late hot alert", async () => {
+    const tables: Tables = { messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")], lead_events: [] };
+    const t = depsWith(tables);
+    t.deps.sendSlack = async () => ({ status: "skipped", reason: "test" });
+    t.deps.sendSms = async () => ({ status: "skipped", reason: "test" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.every((r) => r.holdKey === leadReplyKey("in-1") && r.status === "skipped")).toBe(true);
+    tables.lead_events!.push({ id: "e1", org_id: ORG, property_id: "p1", source_type: HOT_TEXT_SOURCE_TYPE, source_id: "in-1", created_at: "2026-10-21T11:59:00.000Z", payload: { to: OWNER.userId, covered_by_hold: false } });
+    t.deps.sendSlack = async (userId, text) => (t.sent.push({ channel: "slack", userId, text }), { status: "sent" });
+    t.deps.sendSms = async (userId, text) => (t.sent.push({ channel: "sms", userId, text }), { status: "sent" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.filter((r) => r.holdKey === hotTextKey("in-1") && r.status === "sent")).toHaveLength(2);
+  });
+
   it("texts before the lead-reply watermark stay silent", async () => {
     const t = depsWith({ messages: [msg("in-old", "p1", "2026-10-20T10:00:00.000Z")], properties: [prop("p1", "new_lead")] });
     await runHoldAlertsForOrg(t.deps, ORG);

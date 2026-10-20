@@ -194,7 +194,7 @@ export async function loadHotPromotions(
   for (let i = 0; i < srcIds.length; i += HOT_PROMOTION_PAGE) {
     const { data, error } = await db
       .from("hold_alert_deliveries")
-      .select("hold_key")
+      .select("hold_key, status, attempts")
       .eq("org_id", orgId)
       .in("hold_key", srcIds.slice(i, i + HOT_PROMOTION_PAGE).map(leadReplyKey));
     if (error) {
@@ -203,7 +203,12 @@ export async function loadHotPromotions(
       for (const id of srcIds.slice(i, i + HOT_PROMOTION_PAGE)) leadReplied.add(id);
       continue;
     }
-    for (const d of (data ?? []) as Array<{ hold_key: string }>) leadReplied.add(d.hold_key.slice("lead_reply:".length));
+    // Only a live or sent lead reply stands in for the hot alert; a skipped or
+    // terminally failed one never swallows it.
+    for (const d of (data ?? []) as Array<{ hold_key: string; status: string; attempts: number }>) {
+      const live = d.status === "pending" || d.status === "sending" || d.status === "sent" || (d.status === "failed" && d.attempts < MAX_ATTEMPTS);
+      if (live) leadReplied.add(d.hold_key.slice("lead_reply:".length));
+    }
   }
   const todo0 = rows.filter((r) => !done.has(keyOf(r)) && !leadReplied.has(r.source_id));
   // A hot event's moment is its INBOUND text's arrival, never when the event
