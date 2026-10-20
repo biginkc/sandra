@@ -7,6 +7,7 @@ import { sendSmsToContact } from "@/lib/messaging/send";
 import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { classifyAiSkip } from "./classify";
+import { NINE_HOT_REPLY_TEXTS } from "@/lib/sms-classification/nine-questions";
 import { runApprovedTemplateStep, dispatchAiResponse, flagConfirmDncHold, isApprovedFixedText, resolveOutboundPolicy, sendHumanDraft, sendReservationTuning, wrongPersonCloseRevision } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
@@ -9734,6 +9735,18 @@ describe("resolveOutboundPolicy", () => {
     expect(isApprovedFixedText({ ...ok, windowDeferrable: undefined })).toBe(false);
     expect(isApprovedFixedText({ ...ok, body: `${IDENTITY_REPLY_BODY} ` })).toBe(false);
     expect(isApprovedFixedText({ ...ok, replyKind: "send_reply" })).toBe(false);
+  });
+
+  it("isApprovedFixedText accepts the three approved hot reply texts only under the nine_hot_reply kind", () => {
+    for (const body of Object.values(NINE_HOT_REPLY_TEXTS)) {
+      const ok = { approvedFixedText: true, windowDeferrable: true, replyKind: "nine_hot_reply", body };
+      expect(isApprovedFixedText(ok)).toBe(true);
+      expect(isApprovedFixedText({ ...ok, windowDeferrable: undefined })).toBe(false);
+      expect(isApprovedFixedText({ ...ok, body: `${body}!` })).toBe(false);
+      expect(isApprovedFixedText({ ...ok, replyKind: "identity" })).toBe(false);
+      expect(isApprovedFixedText({ ...ok, replyKind: "send_reply" })).toBe(false);
+    }
+    expect(isApprovedFixedText({ approvedFixedText: true, windowDeferrable: true, replyKind: "nine_hot_reply", body: IDENTITY_REPLY_BODY })).toBe(false);
   });
 
   it("LLM_AUTOSEND=0 holds only llm", () => {

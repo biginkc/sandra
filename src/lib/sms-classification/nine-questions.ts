@@ -18,6 +18,10 @@ export const NINE_QUESTION_IDS = [
   "hostile",
   "confirmed_owner",
   "talked_price",
+  // Added 2026-10-20 (approved verbatim by Jarrad); asked in the same single Jev call.
+  "asked_offer",
+  "named_price",
+  "asked_call",
 ] as const;
 
 export type NineQuestionId = (typeof NINE_QUESTION_IDS)[number];
@@ -32,19 +36,31 @@ export const NINE_QUESTIONS: Record<NineQuestionId, string> = {
   hostile: "Was the homeowner rude or hostile?",
   confirmed_owner: "Did the homeowner confirm they are the person or owner we asked about?",
   talked_price: "Did the homeowner mention a price or ask how much we would pay?",
+  asked_offer: "Did the homeowner ask what our offer is or how much we would pay?",
+  named_price: "Did the homeowner name a price or amount they want?",
+  asked_call: "Did the homeowner ask us to call them or give a time to talk?",
 };
 
 /** A "yes" needs at least this probability (Jarrad 2026-10-14). */
 export const NINE_QUESTION_CUTOFF = 0.6;
 
 /**
- * First yes wins, in this order (Jarrad 2026-10-14). `asked_stop` and `hostile`
- * share the top group; inside it the higher probability is reported, ties go
- * to `asked_stop`. Both lead to the same action (wait for a person).
+ * First yes wins, in this order. `asked_stop` and `hostile` share the top group;
+ * inside it the higher probability is reported, ties go to `asked_stop`. Both
+ * lead to the same action (wait for a person).
+ *
+ * Order history: Jarrad set the original order 2026-10-14. On 2026-10-20 he
+ * approved the three new questions (asked_call, asked_offer, named_price) and
+ * delegated their place in the order to Claude, based on a replay of 252 real
+ * seller replies (asked_offer 96% accurate, named_price 98%, asked_call 100%).
+ * Stop / hostile / wrong person still beat every reply.
  */
 export const NINE_QUESTION_GROUPS: ReadonlyArray<ReadonlyArray<NineQuestionId>> = [
   ["asked_stop", "hostile"],
   ["wrong_person"],
+  ["asked_call"],
+  ["asked_offer"],
+  ["named_price"],
   ["talked_price"],
   ["open_to_selling"],
   ["maybe_later"],
@@ -108,7 +124,7 @@ export type NineQuestionResult = NineQuestionDecision & {
   usage: { inputTokens: number | null; outputTokens: number | null } | null;
 };
 
-/** One HTTP call: all nine questions in a single System One request. */
+/** One HTTP call: every question (the nine plus the three added 2026-10-20) in a single System One request. */
 export async function classifyNineQuestions(
   state: NineQuestionState,
   deps: JevAskDeps,
@@ -143,6 +159,9 @@ export const NINE_ANSWER_LABELS: Record<NineAnswer, string> = {
   hostile: "Hostile",
   confirmed_owner: "Confirmed owner",
   talked_price: "Talked price",
+  asked_offer: "Asked for offer",
+  named_price: "Named a price",
+  asked_call: "Asked for a call",
   needs_person: "Can't read it",
 };
 
@@ -160,6 +179,9 @@ export type NineRuleGroup = "jarrad" | "alone" | "person";
 export const NINE_ANSWER_GROUP: Record<NineQuestionId, NineRuleGroup> = {
   open_to_selling: "jarrad",
   talked_price: "jarrad",
+  asked_offer: "jarrad",
+  named_price: "jarrad",
+  asked_call: "jarrad",
   maybe_later: "alone",
   asked_who: "alone",
   not_interested: "alone",
@@ -169,9 +191,31 @@ export const NINE_ANSWER_GROUP: Record<NineQuestionId, NineRuleGroup> = {
   hostile: "person",
 };
 
-/** What Sandra does for each answer (ACTIONS, Jarrad 2026-10-14/15). */
+/**
+ * Reply texts for three hot answers, approved verbatim by Jarrad 2026-10-20.
+ * Character for character; never reword, add or remove (`nine-questions.test.ts`
+ * pins every byte). Sent as fixed approved text by ai-responder/dispatch.ts
+ * (sendNineHotReply) only after the hot hand-off succeeded.
+ */
+export const NINE_HOT_REPLY_TEXTS = {
+  asked_offer:
+    "Thanks for your reply. I'm not authorized to provide offers via SMS, but I'd love to put you in touch with an acquisitions manager. When's a good time to chat?",
+  said_yes: "Fantastic. When's a good time for a quick call with an acquisitions manager?",
+  named_price: "Thanks, I'll update our records. When's a good time for a quick call with an acquisitions manager?",
+} as const;
+
+export type NineHotReply = keyof typeof NINE_HOT_REPLY_TEXTS;
+
+/** The approved names of the three reply texts (Jarrad 2026-10-20). */
+export const NINE_HOT_REPLY_NAMES: Record<NineHotReply, string> = {
+  asked_offer: "Asked for offer",
+  said_yes: "Said yes",
+  named_price: "Named a price",
+};
+
+/** What Sandra does for each answer (ACTIONS, Jarrad 2026-10-14/15/20). */
 export type NineAction =
-  | { kind: "hot" }
+  | { kind: "hot"; reply: NineHotReply | null }
   | { kind: "reply_and_drip"; reply: "nurture" | "identity" | "not_interested"; drip: NineDripName; skipFirstStep: boolean }
   | { kind: "drip_only"; drip: NineDripName }
   | { kind: "reply_and_close_wrong_person" }
@@ -183,8 +227,14 @@ export type NineDripName = "Maybe later" | "Asked who is texting" | "Not interes
 export function actionForNineAnswer(answer: NineAnswer): NineAction {
   switch (answer) {
     case "open_to_selling":
+      return { kind: "hot", reply: "said_yes" };
+    case "asked_offer":
+      return { kind: "hot", reply: "asked_offer" };
+    case "named_price":
+      return { kind: "hot", reply: "named_price" };
+    case "asked_call":
     case "talked_price":
-      return { kind: "hot" };
+      return { kind: "hot", reply: null };
     case "maybe_later":
       return { kind: "reply_and_drip", reply: "nurture", drip: "Maybe later", skipFirstStep: false };
     case "asked_who":

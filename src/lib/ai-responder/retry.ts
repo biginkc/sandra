@@ -64,6 +64,11 @@ export type NineDeferral = {
   classificationRunId: string;
   /** Set when the provider fence refused because the lead changed: the next run decides from scratch. */
   fresh?: boolean;
+  /**
+   * Set when only the approved hot reply text is waiting (the hot hand-off already ran):
+   * the deferred run sends that text and nothing else, and only if the lead did not change.
+   */
+  hotReply?: boolean;
 };
 
 /**
@@ -77,7 +82,7 @@ export type RetryReply = {
   confidence: number;
   sentiment: AiMessageMetadata["sentiment"];
   orgId: string;
-  kind: "send_reply" | "deescalate_close" | "identity";
+  kind: "send_reply" | "deescalate_close" | "identity" | "nine_hot_reply";
   /** deescalate_close only: the route reason for the follow-up disposition. */
   closeReason?: string;
 };

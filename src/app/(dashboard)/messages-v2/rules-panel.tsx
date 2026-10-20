@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import {
   NINE_ANSWER_GROUP,
   NINE_ANSWER_LABELS,
+  NINE_HOT_REPLY_TEXTS,
   NINE_QUESTION_CUTOFF,
   NINE_REPEAT_NOT_INTERESTED_RULE,
   type NineQuestionId,
@@ -65,13 +66,20 @@ const GROUPS: RuleGroup[] = [
 
 // Same sentence as the PR 2 "Open to selling" row. Approved by Jarrad 2026-10-16.
 const HOT_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.";
+// The hot rows that now send an approved reply (2026-10-20) can't say "never texts them back":
+// the same approved sentence with its last clause dropped, and the reply text shown under the row.
+// PENDING Jarrad's verbatim approval of this display (flagged in the PR); the reply texts are approved.
+const HOT_REPLY_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent.";
 
 /**
  * Nine-question rows. All wording approved verbatim by Jarrad 2026-10-16 (PR #889).
  */
 const NINE_DETAIL: Record<NineQuestionId, string> = {
-  open_to_selling: HOT_DETAIL,
+  open_to_selling: HOT_REPLY_DETAIL,
   talked_price: HOT_DETAIL,
+  asked_offer: HOT_REPLY_DETAIL,
+  named_price: HOT_REPLY_DETAIL,
+  asked_call: HOT_DETAIL,
   maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
   not_interested: "When this is on, Sandra sends the approved reply and starts the Not interested drip.",
   wrong_person: "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.",
@@ -84,11 +92,15 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
 /** Extra rules shown under a row; each text approved verbatim by Jarrad (repeat-no: 2026-10-20). */
 const NINE_EXTRA_RULE: Partial<Record<NineQuestionId, string>> = {
   not_interested: NINE_REPEAT_NOT_INTERESTED_RULE,
+  // Reply texts approved verbatim by Jarrad 2026-10-20.
+  open_to_selling: NINE_HOT_REPLY_TEXTS.said_yes,
+  asked_offer: NINE_HOT_REPLY_TEXTS.asked_offer,
+  named_price: NINE_HOT_REPLY_TEXTS.named_price,
 };
 
 // Group headings approved verbatim by Jarrad 2026-10-16 (PR #889).
 const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
-  { heading: "Goes to Jarrad", group: "jarrad", ids: ["open_to_selling", "talked_price"] },
+  { heading: "Goes to Jarrad", group: "jarrad", ids: ["asked_call", "asked_offer", "named_price", "talked_price", "open_to_selling"] },
   { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
   { heading: "Waits for a person", group: "person", ids: ["asked_stop", "hostile"] },
 ];
@@ -97,6 +109,9 @@ const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | 
 const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
   open_to_selling: "new_lead",
   talked_price: "new_lead",
+  asked_offer: "new_lead",
+  named_price: "new_lead",
+  asked_call: "new_lead",
   maybe_later: "nurture",
   not_interested: "not_interested",
   wrong_person: "wrong_number",
