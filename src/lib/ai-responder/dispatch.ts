@@ -2932,6 +2932,23 @@ const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
  * A row that failed before reaching the provider (status failed, no external id) never
  * went out and does not count; pending / unknown / sent rows do.
  */
+/** The approved not-interested text went out to this property and the provider accepted it. */
+async function notInterestedReplyAccepted(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<"yes" | "no" | "error"> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, status, external_id")
+    .eq("org_id", orgId)
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .eq("body", APPROVED_REPLY_TEXTS.not_interested);
+  if (error || !Array.isArray(data)) return "error";
+  return data.some((r) => !!r.external_id && (r.status === "sent" || r.status === "delivered")) ? "yes" : "no";
+}
+
 async function templateAlreadySentToProperty(
   supabase: SupabaseClient<Database>,
   orgId: string,
@@ -5123,6 +5140,7 @@ async function renewSend(
  */
 const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
 const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+const FENCE_NINE_CONTEXT_CHANGED = "fence:nine_deferred_context_changed";
 
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
@@ -5200,6 +5218,23 @@ async function fenceProviderSubmit(
       return false;
     }
     if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
+  const deferral = args.input.nineDeferral;
+  if (deferral) {
+    // A deferred nine-question reply acts only on the lead it decided on: compare the live
+    // revision, allowing exactly the one bump this attempt's own pending message row causes.
+    const { data: live, error: liveError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const expected = deferral.revision + (ctx.messageId ? 1 : 0);
+    if (liveError || !live || live.decision_context_revision !== expected) return refuse(FENCE_NINE_CONTEXT_CHANGED);
   }
   attempt.providerStarted = true;
   return true;
@@ -6335,7 +6370,9 @@ async function deliverResponderMessage(
     }
     if (
       attempt.fenceRefusal === "revalidate" &&
-      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED ||
+        attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT ||
+        attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED)
     ) {
       // The template must not go out now. Nothing was sent; drop it silently
       // (the outcome still applies, same as the earlier pre-send drops).
@@ -6351,7 +6388,9 @@ async function deliverResponderMessage(
         reason:
           attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
             ? TEMPLATE_APPROVAL_CHANGED
-            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+            : attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED
+              ? NINE_DEFERRED_CONTEXT_CHANGED
+              : TEMPLATE_QUIET_HOURS_RECIPIENT,
       };
     }
     if (attempt.fenceRefusal === "error") {
@@ -7944,14 +7983,10 @@ async function routeNineRepeatNotInterested(
   r: { classificationRunId: string; evaluationRevision: number },
 ): Promise<AiDispatchOutcome | null> {
   const { input, property, claim, runCtx } = a;
-  const already = await templateAlreadySentToProperty(
-    supabase,
-    property.org_id,
-    input.propertyId,
-    null,
-    APPROVED_REPLY_TEXTS.not_interested,
-  );
-  if (already !== "yes") return null;
+  // Proof the first reply was RECEIVED: the provider accepted it. Anything less (none, only
+  // pending / queued / failed rows, an unreadable history) is not this rule: the existing path
+  // runs, and its repeat guard holds for a person whenever any copy might have gone out.
+  if ((await notInterestedReplyAccepted(supabase, property.org_id, input.propertyId)) !== "yes") return null;
   const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
   if (thresholds.not_interested?.automationEnabled !== true) {
     return nineHoldAndComplete(supabase, a, "nine_automation_disabled:not_interested");
@@ -8229,6 +8264,19 @@ export async function runNineQuestionsStep(
         detail: { replyKind: "identity", reason: TEMPLATE_ALREADY_SENT, ...(identityRepeat === "error" ? { lookup: "failed" } : {}) },
       }, runCtx);
       return noReply(TEMPLATE_ALREADY_SENT);
+    }
+    // The identity text is not a library template, so the send path's recipient-window
+    // guards (approved_template only) would not stop it: check the recipient's clock here.
+    // A closed window waits for it to open (see maybeDeferNineReply), as a template does.
+    const identityWindow = await evaluateRecipientWindow(supabase, input);
+    if (!identityWindow.ok) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "held",
+        detail: { replyKind: "identity", window: identityWindow.why },
+      }, runCtx);
+      return noReply(`quiet_hours_recipient:${identityWindow.why}`);
     }
     const sent = await sendResponderMessage(supabase, {
       runContext: runCtx,

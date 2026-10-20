@@ -505,6 +505,58 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(rows[0].n).toBeGreaterThanOrEqual(1);
   });
 
+  it("not_interested when the earlier not-interested text was never provider-accepted (queued, no id): not closed, held", async () => {
+    await seedOrg();
+    const lead = await seedLead();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "queued", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: APPROVED_REPLY_TEXTS.not_interested });
+    const { outcome } = await run({ not_interested: 0.85 }, "No", lead);
+    expect(outcome).toEqual({ outcome: "escalated", reason: "nine_reply_not_sent:template_already_sent" });
+    const row = await propertyRow(lead.propertyId);
+    expect(row.outreach_dispo).toBeNull();
+    expect(row.needs_human_attention).toBe(true);
+  });
+
+  it("asked_who with the recipient's window closed: the identity reply is deferred, not sent now", async () => {
+    await seedOrg();
+    windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const { lead, outcome } = await run({ asked_who: 0.9 }, "who is this");
+    const o = outcome as AiRetryOutcome;
+    expect(o.outcome).toBe("retry");
+    expect(o.reason).toBe("nine_reply_deferred");
+    expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("deferred run: the lead changes after the early check but before the provider: refused at the fence, nothing sent, held", async () => {
+    await seedOrg({ businessHoursOnly: true });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const first = await run({ not_interested: 0.85 }, "No");
+    const deferred = first.outcome as AiRetryOutcome;
+    expect(deferred.reason).toBe("nine_reply_deferred");
+    windows.businessClosedUntil = null;
+    // Test-only (throwaway DB): a concurrent change lands as our pending row is written,
+    // i.e. after the early revision check and before the provider fence.
+    await pg.query(`create or replace function public.test_nine_bump_extra() returns trigger language plpgsql as $$
+      begin
+        if new.direction = 'outbound' and new.property_id = '${first.lead.propertyId}' then
+          update public.properties set decision_context_revision = decision_context_revision + 1 where id = new.property_id;
+        end if;
+        return new;
+      end $$`);
+    await pg.query("create trigger test_nine_bump_extra after insert on public.messages for each row execute function public.test_nine_bump_extra()");
+    try {
+      await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
+    } finally {
+      await pg.query("drop trigger if exists test_nine_bump_extra on public.messages");
+      await pg.query("drop function if exists public.test_nine_bump_extra()");
+    }
+    expect(getMockMessageLog()).toHaveLength(0);
+    const row = await propertyRow(first.lead.propertyId);
+    expect(row.needs_human_attention).toBe(true);
+    expect(row.last_ai_escalation_reason).toBe("nine_reply_not_sent:skipped:nine_deferred_context_changed");
+    expect(await enrollmentsFor(first.lead.propertyId)).toEqual([]);
+  });
+
   it("a second not_interested with the not_interested switch off: still held for a person, nothing changed", async () => {
     await seedOrg();
     const first = await run({ not_interested: 0.85 }, "No");
