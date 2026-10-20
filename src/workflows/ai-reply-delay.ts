@@ -10,6 +10,7 @@ import {
   isRetryOutcome,
   recordRetryScheduled,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReply,
 } from "@/lib/ai-responder/retry";
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
@@ -32,6 +33,8 @@ export type AiReplyDelayParams = {
   retryAttempt?: number;
   /** The reply the previous attempt generated, re-sent verbatim (never logged). */
   retryReply?: RetryReply;
+  /** A nine-question reply deferred until the send window opens (never logged). */
+  nineDeferral?: NineDeferral;
 };
 
 async function dispatchStep(
@@ -61,6 +64,7 @@ async function dispatchStep(
         : {}),
       ...(params.retryAttempt ? { retryAttempt: params.retryAttempt } : {}),
       ...(params.retryReply ? { retryReply: params.retryReply } : {}),
+      ...(params.nineDeferral ? { nineDeferral: params.nineDeferral } : {}),
     },
     {
       anthropic: new Anthropic(),
@@ -111,6 +115,11 @@ export async function aiReplyDelayWorkflow(
       ...params,
       retryAttempt: outcome.attempt,
       ...(outcome.reply ? { retryReply: outcome.reply } : {}),
+      // A deferred nine-question reply waited for the window: the wait was its
+      // delay, so the re-dispatch is not a zero-delay (bypassed) send.
+      ...(outcome.nineDeferral
+        ? { nineDeferral: outcome.nineDeferral, delaySeconds: outcome.delaySeconds }
+        : {}),
     });
   }
   return outcome;

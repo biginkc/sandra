@@ -146,6 +146,14 @@ export const NINE_ANSWER_LABELS: Record<NineAnswer, string> = {
   needs_person: "Can't read it",
 };
 
+/**
+ * Jarrad's repeat-no rule, approved word for word 2026-10-20. Shown in the rules
+ * panel under "Not interested"; implemented in ai-responder/dispatch.ts
+ * (routeNineRepeatNotInterested). Never reword.
+ */
+export const NINE_REPEAT_NOT_INTERESTED_RULE =
+  "If the homeowner says no again after already getting our not-interested reply, stop their drip, mark them Not interested, and send nothing.";
+
 export type NineRuleGroup = "jarrad" | "alone" | "person";
 
 /** Rules-panel grouping (Jarrad 2026-10-14). */

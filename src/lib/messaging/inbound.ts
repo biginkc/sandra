@@ -1870,6 +1870,7 @@ async function scheduleReplyRetry(
         runId: runContext?.runId ?? input.runId ?? null,
         retryAttempt: retry.attempt,
         ...(retry.reply ? { retryReply: retry.reply } : {}),
+        ...(retry.nineDeferral ? { nineDeferral: retry.nineDeferral } : {}),
       },
     ]);
     await recordRetryScheduled(supabase, runContext, retry);

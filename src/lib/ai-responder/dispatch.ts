@@ -84,6 +84,7 @@ import {
   REPLY_RETRY_MAX,
   writeReplyDeadLetter,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReason,
   type RetryReply,
 } from "./retry";
@@ -104,7 +105,7 @@ import {
   runNineClassification,
   type NineDripResult,
 } from "./nine-questions-engine";
-import { actionForNineAnswer, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+import { actionForNineAnswer, NINE_REPEAT_NOT_INTERESTED_RULE, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
 import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
@@ -310,6 +311,8 @@ export type AiDispatchInput = {
   replyDelayBypassed?: boolean;
   /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
   replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
+  /** A nine-question reply deferred until the send window opened (see ./retry NineDeferral). */
+  nineDeferral?: NineDeferral;
 };
 
 export type AiDispatchOptions = {
@@ -833,6 +836,7 @@ async function dispatchAiResponseCore(
         config,
         currentTurn,
         deps.runContext,
+        decision.reason,
       );
       if (outcome) return outcome;
       // use_legacy — Jev had nothing actionable to apply (jev_no_action
@@ -1235,6 +1239,8 @@ async function classifyAndApplyDespiteReplyIneligibility(
   },
   currentTurn: number,
   runCtx?: MaybeRunContext,
+  /** Why no reply may be sent (the skip classifier's reason), e.g. `outside_business_hours`. */
+  replyIneligibleReason?: string,
 ): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
@@ -1256,6 +1262,9 @@ async function classifyAndApplyDespiteReplyIneligibility(
     config,
     responseClaim,
     runCtx,
+    undefined,
+    undefined,
+    replyIneligibleReason,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -1334,6 +1343,8 @@ async function classifyAndHandleNonRouteOutcomes(
   templateCtx?: TemplateStepContext,
   /** The identity check's classification of this same inbound: reused, never recomputed. */
   precomputed?: ClassificationBridgeResult | null,
+  /** Reply-ineligible path only: why no reply may be sent now. */
+  replyIneligibleReason?: string,
 ): Promise<
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
@@ -1343,7 +1354,15 @@ async function classifyAndHandleNonRouteOutcomes(
     if (config.classifier_mode === "automatic") {
       return {
         handled: true,
-        outcome: await runNineQuestionsStep(supabase, { input, property, claim: responseClaim, runCtx, templateCtx, escalationKeywords: config.escalation_keywords ?? null }),
+        outcome: await runNineQuestionsStep(supabase, {
+          input,
+          property,
+          claim: responseClaim,
+          runCtx,
+          templateCtx,
+          escalationKeywords: config.escalation_keywords ?? null,
+          ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+        }),
       };
     }
     // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
@@ -7647,7 +7666,55 @@ type NineStepArgs = {
   templateCtx?: TemplateStepContext;
   /** The org's escalation phrases (the same list PR 2's price-keyword decision reads). */
   escalationKeywords?: ReadonlyArray<string> | null;
+  /** Reply-ineligible path only: the skip classifier's reason (e.g. `outside_business_hours`). */
+  replyIneligibleReason?: string;
+  /** Test seam: the clock the deferral reads. */
+  now?: Date;
 };
+
+/** A deferred nine-question reply whose lead changed while it waited: a person looks. */
+export const NINE_DEFERRED_CONTEXT_CHANGED = "nine_deferred_context_changed";
+/** The repeat-no rule could not stop the drip after marking the lead not interested. */
+export const NINE_REPEAT_NO_DRIP_STOP_FAILED = "nine_repeat_no_drip_stop_failed";
+const NINE_REPEAT_NO_PAUSE_REASON = "status_terminal" as const;
+/** Loop bound only (one inbound is deferred at most this many times), not a send cap. */
+export const NINE_DEFER_MAX = 3;
+/** Wait this long past the moment both windows open before re-dispatching. */
+const NINE_DEFER_BUFFER_SECONDS = 5 * 60;
+const NINE_DEFER_STEP_SECONDS = 15 * 60;
+const NINE_DEFER_HORIZON_SECONDS = 48 * 60 * 60;
+
+/**
+ * Why a nine-question reply was not sent, when the ONLY reason is a closed send
+ * window: business hours (the reply-ineligible skip), the recipient's local
+ * window, or the reply delay clamped to 0 at the window's edge (delay.ts clamps
+ * to 0 whenever the window is closed or about to close). Anything else (Florida
+ * cap, draft-only mode, a repeat, a gate) is not deferrable.
+ */
+export function isNineDeferrableNotSent(why: string, replyIneligibleReason?: string): boolean {
+  if (why === "reply_ineligible") return replyIneligibleReason === "outside_business_hours";
+  return why === "quiet_hours_recipient:outside_window" || why === "delay_not_applied";
+}
+
+/**
+ * Seconds from `now` until both the property's business-hours window and the
+ * recipient's local window are open (plus a small buffer), or null when they
+ * never are within 48 hours (unknown state / area code). Steps in 15-minute
+ * increments so DST and multi-zone area codes need no date math.
+ */
+export function secondsUntilNineSendWindow(
+  propertyState: string | null | undefined,
+  recipientPhone: string | null | undefined,
+  now: Date,
+): number | null {
+  for (let t = NINE_DEFER_STEP_SECONDS; t <= NINE_DEFER_HORIZON_SECONDS; t += NINE_DEFER_STEP_SECONDS) {
+    const at = new Date(now.getTime() + t * 1000);
+    if (checkQuietHours(propertyState, at).ok && checkRecipientQuietHours(recipientPhone, at).ok) {
+      return t + NINE_DEFER_BUFFER_SECONDS;
+    }
+  }
+  return null;
+}
 
 /**
  * Held for Jarrad exactly as the eight-answer path holds a price keyword: a hot hold
@@ -7797,11 +7864,158 @@ async function routeNineHot(
   return nineHoldAndComplete(supabase, a, "hot_lead");
 }
 
+/**
+ * A nine-question reply that could not go out only because the send window was
+ * closed (see isNineDeferrableNotSent): instead of holding for a person, release
+ * the claim and ask the caller to dispatch the same inbound again when both the
+ * business-hours and the recipient's windows are open. The deferred run re-checks
+ * the lead's decision_context_revision first (runNineQuestionsStep). Returns null
+ * when it cannot be deferred (other reason, no computable window, loop bound hit):
+ * the caller then holds exactly as before.
+ */
+async function maybeDeferNineReply(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  why: string,
+  evaluationRevision: number,
+): Promise<AiRetryOutcome | null> {
+  if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
+  if (!a.input.inboundMessageId) return null;
+  const count = a.input.nineDeferral?.count ?? 0;
+  if (count >= NINE_DEFER_MAX) return null;
+  const phone = await resolveSendDestinationPhone(supabase, a.input);
+  const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
+  if (delaySeconds === null) return null;
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "applied",
+    detail: { engine: "nine_questions", why, delaySeconds, deferral: count + 1 },
+  }, a.runCtx);
+  // Released so the deferred re-dispatch of this same inbound can claim it again.
+  await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "skipped",
+    errorMessage: `nine_reply_deferred:${why}`,
+    releaseLease: true,
+  });
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds,
+    nineDeferral: { count: count + 1, revision: evaluationRevision },
+  };
+}
+
+/**
+ * Jarrad's rule, approved verbatim 2026-10-20:
+ * "If the homeowner says no again after already getting our not-interested reply, stop their drip, mark them Not interested, and send nothing."
+ *
+ * Runs only for a `not_interested` answer (at or above the cutoff: the engine's own
+ * pick, never a keyword) after hostile / stop / price precedence. Returns null when
+ * the property has not had the approved not-interested reply yet (the first no), or
+ * its history is unreadable (the existing repeat guard then fails closed).
+ */
+async function routeNineRepeatNotInterested(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  r: { classificationRunId: string; evaluationRevision: number },
+): Promise<AiDispatchOutcome | null> {
+  const { input, property, claim, runCtx } = a;
+  const already = await templateAlreadySentToProperty(
+    supabase,
+    property.org_id,
+    input.propertyId,
+    null,
+    APPROVED_REPLY_TEXTS.not_interested,
+  );
+  if (already !== "yes") return null;
+  const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+  if (thresholds.not_interested?.automationEnabled !== true) {
+    return nineHoldAndComplete(supabase, a, "nine_automation_disabled:not_interested");
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_repeat_not_interested",
+    result: "applied",
+    detail: { engine: "nine_questions", rule: NINE_REPEAT_NOT_INTERESTED_RULE },
+  }, runCtx);
+  const reason = "nine_questions:not_interested_again";
+  // The sanctioned disposition path (DNC lock, opt-out and stale-revision guards in the RPC).
+  const closed = await setResponderDispo(supabase, {
+    runContext: runCtx,
+    propertyId: input.propertyId,
+    conversationId: input.conversationId ?? null,
+    inboundMessageId: input.inboundMessageId ?? null,
+    dispo: "not_interested",
+    reason,
+    expectedRevision: r.evaluationRevision,
+    undo: { orgId: property.org_id, classificationRunId: r.classificationRunId },
+  });
+  await traceDisposition(supabase, "not_interested", closed, false, runCtx);
+  if (closed.updated && input.inboundMessageId) {
+    await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, r.classificationRunId);
+  }
+  const outcome = closeOutcome(closed, reason);
+  if (closed.updated || (!closed.updated && closed.reason === "already_terminal")) {
+    // Stop the drip for good (the paused "Not interested" enrolment included); the
+    // helper records the lead event.
+    try {
+      const stopped = await pausePropertyEnrollments(supabase, {
+        propertyId: input.propertyId,
+        // An enrolment pause reason (sequences/pause-rules), not a hold reason.
+        reason: NINE_REPEAT_NO_PAUSE_REASON,
+        permanent: true,
+      });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "applied",
+        detail: { engine: "nine_questions", stopped: stopped.paused },
+      }, runCtx);
+    } catch (error) {
+      reportError(error, { tags: { surface: "nine_repeat_not_interested_drip_stop" }, extra: { propertyId: input.propertyId } });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "error",
+        detail: { engine: "nine_questions" },
+      }, runCtx);
+      return nineHoldAndComplete(supabase, a, NINE_REPEAT_NO_DRIP_STOP_FAILED);
+    }
+  }
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: claimOutcomeOf(outcome),
+    errorMessage: dispositionClaimError(closed),
+  });
+  return outcome;
+}
+
 export async function runNineQuestionsStep(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const { input, property, claim, runCtx, templateCtx } = a;
+  if (input.nineDeferral) {
+    // A deferred reply: act only if nothing about the lead changed while it waited
+    // (a new text, a takeover, a status / dispo change all move the revision).
+    const { data: current, error: revisionError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (revisionError || !current || current.decision_context_revision !== input.nineDeferral.revision) {
+      await trace(supabase, {
+        kind: "hold",
+        name: "nine_reply_deferred",
+        result: "held",
+        detail: { engine: "nine_questions", why: "context_changed" },
+      }, runCtx);
+      return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+    }
+  }
   const cls = await runNineClassification(
     supabase,
     {
@@ -7845,6 +8059,14 @@ export async function runNineQuestionsStep(
 
   if (action.kind === "hot") {
     return routeNineHot(supabase, a, { classificationRunId: cls.classificationRunId, evaluationRevision: cls.evaluationRevision, result });
+  }
+
+  if (result.answer === "not_interested") {
+    const repeatNo = await routeNineRepeatNotInterested(supabase, a, {
+      classificationRunId: cls.classificationRunId,
+      evaluationRevision: cls.evaluationRevision,
+    });
+    if (repeatNo) return repeatNo;
   }
 
   if (action.kind === "wait_for_person") {
@@ -7945,7 +8167,10 @@ export async function runNineQuestionsStep(
   }
 
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.
-  const noReply = async (why: string): Promise<AiDispatchOutcome> => {
+  const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // Only a closed send window: wait for it to open instead of holding (A/B/C).
+    const deferred = await maybeDeferNineReply(supabase, a, why, cls.evaluationRevision);
+    if (deferred) return deferred;
     await trace(supabase, {
       kind: "action",
       name: "drip_enrolled",
