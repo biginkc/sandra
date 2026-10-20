@@ -5,6 +5,7 @@ import { createTestClient } from "@tests/integration/client";
 import { BMH_ORG_ID, getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/delivery";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
+import { markInboundMessageState } from "@/lib/messaging/inbound-state";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 import {
   NINE_QUESTION_IDS,
@@ -40,11 +41,15 @@ const windows = vi.hoisted(() => ({
   recipientCalls: 0,
   recipientUnknown: false,
   floridaCapped: false,
+  /** The same for the property window: the first N live checks (no `at`) see it open. */
+  businessOpenCalls: null as number | null,
+  businessCalls: 0,
 }));
 const openAt = (closedUntil: Date | null, at?: Date) => !closedUntil || (at ?? new Date()).getTime() >= closedUntil.getTime();
 vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
   checkQuietHours: (_state: unknown, at?: Date) =>
+    (!at && windows.businessOpenCalls !== null && ++windows.businessCalls <= windows.businessOpenCalls) ||
     openAt(windows.businessClosedUntil, at)
       ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
       : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" },
@@ -313,6 +318,8 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     windows.recipientCalls = 0;
     windows.recipientUnknown = false;
     windows.floridaCapped = false;
+    windows.businessOpenCalls = null;
+    windows.businessCalls = 0;
     // A schema-only throwaway database has no tenant rows: make sure the canonical org exists.
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (nine questions test)" });
     expect(orgError).toBeNull();
@@ -547,7 +554,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
-  it("deferred run: the lead changes after the early check but before the provider: refused at the fence, nothing sent, held", async () => {
+  it("deferred run: the lead changes after the early check but before the provider: refused at the fence, nothing sent, silent exit", async () => {
     await seedOrg({ businessHoursOnly: true });
     windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
     const first = await run({ not_interested: 0.85 }, "No");
@@ -572,8 +579,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     }
     expect(getMockMessageLog()).toHaveLength(0);
     const row = await propertyRow(first.lead.propertyId);
-    expect(row.needs_human_attention).toBe(true);
-    expect(row.last_ai_escalation_reason).toBe("nine_reply_not_sent:skipped:nine_deferred_context_changed");
+    expect(row.needs_human_attention).toBe(false);
     expect(await enrollmentsFor(first.lead.propertyId)).toEqual([]);
   });
 
@@ -640,7 +646,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(await enrollmentsFor(first.lead.propertyId)).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
   });
 
-  it("A: a deferred reply whose lead changed while it waited is held for a person, nothing sent", async () => {
+  it("A: a deferred reply whose lead changed while it waited exits silently: nothing sent, no hold", async () => {
     await seedOrg({ businessHoursOnly: true });
     windows.businessClosedUntil = new Date(Date.now() + 2 * HOURS);
     const first = await run({ not_interested: 0.85 }, "No");
@@ -648,9 +654,9 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     windows.businessClosedUntil = null;
     await pg.query("update public.properties set status = 'contacted' where id = $1", [first.lead.propertyId]);
     const again = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC });
-    expect(again).toEqual({ outcome: "escalated", reason: "nine_deferred_context_changed" });
+    expect(again).toEqual({ outcome: "skipped", reason: "nine_deferred_context_changed" });
     expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
-    expect((await propertyRow(first.lead.propertyId)).last_ai_escalation_reason).toBe("nine_deferred_context_changed");
+    expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(false);
   });
 
   it("B: recipient's window closed: deferred (not held), nothing sent yet", async () => {
@@ -795,6 +801,83 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     const { lead, outcome } = await run(probs, text);
     await expectWindowDeferred(outcome, lead.propertyId);
     expect(windows.recipientCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each(answers)("matrix property window closes during preflight, provider fence (%s): deferred", async (_k, probs, text) => {
+    await seedOrg({ businessHoursOnly: false });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    windows.businessOpenCalls = 2; // the skip classifier and sendSmsToContact pass; the fence sees it closed
+    const { lead, outcome } = await run(probs, text);
+    await expectWindowDeferred(outcome, lead.propertyId);
+    expect(windows.businessCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  // Intended: a deferred run exits silently, WITHOUT sending, when a newer inbound or a
+  // person's change owns the thread (no extra hold). It never sends and never skips suppression.
+  async function deferOnce() {
+    await seedOrg({ businessHoursOnly: true });
+    windows.businessClosedUntil = new Date(Date.now() + 2 * 3600_000);
+    const first = await run({ not_interested: 0.85 }, "No");
+    const deferred = first.outcome as AiRetryOutcome;
+    expect(deferred.reason).toBe("nine_reply_deferred");
+    windows.businessClosedUntil = null;
+    return { first, deferred };
+  }
+  const redispatch = (first: Awaited<ReturnType<typeof run>>, deferred: AiRetryOutcome) =>
+    dispatchAiResponse(supabase, { ...first.input, nineDeferral: deferred.nineDeferral }, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+  async function expectNothingSent(propertyId: string) {
+    expect(getMockMessageLog()).toHaveLength(0);
+    // No orphan pending/queued row either: our only outbound is the seeded opener.
+    expect(await outboundBodies(propertyId)).toEqual([]);
+  }
+
+  async function newerInbound(first: Awaited<ReturnType<typeof run>>) {
+    const { data, error } = await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: first.lead.propertyId, contact_id: first.lead.contactId, from_address: first.lead.phone, to_address: MOCK_SENDER_PRIMARY, body: "also, call me", conversation_id: first.inbound.conversationId }).select("id").single();
+    expect(error).toBeNull();
+    return data!.id as string;
+  }
+
+  it("deferred run, a newer HANDLED inbound owns the thread: exits silently, sends nothing, no hold, terminal", async () => {
+    const { first, deferred } = await deferOnce();
+    const newer = await newerInbound(first);
+    // The newer inbound's own run finished (terminal stamp), so it owns the thread.
+    await markInboundMessageState(supabase, newer, { aiResponder: { outcome: "auto_closed", reason: "nine_questions:confirmed_owner", completedAt: new Date().toISOString() } as never });
+    const out = await redispatch(first, deferred);
+    expect(out.outcome).not.toBe("retry");
+    expect(out.outcome).not.toBe("sent");
+    await expectNothingSent(first.lead.propertyId);
+    expect((await propertyRow(first.lead.propertyId)).needs_human_attention).toBe(false);
+  });
+
+  it("deferred run, a newer inbound not yet handled: sends nothing, terminal (today's supersession rule flags it)", async () => {
+    const { first, deferred } = await deferOnce();
+    await newerInbound(first);
+    const out = await redispatch(first, deferred);
+    expect(out.outcome).not.toBe("retry");
+    expect(out.outcome).not.toBe("sent");
+    await expectNothingSent(first.lead.propertyId);
+  });
+
+  it("deferred run, a person moved the lead to nurture during the wait: sends nothing, terminal", async () => {
+    const { first, deferred } = await deferOnce();
+    await pg.query("update public.properties set outreach_dispo = 'nurture' where id = $1", [first.lead.propertyId]);
+    const out = await redispatch(first, deferred);
+    expect(out.outcome).not.toBe("retry");
+    expect(out.outcome).not.toBe("sent");
+    await expectNothingSent(first.lead.propertyId);
+    expect((await propertyRow(first.lead.propertyId)).outreach_dispo).toBe("nurture");
+  });
+
+  it("deferred run, the contact opted out during the wait: sends nothing and the opt-out stands", async () => {
+    const { first, deferred } = await deferOnce();
+    await supabase.from("consent_events").insert({ contact_id: first.lead.contactId, channel: "sms", event_type: "opt_out", source: "nine-test", org_id: orgId });
+    const out = await redispatch(first, deferred);
+    expect(out.outcome).not.toBe("retry");
+    expect(out.outcome).not.toBe("sent");
+    await expectNothingSent(first.lead.propertyId);
+    const { rows } = await pg.query("select event_type from public.consent_events where contact_id = $1 order by created_at desc limit 1", [first.lead.contactId]);
+    expect(rows[0].event_type).toBe("opt_out");
+    expect(await enrollmentsFor(first.lead.propertyId)).toEqual([]);
   });
 
   it.each(answers)("matrix Florida cap (%s): held, never deferred", async (_k, probs, text) => {

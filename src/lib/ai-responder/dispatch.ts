@@ -5153,6 +5153,7 @@ async function renewSend(
 const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
 const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
 const FENCE_NINE_CONTEXT_CHANGED = "fence:nine_deferred_context_changed";
+const FENCE_PROPERTY_WINDOW = "fence:property_window";
 
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
@@ -5210,6 +5211,26 @@ async function fenceProviderSubmit(
     return false;
   }
   if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
+  if (args.windowDeferrable) {
+    // The property's own window (business hours / quiet hours: the same checkQuietHours rule
+    // sendSmsToContact applies at its step 4, which runs BEFORE several awaits). Re-checked
+    // here so a deferrable nine reply cannot reach the provider after it closes.
+    const { data: prop, error: propError } = await supabase
+      .from("properties")
+      .select("state")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const propertyWindow = propError || !prop ? null : checkQuietHours(prop.state);
+    if (!propertyWindow || !propertyWindow.ok) {
+      attempt.fenceWindowWhy = propertyWindow && !propertyWindow.ok ? propertyWindow.reason : "unreadable";
+      return refuse(FENCE_PROPERTY_WINDOW);
+    }
+  }
   if (args.source === "approved_template" || args.windowDeferrable) {
     // The last word before the provider, AFTER every preflight read in
     // sendSmsToContact: the owner may have revoked / edited / deleted the
@@ -6390,7 +6411,8 @@ async function deliverResponderMessage(
       attempt.fenceRefusal === "revalidate" &&
       (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED ||
         attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT ||
-        attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED)
+        attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED ||
+        attempt.fenceReason === FENCE_PROPERTY_WINDOW)
     ) {
       // The template must not go out now. Nothing was sent; drop it silently
       // (the outcome still applies, same as the earlier pre-send drops).
@@ -6403,7 +6425,7 @@ async function deliverResponderMessage(
       }, args.runContext);
       if (
         args.windowDeferrable &&
-        attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT &&
+        (attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT || attempt.fenceReason === FENCE_PROPERTY_WINDOW) &&
         attempt.fenceWindowWhy === "outside_window"
       ) {
         // At the fence this attempt's pending row already exists (and moved the revision once).
@@ -8104,6 +8126,27 @@ async function routeNineRepeatNotInterested(
   return outcome;
 }
 
+/**
+ * A deferred reply whose lead changed while it waited (a newer text, a person's dispo /
+ * status change): that newer event owns the thread. Intended behaviour: exit silently,
+ * WITHOUT sending and without a hold (a hold would only add noise; the newer event has its
+ * own run or a person already acted). Recorded as a silent handled exit for this inbound.
+ */
+async function nineDeferredOwnedElsewhere(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "skipped",
+    detail: { engine: "nine_questions", why: "context_changed" },
+  }, a.runCtx);
+  const outcome = silentSkip(NINE_DEFERRED_CONTEXT_CHANGED, 0);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: claimOutcomeOf(outcome) });
+  return outcome;
+}
+
 export async function runNineQuestionsStep(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
@@ -8117,14 +8160,12 @@ export async function runNineQuestionsStep(
       .select("decision_context_revision")
       .eq("id", input.propertyId)
       .maybeSingle();
-    if (revisionError || !current || current.decision_context_revision !== input.nineDeferral.revision) {
-      await trace(supabase, {
-        kind: "hold",
-        name: "nine_reply_deferred",
-        result: "held",
-        detail: { engine: "nine_questions", why: "context_changed" },
-      }, runCtx);
+    if (revisionError || !current) {
+      // Unreadable: we cannot tell who owns the thread, so a person looks.
       return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+    }
+    if (current.decision_context_revision !== input.nineDeferral.revision) {
+      return nineDeferredOwnedElsewhere(supabase, a);
     }
   }
   // A deferred run reuses the deferring run's decision: the revision check above proved the
@@ -8288,6 +8329,8 @@ export async function runNineQuestionsStep(
 
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.
   const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // Refused at the provider fence because the lead changed after a deferral: silent exit.
+    if (input.nineDeferral && why.endsWith(NINE_DEFERRED_CONTEXT_CHANGED)) return nineDeferredOwnedElsewhere(supabase, a);
     // Only a closed send window: wait for it to open instead of holding (A/B/C).
     const deferred = await maybeDeferNineReply(supabase, a, why, {
       evaluationRevision: cls.evaluationRevision,
@@ -8351,7 +8394,10 @@ export async function runNineQuestionsStep(
       // window-only refusal comes back unflagged so it can be deferred below.
       windowDeferrable: true,
     });
-    if (sent.outcome === "skipped" && (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE)) {
+    if (
+      sent.outcome === "skipped" &&
+      (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE || sent.reason === NINE_DEFERRED_CONTEXT_CHANGED)
+    ) {
       return noReply(sent.reason);
     }
     if (sent.outcome === "retry") {
