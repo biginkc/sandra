@@ -79,11 +79,25 @@ function status(v: unknown, what: string): "success" | "failure" {
   throw new Error(`${what}: status must be success or failure`);
 }
 
+/**
+ * Thrown for a validly signed webhook whose event type Sandra doesn't handle.
+ * Callers must acknowledge it with a 2xx: Drop Cowboy pauses an endpoint after
+ * 5 non-retriable rejections in a row and drops events while paused.
+ */
+export class UnsupportedDropCowboyEventError extends Error {
+  readonly eventType: string;
+  constructor(eventType: string) {
+    super(`dropcowboy webhook: unsupported event ${eventType}`);
+    this.name = "UnsupportedDropCowboyEventError";
+    this.eventType = eventType;
+  }
+}
+
 export function parseDropCowboyStatusWebhook(rawBody: string): VoicemailDropStatusEvent {
   const body = parseObject(rawBody, "dropcowboy webhook");
   const event = body.event;
   if (event !== "contact.rvm.status" && event !== "contact.rvm.receipt") {
-    throw new Error(`dropcowboy webhook: unsupported event ${String(event)}`);
+    throw new UnsupportedDropCowboyEventError(String(event));
   }
   const eventId = str(body.event_id);
   if (!eventId) throw new Error("dropcowboy webhook: missing event_id");
@@ -105,7 +119,6 @@ export function parseDropCowboyStatusWebhook(rawBody: string): VoicemailDropStat
     reason: str(d.reason),
     reasonCode: info.reasonCode,
     reasonClass: info.reasonClass,
-    reasonUnverified: info.unverified,
     proofUrl: str(d.proof_of_delivery_url),
     receiptReadyAt: str(d.receipt_ready_at),
     raw: body,
@@ -127,7 +140,6 @@ export function parseDropCowboyCallback(rawBody: string): VoicemailDropCallbackE
     reason: str(body.reason),
     reasonCode: info.reasonCode,
     reasonClass: info.reasonClass,
-    reasonUnverified: info.unverified,
     phoneNumber: str(body.phone_number),
     productCode: str(body.product_code),
     proofUrl: str(body.proof_of_delivery_url),
