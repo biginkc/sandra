@@ -68,7 +68,7 @@ const GROUPS: RuleGroup[] = [
 const HOT_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent. She never texts them back on her own.";
 // The hot rows that now send an approved reply (2026-10-20) can't say "never texts them back":
 // the same approved sentence with its last clause dropped, and the reply text shown under the row.
-// PENDING Jarrad's verbatim approval of this display (flagged in the PR); the reply texts are approved.
+// Display approved verbatim by Jarrad 2026-10-20, as are the reply texts.
 const HOT_REPLY_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and text sent.";
 
 /**

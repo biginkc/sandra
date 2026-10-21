@@ -161,7 +161,7 @@ export const NINE_ANSWER_LABELS: Record<NineAnswer, string> = {
   talked_price: "Talked price",
   asked_offer: "Asked for offer",
   named_price: "Named a price",
-  asked_call: "Asked for a call",
+  asked_call: "Asked for a call", // label approved verbatim by Jarrad 2026-10-20
   needs_person: "Can't read it",
 };
 
