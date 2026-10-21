@@ -345,7 +345,7 @@ export async function reconcileHeldDropWithClient(
   if (runReadError) throw new Error(`reconcileHeldDrop run read: ${runReadError.message}`);
   if (!run || !run.claim_active || !["unknown", "accepted"].includes(run.attempt_outcome ?? "")) return "not_held";
   if (run.attempt_outcome === "unknown") {
-    const { error } = await client
+    const { data: accepted, error } = await client
       .from("sequence_step_runs")
       .update({
         attempt_outcome: "accepted",
@@ -357,8 +357,13 @@ export async function reconcileHeldDropWithClient(
       })
       .eq("id", run.id)
       .eq("claim_active", true)
-      .eq("attempt_outcome", "unknown");
+      .eq("attempt_outcome", "unknown")
+      .select("id")
+      .maybeSingle();
     if (error) throw new Error(`reconcileHeldDrop run write: ${error.message}`);
+    // No match: the claim was released or the outcome moved since the read.
+    // Do not advance the enrollment.
+    if (!accepted) return "not_held";
   }
 
   // 2. Enrollment: paused reconciliation_required on this step → advanced
