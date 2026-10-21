@@ -4641,6 +4641,10 @@ export type Database = {
           template_body: string | null
           template_category: string | null
           template_id: string | null
+          vm_media_id: string | null
+          vm_phone_line_id: string | null
+          vm_tts_body: string | null
+          vm_voice_id: string | null
         }
         Insert: {
           action_type: string
@@ -4653,6 +4657,10 @@ export type Database = {
           template_body?: string | null
           template_category?: string | null
           template_id?: string | null
+          vm_media_id?: string | null
+          vm_phone_line_id?: string | null
+          vm_tts_body?: string | null
+          vm_voice_id?: string | null
         }
         Update: {
           action_type?: string
@@ -4665,6 +4673,10 @@ export type Database = {
           template_body?: string | null
           template_category?: string | null
           template_id?: string | null
+          vm_media_id?: string | null
+          vm_phone_line_id?: string | null
+          vm_tts_body?: string | null
+          vm_voice_id?: string | null
         }
         Relationships: [
           {
@@ -6575,6 +6587,131 @@ export type Database = {
             columns: ["property_id"]
             isOneToOne: false
             referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voicemail_drops: {
+        Row: {
+          attempt_outcome: string
+          audio_kind: string
+          completed_at: string | null
+          contact_id: string | null
+          cost: number | null
+          created_at: string
+          drop_id: string | null
+          enrollment_id: string | null
+          id: string
+          idempotency_key: string
+          org_id: string
+          proof_url: string | null
+          property_id: string | null
+          provider: string
+          provider_payload: Json | null
+          queued_at: string | null
+          reason: string | null
+          reason_code: string | null
+          rendered_script: string | null
+          status: string
+          step_run_id: string
+          to_phone: string
+        }
+        Insert: {
+          attempt_outcome?: string
+          audio_kind: string
+          completed_at?: string | null
+          contact_id?: string | null
+          cost?: number | null
+          created_at?: string
+          drop_id?: string | null
+          enrollment_id?: string | null
+          id?: string
+          idempotency_key: string
+          org_id: string
+          proof_url?: string | null
+          property_id?: string | null
+          provider: string
+          provider_payload?: Json | null
+          queued_at?: string | null
+          reason?: string | null
+          reason_code?: string | null
+          rendered_script?: string | null
+          status?: string
+          step_run_id: string
+          to_phone: string
+        }
+        Update: {
+          attempt_outcome?: string
+          audio_kind?: string
+          completed_at?: string | null
+          contact_id?: string | null
+          cost?: number | null
+          created_at?: string
+          drop_id?: string | null
+          enrollment_id?: string | null
+          id?: string
+          idempotency_key?: string
+          org_id?: string
+          proof_url?: string | null
+          property_id?: string | null
+          provider?: string
+          provider_payload?: Json | null
+          queued_at?: string | null
+          reason?: string | null
+          reason_code?: string | null
+          rendered_script?: string | null
+          status?: string
+          step_run_id?: string
+          to_phone?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voicemail_drops_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_enrollment_id_fkey"
+            columns: ["enrollment_id"]
+            isOneToOne: false
+            referencedRelation: "sequence_enrollments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "leads_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "leads_unskip_traced"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_step_run_id_fkey"
+            columns: ["step_run_id"]
+            isOneToOne: true
+            referencedRelation: "sequence_step_runs"
             referencedColumns: ["id"]
           },
         ]

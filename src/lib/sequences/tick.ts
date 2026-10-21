@@ -953,7 +953,14 @@ async function advanceEnrollment(
 async function markRunSkipped(
   client: SupabaseClient<Database>,
   runId: string,
-  reason: "quiet_hours" | "consent_revoked" | "paused" | "escalated" | "no_phone" | "provider_failed",
+  reason:
+    | "quiet_hours"
+    | "consent_revoked"
+    | "paused"
+    | "escalated"
+    | "no_phone"
+    | "provider_failed"
+    | "not_eligible",
   attemptOutcome: SequenceAttemptOutcome = "not_attempted",
   failureReason?: string,
 ): Promise<string | null> {
