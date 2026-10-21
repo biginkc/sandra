@@ -8,14 +8,14 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { copyDropProof, PROOF_BUCKET, supabaseProofCopyStore, sweepPendingProofCopies } from "@/lib/voicemail-drop/proof-copy";
 import { handleDropStatusEvent, supabaseDropStatusStore } from "@/lib/voicemail-drop/status-updates";
 
-// Real-DB proof of 20261021200500: the proof columns and their invariants,
+// Real-DB proof of 20261021230000: the proof columns and their invariants,
 // the private bucket, the real Storage path written by supabaseProofCopyStore,
 // RLS (no member of any org reads the object; members read their own org's
 // drop row only), idempotent replays, and the rollback.
 const pg = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "") });
 const client = createTestClient();
-const migration = readFileSync("supabase/migrations/20261021200500_voicemail_drop_proof_copy.sql", "utf8");
-const rollback = readFileSync("supabase/rollbacks/20261021200500_voicemail_drop_proof_copy.sql", "utf8");
+const migration = readFileSync("supabase/migrations/20261021230000_voicemail_drop_proof_copy.sql", "utf8");
+const rollback = readFileSync("supabase/rollbacks/20261021230000_voicemail_drop_proof_copy.sql", "utf8");
 
 const orgA = randomUUID();
 const orgB = randomUUID();
@@ -111,7 +111,7 @@ afterAll(async () => {
   }
 });
 
-describe("20261021200500_voicemail_drop_proof_copy", () => {
+describe("20261021230000_voicemail_drop_proof_copy", () => {
   it("creates a private bucket with an audio-only, 25 MB limit", async () => {
     const { rows } = await pg.query("select public, file_size_limit, allowed_mime_types from storage.buckets where id = $1", [PROOF_BUCKET]);
     expect(rows[0]).toMatchObject({ public: false, file_size_limit: "26214400" });

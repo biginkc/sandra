@@ -1,4 +1,4 @@
--- Roll back 20261021200500_voicemail_drop_proof_copy.
+-- Roll back 20261021230000_voicemail_drop_proof_copy.
 -- Refuses to run while any stored proof copy exists: delete the objects in
 -- the voicemail-drop-proofs bucket first, so no recording is orphaned or
 -- silently lost. Storage forbids deleting storage rows from SQL, so the
