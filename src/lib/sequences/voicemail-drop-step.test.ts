@@ -10,7 +10,12 @@ import {
 } from "@/lib/voicemail-drop/providers/mock";
 
 import { processEnrollmentTick } from "./tick";
-import { processVoicemailDropStep, renderVoicemailScript, voicemailDropCallbackUrl } from "./voicemail-drop-step";
+import {
+  MAX_CONSECUTIVE_NOT_QUEUED,
+  processVoicemailDropStep,
+  renderVoicemailScript,
+  voicemailDropCallbackUrl,
+} from "./voicemail-drop-step";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/messaging/send", () => ({ sendSmsToContact: vi.fn() }));
@@ -68,6 +73,12 @@ type World = {
   norma: Record<string, unknown>[];
   normaInbound: Record<string, unknown>[];
   dropCount: number;
+  registry: Record<string, unknown>[];
+  /** Registry rows appear only from this registry query on (1-based). */
+  registryFromCall: number;
+  wrongNumbers: Record<string, unknown>[];
+  runHistory: Record<string, unknown>[];
+  reserveError: { message: string } | null;
   auth: { authorized: boolean; reason: string | null; attempt_outcome: string } | null;
   authError: { message: string } | null;
   readError: string | null;
@@ -96,6 +107,11 @@ function baseWorld(over: Partial<World> = {}): World {
     norma: [],
     normaInbound: [],
     dropCount: 0,
+    registry: [],
+    registryFromCall: 1,
+    wrongNumbers: [],
+    runHistory: [],
+    reserveError: null,
     auth: { authorized: true, reason: null, attempt_outcome: "unknown" },
     authError: null,
     readError: null,
@@ -106,6 +122,7 @@ function baseWorld(over: Partial<World> = {}): World {
 
 function makeClient(world: World) {
   const ops: Op[] = [];
+  let registryCalls = 0;
   const resolve = (op: Op): { data: unknown; error: unknown; count?: number | null } => {
     const has = (col: string) => op.filters.some(([, c]) => c === col);
     if (op.kind === "update") {
@@ -127,7 +144,15 @@ function makeClient(world: World) {
       case "messages":
         return { data: world.inbound, error: null };
       case "norma_call_requests":
+        if (op.filters.some(([, c, v]) => c === "outcome" && v === "wrong_number")) {
+          return { data: world.wrongNumbers, error: null };
+        }
         return { data: world.norma, error: null };
+      case "global_phone_dnc_registry":
+        registryCalls += 1;
+        return { data: registryCalls >= world.registryFromCall ? world.registry : [], error: null };
+      case "sequence_step_runs":
+        return { data: world.runHistory, error: null };
       case "norma_inbound_calls":
         return { data: world.normaInbound, error: null };
       case "voicemail_drops":
@@ -173,6 +198,11 @@ function makeClient(world: World) {
   });
   const rpc = vi.fn((name: string, args: unknown) => {
     ops.push({ table: name, kind: "rpc", payload: args, filters: [] });
+    if (name === "reserve_voicemail_drop_with_cap") {
+      if (world.reserveError) return Promise.resolve({ data: null, error: world.reserveError });
+      const cap = (args as { p_cap: number }).p_cap;
+      return Promise.resolve({ data: world.dropCount >= cap ? null : "drop-1", error: null });
+    }
     return Promise.resolve({ data: world.auth ? [world.auth] : [], error: world.authError });
   });
   return { client: { from, rpc } as never, ops };
@@ -220,7 +250,7 @@ describe("voicemail drop step — 202 accepted", () => {
       audio_kind: "tts",
       attempt_outcome: "unknown",
     });
-    const auth = ops.find((o) => o.kind === "rpc")!;
+    const auth = ops.find((o) => o.kind === "rpc" && o.table === "authorize_sequence_provider_attempt")!;
     expect(auth.table).toBe("authorize_sequence_provider_attempt");
     expect(auth.payload).toMatchObject({ p_claim_id: CLAIM, p_phone: "+18165550101", p_message_id: null });
 
@@ -247,6 +277,30 @@ describe("voicemail drop step — RULING RVM-4 failures", () => {
     const enrollmentUpdate = updatesTo(ops, "sequence_enrollments")[0];
     expect(enrollmentUpdate.next_run_at).toBeDefined();
     expect(enrollmentUpdate.current_step_index).toBeUndefined();
+  });
+
+  it(`${MAX_CONSECUTIVE_NOT_QUEUED} consecutive not-queued runs pause provider_failed and report`, async () => {
+    expect(MAX_CONSECUTIVE_NOT_QUEUED).toBe(12);
+    setMockVoicemailDropResult({ outcome: "not_queued", httpStatus: 429, raw: {} });
+    const history = Array.from({ length: 12 }, () => ({ recovery_action: "voicemail_drop_not_queued_retry" }));
+    const { outcome, ops } = await run(baseWorld({ runHistory: history }));
+    expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "provider_failed" });
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(updatesTo(ops, "sequence_enrollments")[0]).toMatchObject({ status: "paused", pause_reason: "provider_failed" });
+    const streakRead = ops.find((o) => o.table === "sequence_step_runs" && o.kind === "select")!;
+    expect(streakRead.filters).toContainEqual(["eq", "step_id", "step-1"]);
+    expect(streakRead.filters).toContainEqual(["eq", "enrollment_id", "enr-1"]);
+  });
+
+  it("an interrupted streak (11 not-queued, then another outcome) keeps retrying", async () => {
+    setMockVoicemailDropResult({ outcome: "not_queued", httpStatus: 500, raw: {} });
+    const history = [
+      ...Array.from({ length: 11 }, () => ({ recovery_action: "voicemail_drop_not_queued_retry" })),
+      { recovery_action: "quiet_hours_deferred" },
+    ];
+    const { outcome } = await run(baseWorld({ runHistory: history }));
+    expect(outcome.status).toBe("rescheduled_provider_not_queued");
+    expect(reportError).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -337,6 +391,35 @@ describe("voicemail drop step — gates before the provider", () => {
     expect(getMockVoicemailDropLog()).toHaveLength(0);
   });
 
+  it("with a cap, count + insert go through the locked reserve RPC (no direct insert)", async () => {
+    const { outcome, ops } = await run(baseWorld({ dropCount: 2 }), TTS_STEP, { ...ENV, VOICEMAIL_DROP_DAILY_CAP: "3" } as never);
+    expect(outcome.status).toBe("voicemail_queued");
+    const reserve = ops.find((o) => o.kind === "rpc" && o.table === "reserve_voicemail_drop_with_cap")!;
+    expect(reserve.payload).toMatchObject({
+      p_org_id: "org-1",
+      p_cap: 3,
+      p_since: chicagoDayWindow(new Date()).start.toISOString(),
+      p_step_run_id: CLAIM,
+      p_to_phone: "+18165550101",
+      p_audio_kind: "tts",
+    });
+    expect(ops.some((o) => o.table === "voicemail_drops" && o.kind === "insert")).toBe(false);
+    expect(getMockVoicemailDropLog()[0].input.foreignId).toBe("drop-1");
+  });
+
+  it("a reserve RPC error fails closed and retries in 5 minutes", async () => {
+    const before = Date.now();
+    const { outcome } = await run(baseWorld({ reserveError: { message: "lock timeout" } }), TTS_STEP, {
+      ...ENV,
+      VOICEMAIL_DROP_DAILY_CAP: "3",
+    } as never);
+    expect(outcome.status).toBe("rescheduled_daily_cap");
+    const next = Date.parse((outcome as { nextRunAt: string }).nextRunAt);
+    expect(next - before).toBeGreaterThanOrEqual(5 * 60 * 1000 - 50);
+    expect(next - before).toBeLessThan(6 * 60 * 1000);
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
   it("under the cap sends", async () => {
     const { outcome } = await run(baseWorld({ dropCount: 2 }), TTS_STEP, { ...ENV, VOICEMAIL_DROP_DAILY_CAP: "3" } as never);
     expect(outcome.status).toBe("voicemail_queued");
@@ -420,7 +503,9 @@ describe("voicemail drop step — eligibility (RVM-2 / RVM-3)", () => {
 
   it("only queries Norma outcomes where a person answered", async () => {
     const { ops } = await run(baseWorld());
-    const norma = ops.find((o) => o.table === "norma_call_requests")!;
+    const norma = ops.find(
+      (o) => o.table === "norma_call_requests" && o.filters.some(([f, c]) => f === "in" && c === "outcome"),
+    )!;
     expect(norma.filters).toContainEqual(["in", "outcome", ["callback_requested", "reached_no_callback", "not_interested"]]);
   });
 
@@ -446,6 +531,104 @@ describe("voicemail drop step — eligibility (RVM-2 / RVM-3)", () => {
     expect(calls.filters.some(([, c]) => c === "outcome")).toBe(false);
     expect(ops.some((o) => o.table === "consent_events")).toBe(false);
   });
+});
+
+describe("voicemail drop step — per-number don't-call checks", () => {
+  const rawOnly = { ...baseWorld().contact, phone_1: "8165550101", phone_1_type: "mobile", phone_2: null };
+
+  it("global DNC registry on the only phone (raw 10-digit slot) → not_eligible", async () => {
+    const { outcome, ops } = await run(
+      baseWorld({ contact: rawOnly, registry: [{ phone_e164: "+18165550101" }] }),
+    );
+    expect(outcome).toEqual({ status: "skipped_not_eligible", enrollmentId: "enr-1", stepIndex: 0, reason: "global_dnc_registry" });
+    const reg = ops.find((o) => o.table === "global_phone_dnc_registry")!;
+    expect(reg.filters).toContainEqual(["in", "phone_e164", ["+18165550101"]]);
+    expect(reg.filters).toContainEqual(["eq", "org_id", "org-1"]);
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
+  it("Norma wrong_number on the only phone (raw 10-digit slot) → not_eligible", async () => {
+    const { outcome, ops } = await run(
+      baseWorld({ contact: rawOnly, wrongNumbers: [{ phone_e164: "+18165550101" }] }),
+    );
+    expect(outcome).toEqual({ status: "skipped_not_eligible", enrollmentId: "enr-1", stepIndex: 0, reason: "wrong_number_flagged" });
+    const wrong = ops.find(
+      (o) => o.table === "norma_call_requests" && o.filters.some(([, c, v]) => c === "outcome" && v === "wrong_number"),
+    )!;
+    expect(wrong.filters).toContainEqual(["eq", "status", "completed"]);
+    expect(wrong.filters).toContainEqual(["in", "phone_e164", ["+18165550101"]]);
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
+  it("a blocked qualifying-event phone is skipped for another saved phone", async () => {
+    await run(baseWorld({ registry: [{ phone_e164: "+18165550101" }] }));
+    expect(getMockVoicemailDropLog()[0].input.to).toBe("+18165550102");
+  });
+
+  it("the slot fallback never picks a blocked phone", async () => {
+    // Event phone no longer saved; the mobile slot is a known wrong number.
+    await run(
+      baseWorld({
+        calls: [{ phone_e164: "+19995550000", started_at: "2026-10-01T00:00:00Z" }],
+        wrongNumbers: [{ phone_e164: "+18165550102" }],
+      }),
+    );
+    expect(getMockVoicemailDropLog()[0].input.to).toBe("+18165550101");
+  });
+
+  it("a registry entry added after eligibility is caught by the re-check before the provider call", async () => {
+    const { outcome, ops } = await run(baseWorld({ registry: [{ phone_e164: "+18165550101" }], registryFromCall: 2 }));
+    expect(outcome).toEqual({ status: "skipped_not_eligible", enrollmentId: "enr-1", stepIndex: 0, reason: "global_dnc_registry" });
+    expect(ops.filter((o) => o.table === "global_phone_dnc_registry")).toHaveLength(2);
+    expect(ops.some((o) => o.table === "authorize_sequence_provider_attempt")).toBe(false);
+    expect(ops.some((o) => o.table === "voicemail_drops" && o.kind === "insert")).toBe(false);
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+});
+
+describe("voicemail drop step — BYOC caller ID", () => {
+  const BYOC = { ...ENV, DROPCOWBOY_CALLER_ID: "+18165550199" } as NodeJS.ProcessEnv;
+
+  it("DROPCOWBOY_CALLER_ID set: no phone line needed, sends callerId and no phone line", async () => {
+    const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_phone_line_id: null }, BYOC);
+    expect(outcome.status).toBe("voicemail_queued");
+    const input = getMockVoicemailDropLog()[0].input;
+    expect(input.callerId).toBe("+18165550199");
+    expect(input.phoneLineId).toBeNull();
+  });
+
+  it("caller ID wins over a step phone line", async () => {
+    await run(baseWorld(), TTS_STEP, BYOC);
+    expect(getMockVoicemailDropLog()[0].input).toMatchObject({ callerId: "+18165550199", phoneLineId: null });
+  });
+
+  it("a non-E.164 DROPCOWBOY_CALLER_ID pauses provider_failed and reports", async () => {
+    const { outcome } = await run(baseWorld(), TTS_STEP, { ...ENV, DROPCOWBOY_CALLER_ID: "816-555-0199" } as never);
+    expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "provider_failed" });
+    expect(reportError).toHaveBeenCalled();
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+});
+
+describe("voicemail drop step — merge fields reach Drop Cowboy rendered", () => {
+  it("no { or } survives in the tts_body sent to the provider", async () => {
+    await run(baseWorld(), {
+      ...TTS_STEP,
+      vm_tts_body: "Hi {{first_name}}, about {{property_address}}. {{#if first_name}}Talk soon {{first_name | friend}}.{{/if}}",
+    });
+    const audio = getMockVoicemailDropLog()[0].input.audio as { kind: "tts"; ttsBody: string };
+    expect(audio.ttsBody).toBe("Hi Pat, about 12 Elm St. Talk soon Pat.");
+    expect(audio.ttsBody).not.toMatch(/[{}]/);
+  });
+
+  it.each(["Hi {first_name}, this is Norma.", "Hi {{#if first_name}}Pat"])(
+    "an unrendered placeholder (%s) pauses step_misconfigured and sends nothing",
+    async (body) => {
+      const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_tts_body: body });
+      expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+      expect(getMockVoicemailDropLog()).toHaveLength(0);
+    },
+  );
 });
 
 describe("voicemail drop helpers", () => {

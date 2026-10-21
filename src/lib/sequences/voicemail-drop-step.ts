@@ -7,7 +7,9 @@ import {
   checkVoicemailDropEligibility,
   chicagoDayWindow,
   EligibilityReadError,
+  findBlockedDropPhones,
   readDailyCap,
+  readDropCallerId,
   VOICEMAIL_DROP_SCRIPT_MAX_CHARS,
 } from "@/lib/voicemail-drop/eligibility";
 import { getVoicemailDropProvider } from "@/lib/voicemail-drop/registry";
@@ -33,8 +35,9 @@ import {
  * pre-claim checks (DNC lock, pausing outreach_dispo, status pause rules) and
  * after the step run claim was inserted.
  *
- * Order: provider configured → eligibility → quiet hours → per-org daily cap
- * → step config + deterministic render → voicemail_drops row → provider
+ * Order: provider configured → eligibility → quiet hours
+ * → step config + deterministic render → per-number block re-check →
+ * voicemail_drops row (cap-reserved under a per-org lock) → provider
  * intent fence (authorize_sequence_provider_attempt, run → 'unknown') → POST
  * → RULING RVM-4 result handling. Nothing here blind-retries a possibly
  * queued drop.
@@ -43,6 +46,11 @@ import {
 const QUIET_HOURS_RETRY_MS = 10 * 60 * 60 * 1000;
 const ELIGIBILITY_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000;
 const NOT_QUEUED_RETRY_MS = 5 * 60 * 1000;
+/**
+ * After this many consecutive 429/500 not-queued runs for the same enrollment
+ * step (12 × 5 min ≈ 1 hour), stop retrying: pause provider_failed and report.
+ */
+export const MAX_CONSECUTIVE_NOT_QUEUED = 12;
 
 type DropEnrollment = {
   id: string;
@@ -208,6 +216,22 @@ export async function processVoicemailDropStep(
     return pauseNotAttempted(client, enrollment.id, claimId, "provider_failed", "voicemail drop callback secret missing");
   }
 
+  // BYOC caller ID (dedicated Telnyx number). Set = send caller_id and no
+  // phone line; unset = the step's vm_phone_line_id.
+  let callerId: string | null;
+  try {
+    callerId = readDropCallerId(env);
+  } catch (error) {
+    reportError(error, { tags: { surface: "sequence_tick_voicemail_drop_config" } });
+    return pauseNotAttempted(
+      client,
+      enrollment.id,
+      claimId,
+      "provider_failed",
+      `voicemail drop caller id misconfigured: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   // 1. Eligibility (RULING RVM-2 / RVM-3).
   const notEligible = async (reason: string): Promise<TickOutcome> => {
     const runError = await markRunSkipped(client, claimId, "not_eligible", "not_attempted", reason);
@@ -260,43 +284,12 @@ export async function processVoicemailDropStep(
     return { status: "rescheduled_quiet_hours", enrollmentId: enrollment.id, nextRunAt: nextRunAt.toISOString() };
   }
 
-  // 3. Per-org daily cap — same retire block, reschedule to the next day.
-  const cap = readDailyCap(env);
-  if (cap !== null) {
-    const day = chicagoDayWindow(new Date());
-    const { count, error: countError } = await client
-      .from("voicemail_drops")
-      .select("id", { count: "exact", head: true })
-      .eq("org_id", enrollment.org_id)
-      .gte("created_at", day.start.toISOString())
-      .in("attempt_outcome", ["queued", "unknown"]);
-    const overCap = countError || count === null || count >= cap;
-    if (overCap) {
-      // Fail closed when the count cannot be read: retry in 5 minutes.
-      const nextRunAt = countError || count === null
-        ? new Date(Date.now() + ELIGIBILITY_UNAVAILABLE_RETRY_MS)
-        : day.next;
-      const retireError = await retireNotAttemptedClaim(client, enrollment, claimId, nextRunAt, {
-        skipped_reason: null,
-        failure_reason: "voicemail_drop_daily_cap",
-        recovery_action: "voicemail_drop_daily_cap_deferred",
-        recovery_evidence: countError
-          ? `daily cap count unavailable (${countError.message}); no provider attempt was made`
-          : `org reached VOICEMAIL_DROP_DAILY_CAP=${cap}; no provider attempt was made`,
-      });
-      if (retireError) {
-        return failAfterRunWrite(client, enrollment.id, retireError, "Daily-cap claim bookkeeping failed");
-      }
-      return { status: "rescheduled_daily_cap", enrollmentId: enrollment.id, nextRunAt: nextRunAt.toISOString() };
-    }
-  }
-
   // 4. Step config + deterministic render.
   const mediaId = step.vm_media_id?.trim() || null;
   const ttsTemplate = step.vm_tts_body?.trim() || null;
   const voiceId = step.vm_voice_id?.trim() || null;
   const phoneLineId = step.vm_phone_line_id?.trim() || null;
-  if (!phoneLineId || (mediaId ? Boolean(ttsTemplate) : !ttsTemplate || !voiceId)) {
+  if ((!callerId && !phoneLineId) || (mediaId ? Boolean(ttsTemplate) : !ttsTemplate || !voiceId)) {
     return pauseNotAttempted(client, enrollment.id, claimId, "step_misconfigured", "voicemail drop step is missing audio, voice, or phone line");
   }
   const vars = await loadTemplateVars(client, {
@@ -309,6 +302,17 @@ export async function processVoicemailDropStep(
     audio = { kind: "media", mediaId };
   } else {
     renderedScript = renderVoicemailScript(ttsTemplate ?? "", vars);
+    // Drop Cowboy treats braces as its own merge fields: nothing unrendered
+    // (malformed or single-brace placeholders) may reach it.
+    if (/[{}]/.test(renderedScript)) {
+      return pauseNotAttempted(
+        client,
+        enrollment.id,
+        claimId,
+        "step_misconfigured",
+        "voicemail drop script has an unrendered merge field ({ or } left after render)",
+      );
+    }
     if (!renderedScript || renderedScript.length > VOICEMAIL_DROP_SCRIPT_MAX_CHARS) {
       return pauseNotAttempted(
         client,
@@ -322,36 +326,104 @@ export async function processVoicemailDropStep(
   }
   const postalCode = typeof vars.property_zip === "string" && vars.property_zip.trim() ? vars.property_zip.trim() : null;
 
-  // 5. voicemail_drops row (attempt_outcome 'unknown' until the POST answers).
-  const { data: dropRow, error: dropInsertError } = await client
-    .from("voicemail_drops")
-    .insert({
-      org_id: enrollment.org_id,
-      enrollment_id: enrollment.id,
-      step_run_id: claimId,
-      idempotency_key: claimId,
-      contact_id: enrollment.contact_id,
-      property_id: enrollment.property_id,
-      to_phone: eligibility.phone,
-      provider: provider.id,
-      audio_kind: audio.kind,
-      rendered_script: renderedScript,
-      status: "queued",
-      attempt_outcome: "unknown",
-    })
-    .select("id")
-    .single();
-  if (dropInsertError || !dropRow) {
-    return pauseNotAttempted(
-      client,
-      enrollment.id,
-      claimId,
-      "provider_failed",
-      `voicemail_drops insert failed: ${dropInsertError?.message ?? "no row"}`,
-    );
+  // 5. Re-check the per-number blocks right before the attempt (eligibility
+  //    read them earlier in this tick; this closes most of the gap). Not
+  //    inside the DB fence: authorize_sequence_provider_attempt does not know
+  //    voicemail-only rules.
+  let lateBlock: string | undefined;
+  try {
+    lateBlock = (await findBlockedDropPhones(client, enrollment.org_id, [eligibility.phone])).get(eligibility.phone);
+  } catch (error) {
+    if (!(error instanceof EligibilityReadError)) throw error;
+    const retryAt = new Date(Date.now() + ELIGIBILITY_UNAVAILABLE_RETRY_MS);
+    const retireError = await retireNotAttemptedClaim(client, enrollment, claimId, retryAt, {
+      skipped_reason: null,
+      failure_reason: "voicemail_eligibility_unavailable",
+      recovery_action: "voicemail_eligibility_deferred",
+      recovery_evidence: `phone block re-check could not be read (${error.message}); no provider attempt was made`,
+    });
+    if (retireError) {
+      return failAfterRunWrite(client, enrollment.id, retireError, "Eligibility-unavailable claim bookkeeping failed");
+    }
+    return { status: "failed", enrollmentId: enrollment.id, message: error.message };
+  }
+  if (lateBlock) return notEligible(lateBlock);
+
+  // 6. voicemail_drops row (attempt_outcome 'unknown' until the POST answers).
+  //    With VOICEMAIL_DROP_DAILY_CAP set, the count and the insert run in one
+  //    transaction under a per-org advisory lock so parallel ticks cannot
+  //    overshoot the cap.
+  const cap = readDailyCap(env);
+  let dropRowId: string;
+  if (cap !== null) {
+    const day = chicagoDayWindow(new Date());
+    const { data: reservedId, error: reserveError } = await (
+      client.rpc as unknown as (
+        fn: string,
+        args: Record<string, unknown>,
+      ) => Promise<{ data: string | null; error: { message: string } | null }>
+    )("reserve_voicemail_drop_with_cap", {
+      p_org_id: enrollment.org_id,
+      p_cap: cap,
+      p_since: day.start.toISOString(),
+      p_enrollment_id: enrollment.id,
+      p_step_run_id: claimId,
+      p_contact_id: enrollment.contact_id,
+      p_property_id: enrollment.property_id,
+      p_to_phone: eligibility.phone,
+      p_provider: provider.id,
+      p_audio_kind: audio.kind,
+      p_rendered_script: renderedScript,
+    });
+    if (reserveError || !reservedId) {
+      // Fail closed when the cap cannot be checked: retry in 5 minutes.
+      const nextRunAt = reserveError ? new Date(Date.now() + ELIGIBILITY_UNAVAILABLE_RETRY_MS) : day.next;
+      const retireError = await retireNotAttemptedClaim(client, enrollment, claimId, nextRunAt, {
+        skipped_reason: null,
+        failure_reason: "voicemail_drop_daily_cap",
+        recovery_action: "voicemail_drop_daily_cap_deferred",
+        recovery_evidence: reserveError
+          ? `daily cap check unavailable (${reserveError.message}); no provider attempt was made`
+          : `org reached VOICEMAIL_DROP_DAILY_CAP=${cap}; no provider attempt was made`,
+      });
+      if (retireError) {
+        return failAfterRunWrite(client, enrollment.id, retireError, "Daily-cap claim bookkeeping failed");
+      }
+      return { status: "rescheduled_daily_cap", enrollmentId: enrollment.id, nextRunAt: nextRunAt.toISOString() };
+    }
+    dropRowId = reservedId;
+  } else {
+    const { data: dropRow, error: dropInsertError } = await client
+      .from("voicemail_drops")
+      .insert({
+        org_id: enrollment.org_id,
+        enrollment_id: enrollment.id,
+        step_run_id: claimId,
+        idempotency_key: claimId,
+        contact_id: enrollment.contact_id,
+        property_id: enrollment.property_id,
+        to_phone: eligibility.phone,
+        provider: provider.id,
+        audio_kind: audio.kind,
+        rendered_script: renderedScript,
+        status: "queued",
+        attempt_outcome: "unknown",
+      })
+      .select("id")
+      .single();
+    if (dropInsertError || !dropRow) {
+      return pauseNotAttempted(
+        client,
+        enrollment.id,
+        claimId,
+        "provider_failed",
+        `voicemail_drops insert failed: ${dropInsertError?.message ?? "no row"}`,
+      );
+    }
+    dropRowId = dropRow.id;
   }
 
-  // 6. Provider intent fence: locks the enrollment, re-checks suppression and
+  // 7. Provider intent fence: locks the enrollment, re-checks suppression and
   //    that the phone is still saved on the contact, and moves the run to
   //    attempt_outcome 'unknown' before the POST. message_id stays null.
   const { data: authRows, error: authError } = await client.rpc("authorize_sequence_provider_attempt", {
@@ -366,7 +438,7 @@ export async function processVoicemailDropStep(
   const auth = authRows?.[0];
   if (authError || !auth?.authorized) {
     const reason = authError?.message ?? auth?.reason ?? "authorization returned no row";
-    await updateDropRow(client, dropRow.id, {
+    await updateDropRow(client, dropRowId, {
       status: "skipped",
       attempt_outcome: authError ? "unknown" : "not_queued",
       reason,
@@ -388,15 +460,15 @@ export async function processVoicemailDropStep(
     return { status: "paused", enrollmentId: enrollment.id, reason: pauseReason };
   }
 
-  // 7. POST. Idempotency-Key = step_run_id.
+  // 8. POST. Idempotency-Key = step_run_id.
   let result: VoicemailDropSendResult;
   try {
     result = await provider.sendDrop({
       idempotencyKey: claimId,
       to: eligibility.phone,
       audio,
-      phoneLineId,
-      foreignId: dropRow.id,
+      ...(callerId ? { callerId, phoneLineId: null } : { phoneLineId }),
+      foreignId: dropRowId,
       callbackUrl,
       mobileOnly: true,
       maxAttempts: 1,
@@ -412,8 +484,8 @@ export async function processVoicemailDropStep(
     };
   }
 
-  // 8. RULING RVM-4.
-  return handleSendResult(client, enrollment, step, claimId, dropRow.id, result);
+  // 9. RULING RVM-4.
+  return handleSendResult(client, enrollment, step, claimId, dropRowId, result);
 }
 
 async function handleSendResult(
@@ -499,6 +571,19 @@ async function handleSendResult(
           "Not-queued voicemail drop bookkeeping failed",
         );
       }
+      const streak = await countNotQueuedStreak(client, enrollment.id, step.id);
+      if (streak === null || streak >= MAX_CONSECUTIVE_NOT_QUEUED) {
+        const why = streak === null
+          ? "not-queued streak could not be read"
+          : `${streak} consecutive not-queued attempts (limit ${MAX_CONSECUTIVE_NOT_QUEUED})`;
+        reportError(new Error(`voicemail drop retries exhausted: ${why}`), {
+          tags: { surface: "sequence_tick_voicemail_drop", outcome: "not_queued_exhausted" },
+          extra: { enrollmentId: enrollment.id, claimId, dropRowId, httpStatus: result.httpStatus },
+        });
+        const pauseError = await pauseEnrollment(client, enrollment.id, "provider_failed", false);
+        if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        return { status: "paused", enrollmentId: enrollment.id, reason: "provider_failed" };
+      }
       const nextRunAt = new Date(Date.now() + NOT_QUEUED_RETRY_MS);
       const rescheduleError = await rescheduleEnrollment(client, enrollment, nextRunAt);
       if (rescheduleError) return { status: "failed", enrollmentId: enrollment.id, message: rescheduleError };
@@ -547,4 +632,29 @@ async function handleSendResult(
       return { status: "paused", enrollmentId: enrollment.id, reason: "provider_failed" };
     }
   }
+}
+
+/**
+ * Consecutive most-recent runs of this enrollment step that ended as a
+ * not-queued retry (the run just released included). Null on read error.
+ */
+async function countNotQueuedStreak(
+  client: SupabaseClient<Database>,
+  enrollmentId: string,
+  stepId: string,
+): Promise<number | null> {
+  const { data, error } = await client
+    .from("sequence_step_runs")
+    .select("recovery_action")
+    .eq("enrollment_id", enrollmentId)
+    .eq("step_id", stepId)
+    .order("created_at", { ascending: false })
+    .limit(MAX_CONSECUTIVE_NOT_QUEUED);
+  if (error || !data) return null;
+  let streak = 0;
+  for (const row of data as { recovery_action: string | null }[]) {
+    if (row.recovery_action !== "voicemail_drop_not_queued_retry") break;
+    streak += 1;
+  }
+  return streak;
 }

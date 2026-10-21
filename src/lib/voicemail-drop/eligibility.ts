@@ -17,7 +17,12 @@ import type { Database } from "@/lib/supabase/types";
  *       norma_inbound_calls (seller called Norma) with completed = true, same
  *       property, from_e164 saved on the contact
  *
- * Plus: a usable phone, do_not_contact false, sms_opted_out false. The
+ * Plus: a usable phone, do_not_contact false, sms_opted_out false, and the
+ * same per-number "don't call" checks every other calling path uses
+ * (norma_call_queue eligibility): the phone is not in
+ * global_phone_dnc_registry and Norma never reached it as wrong_number. A
+ * blocked phone is never chosen; if every saved phone is blocked the contact
+ * is not eligible. The
  * outreach_dispo pause runs before the claim in tick.ts. Deliberately NOT
  * call_activities.outcome = 'connected_human' and NOT getConsentState(voice).
  *
@@ -46,8 +51,16 @@ export type VoicemailDropEligibility =
   | { eligible: true; phone: string; basis: SpokenToBasis; phoneSource: "qualifying_event" | "contact_slot" }
   | {
       eligible: false;
-      reason: "contact_missing" | "do_not_contact" | "opted_out" | "no_phone" | "not_spoken_to";
+      reason:
+        | "contact_missing"
+        | "do_not_contact"
+        | "opted_out"
+        | "no_phone"
+        | "not_spoken_to"
+        | DropPhoneBlockReason;
     };
+
+export type DropPhoneBlockReason = "global_dnc_registry" | "wrong_number_flagged";
 
 export function toE164(raw: string | null | undefined): string | null {
   const digits = (raw ?? "").replace(/\D/g, "");
@@ -63,6 +76,41 @@ export class EligibilityReadError extends Error {}
 function check<T>(result: { data: T | null; error: { message: string } | null }, what: string): T {
   if (result.error) throw new EligibilityReadError(`${what}: ${result.error.message}`);
   return (result.data ?? ([] as unknown)) as T;
+}
+
+/**
+ * Per-number blocks, mirroring norma_call_queue (20261009010100:2276-2300):
+ * global_phone_dnc_registry for the org, and a completed Norma call with
+ * outcome wrong_number. Phones must already be E.164 (+1XXXXXXXXXX). Returns
+ * phone → reason for each blocked phone (registry wins). Throws
+ * EligibilityReadError on a read failure.
+ */
+export async function findBlockedDropPhones(
+  client: SupabaseClient<Database>,
+  orgId: string,
+  phones: string[],
+): Promise<Map<string, DropPhoneBlockReason>> {
+  const blocked = new Map<string, DropPhoneBlockReason>();
+  if (phones.length === 0) return blocked;
+  // global_phone_dnc_registry is not in the generated types.
+  const untyped = client as unknown as SupabaseClient;
+  const [registry, wrong] = await Promise.all([
+    untyped.from("global_phone_dnc_registry").select("phone_e164").eq("org_id", orgId).in("phone_e164", phones),
+    client
+      .from("norma_call_requests")
+      .select("phone_e164")
+      .eq("org_id", orgId)
+      .eq("status", "completed")
+      .eq("outcome", "wrong_number")
+      .in("phone_e164", phones),
+  ]);
+  for (const w of check(wrong, "norma wrong_number") as { phone_e164: string }[]) {
+    blocked.set(w.phone_e164, "wrong_number_flagged");
+  }
+  for (const r of check(registry, "global_phone_dnc_registry") as { phone_e164: string }[]) {
+    blocked.set(r.phone_e164, "global_dnc_registry");
+  }
+  return blocked;
 }
 
 /** Throws EligibilityReadError on any read failure (callers fail closed). */
@@ -89,6 +137,9 @@ export async function checkVoicemailDropEligibility(
   ].filter((s): s is { phone: string; type: string } => Boolean(s.phone) && s.type !== "landline");
   if (slots.length === 0) return { eligible: false, reason: "no_phone" };
   const slotPhones = slots.map((s) => s.phone);
+  const blocked = await findBlockedDropPhones(client, params.orgId, [...new Set(slotPhones)]);
+  const usableSlots = slots.filter((s) => !blocked.has(s.phone));
+  const usablePhones = usableSlots.map((s) => s.phone);
 
   const [calls, attempts, inbound, norma, normaInbound] = await Promise.all([
     client
@@ -180,12 +231,20 @@ export async function checkVoicemailDropEligibility(
 
   if (events.length === 0) return { eligible: false, reason: "not_spoken_to" };
 
+  if (usableSlots.length === 0) {
+    const reasons = [...blocked.values()];
+    return {
+      eligible: false,
+      reason: reasons.includes("global_dnc_registry") ? "global_dnc_registry" : "wrong_number_flagged",
+    };
+  }
+
   events.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
-  const fromEvent = events.find((e) => e.phone && slotPhones.includes(e.phone));
+  const fromEvent = events.find((e) => e.phone && usablePhones.includes(e.phone));
   if (fromEvent?.phone) {
     return { eligible: true, phone: fromEvent.phone, basis: fromEvent.basis, phoneSource: "qualifying_event" };
   }
-  const primary = slots.find((s) => s.type === "mobile") ?? slots[0];
+  const primary = usableSlots.find((s) => s.type === "mobile") ?? usableSlots[0];
   return { eligible: true, phone: primary.phone, basis: events[0].basis, phoneSource: "contact_slot" };
 }
 
@@ -213,6 +272,17 @@ export function chicagoDayWindow(now: Date): { start: Date; next: Date } {
   const offsetMs = localAsUtc - Math.floor(now.getTime() / 1000) * 1000;
   const start = new Date(Date.UTC(get("year"), get("month") - 1, get("day")) - offsetMs);
   return { start, next: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
+}
+
+/**
+ * DROPCOWBOY_CALLER_ID: BYOC caller ID (the dedicated Telnyx number). Unset =
+ * null (use the step's phone line). Set but not E.164 = throws.
+ */
+export function readDropCallerId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.DROPCOWBOY_CALLER_ID?.trim();
+  if (!raw) return null;
+  if (!/^\+[1-9]\d{1,14}$/.test(raw)) throw new Error("DROPCOWBOY_CALLER_ID must be E.164 (e.g. +18165550100)");
+  return raw;
 }
 
 /** VOICEMAIL_DROP_DAILY_CAP: positive integer, or null (unset/invalid = no cap). */
