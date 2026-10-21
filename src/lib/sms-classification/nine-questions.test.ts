@@ -28,7 +28,8 @@ describe("approved text is pinned byte for byte", () => {
     asked_who: "Did the homeowner ask who is texting them or why?",
     not_interested: "Did the homeowner say they are not interested in selling?",
     wrong_person: "Did the homeowner say we have the wrong person, or that they don't own the property?",
-    asked_stop: "Did the homeowner ask to stop receiving texts?",
+    // Approved verbatim by Jarrad 2026-10-21.
+    asked_stop: "Did the homeowner request that communication cease?",
     hostile: "Was the homeowner rude or hostile?",
     confirmed_owner: "Did the homeowner confirm they are the person or owner we asked about?",
     talked_price: "Did the homeowner mention a price or ask how much we would pay?",
@@ -36,12 +37,16 @@ describe("approved text is pinned byte for byte", () => {
     asked_offer: "Did the homeowner ask what our offer is or how much we would pay?",
     named_price: "Did the homeowner name a price or amount they want?",
     asked_call: "Did the homeowner ask us to call them or give a time to talk?",
+    // Approved verbatim by Jarrad 2026-10-21.
+    already_sold: "Did the homeowner say they already sold the property?",
+    tenant: "Did the homeowner say they are a tenant who rents the property, not the owner?",
+    just_ok: "Did the homeowner just acknowledge or agree to our message without adding anything new?",
   };
 
-  it("the nine plus the three added 2026-10-20, exactly", () => {
+  it("the nine plus the three added 2026-10-20 and the three added 2026-10-21, exactly", () => {
     expect(Object.keys(NINE_QUESTIONS).sort()).toEqual(Object.keys(APPROVED).sort());
     for (const id of NINE_QUESTION_IDS) expect(NINE_QUESTIONS[id]).toBe(APPROVED[id]);
-    expect(NINE_QUESTION_IDS).toHaveLength(12);
+    expect(NINE_QUESTION_IDS).toHaveLength(15);
   });
 
   it("hot reply texts, approved verbatim by Jarrad 2026-10-20", () => {
@@ -58,10 +63,10 @@ describe("approved text is pinned byte for byte", () => {
     expect(NINE_QUESTION_CUTOFF).toBe(0.6);
   });
 
-  it("group order (2026-10-20): stop/hostile > wrong person > asked call > asked offer > named price > talked price > open > maybe later > not interested > asked who > confirmed owner", () => {
+  it("group order (2026-10-21): stop/hostile > wrong person/already sold/tenant > asked call > asked offer > named price > talked price > open > maybe later > not interested > asked who > confirmed owner", () => {
     expect(NINE_QUESTION_GROUPS).toEqual([
       ["asked_stop", "hostile"],
-      ["wrong_person"],
+      ["wrong_person", "already_sold", "tenant"],
       ["asked_call"],
       ["asked_offer"],
       ["named_price"],
@@ -71,6 +76,7 @@ describe("approved text is pinned byte for byte", () => {
       ["not_interested"],
       ["asked_who"],
       ["confirmed_owner"],
+      ["just_ok"],
     ]);
   });
 
@@ -141,6 +147,9 @@ describe("actionForNineAnswer", () => {
     ["not_interested", { kind: "reply_and_drip", reply: "not_interested", drip: "Not interested", skipFirstStep: false }],
     ["wrong_person", { kind: "reply_and_close_wrong_person" }],
     ["confirmed_owner", { kind: "drip_only", drip: "Confirmed owner" }],
+    ["already_sold", { kind: "reply_and_close_wrong_person" }],
+    ["tenant", { kind: "reply_and_close_wrong_person" }],
+    ["just_ok", { kind: "continue_drip_if_last_was_drip" }],
     ["asked_stop", { kind: "wait_for_person", reason: "asked_stop" }],
     ["hostile", { kind: "wait_for_person", reason: "hostile" }],
     ["needs_person", { kind: "wait_for_person", reason: "needs_person" }],
@@ -179,6 +188,41 @@ describe("new tie-breaker on real replies (2026-10-20)", () => {
   });
 });
 
+describe("already sold / tenant / just ok on real replies (2026-10-21)", () => {
+  // Real seller replies from the 708-reply replay; probabilities shaped like Jev's reads.
+  const cases: Array<[string, Partial<Record<NineQuestionId, number>>, NineAnswer]> = [
+    ["I've already sold it", { already_sold: 0.97, wrong_person: 0.55, not_interested: 0.8 }, "already_sold"],
+    ["We sold it in July", { already_sold: 0.95, wrong_person: 0.4, not_interested: 0.7 }, "already_sold"],
+    ["We just rent here", { tenant: 0.94, wrong_person: 0.75 }, "tenant"],
+    // A landlord: they own it and rent it out. The reworded tenant question stays low.
+    ["It's a rental", { tenant: 0.2, confirmed_owner: 0.65 }, "confirmed_owner"],
+    ["Ok", { just_ok: 0.95 }, "just_ok"],
+    ["\u{1F44D}", { just_ok: 0.9 }, "just_ok"],
+    // Agreeing to our offer opener is a yes to selling, not a bare acknowledgement.
+    ["Sure", { open_to_selling: 0.88, just_ok: 0.85, confirmed_owner: 0.6 }, "open_to_selling"],
+    ["STOP, sold it", { asked_stop: 0.97, already_sold: 0.9, hostile: 0.2 }, "asked_stop"],
+  ];
+  it.each(cases)("%s", (_reply, p, expected) => {
+    expect(decideNineQuestions({ ...none(), ...p }).answer).toBe(expected);
+  });
+  it("already sold and tenant take exactly the wrong-person action; just ok waits on our last text", () => {
+    expect(actionForNineAnswer("already_sold")).toEqual(actionForNineAnswer("wrong_person"));
+    expect(actionForNineAnswer("tenant")).toEqual(actionForNineAnswer("wrong_person"));
+    expect(actionForNineAnswer("just_ok")).toEqual({ kind: "continue_drip_if_last_was_drip" });
+  });
+  it("inside the wrong-person group the higher probability is reported, ties go to wrong_person", () => {
+    expect(decideNineQuestions({ ...none(), wrong_person: 0.7, already_sold: 0.9 }).answer).toBe("already_sold");
+    expect(decideNineQuestions({ ...none(), wrong_person: 0.8, tenant: 0.8 }).answer).toBe("wrong_person");
+  });
+  it("already sold and tenant beat a call request; just ok loses to every other yes", () => {
+    expect(decideNineQuestions({ ...none(), already_sold: 0.61, asked_call: 0.99 }).answer).toBe("already_sold");
+    expect(decideNineQuestions({ ...none(), tenant: 0.61, asked_call: 0.99 }).answer).toBe("tenant");
+    for (const id of NINE_QUESTION_IDS.filter((q) => q !== "just_ok")) {
+      expect(decideNineQuestions({ ...none(), just_ok: 0.99, [id]: 0.6 }).answer).not.toBe("just_ok");
+    }
+  });
+});
+
 describe("recorded matrix (30 scenarios x 3 wordings, synthetic)", () => {
   type Entry = {
     scenario: string;
@@ -210,6 +254,9 @@ describe("recorded matrix (30 scenarios x 3 wordings, synthetic)", () => {
       not_interested: "reply_and_drip",
       wrong_person: "reply_and_close_wrong_person",
       confirmed_owner: "drip_only",
+      already_sold: "reply_and_close_wrong_person",
+      tenant: "reply_and_close_wrong_person",
+      just_ok: "continue_drip_if_last_was_drip",
       asked_stop: "wait_for_person",
       hostile: "wait_for_person",
       needs_person: "wait_for_person",
