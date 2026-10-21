@@ -83,7 +83,10 @@ describe("rules panel", () => {
     expect(group("Goes to Jarrad")).toEqual(["Asked for a call", "Asked for offer", "Named a price", "Talked price", "Wants an offer"]);
     // The approved reply texts (Jarrad 2026-10-20) show under their rows.
     for (const text of Object.values(NINE_HOT_REPLY_TEXTS)) expect(within(panel).getByText(text)).toBeTruthy();
-    expect(group("Sandra handles alone")).toEqual(["Maybe later", "Asked who is texting", "Not interested", "Wrong person", "Already sold", "Tenant", "Confirmed owner", "Just ok"]);
+    expect(group("Sandra handles alone")).toEqual(["Maybe later", "Asked who is texting", "Not interested", "Wrong person", "Already sold", "Tenant", "Confirmed owner", "Just said ok"]);
+    // just_ok row, approved verbatim by Jarrad 2026-10-21.
+    const justOk = within(panel).getAllByTestId("rule-row").find((r) => within(r).getAllByText(/./)[0].textContent === "Just said ok")!;
+    expect(within(justOk).getByText("Sends nothing. Their drip keeps going.")).toBeTruthy();
     expect(group("Waits for a person")).toEqual(["Asked to stop", "Hostile"]);
     expect(within(panel).getByText("60% sure or more")).toBeTruthy();
     expect(panel.textContent).not.toMatch(/Jev/);
