@@ -50,10 +50,30 @@ export function NotificationsBell({ userId }: { userId: string }) {
     let pollId: ReturnType<typeof setInterval> | null = null;
     let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    const fetchCount = async () => {
-      const r = await timedUnreadCount();
-      if (!mounted) return;
-      if (r.ok) setUnreadCount(r.data);
+    // One count read at a time; requests that land meanwhile (a "clear all"
+    // DELETE burst, a reconnect) collapse into one trailing read. Hidden tabs
+    // skip it — the visibility handler re-reads on return.
+    let inFlight: Promise<void> | null = null;
+    let trailing = false;
+    const fetchCount = (): Promise<void> => {
+      if (!mounted || document.hidden) return Promise.resolve();
+      if (inFlight) {
+        trailing = true;
+        return inFlight;
+      }
+      inFlight = (async () => {
+        try {
+          const r = await timedUnreadCount();
+          if (mounted && r.ok) setUnreadCount(r.data);
+        } finally {
+          inFlight = null;
+          if (trailing) {
+            trailing = false;
+            void fetchCount();
+          }
+        }
+      })();
+      return inFlight;
     };
 
     // Reconciliation poll runs only while the tab is visible; hidden tabs stay

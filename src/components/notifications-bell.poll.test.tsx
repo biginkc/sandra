@@ -99,17 +99,17 @@ it("reconciles every 60 s while visible and not at all while hidden", async () =
   expect(getUnreadCount).toHaveBeenCalledTimes(2);
 });
 
-it("refreshes immediately when the tab becomes visible", async () => {
+it("a hidden tab reads nothing until it becomes visible, then refreshes immediately", async () => {
   hidden = true;
   await mount();
   await advance(120_000);
-  expect(getUnreadCount).toHaveBeenCalledTimes(1);
+  expect(getUnreadCount).toHaveBeenCalledTimes(0);
   hidden = false;
   await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
   await flush();
-  expect(getUnreadCount).toHaveBeenCalledTimes(2);
+  expect(getUnreadCount).toHaveBeenCalledTimes(1);
   await advance(60_000);
-  expect(getUnreadCount).toHaveBeenCalledTimes(3);
+  expect(getUnreadCount).toHaveBeenCalledTimes(2);
 });
 
 it("refreshes on realtime reconnect, not on the first join", async () => {
@@ -130,4 +130,29 @@ it("a DELETE re-reads the count so a deleted unread notification lowers it", asy
   await act(async () => rt.handlers.DELETE({ old: { id: "n-1" } }));
   await flush();
   expect(screen.getByTestId("notifications-bell")).toHaveTextContent("2");
+});
+
+it("a clear-all DELETE burst collapses into one read in flight plus one trailing read", async () => {
+  await mount();
+  expect(getUnreadCount).toHaveBeenCalledTimes(1);
+  let release: (value: { ok: true; data: number }) => void = () => {};
+  getUnreadCount.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+  getUnreadCount.mockResolvedValue({ ok: true, data: 4 });
+  await act(async () => { for (let i = 0; i < 100; i++) rt.handlers.DELETE({ old: { id: `n-${i}` } }); });
+  await flush();
+  expect(getUnreadCount).toHaveBeenCalledTimes(2);
+  await act(async () => release({ ok: true, data: 1 }));
+  await flush();
+  await flush();
+  expect(getUnreadCount).toHaveBeenCalledTimes(3);
+  expect(screen.getByTestId("notifications-bell")).toHaveTextContent("4");
+});
+
+it("DELETE events in a hidden tab read nothing", async () => {
+  await mount();
+  hidden = true;
+  await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
+  await act(async () => { for (let i = 0; i < 10; i++) rt.handlers.DELETE({ old: { id: `n-${i}` } }); });
+  await flush();
+  expect(getUnreadCount).toHaveBeenCalledTimes(1);
 });
