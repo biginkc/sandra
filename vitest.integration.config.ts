@@ -40,6 +40,8 @@ export default defineConfig({
       "src/lib/prospects/filter-cache-triggers.integration.test.ts",
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20261021200000_voicemail_drop_step.integration.test.ts",
+      "supabase/migrations/20261021200100_reserve_voicemail_drop_with_cap.integration.test.ts",
+      "supabase/migrations/20261021200200_voicemail_drop_record_outcome.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",
       "supabase/migrations/20261002020000_direct_browser_watchdog.integration.test.ts",
