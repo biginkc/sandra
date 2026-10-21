@@ -49,8 +49,18 @@ begin
   end if;
 
   if not p_eligible then
-    -- Not the owner: a required pause still stops an active enrollment.
-    if p_pause_reason is not null and e.status = 'active' then
+    -- Not the owner: never moves the pointer, only the reason. A required
+    -- pause stops an active enrollment and replaces a temporary pause
+    -- (call_in_progress / norma_call / reconciliation_required), so a call
+    -- ending or a later drop's reconcile cannot reactivate the drip. Consent
+    -- also replaces a real stop reason; step_misconfigured keeps it.
+    if p_pause_reason is not null and (
+      e.status = 'active'
+      or (e.status = 'paused' and e.pause_reason is distinct from p_pause_reason and (
+        p_pause_reason = 'voicemail_drop_consent_blocked'
+        or e.pause_reason in ('call_in_progress', 'norma_call', 'reconciliation_required')
+      ))
+    ) then
       update public.sequence_enrollments
          set status = 'paused', pause_reason = p_pause_reason, updated_at = now()
        where id = e.id;
