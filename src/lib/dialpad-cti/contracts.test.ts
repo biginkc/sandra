@@ -79,6 +79,7 @@ describe('dialpad CTI contracts', () => {
     expect(classifyDialpadRpcError({ code: 'P0002' })).toEqual({ kind: 'not_found' });
     expect(classifyDialpadRpcError({ code: '22023', details: 'phone_unavailable' })).toEqual({ kind: 'invalid_input', detail: 'phone_unavailable' });
     expect(classifyDialpadRpcError({ code: '40001' })).toEqual({ kind: 'idempotency_conflict' });
+    expect(classifyDialpadRpcError({ code: 'DPC01' })).toEqual({ kind: 'idempotency_conflict' });
     expect(classifyDialpadRpcError(null)).toEqual({ kind: 'unknown' });
   });
 

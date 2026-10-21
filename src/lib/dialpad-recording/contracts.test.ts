@@ -40,6 +40,7 @@ describe('recording contracts', () => {
     expect(classifyDialpadRecordingRpcError({ code: 'P0002' })).toEqual({ kind: 'not_found' });
     expect(classifyDialpadRecordingRpcError({ code: '22023' }).kind).toBe('invalid_input');
     expect(classifyDialpadRecordingRpcError({ code: '40001' }).kind).toBe('conflict');
+    expect(classifyDialpadRecordingRpcError({ code: 'DPR01' }).kind).toBe('conflict');
     expect(classifyDialpadRecordingRpcError({ code: '55000' }).kind).toBe('state');
     expect(classifyDialpadRecordingRpcError({ code: '23505' })).toEqual({ kind: 'unknown' });
     expect(classifyDialpadRecordingRpcError(null)).toEqual({ kind: 'unknown' });

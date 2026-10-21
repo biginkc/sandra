@@ -80,7 +80,7 @@ describe('Dialpad timing migration', () => {
     const records = [anchor('tab', 0), anchor('tab', 1, 'periodic'), anchor('tab', 2, 'final')]
     expect(await append(fixture, records)).toMatchObject({ status: 'recorded', recordCount: 3 })
     expect(await append(fixture, records)).toMatchObject({ status: 'replayed' })
-    await expect(append(fixture, [anchor('tab', 0, 'final')])).rejects.toMatchObject({ code: '40001' })
+    await expect(append(fixture, [anchor('tab', 0, 'final')])).rejects.toMatchObject({ code: 'DPR01' })
     await pg.query('set role service_role')
     let result!: { rows: { value: { status: string; reasons: string[] } }[] }
     try {
@@ -88,10 +88,10 @@ describe('Dialpad timing migration', () => {
     } finally { await pg.query('reset role') }
     expect(result.rows[0]!.value).toMatchObject({ status: 'incomplete', reasons: ['missing_final'] })
     expect(await append(fixture, records)).toMatchObject({ status: 'replayed' })
-    await expect(append(fixture, [anchor('tab', 0, 'final')])).rejects.toMatchObject({ code: '40001' })
+    await expect(append(fixture, [anchor('tab', 0, 'final')])).rejects.toMatchObject({ code: 'DPR01' })
     await pg.query('set role service_role')
     try {
-      await expect(pg.query<{ value: unknown }>('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5) as value', [orgId, fixture.captureId, JSON.stringify({ tabAnchor: 2, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 }), 'incomplete', '["missing_final"]'])).rejects.toMatchObject({ code: '40001' })
+      await expect(pg.query<{ value: unknown }>('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5) as value', [orgId, fixture.captureId, JSON.stringify({ tabAnchor: 2, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 }), 'incomplete', '["missing_final"]'])).rejects.toMatchObject({ code: 'DPR01' })
     } finally { await pg.query('reset role') }
   })
 
@@ -140,7 +140,7 @@ describe('Dialpad timing migration', () => {
       const state = await pg.query<{ persisted_sequences: Record<string, number>; last_sequences: Record<string, number> }>('select persisted_sequences,last_sequences from public.dialpad_recording_timing_state where capture_id=$1 and epoch=1', [fixture.captureId])
       expect(state.rows[0]).toEqual({ persisted_sequences: { tabAnchor: 0, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 }, last_sequences: { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 } })
       await expect(pg.query('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5)', [orgId, fixture.captureId, request, 'incomplete', '["missing_final"]'])).resolves.toBeTruthy()
-      await expect(pg.query('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5)', [orgId, fixture.captureId, JSON.stringify({ ...JSON.parse(request), tabAnchor: 0 }), 'incomplete', '["missing_final"]'])).rejects.toMatchObject({ code: '40001' })
+      await expect(pg.query('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5)', [orgId, fixture.captureId, JSON.stringify({ ...JSON.parse(request), tabAnchor: 0 }), 'incomplete', '["missing_final"]'])).rejects.toMatchObject({ code: 'DPR01' })
     } finally { await pg.query('reset role') }
   })
 
