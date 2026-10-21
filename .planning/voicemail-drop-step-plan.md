@@ -9,7 +9,7 @@ Audience: only sellers the team has already spoken to. Legal is owned by Jarrad;
 
 In the sequence editor, a new step type **Voicemail drop** sits next to "Send SMS" and "Change status":
 
-- Pick a recorded message (uploaded once in Drop Cowboy, listed in Sandra), **or** write a script with merge fields (`{first_name}`, `{property_address}`) spoken by Norma's cloned voice.
+- Pick a recorded message (uploaded once in Drop Cowboy, listed in Sandra), **or** write a script with merge fields (`{{first_name}}`, `{{property_address}}`, the same syntax and engine as SMS steps; the worker renders them before the POST, so no `{`/`}` ever reaches Drop Cowboy, which treats braces as its own merge fields) spoken by Norma's cloned voice.
 - Same delay/scheduling controls as SMS steps.
 
 On the lead page, each drop shows in the activity timeline: queued → delivered / failed (plain reason, e.g. "voicemail box full"), plus a proof-of-delivery recording link while Drop Cowboy keeps it (7 days).
@@ -54,7 +54,7 @@ Number: the phone from the qualifying event when known, else the primary mobile 
 2. Quiet hours check; outside → retire claim and reschedule (SMS path).
 3. Per-org daily cap (`VOICEMAIL_DROP_DAILY_CAP`); over → reuse the quiet-hours retire block verbatim (`claim_active = false`, `attempt_outcome = 'not_attempted'`), reschedule to next day. Leaving the claim live would hit 23505 → stale-claim → `provider_failed`.
 4. Insert `voicemail_drops` row, render merge fields deterministically (≤1,200 chars). Same key + different body gives Drop Cowboy error 3027, so the render must not change between attempts.
-5. `POST https://api-v2.dropcowboy.com/rvm` — `x-key`/`x-secret`, `Idempotency-Key = step_run_id`, `to`, `tts_body`+`voice_id` or `media_id`, `phone_line_id`, `foreign_id = voicemail_drops.id`, `callback_url`, `mobile_only`, `max_attempts: 1`, `postal_code`.
+5. `POST https://api-v2.dropcowboy.com/rvm` — `x-key`/`x-secret`, `Idempotency-Key = step_run_id`, `to`, `tts_body`+`voice_id` or `media_id`, sender (`caller_id` when `DROPCOWBOY_CALLER_ID` is set, else `phone_line_id`; never both, because Drop Cowboy ignores `caller_id` when `phone_line_id` is sent), `foreign_id = voicemail_drops.id`, `callback_url`, `mobile_only`, `max_attempts: 1`, `postal_code`.
 6. Results (RULING RVM-4, finding 3) — never blind-retry:
    - `202` → drop `queued`; step run `attempt_outcome = 'accepted'` (constraint `20260919090000:23`), `message_id` null; advance. The step advances on 202 only.
    - `429` / `500` → not queued, release claim, retry next tick.
@@ -75,7 +75,7 @@ Number: the phone from the qualifying event when known, else the primary mobile 
 
 ### Env vars
 
-`VOICEMAIL_DROP_PROVIDER`, `VOICEMAIL_DROP_DAILY_CAP`, `DROPCOWBOY_API_KEY`, `DROPCOWBOY_API_SECRET`, `DROPCOWBOY_PHONE_LINE_ID`, `DROPCOWBOY_VOICE_ID`, `DROPCOWBOY_WEBHOOK_SECRET`, `DROPCOWBOY_CALLBACK_SECRET`. `DROPCOWBOY_VOICE_ID` / `_PHONE_LINE_ID` are only editor defaults; the step's `vm_voice_id` / `vm_phone_line_id` columns are authoritative.
+`VOICEMAIL_DROP_PROVIDER`, `VOICEMAIL_DROP_DAILY_CAP`, `DROPCOWBOY_API_KEY`, `DROPCOWBOY_API_SECRET`, `DROPCOWBOY_PHONE_LINE_ID`, `DROPCOWBOY_VOICE_ID`, `DROPCOWBOY_WEBHOOK_SECRET`, `DROPCOWBOY_CALLBACK_SECRET`, `DROPCOWBOY_CALLER_ID` (BYOC: the dedicated Telnyx number, E.164; when set, drops send `caller_id` and steps no longer need `vm_phone_line_id`). `DROPCOWBOY_VOICE_ID` / `_PHONE_LINE_ID` are only editor defaults; the step's `vm_voice_id` / `vm_phone_line_id` columns are authoritative.
 
 ## Callback number (finding 5)
 
