@@ -52,6 +52,12 @@ describe("failure classes", () => {
     [4001, "mark_failed"],
     [4002, "mark_failed"],
     [4007, "mark_failed"],
+    [4019, "mark_failed"],
+    [4005, "mark_failed"],
+    [4013, "mark_failed"],
+    [4017, "pause_consent"],
+    [3002, "pause_misconfigured"],
+    [5000, "pause_misconfigured"],
     [9999, "mark_failed_and_report"],
     [null, "mark_failed_and_report"],
   ])("code %s → %s", (code, action) => {

@@ -22,6 +22,12 @@ export type VoicemailDropSendInput = {
    * caller_id whenever phone_line_id is also sent.
    */
   callerId?: string | null;
+  /**
+   * Registered Drop Cowboy brand (env DROPCOWBOY_BRAND_ID). Sent as `brand_id`
+   * when set; required only when the account enforces brand registration
+   * (otherwise the send fails with 6009).
+   */
+  brandId?: string | null;
   /** voicemail_drops.id, echoed back on callback_url. */
   foreignId: string;
   callbackUrl: string;
@@ -61,13 +67,12 @@ export type VoicemailDropReasonClass =
   | "config"
   | "consent"
   | "delivery"
+  | "frequency"
   | "unclassified";
 
 export type VoicemailDropReasonInfo = {
   reasonCode: number | null;
   reasonClass: VoicemailDropReasonClass;
-  /** True for codes the plan marks as not in the saved spec (6005, 6011). */
-  unverified: boolean;
 };
 
 /** Body POSTed to callback_url (SendOutcome). Unsigned. */
@@ -79,7 +84,6 @@ export type VoicemailDropCallbackEvent = {
   reason: string | null;
   reasonCode: number | null;
   reasonClass: VoicemailDropReasonClass;
-  reasonUnverified: boolean;
   phoneNumber: string | null;
   productCode: string | null;
   proofUrl: string | null;
@@ -102,7 +106,6 @@ export type VoicemailDropStatusEvent = {
   reason: string | null;
   reasonCode: number | null;
   reasonClass: VoicemailDropReasonClass;
-  reasonUnverified: boolean;
   proofUrl: string | null;
   receiptReadyAt: string | null;
   raw: Record<string, unknown>;

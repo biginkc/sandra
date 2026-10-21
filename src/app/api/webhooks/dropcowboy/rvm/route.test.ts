@@ -52,6 +52,21 @@ describe("dropcowboy rvm webhook route", () => {
     expect(fake.paused).toEqual([]);
   });
 
+  it("acknowledges 200 and ignores an unsupported event type", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const res = await POST(signed(JSON.stringify({ event: "contact.sms.status", event_id: "e-x", data: { status: "success" } })));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, outcome: "ignored" });
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("contact.sms.status"));
+    expect(fake.paused).toEqual([]);
+    info.mockRestore();
+  });
+
+  it("still 401s an unsupported event with a bad signature", async () => {
+    const b = JSON.stringify({ event: "campaign.started", event_id: "e-y", data: {} });
+    expect((await POST(signed(b, { secret: "wrong" }))).status).toBe(401);
+  });
+
   it("rejects a stale timestamp", async () => {
     expect((await POST(signed(body(), { ts: Math.floor(Date.now() / 1000) - 301 }))).status).toBe(401);
   });

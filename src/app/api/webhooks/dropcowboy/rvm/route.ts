@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { handleDropStatusEvent, supabaseDropStatusStore } from "@/lib/voicemail-drop/status-updates";
-import { parseDropCowboyStatusWebhook, verifyDropCowboySignature } from "@/lib/voicemail-drop/webhook";
+import {
+  parseDropCowboyStatusWebhook,
+  UnsupportedDropCowboyEventError,
+  verifyDropCowboySignature,
+} from "@/lib/voicemail-drop/webhook";
 
 export const runtime = "nodejs";
 
@@ -20,6 +24,13 @@ export async function POST(request: Request) {
   try {
     event = parseDropCowboyStatusWebhook(rawBody);
   } catch (error) {
+    // Acknowledge event types Sandra doesn't handle: Drop Cowboy pauses an
+    // endpoint after 5 non-retriable rejections in a row and drops events
+    // while paused.
+    if (error instanceof UnsupportedDropCowboyEventError) {
+      console.info(`[dropcowboy_rvm_webhook] ignored unsupported event ${error.eventType}`);
+      return NextResponse.json({ ok: true, outcome: "ignored" });
+    }
     reportError(error, { tags: { surface: "dropcowboy_rvm_webhook_parse" } });
     return NextResponse.json({ error: "unrecognized_payload" }, { status: 400 });
   }

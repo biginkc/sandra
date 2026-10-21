@@ -85,7 +85,8 @@ export function failureActionFor(
 ): FailureAction {
   if (reasonCode === BAD_CREDENTIALS_REASON_CODE || reasonClass === "config") return "pause_misconfigured";
   if (reasonClass === "consent") return "pause_consent";
-  if (reasonClass === "delivery") return "mark_failed";
+  // Frequency (4013 Too Many Attempts) is handled like delivery: no pause.
+  if (reasonClass === "delivery" || reasonClass === "frequency") return "mark_failed";
   return "mark_failed_and_report";
 }
 

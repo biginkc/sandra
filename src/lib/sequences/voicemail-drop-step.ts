@@ -9,6 +9,8 @@ import {
   EligibilityReadError,
   findBlockedDropPhones,
   readDailyCap,
+  hasDropCowboyRandomVariant,
+  readDropBrandId,
   readDropCallerId,
   VOICEMAIL_DROP_SCRIPT_MAX_CHARS,
 } from "@/lib/voicemail-drop/eligibility";
@@ -341,6 +343,16 @@ export async function processVoicemailDropStep(
         "voicemail drop script has an unrendered merge field ({ or } left after render)",
       );
     }
+    // Drop Cowboy picks a random option from "[a/b]": rotation stays Sandra's.
+    if (hasDropCowboyRandomVariant(renderedScript)) {
+      return pauseNotAttempted(
+        client,
+        enrollment.id,
+        claimId,
+        "step_misconfigured",
+        "voicemail drop script has Drop Cowboy random-variant brackets ([a/b])",
+      );
+    }
     if (!renderedScript || renderedScript.length > VOICEMAIL_DROP_SCRIPT_MAX_CHARS) {
       return pauseNotAttempted(
         client,
@@ -500,6 +512,7 @@ export async function processVoicemailDropStep(
       mobileOnly: true,
       maxAttempts: 1,
       postalCode,
+      brandId: readDropBrandId(env),
     });
   } catch (error) {
     result = {
