@@ -125,6 +125,49 @@ describe("sweepStalePipelineRuns", () => {
     expect(Math.max(...updateChunks)).toBeLessThanOrEqual(100);
   });
 
+  it("reopens a run whose wait step landed between the sweep's read and update", async () => {
+    let stepReads = 0;
+    let reopened: { payload: unknown; ids: unknown; filters: unknown[] } | null = null;
+    const admin = {
+      from(table: string) {
+        const b: Record<string, unknown> = {};
+        let payload: Record<string, unknown> | null = null;
+        let ids: string[] = [];
+        const filters: unknown[] = [];
+        b.select = () => b;
+        b.order = () => b;
+        b.range = () => b;
+        b.lt = () => b;
+        b.eq = (c: string, v: unknown) => (filters.push([c, v]), b);
+        b.update = (p: Record<string, unknown>) => ((payload = p), b);
+        b.in = (c: string, v: unknown) => (c !== "name" && (ids = v as string[]), b);
+        b.then = (resolve: (v: unknown) => void) => {
+          if (table === "pipeline_run_steps") {
+            stepReads += 1;
+            // First read: no wait yet. Recheck: a fresh 1h wait just landed.
+            return resolve({
+              data: stepReads === 1 ? [] : [{ id: 1, run_id: "r", created_at: now.toISOString(), detail: { delaySeconds: 3600 } }],
+              error: null,
+            });
+          }
+          if (payload?.status === "running") {
+            reopened = { payload, ids, filters };
+            return resolve({ error: null });
+          }
+          if (payload) return resolve({ data: ids.map((id) => ({ id })), error: null });
+          return resolve({ data: [{ id: "r" }], error: null });
+        };
+        return b;
+      },
+    } as never;
+    expect(await sweepStalePipelineRuns(admin, { now })).toEqual({ swept: 0 });
+    expect(reopened).toMatchObject({
+      payload: { status: "running", reason: null, completed_at: null },
+      ids: ["r"],
+    });
+    expect(reopened!.filters).toEqual([["status", "error"], ["reason", "stale_running"]]);
+  });
+
   it("throws on db error", async () => {
     const { admin } = sweepAdmin(["a"], [], { error: "nope" });
     await expect(sweepStalePipelineRuns(admin)).rejects.toThrow("nope");

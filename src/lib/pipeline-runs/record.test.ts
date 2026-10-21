@@ -59,7 +59,7 @@ function fakeAdmin(opts: {
           done();
           // Awaitable (updateRun) and chainable (finishRun's guarded update).
           type Chain = Promise<unknown> & {
-            eq: () => Chain;
+            eq: (c: string, v: unknown) => Chain;
             or: (f: string) => Chain;
             is: (c: string, v: unknown) => Chain;
             select: () => Promise<unknown>;
@@ -67,7 +67,10 @@ function fakeAdmin(opts: {
           const chain: Chain = Object.assign(
             Promise.resolve({ error: null }),
             {
-              eq: () => chain,
+              eq: (c2: string, v2: unknown) => {
+                filters.push([c2, v2]);
+                return chain;
+              },
               or: (f: string) => {
                 filters.push(["or", f]);
                 return chain;
@@ -223,6 +226,8 @@ describe("reopen on wait", () => {
     const reopen = calls.find((c) => c.table === "pipeline_runs" && c.op === "update");
     expect(reopen?.payload).toEqual({ status: "running", reason: null, completed_at: null });
     expect(reopen?.filter).toContainEqual(["id", "run-1"]);
+    expect(reopen?.filter).toContainEqual(["status", "error"]);
+    expect(reopen?.filter).toContainEqual(["reason", "stale_running"]);
   });
 });
 
@@ -257,7 +262,10 @@ describe("finishRun / updateRun / resumeRun", () => {
     it("a caller presenting a claim may only finish a run with that claim or none", async () => {
       const { admin, calls } = fakeAdmin();
       await finishRun(admin, { ...base }, { status: "replied", claimId: "cl-1" });
-      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-1"]);
+      expect(calls[0].filter).toContainEqual([
+        "or",
+        "and(status.eq.running,claim_id.is.null),and(status.eq.error,reason.eq.stale_running,claim_id.is.null),and(status.eq.running,claim_id.eq.cl-1),and(status.eq.error,reason.eq.stale_running,claim_id.eq.cl-1)",
+      ]);
     });
 
     it("uses the claim the context won when none is passed", async () => {
@@ -267,13 +275,16 @@ describe("finishRun / updateRun / resumeRun", () => {
       expect(ctx).toMatchObject({ claimId: "cl-9" });
       calls.length = 0;
       await finishRun(admin, ctx, { status: "skipped" });
-      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-9"]);
+      expect(String((calls[0].filter as unknown[][]).find((f) => f[0] === "or")?.[1])).toContain("claim_id.eq.cl-9");
     });
 
     it("a context with no claim can only finish a run that has none", async () => {
       const { admin, calls } = fakeAdmin();
       await finishRun(admin, { ...base }, { status: "skipped" });
-      expect(calls[0].filter).toContainEqual(["is", "claim_id", null]);
+      expect(calls[0].filter).toContainEqual([
+        "or",
+        "and(status.eq.running,claim_id.is.null),and(status.eq.error,reason.eq.stale_running,claim_id.is.null)",
+      ]);
     });
 
     it("a duplicate dispatch records duplicate_dispatch and never writes a status", async () => {
@@ -418,27 +429,24 @@ describe("seam integrity (fix round 2)", () => {
             return chain;
           },
           select: async () => {
-            const claim = initial.claimId ?? null;
-            if (claim && !(typeof filters.or === "string" && filters.or.includes(`claim_id.eq.${claim}`))) {
-              return { data: [], error: null };
-            }
-            if (filters.status === "running" && state.status === "running") {
-              state.status = "terminal";
-              state.payload = payload;
-              return { data: [{ id: "run-1" }], error: null };
-            }
-            if (
-              filters.status === "error" &&
-              filters.reason === "stale_running" &&
-              state.status === "error" &&
-              state.reason === "stale_running"
-            ) {
-              state.status = String(payload.status);
-              state.reason = (payload.reason as string | null) ?? null;
-              state.payload = payload;
-              return { data: [{ id: "run-1" }], error: null };
-            }
-            return { data: [], error: null };
+            const row: Record<string, string | null> = {
+              status: state.status === "terminal" ? "terminal" : state.status,
+              reason: state.reason,
+              claim_id: initial.claimId ?? null,
+            };
+            const terms = [...String(filters.or ?? "").matchAll(/and\(([^)]*)\)/g)].map((m) => m[1].split(","));
+            const ok = terms.some((conds) =>
+              conds.every((c) => {
+                const [col, op, ...rest] = c.split(".");
+                const val = rest.join(".");
+                return op === "is" ? row[col] === null : row[col] === val;
+              }),
+            );
+            if (!ok) return { data: [], error: null };
+            state.status = state.status === "running" ? "terminal" : String(payload.status);
+            state.reason = (payload.reason as string | null) ?? null;
+            state.payload = payload;
+            return { data: [{ id: "run-1" }], error: null };
           },
         };
         return chain;

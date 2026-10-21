@@ -42,6 +42,7 @@ describe("held deferred dispositions", () => {
           const chain = {
             eq: () => chain,
             is: () => chain,
+            or: () => chain,
             select: async () => ({ data: [{ id: "r" }], error: null }),
           };
           return chain;

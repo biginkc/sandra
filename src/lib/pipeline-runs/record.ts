@@ -340,35 +340,32 @@ export async function finishRun(
     return;
   }
   try {
-    const write = (from: "running" | "swept") => {
-      let query = admin
-        .from("pipeline_runs")
-        .update({
-          ...patchColumns(input),
-          status: input.status,
-          // A corrected swept row must not keep stale_running as its reason.
-          ...(input.finalOutcome !== undefined || from === "swept"
-            ? { final_outcome: input.finalOutcome ?? null }
-            : {}),
-          ...(input.reason !== undefined || from === "swept"
-            ? { reason: input.reason ?? null }
-            : {}),
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", ctx.runId);
-      query =
-        from === "running"
-          ? query.eq("status", "running")
-          : query.eq("status", "error").eq("reason", STALE_RUNNING_REASON);
-      query = presentedClaim
-        ? query.or(`claim_id.is.null,claim_id.eq.${presentedClaim}`)
-        : query.is("claim_id", null);
-      return query.select("id");
-    };
-    let { data, error } = await write("running");
-    if (!error && (!data || data.length === 0)) {
-      ({ data, error } = await write("swept"));
+    // One atomic update: the run must be `running` OR a stale-sweep guess
+    // (error/stale_running), and the claim must be null or the presented
+    // one. A single statement cannot lose to a concurrent reopen.
+    const eligible = ["status.eq.running", `status.eq.error`];
+    const claimTerms = presentedClaim
+      ? ["claim_id.is.null", `claim_id.eq.${presentedClaim}`]
+      : ["claim_id.is.null"];
+    const terms: string[] = [];
+    for (const claim of claimTerms) {
+      terms.push(`and(${eligible[0]},${claim})`);
+      terms.push(`and(${eligible[1]},reason.eq.${STALE_RUNNING_REASON},${claim})`);
     }
+    const { data, error } = await admin
+      .from("pipeline_runs")
+      .update({
+        ...patchColumns(input),
+        status: input.status,
+        // Only finishRun and the sweeper write these, so null is the right
+        // default and clears a swept row's stale_running.
+        final_outcome: input.finalOutcome ?? null,
+        reason: input.reason ?? null,
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", ctx.runId)
+      .or(terms.join(","))
+      .select("id");
     if (error) {
       report("finish", error);
       return;
