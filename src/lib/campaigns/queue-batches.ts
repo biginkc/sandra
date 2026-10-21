@@ -85,7 +85,13 @@ export async function runBatchedCadenceRpc(
 ): Promise<BatchedResult<BatchedCadenceTotals>> {
   const limit = options.limit ?? CAMPAIGN_QUEUE_BATCH_LIMIT;
   const maxBatches = options.maxBatches ?? CAMPAIGN_QUEUE_MAX_BATCHES;
-  const batchArgs: Record<string, unknown> = { ...baseArgs, p_limit: limit };
+  // One op id for the whole loop: the database binds continuations to it and
+  // refuses competing operations.
+  const batchArgs: Record<string, unknown> = {
+    ...baseArgs,
+    p_limit: limit,
+    p_op_id: globalThis.crypto.randomUUID(),
+  };
 
   const totals: BatchedCadenceTotals = {
     affected_count: 0,
@@ -146,11 +152,14 @@ export async function runBatchedPauseRpc(
     paused_count: 0,
   };
 
+  const pauseArgs = {
+    ...baseArgs,
+    p_limit: limit,
+    p_op_id: globalThis.crypto.randomUUID(),
+  };
+
   for (let batch = 0; batch < maxBatches; batch += 1) {
-    let { data, error } = await client.rpc("pause_campaign_queue", {
-      ...baseArgs,
-      p_limit: limit,
-    });
+    let { data, error } = await client.rpc("pause_campaign_queue", pauseArgs);
     if (error && batch === 0 && isMissingSignature(error)) {
       ({ data, error } = await client.rpc("pause_campaign_queue", baseArgs));
     }

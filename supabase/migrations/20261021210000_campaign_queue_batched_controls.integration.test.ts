@@ -23,7 +23,7 @@ async function asService(client: Client) {
 
 async function seed(status: "queued" | "paused") {
   await a.query("delete from public.messages where org_id=$1", [org]);
-  await a.query("update public.campaigns set status=$2, pace_seconds=null, cadence_op_id=null, cadence_op_started_at=null where id=$1",
+  await a.query("update public.campaigns set status=$2, pace_seconds=null, queue_op_id=null, queue_op_kind=null, queue_op_pace=null, queue_op_touched_at=null, queue_op_prev_ids=null, queue_op_cancelled_id=null where id=$1",
     [campaign, status === "paused" ? "paused" : "active"]);
   // Deterministic but shuffled times; every 7th has no time (nulls ordering).
   await a.query(
@@ -66,30 +66,50 @@ function tie(p: { created_at: Date; id: string }, q: { created_at: Date; id: str
   return p.created_at.getTime() - q.created_at.getTime() || (p.id < q.id ? -1 : p.id > q.id ? 1 : 0);
 }
 
-async function loop(client: Client, sql: string, params: unknown[]) {
+// Each loop is one operation: one op id reused across its batches.
+async function loop(client: Client, sql: string, params: unknown[], op: string = randomUUID()) {
   const results: Array<Record<string, string>> = [];
   for (let i = 0; i < 100; i += 1) {
     const t0 = performance.now();
-    const r = (await client.query(sql, params)).rows[0];
+    const r = (await client.query(sql, [...params, op])).rows[0];
     batchMs.push(performance.now() - t0);
     results.push(r);
     if (Number(r.remaining_count) === 0) return results;
   }
   throw new Error("did not converge");
 }
+const once = (client: Client, sql: string, params: unknown[], op: string) =>
+  client.query(sql, [...params, op]).then((r) => r.rows[0] as Record<string, string>);
+const status = async () =>
+  (await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status as string;
+const ageOp = () => a.query(
+  "update public.campaigns set queue_op_touched_at = now() - interval '3 minutes' where id=$1", [campaign]);
 
-const RESUME = `select * from public.resume_campaign_queue($1, $2, 300, true, $3)`;
-const PAUSE = `select * from public.pause_campaign_queue($1, true, $2)`;
-const CADENCE = `select * from public.apply_campaign_cadence_reschedule($1, $2, 300, true, $3)`;
+const RESUME = `select * from public.resume_campaign_queue($1, $2, 300, true, $3, $4)`;
+const PAUSE = `select * from public.pause_campaign_queue($1, true, $2, $3)`;
+const CADENCE = `select * from public.apply_campaign_cadence_reschedule($1, $2, 300, true, $3, $4)`;
 
-function expectContinuousCadence(
-  ordered: Array<{ scheduled_for: Date | null }>, pace: number,
-) {
+function expectContinuousCadence(ordered: Array<{ scheduled_for: Date | null }>, pace: number) {
   const first = ordered[0].scheduled_for!.getTime();
   ordered.forEach((row, i) => {
     expect(row.scheduled_for!.getTime() - first).toBe(i * pace * 1000);
   });
 }
+function pausedReference(before: Awaited<ReturnType<typeof rows>>) {
+  return [...before].sort((p, q) =>
+    cmp(ts((p.metadata.campaignPause as Record<string, unknown>).previousScheduledFor),
+      ts((q.metadata.campaignPause as Record<string, unknown>).previousScheduledFor), true) || tie(p, q));
+}
+function queuedReference(before: Awaited<ReturnType<typeof rows>>) {
+  return [...before].sort((p, q) =>
+    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
+}
+async function inOrder(reference: Array<{ id: string }>) {
+  const after = new Map((await rows()).map((r) => [r.id, r]));
+  return reference.map((r) => after.get(r.id)!);
+}
+const sortedByTime = async () =>
+  (await rows()).sort((p, q) => p.scheduled_for!.getTime() - q.scheduled_for!.getTime());
 
 beforeAll(async () => {
   await a.connect(); await b.connect();
@@ -116,62 +136,50 @@ afterAll(async () => {
   await a.end(); await b.end();
 }, 120_000);
 
-beforeEach(() => undefined);
-
 it("resumes 3,000 paused rows in batches with the single-shot order and 4s spacing", async () => {
   await seed("paused");
-  const before = await rows();
-  const reference = [...before].sort((p, q) =>
-    cmp(ts((p.metadata.campaignPause as Record<string, unknown>).previousScheduledFor),
-      ts((q.metadata.campaignPause as Record<string, unknown>).previousScheduledFor), true) || tie(p, q));
-
+  const reference = pausedReference(await rows());
+  const op = randomUUID();
   const statuses: string[] = [];
-  const results: Array<Record<string, string>> = [];
+  const affected: number[] = [];
   for (let i = 0; i < 100; i += 1) {
     const t0 = performance.now();
-    const r = (await a.query(RESUME, [campaign, PACE, LIMIT])).rows[0];
+    const r = await once(a, RESUME, [campaign, PACE, LIMIT], op);
     batchMs.push(performance.now() - t0);
-    results.push(r);
-    statuses.push((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status);
+    affected.push(Number(r.affected_count));
+    statuses.push(await status());
     if (Number(r.remaining_count) === 0) break;
   }
-
-  expect(results.map((r) => Number(r.affected_count))).toEqual([500, 500, 500, 500, 500, 500]);
+  expect(affected).toEqual([500, 500, 500, 500, 500, 500]);
   expect(statuses).toEqual(["paused", "paused", "paused", "paused", "paused", "completed"]);
-  const after = new Map((await rows()).map((r) => [r.id, r]));
-  const ordered = reference.map((r) => after.get(r.id)!);
+  const ordered = await inOrder(reference);
   expect(ordered.every((r) => r.status === "queued" && !("campaignPause" in r.metadata))).toBe(true);
   expectContinuousCadence(ordered, PACE);
-  expect(Number((await a.query("select pace_seconds from public.campaigns where id=$1", [campaign])).rows[0].pace_seconds)).toBe(PACE);
+  expect((await a.query("select pace_seconds, queue_op_id from public.campaigns where id=$1", [campaign])).rows[0])
+    .toEqual({ pace_seconds: PACE, queue_op_id: null });
 }, 120_000);
 
-it("two concurrent resumers share one cadence and never double-schedule", async () => {
+it("a second concurrent resume is refused; the first finishes one cadence, nothing double-scheduled", async () => {
   await seed("paused");
-  const settle = (client: Client) => loop(client, RESUME, [campaign, PACE, LIMIT])
-    .catch((e: Error) => {
-      // The loser may arrive after the winner flipped the campaign.
-      expect(e.message).toMatch(/not paused/);
-      return [];
-    });
-  await Promise.all([settle(a), settle(b)]);
-
-  const after = (await rows()).sort((p, q) => p.scheduled_for!.getTime() - q.scheduled_for!.getTime());
-  expect(after).toHaveLength(ROWS);
-  expect(after.every((r) => r.status === "queued")).toBe(true);
-  expect(new Set(after.map((r) => r.scheduled_for!.getTime())).size).toBe(ROWS);
-  expectContinuousCadence(after, PACE);
-  expect((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status).toBe("completed");
+  const reference = pausedReference(await rows());
+  const results = await Promise.allSettled([loop(a, RESUME, [campaign, PACE, LIMIT]), loop(b, RESUME, [campaign, PACE, LIMIT])]);
+  const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+  expect(rejected).toHaveLength(1);
+  expect(String(rejected[0].reason)).toMatch(/in progress|not paused/);
+  expectContinuousCadence(await inOrder(reference), PACE);
+  expect(await status()).toBe("completed");
 }, 120_000);
 
 it("pauses 3,000 queued rows in batches; holds the campaign from the first batch", async () => {
   await seed("queued");
   const before = new Map((await rows()).map((r) => [r.id, r.scheduled_for]));
+  const op = randomUUID();
   const statuses: string[] = [];
   for (let i = 0; i < 100; i += 1) {
     const t0 = performance.now();
-    const r = (await a.query(PAUSE, [campaign, LIMIT])).rows[0];
+    const r = await once(a, PAUSE, [campaign, LIMIT], op);
     batchMs.push(performance.now() - t0);
-    statuses.push((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status);
+    statuses.push(await status());
     if (Number(r.remaining_count) === 0) break;
   }
   expect(statuses).toEqual(["paused", "paused", "paused", "paused", "paused", "paused"]);
@@ -187,98 +195,102 @@ it("two concurrent pausers converge without losing previousScheduledFor", async 
   await seed("queued");
   const before = new Map((await rows()).map((r) => [r.id, r.scheduled_for]));
   await Promise.all([loop(a, PAUSE, [campaign, LIMIT]), loop(b, PAUSE, [campaign, LIMIT])]);
-  const after = await rows();
-  expect(after.every((r) => r.status === "paused")).toBe(true);
-  for (const r of after) {
+  for (const r of await rows()) {
+    expect(r.status).toBe("paused");
     const prev = (r.metadata.campaignPause as Record<string, unknown>).previousScheduledFor;
     expect(ts(prev)).toBe(before.get(r.id)?.getTime() ?? null);
   }
-  expect((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status).toBe("paused");
+  expect(await status()).toBe("paused");
 }, 120_000);
 
 it("reschedules 3,000 queued rows in batches with the single-shot order and spacing", async () => {
   await seed("queued");
-  const before = await rows();
-  const reference = [...before].sort((p, q) =>
-    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
-  const results = await loop(a, CADENCE, [campaign, 6, LIMIT]);
-  expect(results).toHaveLength(6);
-  const after = new Map((await rows()).map((r) => [r.id, r]));
-  expectContinuousCadence(reference.map((r) => after.get(r.id)!), 6);
-  expect(Number((await a.query("select pace_seconds from public.campaigns where id=$1", [campaign])).rows[0].pace_seconds)).toBe(6);
+  const reference = queuedReference(await rows());
+  expect(await loop(a, CADENCE, [campaign, 6, LIMIT])).toHaveLength(6);
+  expectContinuousCadence(await inOrder(reference), 6);
+  expect((await a.query("select pace_seconds, queue_op_id from public.campaigns where id=$1", [campaign])).rows[0])
+    .toEqual({ pace_seconds: 6, queue_op_id: null });
 }, 120_000);
 
-it("two independent concurrent cadence callers share one pass and never double-schedule", async () => {
+it("a second concurrent cadence change is refused; no row is rewritten twice", async () => {
   await seed("queued");
-  await Promise.all([loop(a, CADENCE, [campaign, 6, LIMIT]), loop(b, CADENCE, [campaign, 6, LIMIT])]);
-  const after = (await rows()).sort((p, q) => p.scheduled_for!.getTime() - q.scheduled_for!.getTime());
-  expect(new Set(after.map((r) => r.scheduled_for!.getTime())).size).toBe(ROWS);
-  expectContinuousCadence(after, 6);
+  const reference = queuedReference(await rows());
+  const results = await Promise.allSettled([loop(a, CADENCE, [campaign, 6, LIMIT]), loop(b, CADENCE, [campaign, 6, LIMIT])]);
+  const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+  expect(rejected).toHaveLength(1);
+  expect(String(rejected[0].reason)).toMatch(/in progress/);
+  const fulfilled = results.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<unknown[]>;
+  expect(fulfilled.value).toHaveLength(6);
+  expectContinuousCadence(await inOrder(reference), 6);
 }, 120_000);
 
-it("rejects out-of-range limits and stays service_role only", async () => {
-  await expect(a.query(RESUME, [campaign, PACE, 0])).rejects.toThrow(/limit must be between/);
-  await expect(a.query(PAUSE, [campaign, 5001])).rejects.toThrow(/limit must be between/);
-  const grants = await a.query(`select routine_name, grantee from information_schema.routine_privileges
-    where routine_name in ('resume_campaign_queue','pause_campaign_queue','apply_campaign_cadence_reschedule')
-      and privilege_type='EXECUTE'`);
-  const who = grants.rows.map((r) => r.grantee);
-  expect(who).toContain("service_role");
-  expect(who).not.toContain("authenticated");
-  expect(who).not.toContain("anon");
-  expect(who).not.toContain("PUBLIC");
-});
-
-it("a retried cadence pass (same op) continues in the original order", async () => {
+it("an abandoned cadence pass (3 batches of 100) is taken over at a new pace in the original order", async () => {
   await seed("queued");
-  const before = await rows();
-  const reference = [...before].sort((p, q) =>
-    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
-  await a.query(CADENCE, [campaign, 6, LIMIT]); // one batch, then the caller "dies"
-  await loop(a, CADENCE, [campaign, 6, LIMIT]); // retry
-  const after = new Map((await rows()).map((r) => [r.id, r]));
-  expectContinuousCadence(reference.map((r) => after.get(r.id)!), 6);
-  expect((await a.query("select cadence_op_id from public.campaigns where id=$1", [campaign])).rows[0].cadence_op_id).toBeNull();
+  const reference = queuedReference(await rows());
+  const dead = randomUUID();
+  for (let i = 0; i < 3; i += 1) await once(a, CADENCE, [campaign, 6, 100], dead);
+  await expect(loop(a, CADENCE, [campaign, 8, 100])).rejects.toThrow(/in progress/);
+  await ageOp();
+  await loop(a, CADENCE, [campaign, 8, 100]);
+  expectContinuousCadence(await inOrder(reference), 8);
 }, 120_000);
 
-it("an abandoned cadence pass is replaced and rows keep their original order", async () => {
-  await seed("queued");
-  const before = await rows();
-  const reference = [...before].sort((p, q) =>
-    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
-  await a.query(CADENCE, [campaign, 6, LIMIT]);
-  await a.query("update public.campaigns set cadence_op_started_at = now() - interval '20 minutes' where id=$1", [campaign]);
-  await loop(a, CADENCE, [campaign, 8, LIMIT]);
-  const after = new Map((await rows()).map((r) => [r.id, r]));
-  expectContinuousCadence(reference.map((r) => after.get(r.id)!), 8);
+it("an interrupted resume is finished by a retry at the same pace; a different pace is refused", async () => {
+  await seed("paused");
+  const reference = pausedReference(await rows());
+  const dead = randomUUID();
+  await once(a, RESUME, [campaign, PACE, LIMIT], dead);
+  await once(a, RESUME, [campaign, PACE, LIMIT], dead);
+  await ageOp();
+  await expect(loop(b, RESUME, [campaign, 6, LIMIT])).rejects.toThrow(/interrupted resume used 4/);
+  await ageOp();
+  await loop(b, RESUME, [campaign, PACE, LIMIT]);
+  expectContinuousCadence(await inOrder(reference), PACE);
+  expect(await status()).toBe("completed");
 }, 120_000);
 
-it("resume refuses while an interrupted pause left queued rows; finishing the pause unblocks it", async () => {
-  await seed("queued");
-  await a.query(PAUSE, [campaign, LIMIT]); // one batch only
-  expect((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status).toBe("paused");
-  await expect(a.query(RESUME, [campaign, PACE, LIMIT])).rejects.toThrow(/pause has not finished/);
+it("pause preempts an in-flight resume, and that resume can never continue", async () => {
+  await seed("paused");
+  const resumeOp = randomUUID();
+  await once(a, RESUME, [campaign, PACE, LIMIT], resumeOp);
+  await loop(b, PAUSE, [campaign, LIMIT]);
+  expect((await rows()).every((r) => r.status === "paused")).toBe(true);
+  await expect(once(a, RESUME, [campaign, PACE, LIMIT], resumeOp)).rejects.toThrow(/cancelled by a pause/);
+  await loop(a, RESUME, [campaign, PACE, LIMIT]);
+  expect(await status()).toBe("completed");
+}, 120_000);
+
+it("resume refuses after an interrupted pause, including rows tagged by an older resume", async () => {
+  await seed("paused");
+  await loop(a, RESUME, [campaign, PACE, LIMIT]); // older resume generation tags every row
+  await once(a, PAUSE, [campaign, LIMIT], randomUUID()); // pause dies after one batch
+  await ageOp();
+  expect(await status()).toBe("paused");
+  await expect(loop(a, RESUME, [campaign, PACE, LIMIT])).rejects.toThrow(/pause has not finished/);
   await loop(a, PAUSE, [campaign, LIMIT]);
   await loop(a, RESUME, [campaign, PACE, LIMIT]);
   expect((await rows()).every((r) => r.status === "queued")).toBe(true);
+  expectContinuousCadence(await sortedByTime(), PACE);
 }, 120_000);
 
-it("an interrupted resume can be retried and finishes one continuous cadence", async () => {
-  await seed("paused");
-  const before = await rows();
-  const reference = [...before].sort((p, q) =>
-    cmp(ts((p.metadata.campaignPause as Record<string, unknown>).previousScheduledFor),
-      ts((q.metadata.campaignPause as Record<string, unknown>).previousScheduledFor), true) || tie(p, q));
-  await a.query(RESUME, [campaign, PACE, LIMIT]);
-  await a.query(RESUME, [campaign, PACE, LIMIT]); // caller dies here
-  await loop(b, RESUME, [campaign, PACE, LIMIT]); // retry from another request
-  const after = new Map((await rows()).map((r) => [r.id, r]));
-  expectContinuousCadence(reference.map((r) => after.get(r.id)!), PACE);
-}, 120_000);
-
-it("old callers (no p_limit) keep the unbounded single-shot behaviour", async () => {
+it("old callers (no p_limit, no p_op_id) keep the unbounded single-shot behaviour", async () => {
   await seed("queued");
   const r = (await a.query("select * from public.pause_campaign_queue($1, true)", [campaign])).rows[0];
   expect(Number(r.affected_count)).toBe(ROWS);
   expect(Number(r.remaining_count)).toBe(0);
 }, 120_000);
+
+it("rejects out-of-range limits; queue RPCs are service_role only and helpers are not callable", async () => {
+  await expect(a.query(RESUME, [campaign, PACE, 0, randomUUID()])).rejects.toThrow(/limit must be between/);
+  await expect(a.query(PAUSE, [campaign, 5001, randomUUID()])).rejects.toThrow(/limit must be between/);
+  const grants = await a.query(`select routine_name, grantee from information_schema.routine_privileges
+    where routine_name in ('resume_campaign_queue','pause_campaign_queue','apply_campaign_cadence_reschedule',
+      'campaign_queue_claim_op','campaign_queue_finish_op')
+      and privilege_type='EXECUTE' and grantee <> 'postgres'`);
+  const by = (n: string) => grants.rows.filter((r) => r.routine_name === n).map((r) => r.grantee).sort();
+  for (const n of ["resume_campaign_queue", "pause_campaign_queue", "apply_campaign_cadence_reschedule"]) {
+    expect(by(n)).toEqual(["service_role"]);
+  }
+  expect(by("campaign_queue_claim_op")).toEqual([]);
+  expect(by("campaign_queue_finish_op")).toEqual([]);
+});

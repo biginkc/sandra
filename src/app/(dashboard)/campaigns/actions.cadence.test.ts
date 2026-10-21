@@ -226,6 +226,7 @@ describe("campaign cadence actions", () => {
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
       p_limit: 100,
+      p_op_id: expect.any(String),
     });
     expect(admin.campaignUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ pace_seconds: 8 }),
@@ -335,6 +336,7 @@ describe("campaign cadence actions", () => {
       p_campaign_id: "campaign-1",
       p_operator_confirmed: true,
       p_limit: 100,
+      p_op_id: expect.any(String),
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
@@ -374,6 +376,7 @@ describe("campaign cadence actions", () => {
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
       p_limit: 100,
+      p_op_id: expect.any(String),
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
@@ -405,6 +408,8 @@ describe("campaign cadence actions", () => {
     const result = await resumeCampaignSends("campaign-1", 4, true);
 
     expect(rpc).toHaveBeenCalledTimes(3);
+    expect(rpc.mock.calls[0][1].p_op_id).toBeTruthy();
+    expect(rpc.mock.calls[2][1].p_op_id).toBe(rpc.mock.calls[0][1].p_op_id);
     expect(result).toEqual({
       ok: true,
       data: {
