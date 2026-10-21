@@ -6,7 +6,7 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 
 const pg = new Client({ connectionString: requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres") });
-const sql = readFileSync("supabase/migrations/20261020140000_voicemail_drop_step.sql", "utf8");
+const sql = readFileSync("supabase/migrations/20261021200000_voicemail_drop_step.sql", "utf8");
 let actor!: string, org!: string, sequence!: string, first!: string;
 
 async function asActor(user = actor) {

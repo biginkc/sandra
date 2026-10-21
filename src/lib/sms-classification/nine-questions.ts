@@ -22,6 +22,12 @@ export const NINE_QUESTION_IDS = [
   "asked_offer",
   "named_price",
   "asked_call",
+  // Added 2026-10-21 (approved verbatim by Jarrad); asked in the same single Jev call.
+  // Replay on 708 real replies 2026-10-21: already_sold 94% precision / 100% recall;
+  // just_ok 100% precision; tenant was reworded from an earlier version that caught landlords.
+  "already_sold",
+  "tenant",
+  "just_ok",
 ] as const;
 
 export type NineQuestionId = (typeof NINE_QUESTION_IDS)[number];
@@ -32,13 +38,16 @@ export const NINE_QUESTIONS: Record<NineQuestionId, string> = {
   asked_who: "Did the homeowner ask who is texting them or why?",
   not_interested: "Did the homeowner say they are not interested in selling?",
   wrong_person: "Did the homeowner say we have the wrong person, or that they don't own the property?",
-  asked_stop: "Did the homeowner ask to stop receiving texts?",
+  asked_stop: "Did the homeowner request that communication cease?",
   hostile: "Was the homeowner rude or hostile?",
   confirmed_owner: "Did the homeowner confirm they are the person or owner we asked about?",
   talked_price: "Did the homeowner mention a price or ask how much we would pay?",
   asked_offer: "Did the homeowner ask what our offer is or how much we would pay?",
   named_price: "Did the homeowner name a price or amount they want?",
   asked_call: "Did the homeowner ask us to call them or give a time to talk?",
+  already_sold: "Did the homeowner say they already sold the property?",
+  tenant: "Did the homeowner say they are a tenant who rents the property, not the owner?",
+  just_ok: "Did the homeowner just acknowledge or agree to our message without adding anything new?",
 };
 
 /** A "yes" needs at least this probability (Jarrad 2026-10-14). */
@@ -54,10 +63,14 @@ export const NINE_QUESTION_CUTOFF = 0.6;
  * delegated their place in the order to Claude, based on a replay of 252 real
  * seller replies (asked_offer 96% accurate, named_price 98%, asked_call 100%).
  * Stop / hostile / wrong person still beat every reply.
+ *
+ * 2026-10-21 (Jarrad): already_sold and tenant join the wrong_person group (same action,
+ * the higher probability is reported, ties go to the earlier id); just_ok is last, so any
+ * other yes beats a bare acknowledgement and only "nothing else" falls through to it.
  */
 export const NINE_QUESTION_GROUPS: ReadonlyArray<ReadonlyArray<NineQuestionId>> = [
   ["asked_stop", "hostile"],
-  ["wrong_person"],
+  ["wrong_person", "already_sold", "tenant"],
   ["asked_call"],
   ["asked_offer"],
   ["named_price"],
@@ -67,6 +80,7 @@ export const NINE_QUESTION_GROUPS: ReadonlyArray<ReadonlyArray<NineQuestionId>> 
   ["not_interested"],
   ["asked_who"],
   ["confirmed_owner"],
+  ["just_ok"],
 ];
 
 /** No question reached the cutoff: a person reads it ("Can't read it"). */
@@ -124,7 +138,7 @@ export type NineQuestionResult = NineQuestionDecision & {
   usage: { inputTokens: number | null; outputTokens: number | null } | null;
 };
 
-/** One HTTP call: every question (the nine plus the three added 2026-10-20) in a single System One request. */
+/** One HTTP call: every question (the nine plus those added 2026-10-20 and 2026-10-21) in a single System One request. */
 export async function classifyNineQuestions(
   state: NineQuestionState,
   deps: JevAskDeps,
@@ -162,6 +176,9 @@ export const NINE_ANSWER_LABELS: Record<NineAnswer, string> = {
   asked_offer: "Asked for offer",
   named_price: "Named a price",
   asked_call: "Asked for a call", // label approved verbatim by Jarrad 2026-10-20
+  already_sold: "Already sold", // named by Jarrad 2026-10-21
+  tenant: "Tenant", // named by Jarrad 2026-10-21
+  just_ok: "Just ok", // needs Jarrad's wording approval
   needs_person: "Can't read it",
 };
 
@@ -187,6 +204,9 @@ export const NINE_ANSWER_GROUP: Record<NineQuestionId, NineRuleGroup> = {
   not_interested: "alone",
   wrong_person: "alone",
   confirmed_owner: "alone",
+  already_sold: "alone",
+  tenant: "alone",
+  just_ok: "alone",
   asked_stop: "person",
   hostile: "person",
 };
@@ -219,6 +239,12 @@ export type NineAction =
   | { kind: "reply_and_drip"; reply: "nurture" | "identity" | "not_interested"; drip: NineDripName; skipFirstStep: boolean }
   | { kind: "drip_only"; drip: NineDripName }
   | { kind: "reply_and_close_wrong_person" }
+  /**
+   * just_ok (Jarrad 2026-10-21): no reply, no hold, the lead's drip simply continues, but
+   * ONLY when our last text was a drip step or the approved check-back reply. Otherwise the
+   * dispatch step treats it exactly as needs_person.
+   */
+  | { kind: "continue_drip_if_last_was_drip" }
   | { kind: "wait_for_person"; reason: "asked_stop" | "hostile" | "needs_person" };
 
 /** Exact names of Jarrad's drips in the `sequences` table. */
@@ -242,7 +268,12 @@ export function actionForNineAnswer(answer: NineAnswer): NineAction {
     case "not_interested":
       return { kind: "reply_and_drip", reply: "not_interested", drip: "Not interested", skipFirstStep: false };
     case "wrong_person":
+    // Jarrad 2026-10-21: exactly the wrong_person action (approved reply, close, same switch).
+    case "already_sold":
+    case "tenant":
       return { kind: "reply_and_close_wrong_person" };
+    case "just_ok":
+      return { kind: "continue_drip_if_last_was_drip" };
     case "confirmed_owner":
       return { kind: "drip_only", drip: "Confirmed owner" };
     case "asked_stop":
