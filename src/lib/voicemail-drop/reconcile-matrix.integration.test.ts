@@ -14,7 +14,7 @@ vi.mock("@/lib/events", async (importOriginal) => ({
 }));
 
 import { pauseEnrollmentsForInboundCall } from "@/lib/norma/inbound-call-pause";
-import { pauseContactEnrollments, pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { pauseContactEnrollments, pausePropertyEnrollments, resumeByProperty } from "@/lib/sequences/enrollment";
 
 import { handleDropCallback, handleDropStatusEvent, supabaseDropStatusStore } from "./status-updates";
 import { parseDropCowboyCallback, parseDropCowboyStatusWebhook } from "./webhook";
@@ -35,12 +35,14 @@ const property = randomUUID();
 const contact = randomUUID();
 const twoStep = randomUUID();
 const oneStep = randomUUID();
+const threeStep = randomUUID();
 const PHONE = "+18165550101";
 const CONSENT = "voicemail_drop_consent_blocked";
 const obsSchema = `recon_obs_${org.replace(/-/g, "").slice(0, 12)}`;
 const stepIds: Record<string, string> = {};
 let admin!: Client;
 let eventSeq = 0;
+let normaUser: string | null = null;
 
 type Ids = { enrollment: string; run: string; drop: string };
 let ids!: Ids;
@@ -62,11 +64,15 @@ beforeAll(async () => {
   ok(await client.from("sequences").insert([
     { id: twoStep, org_id: org, name: "Two" },
     { id: oneStep, org_id: org, name: "One" },
+    { id: threeStep, org_id: org, name: "Three" },
   ]));
   const steps = ok(await client.from("sequence_steps").insert([
     { sequence_id: twoStep, step_index: 0, action_type: "send_voicemail_drop", vm_tts_body: "Hi", delay_after_previous_minutes: 0 },
     { sequence_id: twoStep, step_index: 1, action_type: "send_sms", template_body: "Hello", delay_after_previous_minutes: 60 },
     { sequence_id: oneStep, step_index: 0, action_type: "send_voicemail_drop", vm_tts_body: "Hi", delay_after_previous_minutes: 0 },
+    { sequence_id: threeStep, step_index: 0, action_type: "send_voicemail_drop", vm_tts_body: "Hi", delay_after_previous_minutes: 0 },
+    { sequence_id: threeStep, step_index: 1, action_type: "send_voicemail_drop", vm_tts_body: "Again", delay_after_previous_minutes: 0 },
+    { sequence_id: threeStep, step_index: 2, action_type: "send_sms", template_body: "Hello", delay_after_previous_minutes: 60 },
   ]).select("id, sequence_id, step_index"));
   for (const s of steps!) stepIds[`${s.sequence_id}:${s.step_index}`] = s.id;
   ok(await client.from("contacts").insert({ id: contact, org_id: org, phone_1: "8165550101", phone_1_type: "mobile" }));
@@ -89,6 +95,8 @@ afterAll(async () => {
   await admin.query(`drop trigger if exists ${obsSchema}_fail on public.sequence_enrollments`);
   await admin.query(`drop schema if exists ${obsSchema} cascade`);
   await client.from("norma_inbound_calls").delete().eq("org_id", org);
+  await admin.query("delete from public.norma_call_requests where org_id = $1", [org]);
+  if (normaUser) await client.auth.admin.deleteUser(normaUser);
   await client.from("voicemail_drops").delete().eq("org_id", org);
   await client.from("sequence_enrollments").delete().eq("org_id", org);
   await client.from("properties").delete().eq("org_id", org);
@@ -201,16 +209,29 @@ async function ordered<A, B>(first: () => Promise<A>, second: () => Promise<B>):
     await lock.query("begin");
     await lock.query("select 1 from public.sequence_enrollments where id = $1 for update", [ids.enrollment]);
     const lockPid = (await lock.query("select pg_backend_pid() as pid")).rows[0].pid as number;
+    // Only the contenders queued behind THIS lock holder count: backends
+    // whose blockers chain back to lockPid (pg_blocking_pids), never other
+    // lock waits in the database.
     const waiters = async (n: number) => {
       for (let i = 0; i < 200; i += 1) {
         const { rows } = await admin.query(
-          "select count(*)::int as n from pg_locks where not granted and pid <> $1 and (locktype in ('transactionid', 'tuple'))",
-          [lockPid],
+          "select pid, pg_blocking_pids(pid) as blockers from pg_stat_activity where wait_event_type = 'Lock'",
         );
-        if (rows[0].n >= n) return;
+        const queued = new Set<number>([lockPid]);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const r of rows as Array<{ pid: number; blockers: number[] }>) {
+            if (!queued.has(r.pid) && r.blockers.some((pid) => queued.has(pid))) {
+              queued.add(r.pid);
+              grew = true;
+            }
+          }
+        }
+        if (queued.size - 1 >= n) return;
         await new Promise((r) => setTimeout(r, 25));
       }
-      throw new Error(`expected ${n} lock waiters`);
+      throw new Error(`expected ${n} contenders queued on the enrollment lock`);
     };
     const a = first();
     await waiters(1);
@@ -551,4 +572,93 @@ describe("reconcile acceptance matrix", () => {
     await handleDropCallback(store, callback({ status: "failure", reason_code: 3007 }));
     expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call", current_step_index: 1 });
   });
+
+  const setPause = async (reason: string) =>
+    ok(await client.from("sequence_enrollments").update({ status: "paused", pause_reason: reason }).eq("id", ids.enrollment));
+
+  /** A finished Norma request whose pause still records this enrollment, then the real Norma release. */
+  async function normaRelease() {
+    if (!normaUser) {
+      const created = await client.auth.admin.createUser({ email: `norma-${org}@example.invalid`, email_confirm: true });
+      if (created.error) throw new Error(created.error.message);
+      normaUser = created.data.user!.id;
+    }
+    const req = await admin.query(
+      `insert into public.norma_call_requests (org_id, property_id, phone_e164, callback_assignee_id, status)
+       values ($1, $2, $3, $4, 'requested') returning id`,
+      [org, property, PHONE, normaUser],
+    );
+    const requestId = req.rows[0].id as string;
+    // Close the hold through Norma's own transitions (requested -> dispatching -> rejected).
+    for (const [fn, args] of [
+      ["fn_norma_claim_dispatch", { p_request_id: requestId }],
+      ["fn_norma_mark_dispatch_rejected", { p_request_id: requestId, p_reason: "matrix" }],
+    ] as const) {
+      const { error: transitionError } = await client.rpc(fn as never, args as never);
+      if (transitionError) throw new Error(`${fn}: ${(transitionError as { message: string }).message}`);
+    }
+    await admin.query("insert into public.norma_enrollment_pauses (request_id, enrollment_id) values ($1, $2)", [requestId, ids.enrollment]);
+    const { data, error } = await client.rpc("fn_norma_release_pauses" as never, { p_request_id: requestId } as never);
+    if (error) throw new Error((error as { message: string }).message);
+    return data as unknown as number;
+  }
+  const release = async (reason: "call_in_progress" | "norma_call") =>
+    reason === "call_in_progress" ? (await resumeByProperty(client, { propertyId: property })).resumed : normaRelease();
+
+  it.each(["call_in_progress", "norma_call"] as const)("27-31 control: the %s release does resume its own untouched pause", async (reason) => {
+    await seed("accepted");
+    await setPause(reason);
+    expect(await release(reason)).toBe(1);
+    expect((await state()).enrollment.status).toBe("active");
+  });
+
+  it.each([["27", "call_in_progress"], ["28", "norma_call"]] as const)(
+    "%s: late 4016 while paused %s -> consent; the call release does not reactivate",
+    async (_row, reason) => {
+      await seed("accepted", { dropId: `dc-${org}` });
+      await setPause(reason);
+      await handleDropCallback(store, callback({ status: "failure", reason_code: 4016 }));
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: CONSENT, current_step_index: 1 });
+      expect(await release(reason)).toBe(0);
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: CONSENT, current_step_index: 1 });
+    },
+  );
+
+  it("29: earlier drop's 4016 while the next drop is held -> consent; the later reconcile advances in place, never active", async () => {
+    await seed("accepted", { sequence: threeStep, dropId: `dc-${org}` });
+    const first = { ...ids };
+    // The next drop (step 1) answered unknown and holds the enrollment.
+    ok(await client.from("sequence_enrollments").update({ status: "paused", pause_reason: "reconciliation_required" }).eq("id", ids.enrollment));
+    const run2 = ok(await client.from("sequence_step_runs").insert({
+      enrollment_id: ids.enrollment, step_id: stepIds[`${threeStep}:1`], scheduled_for: new Date().toISOString(),
+      claim_active: true, run_at: new Date().toISOString(), attempt_outcome: "unknown",
+    }).select("id").single())!.id;
+    const drop2 = ok(await client.from("voicemail_drops").insert({
+      org_id: org, enrollment_id: ids.enrollment, step_run_id: run2, idempotency_key: run2,
+      to_phone: PHONE, provider: "dropcowboy", audio_kind: "tts", attempt_outcome: "unknown",
+    }).select("id").single())!.id;
+    await admin.query(`truncate ${obsSchema}.log`);
+
+    await handleDropCallback(store, callback({ status: "failure", reason_code: 4016 }));
+    expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: CONSENT, current_step_index: 1 });
+
+    ids = { enrollment: first.enrollment, run: run2, drop: drop2 };
+    await handleDropCallback(store, callback({ drop_id: `dc2-${org}` }));
+    const after = await state();
+    expect(after.run.attempt_outcome).toBe("accepted");
+    expect(after.enrollment).toMatchObject({ status: "paused", pause_reason: CONSENT, current_step_index: 2 });
+    expect((await observed()).some((r) => r.status === "active")).toBe(false);
+  });
+
+  it.each([["30", "call_in_progress"], ["31", "norma_call"]] as const)(
+    "%s: call-back while paused %s -> inbound_call; the call release does not restart",
+    async (_row, reason) => {
+      await seed("accepted");
+      await setPause(reason);
+      expect((await inboundCall()).paused).toBe(1);
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
+      expect(await release(reason)).toBe(0);
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
+    },
+  );
 });

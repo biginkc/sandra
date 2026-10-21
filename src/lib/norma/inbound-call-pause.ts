@@ -41,8 +41,32 @@ export async function pauseEnrollmentsForInboundCall(
 
   let paused = 0;
   for (const contactId of contactIds) {
-    // Also takes over a reconciliation_required hold in the same UPDATE.
+    // First override a temporary call pause (call_in_progress / norma_call),
+    // like the reply path's fn_norma_upgrade_pauses_for_reply, so the
+    // softphone / Norma release cannot restart the drip. Upgrade BEFORE the
+    // pause: a release landing in between reactivates the row, and the pause
+    // below then catches it. The pause's single UPDATE also takes over a
+    // reconciliation_required hold.
+    paused += await upgradeTemporaryPauses(client, contactId);
     paused += (await pauseContactEnrollments(client, { contactId, reason: "inbound_call" })).paused;
   }
   return { matchedContactIds: [...contactIds], paused };
+}
+
+async function upgradeTemporaryPauses(client: SupabaseClient<Database>, contactId: string): Promise<number> {
+  const { data: properties, error: propertyError } = await client
+    .from("properties")
+    .select("id")
+    .eq("homeowner_contact_id", contactId);
+  if (propertyError) throw new Error(`pauseEnrollmentsForInboundCall properties: ${propertyError.message}`);
+  const propertyIds = (properties ?? []).map((p) => p.id);
+  if (propertyIds.length === 0) return 0;
+  const { data, error } = await (
+    client.rpc as unknown as (
+      fn: string,
+      args: Record<string, unknown>,
+    ) => Promise<{ data: number | null; error: { message: string } | null }>
+  )("upgrade_temporary_pauses_for_inbound_call", { p_property_ids: propertyIds });
+  if (error) throw new Error(`pauseEnrollmentsForInboundCall upgrade: ${error.message}`);
+  return data ?? 0;
 }
