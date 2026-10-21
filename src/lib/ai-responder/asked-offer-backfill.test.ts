@@ -214,7 +214,7 @@ describe("runAskedOfferBackfill", () => {
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
-  it("apply sends the approved text now, automated, to the seller's number, with a per-inbound key", async () => {
+  it("apply sends the approved text now, automated, to the seller's number, with a per-phone key", async () => {
     const rows = await runAskedOfferBackfill(db().client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
     expect(sendSmsToContact).toHaveBeenCalledTimes(1);
     const [, input] = sendSmsToContact.mock.calls[0]!;

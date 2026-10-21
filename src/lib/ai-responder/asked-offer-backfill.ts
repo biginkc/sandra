@@ -35,8 +35,9 @@ import type { Database, Json } from "@/lib/supabase/types";
  *   8:00–21:00 Chicago window, as the last step before the provider;
  * - one send per seller phone, ever, enforced by the database: a deterministic
  *   idempotency key (org + phone) on the unique (org_id, idempotency_key)
- *   outbound index, so a second or concurrent run, or a second property with the
- *   same seller, replays the first row instead of sending.
+ *   outbound index, so a second or concurrent run replays the first row, and a
+ *   second property with the same seller is refused by the send path (and
+ *   skipped as "texted since" before that), never sent.
  *
  * History is read by property AND by the seller's phone across the org, so a
  * text, call or reply on another property with the same number counts.
