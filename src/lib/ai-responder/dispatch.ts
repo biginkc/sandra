@@ -8474,7 +8474,7 @@ export async function runNineQuestionsStep(
   }
 
   if (action.kind === "continue_drip_if_last_was_drip") {
-    return routeNineJustOk(supabase, a);
+    return routeNineJustOk(supabase, a, cls.evaluationRevision);
   }
 
   if (action.kind === "wait_for_person") {
@@ -8752,7 +8752,11 @@ export const NINE_JUST_OK_DRIP_RESUME_FAILED = "nine_just_ok_drip_resume_failed"
  * inbound paused (`pause_reason = 'inbound_reply'`) is resumed so it simply continues.
  * Anything else (an offer question, a person's text, nothing readable) is needs_person.
  */
-async function routeNineJustOk(supabase: SupabaseClient<Database>, a: NineStepArgs): Promise<AiDispatchOutcome> {
+async function routeNineJustOk(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  evaluationRevision: number,
+): Promise<AiDispatchOutcome> {
   const { input, claim, runCtx } = a;
   const lastWasDrip = await nineLastOutboundWasDripOrCheckBack(supabase, input);
   if (lastWasDrip === "no") {
@@ -8761,6 +8765,25 @@ async function routeNineJustOk(supabase: SupabaseClient<Database>, a: NineStepAr
       name: "nine_just_ok",
       result: "skipped",
       detail: { engine: "nine_questions", why: "last_text_not_drip" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  // Freshness: anything that moved the lead since this inbound was evaluated (a newer text, a
+  // person acting) owns the thread now, so this older "Ok" must not resume the drip.
+  const revisionNow = async (): Promise<number | null> => {
+    const { data, error: revError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    return revError || !data ? null : data.decision_context_revision;
+  };
+  if ((await revisionNow()) !== evaluationRevision) {
+    await trace(supabase, {
+      kind: "action",
+      name: "nine_just_ok",
+      result: "skipped",
+      detail: { engine: "nine_questions", why: "context_changed" },
     }, runCtx);
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
@@ -8785,6 +8808,14 @@ async function routeNineJustOk(supabase: SupabaseClient<Database>, a: NineStepAr
     if (outcome === "resumed") resumed.push(row.id);
     else notResumed.push({ id: row.id, outcome });
   }
+  // The resume RPC cannot check the lead's revision, so re-check after it: if anything moved the
+  // lead during the resume, pause the drip again and let a person look.
+  if (resumed.length > 0 && (await revisionNow()) !== evaluationRevision) {
+    await pausePropertyEnrollments(supabase, { propertyId: input.propertyId, reason: "inbound_reply" }).catch((e) => {
+      reportError(e, { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId } });
+    });
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
   if (resumed.length > 0) {
     await recordLeadEvent({
       propertyId: input.propertyId,
@@ -8795,7 +8826,9 @@ async function routeNineJustOk(supabase: SupabaseClient<Database>, a: NineStepAr
   }
   // A resume that errored (or needs reconciliation) would leave the lead silent: a person looks.
   // not_paused / norma_hold mean someone else already owns the drip state: nothing to do.
-  const failed = notResumed.filter((r) => r.outcome !== "not_paused" && r.outcome !== "norma_hold");
+  const failed = notResumed.filter(
+    (r) => r.outcome !== "not_paused" && r.outcome !== "norma_hold" && r.outcome !== "pause_reason_changed",
+  );
   await trace(supabase, {
     kind: "action",
     name: "nine_just_ok",
@@ -8823,7 +8856,7 @@ async function nineLastOutboundWasDripOrCheckBack(
   // Same thread scope and cut-off as buildTwoWayThreadState (what Jev was shown).
   let query = supabase
     .from("messages")
-    .select("body, metadata")
+    .select("body, metadata, status")
     .eq("property_id", input.propertyId)
     .eq("direction", "outbound")
     .neq("id", input.inboundMessageId)
@@ -8834,6 +8867,11 @@ async function nineLastOutboundWasDripOrCheckBack(
   const { data: last, error } = await query.maybeSingle();
   if (error || !last) return "no";
   const meta = readJsonObject((last.metadata ?? null) as Json | null);
+  // Only a text the provider actually took counts. A retired / failed / still-queued attempt
+  // (its metadata may still carry reply_key or sequence_enrollment_id) is not proof the seller
+  // saw it: fail closed to needs_person.
+  if (last.status !== "sent" && last.status !== "delivered") return "no";
+  if (meta.abortedBeforeProvider === true || meta.aborted_inbound_message_id != null) return "no";
   if (typeof meta.sequence_enrollment_id === "string" && meta.sequence_enrollment_id.length > 0) return "yes";
   if (meta.reply_key === "not_interested" && last.body === APPROVED_REPLY_TEXTS.not_interested) return "yes";
   return "no";

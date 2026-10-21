@@ -115,6 +115,17 @@ function installFakeJev() {
   }) as typeof fetch;
 }
 
+/** Fake Jev that runs `side` (a person / a newer text acting mid-read) before answering. */
+function installFakeJevThen(side: () => Promise<void>) {
+  installFakeJev();
+  const inner = globalThis.fetch;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("api.typesafe.ai")) await side();
+    return inner(input, init);
+  }) as typeof fetch;
+}
+
 const NO_ANTHROPIC: AnthropicLike = {
   messages: {
     create: async () => {
@@ -1745,14 +1756,14 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     });
 
     /** A lead in the Not interested drip whose last text from us is `last`, then the seller replies. */
-    async function justOkAfter(last: { body: string; metadata?: Record<string, unknown> }, reply = "Ok") {
+    async function justOkAfter(last: { body: string; metadata?: Record<string, unknown>; status?: string }, reply = "Ok", beforeDispatch?: (propertyId: string) => Promise<void>) {
       await seedOrg();
       const lead = await seedLead();
       const drip = await enrollNineDrip(supabase, { orgId, propertyId: lead.propertyId, dripName: "Not interested", skipFirstStep: false });
       expect(drip.status).toBe("enrolled");
       const enrollmentId = drip.status === "enrolled" ? drip.enrollmentId : "";
       await supabase.from("messages").insert({
-        org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId,
+        org_id: orgId, channel: "sms", direction: "outbound", status: last.status ?? "delivered", property_id: lead.propertyId, contact_id: lead.contactId,
         from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: last.body, metadata: (last.metadata ?? null) as never,
         created_at: new Date(Date.now() - 600_000).toISOString(),
       });
@@ -1764,11 +1775,13 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
       // The inbound webhook pauses the drip (pause_reason inbound_reply) before dispatch runs.
       await pg.query("update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where id = $1 and status = 'active'", [enrollmentId]);
       jevProbabilities = { just_ok: 0.95 };
+      if (beforeDispatch) installFakeJevThen(() => beforeDispatch(lead.propertyId));
       const outcome = await dispatchAiResponse(
         supabase,
         { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound!.conversation_id as string, inboundMessageId: inbound!.id, inboundBody: reply, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
         { anthropic: NO_ANTHROPIC },
       );
+      installFakeJev();
       const sent = (await outboundBodies(lead.propertyId)).filter((b) => b !== last.body);
       return { lead, outcome, sent, enrollments: await enrollmentsFor(lead.propertyId), row: await propertyRow(lead.propertyId) };
     }
@@ -1805,6 +1818,36 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     it("just_ok after the check-back WORDS without the template's metadata: needs_person (no string matching)", async () => {
       const r = await justOkAfter({ body: APPROVED_REPLY_TEXTS.not_interested });
       expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+    });
+
+    const DRIP_META = { generated_by: "sequence_tick", sequence_enrollment_id: "00000000-0000-0000-0000-000000000001" };
+
+    it("just_ok after a drip step that FAILED to send: needs_person, drip stays paused", async () => {
+      const r = await justOkAfter({ body: "Not interested one", metadata: DRIP_META, status: "failed" });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "paused", step: 0 }]);
+    });
+
+    it("just_ok after a check-back attempt retired before the provider: needs_person", async () => {
+      const r = await justOkAfter({
+        body: APPROVED_REPLY_TEXTS.not_interested,
+        status: "sent",
+        metadata: { generated_by: "ai_responder_v1", reply_source: "approved_template", reply_key: "not_interested", abortedBeforeProvider: true },
+      });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+    });
+
+    it("a newer text arrives while Jev reads the older 'Ok': the drip is NOT resumed, a person looks", async () => {
+      const r = await justOkAfter({ body: "Not interested one", metadata: DRIP_META }, "Ok", async (propertyId) => {
+        const { rows } = await pg.query("select homeowner_contact_id as c from public.properties where id = $1", [propertyId]);
+        const { rows: ph } = await pg.query("select phone_1 from public.contacts where id = $1", [rows[0].c]);
+        await pg.query(
+          "insert into public.messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body) values ($1, 'sms', 'inbound', 'received', $2, $3, $4, $5, 'actually what would you pay')",
+          [orgId, propertyId, rows[0].c, ph[0].phone_1, MOCK_SENDER_PRIMARY],
+        );
+      });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "paused", step: 0 }]);
     });
   });
 });
