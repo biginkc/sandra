@@ -285,9 +285,14 @@ export function readDropCallerId(env: NodeJS.ProcessEnv = process.env): string |
   return raw;
 }
 
-/** VOICEMAIL_DROP_DAILY_CAP: positive integer, or null (unset/invalid = no cap). */
+/**
+ * VOICEMAIL_DROP_DAILY_CAP: non-negative integer, or null when unset (no cap).
+ * Set but not an integer (negative, decimal, text) = throws, so a typo fails
+ * closed instead of silently removing the cap.
+ */
 export function readDailyCap(env: NodeJS.ProcessEnv = process.env): number | null {
   const raw = env.VOICEMAIL_DROP_DAILY_CAP?.trim();
-  if (!raw || !/^\d+$/.test(raw)) return null;
+  if (!raw) return null;
+  if (!/^\d+$/.test(raw)) throw new Error("VOICEMAIL_DROP_DAILY_CAP must be a non-negative integer");
   return Number(raw);
 }
