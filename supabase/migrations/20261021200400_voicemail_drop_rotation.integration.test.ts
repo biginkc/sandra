@@ -7,7 +7,7 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 const pg = new Client({ connectionString: requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres") });
 // The migration wraps itself in begin/commit; run its body inside this test's transaction.
-const sql = readFileSync("supabase/migrations/20261021150000_voicemail_drop_rotation.sql", "utf8")
+const sql = readFileSync("supabase/migrations/20261021200400_voicemail_drop_rotation.sql", "utf8")
   .replace(/^begin;$/m, "").replace(/^commit;$/m, "");
 let actor!: string, org!: string, sequence!: string, first!: string;
 

@@ -1,94 +1,72 @@
--- Voicemail drop PR 6: script rotation (.planning/voicemail-drop-step-plan.md).
--- A drop step can rotate among saved voicemail scripts: the worker picks one
--- per enrollment, the same way send_sms steps pick from a template_category
--- pool.
---
--- 1. voicemail_templates: saved voicemail scripts, kept in their own table so
---    they can never show up in SMS pickers (sms_templates is read by SMS
---    sends, campaigns and the AI responder) and SMS templates can never be
---    read aloud.
--- 2. sequence_steps.vm_template_category: the third drop source. A drop step
---    needs exactly one of vm_media_id / vm_tts_body / vm_template_category.
--- 3. sequence_replace_steps / sequence_copy_steps accept and copy it.
--- Rollback: supabase/rollbacks/20261021150000_voicemail_drop_rotation.sql.
-
+-- Roll back 20261021200000_voicemail_drop_step.
+-- Refuses to run while any voicemail drop step exists (delete or convert those
+-- steps first) so no drip silently loses a step.
 begin;
 
-set local lock_timeout = '5s';
-set local statement_timeout = '60s';
+do $$
+begin
+  -- Later voicemail drop migrations must be rolled back first:
+  -- 20261021200400_voicemail_drop_rotation, then
+  -- 20261021200300_voicemail_drop_resolve_outcome, then
+  -- 20261021200200_voicemail_drop_record_outcome, then
+  -- 20261021200100_reserve_voicemail_drop_with_cap.
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'sequence_steps'
+      and column_name = 'vm_template_category'
+  ) or to_regclass('public.voicemail_templates') is not null then
+    raise exception 'roll back 20261021200400_voicemail_drop_rotation first';
+  end if;
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'resolve_voicemail_drop_outcome'
+  ) then
+    raise exception 'roll back 20261021200300_voicemail_drop_resolve_outcome first';
+  end if;
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname in ('record_voicemail_drop_accepted', 'record_voicemail_drop_unknown')
+  ) then
+    raise exception 'roll back 20261021200200_voicemail_drop_record_outcome first';
+  end if;
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'reserve_voicemail_drop_with_cap'
+  ) then
+    raise exception 'roll back 20261021200100_reserve_voicemail_drop_with_cap first';
+  end if;
+  if exists (select 1 from public.sequence_steps where action_type = 'send_voicemail_drop') then
+    raise exception 'voicemail drop steps still exist; remove them before rolling back';
+  end if;
+end;
+$$;
 
--- ---------------------------------------------------------------------------
--- 1. voicemail_templates
--- ---------------------------------------------------------------------------
-create table if not exists public.voicemail_templates (
-  id uuid primary key default gen_random_uuid(),
-  org_id uuid not null references public.organizations(id) on delete cascade,
-  name text not null check (length(btrim(name)) > 0 and length(name) <= 120),
-  -- Drop Cowboy reads at most 1,200 characters (reason code 3021).
-  content text not null check (length(btrim(content)) > 0 and length(content) <= 1200),
-  category text not null check (length(btrim(category)) > 0 and length(category) <= 120),
-  created_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  deleted_at timestamptz
-);
+drop table if exists public.voicemail_drops;
 
-create index if not exists idx_voicemail_templates_org_category
-  on public.voicemail_templates (org_id, category) where deleted_at is null;
-
-drop trigger if exists trg_voicemail_templates_updated_at on public.voicemail_templates;
-create trigger trg_voicemail_templates_updated_at
-  before update on public.voicemail_templates
-  for each row execute function public.set_updated_at();
-
-alter table public.voicemail_templates enable row level security;
-drop policy if exists voicemail_templates_org_select on public.voicemail_templates;
-create policy voicemail_templates_org_select on public.voicemail_templates
-  for select to authenticated using (public.hugo_has_active_org_access(org_id));
-drop policy if exists voicemail_templates_org_insert on public.voicemail_templates;
-create policy voicemail_templates_org_insert on public.voicemail_templates
-  for insert to authenticated with check (public.hugo_has_active_org_access(org_id));
-drop policy if exists voicemail_templates_org_update on public.voicemail_templates;
-create policy voicemail_templates_org_update on public.voicemail_templates
-  for update to authenticated
-  using (public.hugo_has_active_org_access(org_id))
-  with check (public.hugo_has_active_org_access(org_id));
-
--- Soft delete only (deleted_at): no delete grant for members.
-revoke all on public.voicemail_templates from public, anon, authenticated;
-grant select, insert, update on public.voicemail_templates to authenticated;
-grant select, insert, update, delete on public.voicemail_templates to service_role;
-
--- ---------------------------------------------------------------------------
--- 2. Third drop source + body constraint
--- ---------------------------------------------------------------------------
-alter table public.sequence_steps
-  add column if not exists vm_template_category text;
+update public.sequence_step_runs set skipped_reason = 'provider_failed'
+  where skipped_reason = 'not_eligible';
+alter table public.sequence_step_runs
+  drop constraint if exists sequence_step_runs_skipped_reason_check;
+alter table public.sequence_step_runs
+  add constraint sequence_step_runs_skipped_reason_check
+  check (skipped_reason is null or skipped_reason in
+    ('quiet_hours','consent_revoked','paused','escalated','no_phone','provider_failed'));
 
 alter table public.sequence_steps
   drop constraint if exists sequence_steps_voicemail_drop_body_xor;
 alter table public.sequence_steps
-  add constraint sequence_steps_voicemail_drop_body_xor
-  check (
-    case when action_type = 'send_voicemail_drop' then
-      num_nonnulls(
-        nullif(btrim(vm_media_id), ''),
-        nullif(btrim(vm_tts_body), ''),
-        nullif(btrim(vm_template_category), '')
-      ) = 1
-      and num_nonnulls(vm_media_id, vm_tts_body, vm_template_category) = 1
-      and template_body is null
-      and template_id is null
-      and template_category is null
-      and target_status is null
-    else
-      num_nonnulls(vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category) = 0
-    end
-  );
+  drop constraint if exists sequence_steps_action_type_check;
+alter table public.sequence_steps
+  add constraint sequence_steps_action_type_check
+  check (action_type in ('send_sms', 'change_status'));
+alter table public.sequence_steps
+  drop column if exists vm_media_id,
+  drop column if exists vm_tts_body,
+  drop column if exists vm_voice_id,
+  drop column if exists vm_phone_line_id;
 
--- ---------------------------------------------------------------------------
--- 3. Step RPCs (redefinitions of 20261020140000)
--- ---------------------------------------------------------------------------
+-- Restore the step RPCs from 20260929238000 and 20260929239000.
+-- Save drip details and the complete ordered step set in one transaction.
 create or replace function public.sequence_replace_steps(
   p_sequence uuid, p_steps jsonb, p_name text, p_description text
 ) returns jsonb
@@ -105,11 +83,6 @@ declare
   v_template uuid;
   v_category text;
   v_status text;
-  v_media text;
-  v_tts text;
-  v_voice text;
-  v_line text;
-  v_vmcat text;
   v_delay integer;
   v_offset integer;
   v_saved jsonb := '[]'::jsonb;
@@ -156,21 +129,12 @@ begin
     v_template := nullif(v_step ->> 'template_id', '')::uuid;
     v_category := v_step ->> 'template_category';
     v_status := nullif(btrim(v_step ->> 'target_status'), '');
-    v_media := nullif(btrim(v_step ->> 'vm_media_id'), '');
-    v_tts := nullif(btrim(v_step ->> 'vm_tts_body'), '');
-    v_voice := nullif(btrim(v_step ->> 'vm_voice_id'), '');
-    v_line := nullif(btrim(v_step ->> 'vm_phone_line_id'), '');
-    v_vmcat := nullif(btrim(v_step ->> 'vm_template_category'), '');
     v_delay := (v_step ->> 'delay_after_previous_minutes')::integer;
     if v_delay is null or v_delay < 0 or
       (v_action = 'send_sms' and (num_nonnulls(v_body, v_template, v_category) <> 1 or
-        (v_category is not null and length(btrim(v_category)) = 0) or v_status is not null or
-        num_nonnulls(v_media, v_tts, v_voice, v_line, v_vmcat) <> 0)) or
-      (v_action = 'change_status' and (v_status is null or num_nonnulls(v_body, v_template, v_category) <> 0 or
-        num_nonnulls(v_media, v_tts, v_voice, v_line, v_vmcat) <> 0)) or
-      (v_action = 'send_voicemail_drop' and (num_nonnulls(v_media, v_tts, v_vmcat) <> 1 or
-        num_nonnulls(v_body, v_template, v_category, v_status) <> 0)) or
-      v_action not in ('send_sms', 'change_status', 'send_voicemail_drop') or v_action is null then
+        (v_category is not null and length(btrim(v_category)) = 0) or v_status is not null)) or
+      (v_action = 'change_status' and (v_status is null or num_nonnulls(v_body, v_template, v_category) <> 0)) or
+      v_action not in ('send_sms', 'change_status') or v_action is null then
       raise exception 'Invalid step body, template, status, or delay' using errcode = '22023';
     end if;
     v_index := v_index + 1;
@@ -201,26 +165,17 @@ begin
     v_template := nullif(v_step ->> 'template_id', '')::uuid;
     v_category := v_step ->> 'template_category';
     v_status := nullif(btrim(v_step ->> 'target_status'), '');
-    v_media := nullif(btrim(v_step ->> 'vm_media_id'), '');
-    v_tts := nullif(btrim(v_step ->> 'vm_tts_body'), '');
-    v_voice := nullif(btrim(v_step ->> 'vm_voice_id'), '');
-    v_line := nullif(btrim(v_step ->> 'vm_phone_line_id'), '');
-    v_vmcat := nullif(btrim(v_step ->> 'vm_template_category'), '');
     v_delay := (v_step ->> 'delay_after_previous_minutes')::integer;
     if v_id is null then
       insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
-        action_type, template_body, template_id, template_category, target_status,
-        vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category)
-      values (p_sequence, v_index, v_delay, v_action, v_body, v_template, v_category, v_status,
-        v_media, v_tts, v_voice, v_line, v_vmcat)
+        action_type, template_body, template_id, template_category, target_status)
+      values (p_sequence, v_index, v_delay, v_action, v_body, v_template, v_category, v_status)
       returning id into v_id;
     else
       update public.sequence_steps set step_index = v_index,
         delay_after_previous_minutes = v_delay, action_type = v_action,
         template_body = v_body, template_id = v_template,
-        template_category = v_category, target_status = v_status,
-        vm_media_id = v_media, vm_tts_body = v_tts, vm_voice_id = v_voice,
-        vm_phone_line_id = v_line, vm_template_category = v_vmcat
+        template_category = v_category, target_status = v_status
       where id = v_id and sequence_id = p_sequence;
     end if;
     v_saved := v_saved || to_jsonb(v_id::text);
@@ -234,7 +189,6 @@ $$;
 revoke all on function public.sequence_replace_steps(uuid, jsonb, text, text) from public, anon, service_role;
 grant execute on function public.sequence_replace_steps(uuid, jsonb, text, text) to authenticated;
 
--- Preserve each step source when copying, including voicemail drop columns.
 create or replace function public.sequence_copy_steps(p_target uuid, p_source uuid)
 returns integer
 language plpgsql security definer set search_path = '' set statement_timeout = '5s'
@@ -261,11 +215,9 @@ begin
   then raise exception 'SOURCE_EMPTY' using errcode = '23514'; end if;
 
   insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
-    action_type, template_body, template_id, template_category, target_status,
-    vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category)
+    action_type, template_body, template_id, template_category, target_status)
   select p_target, st.step_index, st.delay_after_previous_minutes,
-    st.action_type, st.template_body, st.template_id, st.template_category, st.target_status,
-    st.vm_media_id, st.vm_tts_body, st.vm_voice_id, st.vm_phone_line_id, st.vm_template_category
+    st.action_type, st.template_body, st.template_id, st.template_category, st.target_status
   from public.sequence_steps st where st.sequence_id = p_source order by st.step_index;
   get diagnostics copied = row_count;
   return copied;

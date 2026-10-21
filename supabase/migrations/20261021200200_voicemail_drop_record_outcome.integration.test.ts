@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 
-// Real-DB proof of 20261021130000: the worker records the POST answer in one
+// Real-DB proof of 20261021200200: the worker records the POST answer in one
 // transaction, and only the unknown -> accepted flip advances the enrollment.
 const client = createTestClient();
 const org = randomUUID();
