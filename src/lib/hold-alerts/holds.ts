@@ -19,6 +19,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "nine_close_wrong_person_unreadable",
   "nine_deferred_context_changed",
   "nine_repeat_no_drip_stop_failed",
+  "nine_just_ok_drip_resume_failed",
   "reply_text_not_approved",
   "classifier_engine_unreadable",
   "hot_lead",
