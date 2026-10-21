@@ -178,7 +178,7 @@ export const NINE_ANSWER_LABELS: Record<NineAnswer, string> = {
   asked_call: "Asked for a call", // label approved verbatim by Jarrad 2026-10-20
   already_sold: "Already sold", // named by Jarrad 2026-10-21
   tenant: "Tenant", // named by Jarrad 2026-10-21
-  just_ok: "Just ok", // needs Jarrad's wording approval
+  just_ok: "Just said ok", // approved verbatim by Jarrad 2026-10-21
   needs_person: "Can't read it",
 };
 

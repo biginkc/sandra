@@ -88,8 +88,8 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
   // 2026-10-21: same action as wrong_person, so the same approved sentence.
   already_sold: WRONG_PERSON_DETAIL,
   tenant: WRONG_PERSON_DETAIL,
-  // No detail sentence until Jarrad approves one (the row shows only its label).
-  just_ok: "",
+  // approved verbatim by Jarrad 2026-10-21
+  just_ok: "Sends nothing. Their drip keeps going.",
   asked_who: "Sandra answers who is texting and why.",
   confirmed_owner: "Sandra starts the Confirmed owner drip. She doesn't reply first.",
   asked_stop: "Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.",
