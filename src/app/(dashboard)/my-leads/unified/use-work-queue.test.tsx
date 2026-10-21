@@ -758,3 +758,97 @@ describe("pinned deep-linked lead", () => {
     expect(result.current.notice).toBe("Moved to Waiting on them");
   });
 });
+
+describe("background read in-flight guard", () => {
+  const focus = () => act(async () => void window.dispatchEvent(new Event("focus")));
+
+  it("coalesces ticks during a page read into one trailing run", async () => {
+    const server = makeServer().addMany("L", 2);
+    const { loadPage } = setup(server);
+    const slow = deferred<LoadWorkPageResult>();
+    loadPage.mockImplementationOnce(() => slow.promise);
+    await advance(30_000);
+    await focus();
+    await focus();
+    await advance(30_000);
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    await act(async () => slow.resolve({ ok: true, page: server.page(Q()) }));
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("covers the facts read too: a tick while retained-row facts load waits for them", async () => {
+    const server = makeServer(2).addMany("L", 4);
+    const { loadPage, loadFacts } = setup(server, Q({ page: 2 }));
+    server.add("NEW", {}, 0);
+    const slowFacts = deferred<LoadWorkFactsResult>();
+    loadFacts.mockImplementationOnce(() => slowFacts.promise);
+    await advance(30_000);
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    expect(loadFacts).toHaveBeenCalledTimes(1);
+    await focus();
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    await act(async () => slowFacts.resolve({ ok: true, facts: server.facts(["L3", "L4"]) }));
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the trailing run while hidden or paused, then runs it on return", async () => {
+    const server = makeServer().addMany("L", 2);
+    const { loadPage, rerender } = setup(server);
+    const slow = deferred<LoadWorkPageResult>();
+    loadPage.mockImplementationOnce(() => slow.promise);
+    await advance(30_000);
+    await focus();
+    hidden = true;
+    await act(async () => slow.resolve({ ok: true, page: server.page(Q()) }));
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    hidden = false;
+    rerender({ paused: true, memberId: "m1" });
+    await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    rerender({ paused: false, memberId: "m1" });
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the trailing run when the member changed, and the stale read cannot overwrite the new member's list", async () => {
+    const server = makeServer().addMany("L", 3);
+    const { result, loadPage, rerender } = setup(server);
+    const slow = deferred<LoadWorkPageResult>();
+    loadPage.mockImplementationOnce(() => slow.promise);
+    const stale = server.page(Q());
+    await advance(30_000);
+    await focus();
+    server.remove("L1");
+    rerender({ paused: false, memberId: "m2" });
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    await act(async () => slow.resolve({ ok: true, page: stale }));
+    await flush();
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    expect(loadPage).toHaveBeenLastCalledWith("m2", Q());
+    expect(ids(result)).toEqual(["L2", "L3"]);
+  });
+
+  it("the trailing run reads the query current when it fires", async () => {
+    const server = makeServer()
+      .addMany("L", 2)
+      .add("W", { place: "their_move", reason: "in_drip" });
+    const { result, loadPage } = setup(server);
+    const slow = deferred<LoadWorkPageResult>();
+    loadPage.mockImplementationOnce(() => slow.promise);
+    await advance(30_000);
+    await focus();
+    await act(async () => result.current.setTab("waiting"));
+    await flush();
+    await act(async () => slow.resolve({ ok: true, page: server.page(Q()) }));
+    await flush();
+    expect(loadPage).toHaveBeenLastCalledWith("m1", Q({ tab: "waiting" }));
+    expect(ids(result)).toEqual(["W"]);
+  });
+});
