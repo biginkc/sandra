@@ -1,4 +1,4 @@
--- 20261021130000_voicemail_drop_record_outcome.sql
+-- 20261021200200_voicemail_drop_record_outcome.sql
 -- Voicemail drop PR 3: the worker records the POST answer in ONE transaction.
 --
 -- record_voicemail_drop_accepted (202) and record_voicemail_drop_unknown
@@ -10,10 +10,10 @@
 --
 -- Only the transition that flips the run unknown -> accepted (the owner)
 -- advances the enrollment. voicemail_drop_settle_enrollment is that shared
--- advance; the status-event resolver (20261021140000) reuses it.
+-- advance; the status-event resolver (20261021200300) reuses it.
 --
 -- Additive: three new functions, no table change. Rollback:
--- supabase/rollbacks/20261021130000_voicemail_drop_record_outcome.sql.
+-- supabase/rollbacks/20261021200200_voicemail_drop_record_outcome.sql.
 
 begin;
 
