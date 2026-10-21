@@ -140,35 +140,34 @@ revoke all on function public.resolve_voicemail_drop_outcome(uuid, text, text, t
 grant execute on function public.resolve_voicemail_drop_outcome(uuid, text, text, text, text, text, numeric, text, jsonb)
   to service_role;
 
--- A seller calling back must also override a temporary call pause
--- (call_in_progress / norma_call), the way fn_norma_upgrade_pauses_for_reply
--- does for a reply; otherwise the softphone / Norma release (which only
--- resumes its own reason) would restart the drip. Returns rows upgraded.
-create or replace function public.upgrade_temporary_pauses_for_inbound_call(p_property_ids uuid[])
-returns integer
+-- A seller calling back stops the drip in ONE UPDATE: active enrollments,
+-- reconciliation holds and temporary call pauses (call_in_progress /
+-- norma_call) all become paused inbound_call. A single statement re-checks
+-- its WHERE after any row-lock wait, so a temporary pause committing at the
+-- same moment is either seen and overridden or lands after (and then only
+-- touches active rows, finding none). The softphone / Norma release resumes
+-- only its own reason, so it cannot restart the drip.
+-- Returns the rows paused (for the lead timeline).
+create or replace function public.pause_enrollments_for_inbound_call(p_contact_ids uuid[])
+returns table (id uuid, property_id uuid, sequence_id uuid)
 language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
-declare
-  v_n integer := 0;
 begin
-  begin
-    update public.sequence_enrollments e
-       set pause_reason = 'inbound_call', updated_at = now()
-     where e.property_id = any(p_property_ids) and e.status = 'paused'
-       and e.pause_reason in ('call_in_progress', 'norma_call');
-    get diagnostics v_n = row_count;
-  exception when others then
-    -- Same as fn_norma_upgrade_pauses_for_reply: a DNC lock makes the lead
-    -- permanently opted out anyway, so there is nothing to upgrade.
-    if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
-    return 0;
-  end;
-  return v_n;
+  return query
+  update public.sequence_enrollments e
+     set status = 'paused', pause_reason = 'inbound_call', updated_at = now()
+   where e.property_id in (
+           select pr.id from public.properties pr where pr.homeowner_contact_id = any(p_contact_ids)
+         )
+     and (e.status = 'active'
+          or (e.status = 'paused'
+              and e.pause_reason in ('reconciliation_required', 'call_in_progress', 'norma_call')))
+  returning e.id, e.property_id, e.sequence_id;
 end;
 $$;
-revoke all on function public.upgrade_temporary_pauses_for_inbound_call(uuid[]) from public, anon, authenticated;
-grant execute on function public.upgrade_temporary_pauses_for_inbound_call(uuid[]) to service_role;
+revoke all on function public.pause_enrollments_for_inbound_call(uuid[]) from public, anon, authenticated;
+grant execute on function public.pause_enrollments_for_inbound_call(uuid[]) to service_role;
 
 commit;

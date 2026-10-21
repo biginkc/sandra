@@ -661,4 +661,24 @@ describe("reconcile acceptance matrix", () => {
       expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
     },
   );
+
+  describe.each(["call_in_progress", "norma_call"] as const)("32: call-back vs a concurrent %s pause on two connections", (reason) => {
+    it.each(["callback_first", "pause_first"] as const)("%s -> ends inbound_call; the release does not restart", async (order) => {
+      await seed("accepted");
+      const callBack = () => inboundCall();
+      const temporary = () => pausePropertyEnrollments(client, { propertyId: property, reason });
+      if (order === "callback_first") {
+        const [c, t] = await ordered(callBack, temporary);
+        expect(c.paused).toBe(1);
+        expect(t.paused).toBe(0);
+      } else {
+        const [t, c] = await ordered(temporary, callBack);
+        expect(t.paused).toBe(1);
+        expect(c.paused).toBe(1);
+      }
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
+      expect(await release(reason)).toBe(0);
+      expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
+    });
+  });
 });
