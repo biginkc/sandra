@@ -151,7 +151,7 @@ export async function checkVoicemailDropEligibility(
       .order("started_at", { ascending: false })
       .limit(5),
     // acquisition_attempts has no service-role table grant; read the reached
-    // attempts' facts through the definer RPC (20261021220000).
+    // attempts' facts through the definer RPC (20261021230100).
     client.rpc("get_voicemail_drop_reached_attempt_facts", {
       p_org_id: params.orgId,
       p_property_id: params.propertyId,

@@ -21,7 +21,7 @@ export default defineConfig({
       "supabase/migrations/20261021200100_reserve_voicemail_drop_with_cap.integration.test.ts",
       "supabase/migrations/20261021200200_voicemail_drop_record_outcome.integration.test.ts",
       "supabase/migrations/20261021200400_voicemail_drop_rotation.integration.test.ts",
-      "supabase/migrations/20261021200500_voicemail_drop_proof_copy.integration.test.ts",
+      "supabase/migrations/20261021230000_voicemail_drop_proof_copy.integration.test.ts",
       "src/lib/voicemail-drop/status-reconcile.integration.test.ts",
       "src/lib/voicemail-drop/reconcile-matrix.integration.test.ts",
       "src/lib/voicemail-drop/service-role-grants.integration.test.ts",

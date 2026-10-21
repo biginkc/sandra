@@ -9,7 +9,7 @@
 --    storage.objects policies, so no member of any org can read it directly.
 --    The app checks org access, then hands out a short-lived signed URL.
 --    Object path: <org_id>/<voicemail_drops.id>.<ext>.
--- Rollback: supabase/rollbacks/20261021200500_voicemail_drop_proof_copy.sql
+-- Rollback: supabase/rollbacks/20261021230000_voicemail_drop_proof_copy.sql
 begin;
 
 alter table public.voicemail_drops

@@ -8,7 +8,7 @@ import { supabaseProofCopyStore, sweepPendingProofCopies } from "@/lib/voicemail
  * Vercel cron → `/api/cron/voicemail-proof-sweep` every 5 minutes. Retries
  * voicemail drop proof-of-delivery copies whose download failed (or never
  * recorded a result) while Drop Cowboy's link still works. Answers
- * `disabled` until the 20261021200500 migration's columns exist.
+ * `disabled` until the 20261021230000 migration's columns exist.
  */
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
