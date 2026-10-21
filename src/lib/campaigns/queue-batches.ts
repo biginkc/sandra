@@ -152,11 +152,8 @@ export async function runBatchedPauseRpc(
     paused_count: 0,
   };
 
-  const pauseArgs = {
-    ...baseArgs,
-    p_limit: limit,
-    p_op_id: globalThis.crypto.randomUUID(),
-  };
+  // Pause is idempotent and preempts any resume/cadence op; it needs no op id.
+  const pauseArgs = { ...baseArgs, p_limit: limit };
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
     let { data, error } = await client.rpc("pause_campaign_queue", pauseArgs);

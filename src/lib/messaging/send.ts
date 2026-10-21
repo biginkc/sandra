@@ -1673,6 +1673,8 @@ async function releaseQueuedMessageInner(
     msg.scheduled_for,
   );
   if (campaignPause) return campaignPause;
+  const cadenceHold = await holdIfCampaignCadenceChanging(supabase, msg.id, msg.campaign_id);
+  if (cadenceHold) return cadenceHold;
   if (msg.scheduled_for && new Date(msg.scheduled_for).getTime() > Date.now()) {
     return {
       status: "blocked_not_due",
@@ -2279,6 +2281,51 @@ async function campaignIsPaused(
     .maybeSingle();
   if (error) return { paused: false, error: error.message };
   return { paused: data?.status === "paused", error: null };
+}
+
+/**
+ * While a batched cadence change is rewriting a campaign's queued schedule
+ * (campaign_queue_ops, active, touched in the last 2 minutes), hold its rows
+ * so ones not yet rescheduled cannot send ahead of the new cadence.
+ */
+async function holdIfCampaignCadenceChanging(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  campaignId: string | null | undefined,
+): Promise<Extract<SendSmsOutcome, { status: "blocked_not_due" | "db_error" }> | null> {
+  if (!campaignId) return null;
+  const freshSince = new Date(Date.now() - 2 * 60_000).toISOString();
+  const { data, error } = await (
+    supabase as unknown as {
+      from: (table: "campaign_queue_ops") => {
+        select: (cols: "id") => {
+          eq: (col: "campaign_id", v: string) => {
+            eq: (col: "kind", v: "cadence") => {
+              eq: (col: "state", v: "active") => {
+                gt: (col: "touched_at", v: string) => {
+                  limit: (n: number) => PromiseLike<{ data: Array<{ id: string }> | null; error: { message: string } | null }>;
+                };
+              };
+            };
+          };
+        };
+      };
+    }
+  )
+    .from("campaign_queue_ops")
+    .select("id")
+    .eq("campaign_id", campaignId)
+    .eq("kind", "cadence")
+    .eq("state", "active")
+    .gt("touched_at", freshSince)
+    .limit(1);
+  if (error) return { status: "db_error", error: error.message };
+  if (!data || data.length === 0) return null;
+  return {
+    status: "blocked_not_due",
+    messageId,
+    retryAt: new Date(Date.now() + 30_000).toISOString(),
+  };
 }
 
 async function blockIfCampaignPaused(

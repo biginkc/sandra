@@ -6,150 +6,151 @@
 -- triggers, and service_role/authenticator run with an 8s statement_timeout
 -- in production, so ~2,700 rows hit "canceling statement due to statement
 -- timeout". A function-level SET statement_timeout does not extend the
--- already-running top-level statement, so the fix is to bound the work per
--- call: each call touches at most p_limit rows and returns remaining_count.
--- Callers loop until remaining_count = 0, passing the same p_op_id each call.
+-- already-running top-level statement, so the fix is to bound the message
+-- writes per call: each call touches at most p_limit messages and returns
+-- remaining_count. Callers loop, passing the same p_op_id on every call.
 --
--- Operations. A campaign has at most one in-flight queue operation
--- (campaigns.queue_op_*), owned by the caller's p_op_id:
---   * A call whose p_op_id owns the op continues it. Its pace must match.
---   * A different op while the owner touched it in the last 2 minutes is
---     refused (55P03, "in progress") - except pause, which always preempts
---     and records the preempted op as cancelled; a cancelled op is refused
---     forever after.
---   * An op idle for 2 minutes may be taken over by a new op (retry after a
---     crash). A resume takeover must use the same pace (no mixed cadence);
---     its predecessors stay in queue_op_prev_ids so their rows still count as
---     this resume's prefix.
---   * The op is cleared on the call that leaves remaining_count = 0.
---
--- Ordering/continuity:
---   * resume: re-queued rows are tagged metadata.campaignResume.op. The next
---     batch starts one pace after the latest queued row tagged by this op
---     (or its predecessors), picking paused rows in the original order
---     (previousScheduledFor asc nulls last, created_at, id). It refuses while
---     any queued row is not tagged by this op chain (a pause that has not
---     finished, or rows from an older resume generation). The campaign flips
---     to 'completed' only on the final batch.
---   * cadence: rows are tagged metadata.campaignCadence = {op, orig}, orig
---     being the time before the FIRST pass that ever moved the row. Rows not
---     tagged by this op are processed ordered by orig when tagged, else by
---     scheduled_for, so untouched rows and rows moved by an abandoned pass
---     share one key space and the result matches the single-shot order.
---   * pause: the campaign flips to 'paused' on the FIRST batch, so the
---     sender's paused-campaign gate holds every due queued row even if a
---     later batch never runs. Pause strips campaignResume/campaignCadence.
+-- Resume and cadence are OPERATIONS (campaign_queue_ops):
+--   * The first call builds the whole schedule into campaign_queue_plan in
+--     one cheap insert (no message triggers), using exactly the single-shot
+--     order and spacing. Later calls only copy the next p_limit planned times
+--     onto messages, so order and cadence are fixed at plan time and cannot
+--     drift across batches, retries, or sender activity.
+--   * One active op per campaign. A call with a known op id continues it
+--     (same kind and pace) only while it is active; done / cancelled /
+--     superseded ops are refused forever. A different op is refused while
+--     the active one was touched in the last 2 minutes (55P03). After that
+--     it may take over (crash retry): same kind inherits the plan order (a
+--     resume takeover must use the same pace; a cadence takeover re-times
+--     every planned row at its own pace), and the old op is superseded.
+--   * Pause preempts: it cancels any active resume/cadence op. Pause itself
+--     is idempotent and needs no op. It flips the campaign to 'paused' on its
+--     FIRST batch, so the sender's paused-campaign gate holds every due
+--     queued row even if a later batch never runs.
+--   * Resume refuses to start while any queued row remains (a pause that has
+--     not finished). It re-queues planned rows that are still paused (rows
+--     the sender re-paused mid-resume are re-applied with their planned
+--     time) and flips the campaign to 'completed' only on the final batch.
+--   * While a cadence op is active, the sender holds the campaign's queued
+--     rows (blocked_not_due), so rows not yet rescheduled cannot jump ahead.
 --
 -- p_limit null (the default) keeps the old unbounded single-statement
 -- behaviour for any caller still on the old argument list.
 
 begin;
 
-alter table public.campaigns
-  add column if not exists queue_op_id uuid,
-  add column if not exists queue_op_kind text,
-  add column if not exists queue_op_pace integer,
-  add column if not exists queue_op_touched_at timestamptz,
-  add column if not exists queue_op_prev_ids uuid[],
-  add column if not exists queue_op_cancelled_id uuid;
+create table if not exists public.campaign_queue_ops (
+  id uuid primary key,
+  campaign_id uuid not null references public.campaigns (id) on delete cascade,
+  kind text not null check (kind in ('resume', 'cadence')),
+  pace_seconds integer not null,
+  state text not null default 'active'
+    check (state in ('active', 'done', 'cancelled', 'superseded')),
+  created_at timestamptz not null default now(),
+  touched_at timestamptz not null default now()
+);
+
+create unique index if not exists campaign_queue_ops_one_active
+  on public.campaign_queue_ops (campaign_id)
+  where state = 'active';
+
+create table if not exists public.campaign_queue_plan (
+  op_id uuid not null references public.campaign_queue_ops (id) on delete cascade,
+  seq integer not null,
+  message_id uuid not null,
+  scheduled_for timestamptz not null,
+  applied boolean not null default false,
+  primary key (op_id, seq)
+);
+
+alter table public.campaign_queue_ops enable row level security;
+alter table public.campaign_queue_plan enable row level security;
+revoke all on table public.campaign_queue_ops from public, anon, authenticated;
+revoke all on table public.campaign_queue_plan from public, anon, authenticated;
+grant select, insert, update, delete on table public.campaign_queue_ops to service_role;
+grant select, insert, update, delete on table public.campaign_queue_plan to service_role;
 
 drop function if exists public.pause_campaign_queue(uuid, boolean);
 drop function if exists public.resume_campaign_queue(uuid, integer, integer, boolean);
 drop function if exists public.apply_campaign_cadence_reschedule(uuid, integer, integer, boolean);
 
--- Internal: claim/continue/take over the campaign's queue op. Caller must
--- already hold the campaign row lock. Returns the op chain (current op plus
--- taken-over predecessors of the same kind).
+-- Internal. Caller holds the campaign row lock. Returns 'new' (build a plan),
+-- 'inherit' (plan taken over from an abandoned op of the same kind) or
+-- 'continue'.
 create function public.campaign_queue_claim_op(
   p_campaign_id uuid,
   p_kind text,
   p_op_id uuid,
   p_pace integer
 )
-returns uuid[]
+returns text
 language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
 declare
   v_now timestamptz := clock_timestamp();
-  c record;
-  v_prev uuid[];
+  v_mine public.campaign_queue_ops%rowtype;
+  v_active public.campaign_queue_ops%rowtype;
 begin
-  select queue_op_id, queue_op_kind, queue_op_pace, queue_op_touched_at,
-         queue_op_prev_ids, queue_op_cancelled_id
-  into c
-  from public.campaigns
-  where id = p_campaign_id;
-
-  if c.queue_op_cancelled_id = p_op_id then
-    raise exception 'campaign queue operation was cancelled by a pause'
-      using errcode = '55000';
-  end if;
-
-  if p_kind = 'pause' then
-    if c.queue_op_id is not null and c.queue_op_kind <> 'pause' then
-      update public.campaigns
-      set queue_op_cancelled_id = c.queue_op_id
-      where id = p_campaign_id;
-    end if;
-    if c.queue_op_id is distinct from p_op_id then
-      update public.campaigns
-      set queue_op_id = p_op_id, queue_op_kind = 'pause', queue_op_pace = null,
-          queue_op_prev_ids = null
-      where id = p_campaign_id;
-    end if;
-    update public.campaigns set queue_op_touched_at = v_now where id = p_campaign_id;
-    return array[p_op_id];
-  end if;
-
-  if c.queue_op_id = p_op_id then
-    if c.queue_op_kind <> p_kind or c.queue_op_pace is distinct from p_pace then
-      raise exception 'campaign queue operation % changed kind or pace mid-run', p_op_id
+  select * into v_mine from public.campaign_queue_ops where id = p_op_id;
+  if found then
+    if v_mine.campaign_id <> p_campaign_id or v_mine.kind <> p_kind or v_mine.pace_seconds <> p_pace then
+      raise exception 'campaign queue operation % does not match this request', p_op_id
         using errcode = '22023';
     end if;
-    update public.campaigns set queue_op_touched_at = v_now where id = p_campaign_id;
-    return array[p_op_id] || coalesce(c.queue_op_prev_ids, '{}');
+    if v_mine.state <> 'active' then
+      raise exception 'campaign queue operation is %; start a new one', v_mine.state
+        using errcode = '55000';
+    end if;
+    update public.campaign_queue_ops set touched_at = v_now where id = p_op_id;
+    return 'continue';
   end if;
 
-  if c.queue_op_id is not null and c.queue_op_touched_at > v_now - interval '2 minutes' then
-    raise exception 'another campaign queue change (%) is in progress; try again shortly', c.queue_op_kind
+  select * into v_active
+  from public.campaign_queue_ops
+  where campaign_id = p_campaign_id and state = 'active';
+
+  if not found then
+    insert into public.campaign_queue_ops (id, campaign_id, kind, pace_seconds, touched_at)
+    values (p_op_id, p_campaign_id, p_kind, p_pace, v_now);
+    return 'new';
+  end if;
+
+  if v_active.touched_at > v_now - interval '2 minutes' then
+    raise exception 'another campaign queue change (%) is in progress; try again in 2 minutes', v_active.kind
       using errcode = '55P03';
   end if;
 
-  v_prev := null;
-  if c.queue_op_id is not null and c.queue_op_kind = p_kind and p_kind = 'resume' then
-    if c.queue_op_pace is distinct from p_pace then
-      raise exception 'an interrupted resume used % second pacing; resume again at % seconds to finish it',
-        c.queue_op_pace, c.queue_op_pace
-        using errcode = '22023';
-    end if;
-    v_prev := array[c.queue_op_id] || coalesce(c.queue_op_prev_ids, '{}');
+  if v_active.kind = 'resume' and p_kind = 'resume' and v_active.pace_seconds <> p_pace then
+    raise exception 'an interrupted resume used % second pacing; resume again at % seconds to finish it',
+      v_active.pace_seconds, v_active.pace_seconds
+      using errcode = '22023';
   end if;
 
-  update public.campaigns
-  set queue_op_id = p_op_id,
-      queue_op_kind = p_kind,
-      queue_op_pace = p_pace,
-      queue_op_touched_at = v_now,
-      queue_op_prev_ids = v_prev
-  where id = p_campaign_id;
+  update public.campaign_queue_ops set state = 'superseded' where id = v_active.id;
+  insert into public.campaign_queue_ops (id, campaign_id, kind, pace_seconds, touched_at)
+  values (p_op_id, p_campaign_id, p_kind, p_pace, v_now);
 
-  return array[p_op_id] || coalesce(v_prev, '{}');
+  if v_active.kind = p_kind then
+    update public.campaign_queue_plan set op_id = p_op_id where op_id = v_active.id;
+    return 'inherit';
+  end if;
+
+  delete from public.campaign_queue_plan where op_id = v_active.id;
+  return 'new';
 end;
 $$;
 
-create function public.campaign_queue_finish_op(p_campaign_id uuid, p_op_id uuid)
+create function public.campaign_queue_finish_op(p_op_id uuid, p_state text)
 returns void
 language sql
 security definer
 set search_path = public, pg_temp
 as $$
-  update public.campaigns
-  set queue_op_id = null, queue_op_kind = null, queue_op_pace = null,
-      queue_op_touched_at = null, queue_op_prev_ids = null
-  where id = p_campaign_id
-    and queue_op_id = p_op_id;
+  delete from public.campaign_queue_plan where op_id = p_op_id;
+  update public.campaign_queue_ops set state = p_state, touched_at = clock_timestamp()
+  where id = p_op_id and state = 'active';
 $$;
 
 create function public.apply_campaign_cadence_reschedule(
@@ -174,15 +175,15 @@ declare
   v_org_id uuid;
   v_caller_id uuid := auth.uid();
   v_op uuid := coalesce(p_op_id, gen_random_uuid());
-  v_run_id text := v_op::text;
   v_start_after_seconds integer := greatest(coalesce(p_start_after_seconds, 300), 0);
   v_now timestamptz := clock_timestamp();
-  v_start_at timestamptz;
-  v_prev_last timestamptz;
+  v_start_at timestamptz := v_now + make_interval(secs => v_start_after_seconds);
   v_affected_count bigint := 0;
   v_first_scheduled_for timestamptz;
   v_last_scheduled_for timestamptz;
   v_remaining bigint := 0;
+  v_ever_applied boolean;
+  v_claim text;
 begin
   if p_operator_confirmed is distinct from true then
     raise exception 'apply_campaign_cadence_reschedule: operator confirmation required'
@@ -227,72 +228,55 @@ begin
     end if;
   end if;
 
-  perform public.campaign_queue_claim_op(p_campaign_id, 'cadence', v_op, p_pace_seconds);
-
-  select max(m.scheduled_for)
-  into v_prev_last
-  from public.messages m
-  where m.campaign_id = p_campaign_id
-    and m.org_id = v_org_id
-    and m.channel = 'sms'
-    and m.direction = 'outbound'
-    and m.status = 'queued'
-    and m.metadata #>> '{campaignCadence,op}' = v_run_id;
-
-  v_start_at := case
-    when v_prev_last is null then v_now + make_interval(secs => v_start_after_seconds)
-    else greatest(v_prev_last + make_interval(secs => p_pace_seconds), v_now)
-  end;
-
-  with candidates as (
+  v_claim := public.campaign_queue_claim_op(p_campaign_id, 'cadence', v_op, p_pace_seconds);
+  if v_claim = 'inherit' then
+    -- Keep the abandoned pass's order; re-time every row at this pace.
+    update public.campaign_queue_plan p
+    set scheduled_for = v_start_at + (p.seq::double precision * make_interval(secs => p_pace_seconds)),
+        applied = false
+    where p.op_id = v_op;
+  elsif v_claim = 'new' then
+    insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
     select
+      v_op,
+      (row_number() over (order by m.scheduled_for asc nulls first, m.created_at asc, m.id asc) - 1)::integer,
       m.id,
-      m.created_at,
-      case
-        when m.metadata ? 'campaignCadence'
-          then nullif(m.metadata #>> '{campaignCadence,orig}', '')::timestamptz
-        else m.scheduled_for
-      end as order_key
+      v_start_at + (
+        (row_number() over (order by m.scheduled_for asc nulls first, m.created_at asc, m.id asc) - 1)::double precision
+        * make_interval(secs => p_pace_seconds))
     from public.messages m
     where m.campaign_id = p_campaign_id
       and m.org_id = v_org_id
       and m.channel = 'sms'
       and m.direction = 'outbound'
+      and m.status = 'queued';
+  end if;
+
+  with batch as (
+    select p.seq, p.message_id, p.scheduled_for
+    from public.campaign_queue_plan p
+    join public.messages m on m.id = p.message_id
+    where p.op_id = v_op
+      and not p.applied
       and m.status = 'queued'
-      and (m.metadata #>> '{campaignCadence,op}') is distinct from v_run_id
-  ),
-  batch as (
-    select m.id, candidates.order_key, m.created_at
-    from candidates
-    join public.messages m on m.id = candidates.id
-    order by candidates.order_key asc nulls first, candidates.created_at asc, candidates.id asc
+    order by p.seq
     limit coalesce(p_limit, 2147483647)
     for update of m
   ),
-  planned as (
-    select
-      batch.id,
-      v_start_at + (
-        (row_number() over (
-          order by batch.order_key asc nulls first, batch.created_at asc, batch.id asc
-        ) - 1)::double precision * make_interval(secs => p_pace_seconds)
-      ) as scheduled_for
-    from batch
-  ),
   updated as (
     update public.messages m
-    set scheduled_for = planned.scheduled_for,
-        metadata = (coalesce(m.metadata, '{}'::jsonb) - 'campaignCadence')
-          || jsonb_build_object('campaignCadence', jsonb_build_object(
-            'op', v_run_id,
-            'orig', case
-              when m.metadata ? 'campaignCadence'
-                then m.metadata #>> '{campaignCadence,orig}'
-              else m.scheduled_for::text
-            end))
-    from planned
-    where m.id = planned.id
-    returning m.scheduled_for
+    set scheduled_for = batch.scheduled_for
+    from batch
+    where m.id = batch.message_id
+      and m.status = 'queued'
+    returning m.id, m.scheduled_for
+  ),
+  marked as (
+    update public.campaign_queue_plan p
+    set applied = true
+    from updated
+    where p.op_id = v_op and p.message_id = updated.id
+    returning 1
   )
   select
     count(updated.scheduled_for)::bigint,
@@ -303,23 +287,23 @@ begin
 
   select count(*)::bigint
   into v_remaining
-  from public.messages m
-  where m.campaign_id = p_campaign_id
-    and m.org_id = v_org_id
-    and m.channel = 'sms'
-    and m.direction = 'outbound'
-    and m.status = 'queued'
-    and (m.metadata #>> '{campaignCadence,op}') is distinct from v_run_id;
+  from public.campaign_queue_plan p
+  join public.messages m on m.id = p.message_id
+  where p.op_id = v_op
+    and not p.applied
+    and m.status = 'queued';
 
   if v_remaining = 0 then
-    if v_affected_count > 0 or v_prev_last is not null then
+    select exists (select 1 from public.campaign_queue_plan p where p.op_id = v_op and p.applied)
+    into v_ever_applied;
+    if v_ever_applied then
       update public.campaigns c
       set pace_seconds = p_pace_seconds,
           updated_at = clock_timestamp()
       where c.id = p_campaign_id
         and c.org_id = v_org_id;
     end if;
-    perform public.campaign_queue_finish_op(p_campaign_id, v_op);
+    perform public.campaign_queue_finish_op(v_op, 'done');
   end if;
 
   return query
@@ -330,8 +314,7 @@ $$;
 create function public.pause_campaign_queue(
   p_campaign_id uuid,
   p_operator_confirmed boolean default false,
-  p_limit integer default null,
-  p_op_id uuid default null
+  p_limit integer default null
 )
 returns table (
   affected_count bigint,
@@ -347,12 +330,12 @@ declare
   v_org_id uuid;
   v_campaign_status text;
   v_caller_id uuid := auth.uid();
-  v_op uuid := coalesce(p_op_id, gen_random_uuid());
   v_now timestamptz := clock_timestamp();
   v_affected_count bigint := 0;
   v_pending_count bigint := 0;
   v_paused_count bigint := 0;
   v_remaining bigint := 0;
+  v_active uuid;
 begin
   if p_operator_confirmed is distinct from true then
     raise exception 'pause_campaign_queue: operator confirmation required'
@@ -397,7 +380,13 @@ begin
     end if;
   end if;
 
-  perform public.campaign_queue_claim_op(p_campaign_id, 'pause', v_op, null);
+  -- Pause preempts any in-flight resume or cadence operation.
+  select o.id into v_active
+  from public.campaign_queue_ops o
+  where o.campaign_id = p_campaign_id and o.state = 'active';
+  if v_active is not null then
+    perform public.campaign_queue_finish_op(v_active, 'cancelled');
+  end if;
 
   with batch as (
     select m.id
@@ -415,15 +404,14 @@ begin
     update public.messages m
     set status = 'paused',
         scheduled_for = null,
-        metadata = (coalesce(m.metadata, '{}'::jsonb) - 'campaignResume' - 'campaignCadence')
-          || jsonb_build_object(
-            'campaignPause',
-            jsonb_build_object(
-              'pausedAt', v_now,
-              'previousScheduledFor', m.scheduled_for,
-              'reason', 'operator_pause'
-            )
+        metadata = coalesce(m.metadata, '{}'::jsonb) || jsonb_build_object(
+          'campaignPause',
+          jsonb_build_object(
+            'pausedAt', v_now,
+            'previousScheduledFor', m.scheduled_for,
+            'reason', 'operator_pause'
           )
+        )
     from batch
     where m.id = batch.id
     returning 1
@@ -473,10 +461,6 @@ begin
     and c.org_id = v_org_id
     and c.status <> 'archived';
 
-  if v_remaining = 0 then
-    perform public.campaign_queue_finish_op(p_campaign_id, v_op);
-  end if;
-
   return query
   select v_affected_count, v_pending_count, v_paused_count, v_remaining;
 end;
@@ -505,11 +489,9 @@ declare
   v_campaign_status text;
   v_caller_id uuid := auth.uid();
   v_op uuid := coalesce(p_op_id, gen_random_uuid());
-  v_chain text[];
   v_start_after_seconds integer := greatest(coalesce(p_start_after_seconds, 300), 0);
   v_now timestamptz := clock_timestamp();
-  v_start_at timestamptz;
-  v_prev_last timestamptz;
+  v_start_at timestamptz := v_now + make_interval(secs => v_start_after_seconds);
   v_affected_count bigint := 0;
   v_first_scheduled_for timestamptz;
   v_last_scheduled_for timestamptz;
@@ -568,79 +550,60 @@ begin
     end if;
   end if;
 
-  select array_agg(x::text)
-  into v_chain
-  from unnest(public.campaign_queue_claim_op(p_campaign_id, 'resume', v_op, p_pace_seconds)) x;
+  if public.campaign_queue_claim_op(p_campaign_id, 'resume', v_op, p_pace_seconds) = 'new' then
+    if exists (
+      select 1
+      from public.messages m
+      where m.campaign_id = p_campaign_id
+        and m.org_id = v_org_id
+        and m.channel = 'sms'
+        and m.direction = 'outbound'
+        and m.status = 'queued'
+    ) then
+      raise exception 'resume_campaign_queue: pause has not finished holding queued messages; pause again, then resume'
+        using errcode = '55000';
+    end if;
 
-  -- Queued rows not re-queued by this resume (or the interrupted resume it
-  -- took over) mean a pause has not finished holding them.
-  if exists (
-    select 1
-    from public.messages m
-    where m.campaign_id = p_campaign_id
-      and m.org_id = v_org_id
-      and m.channel = 'sms'
-      and m.direction = 'outbound'
-      and m.status = 'queued'
-      and not coalesce(m.metadata #>> '{campaignResume,op}' = any (v_chain), false)
-  ) then
-    raise exception 'resume_campaign_queue: pause has not finished holding queued messages; pause again, then resume'
-      using errcode = '55000';
-  end if;
-
-  select max(m.scheduled_for)
-  into v_prev_last
-  from public.messages m
-  where m.campaign_id = p_campaign_id
-    and m.org_id = v_org_id
-    and m.channel = 'sms'
-    and m.direction = 'outbound'
-    and m.status = 'queued'
-    and m.metadata #>> '{campaignResume,op}' = any (v_chain);
-
-  v_start_at := case
-    when v_prev_last is null then v_now + make_interval(secs => v_start_after_seconds)
-    else greatest(v_prev_last + make_interval(secs => p_pace_seconds), v_now)
-  end;
-
-  with batch as (
+    insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
     select
+      v_op,
+      (row_number() over w - 1)::integer,
       m.id,
-      nullif(m.metadata #>> '{campaignPause,previousScheduledFor}', '')::timestamptz
-        as previous_scheduled_for,
-      m.created_at
+      v_start_at + ((row_number() over w - 1)::double precision * make_interval(secs => p_pace_seconds))
     from public.messages m
     where m.campaign_id = p_campaign_id
       and m.org_id = v_org_id
       and m.channel = 'sms'
       and m.direction = 'outbound'
       and m.status = 'paused'
-    order by
-      nullif(m.metadata #>> '{campaignPause,previousScheduledFor}', '')::timestamptz asc nulls last,
-      m.created_at asc,
-      m.id asc
+    window w as (
+      order by
+        nullif(m.metadata #>> '{campaignPause,previousScheduledFor}', '')::timestamptz asc nulls last,
+        m.created_at asc,
+        m.id asc
+    );
+  end if;
+
+  -- Planned rows still paused: never applied, or re-paused by the sender
+  -- while this resume was running (they get their planned time back).
+  with batch as (
+    select p.seq, p.message_id, p.scheduled_for
+    from public.campaign_queue_plan p
+    join public.messages m on m.id = p.message_id
+    where p.op_id = v_op
+      and m.status = 'paused'
+    order by p.seq
     limit coalesce(p_limit, 2147483647)
     for update of m
-  ),
-  planned as (
-    select
-      batch.id,
-      v_start_at + (
-        (row_number() over (
-          order by batch.previous_scheduled_for asc nulls last, batch.created_at asc, batch.id asc
-        ) - 1)::double precision * make_interval(secs => p_pace_seconds)
-      ) as scheduled_for
-    from batch
   ),
   updated as (
     update public.messages m
     set status = 'queued',
-        scheduled_for = planned.scheduled_for,
-        metadata = (coalesce(m.metadata, '{}'::jsonb) - 'campaignPause')
-          || jsonb_build_object('campaignResume', jsonb_build_object(
-            'op', v_op::text, 'resumedAt', v_now))
-    from planned
-    where m.id = planned.id
+        scheduled_for = batch.scheduled_for,
+        metadata = coalesce(m.metadata, '{}'::jsonb) - 'campaignPause'
+    from batch
+    where m.id = batch.message_id
+      and m.status = 'paused'
     returning m.scheduled_for
   )
   select
@@ -652,11 +615,9 @@ begin
 
   select count(*)::bigint
   into v_remaining
-  from public.messages m
-  where m.campaign_id = p_campaign_id
-    and m.org_id = v_org_id
-    and m.channel = 'sms'
-    and m.direction = 'outbound'
+  from public.campaign_queue_plan p
+  join public.messages m on m.id = p.message_id
+  where p.op_id = v_op
     and m.status = 'paused';
 
   if v_remaining = 0 then
@@ -666,7 +627,7 @@ begin
         updated_at = clock_timestamp()
     where c.id = p_campaign_id
       and c.org_id = v_org_id;
-    perform public.campaign_queue_finish_op(p_campaign_id, v_op);
+    perform public.campaign_queue_finish_op(v_op, 'done');
   end if;
 
   return query
@@ -675,12 +636,12 @@ end;
 $$;
 
 revoke all on function public.campaign_queue_claim_op(uuid, text, uuid, integer) from public, anon, authenticated, service_role;
-revoke all on function public.campaign_queue_finish_op(uuid, uuid) from public, anon, authenticated, service_role;
+revoke all on function public.campaign_queue_finish_op(uuid, text) from public, anon, authenticated, service_role;
 revoke execute on function public.apply_campaign_cadence_reschedule(uuid, integer, integer, boolean, integer, uuid) from public, anon, authenticated;
-revoke execute on function public.pause_campaign_queue(uuid, boolean, integer, uuid) from public, anon, authenticated;
+revoke execute on function public.pause_campaign_queue(uuid, boolean, integer) from public, anon, authenticated;
 revoke execute on function public.resume_campaign_queue(uuid, integer, integer, boolean, integer, uuid) from public, anon, authenticated;
 grant execute on function public.apply_campaign_cadence_reschedule(uuid, integer, integer, boolean, integer, uuid) to service_role;
-grant execute on function public.pause_campaign_queue(uuid, boolean, integer, uuid) to service_role;
+grant execute on function public.pause_campaign_queue(uuid, boolean, integer) to service_role;
 grant execute on function public.resume_campaign_queue(uuid, integer, integer, boolean, integer, uuid) to service_role;
 
 commit;

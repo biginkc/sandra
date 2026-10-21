@@ -336,7 +336,6 @@ describe("campaign cadence actions", () => {
       p_campaign_id: "campaign-1",
       p_operator_confirmed: true,
       p_limit: 100,
-      p_op_id: expect.any(String),
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
