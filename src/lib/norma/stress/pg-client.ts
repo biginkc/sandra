@@ -247,7 +247,7 @@ export function createPgSupabase(pool: Pool, options: PgClientOptions): Supabase
  * is.null / is.true / is.false. Anything else throws, so the harness never
  * silently mis-filters.
  */
-type LogicNode =
+export type LogicNode =
   | { kind: "and" | "or"; items: LogicNode[] }
   | { kind: "cond"; col: string; op: "eq" | "neq" | "is"; value: string };
 
@@ -258,6 +258,7 @@ function splitTopLevel(expr: string): string[] {
   for (const ch of expr) {
     if (ch === "(") depth += 1;
     if (ch === ")") depth -= 1;
+    if (depth < 0) throw new Error(`pg-client: unbalanced or() expression: ${expr}`);
     if (ch === "," && depth === 0) {
       out.push(cur);
       cur = "";
@@ -265,15 +266,22 @@ function splitTopLevel(expr: string): string[] {
   }
   if (depth !== 0) throw new Error(`pg-client: unbalanced or() expression: ${expr}`);
   out.push(cur);
-  return out.map((x) => x.trim()).filter(Boolean);
+  // PostgREST rejects an empty clause (a stray or trailing comma); so do we.
+  for (const item of out) {
+    if (item.trim() === "") throw new Error(`pg-client: empty clause in or() expression: ${expr}`);
+  }
+  return out;
 }
 
-function parseLogicList(expr: string): LogicNode[] {
+/** Exported for the parser's own regression tests. */
+export function parseLogicList(expr: string): LogicNode[] {
   return splitTopLevel(expr).map((item) => {
     const nested = /^(and|or)\((.*)\)$/.exec(item);
     if (nested) return { kind: nested[1] as "and" | "or", items: parseLogicList(nested[2]) };
     const m = /^([a-z_][a-z0-9_]*)\.(eq|neq|is)\.(.*)$/.exec(item);
     if (!m) throw new Error(`pg-client: or() condition not modelled: ${item}`);
+    // Quoting / escaping is not decoded here: reject rather than misread.
+    if (/["\\(),]/.test(m[3]) || m[3] === "") throw new Error(`pg-client: or() value not modelled: ${item}`);
     if (m[2] === "is" && !["null", "true", "false"].includes(m[3])) {
       throw new Error(`pg-client: or() is.${m[3]} not modelled`);
     }
