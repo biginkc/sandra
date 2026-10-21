@@ -218,6 +218,13 @@ export async function handleDropStatusEvent(
   store: DropStatusStore,
   event: VoicemailDropStatusEvent,
   now: Date = new Date(),
+  hooks: {
+    /**
+     * Runs after a receipt's proof_url is saved (durable copy, PR 7). Its
+     * failure is reported and never fails the event: the copy is retried.
+     */
+    onProofUrl?: (dropRowId: string, receivedAt: Date) => Promise<unknown>;
+  } = {},
 ): Promise<StatusWebhookResult> {
   const eventType = event.kind === "receipt" ? "contact.rvm.receipt" : "contact.rvm.status";
   const reservation = await store.reserveEvent(eventType, event.eventId, event.raw as Json);
@@ -231,7 +238,16 @@ export async function handleDropStatusEvent(
     }
     if (event.kind === "receipt") {
       // A receipt only carries proof; it never changes the outcome.
-      if (event.proofUrl) await store.updateDrop(drop.id, { proof_url: event.proofUrl });
+      if (event.proofUrl) {
+        await store.updateDrop(drop.id, { proof_url: event.proofUrl });
+        if (hooks.onProofUrl) {
+          try {
+            await hooks.onProofUrl(drop.id, now);
+          } catch (error) {
+            reportError(error, { tags: { surface: "dropcowboy_rvm_proof_copy" }, extra: { dropRowId: drop.id } });
+          }
+        }
+      }
     } else {
       await applyTerminalOutcome(
         store,

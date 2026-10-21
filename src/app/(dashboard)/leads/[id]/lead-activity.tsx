@@ -17,6 +17,7 @@ import {
   voicemailDropTimelineText,
   type VoicemailDropTimelineRow,
 } from "@/lib/sequences/voicemail-drop-step-config";
+import { hasProofOfDelivery } from "@/lib/voicemail-drop/proof-link";
 
 import {
   CallEventCard,
@@ -802,14 +803,19 @@ function VoicemailDropCard({ row }: { row: VoicemailDropTimelineRow }) {
         </time>
       </div>
       {detail ? <p className="text-muted-foreground text-xs">{detail}</p> : null}
-      {row.proof_url?.startsWith("https://") ? (
+      {hasProofOfDelivery({
+        proof_url: row.proof_url,
+        proof_url_at: row.proof_url_at ?? null,
+        completed_at: row.completed_at,
+        proof_storage_path: row.proof_storage_path ?? null,
+      }) ? (
         <a
-          href={row.proof_url}
+          href={`/api/voicemail-drops/${encodeURIComponent(row.id)}/proof`}
           target="_blank"
           rel="noreferrer noopener"
           className="text-xs underline"
         >
-          Proof of delivery (kept 7 days)
+          Proof of delivery
         </a>
       ) : null}
     </div>

@@ -6608,6 +6608,15 @@ export type Database = {
           idempotency_key: string
           org_id: string
           proof_url: string | null
+          proof_url_at: string | null
+          proof_storage_path: string | null
+          proof_content_type: string | null
+          proof_size_bytes: number | null
+          proof_fetched_at: string | null
+          proof_copy_status: string | null
+          proof_copy_attempts: number
+          proof_copy_next_at: string | null
+          proof_copy_error: string | null
           property_id: string | null
           provider: string
           provider_payload: Json | null
@@ -6632,6 +6641,15 @@ export type Database = {
           idempotency_key: string
           org_id: string
           proof_url?: string | null
+          proof_url_at?: string | null
+          proof_storage_path?: string | null
+          proof_content_type?: string | null
+          proof_size_bytes?: number | null
+          proof_fetched_at?: string | null
+          proof_copy_status?: string | null
+          proof_copy_attempts?: number
+          proof_copy_next_at?: string | null
+          proof_copy_error?: string | null
           property_id?: string | null
           provider: string
           provider_payload?: Json | null
@@ -6656,6 +6674,15 @@ export type Database = {
           idempotency_key?: string
           org_id?: string
           proof_url?: string | null
+          proof_url_at?: string | null
+          proof_storage_path?: string | null
+          proof_content_type?: string | null
+          proof_size_bytes?: number | null
+          proof_fetched_at?: string | null
+          proof_copy_status?: string | null
+          proof_copy_attempts?: number
+          proof_copy_next_at?: string | null
+          proof_copy_error?: string | null
           property_id?: string | null
           provider?: string
           provider_payload?: Json | null

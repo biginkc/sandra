@@ -75,7 +75,7 @@ Number: the phone from the qualifying event when known, else the primary mobile 
 
 ### Env vars
 
-`VOICEMAIL_DROP_PROVIDER`, `VOICEMAIL_DROP_DAILY_CAP`, `DROPCOWBOY_API_KEY`, `DROPCOWBOY_API_SECRET`, `DROPCOWBOY_PHONE_LINE_ID`, `DROPCOWBOY_VOICE_ID`, `DROPCOWBOY_WEBHOOK_SECRET`, `DROPCOWBOY_CALLBACK_SECRET`, `DROPCOWBOY_CALLER_ID` (BYOC: the dedicated Telnyx number, E.164; when set, drops send `caller_id` and steps no longer need `vm_phone_line_id`). `DROPCOWBOY_VOICE_ID` / `_PHONE_LINE_ID` are only editor defaults; the step's `vm_voice_id` / `vm_phone_line_id` columns are authoritative.
+`VOICEMAIL_DROP_PROVIDER`, `VOICEMAIL_DROP_DAILY_CAP`, `DROPCOWBOY_API_KEY`, `DROPCOWBOY_API_SECRET`, `DROPCOWBOY_PHONE_LINE_ID`, `DROPCOWBOY_VOICE_ID`, `DROPCOWBOY_WEBHOOK_SECRET` (contact.rvm.status subscription), `DROPCOWBOY_RECEIPT_WEBHOOK_SECRET` (contact.rvm.receipt subscription; each subscription has its own signing secret), `DROPCOWBOY_CALLBACK_SECRET`, `DROPCOWBOY_CALLER_ID` (BYOC: the dedicated Telnyx number, E.164; when set, drops send `caller_id` and steps no longer need `vm_phone_line_id`). `DROPCOWBOY_VOICE_ID` / `_PHONE_LINE_ID` are only editor defaults; the step's `vm_voice_id` / `vm_phone_line_id` columns are authoritative.
 
 ## Callback number (finding 5)
 

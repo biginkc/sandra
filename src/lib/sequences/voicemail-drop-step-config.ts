@@ -98,6 +98,10 @@ export type VoicemailDropTimelineRow = {
   reason: string | null;
   reason_code: string | null;
   proof_url: string | null;
+  /** When the receipt saved proof_url (its 7 days start here). */
+  proof_url_at?: string | null;
+  /** Sandra's own stored copy (private bucket), when it has one. */
+  proof_storage_path?: string | null;
   audio_kind: string;
   queued_at: string | null;
   completed_at: string | null;
@@ -105,7 +109,7 @@ export type VoicemailDropTimelineRow = {
 };
 
 export const VOICEMAIL_DROP_TIMELINE_COLUMNS =
-  "id, status, attempt_outcome, reason, reason_code, proof_url, audio_kind, queued_at, completed_at, created_at";
+  "id, status, attempt_outcome, reason, reason_code, proof_url, proof_url_at, proof_storage_path, audio_kind, queued_at, completed_at, created_at";
 
 /**
  * Drops Drop Cowboy proved it never queued (429/500/400/401, or an
