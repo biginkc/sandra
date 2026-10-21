@@ -74,6 +74,8 @@ const HOT_REPLY_DETAIL = "Becomes a lead on My Leads under Jarrad. Slack and tex
 /**
  * Nine-question rows. All wording approved verbatim by Jarrad 2026-10-16 (PR #889).
  */
+const WRONG_PERSON_DETAIL = "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.";
+
 const NINE_DETAIL: Record<NineQuestionId, string> = {
   open_to_selling: HOT_REPLY_DETAIL,
   talked_price: HOT_DETAIL,
@@ -82,7 +84,12 @@ const NINE_DETAIL: Record<NineQuestionId, string> = {
   asked_call: HOT_DETAIL,
   maybe_later: "Sends the approved reply. The drip switch below decides whether a drip starts.",
   not_interested: "When this is on, Sandra sends the approved reply and starts the Not interested drip.",
-  wrong_person: "When this is on, Sandra sends the approved reply, and closes out the property only after the reply has gone out.",
+  wrong_person: WRONG_PERSON_DETAIL,
+  // 2026-10-21: same action as wrong_person, so the same approved sentence.
+  already_sold: WRONG_PERSON_DETAIL,
+  tenant: WRONG_PERSON_DETAIL,
+  // No detail sentence until Jarrad approves one (the row shows only its label).
+  just_ok: "",
   asked_who: "Sandra answers who is texting and why.",
   confirmed_owner: "Sandra starts the Confirmed owner drip. She doesn't reply first.",
   asked_stop: "Do-not-contact can't be undone, so a person confirms it. The word STOP still works on its own.",
@@ -101,7 +108,7 @@ const NINE_EXTRA_RULE: Partial<Record<NineQuestionId, string>> = {
 // Group headings approved verbatim by Jarrad 2026-10-16 (PR #889).
 const NINE_GROUPS: ReadonlyArray<{ heading: string; group: "jarrad" | "alone" | "person"; ids: NineQuestionId[] }> = [
   { heading: "Goes to Jarrad", group: "jarrad", ids: ["asked_call", "asked_offer", "named_price", "talked_price", "open_to_selling"] },
-  { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "confirmed_owner"] },
+  { heading: "Sandra handles alone", group: "alone", ids: ["maybe_later", "asked_who", "not_interested", "wrong_person", "already_sold", "tenant", "confirmed_owner", "just_ok"] },
   { heading: "Waits for a person", group: "person", ids: ["asked_stop", "hostile"] },
 ];
 
@@ -115,6 +122,8 @@ const NINE_BADGE: Partial<Record<NineQuestionId, string>> = {
   maybe_later: "nurture",
   not_interested: "not_interested",
   wrong_person: "wrong_number",
+  already_sold: "wrong_number",
+  tenant: "wrong_number",
   asked_stop: "opted_out",
 };
 

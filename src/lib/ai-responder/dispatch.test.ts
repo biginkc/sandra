@@ -2000,6 +2000,47 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
   });
 
+  // 20261021120000: STALE_DECISION_CONTEXT now raises SQLSTATE JDC01 (was 40001, which
+  // PostgREST 14 retried forever). The RPC error now reaches dispatch: it must be
+  // handled on the first answer (never re-called), hold for a person, and send nothing.
+  it("handles a JDC01 STALE_DECISION_CONTEXT disposition rejection once: no retry, held, nothing sent", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalRpc = supabase.rpc.bind(supabase);
+    const rpc = vi.spyOn(supabase, "rpc").mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "fn_apply_ai_disposition_with_review") {
+        return Promise.resolve({ data: null, error: { code: "JDC01", message: "STALE_DECISION_CONTEXT" } }) as never;
+      }
+      return originalRpc(name, args as never) as never;
+    });
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_not_interested",
+      confidence: 0.9,
+      sentiment: "neutral",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "not interested",
+        inboundMessageId: "inbound-stale-dispo",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(rpc.mock.calls.filter(([name]) => name === "fn_apply_ai_disposition_with_review")).toHaveLength(1);
+    expect(outcome.outcome).not.toBe("auto_closed");
+    expect(outcome.outcome).not.toBe("sent");
+    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("jev_stale_decision_context");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
   it("leaves a persistent disposition failure visible and retryable", async () => {
     const state = createMockState();
     state.aiDispositionRpcErrorsRemaining = 2;
