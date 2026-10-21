@@ -88,7 +88,7 @@ export type BackfillFacts = {
   latestInbound: BackfillMessage | null;
   /** Any outbound sent after the latest inbound, or still waiting to go (this property or this phone). */
   outboundSinceInbound: boolean;
-  /** The seller texted again from this phone, on another property, after this inbound. */
+  /** The seller texted again from this phone (another property, or unrouted) after this inbound. */
   newerInboundElsewhere: boolean;
   /** The lead's current status is still one the run was told to scan. */
   statusInScope: boolean;
@@ -354,8 +354,10 @@ export async function loadLeadFacts(
         exists("sent after", () => toPhone().gt("sent_at", at).limit(1)),
         exists("created after", () => toPhone().is("sent_at", null).gt("created_at", at).limit(1)),
         exists("newer inbound", () =>
+          // Any property, or none (an unrouted inbound has property_id null): this
+          // property's own newer inbound would have been the latest anyway.
           supabase.from("messages").select("id").eq("org_id", orgId).eq("channel", "sms").eq("direction", "inbound").eq("from_address", phone)
-            .neq("property_id", propertyId).gt("created_at", at).limit(1),
+            .gt("created_at", at).limit(1),
         ),
         exists("calls", () => supabase.from("call_activities").select("id").eq("org_id", orgId).eq("phone_e164", phone).gt("created_at", at).limit(1)),
       ]);

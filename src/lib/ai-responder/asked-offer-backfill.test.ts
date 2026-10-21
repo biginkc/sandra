@@ -32,7 +32,8 @@ function fakeSupabase(tables: Record<string, Row[]>) {
     const q = {
       select: () => q,
       eq: (c: string, v: unknown) => ((rows = rows.filter((r) => r[c] === v)), q),
-      neq: (c: string, v: unknown) => ((rows = rows.filter((r) => r[c] !== v)), q),
+      // SQL semantics: a NULL column never matches `<>`.
+      neq: (c: string, v: unknown) => ((rows = rows.filter((r) => r[c] != null && r[c] !== v)), q),
       is: (c: string, v: null) => ((rows = rows.filter((r) => (r[c] ?? null) === v)), q),
       in: (c: string, vs: unknown[]) => ((rows = rows.filter((r) => vs.includes(r[c]))), q),
       gt: (c: string, v: string) => ((rows = rows.filter((r) => r[c] != null && String(r[c]) > v)), q),
@@ -270,6 +271,7 @@ describe("runAskedOfferBackfill", () => {
       ["already_got_this_text", [msg("ox", "px", "outbound", "2026-10-02T15:00:00Z", NINE_HOT_REPLY_TEXTS.asked_offer, { to_address: phoneOf("p1") })], []],
       ["texted_since", [msg("ox", "px", "outbound", "2026-10-20T05:00:00Z", "hello from the other property", { to_address: phoneOf("p1") })], []],
       ["texted_elsewhere_since", [msg("ix", "px", "inbound", "2026-10-20T05:00:00Z", "not interested", { from_address: phoneOf("p1") })], []],
+      ["texted_elsewhere_since", [msg("iu", "px", "inbound", "2026-10-20T05:00:00Z", "never mind", { from_address: phoneOf("p1"), property_id: null })], []],
       ["called_since", [], [{ id: "cx", property_id: "px", org_id: ORG, phone_e164: phoneOf("p1"), created_at: "2026-10-20T05:00:00Z" }]],
     ])("skips: %s", async (reason, extra, calls) => {
       const rows = await runAskedOfferBackfill(withOther(extra, calls).client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
