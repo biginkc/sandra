@@ -6,9 +6,10 @@ was read out; only counts, ids of members, and timings.
 
 ## Plain-English summary
 
-- **The saved-queue design (A) is a NO-GO under MLQ-11.** Two independent measurements each fail by more than 10×:
-  recomputing 20 leads costs 1.7–2.6 s (limit 150 ms), and a limited fingerprint prototype costs 2.3–15.7 s for the
-  1,755-lead queue (limit 250 ms). Per the ruling, A stops; no part of it ships.
+- **The saved-queue design (A) is a NO-GO under MLQ-11.** The deciding measurement: recomputing 20 leads costs
+  1.7–2.6 s against the 150 ms limit (11–17× over). A limited fingerprint prototype also ran 2.3–15.7 s for the
+  1,755-lead queue (limit 250 ms); that result is concerning but inconclusive, since the prototype both omits paths and
+  over-counts work. Per the ruling, A stops; no part of it ships.
 - **No narrow fix (C) clears MLQ-1.** The attribution below is partial (about 2.6 s of 13.3 s is not assigned to a CTE),
   but even if all of that remainder belonged to the top two CTEs they would hold at most ~62%, below the 70% bar. No index
   or code change ships in this PR.
@@ -131,8 +132,9 @@ statement; on this prototype the fingerprint alone costs 20–150% of the live c
 
 ## B. Decisions
 
-**MLQ-11: NO-GO for A.** The NO-GO rests on two independent results: the real 20-lead recompute (1.7–2.6 s vs 150 ms)
-and the limited fingerprint prototype (fastest 2.3 s vs 250 ms). Either alone fails the gate. Work on A stops; PR-1 … PR-5
+**MLQ-11: NO-GO for A.** The NO-GO rests on the real 20-lead recompute (1.7–2.6 s vs 150 ms), which fails the gate on
+its own. The limited fingerprint prototype (2.3–15.7 s vs 250 ms, six sequential runs, not a production-pattern p95) is
+concerning but inconclusive: it omits some dependency paths and over-counts others, so it is not a lower bound. Work on A stops; PR-1 … PR-5
 are not started. The plan's named next option (WAL-fed dirty log with LSN fencing) is not built now.
 
 **MLQ-1: no narrow fix clears the gate, with this uncertainty.** Attributed top two = main + q0 = 5,676 ms (43%). If the
