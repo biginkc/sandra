@@ -16,7 +16,7 @@ import {
   hasSingleBraceMergeField,
   isValidVoicemailDropStep,
   VOICEMAIL_SCRIPT_MAX_CHARS,
-} from "@/lib/sequences/voicemail-drop-step";
+} from "@/lib/sequences/voicemail-drop-step-config";
 
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 

@@ -101,7 +101,7 @@ import { LeadActivityTimeline } from "./lead-activity";
 import {
   VOICEMAIL_DROP_TIMELINE_COLUMNS,
   type VoicemailDropTimelineRow,
-} from "@/lib/sequences/voicemail-drop-step";
+} from "@/lib/sequences/voicemail-drop-step-config";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 import { HaveNormaCallButton } from "./have-norma-call-button";

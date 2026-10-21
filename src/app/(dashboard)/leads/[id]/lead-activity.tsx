@@ -16,7 +16,7 @@ import { messageDripLabels } from "@/lib/sequences/message-drip-labels";
 import {
   voicemailDropTimelineText,
   type VoicemailDropTimelineRow,
-} from "@/lib/sequences/voicemail-drop-step";
+} from "@/lib/sequences/voicemail-drop-step-config";
 
 import {
   CallEventCard,

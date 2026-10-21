@@ -13,7 +13,7 @@ import {
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
-import { hasVoicemailFields, isValidVoicemailDropStep } from "@/lib/sequences/voicemail-drop-step";
+import { hasVoicemailFields, isValidVoicemailDropStep } from "@/lib/sequences/voicemail-drop-step-config";
 import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
 import { NEEDS_PERSON_PAGE_SIZE } from "./overview-model";
 import { loadDripChoices, type DripChoice } from "@/lib/sequences/drip-choices";

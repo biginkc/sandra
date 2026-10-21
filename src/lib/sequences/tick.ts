@@ -14,6 +14,7 @@ import { applyOptOut } from "./opt-out";
 import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
+import { processVoicemailDropStep } from "./voicemail-drop-step";
 
 const FIRST_TOUCH_SENDER_PAUSE_REASON =
   "no approved sender for first-touch sequence send";
@@ -57,6 +58,10 @@ export type TickOutcome =
   | { status: "rescheduled_consent_unavailable"; enrollmentId: string; nextRunAt: string; reason: "consent_unavailable" }
   | { status: "skipped_already_claimed"; enrollmentId: string }
   | { status: "skipped_no_step"; enrollmentId: string }
+  | { status: "voicemail_queued"; enrollmentId: string; stepIndex: number; dropId: string }
+  | { status: "skipped_not_eligible"; enrollmentId: string; stepIndex: number; reason: string }
+  | { status: "rescheduled_daily_cap"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_provider_not_queued"; enrollmentId: string; nextRunAt: string }
   | { status: "failed"; enrollmentId: string; message: string };
 
 /** A live provider attempt gets this long before requiring reconciliation. */
@@ -80,7 +85,7 @@ export async function processEnrollmentTick(
   // 1. Load current step.
   const { data: step, error: stepErr } = await client
     .from("sequence_steps")
-    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes")
+    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id")
     .eq("sequence_id", enrollment.sequence_id)
     .eq("step_index", enrollment.current_step_index)
     .maybeSingle();
@@ -781,6 +786,10 @@ export async function processEnrollmentTick(
     }
   }
 
+  if (step.action_type === "send_voicemail_drop") {
+    return processVoicemailDropStep(client, enrollment, step, property, claim.id);
+  }
+
   if (step.action_type === "change_status" && step.target_status) {
     const { data: changedProperty, error: changeError } = await client
       .from("properties")
@@ -892,7 +901,7 @@ export async function processEnrollmentTick(
  * this was the last step. Separate so the send_sms and change_status
  * branches share it.
  */
-async function advanceEnrollment(
+export async function advanceEnrollment(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   sequenceId: string,
@@ -950,7 +959,7 @@ async function advanceEnrollment(
       : "enrollment changed before advancement";
 }
 
-async function markRunSkipped(
+export async function markRunSkipped(
   client: SupabaseClient<Database>,
   runId: string,
   reason:
@@ -994,7 +1003,7 @@ async function markRunSkipped(
   return null;
 }
 
-async function failAfterRunWrite(
+export async function failAfterRunWrite(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   runError: string,
@@ -1013,7 +1022,7 @@ async function failAfterRunWrite(
   };
 }
 
-async function pauseEnrollment(
+export async function pauseEnrollment(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   reason: string,
