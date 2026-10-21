@@ -44,6 +44,8 @@ export function buildDropCowboyRvmBody(input: VoicemailDropSendInput): Record<st
     max_attempts: input.maxAttempts,
   };
   if (input.postalCode) body.postal_code = input.postalCode;
+  const brandId = input.brandId?.trim();
+  if (brandId) body.brand_id = brandId;
   if (input.audio.kind === "tts") {
     body.tts_body = input.audio.ttsBody;
     body.voice_id = input.audio.voiceId;

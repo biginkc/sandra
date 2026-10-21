@@ -12,6 +12,7 @@ import {
   setMockVoicemailDropResult,
 } from "./providers/mock";
 import { classifyReasonCode } from "./reason-codes";
+import { UnsupportedDropCowboyEventError } from "./webhook";
 import { getVoicemailDropProvider, isVoicemailDropEnabled } from "./registry";
 import type { VoicemailDropSendInput } from "./types";
 
@@ -93,6 +94,12 @@ describe("dropcowboy sendDrop", () => {
     const body = JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(body).toMatchObject({ caller_id: "+18165550100" });
     expect(body).not.toHaveProperty("phone_line_id");
+  });
+
+  it("sends brand_id only when brandId is set", () => {
+    expect(buildDropCowboyRvmBody({ ...ttsInput, brandId: " brand_1 " })).toMatchObject({ brand_id: "brand_1" });
+    expect(buildDropCowboyRvmBody({ ...ttsInput, brandId: "  " })).not.toHaveProperty("brand_id");
+    expect(buildDropCowboyRvmBody(ttsInput)).not.toHaveProperty("brand_id");
   });
 
   it("rejects a send with neither callerId nor phoneLineId, and a non-E.164 callerId", () => {
@@ -300,6 +307,13 @@ describe("parsers", () => {
     expect(receipt).toMatchObject({ kind: "receipt", proofUrl: "https://x.test/r", receiptReadyAt: "2026-10-20T15:01:00Z" });
   });
 
+  it("throws the typed unsupported-event error for other event types", () => {
+    expect(() =>
+      p.parseStatusWebhook(JSON.stringify({ event_id: "e", event: "contact.sms.status", data: { status: "success" } })),
+    ).toThrow(UnsupportedDropCowboyEventError);
+    expect(() => p.parseStatusWebhook("nope")).not.toThrow(UnsupportedDropCowboyEventError);
+  });
+
   it("rejects non-JSON, other events and missing event_id", () => {
     expect(() => p.parseStatusWebhook("nope")).toThrow();
     expect(() => p.parseStatusWebhook(JSON.stringify({ event_id: "e", event: "contact.sms.status", data: { status: "success" } }))).toThrow();
@@ -311,19 +325,15 @@ describe("parsers", () => {
 
 describe("classifyReasonCode", () => {
   it.each([
-    [0, "success", false],
-    [3021, "config", false],
-    [4010, "config", false],
-    [4016, "consent", false],
-    [6005, "consent", true],
-    [6011, "consent", true],
-    [4001, "delivery", false],
-    [4002, "delivery", false],
-    [4007, "delivery", false],
-    [4013, "unclassified", false],
-    [null, "unclassified", false],
-  ] as const)("%s → %s", (code, cls, unverified) => {
-    expect(classifyReasonCode(code)).toEqual({ reasonCode: code, reasonClass: cls, unverified });
+    [0, "success"],
+    ...[3000, 3001, 3002, 3007, 3013, 3015, 3021, 3023, 3027, 3028, 3040, 4010, 5000, 5001, 6009].map((c) => [c, "config"]),
+    ...[4016, 4017, 6005, 6011].map((c) => [c, "consent"]),
+    ...[4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008, 4009, 4019].map((c) => [c, "delivery"]),
+    [4013, "frequency"],
+    [3999, "unclassified"],
+    [null, "unclassified"],
+  ] as Array<[number | null, string]>)("%s → %s", (code, cls) => {
+    expect(classifyReasonCode(code)).toEqual({ reasonCode: code, reasonClass: cls });
   });
 });
 
