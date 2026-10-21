@@ -633,12 +633,33 @@ async function handleSendResult(
       // 502 / timeout / network / unexpected status: may be queued. Keep the
       // claim at 'unknown' and pause; never re-fire.
       const reason = `voicemail drop outcome unknown (${result.cause}${result.httpStatus ? ` ${result.httpStatus}` : ""})${result.error ? `: ${result.error}` : ""}`;
-      await updateDropRow(client, dropRowId, {
-        attempt_outcome: "unknown",
-        reason,
-        provider_payload: payload,
-      });
-      const runError = await markRunSkipped(client, claimId, "provider_failed", "unknown", reason);
+      // CAS on attempt_outcome = 'unknown' (run first, then drop row): a
+      // Drop Cowboy status event may already have reconciled this drop (run
+      // accepted, enrollment advanced, drop queued). Never flip it back or
+      // re-pause the enrollment.
+      const { data: heldRun, error: runWriteError } = await client
+        .from("sequence_step_runs")
+        .update({
+          run_at: new Date().toISOString(),
+          skipped_reason: "provider_failed",
+          attempt_outcome: "unknown",
+          failure_reason: reason,
+        })
+        .eq("id", claimId)
+        .eq("claim_active", true)
+        .eq("attempt_outcome", "unknown")
+        .select("id")
+        .maybeSingle();
+      if (!runWriteError && !heldRun) {
+        // Already reconciled: the drop was queued and the run accepted.
+        return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
+      }
+      await client
+        .from("voicemail_drops")
+        .update({ attempt_outcome: "unknown", reason, provider_payload: payload })
+        .eq("id", dropRowId)
+        .eq("attempt_outcome", "unknown");
+      const runError = runWriteError ? `sequence run write failed: ${runWriteError.message}` : null;
       const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
       if (runError || pauseError) {
         return {
