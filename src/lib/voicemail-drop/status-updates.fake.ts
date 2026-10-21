@@ -11,7 +11,7 @@ export type FakeEnrollment = { status: string; pause_reason: string | null; curr
  * run and enrollment (keyed by step_run_id / enrollment_id); each drop's step
  * is index 0 of a two-step drip. resolveOutcome mirrors
  * resolve_voicemail_drop_outcome + voicemail_drop_settle_enrollment
- * (20261021130000 / 20261021140000); the real-DB matrix proves the SQL.
+ * (20261021200200 / 20261021200300); the real-DB matrix proves the SQL.
  */
 export function createFakeDropStore(
   drops: FakeDrop[] = [],

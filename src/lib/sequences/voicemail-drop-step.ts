@@ -657,7 +657,7 @@ async function handleSendResult(
   }
 }
 
-/** The record_voicemail_drop_* RPCs (20261021130000) return a text outcome. */
+/** The record_voicemail_drop_* RPCs (20261021200200) return a text outcome. */
 function callDropRpc(
   client: SupabaseClient<Database>,
   fn: "record_voicemail_drop_accepted" | "record_voicemail_drop_unknown",

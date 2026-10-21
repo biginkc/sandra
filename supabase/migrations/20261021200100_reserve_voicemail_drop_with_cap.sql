@@ -1,4 +1,4 @@
--- 20261021120000_reserve_voicemail_drop_with_cap.sql
+-- 20261021200100_reserve_voicemail_drop_with_cap.sql
 -- Voicemail drop PR 3: count today's drops and insert the new voicemail_drops
 -- row in ONE transaction under a per-org advisory lock, so two parallel ticks
 -- cannot both read "one slot left" and overshoot VOICEMAIL_DROP_DAILY_CAP.
@@ -6,7 +6,7 @@
 --
 -- Returns the new row id, or null when the org is at the cap (nothing
 -- inserted). Additive: one new function, no table change. Rollback:
--- supabase/rollbacks/20261021120000_reserve_voicemail_drop_with_cap.sql.
+-- supabase/rollbacks/20261021200100_reserve_voicemail_drop_with_cap.sql.
 
 begin;
 

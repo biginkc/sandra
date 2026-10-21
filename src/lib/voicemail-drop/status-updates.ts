@@ -38,7 +38,7 @@ export type DropRow = {
 /** recovery_action on a step run whose unknown POST was proven queued by Drop Cowboy. */
 export const RECOVERY_VOICEMAIL_DROP_RECONCILED = "voicemail_drop_reconciled";
 
-/** Input to resolve_voicemail_drop_outcome (20261021140000). */
+/** Input to resolve_voicemail_drop_outcome (20261021200300). */
 export type ResolveOutcomeInput = {
   dropRowId: string;
   status: "delivered" | "failed";

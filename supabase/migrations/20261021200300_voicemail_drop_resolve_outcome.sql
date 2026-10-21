@@ -1,11 +1,11 @@
--- 20261021140000_voicemail_drop_resolve_outcome.sql
+-- 20261021200300_voicemail_drop_resolve_outcome.sql
 -- Voicemail drop PR 4: a Drop Cowboy terminal outcome (callback or signed
 -- contact.rvm.status) is applied in ONE transaction.
 --
 -- resolve_voicemail_drop_outcome replaces the separate reconcile / pause /
 -- drop-status writes in status-updates.ts. Locks enrollment -> step run ->
 -- drop row (the authorize_sequence_provider_attempt / fn_norma_lock_lead
--- order, same as record_voicemail_drop_* in 20261021130000) and re-checks:
+-- order, same as record_voicemail_drop_* in 20261021200200) and re-checks:
 --   * a drop still queued, or a replay of the same terminal state, whose run
 --     is still 'unknown' makes this call the owner: run -> accepted, drop
 --     attempt_outcome -> queued, enrollment settled by
@@ -19,7 +19,7 @@
 -- If anything fails, nothing commits, so the webhook retry redoes all of it.
 --
 -- Additive: one new function, no table change. Rollback:
--- supabase/rollbacks/20261021140000_voicemail_drop_resolve_outcome.sql.
+-- supabase/rollbacks/20261021200300_voicemail_drop_resolve_outcome.sql.
 
 begin;
 

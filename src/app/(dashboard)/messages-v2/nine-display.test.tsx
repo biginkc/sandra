@@ -29,7 +29,7 @@ describe("nine-question tape tag", () => {
     expect(view.kind).toBe("decided");
   });
 
-  it("covers all thirteen answers (nine + three added 2026-10-20 + can't read it)", () => expect(answers).toHaveLength(13));
+  it("covers all sixteen answers (nine + three added 2026-10-20 + three added 2026-10-21 + can't read it)", () => expect(answers).toHaveLength(16));
 
   it("old-engine runs keep today's mapping", () => {
     expect(tapeTagForRun(run([step({ outcome: "nurture" })]))?.label).toBe("Maybe later");
@@ -76,14 +76,14 @@ const open = async (props: Partial<Parameters<typeof RulesPanel>[0]> = {}) => {
 };
 
 describe("rules panel", () => {
-  it("nine_questions: twelve rows in three groups plus the cutoff row", async () => {
+  it("nine_questions: fifteen rows in three groups plus the cutoff row", async () => {
     const panel = await open({ classifierEngine: "nine_questions" });
-    expect(within(panel).getAllByTestId("rule-row")).toHaveLength(13);
+    expect(within(panel).getAllByTestId("rule-row")).toHaveLength(16);
     const group = (name: string) => within(within(panel).getByRole("region", { name })).getAllByTestId("rule-row").map((r) => within(r).getAllByText(/./)[0].textContent);
     expect(group("Goes to Jarrad")).toEqual(["Asked for a call", "Asked for offer", "Named a price", "Talked price", "Wants an offer"]);
     // The approved reply texts (Jarrad 2026-10-20) show under their rows.
     for (const text of Object.values(NINE_HOT_REPLY_TEXTS)) expect(within(panel).getByText(text)).toBeTruthy();
-    expect(group("Sandra handles alone")).toEqual(["Maybe later", "Asked who is texting", "Not interested", "Wrong person", "Confirmed owner"]);
+    expect(group("Sandra handles alone")).toEqual(["Maybe later", "Asked who is texting", "Not interested", "Wrong person", "Already sold", "Tenant", "Confirmed owner", "Just ok"]);
     expect(group("Waits for a person")).toEqual(["Asked to stop", "Hostile"]);
     expect(within(panel).getByText("60% sure or more")).toBeTruthy();
     expect(panel.textContent).not.toMatch(/Jev/);

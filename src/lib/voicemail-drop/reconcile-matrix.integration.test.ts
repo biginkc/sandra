@@ -20,8 +20,8 @@ import { handleDropCallback, handleDropStatusEvent, supabaseDropStatusStore } fr
 import { parseDropCowboyCallback, parseDropCowboyStatusWebhook } from "./webhook";
 
 // Acceptance matrix for the consolidated reconcile design
-// (record_voicemail_drop_accepted/unknown 20261021130000,
-// resolve_voicemail_drop_outcome 20261021140000, stop-path filter).
+// (record_voicemail_drop_accepted/unknown 20261021200200,
+// resolve_voicemail_drop_outcome 20261021200300, stop-path filter).
 // Real DB. Where a row specifies concurrency, a third connection holds the
 // enrollment row lock, the two contenders queue on it in a forced order
 // (row-lock waiters are served FIFO), then the lock is released; both
