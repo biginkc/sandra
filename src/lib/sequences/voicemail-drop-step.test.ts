@@ -17,6 +17,10 @@ describe("voicemail drop step rules", () => {
     expect(isValidVoicemailDropStep({ ...base, vm_tts_body: "Hi", template_body: "x" })).toBe(false);
     expect(isValidVoicemailDropStep({ ...base, vm_tts_body: "Hi", target_status: "dead" })).toBe(false);
   });
+  it("rejects single-brace merge fields but accepts double-brace ones", () => {
+    expect(isValidVoicemailDropStep({ ...base, vm_tts_body: "Hi {first_name}" })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_tts_body: "Hi {{first_name}} at {{property_address}}" })).toBe(true);
+  });
   it("detects voicemail fields on other step types", () => {
     expect(hasVoicemailFields({ action_type: "send_sms", vm_voice_id: "v" })).toBe(true);
     expect(hasVoicemailFields({ action_type: "send_sms", vm_voice_id: null })).toBe(false);

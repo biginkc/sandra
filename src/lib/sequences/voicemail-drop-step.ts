@@ -20,6 +20,11 @@ export type VoicemailDropStepFields = {
   vm_phone_line_id?: string | null;
 };
 
+/** Single-brace tokens like {first_name} are never filled in; the engine uses {{first_name}}. */
+export function hasSingleBraceMergeField(text: string | null | undefined): boolean {
+  return /(^|[^{])\{\s*[a-z_]+\s*\}(?!\})/i.test(text ?? "");
+}
+
 const filled = (value: string | null | undefined) => Boolean(value?.trim());
 
 /** Exactly one of recording / script, script within the limit, no SMS or status fields. */
@@ -29,6 +34,7 @@ export function isValidVoicemailDropStep(step: VoicemailDropStepFields): boolean
   const tts = filled(step.vm_tts_body);
   if (Number(media) + Number(tts) !== 1) return false;
   if (tts && (step.vm_tts_body ?? "").trim().length > VOICEMAIL_SCRIPT_MAX_CHARS) return false;
+  if (tts && hasSingleBraceMergeField(step.vm_tts_body)) return false;
   return !filled(step.template_body) && !step.template_id && !filled(step.template_category) &&
     !filled(step.target_status);
 }

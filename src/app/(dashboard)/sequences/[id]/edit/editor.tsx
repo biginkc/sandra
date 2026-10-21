@@ -13,6 +13,7 @@ import {
 } from "@/lib/presentation/system-labels";
 
 import {
+  hasSingleBraceMergeField,
   isValidVoicemailDropStep,
   VOICEMAIL_SCRIPT_MAX_CHARS,
 } from "@/lib/sequences/voicemail-drop-step";
@@ -471,6 +472,7 @@ function VoicemailDropEditor({ step, enabled, onChange }: {
               {script.trim().length} / {VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")}
             </span>
           </span>
+          {hasSingleBraceMergeField(script) ? <span className="text-destructive text-xs">Use double braces, like {"{{first_name}}"}, so Sandra fills them in.</span> : null}
           {over ? <span className="text-destructive text-xs">Scripts can be at most {VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")} characters.</span> : null}
         </div>
       ) : (

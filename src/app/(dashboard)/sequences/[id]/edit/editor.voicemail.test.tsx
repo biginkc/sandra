@@ -74,6 +74,12 @@ describe("drip editor voicemail drop step", () => {
     expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
   });
 
+  it("blocks single-brace merge fields with a hint", () => {
+    mount([smsStep, { ...dropStep, vm_tts_body: "Hi {first_name}" }], on);
+    expect(screen.getByText(/Use double braces/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+  });
+
   it("still shows an existing drop step when the provider is off", () => {
     mount([smsStep, dropStep]);
     expect(within(card(2)).getByText(/this step will not send/)).toBeInTheDocument();
