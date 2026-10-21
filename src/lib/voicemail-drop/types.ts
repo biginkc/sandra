@@ -14,7 +14,14 @@ export type VoicemailDropSendInput = {
   /** E.164 recipient number. */
   to: string;
   audio: VoicemailDropAudio;
-  phoneLineId: string;
+  /** Drop Cowboy phone line. Used only when callerId is absent. */
+  phoneLineId?: string | null;
+  /**
+   * BYOC caller ID (E.164, e.g. the dedicated Telnyx number). When present it
+   * is sent as `caller_id` and phone_line_id is left out: Drop Cowboy ignores
+   * caller_id whenever phone_line_id is also sent.
+   */
+  callerId?: string | null;
   /** voicemail_drops.id, echoed back on callback_url. */
   foreignId: string;
   callbackUrl: string;

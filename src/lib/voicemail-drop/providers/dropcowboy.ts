@@ -25,9 +25,19 @@ export type DropCowboyConfig = {
 };
 
 export function buildDropCowboyRvmBody(input: VoicemailDropSendInput): Record<string, unknown> {
+  const callerId = input.callerId?.trim() || null;
+  const phoneLineId = input.phoneLineId?.trim() || null;
+  if (!callerId && !phoneLineId) {
+    throw new Error("voicemail drop needs a callerId (BYOC) or a phoneLineId");
+  }
+  if (callerId && !/^\+[1-9]\d{1,14}$/.test(callerId)) {
+    throw new Error("voicemail drop callerId must be E.164");
+  }
+  // BYOC: caller_id only. Drop Cowboy ignores caller_id when phone_line_id is
+  // also sent (SendRvm / SendCallerId), so never send both.
   const body: Record<string, unknown> = {
     to: input.to,
-    phone_line_id: input.phoneLineId,
+    ...(callerId ? { caller_id: callerId } : { phone_line_id: phoneLineId }),
     foreign_id: input.foreignId,
     callback_url: input.callbackUrl,
     mobile_only: input.mobileOnly,
@@ -74,6 +84,18 @@ export class DropCowboyVoicemailDropProvider implements VoicemailDropProvider {
   }
 
   async sendDrop(input: VoicemailDropSendInput): Promise<VoicemailDropSendResult> {
+    // Build before any network call: a bad input never reaches Drop Cowboy.
+    let requestBody: string;
+    try {
+      requestBody = JSON.stringify(buildDropCowboyRvmBody(input));
+    } catch (error) {
+      return {
+        outcome: "bad_request",
+        httpStatus: 400,
+        detail: error instanceof Error ? error.message : String(error),
+        raw: null,
+      };
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res: Response;
@@ -87,7 +109,7 @@ export class DropCowboyVoicemailDropProvider implements VoicemailDropProvider {
           "x-secret": this.config.apiSecret,
           "Idempotency-Key": input.idempotencyKey,
         },
-        body: JSON.stringify(buildDropCowboyRvmBody(input)),
+        body: requestBody,
         signal: controller.signal,
       });
     } catch (error) {
