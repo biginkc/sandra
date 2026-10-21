@@ -529,4 +529,26 @@ describe("reconcile acceptance matrix", () => {
     expect(await handleDropStatusEvent(store, statusEvent({ drop_id: `dc-${org}`, status: "failure", reason_code: 4016 }))).toBe("applied");
     expect(await state()).toEqual(once);
   });
+  it("15: delivered then failed through resolve_voicemail_drop_outcome -> conflict, no pause", async () => {
+    await seed("accepted");
+    expect(await resolveSql(admin, "delivered", null)).toEqual({ drop_result: "applied", enrollment_action: "none" });
+    expect(await resolveSql(admin, "failed", CONSENT, "4016")).toEqual({ drop_result: "conflict", enrollment_action: "none" });
+    const after = await state();
+    expect(after.drop.status).toBe("delivered");
+    expect(after.enrollment).toMatchObject({ status: "active", pause_reason: null, current_step_index: 1 });
+  });
+
+  it("25: consent over an inbound_reply pause -> reason becomes consent, pointer @1", async () => {
+    await seed("held");
+    await pausePropertyEnrollments(client, { propertyId: property, reason: "inbound_reply" });
+    await handleDropCallback(store, callback({ status: "failure", reason_code: 4016 }));
+    expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: CONSENT, current_step_index: 1 });
+  });
+
+  it("26: step_misconfigured over an inbound_call pause -> stays inbound_call, pointer @1", async () => {
+    await seed("held");
+    expect((await inboundCall()).paused).toBe(1);
+    await handleDropCallback(store, callback({ status: "failure", reason_code: 3007 }));
+    expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call", current_step_index: 1 });
+  });
 });
