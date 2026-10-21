@@ -5,7 +5,12 @@ import { createTestClient } from "@tests/integration/client";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn(), reportInfo: vi.fn() }));
 
-import { handleDropCallback, handleDropStatusEvent, supabaseDropStatusStore } from "./status-updates";
+import {
+  handleDropCallback,
+  handleDropStatusEvent,
+  reconcileHeldDropWithClient,
+  supabaseDropStatusStore,
+} from "./status-updates";
 import { parseDropCowboyCallback, parseDropCowboyStatusWebhook } from "./webhook";
 
 // Real-DB proof of the held-drop reconciliation (fix 1): a callback or signed
@@ -109,4 +114,66 @@ it("a signed status event correlated by phone reconciles the same way", async ()
   expect(after.run.attempt_outcome).toBe("accepted");
   expect(after.enrollment).toMatchObject({ status: "active", current_step_index: 1 });
   expect(after.drop).toMatchObject({ status: "failed", attempt_outcome: "queued" });
+});
+
+async function dropRowNow() {
+  const d = await client.from("voicemail_drops").select("*").eq("id", dropRow).single();
+  if (d.error) throw new Error(d.error.message);
+  return d.data;
+}
+
+it("claim already released: not_held, enrollment not advanced, drop left unknown", async () => {
+  await client.from("sequence_step_runs").update({ claim_active: false }).eq("id", run);
+  expect(await reconcileHeldDropWithClient(client, await dropRowNow())).toBe("not_held");
+  const after = await state();
+  expect(after.run.attempt_outcome).toBe("unknown");
+  expect(after.enrollment).toMatchObject({ status: "paused", pause_reason: "reconciliation_required", current_step_index: 0 });
+  expect(after.drop.attempt_outcome).toBe("unknown");
+});
+
+it("claim released between the run read and the accept write: CAS misses, not_held, no advance", async () => {
+  // Release the claim right after reconcile reads the run row.
+  let first = true;
+  const racing = new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== "from") return Reflect.get(target, prop, receiver);
+      return (table: string) => {
+        const builder = target.from(table as never);
+        if (table !== "sequence_step_runs" || !first) return builder;
+        first = false;
+        const select = builder.select.bind(builder);
+        (builder as { select: unknown }).select = (...args: Parameters<typeof select>) => {
+          const q = select(...args);
+          const maybeSingle = q.maybeSingle.bind(q);
+          (q as { maybeSingle: unknown }).maybeSingle = async () => {
+            const r = await maybeSingle();
+            await target.from("sequence_step_runs").update({ claim_active: false }).eq("id", run);
+            return r;
+          };
+          return q;
+        };
+        return builder;
+      };
+    },
+  });
+  expect(await reconcileHeldDropWithClient(racing, await dropRowNow())).toBe("not_held");
+  const after = await state();
+  expect(after.run).toMatchObject({ attempt_outcome: "unknown", claim_active: false });
+  expect(after.enrollment).toMatchObject({ status: "paused", current_step_index: 0 });
+  expect(after.drop.attempt_outcome).toBe("unknown");
+});
+
+it("replay after a crash between step 1 and step 2 converges without double-advance", async () => {
+  // Step 1 landed (run accepted), then the process died: enrollment still
+  // paused, drop row still unknown.
+  await client.from("sequence_step_runs").update({ attempt_outcome: "accepted", skipped_reason: null }).eq("id", run);
+  expect(await reconcileHeldDropWithClient(client, await dropRowNow())).toBe("reconciled");
+  const once = await state();
+  expect(once.enrollment).toMatchObject({ status: "active", current_step_index: 1 });
+  expect(once.drop.attempt_outcome).toBe("queued");
+
+  expect(await reconcileHeldDropWithClient(client, await dropRowNow())).toBe("not_held");
+  const twice = await state();
+  expect(twice.enrollment.current_step_index).toBe(1);
+  expect(twice.enrollment.next_run_at).toBe(once.enrollment.next_run_at);
 });
