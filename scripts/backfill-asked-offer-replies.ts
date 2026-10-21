@@ -3,19 +3,21 @@
  * Answer sellers who asked for our offer before the approved asked_offer reply
  * shipped (PR #909, 2026-10-20). See src/lib/ai-responder/asked-offer-backfill.ts.
  *
- * Dry run is the default: reads the database, asks Jev, writes nothing, and
- * prints the target list. Writes need --apply AND an explicit human yes on the
- * dry-run list (these are real sellers).
+ * Dry run is the default: reads the database, asks Jev, writes nothing (no
+ * database rows, no files unless --out is given), and prints the target list.
+ * Sends need --apply AND an explicit human yes on the dry-run list (these are
+ * real sellers).
  *
  * Usage
  *   vercel env pull --environment=production <scratch>/.env.sandra-prod
  *   env $(grep -v '^#' <scratch>/.env.sandra-prod | xargs) \
  *     npx tsx scripts/backfill-asked-offer-replies.ts [--apply] [--only <propertyId>]...
  *
- * --apply queues the approved text in the normal outbox (scheduled now). The
- * production sequence-tick drain releases it, re-checking consent, opt-out,
- * suppression, human-owned dispositions and quiet hours, and sends through the
- * configured provider. A second run skips every lead it queued ("texted_since").
+ * --apply sends the approved text immediately through the normal automated send
+ * path, only between 08:00 and 21:00 Chicago, re-checking every skip rule as the
+ * last step before the provider. One send per seller text is enforced by the
+ * database (idempotency key), so a second or concurrent run sends nothing new.
+ * Needs the production messaging env (MESSAGING_PROVIDER and its credentials).
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -23,6 +25,7 @@ import { dirname, resolve } from "node:path";
 
 import {
   ASKED_OFFER_BACKFILL_BODY,
+  chicagoWindowOpen,
   liveClassifier,
   runAskedOfferBackfill,
   type BackfillRow,
@@ -31,8 +34,8 @@ import { createAdminClient } from "../src/lib/supabase/admin";
 
 const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
 const BMH_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
-/** PR #909 merged 2026-10-20 ~19:58 CT; inbounds from then on ran with the asked_offer reply. */
-const DEFAULT_BEFORE = "2026-10-21T00:58:00Z";
+/** PR #909's production deploy went live 2026-10-21T01:01:43Z; inbounds from then on ran with the asked_offer reply. */
+const DEFAULT_BEFORE = "2026-10-21T01:02:00Z";
 const DEFAULT_SINCE_DAYS = 30;
 /**
  * Already handled by hand (2026-10-20): five texts queued in Messages, and Lees
@@ -55,7 +58,7 @@ type Options = {
   before: Date;
   exclude: string[];
   only: string[];
-  out: string;
+  out: string | null;
 };
 
 function value(argv: string[], i: number, flag: string): string {
@@ -83,7 +86,7 @@ function parse(argv: string[]): Options {
     before: new Date(DEFAULT_BEFORE),
     exclude: [],
     only: [],
-    out: `tmp/asked-offer-backfill/run-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+    out: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -102,7 +105,7 @@ function parse(argv: string[]): Options {
   --before <iso>       Inbounds at or after this ran with the new reply. Default: ${DEFAULT_BEFORE}.
   --exclude <uuid>     Extra property to skip; repeatable (the six handled by hand are always skipped).
   --only <uuid>        Limit to these properties; repeatable.
-  --out <path>         Where to write the JSON report.`);
+  --out <path>         Write the JSON report here (refuses to overwrite). Apply always writes one.`);
       process.exit(0);
     } else throw new Error(`Unknown option: ${a}`);
   }
@@ -126,7 +129,7 @@ function report(rows: BackfillRow[], apply: boolean): void {
   const targets = rows.filter((r) => r.target);
   console.log(`\n${apply ? "APPLY" : "DRY RUN"}: ${targets.length} target(s). Text: "${ASKED_OFFER_BACKFILL_BODY}"\n`);
   for (const r of targets) {
-    const q = r.queued ? `  -> ${r.queued.status}${r.queued.detail ? ` (${r.queued.detail})` : ""}` : "";
+    const q = r.sent ? `  -> ${r.sent.status}${r.sent.detail ? ` (${r.sent.detail})` : ""}` : "";
     console.log(`  ${r.address}  |  "${oneLine(r.sellerText)}"  |  p=${r.askedOfferProbability ?? "?"}  |  ${r.propertyId}${q}`);
   }
   const notOffer = rows.filter((r) => !r.target && !r.skip && !r.classifyError);
@@ -145,6 +148,7 @@ function report(rows: BackfillRow[], apply: boolean): void {
 async function main(): Promise<void> {
   const o = parse(process.argv.slice(2));
   assertProd();
+  if (o.apply && !chicagoWindowOpen(new Date())) throw new Error("Refusing to send outside 08:00-21:00 Chicago.");
   const apiKey = process.env.TYPESAFE_API_KEY ?? "";
   if (!apiKey) throw new Error("TYPESAFE_API_KEY must be set (the classifier is re-asked).");
   const rows = await runAskedOfferBackfill(
@@ -161,9 +165,12 @@ async function main(): Promise<void> {
     { classify: liveClassifier(apiKey), now: () => new Date() },
   );
   report(rows, o.apply);
-  const out = resolve(o.out);
+  const outPath = o.out ?? (o.apply ? `tmp/asked-offer-backfill/apply-${new Date().toISOString().replace(/[:.]/g, "-")}.json` : null);
+  if (!outPath) return;
+  const out = resolve(outPath);
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, `${JSON.stringify({ apply: o.apply, options: o, rows }, null, 2)}\n`);
+  // "wx": never overwrite an earlier report.
+  writeFileSync(out, `${JSON.stringify({ apply: o.apply, options: o, rows }, null, 2)}\n`, { flag: "wx" });
   console.log(`\nReport: ${out}`);
 }
 
