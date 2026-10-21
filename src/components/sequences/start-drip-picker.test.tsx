@@ -159,3 +159,11 @@ it("focuses failure feedback before the bounded inline choices", async () => {
   expect(list).toHaveStyle({ maxHeight: "240px", });
   expect(list).toHaveClass("overflow-y-auto");
 });
+
+it("counts voicemail drop steps beside texts", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "s1", name: "Seller follow-up", textCount: 3, voicemailCount: 1, days: 7, firstSend: null }] });
+  const user = userEvent.setup();
+  render(<StartDripPicker onChoose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  expect(await screen.findByText("3 texts · 1 voicemail · over 7 days")).toBeInTheDocument();
+});

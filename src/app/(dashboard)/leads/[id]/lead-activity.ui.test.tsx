@@ -407,3 +407,35 @@ it.each(["", "https://jitter.example.test"])("chooses history actions per provid
   if (jitterHost) expect(screen.getByRole("link", { name: "Open call in Jitter" })).toHaveAttribute("href", "https://jitter.example.test/history?prospect_id=property-123");
   expect(cards).toHaveLength(3);
 });
+
+describe("<LeadActivityTimeline /> voicemail drops", () => {
+  const props = {
+    propertyId: "property-1", contactId: "contact-1", initialMessages: [], initialNotes: [], initialCalls: [], initialEvents: [],
+    messageError: null, noteError: null, callError: null, eventError: null,
+    authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+  };
+  const drop = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, status, reason: null, reason_code: null, proof_url: null, audio_kind: "tts",
+    queued_at: "2026-10-20T14:00:00Z", completed_at: null, created_at: "2026-10-20T14:00:00Z", ...extra,
+  });
+
+  it("shows queued, delivered with proof link, and failed with a plain reason", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[
+      drop("d1", "queued"),
+      drop("d2", "delivered", { completed_at: "2026-10-20T15:00:00Z", proof_url: "https://proof.example/d2" }),
+      drop("d3", "failed", { completed_at: "2026-10-20T16:00:00Z", reason_code: "4002" }),
+    ]} />);
+    const cards = screen.getAllByTestId("lead-voicemail-drop");
+    expect(cards.map((card) => card.dataset.status)).toEqual(["failed", "delivered", "queued"]);
+    expect(within(cards[0]).getByText("Voicemail not delivered")).toBeInTheDocument();
+    expect(within(cards[0]).getByText("Voicemail box full.")).toBeInTheDocument();
+    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "https://proof.example/d2");
+    expect(within(cards[2]).getByText("Voicemail queued")).toBeInTheDocument();
+    expect(screen.queryByText(/No messages, notes, calls/)).not.toBeInTheDocument();
+  });
+
+  it("hides a non-https proof link", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[drop("d1", "delivered", { proof_url: "javascript:alert(1)" })]} />);
+    expect(screen.queryByRole("link", { name: /Proof of delivery/ })).not.toBeInTheDocument();
+  });
+});

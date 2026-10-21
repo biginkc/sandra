@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,11 @@ import {
   SEQUENCE_ACTION_LABELS,
   systemLabel,
 } from "@/lib/presentation/system-labels";
+
+import {
+  isValidVoicemailDropStep,
+  VOICEMAIL_SCRIPT_MAX_CHARS,
+} from "@/lib/sequences/voicemail-drop-step";
 
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 
@@ -113,6 +118,16 @@ function DelayInput({
 
 type DraftStep = SequenceStepInput & { key: string };
 
+/** Server-resolved voicemail drop settings. IDs only; never credentials. */
+export type VoicemailDropEditorConfig = {
+  enabled: boolean;
+  defaultVoiceId: string | null;
+  defaultPhoneLineId: string | null;
+};
+
+const VOICEMAIL_OFF: VoicemailDropEditorConfig = { enabled: false, defaultVoiceId: null, defaultPhoneLineId: null };
+const NO_VOICEMAIL_FIELDS = { vm_media_id: null, vm_tts_body: null, vm_voice_id: null, vm_phone_line_id: null };
+
 function draftFromStep(step: SequenceWithSteps["steps"][number]): DraftStep {
   return { ...step, key: step.id };
 }
@@ -127,11 +142,12 @@ function blankStep(index: number): DraftStep {
   };
 }
 
-export function SequenceEditor({ sequence, initialImpact, templates, isNew = false }: {
+export function SequenceEditor({ sequence, initialImpact, templates, isNew = false, voicemailDrop = VOICEMAIL_OFF }: {
   sequence: SequenceWithSteps;
   initialImpact: { total_enrolled: number; scheduled_next_7d: number };
   templates: TemplateRow[];
   isNew?: boolean;
+  voicemailDrop?: VoicemailDropEditorConfig;
 }) {
   const router = useRouter();
   const [name, setName] = useState(sequence.name);
@@ -158,6 +174,7 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
       return Number(Boolean(body)) + Number(Boolean(step.template_id)) +
         Number(Boolean(step.template_category?.trim())) === 1 && !step.target_status;
     }
+    if (step.action_type === "send_voicemail_drop") return isValidVoicemailDropStep(step);
     return step.action_type === "change_status" && Boolean(step.target_status?.trim()) &&
       !step.template_body?.trim() && !step.template_id && !step.template_category?.trim();
   });
@@ -180,6 +197,12 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
           template_id: step.action_type === "send_sms" ? step.template_id : null,
           template_category: step.action_type === "send_sms" ? step.template_category : null,
           target_status: step.action_type === "change_status" ? step.target_status : null,
+          ...(step.action_type === "send_voicemail_drop" ? {
+            vm_media_id: step.vm_media_id?.trim() || null,
+            vm_tts_body: step.vm_media_id?.trim() ? null : step.vm_tts_body?.trim() || null,
+            vm_voice_id: step.vm_voice_id?.trim() || null,
+            vm_phone_line_id: step.vm_phone_line_id?.trim() || null,
+          } : NO_VOICEMAIL_FIELDS),
         })),
       }), { successMessage: "Drip saved", fallbackMessage: "Could not save drip" });
       if (result.ok) {
@@ -211,7 +234,7 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
       {initialImpact.total_enrolled > 0 ? <p className="text-muted-foreground text-xs">Saved steps cannot be moved or deleted while leads are enrolled. You can edit text, add a step, or remove an unsaved step.</p> : null}
       {steps.length === 0 ? <div className="text-muted-foreground rounded-md border border-dashed p-6 text-sm">No steps yet. Add a step to start this drip.</div> :
         steps.map((step, index) => <StepEditor key={step.key} step={step} index={index}
-          count={steps.length} locked={initialImpact.total_enrolled > 0} canDelete={!step.id} templates={templates} onChange={(patch) => patchStep(step.key, patch)}
+          count={steps.length} locked={initialImpact.total_enrolled > 0} canDelete={!step.id} templates={templates} voicemailDrop={voicemailDrop} onChange={(patch) => patchStep(step.key, patch)}
           onMove={(delta) => moveStep(index, delta)} onDelete={() => removeStep(step.key)} />)}
     </section>
     <div><Button onClick={onSave} disabled={pending || !valid}>Save all steps</Button></div>
@@ -341,8 +364,9 @@ function MessageBodyEditor({
   );
 }
 
-function StepEditor({ step, index, count, locked, canDelete, templates, onChange, onMove, onDelete }: {
+function StepEditor({ step, index, count, locked, canDelete, templates, voicemailDrop, onChange, onMove, onDelete }: {
   step: DraftStep;
+  voicemailDrop: VoicemailDropEditorConfig;
   index: number;
   count: number;
   locked: boolean;
@@ -362,17 +386,30 @@ function StepEditor({ step, index, count, locked, canDelete, templates, onChange
         <DelayInput value={step.delay_after_previous_minutes} onChange={(value) => onChange({ delay_after_previous_minutes: value })} />
       </div>
       <label className="flex flex-col gap-1 text-sm"><span className="font-medium">Action</span>
-        <select value={step.action_type} onChange={(e) => onChange({
-          action_type: e.target.value as DraftStep["action_type"],
-          template_body: null, template_id: null, template_category: null, target_status: null,
-        })}
+        <select value={step.action_type} onChange={(e) => {
+          const action_type = e.target.value as DraftStep["action_type"];
+          onChange({
+            action_type,
+            template_body: null, template_id: null, template_category: null, target_status: null,
+            ...NO_VOICEMAIL_FIELDS,
+            ...(action_type === "send_voicemail_drop" ? {
+              vm_tts_body: "", vm_voice_id: voicemailDrop.defaultVoiceId,
+              vm_phone_line_id: voicemailDrop.defaultPhoneLineId,
+            } : {}),
+          });
+        }}
           className="border-input rounded-md border px-2 py-1.5 text-sm">
           <option value="send_sms">{systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}</option>
           <option value="change_status">{systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}</option>
+          <option value="send_voicemail_drop" disabled={!voicemailDrop.enabled}>
+            {systemLabel(SEQUENCE_ACTION_LABELS, "send_voicemail_drop")}{voicemailDrop.enabled ? "" : " (not set up)"}
+          </option>
         </select>
       </label>
     </div>
-    {step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
+    {!voicemailDrop.enabled && index === 0 ? <p className="text-muted-foreground text-xs">Voicemail drops are off. They turn on once a voicemail provider is connected.</p> : null}
+    {step.action_type === "send_voicemail_drop" ? <VoicemailDropEditor step={step} enabled={voicemailDrop.enabled} onChange={onChange} /> :
+      step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
       body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value, template_category: null })}
       templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value, template_category: null })}
       templateCategory={step.template_category} setTemplateCategory={(value) => onChange({ template_category: value })} /> :
@@ -385,4 +422,73 @@ function StepEditor({ step, index, count, locked, canDelete, templates, onChange
         </select>
       </label>}
   </div>;
+}
+
+/**
+ * Pick exactly one voicemail source: a recording uploaded in the provider, or
+ * a script read aloud. Voice and caller line default from server settings.
+ */
+function VoicemailDropEditor({ step, enabled, onChange }: {
+  step: DraftStep;
+  enabled: boolean;
+  onChange: (patch: Partial<DraftStep>) => void;
+}) {
+  const mode: "script" | "recording" = step.vm_media_id !== null && step.vm_media_id !== undefined ? "recording" : "script";
+  const script = step.vm_tts_body ?? "";
+  const scriptId = useId();
+  const over = script.trim().length > VOICEMAIL_SCRIPT_MAX_CHARS;
+  const insert = (token: string) => onChange({ vm_tts_body: script ? `${script}${/\s$/.test(script) ? "" : " "}${token}` : token });
+  return (
+    <div className="flex flex-col gap-2" data-testid="voicemail-drop-editor">
+      {!enabled ? (
+        <p className="text-muted-foreground text-xs">Voicemail drops are off, so this step will not send until a voicemail provider is connected.</p>
+      ) : null}
+      <div className="flex items-center gap-4 text-sm">
+        <label className="flex items-center gap-1.5">
+          <input type="radio" checked={mode === "script"} onChange={() => onChange({ vm_media_id: null, vm_tts_body: "" })} />
+          <span>Script (read aloud)</span>
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="radio" checked={mode === "recording"} onChange={() => onChange({ vm_media_id: "", vm_tts_body: null })} />
+          <span>Recorded message</span>
+        </label>
+      </div>
+      {mode === "script" ? (
+        <div className="flex flex-col gap-1 text-sm">
+          <label htmlFor={scriptId} className="font-medium">Voicemail script</label>
+          <textarea
+            id={scriptId}
+            value={script}
+            onChange={(e) => onChange({ vm_tts_body: e.target.value })}
+            rows={4}
+            className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
+            placeholder="Hi {{first_name}}, calling about {{property_address}}."
+          />
+          <span className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => insert("{{first_name}}")}>Insert first name</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => insert("{{property_address}}")}>Insert property address</Button>
+            <span className={`ml-auto text-xs ${over ? "text-destructive font-semibold" : "text-muted-foreground"}`} aria-live="polite">
+              {script.trim().length} / {VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")}
+            </span>
+          </span>
+          {over ? <span className="text-destructive text-xs">Scripts can be at most {VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")} characters.</span> : null}
+        </div>
+      ) : (
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Recording ID</span>
+          <Input value={step.vm_media_id ?? ""} onChange={(e) => onChange({ vm_media_id: e.target.value })} placeholder="From the voicemail provider's media library" />
+        </label>
+      )}
+      <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
+        <label className="flex flex-1 flex-col gap-1 text-sm">
+          <span className="font-medium">Voice</span>
+          <Input value={step.vm_voice_id ?? ""} onChange={(e) => onChange({ vm_voice_id: e.target.value || null })} placeholder="Default voice" />
+        </label>
+        <label className="flex flex-1 flex-col gap-1 text-sm">
+          <span className="font-medium">Caller line</span>
+          <Input value={step.vm_phone_line_id ?? ""} onChange={(e) => onChange({ vm_phone_line_id: e.target.value || null })} placeholder="Default line" />
+        </label>
+      </div>
+    </div>
+  );
 }
