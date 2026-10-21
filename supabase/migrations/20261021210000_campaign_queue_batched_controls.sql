@@ -140,9 +140,11 @@ begin
   end if;
 
   update public.campaign_queue_ops set state = 'superseded' where id = v_active.id;
-  insert into public.campaign_queue_ops (id, campaign_id, kind, pace_seconds, touched_at, prior_campaign_status)
+  insert into public.campaign_queue_ops
+    (id, campaign_id, kind, pace_seconds, touched_at, prior_campaign_status, created_at)
   values (p_op_id, p_campaign_id, p_kind, p_pace, v_now,
-          case when v_active.kind = p_kind then v_active.prior_campaign_status end);
+          case when v_active.kind = p_kind then v_active.prior_campaign_status end,
+          case when v_active.kind = p_kind then v_active.created_at else v_now end);
 
   if v_active.kind = p_kind then
     update public.campaign_queue_plan set op_id = p_op_id where op_id = v_active.id;
@@ -308,9 +310,39 @@ begin
   )
   select count(*) into v_held from held;
 
-  -- Phase 2 (only once nothing is left to hold): release planned rows at
-  -- their planned time. Rows the sender re-paused get their slot back.
-  if v_held = 0 then
+  -- Phase 2 (once nothing is left to hold; same call for unbounded legacy
+  -- callers): release planned rows at their planned time. Rows the sender
+  -- re-paused get their slot back.
+  if v_held = 0 or p_limit is null then
+    -- Rows enqueued while the pass held the campaign are inserted 'paused'
+    -- with no campaignPause record (send.ts queueForLater). Append them to
+    -- the end of this cadence so they are released, not stranded.
+    insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
+    select
+      v_op,
+      t.max_seq + (row_number() over w)::integer,
+      m.id,
+      greatest(t.max_time, v_now) + ((row_number() over w)::double precision * make_interval(secs => p_pace_seconds))
+    from public.messages m
+    cross join (
+      select coalesce(max(p.seq), -1) as max_seq,
+             coalesce(max(p.scheduled_for), v_start_at - make_interval(secs => p_pace_seconds)) as max_time
+      from public.campaign_queue_plan p
+      where p.op_id = v_op
+    ) t
+    where m.campaign_id = p_campaign_id
+      and m.org_id = v_org_id
+      and m.channel = 'sms'
+      and m.direction = 'outbound'
+      and m.status = 'paused'
+      and not (coalesce(m.metadata, '{}'::jsonb) ? 'campaignPause')
+      and m.created_at >= (select o.created_at from public.campaign_queue_ops o where o.id = v_op)
+      and not exists (
+        select 1 from public.campaign_queue_plan p2
+        where p2.op_id = v_op and p2.message_id = m.id
+      )
+    window w as (order by m.created_at asc, m.id asc);
+
     with batch as (
       select p.seq, p.message_id, p.scheduled_for
       from public.campaign_queue_plan p

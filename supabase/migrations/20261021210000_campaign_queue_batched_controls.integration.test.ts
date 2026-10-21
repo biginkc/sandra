@@ -372,3 +372,38 @@ it("a resume retried long after a crash is re-timed from now, never in the past"
   expect(ordered.every((r) => r.status === "queued" && r.scheduled_for!.getTime() >= before)).toBe(true);
   expectContinuousCadence(ordered, PACE);
 }, 120_000);
+
+it("rows enqueued 'paused' while a cadence pass holds the campaign are released at the end of the cadence", async () => {
+  await seed("queued");
+  // Leave 50 contacts' messages out to "enqueue" mid-pass.
+  const late = (await a.query(
+    "delete from public.messages where id in (select id from public.messages where org_id=$1 order by id limit 50) returning contact_id, property_id",
+    [org])).rows as Array<{ contact_id: string; property_id: string }>;
+  const op = randomUUID();
+  await once(a, CADENCE, [campaign, 6, LIMIT], op); // campaign now held
+  expect(await status()).toBe("paused");
+  // What send.ts queueForLater inserts while the campaign is paused.
+  for (const r of late) {
+    await a.query(
+      `insert into public.messages (org_id, campaign_id, contact_id, property_id, channel, direction, status, body, scheduled_for)
+       values ($1, $2, $3, $4, 'sms', 'outbound', 'paused', 'late', null)`, [org, campaign, r.contact_id, r.property_id]);
+  }
+  await loop(a, CADENCE, [campaign, 6, LIMIT], op);
+  const after = await sortedByTime();
+  expect(after).toHaveLength(ROWS);
+  expect(after.every((r) => r.status === "queued" && r.scheduled_for !== null)).toBe(true);
+  expectContinuousCadence(after, 6);
+  expect(after.slice(-50).every((r) => r.created_at.getTime() > 0 && late.length === 50)).toBe(true);
+  expect(await status()).toBe("active");
+}, 120_000);
+
+it("old cadence callers (no p_limit, no p_op_id) still complete in one call", async () => {
+  await seed("queued");
+  const reference = queuedReference(await rows());
+  const r = (await a.query(
+    "select * from public.apply_campaign_cadence_reschedule($1, 5, 300, true)", [campaign])).rows[0];
+  expect(Number(r.remaining_count)).toBe(0);
+  expect(Number(r.affected_count)).toBe(ROWS);
+  expectContinuousCadence(await inOrder(reference), 5);
+  expect(await status()).toBe("active");
+}, 120_000);
