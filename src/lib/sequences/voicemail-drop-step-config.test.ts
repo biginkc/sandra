@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { hasVoicemailFields, isValidVoicemailDropStep, voicemailDropTimelineText } from "./voicemail-drop-step-config";
+import {
+  hasVoicemailFields,
+  isValidVoicemailDropStep,
+  visibleVoicemailDrops,
+  voicemailDropTimelineText,
+} from "./voicemail-drop-step-config";
 
-const base = { action_type: "send_voicemail_drop", template_body: null, template_id: null, template_category: null, target_status: null };
+const base = { action_type: "send_voicemail_drop", template_body: null, template_id: null, template_category: null, target_status: null, vm_voice_id: "voice-1" };
 
 describe("voicemail drop step rules", () => {
   it("requires exactly one of recording or script", () => {
@@ -26,11 +31,24 @@ describe("voicemail drop step rules", () => {
     expect(hasVoicemailFields({ action_type: "send_sms", vm_voice_id: null })).toBe(false);
   });
   it("words timeline states plainly", () => {
-    const row = { id: "d", status: "failed", reason: null, reason_code: "4002", proof_url: null, audio_kind: "tts",
+    const row = { id: "d", status: "failed", attempt_outcome: "queued", reason: null, reason_code: "4002", proof_url: null, audio_kind: "tts",
       queued_at: null, completed_at: null, created_at: "2026-10-20T00:00:00Z" };
     expect(voicemailDropTimelineText(row)).toEqual({ title: "Voicemail not delivered", detail: "Voicemail box full." });
     expect(voicemailDropTimelineText({ ...row, reason_code: null, reason: "carrier rejected" }).detail).toBe("Carrier rejected.");
     expect(voicemailDropTimelineText({ ...row, status: "queued" }).title).toBe("Voicemail queued");
     expect(voicemailDropTimelineText({ ...row, status: "delivered", audio_kind: "media" }).detail).toBe("Left a recorded message.");
+  });
+  it("a script needs a voice (own or default); a recording does not", () => {
+    expect(isValidVoicemailDropStep({ ...base, vm_voice_id: null, vm_tts_body: "Hi" })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_voice_id: " ", vm_tts_body: "Hi" }, "voice-default")).toBe(true);
+    expect(isValidVoicemailDropStep({ ...base, vm_voice_id: null, vm_media_id: "m1" })).toBe(true);
+  });
+  it("hides drops Drop Cowboy never queued from the lead timeline", () => {
+    const rows = [
+      { id: "a", attempt_outcome: "queued" },
+      { id: "b", attempt_outcome: "not_queued" },
+      { id: "c", attempt_outcome: "unknown" },
+    ];
+    expect(visibleVoicemailDrops(rows).map((r) => r.id)).toEqual(["a", "c"]);
   });
 });

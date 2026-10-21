@@ -27,14 +27,30 @@ export function hasSingleBraceMergeField(text: string | null | undefined): boole
 
 const filled = (value: string | null | undefined) => Boolean(value?.trim());
 
-/** Exactly one of recording / script, script within the limit, no SMS or status fields. */
-export function isValidVoicemailDropStep(step: VoicemailDropStepFields): boolean {
+/**
+ * A script is read aloud by a provider voice: the step's vm_voice_id, or the
+ * server default (DROPCOWBOY_VOICE_ID). Recordings need no voice.
+ */
+export function voicemailScriptNeedsVoice(step: VoicemailDropStepFields, defaultVoiceId?: string | null): boolean {
+  return step.action_type === "send_voicemail_drop" && !filled(step.vm_media_id) &&
+    !filled(step.vm_voice_id) && !filled(defaultVoiceId);
+}
+
+export const VOICEMAIL_VOICE_REQUIRED_MESSAGE =
+  "A voicemail script needs a voice. Enter a voice ID, or set a default voice for voicemail drops.";
+
+/**
+ * Exactly one of recording / script, script within the limit and with a
+ * voice (own or default), no SMS or status fields.
+ */
+export function isValidVoicemailDropStep(step: VoicemailDropStepFields, defaultVoiceId?: string | null): boolean {
   if (step.action_type !== "send_voicemail_drop") return false;
   const media = filled(step.vm_media_id);
   const tts = filled(step.vm_tts_body);
   if (Number(media) + Number(tts) !== 1) return false;
   if (tts && (step.vm_tts_body ?? "").trim().length > VOICEMAIL_SCRIPT_MAX_CHARS) return false;
   if (tts && hasSingleBraceMergeField(step.vm_tts_body)) return false;
+  if (voicemailScriptNeedsVoice(step, defaultVoiceId)) return false;
   return !filled(step.template_body) && !step.template_id && !filled(step.template_category) &&
     !filled(step.target_status);
 }
@@ -48,6 +64,7 @@ export function hasVoicemailFields(step: VoicemailDropStepFields): boolean {
 export type VoicemailDropTimelineRow = {
   id: string;
   status: string;
+  attempt_outcome: string;
   reason: string | null;
   reason_code: string | null;
   proof_url: string | null;
@@ -58,7 +75,16 @@ export type VoicemailDropTimelineRow = {
 };
 
 export const VOICEMAIL_DROP_TIMELINE_COLUMNS =
-  "id, status, reason, reason_code, proof_url, audio_kind, queued_at, completed_at, created_at";
+  "id, status, attempt_outcome, reason, reason_code, proof_url, audio_kind, queued_at, completed_at, created_at";
+
+/**
+ * Drops Drop Cowboy proved it never queued (429/500/400/401, or an
+ * authorization that refused the send) are bookkeeping for a retry, not
+ * something that happened to the lead: keep them off the timeline.
+ */
+export function visibleVoicemailDrops<T extends { attempt_outcome: string }>(rows: readonly T[]): T[] {
+  return rows.filter((row) => row.attempt_outcome !== "not_queued");
+}
 
 /** Plain-English failure reasons for the delivery codes the plan names. */
 const REASON_TEXT: Record<string, string> = {

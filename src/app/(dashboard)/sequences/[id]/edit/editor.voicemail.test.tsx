@@ -85,4 +85,16 @@ describe("drip editor voicemail drop step", () => {
     expect(within(card(2)).getByText(/this step will not send/)).toBeInTheDocument();
     expect(actionSelect(2)).toHaveValue("send_voicemail_drop");
   });
+
+  it("script mode with no voice and no default shows the error and blocks saving", () => {
+    mount([smsStep, { ...dropStep, vm_voice_id: null }], { ...on, defaultVoiceId: null });
+    expect(within(card(2)).getByText(/needs a voice/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+  });
+
+  it("a blank step voice is fine when a default voice exists", () => {
+    mount([smsStep, { ...dropStep, vm_voice_id: null }], on);
+    expect(within(card(2)).queryByText(/needs a voice/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeEnabled();
+  });
 });

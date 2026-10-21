@@ -100,6 +100,7 @@ import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
 import {
   VOICEMAIL_DROP_TIMELINE_COLUMNS,
+  visibleVoicemailDrops,
   type VoicemailDropTimelineRow,
 } from "@/lib/sequences/voicemail-drop-step-config";
 import type { LeadEvent } from "./lead-events";
@@ -419,7 +420,7 @@ export default async function LeadDetailPage({
       .order("created_at", { ascending: false })
       .limit(50),
   )
-    .then(({ data, error }) => (error ? [] : ((data ?? []) as VoicemailDropTimelineRow[])))
+    .then(({ data, error }) => (error ? [] : visibleVoicemailDrops((data ?? []) as VoicemailDropTimelineRow[])))
     .catch(() => [] as VoicemailDropTimelineRow[]);
   const normaRequestsPromise = supabase
     .from("norma_call_requests")

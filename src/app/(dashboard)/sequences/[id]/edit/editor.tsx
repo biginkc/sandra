@@ -16,6 +16,8 @@ import {
   hasSingleBraceMergeField,
   isValidVoicemailDropStep,
   VOICEMAIL_SCRIPT_MAX_CHARS,
+  VOICEMAIL_VOICE_REQUIRED_MESSAGE,
+  voicemailScriptNeedsVoice,
 } from "@/lib/sequences/voicemail-drop-step-config";
 
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
@@ -175,7 +177,7 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
       return Number(Boolean(body)) + Number(Boolean(step.template_id)) +
         Number(Boolean(step.template_category?.trim())) === 1 && !step.target_status;
     }
-    if (step.action_type === "send_voicemail_drop") return isValidVoicemailDropStep(step);
+    if (step.action_type === "send_voicemail_drop") return isValidVoicemailDropStep(step, voicemailDrop.defaultVoiceId);
     return step.action_type === "change_status" && Boolean(step.target_status?.trim()) &&
       !step.template_body?.trim() && !step.template_id && !step.template_category?.trim();
   });
@@ -409,7 +411,7 @@ function StepEditor({ step, index, count, locked, canDelete, templates, voicemai
       </label>
     </div>
     {!voicemailDrop.enabled && index === 0 ? <p className="text-muted-foreground text-xs">Voicemail drops are off. They turn on once a voicemail provider is connected.</p> : null}
-    {step.action_type === "send_voicemail_drop" ? <VoicemailDropEditor step={step} enabled={voicemailDrop.enabled} onChange={onChange} /> :
+    {step.action_type === "send_voicemail_drop" ? <VoicemailDropEditor step={step} enabled={voicemailDrop.enabled} defaultVoiceId={voicemailDrop.defaultVoiceId} onChange={onChange} /> :
       step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
       body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value, template_category: null })}
       templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value, template_category: null })}
@@ -429,15 +431,17 @@ function StepEditor({ step, index, count, locked, canDelete, templates, voicemai
  * Pick exactly one voicemail source: a recording uploaded in the provider, or
  * a script read aloud. Voice and caller line default from server settings.
  */
-function VoicemailDropEditor({ step, enabled, onChange }: {
+function VoicemailDropEditor({ step, enabled, defaultVoiceId, onChange }: {
   step: DraftStep;
   enabled: boolean;
+  defaultVoiceId: string | null;
   onChange: (patch: Partial<DraftStep>) => void;
 }) {
   const mode: "script" | "recording" = step.vm_media_id !== null && step.vm_media_id !== undefined ? "recording" : "script";
   const script = step.vm_tts_body ?? "";
   const scriptId = useId();
   const over = script.trim().length > VOICEMAIL_SCRIPT_MAX_CHARS;
+  const voiceMissing = mode === "script" && voicemailScriptNeedsVoice(step, defaultVoiceId);
   const insert = (token: string) => onChange({ vm_tts_body: script ? `${script}${/\s$/.test(script) ? "" : " "}${token}` : token });
   return (
     <div className="flex flex-col gap-2" data-testid="voicemail-drop-editor">
@@ -484,7 +488,9 @@ function VoicemailDropEditor({ step, enabled, onChange }: {
       <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
         <label className="flex flex-1 flex-col gap-1 text-sm">
           <span className="font-medium">Voice</span>
-          <Input value={step.vm_voice_id ?? ""} onChange={(e) => onChange({ vm_voice_id: e.target.value || null })} placeholder="Default voice" />
+          <Input value={step.vm_voice_id ?? ""} onChange={(e) => onChange({ vm_voice_id: e.target.value || null })}
+            placeholder={defaultVoiceId ? "Default voice" : "Voice ID"} aria-invalid={voiceMissing || undefined} />
+          {voiceMissing ? <span className="text-destructive text-xs">{VOICEMAIL_VOICE_REQUIRED_MESSAGE}</span> : null}
         </label>
         <label className="flex flex-1 flex-col gap-1 text-sm">
           <span className="font-medium">Caller line</span>

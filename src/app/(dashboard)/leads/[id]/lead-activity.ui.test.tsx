@@ -415,7 +415,7 @@ describe("<LeadActivityTimeline /> voicemail drops", () => {
     authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
   };
   const drop = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
-    id, status, reason: null, reason_code: null, proof_url: null, audio_kind: "tts",
+    id, status, attempt_outcome: "queued", reason: null, reason_code: null, proof_url: null, audio_kind: "tts",
     queued_at: "2026-10-20T14:00:00Z", completed_at: null, created_at: "2026-10-20T14:00:00Z", ...extra,
   });
 
