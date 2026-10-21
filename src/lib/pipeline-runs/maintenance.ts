@@ -6,9 +6,21 @@ type Admin = SupabaseClient<Database>;
 
 export const STALE_RUNNING_REASON = "stale_running";
 
+/** Steps that mean "this run is intentionally parked until a later wake". */
+export const WAIT_STEP_NAMES = [
+  "retry_scheduled",
+  "nine_reply_deferred",
+  "reply_delay_scheduled",
+] as const;
+
+/** Grace after a waiting run's scheduled wake before it counts as crashed. */
+export const WAIT_WAKE_MARGIN_MINUTES = 30;
+
 /**
  * Close out runs that never reached a terminal state (crashed function,
  * lost workflow). Only `running` rows older than the cutoff are touched.
+ * A run whose latest wait step (retry / send-window deferral / reply delay)
+ * schedules a wake time is left alone until wake + WAIT_WAKE_MARGIN_MINUTES.
  * Throws on DB error so the cron route can report it.
  */
 export async function sweepStalePipelineRuns(
@@ -18,6 +30,41 @@ export async function sweepStalePipelineRuns(
   const minutes = opts.olderThanMinutes ?? 30;
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - minutes * 60_000).toISOString();
+  const { data: candidates, error: candError } = await admin
+    .from("pipeline_runs")
+    .select("id")
+    .eq("status", "running")
+    .lt("started_at", cutoff);
+  if (candError) {
+    throw new Error(`sweep stale pipeline runs failed: ${candError.message}`);
+  }
+  const ids = (candidates ?? []).map((r) => r.id);
+  if (ids.length === 0) return { swept: 0 };
+
+  const { data: waits, error: waitError } = await admin
+    .from("pipeline_run_steps")
+    .select("run_id, created_at, detail")
+    .in("run_id", ids)
+    .in("name", [...WAIT_STEP_NAMES]);
+  if (waitError) {
+    throw new Error(`sweep stale pipeline runs failed: ${waitError.message}`);
+  }
+  // Latest wake time per run (max over its wait steps).
+  const wakeByRun = new Map<string, number>();
+  for (const w of waits ?? []) {
+    const detail = (w.detail ?? {}) as { delaySeconds?: unknown };
+    const delay = typeof detail.delaySeconds === "number" ? detail.delaySeconds : 0;
+    const wake = new Date(w.created_at).getTime() + delay * 1000;
+    if (!Number.isFinite(wake)) continue;
+    wakeByRun.set(w.run_id, Math.max(wakeByRun.get(w.run_id) ?? 0, wake));
+  }
+  const marginMs = WAIT_WAKE_MARGIN_MINUTES * 60_000;
+  const stale = ids.filter((id) => {
+    const wake = wakeByRun.get(id);
+    return wake === undefined || now.getTime() >= wake + marginMs;
+  });
+  if (stale.length === 0) return { swept: 0 };
+
   const { data, error } = await admin
     .from("pipeline_runs")
     .update({
@@ -25,8 +72,8 @@ export async function sweepStalePipelineRuns(
       reason: STALE_RUNNING_REASON,
       completed_at: now.toISOString(),
     })
+    .in("id", stale)
     .eq("status", "running")
-    .lt("started_at", cutoff)
     .select("id");
   if (error) throw new Error(`sweep stale pipeline runs failed: ${error.message}`);
   return { swept: data?.length ?? 0 };

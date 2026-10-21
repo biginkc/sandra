@@ -359,8 +359,14 @@ describe("seam integrity (fix round 2)", () => {
   afterEach(() => reportError.mockClear());
 
   /** Stateful fake: enforces unique (run_id, seq) and a guarded status update. */
-  function statefulAdmin(initial: { steps: number[]; status: string }) {
-    const state = { steps: [...initial.steps], status: initial.status, inserted: [] as Array<{ seq: number; name: string }> };
+  function statefulAdmin(initial: { steps: number[]; status: string; reason?: string | null }) {
+    const state = {
+      steps: [...initial.steps],
+      status: initial.status,
+      reason: initial.reason ?? null,
+      payload: null as Record<string, unknown> | null,
+      inserted: [] as Array<{ seq: number; name: string }>,
+    };
     const admin = {
       from(table: string) {
         if (table === "pipeline_run_steps") {
@@ -386,8 +392,9 @@ describe("seam integrity (fix round 2)", () => {
           };
         }
         const filters: Record<string, unknown> = {};
+        let payload: Record<string, unknown> = {};
         const chain = {
-          update: () => chain,
+          update: (p: Record<string, unknown>) => ((payload = p), chain),
           eq: (c: string, v: unknown) => {
             filters[c] = v;
             return chain;
@@ -397,6 +404,18 @@ describe("seam integrity (fix round 2)", () => {
           select: async () => {
             if (filters.status === "running" && state.status === "running") {
               state.status = "terminal";
+              state.payload = payload;
+              return { data: [{ id: "run-1" }], error: null };
+            }
+            if (
+              filters.status === "error" &&
+              filters.reason === "stale_running" &&
+              state.status === "error" &&
+              state.reason === "stale_running"
+            ) {
+              state.status = String(payload.status);
+              state.reason = (payload.reason as string | null) ?? null;
+              state.payload = payload;
               return { data: [{ id: "run-1" }], error: null };
             }
             return { data: [], error: null };
@@ -424,6 +443,23 @@ describe("seam integrity (fix round 2)", () => {
     await finishRun(admin, ctx, { status: "replied" });
     expect(state.status).toBe("terminal");
     expect(state.inserted).toEqual([{ seq: 2, name: "terminal_conflict" }]);
+  });
+
+  it("corrects a run the stale sweeper closed when the deferred re-dispatch finishes", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "stale_running" });
+    const ctx = { runId: "run-1", orgId: "o", seq: 1 };
+    await finishRun(admin, ctx, { status: "replied", finalOutcome: "ai_replied", outboundMessageId: "m-9" });
+    expect(state.status).toBe("replied");
+    expect(state.reason).toBeNull();
+    expect(state.payload).toMatchObject({ final_outcome: "ai_replied", outbound_message_id: "m-9", reason: null });
+    expect(state.inserted).toEqual([]);
+  });
+
+  it("does not overwrite a real error (not stale_running)", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "send_failed" });
+    await finishRun(admin, { runId: "run-1", orgId: "o", seq: 1 }, { status: "replied" });
+    expect(state.status).toBe("error");
+    expect(state.inserted.map((s) => s.name)).toEqual(["terminal_conflict"]);
   });
 
   it("stamps a running run exactly once", async () => {

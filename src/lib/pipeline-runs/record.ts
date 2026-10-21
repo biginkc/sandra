@@ -3,6 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
+import { STALE_RUNNING_REASON } from "./maintenance";
+
 import type {
   MaybeRunContext,
   PipelineRunContext,
@@ -290,8 +292,10 @@ export type FinishRunInput = RunPatch & {
 /**
  * Stamp the terminal state. Never throws. Only a run still `running` can
  * transition: a second terminal write (a late workflow after the webhook
- * already stamped the run, or after the stale sweep) never overwrites the
- * first. The rejected attempt is recorded as a `terminal_conflict` step.
+ * already stamped the run) never overwrites the first. The rejected attempt
+ * is recorded as a `terminal_conflict` step. Exception: a run the stale
+ * sweeper closed (error/stale_running) is corrected by the real finish, since
+ * the sweep was only a guess that the run had died.
  *
  * Terminal ownership: once a run has a claim_id, only the caller presenting
  * that claim (input.claimId, else the claim this context won) may write a
@@ -316,23 +320,35 @@ export async function finishRun(
     return;
   }
   try {
-    let query = admin
-      .from("pipeline_runs")
-      .update({
-        ...patchColumns(input),
-        status: input.status,
-        ...(input.finalOutcome !== undefined
-          ? { final_outcome: input.finalOutcome }
-          : {}),
-        ...(input.reason !== undefined ? { reason: input.reason } : {}),
-        completed_at: new Date().toISOString(),
-      })
-      .eq("id", ctx.runId)
-      .eq("status", "running");
-    query = presentedClaim
-      ? query.or(`claim_id.is.null,claim_id.eq.${presentedClaim}`)
-      : query.is("claim_id", null);
-    const { data, error } = await query.select("id");
+    const write = (from: "running" | "swept") => {
+      let query = admin
+        .from("pipeline_runs")
+        .update({
+          ...patchColumns(input),
+          status: input.status,
+          // A corrected swept row must not keep stale_running as its reason.
+          ...(input.finalOutcome !== undefined || from === "swept"
+            ? { final_outcome: input.finalOutcome ?? null }
+            : {}),
+          ...(input.reason !== undefined || from === "swept"
+            ? { reason: input.reason ?? null }
+            : {}),
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", ctx.runId);
+      query =
+        from === "running"
+          ? query.eq("status", "running")
+          : query.eq("status", "error").eq("reason", STALE_RUNNING_REASON);
+      query = presentedClaim
+        ? query.or(`claim_id.is.null,claim_id.eq.${presentedClaim}`)
+        : query.is("claim_id", null);
+      return query.select("id");
+    };
+    let { data, error } = await write("running");
+    if (!error && (!data || data.length === 0)) {
+      ({ data, error } = await write("swept"));
+    }
     if (error) {
       report("finish", error);
       return;
