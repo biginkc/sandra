@@ -315,8 +315,9 @@ begin
   -- re-paused get their slot back.
   if v_held = 0 or p_limit is null then
     -- Rows enqueued while the pass held the campaign are inserted 'paused'
-    -- with no campaignPause record (send.ts queueForLater). Append them to
-    -- the end of this cadence so they are released, not stranded.
+    -- by send.ts queueForLater. Append them to the end of this cadence so
+    -- they are released, not stranded (skipped when the campaign was already
+    -- operator-paused before the pass: those stay held for a real resume).
     insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
     select
       v_op,
@@ -335,13 +336,19 @@ begin
       and m.channel = 'sms'
       and m.direction = 'outbound'
       and m.status = 'paused'
-      and not (coalesce(m.metadata, '{}'::jsonb) ? 'campaignPause')
       and m.created_at >= (select o.created_at from public.campaign_queue_ops o where o.id = v_op)
+      and (select o.prior_campaign_status from public.campaign_queue_ops o where o.id = v_op)
+        is distinct from 'paused'
       and not exists (
         select 1 from public.campaign_queue_plan p2
         where p2.op_id = v_op and p2.message_id = m.id
       )
-    window w as (order by m.created_at asc, m.id asc);
+    window w as (
+      order by
+        nullif(m.metadata #>> '{campaignPause,previousScheduledFor}', '')::timestamptz asc nulls last,
+        m.created_at asc,
+        m.id asc
+    );
 
     with batch as (
       select p.seq, p.message_id, p.scheduled_for
@@ -688,6 +695,38 @@ begin
         m.id asc
     );
   end if;
+
+  -- Paused rows that are not in the plan yet (enqueued 'paused' between
+  -- batches while the campaign is still paused) join the end of this
+  -- resume's cadence, so completion never leaves a paused row behind.
+  insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
+  select
+    v_op,
+    t.max_seq + (row_number() over w)::integer,
+    m.id,
+    greatest(t.max_time, v_now) + ((row_number() over w)::double precision * make_interval(secs => p_pace_seconds))
+  from public.messages m
+  cross join (
+    select coalesce(max(p.seq), -1) as max_seq,
+           coalesce(max(p.scheduled_for), v_start_at - make_interval(secs => p_pace_seconds)) as max_time
+    from public.campaign_queue_plan p
+    where p.op_id = v_op
+  ) t
+  where m.campaign_id = p_campaign_id
+    and m.org_id = v_org_id
+    and m.channel = 'sms'
+    and m.direction = 'outbound'
+    and m.status = 'paused'
+    and not exists (
+      select 1 from public.campaign_queue_plan p2
+      where p2.op_id = v_op and p2.message_id = m.id
+    )
+  window w as (
+    order by
+      nullif(m.metadata #>> '{campaignPause,previousScheduledFor}', '')::timestamptz asc nulls last,
+      m.created_at asc,
+      m.id asc
+  );
 
   -- Planned rows still paused: never applied, or re-paused by the sender
   -- while this resume was running (they get their planned time back).

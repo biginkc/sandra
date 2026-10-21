@@ -385,15 +385,18 @@ it("rows enqueued 'paused' while a cadence pass holds the campaign are released 
   // What send.ts queueForLater inserts while the campaign is paused.
   for (const r of late) {
     await a.query(
-      `insert into public.messages (org_id, campaign_id, contact_id, property_id, channel, direction, status, body, scheduled_for)
-       values ($1, $2, $3, $4, 'sms', 'outbound', 'paused', 'late', null)`, [org, campaign, r.contact_id, r.property_id]);
+      `insert into public.messages (org_id, campaign_id, contact_id, property_id, channel, direction, status, body, scheduled_for, metadata)
+       values ($1, $2, $3, $4, 'sms', 'outbound', 'paused', 'late', null,
+               jsonb_build_object('sendOrigin', 'bulk', 'campaignPause', jsonb_build_object(
+                 'pausedAt', now(), 'previousScheduledFor', now() + interval '1 hour', 'reason', 'operator_pause')))`,
+      [org, campaign, r.contact_id, r.property_id]);
   }
   await loop(a, CADENCE, [campaign, 6, LIMIT], op);
   const after = await sortedByTime();
   expect(after).toHaveLength(ROWS);
   expect(after.every((r) => r.status === "queued" && r.scheduled_for !== null)).toBe(true);
   expectContinuousCadence(after, 6);
-  expect(after.slice(-50).every((r) => r.created_at.getTime() > 0 && late.length === 50)).toBe(true);
+  expect(after.slice(-50).every((r) => r.created_at.getTime() > Date.parse("2026-10-02"))).toBe(true);
   expect(await status()).toBe("active");
 }, 120_000);
 
@@ -406,4 +409,28 @@ it("old cadence callers (no p_limit, no p_op_id) still complete in one call", as
   expect(Number(r.affected_count)).toBe(ROWS);
   expectContinuousCadence(await inOrder(reference), 5);
   expect(await status()).toBe("active");
+}, 120_000);
+
+it("rows enqueued 'paused' between resume batches are resumed at the end of the cadence", async () => {
+  await seed("paused");
+  const late = (await a.query(
+    "delete from public.messages where id in (select id from public.messages where org_id=$1 order by id limit 50) returning contact_id, property_id",
+    [org])).rows as Array<{ contact_id: string; property_id: string }>;
+  const op = randomUUID();
+  await once(a, RESUME, [campaign, PACE, LIMIT], op);
+  for (const r of late) {
+    await a.query(
+      `insert into public.messages (org_id, campaign_id, contact_id, property_id, channel, direction, status, body, scheduled_for, metadata)
+       values ($1, $2, $3, $4, 'sms', 'outbound', 'paused', 'late', null,
+               jsonb_build_object('campaignPause', jsonb_build_object(
+                 'pausedAt', now(), 'previousScheduledFor', now() + interval '1 hour', 'reason', 'operator_pause')))`,
+      [org, campaign, r.contact_id, r.property_id]);
+  }
+  await loop(a, RESUME, [campaign, PACE, LIMIT], op);
+  const after = await sortedByTime();
+  expect(after).toHaveLength(ROWS);
+  expect(after.every((r) => r.status === "queued")).toBe(true);
+  expectContinuousCadence(after, PACE);
+  expect(after.slice(-50).every((r) => r.created_at.getTime() > Date.parse("2026-10-02"))).toBe(true);
+  expect(await status()).toBe("completed");
 }, 120_000);
