@@ -645,8 +645,28 @@ describe("voicemail drop helpers", () => {
     expect(toE164("12345")).toBeNull();
     expect(readDailyCap({ VOICEMAIL_DROP_DAILY_CAP: "50" } as never)).toBe(50);
     expect(readDailyCap({} as never)).toBeNull();
-    expect(readDailyCap({ VOICEMAIL_DROP_DAILY_CAP: "abc" } as never)).toBeNull();
+    expect(() => readDailyCap({ VOICEMAIL_DROP_DAILY_CAP: "abc" } as never)).toThrow();
+    expect(() => readDailyCap({ VOICEMAIL_DROP_DAILY_CAP: "-5" } as never)).toThrow();
     expect(voicemailDropCallbackUrl({} as never)).toBeNull();
+    expect(() => voicemailDropCallbackUrl({ DROPCOWBOY_CALLBACK_SECRET: "s" } as never)).toThrow(/NEXT_PUBLIC_APP_URL/);
+  });
+
+  it.each(["abc", "-5", "2.5"])("invalid daily cap %s fails closed: pauses provider_failed, reports, no drop row", async (cap) => {
+    const { outcome, ops } = await run(baseWorld(), TTS_STEP, { ...ENV, VOICEMAIL_DROP_DAILY_CAP: cap } as never);
+    expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "provider_failed" });
+    expect(reportError).toHaveBeenCalled();
+    expect(ops.some((o) => o.table === "voicemail_drops")).toBe(false);
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
+  it("missing app URL pauses provider_failed and reports instead of using a hardcoded host", async () => {
+    const { NEXT_PUBLIC_APP_URL: _omit, ...noUrl } = ENV as Record<string, string>;
+    void _omit;
+    const { outcome, ops } = await run(baseWorld(), TTS_STEP, noUrl as never);
+    expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "provider_failed" });
+    expect(updatesTo(ops, "sequence_step_runs")[0]).toMatchObject({ failure_reason: "voicemail drop callback url missing" });
+    expect(reportError).toHaveBeenCalled();
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
   });
 
   it("computes the Chicago day window", () => {
