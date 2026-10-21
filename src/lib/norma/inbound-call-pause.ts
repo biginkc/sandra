@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
-import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -39,34 +39,37 @@ export async function pauseEnrollmentsForInboundCall(
     if ([row.phone_1, row.phone_2, row.phone_3].some((slot) => normalizePhone(slot) === phone)) contactIds.add(row.id);
   }
 
-  let paused = 0;
-  for (const contactId of contactIds) {
-    // First override a temporary call pause (call_in_progress / norma_call),
-    // like the reply path's fn_norma_upgrade_pauses_for_reply, so the
-    // softphone / Norma release cannot restart the drip. Upgrade BEFORE the
-    // pause: a release landing in between reactivates the row, and the pause
-    // below then catches it. The pause's single UPDATE also takes over a
-    // reconciliation_required hold.
-    paused += await upgradeTemporaryPauses(client, contactId);
-    paused += (await pauseContactEnrollments(client, { contactId, reason: "inbound_call" })).paused;
-  }
-  return { matchedContactIds: [...contactIds], paused };
-}
-
-async function upgradeTemporaryPauses(client: SupabaseClient<Database>, contactId: string): Promise<number> {
-  const { data: properties, error: propertyError } = await client
-    .from("properties")
-    .select("id")
-    .eq("homeowner_contact_id", contactId);
-  if (propertyError) throw new Error(`pauseEnrollmentsForInboundCall properties: ${propertyError.message}`);
-  const propertyIds = (properties ?? []).map((p) => p.id);
-  if (propertyIds.length === 0) return 0;
-  const { data, error } = await (
+  if (contactIds.size === 0) return { matchedContactIds: [], paused: 0 };
+  // One atomic UPDATE (pause_enrollments_for_inbound_call): active rows,
+  // reconciliation holds and temporary call pauses all become inbound_call,
+  // so a call pause committing at the same moment cannot survive and be
+  // resumed by the softphone / Norma release.
+  const { data, error: pauseError } = await (
     client.rpc as unknown as (
       fn: string,
       args: Record<string, unknown>,
-    ) => Promise<{ data: number | null; error: { message: string } | null }>
-  )("upgrade_temporary_pauses_for_inbound_call", { p_property_ids: propertyIds });
-  if (error) throw new Error(`pauseEnrollmentsForInboundCall upgrade: ${error.message}`);
-  return data ?? 0;
+    ) => Promise<{ data: Array<{ id: string; property_id: string; sequence_id: string }> | null; error: { message: string } | null }>
+  )("pause_enrollments_for_inbound_call", { p_contact_ids: [...contactIds] });
+  if (pauseError) throw new Error(`pauseEnrollmentsForInboundCall pause: ${pauseError.message}`);
+  const rows = data ?? [];
+  const grouped = new Map<string, string[]>();
+  for (const row of rows) grouped.set(row.property_id, [...(grouped.get(row.property_id) ?? []), row.sequence_id]);
+  if (grouped.size > 0) {
+    const batchId = grouped.size > 1 ? crypto.randomUUID() : null;
+    await recordLeadEvents(
+      [...grouped.entries()].map(([propertyId, sequenceIds]) => ({
+        propertyId,
+        actorType: "system" as const,
+        eventType: LEAD_EVENT_TYPES.SEQUENCE_PAUSED,
+        payload: {
+          count: sequenceIds.length,
+          sequence_ids: [...new Set(sequenceIds)],
+          reason: "inbound_call",
+          permanent: false,
+          ...(batchId ? { batch_id: batchId, batch_count: grouped.size } : {}),
+        },
+      })),
+    );
+  }
+  return { matchedContactIds: [...contactIds], paused: rows.length };
 }
