@@ -4,7 +4,7 @@
  * shipped (PR #909, 2026-10-20). See src/lib/ai-responder/asked-offer-backfill.ts.
  *
  * Dry run is the default: reads the database, asks Jev, writes nothing (no
- * database rows, no files unless --out is given), and prints the target list.
+ * database rows, no files), and prints the target list.
  * Sends need --apply AND an explicit human yes on the dry-run list (these are
  * real sellers).
  *
@@ -105,11 +105,13 @@ function parse(argv: string[]): Options {
   --before <iso>       Inbounds at or after this ran with the new reply. Default: ${DEFAULT_BEFORE}.
   --exclude <uuid>     Extra property to skip; repeatable (the six handled by hand are always skipped).
   --only <uuid>        Limit to these properties; repeatable.
-  --out <path>         Write the JSON report here (refuses to overwrite). Apply always writes one.`);
+  --out <path>         Apply only: write the JSON report here (refuses to overwrite). Apply always writes one.`);
       process.exit(0);
     } else throw new Error(`Unknown option: ${a}`);
   }
   if (o.statuses.length === 0) o.statuses = ["new_lead"];
+  // A dry run writes nothing; redirect stdout to keep its report.
+  if (o.out && !o.apply) throw new Error("--out is only for --apply (a dry run writes nothing).");
   return o;
 }
 

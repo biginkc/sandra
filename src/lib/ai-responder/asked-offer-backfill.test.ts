@@ -13,6 +13,7 @@ import {
   backfillSkipReason,
   chicagoWindowOpen,
   idempotencyKeyFor,
+  outboundCountsAfter,
   runAskedOfferBackfill,
   summarizeThread,
   type BackfillFacts,
@@ -63,8 +64,12 @@ function property(id: string, over: Row = {}): Row {
   return { id, org_id: ORG, address: `${id} Main St`, city: "Kansas City", state: "MO", status: "new_lead", outreach_dispo: null, ai_responder_disabled: false, is_dnc_locked: false, ...over };
 }
 
+/** Each test lead's seller has their own number. */
+const phoneOf = (propertyId: string) => `+1816555${String(propertyId.charCodeAt(propertyId.length - 1)).padStart(4, "0")}`;
+
 function msg(id: string, propertyId: string, direction: string, created_at: string, body: string, over: Row = {}): Row {
-  return { id, property_id: propertyId, contact_id: `c-${propertyId}`, conversation_id: `conv-${propertyId}`, direction, status: direction === "inbound" ? "received" : "delivered", body, from_address: direction === "inbound" ? "+18165550100" : "+18164876899", to_address: null, created_at, channel: "sms", ...over };
+  const seller = phoneOf(propertyId);
+  return { id, property_id: propertyId, contact_id: `c-${propertyId}`, conversation_id: `conv-${propertyId}`, direction, status: direction === "inbound" ? "received" : "delivered", body, from_address: direction === "inbound" ? seller : "+18164876899", to_address: direction === "outbound" ? seller : null, created_at, sent_at: null, org_id: ORG, channel: "sms", ...over };
 }
 
 function classifierSaying(answer: "asked_offer" | "talked_price") {
@@ -122,10 +127,19 @@ describe("helpers", () => {
     expect(chicagoWindowOpen(new Date("2026-10-22T02:00:00Z"))).toBe(false); // 21:00
   });
 
-  it("idempotencyKeyFor is stable per inbound and a valid v4 UUID", () => {
-    const k = idempotencyKeyFor("i1");
-    expect(k).toBe(idempotencyKeyFor("i1"));
-    expect(k).not.toBe(idempotencyKeyFor("i2"));
+  it("outboundCountsAfter uses when it actually went, and counts anything still waiting", () => {
+    const inboundAt = "2026-10-20T00:28:00Z";
+    expect(outboundCountsAfter({ status: "delivered", created_at: "2026-10-19T22:00:00Z", sent_at: null }, inboundAt)).toBe(false);
+    // Created before the inbound, released after it.
+    expect(outboundCountsAfter({ status: "delivered", created_at: "2026-10-19T22:00:00Z", sent_at: "2026-10-20T01:00:00Z" }, inboundAt)).toBe(true);
+    expect(outboundCountsAfter({ status: "queued", created_at: "2026-10-01T00:00:00Z", sent_at: null }, inboundAt)).toBe(true);
+    expect(outboundCountsAfter({ status: "paused", created_at: "2026-10-01T00:00:00Z", sent_at: null }, inboundAt)).toBe(true);
+  });
+
+  it("idempotencyKeyFor is stable per seller phone and a valid v4 UUID", () => {
+    const k = idempotencyKeyFor(ORG, "+18165550100");
+    expect(k).toBe(idempotencyKeyFor(ORG, "+18165550100"));
+    expect(k).not.toBe(idempotencyKeyFor(ORG, "+18165550101"));
     expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 });
@@ -135,6 +149,8 @@ describe("backfillSkipReason", () => {
     property: property("p") as never,
     latestInbound: msg("i", "p", "inbound", "2026-10-20T00:28:00Z", "offer?") as never,
     outboundSinceInbound: false,
+    newerInboundElsewhere: false,
+    statusInScope: true,
     approvedTextBefore: false,
     callSinceInbound: false,
     contact: { id: "c-p", do_not_contact: false, sms_opted_out: false },
@@ -154,6 +170,8 @@ describe("backfillSkipReason", () => {
     ["no_inbound", (f) => (f.latestInbound = null)],
     ["inbound_outside_window", (f) => (f.latestInbound = msg("i", "p", "inbound", "2026-10-21T01:30:00Z", "offer?") as never)],
     ["texted_since", (f) => (f.outboundSinceInbound = true)],
+    ["status_changed", (f) => (f.statusInScope = false)],
+    ["texted_elsewhere_since", (f) => (f.newerInboundElsewhere = true)],
     ["already_got_this_text", (f) => (f.approvedTextBefore = true)],
     ["no_inbound_number", (f) => (f.latestInbound!.from_address = null)],
     ["called_since", (f) => (f.callSinceInbound = true)],
@@ -202,9 +220,9 @@ describe("runAskedOfferBackfill", () => {
       contactId: "c-p1",
       propertyId: "p1",
       body: NINE_HOT_REPLY_TEXTS.asked_offer,
-      to: "+18165550100",
+      to: phoneOf("p1"),
       requireStickyFrom: true,
-      idempotencyKey: idempotencyKeyFor("i1"),
+      idempotencyKey: idempotencyKeyFor(ORG, phoneOf("p1")),
       metadata: { kind: ASKED_OFFER_BACKFILL_KIND, sourceInboundMessageId: "i1" },
     });
     expect(input.queueOnly).toBeUndefined();
@@ -234,6 +252,34 @@ describe("runAskedOfferBackfill", () => {
     d.tables.messages!.push(msg("old", "p1", "outbound", "2026-10-02T15:00:00Z", NINE_HOT_REPLY_TEXTS.asked_offer));
     const rows = await runAskedOfferBackfill(d.client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
     expect(rows.find((r) => r.propertyId === "p1")?.skip).toBe("already_got_this_text");
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  describe("the same seller on another property", () => {
+    const withOther = (extra: Row[], calls: Row[] = []) => {
+      const d = db();
+      d.tables.properties!.push(property("px", { status: "prospect" }));
+      d.tables.messages!.push(...extra);
+      d.tables.call_activities!.push(...calls);
+      return d;
+    };
+    it.each<[string, Row[], Row[]]>([
+      ["already_got_this_text", [msg("ox", "px", "outbound", "2026-10-02T15:00:00Z", NINE_HOT_REPLY_TEXTS.asked_offer, { to_address: phoneOf("p1") })], []],
+      ["texted_since", [msg("ox", "px", "outbound", "2026-10-20T05:00:00Z", "hello from the other property", { to_address: phoneOf("p1") })], []],
+      ["texted_elsewhere_since", [msg("ix", "px", "inbound", "2026-10-20T05:00:00Z", "not interested", { from_address: phoneOf("p1") })], []],
+      ["called_since", [], [{ id: "cx", property_id: "px", org_id: ORG, phone_e164: phoneOf("p1"), created_at: "2026-10-20T05:00:00Z" }]],
+    ])("skips: %s", async (reason, extra, calls) => {
+      const rows = await runAskedOfferBackfill(withOther(extra, calls).client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
+      expect(rows.find((r) => r.propertyId === "p1")?.skip).toBe(reason);
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    });
+  });
+
+  it("skips a lead whose only outbound was created before the inbound but sent after it", async () => {
+    const d = db();
+    d.tables.messages!.push(msg("late-release", "p1", "outbound", "2026-10-19T23:00:00Z", "queued earlier", { sent_at: "2026-10-20T02:00:00Z" }));
+    const rows = await runAskedOfferBackfill(d.client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
+    expect(rows.some((r) => r.propertyId === "p1")).toBe(false); // texted since: not even listed
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
@@ -278,11 +324,18 @@ describe("runAskedOfferBackfill", () => {
       ["a call was logged", (d) => void d.tables.call_activities!.push({ id: "c", property_id: "p1", created_at: "2026-10-21T14:59:00Z" })],
       ["the lead was marked not interested", (d) => void (lead(d).outreach_dispo = "not_interested")],
       ["Jev was switched off for the lead", (d) => void (lead(d).ai_responder_disabled = true)],
+      ["the lead stopped being a new lead", (d) => void (lead(d).status = "contacted")],
+      ["the seller was texted on another property", (d) => void d.tables.messages!.push(msg("ox", "px", "outbound", "2026-10-21T14:59:00Z", "hi", { to_address: phoneOf("p1") }))],
     ])("refuses when %s", async (_why, change) => {
       expect(await lastLookAfter(change)).toBe(false);
     });
-    it("refuses when the Chicago window closed while sending", async () => {
+    it("refuses when the Chicago window closed before the last look", async () => {
       const times = [OPEN];
+      expect(await lastLookAfter(() => {}, () => times.shift() ?? new Date("2026-10-22T02:00:00Z"))).toBe(false);
+    });
+    it("refuses when the Chicago window closed during the last look's reads", async () => {
+      // Open for the pre-send check and the fence's first look; closed by the time the reads finish.
+      const times = [OPEN, OPEN];
       expect(await lastLookAfter(() => {}, () => times.shift() ?? new Date("2026-10-22T02:00:00Z"))).toBe(false);
     });
   });

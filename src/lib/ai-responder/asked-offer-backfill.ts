@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { normalizePhone } from "@/lib/csv/normalize";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { sendSmsToContact, type SendSmsOutcome } from "@/lib/messaging/send";
@@ -32,9 +33,13 @@ import type { Database, Json } from "@/lib/supabase/types";
  * - beforeProviderSubmit: the same facts re-read after the pending row exists
  *   (ignoring that row), plus "the source inbound is still the latest" and the
  *   8:00–21:00 Chicago window, as the last step before the provider;
- * - one send per source inbound, enforced by the database: a deterministic
- *   idempotency key on the unique (org_id, idempotency_key) outbound index, so a
- *   second or concurrent run replays the first row instead of sending.
+ * - one send per seller phone, ever, enforced by the database: a deterministic
+ *   idempotency key (org + phone) on the unique (org_id, idempotency_key)
+ *   outbound index, so a second or concurrent run, or a second property with the
+ *   same seller, replays the first row instead of sending.
+ *
+ * History is read by property AND by the seller's phone across the org, so a
+ * text, call or reply on another property with the same number counts.
  */
 
 export const ASKED_OFFER_BACKFILL_KIND = "asked_offer_backfill";
@@ -51,6 +56,7 @@ export type BackfillMessage = {
   from_address: string | null;
   to_address: string | null;
   created_at: string;
+  sent_at: string | null;
 };
 
 export type BackfillProperty = {
@@ -75,8 +81,12 @@ export type BackfillContact = {
 export type BackfillFacts = {
   property: BackfillProperty;
   latestInbound: BackfillMessage | null;
-  /** Any outbound row (any status) after the latest inbound. */
+  /** Any outbound sent after the latest inbound, or still waiting to go (this property or this phone). */
   outboundSinceInbound: boolean;
+  /** The seller texted again from this phone, on another property, after this inbound. */
+  newerInboundElsewhere: boolean;
+  /** The lead's current status is still one the run was told to scan. */
+  statusInScope: boolean;
   /** This exact approved text exists on the property in any status, at any time. */
   approvedTextBefore: boolean;
   /** Any call logged after the latest inbound. */
@@ -94,6 +104,8 @@ export type BackfillSkipReason =
   | "no_inbound"
   | "inbound_outside_window"
   | "texted_since"
+  | "texted_elsewhere_since"
+  | "status_changed"
   | "already_got_this_text"
   | "no_inbound_number"
   | "called_since"
@@ -112,6 +124,8 @@ const OPEN_DISPOS: ReadonlySet<string> = new Set(["needs_sequence"]);
 export function backfillSkipReason(f: BackfillFacts): BackfillSkipReason | null {
   const thread = threadSkipReason(f);
   if (thread) return thread;
+  if (!f.statusInScope) return "status_changed";
+  if (f.newerInboundElsewhere) return "texted_elsewhere_since";
   if (f.approvedTextBefore) return "already_got_this_text";
   if (!f.latestInbound?.from_address) return "no_inbound_number";
   if (f.callSinceInbound) return "called_since";
@@ -155,7 +169,7 @@ export function summarizeThread(
   for (const m of sorted) if (m.direction === "inbound") latestInbound = m;
   if (!latestInbound) return { latestInbound: null, outboundSinceInbound: false, approvedTextBefore, ourLastTextBefore: null };
   const inboundAt = latestInbound.created_at;
-  const outboundSinceInbound = sorted.some((m) => m.direction === "outbound" && m.created_at > inboundAt);
+  const outboundSinceInbound = sorted.some((m) => m.direction === "outbound" && outboundCountsAfter(m, inboundAt));
   const before = sorted.filter((m) => m.direction === "outbound" && m.created_at < inboundAt && m.body);
   return {
     latestInbound,
@@ -163,6 +177,19 @@ export function summarizeThread(
     approvedTextBefore,
     ourLastTextBefore: before.length ? before[before.length - 1]!.body : null,
   };
+}
+
+/** Not sent yet: may still go out at any moment, whenever it was created. */
+const UNSENT_STATUSES: ReadonlySet<string> = new Set(["queued", "pending", "paused"]);
+
+/**
+ * An outbound counts as "texted since" when it actually went (sent_at, else
+ * created_at) after the inbound, or has not gone yet. Failed rows that never
+ * sent fall back to created_at.
+ */
+export function outboundCountsAfter(m: Pick<BackfillMessage, "status" | "created_at" | "sent_at">, inboundAt: string): boolean {
+  if (m.status && UNSENT_STATUSES.has(m.status)) return true;
+  return new Date(m.sent_at ?? m.created_at).getTime() > new Date(inboundAt).getTime();
 }
 
 /** True from 08:00 up to (not including) 21:00 in Chicago. */
@@ -173,9 +200,9 @@ export function chicagoWindowOpen(now: Date): boolean {
   return hour >= 8 && hour < 21;
 }
 
-/** One key per source inbound, shaped as a v4 UUID (the send path's key format). */
-export function idempotencyKeyFor(inboundMessageId: string): string {
-  const h = createHash("sha256").update(`${ASKED_OFFER_BACKFILL_KIND}:${inboundMessageId}`).digest("hex");
+/** One key per seller phone in the org, shaped as a v4 UUID (the send path's key format). */
+export function idempotencyKeyFor(orgId: string, phone: string): string {
+  const h = createHash("sha256").update(`${ASKED_OFFER_BACKFILL_KIND}:${orgId}:${phone}`).digest("hex");
   const variant = ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
@@ -218,7 +245,7 @@ export type BackfillOptions = {
   apply: boolean;
 };
 
-const MESSAGE_SELECT = "id, property_id, contact_id, conversation_id, direction, status, body, from_address, to_address, created_at";
+const MESSAGE_SELECT = "id, property_id, contact_id, conversation_id, direction, status, body, from_address, to_address, created_at, sent_at";
 const PROPERTY_SELECT =
   "id, org_id, address, city, state, status, outreach_dispo, ai_responder_disabled, is_dnc_locked";
 const CHUNK = 100;
@@ -277,18 +304,23 @@ async function loadMessages(supabase: SupabaseClient<Database>, ids: string[]): 
 export async function loadLeadFacts(
   supabase: SupabaseClient<Database>,
   propertyId: string,
-  o: { excluded: boolean; window: BackfillFacts["window"]; ignoreMessageId?: string | null },
+  o: { excluded: boolean; window: BackfillFacts["window"]; statuses: readonly string[]; ignoreMessageId?: string | null },
 ): Promise<{ facts: BackfillFacts; ourLastTextBefore: string | null }> {
   const { data: property, error: propertyError } = await supabase.from("properties").select(PROPERTY_SELECT).eq("id", propertyId).maybeSingle();
   if (propertyError || !property) throw new Error(`property lookup: ${propertyError?.message ?? "not found"}`);
   const messages = await loadMessages(supabase, [propertyId]);
   const thread = summarizeThread(messages.get(propertyId) ?? [], o.ignoreMessageId ?? null);
   const inbound = thread.latestInbound;
+  const orgId = (property as BackfillProperty).org_id;
+  let outboundSinceInbound = thread.outboundSinceInbound;
+  let approvedTextBefore = thread.approvedTextBefore;
+  let newerInboundElsewhere = false;
   let callSinceInbound = false;
   let contact: BackfillContact | null = null;
   let consentState: string | null = null;
   let phoneSuppressed = false;
   if (inbound) {
+    const phone = normalizePhone(inbound.from_address);
     const { data: calls, error: callError } = await supabase
       .from("call_activities")
       .select("id")
@@ -297,6 +329,24 @@ export async function loadLeadFacts(
       .limit(1);
     if (callError) throw new Error(`call lookup: ${callError.message}`);
     callSinceInbound = (calls ?? []).length > 0;
+    if (phone) {
+      // The same seller on any other property in the org.
+      const [toPhone, fromPhone, phoneCalls] = await Promise.all([
+        supabase.from("messages").select(MESSAGE_SELECT).eq("org_id", orgId).eq("channel", "sms").eq("direction", "outbound").eq("to_address", phone),
+        supabase.from("messages").select(MESSAGE_SELECT).eq("org_id", orgId).eq("channel", "sms").eq("direction", "inbound").eq("from_address", phone),
+        supabase.from("call_activities").select("id").eq("org_id", orgId).eq("phone_e164", phone).gt("created_at", inbound.created_at).limit(1),
+      ]);
+      if (toPhone.error || fromPhone.error || phoneCalls.error) {
+        throw new Error(`phone history lookup: ${(toPhone.error ?? fromPhone.error ?? phoneCalls.error)!.message}`);
+      }
+      const sentToPhone = ((toPhone.data ?? []) as BackfillMessage[]).filter((m) => m.id !== o.ignoreMessageId);
+      outboundSinceInbound ||= sentToPhone.some((m) => outboundCountsAfter(m, inbound.created_at));
+      approvedTextBefore ||= sentToPhone.some((m) => m.body === ASKED_OFFER_BACKFILL_BODY);
+      newerInboundElsewhere = ((fromPhone.data ?? []) as BackfillMessage[]).some(
+        (m) => m.property_id !== propertyId && m.created_at > inbound.created_at,
+      );
+      callSinceInbound ||= (phoneCalls.data ?? []).length > 0;
+    }
     if (inbound.contact_id) {
       const { data, error } = await supabase.from("contacts").select("id, do_not_contact, sms_opted_out").eq("id", inbound.contact_id).maybeSingle();
       if (error) throw new Error(`contact lookup: ${error.message}`);
@@ -304,14 +354,16 @@ export async function loadLeadFacts(
       const consent = await getConsentStateStrict(supabase, inbound.contact_id, "sms");
       consentState = consent.ok ? consent.state : null;
     }
-    phoneSuppressed = await isSmsPhoneSuppressed(supabase, inbound.from_address, (property as BackfillProperty).org_id);
+    phoneSuppressed = await isSmsPhoneSuppressed(supabase, inbound.from_address, orgId);
   }
   return {
     facts: {
       property: property as BackfillProperty,
       latestInbound: inbound,
-      outboundSinceInbound: thread.outboundSinceInbound,
-      approvedTextBefore: thread.approvedTextBefore,
+      outboundSinceInbound,
+      newerInboundElsewhere,
+      statusInScope: o.statuses.includes((property as BackfillProperty).status),
+      approvedTextBefore,
       callSinceInbound,
       contact,
       consentState,
@@ -347,7 +399,7 @@ export async function runAskedOfferBackfill(
     const cheap = threadSkipReason({ latestInbound: scan.latestInbound, outboundSinceInbound: scan.outboundSinceInbound, excluded, window });
     // Leads with nothing waiting are not reported row by row (most of the list).
     if (cheap === "no_inbound" || cheap === "inbound_outside_window" || cheap === "texted_since") continue;
-    const { facts, ourLastTextBefore } = await loadLeadFacts(supabase, property.id, { excluded, window });
+    const { facts, ourLastTextBefore } = await loadLeadFacts(supabase, property.id, { excluded, window, statuses: o.statuses });
     const inbound = facts.latestInbound;
     const base = {
       propertyId: property.id,
@@ -379,7 +431,9 @@ export async function runAskedOfferBackfill(
       askedOfferProbability: result.probabilities.asked_offer,
       target: result.answer === "asked_offer",
     };
-    if (row.target && o.apply) row.sent = await sendOne(supabase, facts.property, inbound!, result, { excluded, window }, deps.now);
+    if (row.target && o.apply) {
+      row.sent = await sendOne(supabase, facts.property, inbound!, result, { excluded, window, statuses: o.statuses }, deps.now);
+    }
     rows.push(row);
   }
   return rows;
@@ -390,14 +444,18 @@ async function sendOne(
   property: BackfillProperty,
   inbound: BackfillMessage,
   result: NineQuestionResult,
-  factOptions: { excluded: boolean; window: BackfillFacts["window"] },
+  factOptions: { excluded: boolean; window: BackfillFacts["window"]; statuses: readonly string[] },
   now: () => Date,
 ): Promise<BackfillSendResult> {
   if (!chicagoWindowOpen(now())) return { status: "window_closed" };
+  const phone = normalizePhone(inbound.from_address);
+  if (!phone) return { status: "blocked_no_phone", detail: "inbound number does not normalize" };
   const lastLook = async (ctx?: { messageId: string }): Promise<boolean> => {
     if (!ctx?.messageId || !chicagoWindowOpen(now())) return false;
     const { facts } = await loadLeadFacts(supabase, property.id, { ...factOptions, ignoreMessageId: ctx.messageId });
-    return facts.latestInbound?.id === inbound.id && backfillSkipReason(facts) === null;
+    const ok = facts.latestInbound?.id === inbound.id && backfillSkipReason(facts) === null;
+    // The reads above take time: the window must still be open as permission is given.
+    return ok && chicagoWindowOpen(now());
   };
   const outcome: SendSmsOutcome = await sendSmsToContact(supabase, {
     origin: "automated",
@@ -407,7 +465,7 @@ async function sendOne(
     // The number the seller texted from, from the number they texted (fails closed if unsaved).
     to: inbound.from_address!,
     requireStickyFrom: true,
-    idempotencyKey: idempotencyKeyFor(inbound.id),
+    idempotencyKey: idempotencyKeyFor(property.org_id, phone),
     beforeProviderSubmit: lastLook,
     metadata: {
       kind: ASKED_OFFER_BACKFILL_KIND,
