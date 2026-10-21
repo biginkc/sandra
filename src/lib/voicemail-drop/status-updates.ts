@@ -2,8 +2,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
 import { reportError } from "@/lib/errors/report";
-import { delayToDate } from "@/lib/sequences/delays";
-import { pauseEnrollment } from "@/lib/sequences/tick";
 import type { Database, Json } from "@/lib/supabase/types";
 
 import type {
@@ -40,7 +38,29 @@ export type DropRow = {
 /** recovery_action on a step run whose unknown POST was proven queued by Drop Cowboy. */
 export const RECOVERY_VOICEMAIL_DROP_RECONCILED = "voicemail_drop_reconciled";
 
-export type ReconcileResult = "not_held" | "reconciled";
+/** Input to resolve_voicemail_drop_outcome (20261021140000). */
+export type ResolveOutcomeInput = {
+  dropRowId: string;
+  status: "delivered" | "failed";
+  /** null | voicemail_drop_consent_blocked | step_misconfigured (failureActionFor). */
+  pauseReason: string | null;
+  reasonCode: string | null;
+  reason: string | null;
+  dropId: string | null;
+  cost: number | null;
+  proofUrl: string | null;
+  payload: Json | null;
+};
+
+/**
+ * applied = queued → terminal; replay = already that terminal state;
+ * conflict = already the other terminal state (facts only); not_found.
+ */
+export type ResolveOutcomeResult = {
+  dropResult: "applied" | "replay" | "conflict" | "not_found";
+  /** advanced | completed | advanced_paused | paused | none */
+  enrollmentAction: string;
+};
 
 export type DropPatch = Partial<{
   drop_id: string;
@@ -64,15 +84,13 @@ export interface DropStatusStore {
    */
   updateDrop(id: string, patch: DropPatch, onlyIfStatusIn?: string[]): Promise<boolean>;
   /**
-   * A drop held at attempt_outcome 'unknown' (POST answered 502/timeout) got a
-   * callback or status event, which proves Drop Cowboy queued it. Do what the
-   * 202 path would have done: step run unknown → accepted (claim stays
-   * active), enrollment paused reconciliation_required → advanced, drop
-   * attempt_outcome → queued. Never re-sends. Each write is a compare-and-set,
-   * and the drop row is written last, so replays and crashes mid-way are safe.
+   * Apply a terminal outcome in one DB transaction
+   * (resolve_voicemail_drop_outcome): the owner of the run's unknown →
+   * accepted flip advances the enrollment, a required pause lands in the same
+   * write (never an intermediate active state), and a failure commits
+   * nothing, so the webhook retry redoes all of it.
    */
-  reconcileHeldDrop(drop: DropRow): Promise<ReconcileResult>;
-  pauseEnrollment(enrollmentId: string, reason: string): Promise<void>;
+  resolveOutcome(input: ResolveOutcomeInput): Promise<ResolveOutcomeResult>;
   /** Insert-or-claim the webhook_events row. "skip" = already handled / in flight. */
   reserveEvent(eventType: string, eventId: string, payload: Json): Promise<"reserved" | "skip">;
   finishEvent(eventType: string, eventId: string, outcome: "processed" | "error", message?: string): Promise<void>;
@@ -98,15 +116,6 @@ type Outcome = {
   reasonClass: VoicemailDropReasonClass;
 };
 
-function outcomePatch(o: Outcome, nowIso: string): DropPatch {
-  return {
-    status: o.status === "success" ? "delivered" : "failed",
-    reason_code: o.reasonCode === null ? null : String(o.reasonCode),
-    reason: o.reason,
-    completed_at: nowIso,
-  };
-}
-
 function pauseReasonFor(o: Outcome): string | null {
   if (o.status !== "failure") return null;
   const action = failureActionFor(o.reasonCode, o.reasonClass);
@@ -124,40 +133,28 @@ function reportUnclassified(drop: DropRow, o: Outcome, surface: string) {
 }
 
 /**
- * Apply a terminal outcome only while the drop is still queued (or already in
- * that same terminal state, for a replay). A late or replayed event never
- * flips delivered ↔ failed.
- *
- * A required pause (consent / misconfigured) runs BEFORE the queued → failed
- * write and again on a same-state replay. pauseEnrollment only touches active
- * enrollments, so it is idempotent; if it throws, the drop stays queued (or
- * the replay errors) and the webhook retry re-attempts it. The pause is never
- * lost behind an already-failed drop.
+ * Apply a terminal outcome through the store's single-transaction resolver.
+ * A late or replayed event never flips delivered ↔ failed; a required pause
+ * is never lost behind an already-terminal drop because the drop write and
+ * the pause commit together.
  */
 async function applyTerminalOutcome(
   store: DropStatusStore,
   drop: DropRow,
   o: Outcome,
-  extra: DropPatch,
-  nowIso: string,
+  facts: { dropId: string | null; cost: number | null; proofUrl: string | null; payload: Json | null },
   surface: string,
-): Promise<void> {
-  const patch: DropPatch = { ...extra, ...outcomePatch(o, nowIso) };
-  const target = patch.status as "delivered" | "failed";
-  if (drop.status !== "queued" && drop.status !== target) {
-    // Keep the late event's non-outcome facts (drop id, proof, cost) only.
-    const facts: DropPatch = { ...extra };
-    delete facts.provider_payload;
-    if (Object.keys(facts).length > 0) await store.updateDrop(drop.id, facts);
-    return;
-  }
-  const pauseReason = pauseReasonFor(o);
-  if (pauseReason && drop.enrollment_id) await store.pauseEnrollment(drop.enrollment_id, pauseReason);
-  if (await store.updateDrop(drop.id, patch, ["queued"])) {
-    reportUnclassified(drop, o, surface);
-    return;
-  }
-  await store.updateDrop(drop.id, patch, [target]);
+): Promise<ResolveOutcomeResult> {
+  const result = await store.resolveOutcome({
+    dropRowId: drop.id,
+    status: o.status === "success" ? "delivered" : "failed",
+    pauseReason: pauseReasonFor(o),
+    reasonCode: o.reasonCode === null ? null : String(o.reasonCode),
+    reason: o.reason,
+    ...facts,
+  });
+  if (result.dropResult === "applied") reportUnclassified(drop, o, surface);
+  return result;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -168,18 +165,18 @@ export type CallbackResult = { status: 200 | 404; body: Record<string, unknown> 
 export async function handleDropCallback(
   store: DropStatusStore,
   event: VoicemailDropCallbackEvent,
-  now: Date = new Date(),
 ): Promise<CallbackResult> {
   if (!event.foreignId || !UUID.test(event.foreignId)) return { status: 404, body: { error: "unknown_foreign_id" } };
   const drop = await store.findDropById(event.foreignId);
   if (!drop) return { status: 404, body: { error: "unknown_foreign_id" } };
 
-  await store.reconcileHeldDrop(drop);
-  const extra: DropPatch = { provider_payload: event.raw as Json };
-  if (event.dropId) extra.drop_id = event.dropId;
-  if (event.cost !== null) extra.cost = event.cost;
-  if (event.proofUrl) extra.proof_url = event.proofUrl;
-  await applyTerminalOutcome(store, drop, event, extra, now.toISOString(), "dropcowboy_rvm_callback_unclassified");
+  await applyTerminalOutcome(
+    store,
+    drop,
+    event,
+    { dropId: event.dropId ?? null, cost: event.cost, proofUrl: event.proofUrl ?? null, payload: event.raw as Json },
+    "dropcowboy_rvm_callback_unclassified",
+  );
   return { status: 200, body: { ok: true } };
 }
 
@@ -187,23 +184,24 @@ export async function handleDropCallback(
 export const RVM_CAMPAIGN_TYPE = "rvm";
 
 /**
- * RVM-5 correlation: drop_id first, then a unique recent queued drop to that
- * phone, else none. Status events for another channel (voice/AI broadcast) are
- * never correlated, the phone fallback needs campaign_type 'rvm', and it never
- * picks a drop whose stored drop_id differs from the event's.
+ * RVM-5 correlation. Events for another channel (campaign_type voice / AI
+ * broadcast) are never correlated, whatever their kind. Receipts match by
+ * drop_id only, never by phone. Status events try drop_id first, then a
+ * unique recent queued drop to that phone, only with campaign_type 'rvm', and
+ * never a drop whose stored drop_id differs from the event's.
  */
 export async function correlateStatusEvent(
   store: DropStatusStore,
   event: VoicemailDropStatusEvent,
   now: Date,
 ): Promise<DropRow | null> {
-  if (event.kind === "status" && event.campaignType !== null && event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
+  if (event.campaignType !== null && event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
   if (event.dropId) {
     const byDropId = await store.findDropsByDropId(event.dropId);
     if (byDropId.length === 1) return byDropId[0];
     if (byDropId.length > 1) return null;
   }
-  if (event.kind === "status" && event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
+  if (event.kind !== "status" || event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
   const phone = normalizePhone(event.to);
   if (!phone) return null;
   const since = new Date(now.getTime() - PHONE_CORRELATION_WINDOW_MS).toISOString();
@@ -231,14 +229,17 @@ export async function handleDropStatusEvent(
       await store.finishEvent(eventType, event.eventId, "error", "unmatched voicemail drop");
       return "unmatched";
     }
-    await store.reconcileHeldDrop(drop);
-    const patch: DropPatch = {};
-    if (event.dropId && !drop.drop_id) patch.drop_id = event.dropId;
     if (event.kind === "receipt") {
-      if (event.proofUrl) patch.proof_url = event.proofUrl;
-      if (Object.keys(patch).length > 0) await store.updateDrop(drop.id, patch);
+      // A receipt only carries proof; it never changes the outcome.
+      if (event.proofUrl) await store.updateDrop(drop.id, { proof_url: event.proofUrl });
     } else {
-      await applyTerminalOutcome(store, drop, event, patch, now.toISOString(), "dropcowboy_rvm_webhook_unclassified");
+      await applyTerminalOutcome(
+        store,
+        drop,
+        event,
+        { dropId: event.dropId ?? null, cost: null, proofUrl: null, payload: null },
+        "dropcowboy_rvm_webhook_unclassified",
+      );
     }
     await store.finishEvent(eventType, event.eventId, "processed");
     return "applied";
@@ -285,12 +286,27 @@ export function supabaseDropStatusStore(client: SupabaseClient<Database>): DropS
       if (error) throw new Error(`updateDrop: ${error.message}`);
       return (data ?? []).length > 0;
     },
-    async reconcileHeldDrop(drop) {
-      return reconcileHeldDropWithClient(client, drop);
-    },
-    async pauseEnrollment(enrollmentId, reason) {
-      const error = await pauseEnrollment(client, enrollmentId, reason, false);
-      if (error) throw new Error(`pauseEnrollment: ${error}`);
+    async resolveOutcome(input) {
+      const { data, error } = await (
+        client.rpc as unknown as (
+          fn: string,
+          args: Record<string, unknown>,
+        ) => Promise<{ data: Array<{ drop_result: string; enrollment_action: string }> | null; error: { message: string } | null }>
+      )("resolve_voicemail_drop_outcome", {
+        p_drop_row_id: input.dropRowId,
+        p_status: input.status,
+        p_pause_reason: input.pauseReason,
+        p_reason_code: input.reasonCode,
+        p_reason: input.reason,
+        p_drop_id: input.dropId,
+        p_cost: input.cost,
+        p_proof_url: input.proofUrl,
+        p_payload: input.payload,
+      });
+      if (error) throw new Error(`resolveOutcome: ${error.message}`);
+      const row = data?.[0];
+      if (!row) throw new Error("resolveOutcome: no result row");
+      return { dropResult: row.drop_result as ResolveOutcomeResult["dropResult"], enrollmentAction: row.enrollment_action };
     },
     async reserveEvent(eventType, eventId, payload) {
       const now = new Date().toISOString();
@@ -340,90 +356,4 @@ export function supabaseDropStatusStore(client: SupabaseClient<Database>): DropS
       if (error) throw new Error(`finishEvent: ${error.message}`);
     },
   };
-}
-
-/** Supabase side of DropStatusStore.reconcileHeldDrop (see the interface doc). */
-export async function reconcileHeldDropWithClient(
-  client: SupabaseClient<Database>,
-  drop: DropRow,
-): Promise<ReconcileResult> {
-  // Held = POST outcome unknown, and the drop was actually posted (an
-  // authorization failure before the POST leaves status 'skipped').
-  if (drop.attempt_outcome !== "unknown" || drop.status !== "queued") return "not_held";
-  const nowIso = new Date().toISOString();
-
-  // 1. Step run: unknown → accepted, exactly as the 202 path writes it.
-  const { data: run, error: runReadError } = await client
-    .from("sequence_step_runs")
-    .select("id, step_id, enrollment_id, attempt_outcome, claim_active")
-    .eq("id", drop.step_run_id)
-    .maybeSingle();
-  if (runReadError) throw new Error(`reconcileHeldDrop run read: ${runReadError.message}`);
-  if (!run || !run.claim_active || !["unknown", "accepted"].includes(run.attempt_outcome ?? "")) return "not_held";
-  if (run.attempt_outcome === "unknown") {
-    const { data: accepted, error } = await client
-      .from("sequence_step_runs")
-      .update({
-        attempt_outcome: "accepted",
-        skipped_reason: null,
-        failure_reason: null,
-        message_id: null,
-        recovery_action: RECOVERY_VOICEMAIL_DROP_RECONCILED,
-        recovery_evidence: "Drop Cowboy sent a status event for this drop, so the unknown POST was queued",
-      })
-      .eq("id", run.id)
-      .eq("claim_active", true)
-      .eq("attempt_outcome", "unknown")
-      .select("id")
-      .maybeSingle();
-    if (error) throw new Error(`reconcileHeldDrop run write: ${error.message}`);
-    // No match: the claim was released or the outcome moved since the read.
-    // Do not advance the enrollment.
-    if (!accepted) return "not_held";
-  }
-
-  // 2. Enrollment: paused reconciliation_required on this step → advanced
-  //    (or completed), as advanceEnrollment does after a 202.
-  const { data: step, error: stepError } = await client
-    .from("sequence_steps")
-    .select("sequence_id, step_index")
-    .eq("id", run.step_id)
-    .maybeSingle();
-  if (stepError) throw new Error(`reconcileHeldDrop step read: ${stepError.message}`);
-  if (step) {
-    const { data: nextStep, error: nextError } = await client
-      .from("sequence_steps")
-      .select("delay_after_previous_minutes")
-      .eq("sequence_id", step.sequence_id)
-      .eq("step_index", step.step_index + 1)
-      .maybeSingle();
-    if (nextError) throw new Error(`reconcileHeldDrop next step read: ${nextError.message}`);
-    const advance = nextStep
-      ? {
-          status: "active",
-          pause_reason: null,
-          current_step_index: step.step_index + 1,
-          next_run_at: delayToDate(nextStep.delay_after_previous_minutes, new Date()).toISOString(),
-          updated_at: nowIso,
-        }
-      : { status: "completed", pause_reason: null, completed_at: nowIso, next_run_at: null, updated_at: nowIso };
-    const { error: advanceError } = await client
-      .from("sequence_enrollments")
-      .update(advance)
-      .eq("id", run.enrollment_id)
-      .eq("status", "paused")
-      .eq("pause_reason", "reconciliation_required")
-      .eq("current_step_index", step.step_index);
-    if (advanceError) throw new Error(`reconcileHeldDrop advance: ${advanceError.message}`);
-  }
-
-  // 3. Drop row last: the marker that reconciliation finished.
-  const { error: dropError } = await client
-    .from("voicemail_drops")
-    .update({ attempt_outcome: "queued", queued_at: nowIso })
-    .eq("id", drop.id)
-    .eq("attempt_outcome", "unknown");
-  if (dropError) throw new Error(`reconcileHeldDrop drop write: ${dropError.message}`);
-  drop.attempt_outcome = "queued";
-  return "reconciled";
 }

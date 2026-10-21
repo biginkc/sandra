@@ -7,6 +7,8 @@ do $$
 begin
   -- Later voicemail drop migrations must be rolled back first:
   -- 20261021150000_voicemail_drop_rotation, then
+  -- 20261021140000_voicemail_drop_resolve_outcome, then
+  -- 20261021130000_voicemail_drop_record_outcome, then
   -- 20261021120000_reserve_voicemail_drop_with_cap.
   if exists (
     select 1 from information_schema.columns
@@ -14,6 +16,18 @@ begin
       and column_name = 'vm_template_category'
   ) or to_regclass('public.voicemail_templates') is not null then
     raise exception 'roll back 20261021150000_voicemail_drop_rotation first';
+  end if;
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'resolve_voicemail_drop_outcome'
+  ) then
+    raise exception 'roll back 20261021140000_voicemail_drop_resolve_outcome first';
+  end if;
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname in ('record_voicemail_drop_accepted', 'record_voicemail_drop_unknown')
+  ) then
+    raise exception 'roll back 20261021130000_voicemail_drop_record_outcome first';
   end if;
   if exists (
     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace

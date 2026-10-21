@@ -116,12 +116,10 @@ describe("pauseEnrollmentsForInboundCall", () => {
     },
   );
 
-  it("re-labels a reconciliation_required pause as inbound_call so reconcile cannot resume it", async () => {
-    pauseContactEnrollments.mockResolvedValue({ paused: 0 });
+  it("pauses through pauseContactEnrollments only (its single UPDATE also takes over reconciliation holds)", async () => {
+    pauseContactEnrollments.mockResolvedValue({ paused: 1 });
     const enrollments: Enrollment[] = [
       { id: "e-recon", property_id: "p-1", status: "paused", pause_reason: "reconciliation_required" },
-      { id: "e-manual", property_id: "p-1", status: "paused", pause_reason: "manual" },
-      { id: "e-other", property_id: "p-9", status: "paused", pause_reason: "reconciliation_required" },
     ];
     const { client } = fakeClient(
       { org_id: "org-1", from_e164: "+18165550101" },
@@ -130,7 +128,10 @@ describe("pauseEnrollmentsForInboundCall", () => {
     );
     const result = await pauseEnrollmentsForInboundCall(client, "call-row");
     expect(result.paused).toBe(1);
-    expect(enrollments.map((e) => e.pause_reason)).toEqual(["inbound_call", "manual", "reconciliation_required"]);
+    expect(pauseContactEnrollments).toHaveBeenCalledTimes(1);
+    expect(pauseContactEnrollments).toHaveBeenCalledWith(client, { contactId: "c-1", reason: "inbound_call" });
+    // No second, separate takeover write from this module.
+    expect(enrollments[0].pause_reason).toBe("reconciliation_required");
   });
 
   it("pauses nothing when no contact matches the caller", async () => {

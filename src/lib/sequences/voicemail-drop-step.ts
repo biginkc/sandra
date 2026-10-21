@@ -539,36 +539,20 @@ async function handleSendResult(
   const payload = (result.raw ?? null) as Database["public"]["Tables"]["voicemail_drops"]["Update"]["provider_payload"];
   switch (result.outcome) {
     case "accepted": {
-      const dropError = await recordAcceptedDrop(client, dropRowId, payload);
-      const { data: runWrite, error: runError } = await client
-        .from("sequence_step_runs")
-        .update({
-          run_at: new Date().toISOString(),
-          message_id: null,
-          attempt_outcome: "accepted",
-          failure_reason: null,
-        })
-        .eq("id", claimId)
-        .eq("claim_active", true)
-        .in("attempt_outcome", ["unknown", "accepted"])
-        .select("id")
-        .maybeSingle();
-      // Queued already: keep the claim even on bookkeeping failure.
-      if (dropError || runError || !runWrite) {
-        const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
+      // One transaction: run unknown → accepted, drop attempt_outcome queued
+      // (status/payload only while still queued), and the enrollment advanced
+      // by whoever owns the flip. A status event that already owned it makes
+      // this 'already_settled'.
+      const { data: settled, error } = await callDropRpc(client, "record_voicemail_drop_accepted", {
+        p_run_id: claimId,
+        p_drop_row_id: dropRowId,
+        p_payload: payload,
+      });
+      if (error || !settled || settled === "run_changed") {
         return {
           status: "failed",
           enrollmentId: enrollment.id,
-          message: `Voicemail drop ${dropRowId} queued; bookkeeping failed: ${dropError ?? runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
-        };
-      }
-      const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
-      if (advanceError) {
-        const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
-        return {
-          status: "failed",
-          enrollmentId: enrollment.id,
-          message: `Voicemail drop ${dropRowId} queued; ${advanceError}${pauseError ? `; ${pauseError}` : ""}`,
+          message: `Voicemail drop ${dropRowId} queued; recording the 202 failed: ${error?.message ?? settled ?? "no result"}`,
         };
       }
       return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
@@ -626,40 +610,24 @@ async function handleSendResult(
     }
     case "unknown": {
       // 502 / timeout / network / unexpected status: may be queued. Keep the
-      // claim at 'unknown' and pause; never re-fire.
+      // claim at 'unknown' and pause; never re-fire. One transaction under the
+      // enrollment lock: if a Drop Cowboy event already accepted the run (and
+      // advanced the enrollment), nothing is written.
       const reason = `voicemail drop outcome unknown (${result.cause}${result.httpStatus ? ` ${result.httpStatus}` : ""})${result.error ? `: ${result.error}` : ""}`;
-      // CAS on attempt_outcome = 'unknown' (run first, then drop row): a
-      // Drop Cowboy status event may already have reconciled this drop (run
-      // accepted, enrollment advanced, drop queued). Never flip it back or
-      // re-pause the enrollment.
-      const { data: heldRun, error: runWriteError } = await client
-        .from("sequence_step_runs")
-        .update({
-          run_at: new Date().toISOString(),
-          skipped_reason: "provider_failed",
-          attempt_outcome: "unknown",
-          failure_reason: reason,
-        })
-        .eq("id", claimId)
-        .eq("claim_active", true)
-        .eq("attempt_outcome", "unknown")
-        .select("id")
-        .maybeSingle();
-      if (!runWriteError && !heldRun) {
-        return finishAlreadyReconciled(client, enrollment, step, claimId, dropRowId);
+      const { data: held, error } = await callDropRpc(client, "record_voicemail_drop_unknown", {
+        p_run_id: claimId,
+        p_drop_row_id: dropRowId,
+        p_reason: reason,
+        p_payload: payload,
+      });
+      if (held === "already_reconciled") {
+        return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
       }
-      await client
-        .from("voicemail_drops")
-        .update({ attempt_outcome: "unknown", reason, provider_payload: payload })
-        .eq("id", dropRowId)
-        .eq("attempt_outcome", "unknown");
-      const runError = runWriteError ? `sequence run write failed: ${runWriteError.message}` : null;
-      const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
-      if (runError || pauseError) {
+      if (error || held !== "held") {
         return {
           status: "failed",
           enrollmentId: enrollment.id,
-          message: `${reason}; ${[runError, pauseError].filter(Boolean).join("; ")}`,
+          message: `${reason}; recording it failed: ${error?.message ?? held ?? "no result"}`,
         };
       }
       return { status: "paused", enrollmentId: enrollment.id, reason: "reconciliation_required" };
@@ -689,66 +657,18 @@ async function handleSendResult(
   }
 }
 
-/**
- * Record the 202 on the drop row without undoing a terminal outcome: a
- * callback or status event may already have marked it delivered/failed (and
- * stored its payload) before the POST answered. Status and payload are only
- * written while the drop is still 'queued'; otherwise just attempt_outcome.
- */
-async function recordAcceptedDrop(
+/** The record_voicemail_drop_* RPCs (20261021130000) return a text outcome. */
+function callDropRpc(
   client: SupabaseClient<Database>,
-  dropRowId: string,
-  payload: Database["public"]["Tables"]["voicemail_drops"]["Update"]["provider_payload"],
-): Promise<string | null> {
-  const queuedAt = new Date().toISOString();
-  const { data: stillQueued, error } = await client
-    .from("voicemail_drops")
-    .update({ attempt_outcome: "queued", queued_at: queuedAt, provider_payload: payload })
-    .eq("id", dropRowId)
-    .eq("status", "queued")
-    .select("id");
-  if (error) return error.message;
-  if ((stillQueued ?? []).length > 0) return null;
-  const { error: outcomeError } = await client
-    .from("voicemail_drops")
-    .update({ attempt_outcome: "queued" })
-    .eq("id", dropRowId)
-    .neq("attempt_outcome", "queued");
-  return outcomeError?.message ?? null;
-}
-
-/**
- * The POST answered unknown, but a Drop Cowboy event already reconciled the
- * drop (run accepted) while the enrollment was still active, so reconcile had
- * nothing to advance. Advance exactly like the 202 path; advanceEnrollment is
- * fenced on status 'active' + current_step_index, so a repeat is a no-op.
- */
-async function finishAlreadyReconciled(
-  client: SupabaseClient<Database>,
-  enrollment: DropEnrollment,
-  step: DropStep,
-  claimId: string,
-  dropRowId: string,
-): Promise<TickOutcome> {
-  const { data: runRow, error: readError } = await client
-    .from("sequence_step_runs")
-    .select("attempt_outcome, claim_active")
-    .eq("id", claimId)
-    .maybeSingle();
-  const row = runRow as { attempt_outcome: string | null; claim_active: boolean } | null;
-  if (readError || !row || row.attempt_outcome !== "accepted" || !row.claim_active) {
-    return {
-      status: "failed",
-      enrollmentId: enrollment.id,
-      message: `Voicemail drop ${dropRowId} outcome unknown and the run changed: ${readError?.message ?? `attempt_outcome ${row?.attempt_outcome ?? "missing"}`}`,
-    };
-  }
-  const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
-  // "changed" = someone else already moved the enrollment off this step.
-  if (advanceError && !advanceError.startsWith("enrollment changed")) {
-    return { status: "failed", enrollmentId: enrollment.id, message: `Voicemail drop ${dropRowId} queued; ${advanceError}` };
-  }
-  return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
+  fn: "record_voicemail_drop_accepted" | "record_voicemail_drop_unknown",
+  args: Record<string, unknown>,
+): Promise<{ data: string | null; error: { message: string } | null }> {
+  return (
+    client.rpc as unknown as (
+      name: string,
+      params: Record<string, unknown>,
+    ) => Promise<{ data: string | null; error: { message: string } | null }>
+  )(fn, args);
 }
 
 /**

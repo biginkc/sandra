@@ -41,36 +41,8 @@ export async function pauseEnrollmentsForInboundCall(
 
   let paused = 0;
   for (const contactId of contactIds) {
+    // Also takes over a reconciliation_required hold in the same UPDATE.
     paused += (await pauseContactEnrollments(client, { contactId, reason: "inbound_call" })).paused;
-    paused += await takeOverAutoResumablePauses(client, contactId);
   }
   return { matchedContactIds: [...contactIds], paused };
-}
-
-/**
- * Pauses that resolve on their own would restart the drip after the seller
- * called. reconciliation_required (an unknown voicemail drop POST) advances
- * back to active when Drop Cowboy confirms the drop, and that advance is
- * fenced on pause_reason = 'reconciliation_required'; re-labelling it
- * inbound_call makes the call-back stick.
- */
-export const AUTO_RESUMABLE_PAUSE_REASONS = ["reconciliation_required"] as const;
-
-async function takeOverAutoResumablePauses(client: SupabaseClient<Database>, contactId: string): Promise<number> {
-  const { data: properties, error: propertyError } = await client
-    .from("properties")
-    .select("id")
-    .eq("homeowner_contact_id", contactId);
-  if (propertyError) throw new Error(`pauseEnrollmentsForInboundCall properties: ${propertyError.message}`);
-  const propertyIds = (properties ?? []).map((p) => p.id);
-  if (propertyIds.length === 0) return 0;
-  const { data, error } = await client
-    .from("sequence_enrollments")
-    .update({ pause_reason: "inbound_call", updated_at: new Date().toISOString() })
-    .in("property_id", propertyIds)
-    .eq("status", "paused")
-    .in("pause_reason", [...AUTO_RESUMABLE_PAUSE_REASONS])
-    .select("id");
-  if (error) throw new Error(`pauseEnrollmentsForInboundCall takeover: ${error.message}`);
-  return (data ?? []).length;
 }
