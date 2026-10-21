@@ -107,7 +107,7 @@ it("a signed status event correlated by phone reconciles the same way", async ()
   const store = supabaseDropStatusStore(client);
   const event = parseDropCowboyStatusWebhook(JSON.stringify({
     event: "contact.rvm.status", event_id: `rc-${org}-1`,
-    data: { to: "+18165550101", drop_id: `dc2-${org}`, status: "failure", reason_code: 4001 },
+    data: { to: "+18165550101", drop_id: `dc2-${org}`, campaign_type: "rvm", status: "failure", reason_code: 4001 },
   }));
   expect(await handleDropStatusEvent(store, event)).toBe("applied");
   const after = await state();
@@ -176,4 +176,56 @@ it("replay after a crash between step 1 and step 2 converges without double-adva
   const twice = await state();
   expect(twice.enrollment.current_step_index).toBe(1);
   expect(twice.enrollment.next_run_at).toBe(once.enrollment.next_run_at);
+});
+
+it("phone fallback ignores a broadcast outcome and never picks a drop holding another drop_id", async () => {
+  const store = supabaseDropStatusStore(client);
+  const broadcast = parseDropCowboyStatusWebhook(JSON.stringify({
+    event: "contact.rvm.status", event_id: `rc-${org}-bc`,
+    data: { to: "+18165550101", drop_id: `bc-${org}`, campaign_type: "ai_broadcast", status: "success", reason_code: 0 },
+  }));
+  expect(await handleDropStatusEvent(store, broadcast)).toBe("unmatched");
+  expect((await state()).drop).toMatchObject({ status: "queued", attempt_outcome: "unknown" });
+
+  await client.from("voicemail_drops").update({ drop_id: `mine-${org}` }).eq("id", dropRow);
+  const other = parseDropCowboyStatusWebhook(JSON.stringify({
+    event: "contact.rvm.status", event_id: `rc-${org}-other`,
+    data: { to: "+18165550101", drop_id: `other-${org}`, campaign_type: "rvm", status: "success", reason_code: 0 },
+  }));
+  expect(await handleDropStatusEvent(store, other)).toBe("unmatched");
+  expect((await state()).drop.status).toBe("queued");
+
+  const real = parseDropCowboyStatusWebhook(JSON.stringify({
+    event: "contact.rvm.status", event_id: `rc-${org}-real`,
+    data: { to: "+18165550101", drop_id: `mine-${org}`, campaign_type: "rvm", status: "failure", reason_code: 4016 },
+  }));
+  expect(await handleDropStatusEvent(store, real)).toBe("applied");
+  const after = await state();
+  expect(after.drop.status).toBe("failed");
+  expect(after.enrollment).toMatchObject({ status: "paused", pause_reason: "voicemail_drop_consent_blocked", current_step_index: 1 });
+});
+
+it("a seller call-back during reconciliation sticks: reconcile no longer advances the enrollment", async () => {
+  const { pauseEnrollmentsForInboundCall } = await import("@/lib/norma/inbound-call-pause");
+  const contact = randomUUID();
+  const ok = (r: { error: { message: string } | null }) => {
+    if (r.error) throw new Error(r.error.message);
+  };
+  ok(await client.from("contacts").insert({ id: contact, org_id: org, phone_1: "8165550101", phone_1_type: "mobile" }));
+  ok(await client.from("properties").update({ homeowner_contact_id: contact }).eq("id", property));
+  const call = await client.from("norma_inbound_calls")
+    .insert({ org_id: org, provider_call_id: `pc-${org}`, from_e164: "+18165550101", to_e164: "+18165550199" } as never).select("id").single();
+  if (call.error) throw new Error(call.error.message);
+  try {
+    const result = await pauseEnrollmentsForInboundCall(client, (call.data as { id: string }).id);
+    expect(result.matchedContactIds).toEqual([contact]);
+    expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call" });
+
+    await handleDropCallback(supabaseDropStatusStore(client), callback());
+    expect((await state()).enrollment).toMatchObject({ status: "paused", pause_reason: "inbound_call", current_step_index: 0 });
+  } finally {
+    await client.from("norma_inbound_calls").delete().eq("org_id", org);
+    await client.from("properties").update({ homeowner_contact_id: null }).eq("id", property);
+    await client.from("contacts").delete().eq("id", contact);
+  }
 });

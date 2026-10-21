@@ -36,7 +36,7 @@ const callback = (body: Record<string, unknown>) =>
 
 const statusEvent = (data: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
   parseDropCowboyStatusWebhook(
-    JSON.stringify({ event: "contact.rvm.status", event_id: "evt-1", data: { status: "success", reason_code: 0, ...data }, ...extra }),
+    JSON.stringify({ event: "contact.rvm.status", event_id: "evt-1", data: { status: "success", reason_code: 0, campaign_type: "rvm", ...data }, ...extra }),
   );
 
 beforeEach(() => reportError.mockClear());
@@ -159,6 +159,52 @@ describe("signed status webhook", () => {
     expect(await handleDropStatusEvent(fake.store, statusEvent({ to: "+18165550101", status: "failure", reason_code: 4016 }), NOW)).toBe("unmatched");
     expect(fake.events.get("contact.rvm.status:evt-1")).toEqual({ status: "error", message: "unmatched voicemail drop" });
     expect(fake.paused).toEqual([]);
+  });
+
+  it.each(["ai_broadcast", "voice_broadcast", "sms"])(
+    "an unrelated %s outcome to the same phone never touches the drop; a later real 4016 still pauses",
+    async (campaignType) => {
+      const fake = createFakeDropStore([drop()]);
+      const broadcast = statusEvent({ campaign_type: campaignType, drop_id: "bc-1", to: "+18165550101" }, { event_id: "evt-bc" });
+      expect(await handleDropStatusEvent(fake.store, broadcast, NOW)).toBe("unmatched");
+      expect(fake.drops[0]).toMatchObject({ status: "queued", drop_id: null });
+      const real = statusEvent({ drop_id: "dc-1", to: "+18165550101", status: "failure", reason_code: 4016 }, { event_id: "evt-rvm" });
+      expect(await handleDropStatusEvent(fake.store, real, NOW)).toBe("applied");
+      expect(fake.drops[0]).toMatchObject({ status: "failed", drop_id: "dc-1" });
+      expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
+    },
+  );
+
+  it("phone fallback needs campaign_type rvm", async () => {
+    const fake = createFakeDropStore([drop()]);
+    expect(await handleDropStatusEvent(fake.store, statusEvent({ campaign_type: null, to: "+18165550101" }), NOW)).toBe("unmatched");
+    expect(fake.drops[0].status).toBe("queued");
+  });
+
+  it("phone fallback never picks a drop holding a different drop_id", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-mine" })]);
+    expect(await handleDropStatusEvent(fake.store, statusEvent({ drop_id: "dc-other", to: "+18165550101" }), NOW)).toBe("unmatched");
+    expect(fake.drops[0]).toMatchObject({ status: "queued", drop_id: "dc-mine" });
+  });
+
+  it("a 4016 whose pause fails is retried and the retry pauses the enrollment", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
+    fake.faults.pauseFailures = 1;
+    const event = statusEvent({ drop_id: "dc-1", status: "failure", reason_code: 4016 });
+    await expect(handleDropStatusEvent(fake.store, event, NOW)).rejects.toThrow("pauseEnrollment");
+    expect(fake.events.get("contact.rvm.status:evt-1")?.status).toBe("error");
+    expect(fake.paused).toEqual([]);
+    expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("applied");
+    expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
+    expect(fake.drops[0].status).toBe("failed");
+    expect(fake.events.get("contact.rvm.status:evt-1")?.status).toBe("processed");
+  });
+
+  it("a retried 4016 on a drop already failed (pause pending) still pauses", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-1", status: "failed" })]);
+    const event = statusEvent({ drop_id: "dc-1", status: "failure", reason_code: 4016 });
+    expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("applied");
+    expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
   });
 
   it("does not guess when two rows share a drop_id", async () => {

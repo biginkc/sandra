@@ -18,6 +18,8 @@ export function createFakeDropStore(
 ) {
   const events = new Map<string, { status: "processing" | "processed" | "error"; message?: string }>();
   const paused: Array<{ enrollmentId: string; reason: string }> = [];
+  /** Set to make the next N pauseEnrollment calls throw. */
+  const faults = { pauseFailures: 0 };
   const store: DropStatusStore = {
     async findDropById(id) {
       return drops.find((d) => d.id === id) ?? null;
@@ -25,8 +27,14 @@ export function createFakeDropStore(
     async findDropsByDropId(dropId) {
       return drops.filter((d) => d.drop_id === dropId);
     },
-    async findQueuedDropsByPhone(phone, sinceIso) {
-      return drops.filter((d) => d.to_phone === phone && d.status === "queued" && d.queued_at >= sinceIso);
+    async findQueuedDropsByPhone(phone, sinceIso, dropId) {
+      return drops.filter(
+        (d) =>
+          d.to_phone === phone &&
+          d.status === "queued" &&
+          d.queued_at >= sinceIso &&
+          (!dropId || !d.drop_id || d.drop_id === dropId),
+      );
     },
     async updateDrop(id, patch, onlyIfStatusIn) {
       const drop = drops.find((d) => d.id === id);
@@ -52,6 +60,10 @@ export function createFakeDropStore(
       return "reconciled";
     },
     async pauseEnrollment(enrollmentId, reason) {
+      if (faults.pauseFailures > 0) {
+        faults.pauseFailures -= 1;
+        throw new Error("pauseEnrollment: write failed");
+      }
       paused.push({ enrollmentId, reason });
     },
     async reserveEvent(eventType, eventId) {
@@ -65,5 +77,5 @@ export function createFakeDropStore(
       events.set(`${eventType}:${eventId}`, { status: outcome, message });
     },
   };
-  return { store, drops, events, paused, runs, enrollments };
+  return { store, drops, events, paused, runs, enrollments, faults };
 }
