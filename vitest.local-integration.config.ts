@@ -16,7 +16,7 @@ export default defineConfig({
       "supabase/migrations/20261009060000_dialpad_projection_preserve_queue_until_outcome.integration.test.ts",
       "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
-      "supabase/migrations/20261020140000_voicemail_drop_step.integration.test.ts",
+      "supabase/migrations/20261021200000_voicemail_drop_step.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",
       "supabase/migrations/20261002020000_direct_browser_watchdog.integration.test.ts",
