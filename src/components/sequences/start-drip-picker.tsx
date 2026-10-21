@@ -159,7 +159,7 @@ export function StartDripPicker({
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
             className={`mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50 ${(selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id ? 'border-teal-600 bg-teal-50' : ''}`}>
             <span className="block text-sm font-medium">{choice.name}</span>
-            <span className="block text-xs text-stone-600">{choice.textCount} texts · over {choice.days} days</span>
+            <span className="block text-xs text-stone-600">{choice.textCount} texts{choice.voicemailCount ? ` · ${choice.voicemailCount} voicemail${choice.voicemailCount === 1 ? "" : "s"}` : ""} · over {choice.days} days</span>
             {choice.firstSend && <span className="block text-xs text-stone-600">First text: {choice.firstSend}</span>}
             <span className="block text-xs text-stone-600">Stops when they reply</span>
           </button>

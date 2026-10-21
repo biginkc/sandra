@@ -6,12 +6,17 @@ import {
   NotebookPenIcon,
   PhoneCallIcon,
   RotateCcwIcon,
+  VoicemailIcon,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import { messageDripLabels } from "@/lib/sequences/message-drip-labels";
+import {
+  voicemailDropTimelineText,
+  type VoicemailDropTimelineRow,
+} from "@/lib/sequences/voicemail-drop-step-config";
 
 import {
   CallEventCard,
@@ -62,6 +67,12 @@ export type LeadActivityEvent =
       id: string;
       timestamp: string;
       row: LeadEvent;
+    }
+  | {
+      source: "voicemail";
+      id: string;
+      timestamp: string;
+      row: VoicemailDropTimelineRow;
     };
 
 type SourceName = LeadActivityEvent["source"];
@@ -74,6 +85,8 @@ type Props = {
   initialCalls: CallActivityRollupRow[];
   initialEvents: LeadEvent[];
   initialAcquisitionHistory?: AcquisitionHistoryResult;
+  /** Read-only voicemail drop rows for this lead, newest first. */
+  initialVoicemailDrops?: VoicemailDropTimelineRow[];
   messageError: string | null;
   noteError: string | null;
   callError: string | null;
@@ -203,6 +216,7 @@ export function LeadActivityTimeline(props: Props) {
     propertyId,
     props.initialAcquisitionHistory,
   );
+  const voicemailDrops = props.initialVoicemailDrops ?? EMPTY_VOICEMAIL_DROPS;
   const activity = useMemo(
     () =>
       buildLeadActivitySnapshot(
@@ -213,8 +227,10 @@ export function LeadActivityTimeline(props: Props) {
         { ...errors, acquisition: acquisition.error },
         acquisition.page.rows,
         acquisition.page.hasMore,
+        voicemailDrops,
       ),
     [
+      voicemailDrops,
       calls,
       errors,
       leadEvents,
@@ -237,6 +253,7 @@ export function LeadActivityTimeline(props: Props) {
       acquisition.retry();
       return;
     }
+    if (source === "voicemail") return;
     setRetrying(source);
     const supabase = createClient();
     try {
@@ -423,6 +440,17 @@ export function LeadActivityTimeline(props: Props) {
                 </Fragment>
               );
             }
+            if (event.source === "voicemail") {
+              return (
+                <Fragment key={`voicemail:${event.id}`}>
+                  {boundary}
+                  <div className={`relative pb-4 pl-12${muted}`}>
+                    <TimelineDot source="voicemail" />
+                    <VoicemailDropCard row={event.row} />
+                  </div>
+                </Fragment>
+              );
+            }
             if (event.source === "event") {
               return (
                 <Fragment key={`event:${event.id}`}>
@@ -491,8 +519,17 @@ export function normalizeLeadActivityEvents(
   calls: CallActivityRollupRow[],
   leadEvents: LeadEvent[],
   acquisition: AcquisitionHistoryFact[] = [],
+  voicemailDrops: VoicemailDropTimelineRow[] = [],
 ): LeadActivityEvent[] {
   const deduplicated = new Map<string, LeadActivityEvent>();
+  for (const drop of voicemailDrops) {
+    deduplicated.set(`voicemail:${drop.id}`, {
+      source: "voicemail",
+      id: drop.id,
+      timestamp: drop.completed_at ?? drop.queued_at ?? drop.created_at,
+      row: drop,
+    });
+  }
   for (const message of messages) {
     deduplicated.set(`message:${message.id}`, {
       source: "message",
@@ -569,6 +606,7 @@ export function normalizeLeadActivityEvents(
     note: 1,
     call: 2,
     event: 3,
+    voicemail: 5,
   };
   return [...deduplicated.values()].sort(
     (a, b) =>
@@ -600,6 +638,7 @@ export function buildLeadActivitySnapshot(
   errors: Partial<Record<SourceName, string | null>>,
   acquisition: AcquisitionHistoryFact[] = [],
   acquisitionHasMore = false,
+  voicemailDrops: VoicemailDropTimelineRow[] = [],
 ) {
   const sourceOrder: SourceName[] = [
     "message",
@@ -640,6 +679,7 @@ export function buildLeadActivitySnapshot(
     calls,
     leadEvents,
     acquisition,
+    voicemailDrops,
   );
   return {
     events,
@@ -664,6 +704,8 @@ function TimelineDot({ source }: { source: SourceName }) {
       <MessageSquareIcon className="size-3.5" />
     ) : source === "note" ? (
       <NotebookPenIcon className="size-3.5" />
+    ) : source === "voicemail" ? (
+      <VoicemailIcon className="size-3.5" />
     ) : (
       <PhoneCallIcon className="size-3.5" />
     );
@@ -711,7 +753,9 @@ function ActivitySourceFailure({
           ? "Calls"
           : source === "acquisition"
             ? "Outreach and offers"
-            : "Activity";
+            : source === "voicemail"
+              ? "Voicemails"
+              : "Activity";
   return (
     <div
       className="border-destructive/40 bg-destructive/5 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
@@ -736,6 +780,38 @@ function ActivitySourceFailure({
         <RotateCcwIcon className="size-3.5" />
         {pending ? "Retrying…" : `Retry ${label.toLowerCase()}`}
       </Button>
+    </div>
+  );
+}
+
+const EMPTY_VOICEMAIL_DROPS: VoicemailDropTimelineRow[] = [];
+
+function VoicemailDropCard({ row }: { row: VoicemailDropTimelineRow }) {
+  const { title, detail } = voicemailDropTimelineText(row);
+  const at = row.completed_at ?? row.queued_at ?? row.created_at;
+  return (
+    <div
+      className="bg-card rounded-lg border px-3 py-2 text-sm"
+      data-testid="lead-voicemail-drop"
+      data-status={row.status}
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className={`font-semibold${row.status === "failed" ? " text-destructive" : ""}`}>{title}</p>
+        <time className="text-muted-foreground text-xs" dateTime={at}>
+          {new Date(at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+        </time>
+      </div>
+      {detail ? <p className="text-muted-foreground text-xs">{detail}</p> : null}
+      {row.proof_url?.startsWith("https://") ? (
+        <a
+          href={row.proof_url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-xs underline"
+        >
+          Proof of delivery (kept 7 days)
+        </a>
+      ) : null}
     </div>
   );
 }

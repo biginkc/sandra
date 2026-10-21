@@ -13,6 +13,12 @@ import {
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
+import {
+  hasVoicemailFields,
+  isValidVoicemailDropStep,
+  VOICEMAIL_VOICE_REQUIRED_MESSAGE,
+  voicemailScriptNeedsVoice,
+} from "@/lib/sequences/voicemail-drop-step-config";
 import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
 import { NEEDS_PERSON_PAGE_SIZE } from "./overview-model";
 import { loadDripChoices, type DripChoice } from "@/lib/sequences/drip-choices";
@@ -39,6 +45,8 @@ export type SequenceRow = {
   last_sent?: string | null;
 };
 
+export type SequenceActionType = "send_sms" | "change_status" | "send_voicemail_drop";
+
 export type SequenceWithSteps = {
   id: string;
   name: string;
@@ -50,11 +58,15 @@ export type SequenceWithSteps = {
     id: string;
     step_index: number;
     delay_after_previous_minutes: number;
-    action_type: "send_sms" | "change_status";
+    action_type: SequenceActionType;
     template_body: string | null;
     template_id: string | null;
     template_category: string | null;
     target_status: string | null;
+    vm_media_id?: string | null;
+    vm_tts_body?: string | null;
+    vm_voice_id?: string | null;
+    vm_phone_line_id?: string | null;
   }>;
 };
 
@@ -67,17 +79,34 @@ export async function replaceSequenceSteps(input: {
   steps: SequenceStepInput[];
 }): Promise<Result<string[]>> {
   const name = input.name.trim();
+  // Script drops are read by a voice: the step's own, else the server default
+  // (DROPCOWBOY_VOICE_ID), saved onto the step because the worker reads only
+  // the step. No voice at all = a clear error instead of a broken step.
+  const defaultVoiceId = process.env.DROPCOWBOY_VOICE_ID?.trim() || null;
+  if (input.steps.some((step) => Boolean(step.vm_tts_body?.trim()) && voicemailScriptNeedsVoice(step, defaultVoiceId))) {
+    return { ok: false, error: { code: "VALIDATION", message: VOICEMAIL_VOICE_REQUIRED_MESSAGE } };
+  }
+  input = {
+    ...input,
+    steps: input.steps.map((step) =>
+      step.action_type === "send_voicemail_drop" && step.vm_tts_body?.trim() && !step.vm_voice_id?.trim()
+        ? { ...step, vm_voice_id: defaultVoiceId }
+        : step),
+  };
   if (!name || name.length > 120 || input.steps.length > 100 || input.steps.some((step, index) =>
     step.step_index !== index || !Number.isInteger(step.delay_after_previous_minutes) ||
     step.delay_after_previous_minutes < 0 ||
     (step.action_type === "send_sms" && (
       Number(Boolean(step.template_body?.trim())) + Number(Boolean(step.template_id)) +
-      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status)
+      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status) ||
+      hasVoicemailFields(step)
     )) ||
     (step.action_type === "change_status" && (
       !step.target_status?.trim() || Boolean(step.template_body?.trim()) ||
-      Boolean(step.template_id) || Boolean(step.template_category?.trim())
-    )) || !["send_sms", "change_status"].includes(step.action_type)
+      Boolean(step.template_id) || Boolean(step.template_category?.trim()) || hasVoicemailFields(step)
+    )) ||
+    (step.action_type === "send_voicemail_drop" && !isValidVoicemailDropStep(step)) ||
+    !["send_sms", "change_status", "send_voicemail_drop"].includes(step.action_type)
   )) return { ok: false, error: { code: "VALIDATION", message: "Check the drip name and every step before saving." } };
   try {
     const guard = await requireSequenceAdmin();
@@ -287,7 +316,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });
@@ -301,7 +330,7 @@ export async function getSequenceWithSteps(
       ...seq,
       steps: (steps ?? []).map((s) => ({
         ...s,
-        action_type: s.action_type as "send_sms" | "change_status",
+        action_type: s.action_type as SequenceActionType,
       })),
     });
   } catch (e) {

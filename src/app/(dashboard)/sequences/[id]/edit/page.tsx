@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { listTemplates } from "@/app/(dashboard)/templates/actions";
+import { isVoicemailDropEnabled } from "@/lib/voicemail-drop/registry";
 
 import { getSequenceAdminStatus } from "../../admin";
 import { getImpactAction, getSequenceWithSteps } from "../../actions";
@@ -69,6 +70,12 @@ export default async function SequenceEditPage({
         initialImpact={impact}
         templates={templates}
         isNew={isNew}
+        voicemailDrop={{
+          // Server-only: env presence and default IDs, never credentials.
+          enabled: isVoicemailDropEnabled(),
+          defaultVoiceId: process.env.DROPCOWBOY_VOICE_ID?.trim() || null,
+          defaultPhoneLineId: process.env.DROPCOWBOY_PHONE_LINE_ID?.trim() || null,
+        }}
       />
     </Page>
   );

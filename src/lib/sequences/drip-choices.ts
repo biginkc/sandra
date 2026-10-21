@@ -4,7 +4,7 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { previewFirstSend } from "@/lib/sequences/start-drip";
 
-export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
+export type DripChoice = { id: string; name: string; textCount: number; voicemailCount?: number; days: number; firstSend: string | null };
 
 /** Shared by the listDripChoices server action and GET /api/sequences/drip-choices; reads under the caller's RLS scope. */
 export async function loadDripChoices(supabase: SupabaseClient): Promise<Result<DripChoice[]>> {
@@ -30,6 +30,7 @@ export async function loadDripChoices(supabase: SupabaseClient): Promise<Result<
         id: sequence.id,
         name: sequence.name,
         textCount: own.filter((step) => step.action_type === "send_sms").length,
+        voicemailCount: own.filter((step) => step.action_type === "send_voicemail_drop").length,
         days: Math.ceil(own.reduce((sum, step) => sum + step.delay_after_previous_minutes, 0) / 1440),
         firstSend: firstSmsIndex < 0 ? null : previewFirstSend(
           own.slice(0, firstSmsIndex + 1).reduce((sum, step) => sum + step.delay_after_previous_minutes, 0),

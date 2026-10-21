@@ -98,6 +98,11 @@ import { LeadMediaHero } from "./lead-media-hero";
 import { LeadMediaImageSlot } from "./lead-media-image-slot";
 import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
+import {
+  VOICEMAIL_DROP_TIMELINE_COLUMNS,
+  visibleVoicemailDrops,
+  type VoicemailDropTimelineRow,
+} from "@/lib/sequences/voicemail-drop-step-config";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 import { HaveNormaCallButton } from "./have-norma-call-button";
@@ -405,6 +410,18 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(200);
+  // Read-only voicemail drop log (RLS: org members). A read failure only
+  // hides drops from the timeline.
+  const voicemailDropsPromise = Promise.resolve(
+    supabase
+      .from("voicemail_drops")
+      .select(VOICEMAIL_DROP_TIMELINE_COLUMNS)
+      .eq("property_id", lead.id)
+      .order("created_at", { ascending: false })
+      .limit(50),
+  )
+    .then(({ data, error }) => (error ? [] : visibleVoicemailDrops((data ?? []) as VoicemailDropTimelineRow[])))
+    .catch(() => [] as VoicemailDropTimelineRow[]);
   const normaRequestsPromise = supabase
     .from("norma_call_requests")
     .select(NORMA_REQUEST_VIEW_COLUMNS)
@@ -683,6 +700,7 @@ export default async function LeadDetailPage({
     viewerPrefs,
   ] = settledCoreReads;
   const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
+  const initialVoicemailDrops = await voicemailDropsPromise;
   // loadIntegrationPrefs supplies the persisted timezone when available and
   // keeps the historical Chicago fallback for unset or invalid preferences.
   const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
@@ -1129,6 +1147,7 @@ export default async function LeadDetailPage({
               initialCalls={initialCallRows}
               initialEvents={initialLeadEvents}
               initialAcquisitionHistory={acquisitionHistory}
+              initialVoicemailDrops={initialVoicemailDrops}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}
