@@ -30,7 +30,10 @@ export function createFakeDropStore(
   function settle(id: string, enrollment: FakeEnrollment | undefined, eligible: boolean, pauseReason: string | null): string {
     if (!enrollment) return "none";
     if (!eligible) {
-      if (pauseReason && enrollment.status === "active") {
+      const temporary = ["call_in_progress", "norma_call", "reconciliation_required"];
+      if (pauseReason && (enrollment.status === "active" || (enrollment.status === "paused" &&
+        enrollment.pause_reason !== pauseReason &&
+        (pauseReason === "voicemail_drop_consent_blocked" || temporary.includes(enrollment.pause_reason ?? ""))))) {
         Object.assign(enrollment, { status: "paused", pause_reason: pauseReason });
         paused.push({ enrollmentId: id, reason: pauseReason });
         return "paused";
@@ -134,7 +137,7 @@ export function createFakeDropStore(
           enrollment.current_step_index === STEP && run.attempt_outcome === "accepted");
         if (eligible) {
           const keepStop = input.pauseReason === "step_misconfigured" && enrollment.status === "paused" &&
-            enrollment.pause_reason !== "reconciliation_required";
+            !["reconciliation_required", "call_in_progress", "norma_call"].includes(enrollment.pause_reason ?? "");
           enrollmentAction = settle(drop.enrollment_id!, enrollment, true, keepStop ? null : input.pauseReason);
         }
         else if (dropResult !== "conflict") enrollmentAction = settle(drop.enrollment_id!, enrollment, false, input.pauseReason);
