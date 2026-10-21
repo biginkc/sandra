@@ -86,9 +86,6 @@ export async function runBatchedCadenceRpc(
   const limit = options.limit ?? CAMPAIGN_QUEUE_BATCH_LIMIT;
   const maxBatches = options.maxBatches ?? CAMPAIGN_QUEUE_MAX_BATCHES;
   const batchArgs: Record<string, unknown> = { ...baseArgs, p_limit: limit };
-  if (fn === "apply_campaign_cadence_reschedule") {
-    batchArgs.p_run_id = globalThis.crypto.randomUUID();
-  }
 
   const totals: BatchedCadenceTotals = {
     affected_count: 0,
@@ -97,23 +94,13 @@ export async function runBatchedCadenceRpc(
   };
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
-    const { data, error } = await client.rpc(fn, batchArgs);
+    let { data, error } = await client.rpc(fn, batchArgs);
+    if (error && batch === 0 && isMissingSignature(error)) {
+      // Pre-migration (or stale schema cache): old argument list. Its
+      // result still goes through the remaining_count check below.
+      ({ data, error } = await client.rpc(fn, baseArgs));
+    }
     if (error) {
-      if (batch === 0 && isMissingSignature(error)) {
-        const legacy = await client.rpc(fn, baseArgs);
-        if (legacy.error) {
-          return { ok: false, message: legacy.error.message, batchesCompleted: 0 };
-        }
-        const row = firstRow<CadenceRow>(legacy.data);
-        return {
-          ok: true,
-          data: {
-            affected_count: Number(row?.affected_count ?? 0),
-            first_scheduled_for: row?.first_scheduled_for ?? null,
-            last_scheduled_for: row?.last_scheduled_for ?? null,
-          },
-        };
-      }
       return {
         ok: false,
         message: partialMessage(error.message, batch),
@@ -160,26 +147,14 @@ export async function runBatchedPauseRpc(
   };
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
-    const { data, error } = await client.rpc("pause_campaign_queue", {
+    let { data, error } = await client.rpc("pause_campaign_queue", {
       ...baseArgs,
       p_limit: limit,
     });
+    if (error && batch === 0 && isMissingSignature(error)) {
+      ({ data, error } = await client.rpc("pause_campaign_queue", baseArgs));
+    }
     if (error) {
-      if (batch === 0 && isMissingSignature(error)) {
-        const legacy = await client.rpc("pause_campaign_queue", baseArgs);
-        if (legacy.error) {
-          return { ok: false, message: legacy.error.message, batchesCompleted: 0 };
-        }
-        const row = firstRow<PauseRow>(legacy.data);
-        return {
-          ok: true,
-          data: {
-            affected_count: Number(row?.affected_count ?? 0),
-            pending_count: Number(row?.pending_count ?? 0),
-            paused_count: Number(row?.paused_count ?? 0),
-          },
-        };
-      }
       return {
         ok: false,
         message: partialMessage(error.message, batch),

@@ -226,7 +226,6 @@ describe("campaign cadence actions", () => {
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
       p_limit: 100,
-      p_run_id: expect.any(String),
     });
     expect(admin.campaignUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ pace_seconds: 8 }),
@@ -418,25 +417,6 @@ describe("campaign cadence actions", () => {
     });
   });
 
-  it("reuses one run id across cadence batches", async () => {
-    const rpc = vi
-      .fn()
-      .mockResolvedValueOnce({ data: [{ ...rpcRow, remaining_count: 1 }], error: null })
-      .mockResolvedValueOnce({ data: [{ ...rpcRow, remaining_count: 0 }], error: null });
-    const admin = adminCampaignClient({ rpc });
-    createClient.mockResolvedValue(campaignLookupClient("org-1"));
-    getCallerMemberships.mockResolvedValue([
-      { user_id: "user-1", org_id: "org-1", role: "member" },
-    ]);
-    createAdminClient.mockReturnValue(admin.client);
-
-    const result = await applyCampaignCadenceChange("campaign-1", 8, true);
-
-    expect(result.ok).toBe(true);
-    expect(rpc).toHaveBeenCalledTimes(2);
-    expect(rpc.mock.calls[0][1].p_run_id).toBe(rpc.mock.calls[1][1].p_run_id);
-  });
-
   it("loops pause batches and reports the final counts", async () => {
     const rpc = vi
       .fn()
@@ -498,6 +478,27 @@ describe("campaign cadence actions", () => {
     expect(result).toEqual({
       ok: true,
       data: { affectedCount: 9, pendingCount: 0, pausedCount: 9 },
+    });
+  });
+
+  it("keeps looping when the fallback call still reports rows remaining", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: null, error: { code: "PGRST202", message: "stale schema cache" } })
+      .mockResolvedValueOnce({ data: [{ affected_count: 100, pending_count: 0, paused_count: 100, remaining_count: 50 }], error: null })
+      .mockResolvedValueOnce({ data: [{ affected_count: 50, pending_count: 0, paused_count: 150, remaining_count: 0 }], error: null });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue({ rpc });
+
+    const result = await pauseCampaignSends("campaign-1", true);
+
+    expect(rpc).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({
+      ok: true,
+      data: { affectedCount: 150, pendingCount: 0, pausedCount: 150 },
     });
   });
 

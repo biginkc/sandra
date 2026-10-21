@@ -23,7 +23,7 @@ async function asService(client: Client) {
 
 async function seed(status: "queued" | "paused") {
   await a.query("delete from public.messages where org_id=$1", [org]);
-  await a.query("update public.campaigns set status=$2, pace_seconds=null where id=$1",
+  await a.query("update public.campaigns set status=$2, pace_seconds=null, cadence_op_id=null, cadence_op_started_at=null where id=$1",
     [campaign, status === "paused" ? "paused" : "active"]);
   // Deterministic but shuffled times; every 7th has no time (nulls ordering).
   await a.query(
@@ -80,7 +80,7 @@ async function loop(client: Client, sql: string, params: unknown[]) {
 
 const RESUME = `select * from public.resume_campaign_queue($1, $2, 300, true, $3)`;
 const PAUSE = `select * from public.pause_campaign_queue($1, true, $2)`;
-const CADENCE = `select * from public.apply_campaign_cadence_reschedule($1, $2, 300, true, $3, $4)`;
+const CADENCE = `select * from public.apply_campaign_cadence_reschedule($1, $2, 300, true, $3)`;
 
 function expectContinuousCadence(
   ordered: Array<{ scheduled_for: Date | null }>, pace: number,
@@ -163,7 +163,7 @@ it("two concurrent resumers share one cadence and never double-schedule", async 
   expect((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status).toBe("completed");
 }, 120_000);
 
-it("pauses 3,000 queued rows in batches; flips the campaign once, at the end", async () => {
+it("pauses 3,000 queued rows in batches; holds the campaign from the first batch", async () => {
   await seed("queued");
   const before = new Map((await rows()).map((r) => [r.id, r.scheduled_for]));
   const statuses: string[] = [];
@@ -174,7 +174,7 @@ it("pauses 3,000 queued rows in batches; flips the campaign once, at the end", a
     statuses.push((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status);
     if (Number(r.remaining_count) === 0) break;
   }
-  expect(statuses).toEqual(["active", "active", "active", "active", "active", "paused"]);
+  expect(statuses).toEqual(["paused", "paused", "paused", "paused", "paused", "paused"]);
   for (const r of await rows()) {
     expect(r.status).toBe("paused");
     expect(r.scheduled_for).toBeNull();
@@ -201,18 +201,16 @@ it("reschedules 3,000 queued rows in batches with the single-shot order and spac
   const before = await rows();
   const reference = [...before].sort((p, q) =>
     cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
-  const run = randomUUID();
-  const results = await loop(a, CADENCE, [campaign, 6, LIMIT, run]);
+  const results = await loop(a, CADENCE, [campaign, 6, LIMIT]);
   expect(results).toHaveLength(6);
   const after = new Map((await rows()).map((r) => [r.id, r]));
   expectContinuousCadence(reference.map((r) => after.get(r.id)!), 6);
   expect(Number((await a.query("select pace_seconds from public.campaigns where id=$1", [campaign])).rows[0].pace_seconds)).toBe(6);
 }, 120_000);
 
-it("a concurrent second caller of the same cadence run never double-schedules", async () => {
+it("two independent concurrent cadence callers share one pass and never double-schedule", async () => {
   await seed("queued");
-  const run = randomUUID();
-  await Promise.all([loop(a, CADENCE, [campaign, 6, LIMIT, run]), loop(b, CADENCE, [campaign, 6, LIMIT, run])]);
+  await Promise.all([loop(a, CADENCE, [campaign, 6, LIMIT]), loop(b, CADENCE, [campaign, 6, LIMIT])]);
   const after = (await rows()).sort((p, q) => p.scheduled_for!.getTime() - q.scheduled_for!.getTime());
   expect(new Set(after.map((r) => r.scheduled_for!.getTime())).size).toBe(ROWS);
   expectContinuousCadence(after, 6);
@@ -230,3 +228,57 @@ it("rejects out-of-range limits and stays service_role only", async () => {
   expect(who).not.toContain("anon");
   expect(who).not.toContain("PUBLIC");
 });
+
+it("a retried cadence pass (same op) continues in the original order", async () => {
+  await seed("queued");
+  const before = await rows();
+  const reference = [...before].sort((p, q) =>
+    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
+  await a.query(CADENCE, [campaign, 6, LIMIT]); // one batch, then the caller "dies"
+  await loop(a, CADENCE, [campaign, 6, LIMIT]); // retry
+  const after = new Map((await rows()).map((r) => [r.id, r]));
+  expectContinuousCadence(reference.map((r) => after.get(r.id)!), 6);
+  expect((await a.query("select cadence_op_id from public.campaigns where id=$1", [campaign])).rows[0].cadence_op_id).toBeNull();
+}, 120_000);
+
+it("an abandoned cadence pass is replaced and rows keep their original order", async () => {
+  await seed("queued");
+  const before = await rows();
+  const reference = [...before].sort((p, q) =>
+    cmp(p.scheduled_for?.getTime() ?? null, q.scheduled_for?.getTime() ?? null, false) || tie(p, q));
+  await a.query(CADENCE, [campaign, 6, LIMIT]);
+  await a.query("update public.campaigns set cadence_op_started_at = now() - interval '20 minutes' where id=$1", [campaign]);
+  await loop(a, CADENCE, [campaign, 8, LIMIT]);
+  const after = new Map((await rows()).map((r) => [r.id, r]));
+  expectContinuousCadence(reference.map((r) => after.get(r.id)!), 8);
+}, 120_000);
+
+it("resume refuses while an interrupted pause left queued rows; finishing the pause unblocks it", async () => {
+  await seed("queued");
+  await a.query(PAUSE, [campaign, LIMIT]); // one batch only
+  expect((await a.query("select status from public.campaigns where id=$1", [campaign])).rows[0].status).toBe("paused");
+  await expect(a.query(RESUME, [campaign, PACE, LIMIT])).rejects.toThrow(/pause has not finished/);
+  await loop(a, PAUSE, [campaign, LIMIT]);
+  await loop(a, RESUME, [campaign, PACE, LIMIT]);
+  expect((await rows()).every((r) => r.status === "queued")).toBe(true);
+}, 120_000);
+
+it("an interrupted resume can be retried and finishes one continuous cadence", async () => {
+  await seed("paused");
+  const before = await rows();
+  const reference = [...before].sort((p, q) =>
+    cmp(ts((p.metadata.campaignPause as Record<string, unknown>).previousScheduledFor),
+      ts((q.metadata.campaignPause as Record<string, unknown>).previousScheduledFor), true) || tie(p, q));
+  await a.query(RESUME, [campaign, PACE, LIMIT]);
+  await a.query(RESUME, [campaign, PACE, LIMIT]); // caller dies here
+  await loop(b, RESUME, [campaign, PACE, LIMIT]); // retry from another request
+  const after = new Map((await rows()).map((r) => [r.id, r]));
+  expectContinuousCadence(reference.map((r) => after.get(r.id)!), PACE);
+}, 120_000);
+
+it("old callers (no p_limit) keep the unbounded single-shot behaviour", async () => {
+  await seed("queued");
+  const r = (await a.query("select * from public.pause_campaign_queue($1, true)", [campaign])).rows[0];
+  expect(Number(r.affected_count)).toBe(ROWS);
+  expect(Number(r.remaining_count)).toBe(0);
+}, 120_000);
