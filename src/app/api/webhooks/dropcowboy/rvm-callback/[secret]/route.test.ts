@@ -24,7 +24,7 @@ function call(secret: string, body: Record<string, unknown>) {
 beforeEach(() => {
   vi.stubEnv("DROPCOWBOY_CALLBACK_SECRET", "cb-secret");
   fake = createFakeDropStore([
-    { id: ID, enrollment_id: "enr-1", status: "queued", drop_id: null, to_phone: "+18165550101", queued_at: new Date().toISOString() },
+    { id: ID, enrollment_id: "enr-1", step_run_id: "run-1", status: "queued", attempt_outcome: "queued", drop_id: null, to_phone: "+18165550101", queued_at: new Date().toISOString() },
   ]);
   holder.store = fake.store;
 });

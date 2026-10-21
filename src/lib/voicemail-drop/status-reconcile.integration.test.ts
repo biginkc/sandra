@@ -1,0 +1,112 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+
+import { createTestClient } from "@tests/integration/client";
+
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn(), reportInfo: vi.fn() }));
+
+import { handleDropCallback, handleDropStatusEvent, supabaseDropStatusStore } from "./status-updates";
+import { parseDropCowboyCallback, parseDropCowboyStatusWebhook } from "./webhook";
+
+// Real-DB proof of the held-drop reconciliation (fix 1): a callback or signed
+// status event for a drop whose POST outcome was unknown marks the run
+// accepted, advances the paused enrollment and never touches the provider.
+const client = createTestClient();
+const org = randomUUID();
+const sequence = randomUUID();
+const property = randomUUID();
+let step0!: string;
+let enrollment!: string;
+let run!: string;
+let dropRow!: string;
+
+beforeAll(async () => {
+  const ok = (r: { error: { message: string } | null }) => {
+    if (r.error) throw new Error(r.error.message);
+  };
+  ok(await client.from("organizations").insert({ id: org, name: `Drop reconcile ${org}` }));
+  ok(await client.from("sequences").insert({ id: sequence, org_id: org, name: "Reconcile" }));
+  const steps = await client
+    .from("sequence_steps")
+    .insert([
+      { sequence_id: sequence, step_index: 0, action_type: "send_voicemail_drop", vm_tts_body: "Hi", delay_after_previous_minutes: 0 },
+      { sequence_id: sequence, step_index: 1, action_type: "send_sms", template_body: "Hello", delay_after_previous_minutes: 60 },
+    ])
+    .select("id, step_index");
+  ok(steps);
+  step0 = steps.data!.find((s) => s.step_index === 0)!.id;
+  ok(await client.from("properties").insert({ id: property, org_id: org, address: "1 Main", state: "MO" }));
+});
+
+beforeEach(async () => {
+  await client.from("voicemail_drops").delete().eq("org_id", org);
+  await client.from("sequence_enrollments").delete().eq("org_id", org);
+  enrollment = randomUUID();
+  const e = await client.from("sequence_enrollments").insert({
+    id: enrollment, org_id: org, sequence_id: sequence, property_id: property,
+    status: "paused", pause_reason: "reconciliation_required", current_step_index: 0,
+  });
+  if (e.error) throw new Error(e.error.message);
+  const r = await client.from("sequence_step_runs").insert({
+    enrollment_id: enrollment, step_id: step0, scheduled_for: new Date().toISOString(), claim_active: true,
+    run_at: new Date().toISOString(), attempt_outcome: "unknown", skipped_reason: "provider_failed",
+    failure_reason: "voicemail drop outcome unknown (timeout)",
+  }).select("id").single();
+  if (r.error) throw new Error(r.error.message);
+  run = r.data.id;
+  const d = await client.from("voicemail_drops").insert({
+    org_id: org, enrollment_id: enrollment, step_run_id: run, idempotency_key: run,
+    to_phone: "+18165550101", provider: "dropcowboy", audio_kind: "tts", attempt_outcome: "unknown",
+  }).select("id").single();
+  if (d.error) throw new Error(d.error.message);
+  dropRow = d.data.id;
+});
+
+afterAll(async () => {
+  await client.from("voicemail_drops").delete().eq("org_id", org);
+  await client.from("sequence_enrollments").delete().eq("org_id", org);
+  await client.from("properties").delete().eq("org_id", org);
+  await client.from("sequences").delete().eq("org_id", org);
+  await client.from("webhook_events").delete().eq("provider", "dropcowboy").like("external_id", `rc-${org}%`);
+  await client.from("organizations").delete().eq("id", org);
+});
+
+async function state() {
+  const [r, e, d] = await Promise.all([
+    client.from("sequence_step_runs").select("attempt_outcome, claim_active, skipped_reason, recovery_action").eq("id", run).single(),
+    client.from("sequence_enrollments").select("status, pause_reason, current_step_index, next_run_at").eq("id", enrollment).single(),
+    client.from("voicemail_drops").select("status, attempt_outcome, queued_at").eq("id", dropRow).single(),
+  ]);
+  return { run: r.data!, enrollment: e.data!, drop: d.data! };
+}
+
+const callback = () =>
+  parseDropCowboyCallback(JSON.stringify({ foreign_id: dropRow, drop_id: `dc-${org}`, status: "success", reason_code: 0 }));
+
+it("a callback reconciles: run accepted with claim kept, enrollment advanced, drop delivered; replay is a no-op", async () => {
+  const store = supabaseDropStatusStore(client);
+  expect((await handleDropCallback(store, callback())).status).toBe(200);
+  const after = await state();
+  expect(after.run).toMatchObject({ attempt_outcome: "accepted", claim_active: true, skipped_reason: null, recovery_action: "voicemail_drop_reconciled" });
+  expect(after.enrollment).toMatchObject({ status: "active", pause_reason: null, current_step_index: 1 });
+  expect(after.drop).toMatchObject({ status: "delivered", attempt_outcome: "queued" });
+  expect(after.drop.queued_at).not.toBeNull();
+
+  await handleDropCallback(store, callback());
+  const replay = await state();
+  expect(replay.enrollment.current_step_index).toBe(1);
+  expect(replay.enrollment.next_run_at).toBe(after.enrollment.next_run_at);
+});
+
+it("a signed status event correlated by phone reconciles the same way", async () => {
+  const store = supabaseDropStatusStore(client);
+  const event = parseDropCowboyStatusWebhook(JSON.stringify({
+    event: "contact.rvm.status", event_id: `rc-${org}-1`,
+    data: { to: "+18165550101", drop_id: `dc2-${org}`, status: "failure", reason_code: 4001 },
+  }));
+  expect(await handleDropStatusEvent(store, event)).toBe("applied");
+  const after = await state();
+  expect(after.run.attempt_outcome).toBe("accepted");
+  expect(after.enrollment).toMatchObject({ status: "active", current_step_index: 1 });
+  expect(after.drop).toMatchObject({ status: "failed", attempt_outcome: "queued" });
+});

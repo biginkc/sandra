@@ -72,10 +72,17 @@ type DropStep = {
 
 type DropProperty = { state: string | null };
 
+/**
+ * Callback URL for Drop Cowboy. null = DROPCOWBOY_CALLBACK_SECRET unset.
+ * Throws when the app URL (NEXT_PUBLIC_APP_URL / APP_URL) is unset: no
+ * hardcoded host, so a preview or misconfigured deploy never points callbacks
+ * at production.
+ */
 export function voicemailDropCallbackUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const secret = env.DROPCOWBOY_CALLBACK_SECRET?.trim();
   if (!secret) return null;
-  const base = (env.NEXT_PUBLIC_APP_URL ?? env.APP_URL ?? "https://sandra-sooty.vercel.app").trim();
+  const base = (env.NEXT_PUBLIC_APP_URL?.trim() || env.APP_URL?.trim() || "");
+  if (!base) throw new Error("NEXT_PUBLIC_APP_URL is not set; cannot build the voicemail drop callback URL");
   const normalized = (base.startsWith("http") ? base : `https://${base}`).replace(/\/+$/, "");
   return `${normalized}/api/webhooks/dropcowboy/rvm-callback/${encodeURIComponent(secret)}`;
 }
@@ -208,7 +215,13 @@ export async function processVoicemailDropStep(
   if (!provider) {
     return pauseNotAttempted(client, enrollment.id, claimId, "provider_failed", "voicemail drop provider off");
   }
-  const callbackUrl = voicemailDropCallbackUrl(env);
+  let callbackUrl: string | null;
+  try {
+    callbackUrl = voicemailDropCallbackUrl(env);
+  } catch (error) {
+    reportError(error, { tags: { surface: "sequence_tick_voicemail_drop_config" } });
+    return pauseNotAttempted(client, enrollment.id, claimId, "provider_failed", "voicemail drop callback url missing");
+  }
   if (!callbackUrl) {
     reportError(new Error("DROPCOWBOY_CALLBACK_SECRET is not set"), {
       tags: { surface: "sequence_tick_voicemail_drop_config" },
@@ -229,6 +242,21 @@ export async function processVoicemailDropStep(
       claimId,
       "provider_failed",
       `voicemail drop caller id misconfigured: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // VOICEMAIL_DROP_DAILY_CAP: unset = no cap; set but invalid = fail closed.
+  let cap: number | null;
+  try {
+    cap = readDailyCap(env);
+  } catch (error) {
+    reportError(error, { tags: { surface: "sequence_tick_voicemail_drop_config" } });
+    return pauseNotAttempted(
+      client,
+      enrollment.id,
+      claimId,
+      "provider_failed",
+      `voicemail drop daily cap misconfigured: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -353,7 +381,6 @@ export async function processVoicemailDropStep(
   //    With VOICEMAIL_DROP_DAILY_CAP set, the count and the insert run in one
   //    transaction under a per-org advisory lock so parallel ticks cannot
   //    overshoot the cap.
-  const cap = readDailyCap(env);
   let dropRowId: string;
   if (cap !== null) {
     const day = chicagoDayWindow(new Date());
