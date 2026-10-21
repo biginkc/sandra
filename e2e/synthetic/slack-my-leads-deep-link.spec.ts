@@ -39,7 +39,7 @@ test.beforeAll(async () => {
       export const savePostCallExtras=async()=>({ok:true,note:'skipped',nextStep:'skipped'});
     `],
     ["strip-actions", `export const loadCallNext=async()=>({ok:true,data:null}); export const loadTriage=async()=>({ok:true,data:{rows:[],nextCursor:null}}); export const setStripOverride=async()=>({ok:true,data:null});`],
-    ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}}); export const changeDripAction=startDripForLeads;`],
+    ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const fetchDripChoices=listDripChoices; export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}}); export const changeDripAction=startDripForLeads;`],
     // The unified queue's server actions (flag-on path); this spec renders the flag-off page, so they must never run.
     ["unified-actions", `const off=async()=>({ok:false,code:'FEATURE_DISABLED',message:'synthetic'}); export const loadWorkPage=off; export const loadWorkFacts=off; export const pinLead=off; export const dismissBroken=off; export const loadUnifiedKpis=off;`],
     ["drip-progress", `export const listDripProgress=async()=>[];`],
@@ -89,6 +89,7 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /call-artifacts$/ }, () => virtual("call-artifacts"))
         build.onResolve({ filter: /existing-detail-actions$/ }, () => virtual("existing-detail-actions"))
         build.onResolve({ filter: /\(dashboard\)[\\/]sequences[\\/]actions$/ }, () => virtual("sequences-actions"))
+        build.onResolve({ filter: /sequences[\\/]drip-choices-client$/ }, () => virtual("sequences-actions"))
         build.onResolve({ filter: /sequences[\/]drip-progress$/ }, () => virtual("drip-progress"))
         build.onResolve({ filter: /supabase[\/]client$/ }, () => virtual("supabase-client"))
         build.onResolve({ filter: /login-background$/ }, () => virtual("login-background"))

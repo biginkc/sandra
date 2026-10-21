@@ -484,3 +484,9 @@ it("offers explicit replacement after saving the attempt", async () => {
   expect(onOpenChange).toHaveBeenCalledWith(false)
   vi.mocked(listDripProgress).mockResolvedValue([])
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

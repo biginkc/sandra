@@ -15,7 +15,9 @@ import {
 import { getSequenceImpact } from "@/lib/sequences/impact";
 import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
 import { NEEDS_PERSON_PAGE_SIZE } from "./overview-model";
-import { enrollmentReason, previewFirstSend, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
+import { loadDripChoices, type DripChoice } from "@/lib/sequences/drip-choices";
+import { timeServerAction } from "@/lib/perf/server-action-log";
+import { enrollmentReason, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 
 import { requireSequenceAdmin } from "./admin";
 
@@ -161,42 +163,10 @@ export async function listSequenceNeedsPersonPage(bucket: NeedsPersonBucket, pag
   }
 }
 
-export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
+export type { DripChoice };
 
 export async function listDripChoices(): Promise<Result<DripChoice[]>> {
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
-    const { data: sequences, error } = await supabase.from("sequences")
-      .select("id, name, created_by").eq("active", true).is("archived_at", null).order("name");
-    if (error) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: error.message } };
-    const visibleSequences = (sequences ?? []).filter((sequence) =>
-      !process.env.SEQUENCE_CANARY_USER_ID || sequence.created_by !== process.env.SEQUENCE_CANARY_USER_ID);
-    if (!visibleSequences.length) return ok([]);
-    const { data: steps, error: stepError } = await supabase.from("sequence_steps")
-      .select("sequence_id, step_index, delay_after_previous_minutes, action_type")
-      .in("sequence_id", visibleSequences.map((sequence) => sequence.id)).order("step_index");
-    if (stepError) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stepError.message } };
-    return ok(visibleSequences.flatMap((sequence) => {
-      const own = (steps ?? []).filter((step) => step.sequence_id === sequence.id);
-      if (!own.length || own[0].step_index !== 0) return [];
-      const firstSmsIndex = own.findIndex((step) => step.action_type === "send_sms");
-      return [{
-        id: sequence.id,
-        name: sequence.name,
-        textCount: own.filter((step) => step.action_type === "send_sms").length,
-        days: Math.ceil(own.reduce((sum, step) => sum + step.delay_after_previous_minutes, 0) / 1440),
-        firstSend: firstSmsIndex < 0 ? null : previewFirstSend(
-          own.slice(0, firstSmsIndex + 1).reduce((sum, step) => sum + step.delay_after_previous_minutes, 0),
-          "America/Chicago",
-        ),
-      }];
-    }));
-  } catch (e) {
-    reportError(e, { tags: { surface: "list_drip_choices" } });
-    return errFromUnknown(e, "SEQ_LIST_FAILED");
-  }
+  return timeServerAction("listDripChoices", async () => loadDripChoices(await createClient()));
 }
 
 export async function startDripForLeads(sequenceId: string, propertyIds: string[]): Promise<Result<{ results: DripResult[] }>> {

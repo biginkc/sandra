@@ -201,3 +201,9 @@ describe("MyLeadsClient attempt logging behind post_call_prompt", () => {
     await waitFor(() => expect(screen.queryByTestId("post-call-retry-extras")).not.toBeInTheDocument())
   })
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
 const listDripChoices = vi.hoisted(() => vi.fn());
-vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices }));
+vi.mock("@/lib/sequences/drip-choices-client", () => ({ fetchDripChoices: listDripChoices }));
 
 import { StartDripPicker } from "./start-drip-picker";
 
