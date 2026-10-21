@@ -34,7 +34,7 @@ alter table public.voicemail_drops
 alter table public.voicemail_drops
   add constraint voicemail_drops_proof_stored_facts
   check (
-    (proof_copy_status = 'stored') = (proof_storage_path is not null)
+    (coalesce(proof_copy_status, '') = 'stored') = (proof_storage_path is not null)
     and (proof_storage_path is null or (
       proof_content_type is not null and proof_size_bytes is not null and proof_fetched_at is not null
       and proof_storage_path ~ ('^' || org_id::text || '/' || id::text || '\.[a-z0-9]{2,4}$')

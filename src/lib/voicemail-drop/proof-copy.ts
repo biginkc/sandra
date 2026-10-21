@@ -1,3 +1,6 @@
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
@@ -103,20 +106,96 @@ function baseContentType(header: string | null): string {
   return (header ?? "").split(";")[0].trim().toLowerCase();
 }
 
-/** Download the recording: https only, timeout, size cap, audio content type. */
+/**
+ * The only hosts a proof download may touch, in one place. Drop Cowboy's
+ * OpenAPI spec serves GET /campaign/public/receipts/{token} (the
+ * proof_of_delivery_url) from its public API server api-v2.dropcowboy.com;
+ * the short-lived audio URL it redirects to is not named in the spec, so a
+ * redirect hop must stay on dropcowboy.com (exact host or a subdomain).
+ */
+export const PROOF_URL_HOSTS = ["api-v2.dropcowboy.com"] as const;
+export const PROOF_REDIRECT_DOMAIN = "dropcowboy.com";
+export const PROOF_MAX_REDIRECTS = 3;
+
+export type HostResolver = (host: string) => Promise<string[]>;
+
+const defaultResolver: HostResolver = async (host) =>
+  (await lookup(host, { all: true, verbatim: true })).map((a) => a.address);
+
+/** Private, loopback, link-local, metadata, CGNAT, multicast and reserved ranges. */
+const BLOCKED = new BlockList();
+for (const [net, bits] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const) BLOCKED.addSubnet(net, bits, "ipv4");
+for (const [net, bits] of [
+  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["fd00:ec2::", 32], ["64:ff9b::", 96], ["2001:db8::", 32],
+] as const) BLOCKED.addSubnet(net, bits, "ipv6");
+
+export function isBlockedAddress(address: string): boolean {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped) return isBlockedAddress(mapped[1]);
+  const family = isIP(address);
+  if (family === 4) return BLOCKED.check(address, "ipv4");
+  if (family === 6) return BLOCKED.check(address, "ipv6");
+  return true;
+}
+
+function hostAllowed(host: string, hop: number): boolean {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  if ((PROOF_URL_HOSTS as readonly string[]).includes(h)) return true;
+  return hop > 0 && (h === PROOF_REDIRECT_DOMAIN || h.endsWith(`.${PROOF_REDIRECT_DOMAIN}`));
+}
+
+/** https, allowlisted host, default port, and every resolved address public. */
+async function checkHop(raw: string, hop: number, resolve: HostResolver): Promise<URL> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ProofDownloadError("proof url is invalid");
+  }
+  if (url.protocol !== "https:") throw new ProofDownloadError("proof url is not https");
+  if (url.username || url.password || (url.port && url.port !== "443")) throw new ProofDownloadError("proof url is not plain https");
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host) || !hostAllowed(host, hop)) throw new ProofDownloadError(`proof host not allowed: ${host.slice(0, 80)}`);
+  let addresses: string[];
+  try {
+    addresses = await resolve(host);
+  } catch {
+    throw new ProofDownloadError("proof host did not resolve");
+  }
+  if (addresses.length === 0 || addresses.some(isBlockedAddress)) throw new ProofDownloadError("proof host resolves to a blocked address");
+  return url;
+}
+
+/**
+ * Download the recording: allowlisted https hosts only, redirects followed by
+ * hand (at most 3, each hop re-checked), timeout, size cap, audio type.
+ */
 export async function downloadProof(
   url: string,
   fetcher: Fetcher = fetch,
   timeoutMs: number = PROOF_FETCH_TIMEOUT_MS,
   maxBytes: number = PROOF_MAX_BYTES,
+  resolve: HostResolver = defaultResolver,
 ): Promise<{ bytes: Uint8Array; contentType: string; ext: string }> {
-  if (!url.startsWith("https://")) throw new ProofDownloadError("proof url is not https");
-  let response: Response;
-  try {
-    // The proof URL redirects to a short-lived audio URL; follow it now.
-    response = await fetcher(url, { redirect: "follow", signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
-  } catch (error) {
-    throw new ProofDownloadError(`proof fetch failed: ${error instanceof Error ? error.name : String(error)}`);
+  const signal = AbortSignal.timeout(timeoutMs);
+  let current = url;
+  let response: Response | null = null;
+  for (let hop = 0; ; hop++) {
+    const target = await checkHop(current, hop, resolve);
+    try {
+      response = await fetcher(target.toString(), { redirect: "manual", signal, cache: "no-store" });
+    } catch (error) {
+      throw new ProofDownloadError(`proof fetch failed: ${error instanceof Error ? error.name : String(error)}`);
+    }
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => {});
+    if (!location) throw new ProofDownloadError("proof redirect without location");
+    if (hop >= PROOF_MAX_REDIRECTS) throw new ProofDownloadError("proof too many redirects");
+    current = new URL(location, target).toString();
   }
   if (!response.ok) throw new ProofDownloadError(`proof fetch status ${response.status}`);
   const contentType = baseContentType(response.headers.get("content-type"));
@@ -166,7 +245,7 @@ export function proofStoragePath(orgId: string, dropRowId: string, ext: string):
 export async function copyDropProof(
   store: ProofCopyStore,
   dropRowId: string,
-  opts: { fetcher?: Fetcher; now?: Date; receivedAt?: Date } = {},
+  opts: { fetcher?: Fetcher; now?: Date; receivedAt?: Date; resolve?: HostResolver } = {},
 ): Promise<ProofCopyResult> {
   const now = opts.now ?? new Date();
   if (opts.receivedAt) await store.markReceived(dropRowId, opts.receivedAt.toISOString());
@@ -178,7 +257,7 @@ export async function copyDropProof(
   let downloaded: Awaited<ReturnType<typeof downloadProof>>;
   let path: string;
   try {
-    downloaded = await downloadProof(drop.proof_url, opts.fetcher);
+    downloaded = await downloadProof(drop.proof_url, opts.fetcher, undefined, undefined, opts.resolve);
     path = proofStoragePath(drop.org_id, drop.id, downloaded.ext);
     await store.upload(path, downloaded.bytes, downloaded.contentType);
   } catch (error) {
@@ -206,14 +285,14 @@ export async function copyDropProof(
 /** Retry due pending copies (cron). */
 export async function sweepPendingProofCopies(
   store: ProofCopyStore,
-  opts: { fetcher?: Fetcher; now?: Date; limit?: number } = {},
+  opts: { fetcher?: Fetcher; now?: Date; limit?: number; resolve?: HostResolver } = {},
 ): Promise<Record<ProofCopyResult, number>> {
   const now = opts.now ?? new Date();
   const counts: Record<ProofCopyResult, number> = {
     stored: 0, already_stored: 0, no_proof_url: 0, pending: 0, failed: 0, not_found: 0,
   };
   const ids = await store.listDue(now.toISOString(), opts.limit ?? 10);
-  for (const id of ids) counts[await copyDropProof(store, id, { fetcher: opts.fetcher, now })] += 1;
+  for (const id of ids) counts[await copyDropProof(store, id, { fetcher: opts.fetcher, now, resolve: opts.resolve })] += 1;
   return counts;
 }
 

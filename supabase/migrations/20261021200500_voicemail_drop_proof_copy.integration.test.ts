@@ -43,7 +43,7 @@ async function insertDrop(id: string, org: string) {
   await pg.query(
     `insert into public.voicemail_drops(id,org_id,enrollment_id,step_run_id,idempotency_key,property_id,to_phone,provider,audio_kind,
        status,attempt_outcome,drop_id,proof_url)
-     values ($1::uuid,$2,$3,$4,$1::text,$5,'+18165550101','dropcowboy','tts','delivered','queued',$1::text,'https://proof.example/r/tok')`,
+     values ($1::uuid,$2,$3,$4,$1::text,$5,'+18165550101','dropcowboy','tts','delivered','queued',$1::text,'https://api-v2.dropcowboy.com/campaign/public/receipts/tok')`,
     [id, org, enr, run, prop],
   );
 }
@@ -67,6 +67,7 @@ async function asMember<T>(user: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const pub = async () => ["104.18.1.1"];
 const audioFetcher = async () => new Response(new Uint8Array([73, 68, 51, 4, 0, 0, 1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
 
 beforeAll(async () => {
@@ -103,15 +104,19 @@ describe("20261021200500_voicemail_drop_proof_copy", () => {
     expect(await sqlError(set, [dropA, `${orgA}/${dropA}.mp3/../x`])).toBe("23514");
     expect(await sqlError("update public.voicemail_drops set proof_copy_status='stored' where id=$1", [dropA])).toBe("23514");
     expect(await sqlError("update public.voicemail_drops set proof_copy_status='bogus' where id=$1", [dropA])).toBe("23514");
+    // A path with a NULL or non-stored status is rejected too.
+    const pathOnly = "update public.voicemail_drops set proof_copy_status=$2, proof_storage_path=$3, proof_content_type='audio/mpeg', proof_size_bytes=1, proof_fetched_at=now() where id=$1";
+    expect(await sqlError(pathOnly, [dropA, null, proofPath])).toBe("23514");
+    expect(await sqlError(pathOnly, [dropA, "pending", proofPath])).toBe("23514");
     expect(await sqlError(set, [dropA, proofPath])).toBeNull();
   });
 
   it("stores the real object at <org>/<drop>.mp3 and records it once under replays", async () => {
     const store = supabaseProofCopyStore(client);
-    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, receivedAt: new Date() })).toBe("stored");
-    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher })).toBe("already_stored");
+    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, receivedAt: new Date(), resolve: pub })).toBe("stored");
+    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, resolve: pub })).toBe("already_stored");
     const { rows } = await pg.query("select proof_storage_path, proof_content_type, proof_size_bytes, proof_copy_status, proof_url, proof_url_at from public.voicemail_drops where id=$1", [dropA]);
-    expect(rows[0]).toMatchObject({ proof_storage_path: proofPath, proof_content_type: "audio/mpeg", proof_size_bytes: "9", proof_copy_status: "stored", proof_url: "https://proof.example/r/tok" });
+    expect(rows[0]).toMatchObject({ proof_storage_path: proofPath, proof_content_type: "audio/mpeg", proof_size_bytes: "9", proof_copy_status: "stored", proof_url: "https://api-v2.dropcowboy.com/campaign/public/receipts/tok" });
     expect(rows[0].proof_url_at).not.toBeNull();
     const objects = await pg.query("select name from storage.objects where bucket_id=$1 and name=$2", [PROOF_BUCKET, proofPath]);
     expect(objects.rowCount).toBe(1);
@@ -122,9 +127,9 @@ describe("20261021200500_voicemail_drop_proof_copy", () => {
   it("keeps a failed download pending and the sweep stores it later", async () => {
     const store = supabaseProofCopyStore(client);
     const down = async () => new Response("{}", { status: 404 });
-    expect(await copyDropProof(store, dropPending, { fetcher: down, receivedAt: new Date() })).toBe("pending");
+    expect(await copyDropProof(store, dropPending, { fetcher: down, receivedAt: new Date(), resolve: pub })).toBe("pending");
     await pg.query("update public.voicemail_drops set proof_copy_next_at = now() - interval '1 minute' where id=$1", [dropPending]);
-    const counts = await sweepPendingProofCopies(store, { fetcher: audioFetcher, limit: 50 });
+    const counts = await sweepPendingProofCopies(store, { fetcher: audioFetcher, limit: 50, resolve: pub });
     expect(counts.stored).toBeGreaterThanOrEqual(1);
     const { rows } = await pg.query("select proof_copy_status, proof_storage_path from public.voicemail_drops where id=$1", [dropPending]);
     expect(rows[0]).toEqual({ proof_copy_status: "stored", proof_storage_path: `${orgA}/${dropPending}.mp3` });
