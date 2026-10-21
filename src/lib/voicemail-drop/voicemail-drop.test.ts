@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigurationError } from "@/lib/errors/classes";
 
-import { DropCowboyVoicemailDropProvider, dropCowboyFromEnv } from "./providers/dropcowboy";
+import { buildDropCowboyRvmBody, DropCowboyVoicemailDropProvider, dropCowboyFromEnv } from "./providers/dropcowboy";
 import {
   getMockVoicemailDropLog,
   MockVoicemailDropProvider,
@@ -77,6 +77,34 @@ describe("dropcowboy sendDrop", () => {
       tts_body: "Hi Pat, this is Norma.",
       voice_id: "11111111-1111-4111-8111-111111111111",
     });
+  });
+
+  it("BYOC: sends caller_id and no phone_line_id when callerId is set", async () => {
+    const fetchImpl = respond(202, { message_id: "m", status: "queued" });
+    await provider(fetchImpl as unknown as typeof fetch).sendDrop({ ...ttsInput, callerId: "+18165550100" });
+    const body = JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.caller_id).toBe("+18165550100");
+    expect(body).not.toHaveProperty("phone_line_id");
+  });
+
+  it("BYOC: callerId alone (no phone line) is enough", async () => {
+    const fetchImpl = respond(202, { message_id: "m", status: "queued" });
+    await provider(fetchImpl as unknown as typeof fetch).sendDrop({ ...ttsInput, phoneLineId: null, callerId: "+18165550100" });
+    const body = JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body).toMatchObject({ caller_id: "+18165550100" });
+    expect(body).not.toHaveProperty("phone_line_id");
+  });
+
+  it("rejects a send with neither callerId nor phoneLineId, and a non-E.164 callerId", () => {
+    expect(() => buildDropCowboyRvmBody({ ...ttsInput, phoneLineId: null })).toThrow();
+    expect(() => buildDropCowboyRvmBody({ ...ttsInput, callerId: "8165550100" })).toThrow();
+  });
+
+  it("returns bad_request without calling fetch when no sender is given", async () => {
+    const fetchImpl = respond(202, { message_id: "m", status: "queued" });
+    const result = await provider(fetchImpl as unknown as typeof fetch).sendDrop({ ...ttsInput, phoneLineId: null });
+    expect(result.outcome).toBe("bad_request");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("sends media_id and no tts fields for a media drop", async () => {
