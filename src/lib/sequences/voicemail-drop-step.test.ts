@@ -87,12 +87,10 @@ type World = {
   failUpdate: string | null;
   /** voicemail_templates rows (rotation); filtered by org_id + category. */
   voicemailTemplates: { id: string; org_id: string; category: string; content: string }[];
-  /** sequence_step_runs CAS updates match no row (already reconciled). */
-  runChanged?: boolean;
-  /** The run row a by-id read returns (after an early reconcile). */
-  runRow?: Record<string, unknown> | null;
-  /** The drop already reached delivered/failed (callback before the 202). */
-  dropTerminal?: boolean;
+  /** record_voicemail_drop_accepted / _unknown results (default advanced / held). */
+  acceptedResult?: string | null;
+  unknownResult?: string | null;
+  recordError?: { message: string } | null;
 };
 
 function baseWorld(over: Partial<World> = {}): World {
@@ -138,10 +136,6 @@ function makeClient(world: World) {
     const has = (col: string) => op.filters.some(([, c]) => c === col);
     if (op.kind === "update") {
       if (world.failUpdate === op.table) return { data: null, error: { message: "write failed" } };
-      if (world.runChanged && op.table === "sequence_step_runs" && (op.payload as { skipped_reason?: string }).skipped_reason === "provider_failed") return { data: null, error: null };
-      if (op.table === "voicemail_drops" && op.filters.some(([, c]) => c === "status")) {
-        return { data: world.dropTerminal ? [] : [{ id: "drop-1" }], error: null };
-      }
       return { data: { id: "row" }, error: null };
     }
     if (op.kind === "insert") {
@@ -167,7 +161,6 @@ function makeClient(world: World) {
         registryCalls += 1;
         return { data: registryCalls >= world.registryFromCall ? world.registry : [], error: null };
       case "sequence_step_runs":
-        if (has("id") && world.runRow !== undefined) return { data: world.runRow, error: null };
         return { data: world.runHistory, error: null };
       case "norma_inbound_calls":
         return { data: world.normaInbound, error: null };
@@ -224,6 +217,11 @@ function makeClient(world: World) {
   });
   const rpc = vi.fn((name: string, args: unknown) => {
     ops.push({ table: name, kind: "rpc", payload: args, filters: [] });
+    if (name === "record_voicemail_drop_accepted" || name === "record_voicemail_drop_unknown") {
+      if (world.recordError) return Promise.resolve({ data: null, error: world.recordError });
+      const result = name === "record_voicemail_drop_accepted" ? world.acceptedResult : world.unknownResult;
+      return Promise.resolve({ data: result === undefined ? (name === "record_voicemail_drop_accepted" ? "advanced" : "held") : result, error: null });
+    }
     if (name === "reserve_voicemail_drop_with_cap") {
       if (world.reserveError) return Promise.resolve({ data: null, error: world.reserveError });
       const cap = (args as { p_cap: number }).p_cap;
@@ -249,13 +247,20 @@ async function run(world: World, step = TTS_STEP, env = ENV) {
 }
 
 describe("voicemail drop step — 202 accepted", () => {
-  it("delivered before the 202 stays delivered: status and payload untouched", async () => {
-    const { outcome, ops } = await run(baseWorld({ dropTerminal: true }));
+  it("records the 202 in one RPC; a status event that already settled it is still a success", async () => {
+    const { outcome, ops } = await run(baseWorld({ acceptedResult: "already_settled" }));
     expect(outcome.status).toBe("voicemail_queued");
-    const dropWrites = ops.filter((o) => o.table === "voicemail_drops" && o.kind === "update");
-    expect(dropWrites[0].filters).toContainEqual(["eq", "status", "queued"]);
-    for (const w of dropWrites) expect((w.payload as Record<string, unknown>).status).toBeUndefined();
-    expect(dropWrites[1].payload).toEqual({ attempt_outcome: "queued" });
+    expect(updatesTo(ops, "voicemail_drops")).toHaveLength(0);
+    expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
+  });
+
+  it("a failed 202 record reports failed and writes nothing else (the run stays unknown)", async () => {
+    for (const world of [baseWorld({ recordError: { message: "boom" } }), baseWorld({ acceptedResult: "run_changed" })]) {
+      const { outcome, ops } = await run(world);
+      expect(outcome.status).toBe("failed");
+      expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
+      expect(updatesTo(ops, "sequence_step_runs")).toHaveLength(0);
+    }
   });
 
   it("queues the drop, marks the run accepted with no message id, and advances", async () => {
@@ -290,10 +295,12 @@ describe("voicemail drop step — 202 accepted", () => {
     expect(auth.table).toBe("authorize_sequence_provider_attempt");
     expect(auth.payload).toMatchObject({ p_claim_id: CLAIM, p_phone: "+18165550101", p_message_id: null });
 
-    expect(updatesTo(ops, "voicemail_drops")[0]).toMatchObject({ attempt_outcome: "queued" });
-    expect(ops.find((o) => o.table === "voicemail_drops" && o.kind === "update")!.filters).toContainEqual(["eq", "status", "queued"]);
-    expect(updatesTo(ops, "sequence_step_runs")[0]).toMatchObject({ attempt_outcome: "accepted", message_id: null });
-    expect(updatesTo(ops, "sequence_enrollments")[0]).toMatchObject({ current_step_index: 1 });
+    const record = ops.find((o) => o.kind === "rpc" && o.table === "record_voicemail_drop_accepted")!;
+    expect(record.payload).toEqual({ p_run_id: CLAIM, p_drop_row_id: "drop-1", p_payload: { status: "queued" } });
+    // Run, drop and enrollment are written inside the RPC, never directly.
+    expect(updatesTo(ops, "voicemail_drops")).toHaveLength(0);
+    expect(updatesTo(ops, "sequence_step_runs")).toHaveLength(0);
+    expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
   });
 
   it("sends media drops without a script", async () => {
@@ -349,51 +356,27 @@ describe("voicemail drop step — RULING RVM-4 failures", () => {
     setMockVoicemailDropResult({ outcome: "unknown", httpStatus, cause, raw: null });
     const { outcome, ops } = await run(baseWorld());
     expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "reconciliation_required" });
-    const runUpdate = updatesTo(ops, "sequence_step_runs")[0];
-    expect(runUpdate).toMatchObject({ attempt_outcome: "unknown" });
-    expect(runUpdate.claim_active).toBeUndefined();
-    expect(updatesTo(ops, "sequence_enrollments")[0]).toMatchObject({ status: "paused", pause_reason: "reconciliation_required" });
-  });
-
-  it("unknown after a status event already reconciled the drop: no flip back, no re-pause", async () => {
-    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
-    const { outcome, ops } = await run(
-      baseWorld({ runChanged: true, runRow: { attempt_outcome: "accepted", claim_active: true } }),
-    );
-    expect(outcome).toMatchObject({ status: "voicemail_queued", enrollmentId: "enr-1" });
-    const runWrite = ops.find((o) => o.table === "sequence_step_runs" && o.kind === "update" && (o.payload as { skipped_reason?: string }).skipped_reason === "provider_failed")!;
-    expect(runWrite.filters).toContainEqual(["eq", "attempt_outcome", "unknown"]);
-    expect(updatesTo(ops, "sequence_enrollments").some((u) => u.status === "paused")).toBe(false);
-    expect(updatesTo(ops, "voicemail_drops").some((u) => u.reason)).toBe(false);
-  });
-
-  it("unknown after an early reconcile left the enrollment active: advances it like the 202 path", async () => {
-    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
-    const { outcome, ops } = await run(
-      baseWorld({ runChanged: true, runRow: { attempt_outcome: "accepted", claim_active: true } }),
-    );
-    expect(outcome).toEqual({ status: "voicemail_queued", enrollmentId: "enr-1", stepIndex: 0, dropId: "drop-1" });
-    const advance = ops.find((o) => o.table === "sequence_enrollments" && o.kind === "update")!;
-    expect(advance.payload).toMatchObject({ current_step_index: 1 });
-    expect(advance.filters).toContainEqual(["eq", "status", "active"]);
-    expect(advance.filters).toContainEqual(["eq", "current_step_index", 0]);
-    expect(updatesTo(ops, "sequence_enrollments").some((u) => u.status === "paused")).toBe(false);
-  });
-
-  it("unknown with a run that is no longer accepted: no advance, reported as failed", async () => {
-    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
-    const { outcome, ops } = await run(
-      baseWorld({ runChanged: true, runRow: { attempt_outcome: "definitively_rejected", claim_active: false } }),
-    );
-    expect(outcome.status).toBe("failed");
+    const record = ops.find((o) => o.kind === "rpc" && o.table === "record_voicemail_drop_unknown")!;
+    expect(record.payload).toMatchObject({ p_run_id: CLAIM, p_drop_row_id: "drop-1" });
+    expect(String((record.payload as { p_reason: string }).p_reason)).toContain(cause);
+    expect(updatesTo(ops, "sequence_step_runs")).toHaveLength(0);
     expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
   });
 
-  it("the unknown drop-row write is CAS'd on attempt_outcome = 'unknown'", async () => {
+  it("unknown after a status event already reconciled the drop: success, nothing re-paused", async () => {
     setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
-    const { ops } = await run(baseWorld());
-    const dropWrite = ops.find((o) => o.table === "voicemail_drops" && o.kind === "update" && (o.payload as { reason?: string }).reason)!;
-    expect(dropWrite.filters).toContainEqual(["eq", "attempt_outcome", "unknown"]);
+    const { outcome, ops } = await run(baseWorld({ unknownResult: "already_reconciled" }));
+    expect(outcome).toEqual({ status: "voicemail_queued", enrollmentId: "enr-1", stepIndex: 0, dropId: "drop-1" });
+    expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
+  });
+
+  it("unknown with a run that changed, or an RPC error: failed, no direct writes", async () => {
+    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
+    for (const world of [baseWorld({ unknownResult: "run_changed" }), baseWorld({ recordError: { message: "boom" } })]) {
+      const { outcome, ops } = await run(world);
+      expect(outcome.status).toBe("failed");
+      expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
+    }
   });
 
   it("a thrown provider error is treated as unknown, never re-fired", async () => {
@@ -404,7 +387,7 @@ describe("voicemail drop step — RULING RVM-4 failures", () => {
     const outcome = await processVoicemailDropStep(client, ENROLLMENT, TTS_STEP, { state: "MO" }, CLAIM, env);
     spy.mockRestore();
     expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "reconciliation_required" });
-    expect(updatesTo(ops, "sequence_step_runs")[0]).toMatchObject({ attempt_outcome: "unknown" });
+    expect(ops.some((o) => o.kind === "rpc" && o.table === "record_voicemail_drop_unknown")).toBe(true);
   });
 
   it.each([

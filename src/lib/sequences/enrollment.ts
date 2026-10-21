@@ -319,6 +319,23 @@ export async function enrollLead(
 }
 
 /**
+ * Pauses that clear on their own (the softphone call ending, the Norma call
+ * finishing) must never take over a voicemail drop reconciliation hold.
+ */
+const AUTO_RESUMED_PAUSE_REASONS: ReadonlySet<PauseReason> = new Set(["call_in_progress", "norma_call"]);
+
+/**
+ * Which rows a non-permanent stop pauses (STOP_TAKES_OVER_RECONCILIATION):
+ * active ones, plus an enrollment
+ * paused reconciliation_required (an unknown voicemail drop POST), so a reply
+ * or call-back during reconciliation sticks. One UPDATE: Postgres re-checks
+ * this WHERE after waiting on a row lock, so if the drop resolver commits
+ * first the stop still pauses the now-active row, and if the stop commits
+ * first the resolver advances in place and keeps the stop reason.
+ */
+const STOP_TAKES_OVER_RECONCILIATION = "status.eq.active,and(status.eq.paused,pause_reason.eq.reconciliation_required)";
+
+/**
  * Pause every active enrollment for a property with the given reason.
  * Called from:
  *   - the inbound webhook on a regular reply (reason='inbound_reply')
@@ -351,7 +368,9 @@ export async function pausePropertyEnrollments(
     .eq("property_id", params.propertyId);
   pauseQuery = params.permanent
     ? pauseQuery.in("status", ["active", "paused"])
-    : pauseQuery.eq("status", "active");
+    : AUTO_RESUMED_PAUSE_REASONS.has(params.reason)
+      ? pauseQuery.eq("status", "active")
+      : pauseQuery.or(STOP_TAKES_OVER_RECONCILIATION);
   const { data: pausedRows, error } = await pauseQuery.select("id, sequence_id");
   if (error) {
     throw new Error(`pausePropertyEnrollments: ${error.message}`);
@@ -505,7 +524,9 @@ export async function pauseContactEnrollments(
     .in("property_id", propertyIds);
   pauseQuery = params.permanent
     ? pauseQuery.in("status", ["active", "paused"])
-    : pauseQuery.eq("status", "active");
+    : AUTO_RESUMED_PAUSE_REASONS.has(params.reason)
+      ? pauseQuery.eq("status", "active")
+      : pauseQuery.or(STOP_TAKES_OVER_RECONCILIATION);
   const { data: pausedRows, error } = await pauseQuery.select("id, property_id, sequence_id");
   if (error) {
     throw new Error(`pauseContactEnrollments: ${error.message}`);

@@ -69,9 +69,9 @@ describe("failure classes", () => {
 describe("callback", () => {
   it("rejects an unknown or malformed foreign_id", async () => {
     const fake = createFakeDropStore([drop()]);
-    expect((await handleDropCallback(fake.store, callback({ foreign_id: OTHER_ROW_ID }), NOW)).status).toBe(404);
-    expect((await handleDropCallback(fake.store, callback({ foreign_id: "not-a-uuid" }), NOW)).status).toBe(404);
-    expect((await handleDropCallback(fake.store, callback({ foreign_id: undefined }), NOW)).status).toBe(404);
+    expect((await handleDropCallback(fake.store, callback({ foreign_id: OTHER_ROW_ID }))).status).toBe(404);
+    expect((await handleDropCallback(fake.store, callback({ foreign_id: "not-a-uuid" }))).status).toBe(404);
+    expect((await handleDropCallback(fake.store, callback({ foreign_id: undefined }))).status).toBe(404);
     expect(fake.drops[0].status).toBe("queued");
   });
 
@@ -80,7 +80,6 @@ describe("callback", () => {
     const res = await handleDropCallback(
       fake.store,
       callback({ product_cost: 0.03, tts_fee: 0.01, proof_of_delivery_url: "https://proof.invalid/1" }),
-      NOW,
     );
     expect(res.status).toBe(200);
     expect(fake.drops[0]).toMatchObject({ drop_id: "dc-1", status: "delivered", reason_code: "0", proof_url: "https://proof.invalid/1" });
@@ -90,27 +89,27 @@ describe("callback", () => {
 
   it("config-class failure pauses step_misconfigured", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 3021, reason: "too long" }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 3021, reason: "too long" }));
     expect(fake.drops[0]).toMatchObject({ status: "failed", reason_code: "3021", reason: "too long" });
     expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_STEP_MISCONFIGURED }]);
   });
 
   it("3007 bad credentials after the 202 pauses step_misconfigured", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 3007 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 3007 }));
     expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_STEP_MISCONFIGURED }]);
     expect(reportError).not.toHaveBeenCalled();
   });
 
   it("consent-class failure pauses with a visible reason", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016 }));
     expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
   });
 
   it("delivery-class failure only marks the drop failed", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4001 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4001 }));
     expect(fake.drops[0].status).toBe("failed");
     expect(fake.paused).toEqual([]);
     expect(reportError).not.toHaveBeenCalled();
@@ -118,7 +117,7 @@ describe("callback", () => {
 
   it("unclassified failure marks failed and reports, without pausing", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }));
     expect(fake.drops[0].status).toBe("failed");
     expect(fake.paused).toEqual([]);
     expect(reportError).toHaveBeenCalledTimes(1);
@@ -187,13 +186,14 @@ describe("signed status webhook", () => {
     expect(fake.drops[0]).toMatchObject({ status: "queued", drop_id: "dc-mine" });
   });
 
-  it("a 4016 whose pause fails is retried and the retry pauses the enrollment", async () => {
+  it("R1-1: a 4016 whose resolve fails commits nothing; the retry fails the drop and pauses consent", async () => {
     const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
-    fake.faults.pauseFailures = 1;
+    fake.faults.resolveFailures = 1;
     const event = statusEvent({ drop_id: "dc-1", status: "failure", reason_code: 4016 });
-    await expect(handleDropStatusEvent(fake.store, event, NOW)).rejects.toThrow("pauseEnrollment");
+    await expect(handleDropStatusEvent(fake.store, event, NOW)).rejects.toThrow("resolveOutcome");
     expect(fake.events.get("contact.rvm.status:evt-1")?.status).toBe("error");
     expect(fake.paused).toEqual([]);
+    expect(fake.drops[0].status).toBe("queued");
     expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("applied");
     expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
     expect(fake.drops[0].status).toBe("failed");
@@ -212,13 +212,35 @@ describe("signed status webhook", () => {
     expect(await handleDropStatusEvent(fake.store, statusEvent({ drop_id: "dc-1", to: "+18165550101" }), NOW)).toBe("unmatched");
   });
 
-  it("receipt stores proof_url without changing status", async () => {
-    const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
-    const receipt = parseDropCowboyStatusWebhook(
-      JSON.stringify({ event: "contact.rvm.receipt", event_id: "evt-r", data: { drop_id: "dc-1", status: "success", proof_of_delivery_url: "https://proof.invalid/r" } }),
+  const receipt = (data: Record<string, unknown>, eventId = "evt-r") =>
+    parseDropCowboyStatusWebhook(
+      JSON.stringify({ event: "contact.rvm.receipt", event_id: eventId, data: { status: "success", proof_of_delivery_url: "https://proof.invalid/r", ...data } }),
     );
-    expect(await handleDropStatusEvent(fake.store, receipt, NOW)).toBe("applied");
-    expect(fake.drops[0]).toMatchObject({ status: "queued", proof_url: "https://proof.invalid/r" });
+
+  it("23: a receipt matched by drop_id changes only proof_url (never status, outcome or enrollment)", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
+    const before = { ...fake.drops[0] };
+    expect(await handleDropStatusEvent(fake.store, receipt({ drop_id: "dc-1", to: "+18165550101", campaign_type: "rvm" }), NOW)).toBe("applied");
+    expect(fake.drops[0]).toEqual({ ...before, proof_url: "https://proof.invalid/r" });
+    expect(fake.resolved).toEqual([]);
+  });
+
+  it("23: a receipt with campaign_type voice is ignored even with a matching drop_id", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
+    expect(await handleDropStatusEvent(fake.store, receipt({ drop_id: "dc-1", campaign_type: "voice" }), NOW)).toBe("unmatched");
+    expect(fake.drops[0].proof_url).toBeUndefined();
+  });
+
+  it("R2-1: a broadcast receipt to the same phone with no stored drop_id is unmatched; the real 4016 still pauses", async () => {
+    const fake = createFakeDropStore([drop({ attempt_outcome: "unknown" })]);
+    expect(await handleDropStatusEvent(fake.store, receipt({ drop_id: "bc-9", to: "+18165550101" }, "evt-bcr"), NOW)).toBe("unmatched");
+    expect(await handleDropStatusEvent(fake.store, receipt({ to: "+18165550101", campaign_type: "rvm" }, "evt-bcr2"), NOW)).toBe("unmatched");
+    expect(fake.drops[0]).toMatchObject({ status: "queued", drop_id: null });
+    const real = statusEvent({ drop_id: "dc-1", to: "+18165550101", status: "failure", reason_code: 4016 }, { event_id: "evt-real" });
+    expect(await handleDropStatusEvent(fake.store, real, NOW)).toBe("applied");
+    expect(fake.drops[0]).toMatchObject({ status: "failed", drop_id: "dc-1" });
+    expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
+    expect(fake.enrollments["enr-1"]).toEqual({ status: "paused", pause_reason: PAUSE_VOICEMAIL_DROP_CONSENT, current_step_index: 1 });
   });
 
   it("delivery-class and unclassified failures via webhook do not pause", async () => {
@@ -233,7 +255,7 @@ describe("signed status webhook", () => {
 describe("late and replayed outcomes never flip a terminal drop", () => {
   it("a failure callback after delivered keeps delivered and does not pause", async () => {
     const fake = createFakeDropStore([drop({ status: "delivered", reason_code: "0" })]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016, proof_of_delivery_url: "https://proof.invalid/late" }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016, proof_of_delivery_url: "https://proof.invalid/late" }));
     expect(fake.drops[0]).toMatchObject({ status: "delivered", reason_code: "0", proof_url: "https://proof.invalid/late" });
     expect(fake.paused).toEqual([]);
   });
@@ -246,8 +268,8 @@ describe("late and replayed outcomes never flip a terminal drop", () => {
 
   it("a replayed same-state failure callback does not pause or report again", async () => {
     const fake = createFakeDropStore([drop()]);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }), NOW);
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }));
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 5555 }));
     expect(fake.drops[0].status).toBe("failed");
     expect(reportError).toHaveBeenCalledTimes(1);
   });
@@ -263,7 +285,7 @@ describe("reconciling a drop held at attempt_outcome unknown", () => {
 
   it("a callback proves it queued: run accepted (claim kept), enrollment advanced, outcome applied", async () => {
     const fake = held();
-    expect((await handleDropCallback(fake.store, callback({}), NOW)).status).toBe(200);
+    expect((await handleDropCallback(fake.store, callback({}))).status).toBe(200);
     expect(fake.drops[0]).toMatchObject({ attempt_outcome: "queued", status: "delivered", drop_id: "dc-1" });
     expect(fake.runs["run-1"]).toEqual({ attempt_outcome: "accepted", claim_active: true, recovery_action: "voicemail_drop_reconciled" });
     expect(fake.enrollments["enr-1"]).toEqual({ status: "active", pause_reason: null, current_step_index: 1 });
@@ -273,18 +295,30 @@ describe("reconciling a drop held at attempt_outcome unknown", () => {
     const fake = held();
     const event = statusEvent({ to: "+18165550101", drop_id: "dc-7" });
     expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("applied");
-    expect(await handleDropCallback(fake.store, callback({ drop_id: "dc-7" }), NOW)).toMatchObject({ status: 200 });
+    expect(await handleDropCallback(fake.store, callback({ drop_id: "dc-7" }))).toMatchObject({ status: 200 });
     expect(await handleDropStatusEvent(fake.store, statusEvent({ to: "+18165550101", drop_id: "dc-7" }, { event_id: "evt-9" }), NOW)).toBe("applied");
     expect(fake.enrollments["enr-1"].current_step_index).toBe(1);
     expect(fake.runs["run-1"].attempt_outcome).toBe("accepted");
     expect(fake.drops[0]).toMatchObject({ attempt_outcome: "queued", status: "delivered" });
   });
 
-  it("a held drop whose failure is consent-class is advanced, then paused like a 202 + failure", async () => {
+  it("a held drop whose failure is consent-class lands paused on the next step in one write", async () => {
     const fake = held();
-    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016 }), NOW);
+    await handleDropCallback(fake.store, callback({ status: "failure", reason_code: 4016 }));
     expect(fake.runs["run-1"].attempt_outcome).toBe("accepted");
     expect(fake.paused).toEqual([{ enrollmentId: "enr-1", reason: PAUSE_VOICEMAIL_DROP_CONSENT }]);
+    expect(fake.enrollments["enr-1"]).toEqual({ status: "paused", pause_reason: PAUSE_VOICEMAIL_DROP_CONSENT, current_step_index: 1 });
+  });
+
+  it("14: callback replays and a duplicate event id never advance twice; the duplicate is skipped", async () => {
+    const fake = held();
+    await handleDropCallback(fake.store, callback({}));
+    await handleDropCallback(fake.store, callback({}));
+    const event = statusEvent({ drop_id: "dc-1" }, { event_id: "evt-dup" });
+    expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("applied");
+    expect(await handleDropStatusEvent(fake.store, event, NOW)).toBe("duplicate");
+    expect(fake.enrollments["enr-1"]).toEqual({ status: "active", pause_reason: null, current_step_index: 1 });
+    expect(fake.resolved).toHaveLength(3);
   });
 
   it("a drop skipped before the POST (status skipped) is never reconciled", async () => {
@@ -293,7 +327,7 @@ describe("reconciling a drop held at attempt_outcome unknown", () => {
       { "run-1": { attempt_outcome: "unknown", claim_active: true } },
       { "enr-1": { status: "paused", pause_reason: "reconciliation_required", current_step_index: 0 } },
     );
-    await handleDropCallback(fake.store, callback({}), NOW);
+    await handleDropCallback(fake.store, callback({}));
     expect(fake.runs["run-1"].attempt_outcome).toBe("unknown");
     expect(fake.enrollments["enr-1"].status).toBe("paused");
   });
@@ -304,7 +338,7 @@ describe("reconciling a drop held at attempt_outcome unknown", () => {
       { "run-1": { attempt_outcome: "unknown", claim_active: true } },
       { "enr-1": { status: "opted_out", pause_reason: null, current_step_index: 0 } },
     );
-    await handleDropCallback(fake.store, callback({}), NOW);
+    await handleDropCallback(fake.store, callback({}));
     expect(fake.runs["run-1"].attempt_outcome).toBe("accepted");
     expect(fake.enrollments["enr-1"]).toEqual({ status: "opted_out", pause_reason: null, current_step_index: 0 });
   });

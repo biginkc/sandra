@@ -1,4 +1,4 @@
-import type { DropPatch, DropRow, DropStatusStore } from "./status-updates";
+import type { DropPatch, DropRow, DropStatusStore, ResolveOutcomeInput, ResolveOutcomeResult } from "./status-updates";
 
 export type FakeDrop = DropRow & { to_phone: string; queued_at: string } & Omit<DropPatch, "status" | "drop_id">;
 
@@ -8,8 +8,10 @@ export type FakeEnrollment = { status: string; pause_reason: string | null; curr
 
 /**
  * In-memory DropStatusStore for tests. `runs` / `enrollments` model the step
- * run and enrollment a held drop reconciles (keyed by step_run_id /
- * enrollment_id); each drop's step is index 0 of a two-step drip.
+ * run and enrollment (keyed by step_run_id / enrollment_id); each drop's step
+ * is index 0 of a two-step drip. resolveOutcome mirrors
+ * resolve_voicemail_drop_outcome + voicemail_drop_settle_enrollment
+ * (20261021130000 / 20261021140000); the real-DB matrix proves the SQL.
  */
 export function createFakeDropStore(
   drops: FakeDrop[] = [],
@@ -17,9 +19,47 @@ export function createFakeDropStore(
   enrollments: Record<string, FakeEnrollment> = {},
 ) {
   const events = new Map<string, { status: "processing" | "processed" | "error"; message?: string }>();
+  const resolved: ResolveOutcomeInput[] = [];
+  /** Every required pause the resolver applied. */
   const paused: Array<{ enrollmentId: string; reason: string }> = [];
-  /** Set to make the next N pauseEnrollment calls throw. */
-  const faults = { pauseFailures: 0 };
+  /** Set to make the next N resolveOutcome calls throw (nothing applied). */
+  const faults = { resolveFailures: 0 };
+  const STEP = 0;
+  const LAST_STEP = 1;
+
+  function settle(id: string, enrollment: FakeEnrollment | undefined, eligible: boolean, pauseReason: string | null): string {
+    if (!enrollment) return "none";
+    if (!eligible) {
+      if (pauseReason && enrollment.status === "active") {
+        Object.assign(enrollment, { status: "paused", pause_reason: pauseReason });
+        paused.push({ enrollmentId: id, reason: pauseReason });
+        return "paused";
+      }
+      return "none";
+    }
+    if (!["active", "paused"].includes(enrollment.status) || enrollment.current_step_index !== STEP) return "none";
+    const last = STEP >= LAST_STEP;
+    if (pauseReason) {
+      paused.push({ enrollmentId: id, reason: pauseReason });
+      Object.assign(enrollment, last
+        ? { status: "completed", pause_reason: pauseReason }
+        : { status: "paused", pause_reason: pauseReason, current_step_index: STEP + 1 });
+      return last ? "completed" : "advanced_paused";
+    }
+    if (enrollment.status === "active" || enrollment.pause_reason === "reconciliation_required") {
+      Object.assign(enrollment, last
+        ? { status: "completed", pause_reason: null }
+        : { status: "active", pause_reason: null, current_step_index: STEP + 1 });
+      return last ? "completed" : "advanced";
+    }
+    if (last) {
+      enrollment.status = "completed";
+      return "completed";
+    }
+    enrollment.current_step_index = STEP + 1;
+    return "advanced_paused";
+  }
+
   const store: DropStatusStore = {
     async findDropById(id) {
       return drops.find((d) => d.id === id) ?? null;
@@ -42,29 +82,60 @@ export function createFakeDropStore(
       Object.assign(drop, patch as Partial<FakeDrop>);
       return true;
     },
-    async reconcileHeldDrop(row) {
-      const drop = drops.find((d) => d.id === row.id);
-      if (!drop || drop.attempt_outcome !== "unknown" || drop.status !== "queued") return "not_held";
+    async resolveOutcome(input): Promise<ResolveOutcomeResult> {
+      if (faults.resolveFailures > 0) {
+        faults.resolveFailures -= 1;
+        throw new Error("resolveOutcome: write failed");
+      }
+      resolved.push(input);
+      const drop = drops.find((d) => d.id === input.dropRowId);
+      if (!drop) return { dropResult: "not_found", enrollmentAction: "none" };
+      // Unseeded rows default to the common case: a drop held at 'unknown'
+      // has an unknown run and a paused-on-step enrollment; a 202'd drop has an
+      // accepted run and an enrollment already active on the next step.
+      const held = drop.attempt_outcome === "unknown";
+      runs[drop.step_run_id] ??= { attempt_outcome: held ? "unknown" : "accepted", claim_active: true };
+      if (drop.enrollment_id) {
+        enrollments[drop.enrollment_id] ??= held
+          ? { status: "paused", pause_reason: "reconciliation_required", current_step_index: STEP }
+          : { status: "active", pause_reason: null, current_step_index: STEP + 1 };
+      }
       const run = runs[drop.step_run_id];
-      if (!run || !run.claim_active || !["unknown", "accepted"].includes(run.attempt_outcome)) return "not_held";
-      if (run.attempt_outcome === "unknown") {
+      const enrollment = drop.enrollment_id ? enrollments[drop.enrollment_id] : undefined;
+      let owner = false;
+      if ((drop.status === "queued" || drop.status === input.status) && drop.attempt_outcome === "unknown" &&
+        run && run.claim_active && run.attempt_outcome === "unknown") {
         run.attempt_outcome = "accepted";
         run.recovery_action = "voicemail_drop_reconciled";
+        drop.attempt_outcome = "queued";
+        owner = true;
       }
-      const enrollment = drop.enrollment_id ? enrollments[drop.enrollment_id] : undefined;
-      if (enrollment && enrollment.status === "paused" && enrollment.pause_reason === "reconciliation_required" && enrollment.current_step_index === 0) {
-        Object.assign(enrollment, { status: "active", pause_reason: null, current_step_index: 1 });
+      let dropResult: ResolveOutcomeResult["dropResult"];
+      const facts = {
+        drop_id: drop.drop_id ?? input.dropId ?? null,
+        ...(input.cost !== null ? { cost: input.cost } : {}),
+        ...(input.proofUrl ? { proof_url: input.proofUrl } : {}),
+      };
+      if (drop.status === "queued") {
+        Object.assign(drop, facts, {
+          status: input.status,
+          reason_code: input.reasonCode,
+          reason: input.reason,
+          ...(input.payload !== null ? { provider_payload: input.payload } : {}),
+        });
+        dropResult = "applied";
+      } else {
+        Object.assign(drop, facts);
+        dropResult = drop.status === input.status ? "replay" : "conflict";
       }
-      drop.attempt_outcome = "queued";
-      row.attempt_outcome = "queued";
-      return "reconciled";
-    },
-    async pauseEnrollment(enrollmentId, reason) {
-      if (faults.pauseFailures > 0) {
-        faults.pauseFailures -= 1;
-        throw new Error("pauseEnrollment: write failed");
+      let enrollmentAction = "none";
+      if (enrollment && run && run.claim_active) {
+        const eligible = owner || (enrollment.status === "paused" && enrollment.pause_reason === "reconciliation_required" &&
+          enrollment.current_step_index === STEP && run.attempt_outcome === "accepted");
+        if (eligible) enrollmentAction = settle(drop.enrollment_id!, enrollment, true, input.pauseReason);
+        else if (dropResult !== "conflict") enrollmentAction = settle(drop.enrollment_id!, enrollment, false, input.pauseReason);
       }
-      paused.push({ enrollmentId, reason });
+      return { dropResult, enrollmentAction };
     },
     async reserveEvent(eventType, eventId) {
       const key = `${eventType}:${eventId}`;
@@ -77,5 +148,5 @@ export function createFakeDropStore(
       events.set(`${eventType}:${eventId}`, { status: outcome, message });
     },
   };
-  return { store, drops, events, paused, runs, enrollments, faults };
+  return { store, drops, events, resolved, paused, runs, enrollments, faults };
 }
