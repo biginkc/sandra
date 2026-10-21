@@ -3421,7 +3421,7 @@ export async function checkHotTextAfterKeywordHold(
 /**
  * Classify-only for the nine-question engine (a text on a lead that already needs a person): one
  * nine-question read; hot when the answer is open_to_selling / talked_price, or a price keyword
- * hits and the answer is not asked_stop / hostile / wrong_person. Records the hot text; sends nothing.
+ * hits and the answer is not asked_stop / hostile / wrong_person / already_sold / tenant. Records the hot text; sends nothing.
  */
 async function classifyOnlyClaimedNine(
   supabase: SupabaseClient<Database>,
@@ -3446,7 +3446,8 @@ async function classifyOnlyClaimedNine(
   if (isHostileInbound(input.inboundBody)) return "skipped";
   const keyword = hasHotPriceKeyword(input.inboundBody, escalationKeywords);
   const answer = cls.kind === "ok" ? cls.result.answer : null;
-  const blocked = answer === "asked_stop" || answer === "hostile" || answer === "wrong_person";
+  const blocked =
+    answer === "asked_stop" || answer === "hostile" || answer === "wrong_person" || answer === "already_sold" || answer === "tenant";
   const answerHot = answer === "open_to_selling" || answer === "talked_price";
   if (blocked || !(answerHot || keyword)) return "skipped";
   const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, answerHot ? "hot_lead" : "price_or_offer");
@@ -7897,7 +7898,7 @@ function hasHotPriceKeyword(inboundBody: string, escalationKeywords?: ReadonlyAr
  * always beat hot; talked_price / open_to_selling already are hot; every other answer yields to
  * a hot price keyword. Same phrase test PR 2 uses for the eight-answer path.
  */
-const NINE_YIELDS_TO_HOT: ReadonlySet<string> = new Set(["maybe_later", "not_interested", "asked_who", "confirmed_owner", "needs_person"]);
+const NINE_YIELDS_TO_HOT: ReadonlySet<string> = new Set(["maybe_later", "not_interested", "asked_who", "confirmed_owner", "just_ok", "needs_person"]);
 function nineYieldsToHotKeyword(answer: string, inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
   return NINE_YIELDS_TO_HOT.has(answer) && hasHotPriceKeyword(inboundBody, escalationKeywords);
 }
@@ -8472,6 +8473,10 @@ export async function runNineQuestionsStep(
     if (repeatNo) return repeatNo;
   }
 
+  if (action.kind === "continue_drip_if_last_was_drip") {
+    return routeNineJustOk(supabase, a);
+  }
+
   if (action.kind === "wait_for_person") {
     // Spelled out so the hold-reason registry test sees each literal. Hostile never gets
     // here (held for confirmation above); anything else unreadable waits as needs_person.
@@ -8731,6 +8736,107 @@ export async function runNineQuestionsStep(
   return dripResult.status === "refused"
     ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
     : { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
+}
+
+/** The drip paused by this inbound could not be resumed after a just_ok answer: a person looks. */
+export const NINE_JUST_OK_DRIP_RESUME_FAILED = "nine_just_ok_drip_resume_failed";
+
+/**
+ * just_ok (Jarrad 2026-10-21): the homeowner only acknowledged our text ("Ok", a thumbs up).
+ * Replay on 708 real replies 2026-10-21: just_ok was 100% precise.
+ *
+ * Acts ONLY when our last text to them (the same message Jev was shown as
+ * our_last_text_to_homeowner) was a drip step (`metadata.sequence_enrollment_id`, written by
+ * the sequence tick) or our approved check-back reply (the approved `not_interested` template,
+ * `metadata.reply_key`, with the approved body). Then: no reply, no hold, and the drip the
+ * inbound paused (`pause_reason = 'inbound_reply'`) is resumed so it simply continues.
+ * Anything else (an offer question, a person's text, nothing readable) is needs_person.
+ */
+async function routeNineJustOk(supabase: SupabaseClient<Database>, a: NineStepArgs): Promise<AiDispatchOutcome> {
+  const { input, claim, runCtx } = a;
+  const lastWasDrip = await nineLastOutboundWasDripOrCheckBack(supabase, input);
+  if (lastWasDrip === "no") {
+    await trace(supabase, {
+      kind: "action",
+      name: "nine_just_ok",
+      result: "skipped",
+      detail: { engine: "nine_questions", why: "last_text_not_drip" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  const { data: paused, error } = await supabase
+    .from("sequence_enrollments")
+    .select("id")
+    .eq("property_id", input.propertyId)
+    .eq("status", "paused")
+    .eq("pause_reason", "inbound_reply");
+  if (error) return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+  const resumed: string[] = [];
+  const notResumed: Array<{ id: string; outcome: string }> = [];
+  for (const row of paused ?? []) {
+    // The expected reason is re-checked under the enrolment lock (a person taking over or a
+    // Norma call in between is simply not resumed).
+    const { data, error: rpcError } = await supabase.rpc("resume_sequence_enrollment", {
+      p_enrollment_id: row.id,
+      p_actor_user_id: null,
+      p_expected_pause_reason: "inbound_reply",
+    });
+    const outcome = rpcError ? "error" : (data?.[0]?.outcome ?? "error");
+    if (outcome === "resumed") resumed.push(row.id);
+    else notResumed.push({ id: row.id, outcome });
+  }
+  if (resumed.length > 0) {
+    await recordLeadEvent({
+      propertyId: input.propertyId,
+      actorType: "system",
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
+      payload: { count: resumed.length, enrollment_ids: resumed, reason: "nine_questions:just_ok" },
+    });
+  }
+  // A resume that errored (or needs reconciliation) would leave the lead silent: a person looks.
+  // not_paused / norma_hold mean someone else already owns the drip state: nothing to do.
+  const failed = notResumed.filter((r) => r.outcome !== "not_paused" && r.outcome !== "norma_hold");
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_just_ok",
+    result: failed.length > 0 ? "error" : "applied",
+    detail: { engine: "nine_questions", resumed, notResumed },
+  }, runCtx);
+  if (failed.length > 0) return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+  return { outcome: "auto_closed", reason: "nine_questions:just_ok" };
+}
+
+/** Fails closed ("no") on any read problem or a missing source inbound. */
+async function nineLastOutboundWasDripOrCheckBack(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<"yes" | "no"> {
+  if (!input.inboundMessageId) return "no";
+  const { data: inbound, error: inboundError } = await supabase
+    .from("messages")
+    .select("created_at")
+    .eq("id", input.inboundMessageId)
+    .eq("property_id", input.propertyId)
+    .maybeSingle();
+  if (inboundError || !inbound) return "no";
+  // Same thread scope and cut-off as buildTwoWayThreadState (what Jev was shown).
+  let query = supabase
+    .from("messages")
+    .select("body, metadata")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "outbound")
+    .neq("id", input.inboundMessageId)
+    .lte("created_at", inbound.created_at)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  query = input.conversationId ? query.eq("conversation_id", input.conversationId) : query.eq("contact_id", input.contactId);
+  const { data: last, error } = await query.maybeSingle();
+  if (error || !last) return "no";
+  const meta = readJsonObject((last.metadata ?? null) as Json | null);
+  if (typeof meta.sequence_enrollment_id === "string" && meta.sequence_enrollment_id.length > 0) return "yes";
+  if (meta.reply_key === "not_interested" && last.body === APPROVED_REPLY_TEXTS.not_interested) return "yes";
+  return "no";
 }
 
 /** `ai_responder_configs.nurture_auto_drip`; any read problem counts as OFF (no enrolment). */

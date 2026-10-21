@@ -1716,4 +1716,95 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect((runs ?? []).some((r) => r.schema_version === "nine_questions_v1")).toBe(true);
     expect(await enrollmentsFor(lead.propertyId)).toEqual([]);
   });
+
+  describe("already sold / tenant / just ok (approved verbatim by Jarrad 2026-10-21)", () => {
+    for (const [answer, reply] of [
+      ["already_sold", "I've already sold it"],
+      ["tenant", "We just rent here"],
+    ] as const) {
+      it(`${answer}: the approved wrong-person reply once, this property closed as wrong person, no DNC`, async () => {
+        await seedOrg();
+        const { lead, input } = await run({ [answer]: 0.95 }, reply);
+        expect(await outboundBodies(lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.wrong_number]);
+        const row = await propertyRow(lead.propertyId);
+        expect(row.outreach_dispo).toBe("wrong_number");
+        expect(row.is_dnc_locked).toBe(false);
+        // A repeat dispatch of the same inbound sends nothing more.
+        await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+        expect(await outboundBodies(lead.propertyId)).toEqual([APPROVED_REPLY_TEXTS.wrong_number]);
+      });
+    }
+
+    it("already_sold with the wrong-number switch off: held, nothing sent, NOT closed (same switch)", async () => {
+      await seedOrg();
+      await pg.query("update public.jev_outcome_thresholds set automation_enabled = false where org_id = $1 and outcome = 'wrong_number'", [orgId]);
+      const { lead, outcome } = await run({ already_sold: 0.95 }, "We sold it in July");
+      expect(outcome).toMatchObject({ outcome: "escalated", reason: "nine_automation_disabled:wrong_number" });
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      expect((await propertyRow(lead.propertyId)).outreach_dispo).not.toBe("wrong_number");
+    });
+
+    /** A lead in the Not interested drip whose last text from us is `last`, then the seller replies. */
+    async function justOkAfter(last: { body: string; metadata?: Record<string, unknown> }, reply = "Ok") {
+      await seedOrg();
+      const lead = await seedLead();
+      const drip = await enrollNineDrip(supabase, { orgId, propertyId: lead.propertyId, dripName: "Not interested", skipFirstStep: false });
+      expect(drip.status).toBe("enrolled");
+      const enrollmentId = drip.status === "enrolled" ? drip.enrollmentId : "";
+      await supabase.from("messages").insert({
+        org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId,
+        from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: last.body, metadata: (last.metadata ?? null) as never,
+        created_at: new Date(Date.now() - 600_000).toISOString(),
+      });
+      const { data: inbound } = await supabase
+        .from("messages")
+        .insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: reply })
+        .select("id, conversation_id")
+        .single();
+      // The inbound webhook pauses the drip (pause_reason inbound_reply) before dispatch runs.
+      await pg.query("update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where id = $1 and status = 'active'", [enrollmentId]);
+      jevProbabilities = { just_ok: 0.95 };
+      const outcome = await dispatchAiResponse(
+        supabase,
+        { propertyId: lead.propertyId, contactId: lead.contactId, conversationId: inbound!.conversation_id as string, inboundMessageId: inbound!.id, inboundBody: reply, inboundFromPhone: lead.phone, inboundToPhone: MOCK_SENDER_PRIMARY },
+        { anthropic: NO_ANTHROPIC },
+      );
+      const sent = (await outboundBodies(lead.propertyId)).filter((b) => b !== last.body);
+      return { lead, outcome, sent, enrollments: await enrollmentsFor(lead.propertyId), row: await propertyRow(lead.propertyId) };
+    }
+
+    it("just_ok after a drip step: nothing sent, no hold, the drip continues", async () => {
+      const r = await justOkAfter({ body: "Not interested one", metadata: { generated_by: "sequence_tick", sequence_enrollment_id: crypto.randomUUID() } }, "\u{1F44D}");
+      expect(r.outcome).toEqual({ outcome: "auto_closed", reason: "nine_questions:just_ok" });
+      expect(r.sent).toEqual([]);
+      expect(getMockMessageLog()).toHaveLength(0);
+      expect(r.row.needs_human_attention).toBe(false);
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
+    });
+
+    it("just_ok after our approved check-back reply: nothing sent, no hold, the drip continues", async () => {
+      const r = await justOkAfter({
+        body: APPROVED_REPLY_TEXTS.not_interested,
+        metadata: { generated_by: "ai_responder_v1", reply_source: "approved_template", reply_key: "not_interested" },
+      });
+      expect(r.outcome).toEqual({ outcome: "auto_closed", reason: "nine_questions:just_ok" });
+      expect(r.sent).toEqual([]);
+      expect(r.row.needs_human_attention).toBe(false);
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "active", step: 0 }]);
+    });
+
+    it("just_ok after a person's text: held as needs_person, nothing sent, the drip stays paused", async () => {
+      const r = await justOkAfter({ body: "Would you take 250k for it?" });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      expect(r.sent).toEqual([]);
+      expect(r.row.needs_human_attention).toBe(true);
+      expect(r.row.last_ai_escalation_reason).toBe("nine_needs_person");
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "paused", step: 0 }]);
+    });
+
+    it("just_ok after the check-back WORDS without the template's metadata: needs_person (no string matching)", async () => {
+      const r = await justOkAfter({ body: APPROVED_REPLY_TEXTS.not_interested });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+    });
+  });
 });
