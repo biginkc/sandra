@@ -1,9 +1,15 @@
+import "server-only";
+
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
+
+import { PROOF_BUCKET, proofUrlExpiresAt } from "./proof-shared";
+
+export { PROOF_BUCKET, PROOF_SIGNED_URL_TTL_SECONDS, PROOF_URL_TTL_MS, proofUrlExpiresAt } from "./proof-shared";
 
 /**
  * Durable proof of delivery (voicemail drop PR 7). Drop Cowboy keeps the
@@ -18,15 +24,10 @@ import type { Database } from "@/lib/supabase/types";
  * link expires.
  */
 
-export const PROOF_BUCKET = "voicemail-drop-proofs";
-/** Provider link lifetime. */
-export const PROOF_URL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const PROOF_FETCH_TIMEOUT_MS = 15_000;
 /** Matches the bucket's file_size_limit (25 MB). */
 export const PROOF_MAX_BYTES = 25 * 1024 * 1024;
 export const PROOF_MAX_ATTEMPTS = 12;
-/** Signed URL lifetime for the timeline link. */
-export const PROOF_SIGNED_URL_TTL_SECONDS = 60;
 
 /** Content type → file extension. Must stay inside the bucket's allowed_mime_types. */
 export const PROOF_CONTENT_TYPES: Record<string, string> = {
@@ -61,8 +62,6 @@ export type StoredProofFacts = {
 
 export interface ProofCopyStore {
   getDrop(id: string): Promise<ProofDrop | null>;
-  /** Stamp when a receipt saved proof_url (starts its 7 days; queues the sweep). */
-  markReceived(id: string, atIso: string): Promise<void>;
   /** Stored copy facts; only writes when the drop has no stored copy yet. */
   markStored(id: string, facts: StoredProofFacts): Promise<void>;
   markPending(id: string, attempts: number, nextAt: string, error: string): Promise<void>;
@@ -89,13 +88,6 @@ export class ProofDownloadError extends Error {
 
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
-/** When the provider link stops working: proof_url_at (or completed_at) + 7 days. */
-export function proofUrlExpiresAt(drop: Pick<ProofDrop, "proof_url_at" | "completed_at">): number | null {
-  const at = drop.proof_url_at ?? drop.completed_at;
-  if (!at) return null;
-  const ms = new Date(at).getTime();
-  return Number.isFinite(ms) ? ms + PROOF_URL_TTL_MS : null;
-}
 
 /** Backoff after the n-th failure: 5m, 10m, 20m … capped at 6h. */
 export function proofRetryDelayMs(attempts: number): number {
@@ -110,8 +102,8 @@ function baseContentType(header: string | null): string {
  * The only hosts a proof download may touch, in one place. Drop Cowboy's
  * OpenAPI spec serves GET /campaign/public/receipts/{token} (the
  * proof_of_delivery_url) from its public API server api-v2.dropcowboy.com;
- * the short-lived audio URL it redirects to is not named in the spec, so a
- * redirect hop must stay on dropcowboy.com (exact host or a subdomain).
+ * the short-lived audio URL it redirects to is not named in the spec. Every
+ * hop, the first included, must stay on dropcowboy.com (exact or subdomain).
  */
 export const PROOF_URL_HOSTS = ["api-v2.dropcowboy.com"] as const;
 export const PROOF_REDIRECT_DOMAIN = "dropcowboy.com";
@@ -141,14 +133,14 @@ export function isBlockedAddress(address: string): boolean {
   return true;
 }
 
-function hostAllowed(host: string, hop: number): boolean {
+function hostAllowed(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");
   if ((PROOF_URL_HOSTS as readonly string[]).includes(h)) return true;
-  return hop > 0 && (h === PROOF_REDIRECT_DOMAIN || h.endsWith(`.${PROOF_REDIRECT_DOMAIN}`));
+  return h === PROOF_REDIRECT_DOMAIN || h.endsWith(`.${PROOF_REDIRECT_DOMAIN}`);
 }
 
 /** https, allowlisted host, default port, and every resolved address public. */
-async function checkHop(raw: string, hop: number, resolve: HostResolver): Promise<URL> {
+async function checkHop(raw: string, resolve: HostResolver): Promise<URL> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -158,7 +150,7 @@ async function checkHop(raw: string, hop: number, resolve: HostResolver): Promis
   if (url.protocol !== "https:") throw new ProofDownloadError("proof url is not https");
   if (url.username || url.password || (url.port && url.port !== "443")) throw new ProofDownloadError("proof url is not plain https");
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host) || !hostAllowed(host, hop)) throw new ProofDownloadError(`proof host not allowed: ${host.slice(0, 80)}`);
+  if (isIP(host) || !hostAllowed(host)) throw new ProofDownloadError(`proof host not allowed: ${host.slice(0, 80)}`);
   let addresses: string[];
   try {
     addresses = await resolve(host);
@@ -184,7 +176,7 @@ export async function downloadProof(
   let current = url;
   let response: Response | null = null;
   for (let hop = 0; ; hop++) {
-    const target = await checkHop(current, hop, resolve);
+    const target = await checkHop(current, resolve);
     try {
       response = await fetcher(target.toString(), { redirect: "manual", signal, cache: "no-store" });
     } catch (error) {
@@ -245,10 +237,9 @@ export function proofStoragePath(orgId: string, dropRowId: string, ext: string):
 export async function copyDropProof(
   store: ProofCopyStore,
   dropRowId: string,
-  opts: { fetcher?: Fetcher; now?: Date; receivedAt?: Date; resolve?: HostResolver } = {},
+  opts: { fetcher?: Fetcher; now?: Date; resolve?: HostResolver } = {},
 ): Promise<ProofCopyResult> {
   const now = opts.now ?? new Date();
-  if (opts.receivedAt) await store.markReceived(dropRowId, opts.receivedAt.toISOString());
   const drop = await store.getDrop(dropRowId);
   if (!drop) return "not_found";
   if (drop.proof_storage_path) return "already_stored";
@@ -306,10 +297,6 @@ export function supabaseProofCopyStore(client: SupabaseClient<Database>): ProofC
       const { data, error } = await client.from("voicemail_drops").select(PROOF_DROP_COLUMNS).eq("id", id).maybeSingle();
       if (error) throw new Error(`proof getDrop: ${error.message}`);
       return (data as ProofDrop | null) ?? null;
-    },
-    async markReceived(id, atIso) {
-      const { error } = await client.from("voicemail_drops").update({ proof_url_at: atIso }).eq("id", id);
-      if (error) throw new Error(`proof markReceived: ${error.message}`);
     },
     async markStored(id, facts) {
       const { error } = await client

@@ -25,7 +25,6 @@ function fakeStore(initial: Partial<ProofDrop> = {}) {
   const faults = { upload: 0 };
   const store: ProofCopyStore = {
     async getDrop(id) { return id === drop.id ? { ...drop } : null; },
-    async markReceived(_id, at) { drop.proof_url_at = at; },
     async markStored(_id, facts) { if (!drop.proof_storage_path) Object.assign(drop, facts, { proof_copy_status: "stored" }); },
     async markPending(_id, attempts, nextAt, error) {
       Object.assign(drop, { proof_copy_status: "pending", proof_copy_attempts: attempts, proof_copy_next_at: nextAt, proof_copy_error: error });
@@ -49,12 +48,12 @@ describe("copyDropProof", () => {
   it("downloads, stores under <org>/<drop>.<ext> and records the facts", async () => {
     const { store, drop, uploads } = fakeStore();
     const fetcher = audio(1234, "audio/mpeg; charset=binary");
-    expect(await copyDropProof(store, DROP, { fetcher, now: NOW, resolve: pub, receivedAt: NOW })).toBe("stored");
+    expect(await copyDropProof(store, DROP, { fetcher, now: NOW, resolve: pub })).toBe("stored");
     expect(fetcher).toHaveBeenCalledWith("https://api-v2.dropcowboy.com/campaign/public/receipts/tok", expect.objectContaining({ redirect: "manual" }));
     expect(uploads).toEqual([{ path: `${ORG}/${DROP}.mp3`, size: 1234, contentType: "audio/mpeg" }]);
     expect(drop).toMatchObject({
       proof_storage_path: `${ORG}/${DROP}.mp3`, proof_content_type: "audio/mpeg", proof_size_bytes: 1234,
-      proof_fetched_at: NOW.toISOString(), proof_copy_status: "stored", proof_url_at: NOW.toISOString(),
+      proof_fetched_at: NOW.toISOString(), proof_copy_status: "stored",
     });
   });
 
@@ -139,7 +138,7 @@ describe("downloadProof", () => {
 
   it("rejects hosts off the allowlist, on the first URL or any hop", async () => {
     const fetcher = audio();
-    for (const bad of ["https://evil.com/x", "https://dropcowboy.com.evil.com/x", "https://media.dropcowboy.com/x",
+    for (const bad of ["https://evil.com/x", "https://dropcowboy.com.evil.com/x", "https://dropcowboy.co/x",
       "https://104.18.1.1/x", "https://user:pw@api-v2.dropcowboy.com/x", "https://api-v2.dropcowboy.com:8443/x"]) {
       await expect(downloadProof(bad, fetcher, 1000, 1000, pub)).rejects.toThrow(/not allowed|not plain/);
     }
@@ -156,6 +155,10 @@ describe("downloadProof", () => {
     }
     await expect(downloadProof(U, audio(), 1000, 1000, async () => [])).rejects.toThrow(/blocked address/);
     await expect(downloadProof(U, audio(), 1000, 1000, async () => { throw new Error("ENOTFOUND"); })).rejects.toThrow(/did not resolve/);
+  });
+
+  it("accepts any dropcowboy.com subdomain on the first URL", async () => {
+    expect((await downloadProof("https://media.dropcowboy.com/r/t", audio(3), 1000, 1000, pub)).bytes.byteLength).toBe(3);
   });
 
   it("maps wav to .wav", async () => {

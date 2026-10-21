@@ -128,7 +128,8 @@ describe("dropcowboy rvm webhook route", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true, outcome: "applied" });
       expect(fake.drops[0].proof_url).toBe("https://proof.example/r/abc");
-      expect(copy).toHaveBeenCalledWith({ proofStore: true }, "11111111-1111-4111-8111-111111111111", { receivedAt: expect.any(Date) });
+      expect(copy).toHaveBeenCalledWith({ proofStore: true }, "11111111-1111-4111-8111-111111111111");
+      expect(fake.drops[0]).toMatchObject({ proof_copy_status: "pending", proof_url_at: expect.any(String) });
     });
 
     it("never accepts a receipt signed with the status secret", async () => {
@@ -140,6 +141,17 @@ describe("dropcowboy rvm webhook route", () => {
       vi.stubEnv("DROPCOWBOY_RECEIPT_WEBHOOK_SECRET", "");
       expect((await POST(signed(receipt(), { secret: RECEIPT_SECRET }))).status).toBe(401);
       expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("DROPCOWBOY_RECEIPT_WEBHOOK_SECRET") }), expect.anything());
+    });
+
+    it("500s without marking the event processed when the receipt write fails, then the retry applies", async () => {
+      fake.faults.receiptFailures = 1;
+      const res = await POST(signed(receipt(), { secret: RECEIPT_SECRET }));
+      expect(res.status).toBe(500);
+      expect(copy).not.toHaveBeenCalled();
+      expect(fake.events.get("contact.rvm.receipt:evt-r1")?.status).toBe("error");
+      const retry = await POST(signed(receipt(), { secret: RECEIPT_SECRET }));
+      expect(await retry.json()).toEqual({ ok: true, outcome: "applied" });
+      expect(fake.drops[0]).toMatchObject({ proof_url: "https://proof.example/r/abc", proof_copy_status: "pending" });
     });
 
     it("keeps the event when the copy throws", async () => {

@@ -61,8 +61,7 @@ export async function POST(request: Request) {
   try {
     const admin = createAdminClient();
     const outcome = await handleDropStatusEvent(supabaseDropStatusStore(admin), event, new Date(), {
-      onProofUrl: (dropRowId, receivedAt) =>
-        copyDropProof(supabaseProofCopyStore(admin), dropRowId, { receivedAt }),
+      onProofUrl: (dropRowId) => copyDropProof(supabaseProofCopyStore(admin), dropRowId),
     });
     return NextResponse.json({ ok: true, outcome });
   } catch (error) {

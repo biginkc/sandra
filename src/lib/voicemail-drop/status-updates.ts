@@ -91,6 +91,12 @@ export interface DropStatusStore {
    * nothing, so the webhook retry redoes all of it.
    */
   resolveOutcome(input: ResolveOutcomeInput): Promise<ResolveOutcomeResult>;
+  /**
+   * One write before the receipt is acknowledged: proof_url, proof_url_at and
+   * (unless a copy is already stored) a pending copy due now, so the row is
+   * always sweep-eligible. Throws on failure so the event is retried.
+   */
+  saveReceiptProof(id: string, proofUrl: string, atIso: string): Promise<void>;
   /** Insert-or-claim the webhook_events row. "skip" = already handled / in flight. */
   reserveEvent(eventType: string, eventId: string, payload: Json): Promise<"reserved" | "skip">;
   finishEvent(eventType: string, eventId: string, outcome: "processed" | "error", message?: string): Promise<void>;
@@ -220,10 +226,11 @@ export async function handleDropStatusEvent(
   now: Date = new Date(),
   hooks: {
     /**
-     * Runs after a receipt's proof_url is saved (durable copy, PR 7). Its
-     * failure is reported and never fails the event: the copy is retried.
+     * Runs after a receipt's proof is saved and queued (durable copy, PR 7).
+     * Its failure is reported and never fails the event: the row is already
+     * pending, so the sweep retries the copy.
      */
-    onProofUrl?: (dropRowId: string, receivedAt: Date) => Promise<unknown>;
+    onProofUrl?: (dropRowId: string) => Promise<unknown>;
   } = {},
 ): Promise<StatusWebhookResult> {
   const eventType = event.kind === "receipt" ? "contact.rvm.receipt" : "contact.rvm.status";
@@ -239,10 +246,10 @@ export async function handleDropStatusEvent(
     if (event.kind === "receipt") {
       // A receipt only carries proof; it never changes the outcome.
       if (event.proofUrl) {
-        await store.updateDrop(drop.id, { proof_url: event.proofUrl });
+        await store.saveReceiptProof(drop.id, event.proofUrl, now.toISOString());
         if (hooks.onProofUrl) {
           try {
-            await hooks.onProofUrl(drop.id, now);
+            await hooks.onProofUrl(drop.id);
           } catch (error) {
             reportError(error, { tags: { surface: "dropcowboy_rvm_proof_copy" }, extra: { dropRowId: drop.id } });
           }
@@ -323,6 +330,23 @@ export function supabaseDropStatusStore(client: SupabaseClient<Database>): DropS
       const row = data?.[0];
       if (!row) throw new Error("resolveOutcome: no result row");
       return { dropResult: row.drop_result as ResolveOutcomeResult["dropResult"], enrollmentAction: row.enrollment_action };
+    },
+    async saveReceiptProof(id, proofUrl, atIso) {
+      // No stored copy yet: queue one, due now, in the same write.
+      const { data, error } = await client
+        .from("voicemail_drops")
+        .update({ proof_url: proofUrl, proof_url_at: atIso, proof_copy_status: "pending", proof_copy_next_at: atIso })
+        .eq("id", id)
+        .is("proof_storage_path", null)
+        .select("id");
+      if (error) throw new Error(`saveReceiptProof: ${error.message}`);
+      if ((data ?? []).length > 0) return;
+      // Already stored: keep the copy, refresh the provider link only.
+      const { error: storedError } = await client
+        .from("voicemail_drops")
+        .update({ proof_url: proofUrl, proof_url_at: atIso })
+        .eq("id", id);
+      if (storedError) throw new Error(`saveReceiptProof: ${storedError.message}`);
     },
     async reserveEvent(eventType, eventId, payload) {
       const now = new Date().toISOString();

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 import { copyDropProof, PROOF_BUCKET, supabaseProofCopyStore, sweepPendingProofCopies } from "@/lib/voicemail-drop/proof-copy";
+import { handleDropStatusEvent, supabaseDropStatusStore } from "@/lib/voicemail-drop/status-updates";
 
 // Real-DB proof of 20261021200500: the proof columns and their invariants,
 // the private bucket, the real Storage path written by supabaseProofCopyStore,
@@ -42,8 +43,8 @@ async function insertDrop(id: string, org: string) {
   )).rows[0].id;
   await pg.query(
     `insert into public.voicemail_drops(id,org_id,enrollment_id,step_run_id,idempotency_key,property_id,to_phone,provider,audio_kind,
-       status,attempt_outcome,drop_id,proof_url)
-     values ($1::uuid,$2,$3,$4,$1::text,$5,'+18165550101','dropcowboy','tts','delivered','queued',$1::text,'https://api-v2.dropcowboy.com/campaign/public/receipts/tok')`,
+       status,attempt_outcome,drop_id)
+     values ($1::uuid,$2,$3,$4,$1::text,$5,'+18165550101','dropcowboy','tts','delivered','queued',$1::text)`,
     [id, org, enr, run, prop],
   );
 }
@@ -113,7 +114,8 @@ describe("20261021200500_voicemail_drop_proof_copy", () => {
 
   it("stores the real object at <org>/<drop>.mp3 and records it once under replays", async () => {
     const store = supabaseProofCopyStore(client);
-    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, receivedAt: new Date(), resolve: pub })).toBe("stored");
+    await supabaseDropStatusStore(client).saveReceiptProof(dropA, "https://api-v2.dropcowboy.com/campaign/public/receipts/tok", new Date().toISOString());
+    expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, resolve: pub })).toBe("stored");
     expect(await copyDropProof(store, dropA, { fetcher: audioFetcher, resolve: pub })).toBe("already_stored");
     const { rows } = await pg.query("select proof_storage_path, proof_content_type, proof_size_bytes, proof_copy_status, proof_url, proof_url_at from public.voicemail_drops where id=$1", [dropA]);
     expect(rows[0]).toMatchObject({ proof_storage_path: proofPath, proof_content_type: "audio/mpeg", proof_size_bytes: "9", proof_copy_status: "stored", proof_url: "https://api-v2.dropcowboy.com/campaign/public/receipts/tok" });
@@ -127,7 +129,8 @@ describe("20261021200500_voicemail_drop_proof_copy", () => {
   it("keeps a failed download pending and the sweep stores it later", async () => {
     const store = supabaseProofCopyStore(client);
     const down = async () => new Response("{}", { status: 404 });
-    expect(await copyDropProof(store, dropPending, { fetcher: down, receivedAt: new Date(), resolve: pub })).toBe("pending");
+    await supabaseDropStatusStore(client).saveReceiptProof(dropPending, "https://api-v2.dropcowboy.com/campaign/public/receipts/tok", new Date().toISOString());
+    expect(await copyDropProof(store, dropPending, { fetcher: down, resolve: pub })).toBe("pending");
     await pg.query("update public.voicemail_drops set proof_copy_next_at = now() - interval '1 minute' where id=$1", [dropPending]);
     const counts = await sweepPendingProofCopies(store, { fetcher: audioFetcher, limit: 50, resolve: pub });
     expect(counts.stored).toBeGreaterThanOrEqual(1);
@@ -135,6 +138,34 @@ describe("20261021200500_voicemail_drop_proof_copy", () => {
     expect(rows[0]).toEqual({ proof_copy_status: "stored", proof_storage_path: `${orgA}/${dropPending}.mp3` });
     await client.storage.from(PROOF_BUCKET).remove([`${orgA}/${dropPending}.mp3`]);
     await pg.query("update public.voicemail_drops set proof_copy_status=null, proof_storage_path=null, proof_content_type=null, proof_size_bytes=null, proof_fetched_at=null where id=$1", [dropPending]);
+  });
+
+  it("a receipt is queued in one write before the ack; a failed write errors the event and a retry applies", async () => {
+    const real = supabaseDropStatusStore(client);
+    const eventId = `evt-${randomUUID()}`;
+    const event = {
+      kind: "receipt" as const, eventId, eventAt: null, dropId: dropPending, to: null, contactId: null, campaignType: "rvm",
+      status: "success" as const, reason: null, reasonCode: 0, reasonClass: "success" as never,
+      proofUrl: "https://api-v2.dropcowboy.com/campaign/public/receipts/new", receiptReadyAt: null, raw: { event_id: eventId },
+    };
+    await pg.query("update public.voicemail_drops set proof_url=null, proof_url_at=null, proof_copy_status=null, proof_copy_next_at=null where id=$1", [dropPending]);
+    // A real DB failure inside the single write (an invalid timestamp).
+    const broken = { ...real, saveReceiptProof: (id: string, url: string) => real.saveReceiptProof(id, url, "not-a-time") };
+    await expect(handleDropStatusEvent(broken, event)).rejects.toThrow(/saveReceiptProof/);
+    const failed = await pg.query("select proof_url, proof_url_at, proof_copy_status from public.voicemail_drops where id=$1", [dropPending]);
+    expect(failed.rows[0]).toEqual({ proof_url: null, proof_url_at: null, proof_copy_status: null });
+    const ev = await pg.query("select processing_status from public.webhook_events where provider='dropcowboy' and external_id=$1", [eventId]);
+    expect(ev.rows[0].processing_status).toBe("error");
+
+    const copy = vi.fn(async () => { throw new Error("copy crashed"); });
+    expect(await handleDropStatusEvent(real, event, new Date(), { onProofUrl: copy })).toBe("applied");
+    const ok = await pg.query("select proof_url, proof_url_at, proof_copy_status, proof_copy_next_at from public.voicemail_drops where id=$1", [dropPending]);
+    expect(ok.rows[0]).toMatchObject({ proof_url: event.proofUrl, proof_copy_status: "pending" });
+    expect(ok.rows[0].proof_url_at).not.toBeNull();
+    expect(ok.rows[0].proof_copy_next_at).not.toBeNull();
+    // Even though the copy crashed, the sweep picks the row up.
+    const due = await supabaseProofCopyStore(client).listDue(new Date(Date.now() + 1000).toISOString(), 500);
+    expect(due).toContain(dropPending);
   });
 
   it("RLS: no member reads the stored object; only the drop's own org reads the drop row", async () => {

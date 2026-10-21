@@ -1,4 +1,4 @@
-import { PROOF_SIGNED_URL_TTL_SECONDS, proofUrlExpiresAt } from "./proof-copy";
+import { PROOF_SIGNED_URL_TTL_SECONDS, proofUrlExpiresAt } from "./proof-shared";
 
 export type ProofLinkRow = {
   org_id: string;
