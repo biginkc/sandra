@@ -24,7 +24,7 @@ import { NINE_HOT_REPLY_TEXTS, decideNineQuestions, type NineQuestionResult } fr
 
 type Row = Record<string, unknown>;
 
-/** Minimal in-memory stand-in for the supabase-js query chain the backfill uses. */
+/** Minimal in-memory stand-in for the supabase-js query chain the backfill uses (with the API's row cap). */
 function fakeSupabase(tables: Record<string, Row[]>) {
   const from = (table: string) => {
     let rows = [...(tables[table] ?? [])];
@@ -32,14 +32,17 @@ function fakeSupabase(tables: Record<string, Row[]>) {
     const q = {
       select: () => q,
       eq: (c: string, v: unknown) => ((rows = rows.filter((r) => r[c] === v)), q),
+      neq: (c: string, v: unknown) => ((rows = rows.filter((r) => r[c] !== v)), q),
+      is: (c: string, v: null) => ((rows = rows.filter((r) => (r[c] ?? null) === v)), q),
       in: (c: string, vs: unknown[]) => ((rows = rows.filter((r) => vs.includes(r[c]))), q),
-      gt: (c: string, v: string) => ((rows = rows.filter((r) => String(r[c]) > v)), q),
+      gt: (c: string, v: string) => ((rows = rows.filter((r) => r[c] != null && String(r[c]) > v)), q),
       order: () => q,
       range: (a: number, b: number) => ((rows = rows.slice(a, b + 1)), q),
       limit: (n: number) => ((limit = n), q),
       maybeSingle: async () => ({ data: rows[0] ?? null, error: null }),
       then: (resolve: (v: { data: Row[]; error: null }) => unknown) =>
-        resolve({ data: limit === null ? rows : rows.slice(0, limit), error: null }),
+        // PostgREST caps an unbounded read at 1000 rows, as the real API does.
+        resolve({ data: rows.slice(0, limit ?? 1000), error: null }),
     };
     return q;
   };
@@ -273,6 +276,18 @@ describe("runAskedOfferBackfill", () => {
       expect(rows.find((r) => r.propertyId === "p1")?.skip).toBe(reason);
       expect(sendSmsToContact).not.toHaveBeenCalled();
     });
+  });
+
+  it("finds an earlier copy on another property even behind a long history", async () => {
+    const d = db();
+    d.tables.properties!.push(property("px", { status: "prospect" }));
+    for (let i = 0; i < 1500; i += 1) {
+      d.tables.messages!.push(msg(`old${i}`, "px", "outbound", "2026-09-01T00:00:00Z", `drip ${i}`, { to_address: phoneOf("p1") }));
+    }
+    d.tables.messages!.push(msg("copy", "px", "outbound", "2026-09-02T00:00:00Z", NINE_HOT_REPLY_TEXTS.asked_offer, { to_address: phoneOf("p1") }));
+    const rows = await runAskedOfferBackfill(d.client, options({ apply: true }), { classify: classifierSaying("asked_offer"), now: () => OPEN });
+    expect(rows.find((r) => r.propertyId === "p1")?.skip).toBe("already_got_this_text");
+    expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
   it("skips a lead whose only outbound was created before the inbound but sent after it", async () => {

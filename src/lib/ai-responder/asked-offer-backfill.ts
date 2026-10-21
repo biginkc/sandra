@@ -334,22 +334,34 @@ export async function loadLeadFacts(
     if (callError) throw new Error(`call lookup: ${callError.message}`);
     callSinceInbound = (calls ?? []).length > 0;
     if (phone) {
-      // The same seller on any other property in the org.
-      const [toPhone, fromPhone, phoneCalls] = await Promise.all([
-        supabase.from("messages").select(MESSAGE_SELECT).eq("org_id", orgId).eq("channel", "sms").eq("direction", "outbound").eq("to_address", phone),
-        supabase.from("messages").select(MESSAGE_SELECT).eq("org_id", orgId).eq("channel", "sms").eq("direction", "inbound").eq("from_address", phone),
-        supabase.from("call_activities").select("id").eq("org_id", orgId).eq("phone_e164", phone).gt("created_at", inbound.created_at).limit(1),
+      // The same seller on any other property in the org. Each is a bounded,
+      // server-filtered existence check (limit 1), never a capped history read.
+      const at = inbound.created_at;
+      const exists = async (label: string, run: () => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>) => {
+        const { data, error } = await run();
+        if (error) throw new Error(`phone history (${label}): ${error.message}`);
+        return (data ?? []).length > 0;
+      };
+      const toPhone = () => {
+        let q = supabase.from("messages").select("id").eq("org_id", orgId).eq("channel", "sms").eq("direction", "outbound").eq("to_address", phone);
+        if (o.ignoreMessageId) q = q.neq("id", o.ignoreMessageId);
+        return q;
+      };
+      const [approved, unsent, sentAfter, createdAfterUnsent, inboundElsewhere, phoneCall] = await Promise.all([
+        exists("approved text", () => toPhone().eq("body", ASKED_OFFER_BACKFILL_BODY).limit(1)),
+        exists("not sent yet", () => toPhone().in("status", [...UNSENT_STATUSES]).limit(1)),
+        exists("sent after", () => toPhone().gt("sent_at", at).limit(1)),
+        exists("created after", () => toPhone().is("sent_at", null).gt("created_at", at).limit(1)),
+        exists("newer inbound", () =>
+          supabase.from("messages").select("id").eq("org_id", orgId).eq("channel", "sms").eq("direction", "inbound").eq("from_address", phone)
+            .neq("property_id", propertyId).gt("created_at", at).limit(1),
+        ),
+        exists("calls", () => supabase.from("call_activities").select("id").eq("org_id", orgId).eq("phone_e164", phone).gt("created_at", at).limit(1)),
       ]);
-      if (toPhone.error || fromPhone.error || phoneCalls.error) {
-        throw new Error(`phone history lookup: ${(toPhone.error ?? fromPhone.error ?? phoneCalls.error)!.message}`);
-      }
-      const sentToPhone = ((toPhone.data ?? []) as BackfillMessage[]).filter((m) => m.id !== o.ignoreMessageId);
-      outboundSinceInbound ||= sentToPhone.some((m) => outboundCountsAfter(m, inbound.created_at));
-      approvedTextBefore ||= sentToPhone.some((m) => m.body === ASKED_OFFER_BACKFILL_BODY);
-      newerInboundElsewhere = ((fromPhone.data ?? []) as BackfillMessage[]).some(
-        (m) => m.property_id !== propertyId && m.created_at > inbound.created_at,
-      );
-      callSinceInbound ||= (phoneCalls.data ?? []).length > 0;
+      approvedTextBefore ||= approved;
+      outboundSinceInbound ||= unsent || sentAfter || createdAfterUnsent;
+      newerInboundElsewhere = inboundElsewhere;
+      callSinceInbound ||= phoneCall;
     }
     if (inbound.contact_id) {
       const { data, error } = await supabase.from("contacts").select("id, do_not_contact, sms_opted_out").eq("id", inbound.contact_id).maybeSingle();
