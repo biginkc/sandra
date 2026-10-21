@@ -16,6 +16,7 @@ import { getSequenceImpact } from "@/lib/sequences/impact";
 import {
   hasVoicemailFields,
   isValidVoicemailDropStep,
+  voicemailStepIsSpoken,
   VOICEMAIL_VOICE_REQUIRED_MESSAGE,
   voicemailScriptNeedsVoice,
 } from "@/lib/sequences/voicemail-drop-step-config";
@@ -67,6 +68,7 @@ export type SequenceWithSteps = {
     vm_tts_body?: string | null;
     vm_voice_id?: string | null;
     vm_phone_line_id?: string | null;
+    vm_template_category?: string | null;
   }>;
 };
 
@@ -83,13 +85,13 @@ export async function replaceSequenceSteps(input: {
   // (DROPCOWBOY_VOICE_ID), saved onto the step because the worker reads only
   // the step. No voice at all = a clear error instead of a broken step.
   const defaultVoiceId = process.env.DROPCOWBOY_VOICE_ID?.trim() || null;
-  if (input.steps.some((step) => Boolean(step.vm_tts_body?.trim()) && voicemailScriptNeedsVoice(step, defaultVoiceId))) {
+  if (input.steps.some((step) => voicemailStepIsSpoken(step) && voicemailScriptNeedsVoice(step, defaultVoiceId))) {
     return { ok: false, error: { code: "VALIDATION", message: VOICEMAIL_VOICE_REQUIRED_MESSAGE } };
   }
   input = {
     ...input,
     steps: input.steps.map((step) =>
-      step.action_type === "send_voicemail_drop" && step.vm_tts_body?.trim() && !step.vm_voice_id?.trim()
+      voicemailStepIsSpoken(step) && !step.vm_voice_id?.trim()
         ? { ...step, vm_voice_id: defaultVoiceId }
         : step),
   };
@@ -316,7 +318,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });

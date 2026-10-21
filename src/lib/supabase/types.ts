@@ -4643,6 +4643,7 @@ export type Database = {
           template_id: string | null
           vm_media_id: string | null
           vm_phone_line_id: string | null
+          vm_template_category: string | null
           vm_tts_body: string | null
           vm_voice_id: string | null
         }
@@ -4659,6 +4660,7 @@ export type Database = {
           template_id?: string | null
           vm_media_id?: string | null
           vm_phone_line_id?: string | null
+          vm_template_category?: string | null
           vm_tts_body?: string | null
           vm_voice_id?: string | null
         }
@@ -4675,6 +4677,7 @@ export type Database = {
           template_id?: string | null
           vm_media_id?: string | null
           vm_phone_line_id?: string | null
+          vm_template_category?: string | null
           vm_tts_body?: string | null
           vm_voice_id?: string | null
         }
@@ -6712,6 +6715,50 @@ export type Database = {
             columns: ["step_run_id"]
             isOneToOne: true
             referencedRelation: "sequence_step_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voicemail_templates: {
+        Row: {
+          category: string
+          content: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          id: string
+          name: string
+          org_id: string
+          updated_at: string
+        }
+        Insert: {
+          category: string
+          content: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name: string
+          org_id: string
+          updated_at?: string
+        }
+        Update: {
+          category?: string
+          content?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voicemail_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]

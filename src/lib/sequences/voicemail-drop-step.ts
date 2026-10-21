@@ -21,6 +21,8 @@ import type {
   VoicemailDropSendResult,
 } from "@/lib/voicemail-drop/types";
 
+import { pickVoicemailFromPool } from "@/lib/templates/pool";
+
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
 import {
@@ -70,6 +72,7 @@ type DropStep = {
   vm_tts_body: string | null;
   vm_voice_id: string | null;
   vm_phone_line_id: string | null;
+  vm_template_category?: string | null;
 };
 
 type DropProperty = { state: string | null };
@@ -316,11 +319,34 @@ export async function processVoicemailDropStep(
 
   // 4. Step config + deterministic render.
   const mediaId = step.vm_media_id?.trim() || null;
-  const ttsTemplate = step.vm_tts_body?.trim() || null;
+  const stepScript = step.vm_tts_body?.trim() || null;
+  const rotationGroup = step.vm_template_category?.trim() || null;
   const voiceId = step.vm_voice_id?.trim() || null;
   const phoneLineId = step.vm_phone_line_id?.trim() || null;
-  if ((!callerId && !phoneLineId) || (mediaId ? Boolean(ttsTemplate) : !ttsTemplate || !voiceId)) {
+  const sources = Number(Boolean(mediaId)) + Number(Boolean(stepScript)) + Number(Boolean(rotationGroup));
+  if ((!callerId && !phoneLineId) || sources !== 1 || (!mediaId && !voiceId)) {
     return pauseNotAttempted(client, enrollment.id, claimId, "step_misconfigured", "voicemail drop step is missing audio, voice, or phone line");
+  }
+  // Rotation: pick one saved voicemail script per enrollment + step. The seed
+  // is stable, so a retry of this claim reads the same script.
+  let ttsTemplate = stepScript;
+  if (rotationGroup) {
+    const picked = await pickVoicemailFromPool(
+      client,
+      enrollment.org_id,
+      rotationGroup,
+      `${enrollment.id}:${step.id}`,
+    );
+    if (!picked) {
+      return pauseNotAttempted(
+        client,
+        enrollment.id,
+        claimId,
+        "step_misconfigured",
+        `voicemail drop script group "${rotationGroup}" has no saved voicemail scripts`,
+      );
+    }
+    ttsTemplate = picked.content.trim() || null;
   }
   const vars = await loadTemplateVars(client, {
     propertyId: enrollment.property_id,

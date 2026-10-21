@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { listTemplates } from "@/app/(dashboard)/templates/actions";
+import { listVoicemailTemplateGroups } from "@/app/(dashboard)/templates/voicemail-template-actions";
 import { isVoicemailDropEnabled } from "@/lib/voicemail-drop/registry";
 
 import { getSequenceAdminStatus } from "../../admin";
@@ -47,6 +48,8 @@ export default async function SequenceEditPage({
 
   const templatesResult = await listTemplates();
   const templates = templatesResult.ok ? templatesResult.data : [];
+  const voicemailGroupsResult = await listVoicemailTemplateGroups();
+  const voicemailGroups = voicemailGroupsResult.ok ? voicemailGroupsResult.data : [];
 
   return (
     <Page>
@@ -75,6 +78,7 @@ export default async function SequenceEditPage({
           enabled: isVoicemailDropEnabled(),
           defaultVoiceId: process.env.DROPCOWBOY_VOICE_ID?.trim() || null,
           defaultPhoneLineId: process.env.DROPCOWBOY_PHONE_LINE_ID?.trim() || null,
+          scriptGroups: voicemailGroups,
         }}
       />
     </Page>

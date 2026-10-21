@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reportError } from "@/lib/errors/report";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { chicagoDayWindow, readDailyCap, toE164 } from "@/lib/voicemail-drop/eligibility";
+import { poolIndex } from "@/lib/templates/pool";
 import {
   getMockVoicemailDropLog,
   resetMockVoicemailDropState,
@@ -45,6 +46,7 @@ const TTS_STEP: {
   vm_tts_body: string | null;
   vm_voice_id: string | null;
   vm_phone_line_id: string | null;
+  vm_template_category?: string | null;
 } = {
   id: "step-1",
   step_index: 0,
@@ -83,6 +85,8 @@ type World = {
   authError: { message: string } | null;
   readError: string | null;
   failUpdate: string | null;
+  /** voicemail_templates rows (rotation); filtered by org_id + category. */
+  voicemailTemplates: { id: string; org_id: string; category: string; content: string }[];
 };
 
 function baseWorld(over: Partial<World> = {}): World {
@@ -116,6 +120,7 @@ function baseWorld(over: Partial<World> = {}): World {
     authError: null,
     readError: null,
     failUpdate: null,
+    voicemailTemplates: [],
     ...over,
   };
 }
@@ -163,6 +168,16 @@ function makeClient(world: World) {
         return { data: { name: "BMH" }, error: null };
       case "sequence_steps":
         return { data: { delay_after_previous_minutes: 60 }, error: null };
+      case "voicemail_templates": {
+        const eq = (col: string) => op.filters.find(([n, c]) => n === "eq" && c === col)?.[2];
+        const rows = world.voicemailTemplates
+          .filter((t) => t.org_id === eq("org_id") && t.category === eq("category"))
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map(({ id, content }) => ({ id, content }));
+        return { data: rows, error: null };
+      }
+      case "sms_templates":
+        return { data: [{ id: "sms-1", content: "SMS TEMPLATE TEXT" }], error: null };
       default:
         return { data: null, error: null };
     }
@@ -189,7 +204,7 @@ function makeClient(world: World) {
       op.payload = payload;
       return b;
     };
-    for (const name of ["eq", "in", "gt", "gte", "not", "order", "limit"]) b[name] = filter(name);
+    for (const name of ["eq", "in", "gt", "gte", "not", "order", "limit", "is"]) b[name] = filter(name);
     b.maybeSingle = () => Promise.resolve(resolve(op));
     b.single = () => Promise.resolve(resolve(op));
     b.then = (ok: (v: unknown) => unknown, fail?: (e: unknown) => unknown) =>
@@ -739,5 +754,80 @@ describe("processEnrollmentTick dispatch", () => {
     vi.unstubAllEnvs();
     expect(outcome).toEqual({ status: "paused", enrollmentId: "enr-1", reason: "provider_failed" });
     expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+});
+
+describe("voicemail drop step — rotating saved voicemail scripts", () => {
+  const ROTATE_STEP = { ...TTS_STEP, vm_tts_body: null, vm_template_category: "Group A" };
+  const templates = [
+    { id: "vt-1", org_id: "org-1", category: "Group A", content: "Script one for {{first_name}}." },
+    { id: "vt-2", org_id: "org-1", category: "Group A", content: "Script two for {{first_name}}." },
+    { id: "vt-3", org_id: "org-1", category: "Group A", content: "Script three for {{first_name}}." },
+    { id: "vt-other-group", org_id: "org-1", category: "Group B", content: "Other group." },
+    { id: "vt-other-org", org_id: "org-2", category: "Group A", content: "Other org." },
+  ];
+  const expected = () => {
+    const pool = templates.filter((t) => t.org_id === "org-1" && t.category === "Group A");
+    return pool[poolIndex(`${ENROLLMENT.id}:${ROTATE_STEP.id}`, pool.length)].content.replace("{{first_name}}", "Pat");
+  };
+
+  it("picks one script from the group by enrollment + step, renders it, and stores it", async () => {
+    const { outcome, ops } = await run(baseWorld({ voicemailTemplates: templates }), ROTATE_STEP);
+    expect(outcome.status).toBe("voicemail_queued");
+    const audio = getMockVoicemailDropLog()[0].input.audio as { kind: "tts"; ttsBody: string };
+    expect(audio).toEqual({ kind: "tts", ttsBody: expected(), voiceId: "voice-1" });
+    const insert = ops.find((o) => o.table === "voicemail_drops" && o.kind === "insert")!.payload as Record<string, unknown>;
+    expect(insert).toMatchObject({ audio_kind: "tts", rendered_script: expected() });
+  });
+
+  it("is stable across retries of the same enrollment", async () => {
+    await run(baseWorld({ voicemailTemplates: templates }), ROTATE_STEP);
+    resetMockVoicemailDropState();
+    await run(baseWorld({ voicemailTemplates: [...templates].reverse() }), ROTATE_STEP);
+    const audio = getMockVoicemailDropLog()[0].input.audio as { ttsBody: string };
+    expect(audio.ttsBody).toBe(expected());
+  });
+
+  it("spreads different enrollments across the group", () => {
+    const picks = new Set(Array.from({ length: 60 }, (_, i) => poolIndex(`enr-${i}:step-1`, 3)));
+    expect(picks.size).toBe(3);
+  });
+
+  it("reads voicemail_templates only, never sms_templates", async () => {
+    const { ops } = await run(baseWorld({ voicemailTemplates: templates }), ROTATE_STEP);
+    expect(ops.some((o) => o.table === "sms_templates")).toBe(false);
+    const read = ops.find((o) => o.table === "voicemail_templates")!;
+    expect(read.filters).toEqual(expect.arrayContaining([
+      ["eq", "org_id", "org-1"], ["eq", "category", "Group A"], ["is", "deleted_at", null],
+    ]));
+    const audio = getMockVoicemailDropLog()[0].input.audio as { ttsBody: string };
+    expect(audio.ttsBody).not.toContain("SMS TEMPLATE TEXT");
+  });
+
+  it("an empty group pauses step_misconfigured and sends nothing", async () => {
+    const { outcome } = await run(baseWorld({ voicemailTemplates: [] }), ROTATE_STEP);
+    expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
+  it.each([
+    ["single braces", "Hi {first_name}."],
+    ["random-variant brackets", "[Hi/Hello] {{first_name}}."],
+    ["over 1,200 characters", "a".repeat(1201)],
+  ])("a picked script with %s pauses step_misconfigured", async (_label, content) => {
+    const bad = [{ id: "vt-1", org_id: "org-1", category: "Group A", content }];
+    const { outcome } = await run(baseWorld({ voicemailTemplates: bad }), ROTATE_STEP);
+    expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
+  it("two sources at once (script + group) pauses step_misconfigured", async () => {
+    const { outcome } = await run(baseWorld({ voicemailTemplates: templates }), { ...ROTATE_STEP, vm_tts_body: "Hi." });
+    expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+  });
+
+  it("a rotation step with no voice pauses step_misconfigured", async () => {
+    const { outcome } = await run(baseWorld({ voicemailTemplates: templates }), { ...ROTATE_STEP, vm_voice_id: null });
+    expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
   });
 });

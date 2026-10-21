@@ -13,6 +13,7 @@ import {
 } from "@/lib/presentation/system-labels";
 
 import {
+  hasDropCowboyRandomVariant,
   hasSingleBraceMergeField,
   isValidVoicemailDropStep,
   VOICEMAIL_SCRIPT_MAX_CHARS,
@@ -21,6 +22,7 @@ import {
 } from "@/lib/sequences/voicemail-drop-step-config";
 
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
+import { type VoicemailTemplateGroup } from "@/app/(dashboard)/templates/voicemail-template-actions";
 
 import {
   replaceSequenceSteps,
@@ -126,10 +128,14 @@ export type VoicemailDropEditorConfig = {
   enabled: boolean;
   defaultVoiceId: string | null;
   defaultPhoneLineId: string | null;
+  /** Saved voicemail script groups a step can rotate between. */
+  scriptGroups?: VoicemailTemplateGroup[];
 };
 
 const VOICEMAIL_OFF: VoicemailDropEditorConfig = { enabled: false, defaultVoiceId: null, defaultPhoneLineId: null };
-const NO_VOICEMAIL_FIELDS = { vm_media_id: null, vm_tts_body: null, vm_voice_id: null, vm_phone_line_id: null };
+const NO_VOICEMAIL_FIELDS = {
+  vm_media_id: null, vm_tts_body: null, vm_voice_id: null, vm_phone_line_id: null, vm_template_category: null,
+};
 
 function draftFromStep(step: SequenceWithSteps["steps"][number]): DraftStep {
   return { ...step, key: step.id };
@@ -202,7 +208,8 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
           target_status: step.action_type === "change_status" ? step.target_status : null,
           ...(step.action_type === "send_voicemail_drop" ? {
             vm_media_id: step.vm_media_id?.trim() || null,
-            vm_tts_body: step.vm_media_id?.trim() ? null : step.vm_tts_body?.trim() || null,
+            vm_tts_body: step.vm_media_id?.trim() || step.vm_template_category?.trim() ? null : step.vm_tts_body?.trim() || null,
+            vm_template_category: step.vm_media_id?.trim() ? null : step.vm_template_category?.trim() || null,
             vm_voice_id: step.vm_voice_id?.trim() || null,
             vm_phone_line_id: step.vm_phone_line_id?.trim() || null,
           } : NO_VOICEMAIL_FIELDS),
@@ -411,7 +418,7 @@ function StepEditor({ step, index, count, locked, canDelete, templates, voicemai
       </label>
     </div>
     {!voicemailDrop.enabled && index === 0 ? <p className="text-muted-foreground text-xs">Voicemail drops are off. They turn on once a voicemail provider is connected.</p> : null}
-    {step.action_type === "send_voicemail_drop" ? <VoicemailDropEditor step={step} enabled={voicemailDrop.enabled} defaultVoiceId={voicemailDrop.defaultVoiceId} onChange={onChange} /> :
+    {step.action_type === "send_voicemail_drop" ? <VoicemailDropEditor step={step} enabled={voicemailDrop.enabled} defaultVoiceId={voicemailDrop.defaultVoiceId} scriptGroups={voicemailDrop.scriptGroups ?? []} onChange={onChange} /> :
       step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
       body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value, template_category: null })}
       templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value, template_category: null })}
@@ -431,13 +438,18 @@ function StepEditor({ step, index, count, locked, canDelete, templates, voicemai
  * Pick exactly one voicemail source: a recording uploaded in the provider, or
  * a script read aloud. Voice and caller line default from server settings.
  */
-function VoicemailDropEditor({ step, enabled, defaultVoiceId, onChange }: {
+function VoicemailDropEditor({ step, enabled, defaultVoiceId, scriptGroups, onChange }: {
   step: DraftStep;
   enabled: boolean;
   defaultVoiceId: string | null;
+  scriptGroups: VoicemailTemplateGroup[];
   onChange: (patch: Partial<DraftStep>) => void;
 }) {
-  const mode: "script" | "recording" = step.vm_media_id !== null && step.vm_media_id !== undefined ? "recording" : "script";
+  const mode: "script" | "recording" | "rotation" =
+    step.vm_template_category !== null && step.vm_template_category !== undefined ? "rotation"
+    : step.vm_media_id !== null && step.vm_media_id !== undefined ? "recording" : "script";
+  const groupId = useId();
+  const group = scriptGroups.find((g) => g.category === step.vm_template_category);
   const script = step.vm_tts_body ?? "";
   const scriptId = useId();
   const over = script.trim().length > VOICEMAIL_SCRIPT_MAX_CHARS;
@@ -450,15 +462,41 @@ function VoicemailDropEditor({ step, enabled, defaultVoiceId, onChange }: {
       ) : null}
       <div className="flex items-center gap-4 text-sm">
         <label className="flex items-center gap-1.5">
-          <input type="radio" checked={mode === "script"} onChange={() => onChange({ vm_media_id: null, vm_tts_body: "" })} />
+          <input type="radio" checked={mode === "script"} onChange={() => onChange({ vm_media_id: null, vm_tts_body: "", vm_template_category: null })} />
           <span>Script (read aloud)</span>
         </label>
         <label className="flex items-center gap-1.5">
-          <input type="radio" checked={mode === "recording"} onChange={() => onChange({ vm_media_id: "", vm_tts_body: null })} />
+          <input type="radio" checked={mode === "recording"} onChange={() => onChange({ vm_media_id: "", vm_tts_body: null, vm_template_category: null })} />
           <span>Recorded message</span>
         </label>
+        <label className="flex items-center gap-1.5">
+          <input type="radio" checked={mode === "rotation"} onChange={() => onChange({ vm_media_id: null, vm_tts_body: null, vm_template_category: "" })} />
+          <span>Rotate between saved voicemail scripts</span>
+        </label>
       </div>
-      {mode === "script" ? (
+      {mode === "rotation" ? (
+        <div className="flex flex-col gap-1 text-sm">
+          <label htmlFor={groupId} className="font-medium">Script group</label>
+          <select id={groupId} value={step.vm_template_category ?? ""} onChange={(e) => onChange({ vm_template_category: e.target.value })}
+            className="border-input rounded-md border px-2 py-1.5 text-sm">
+            <option value="">Choose a group</option>
+            {scriptGroups.map((g) => (
+              <option key={g.category} value={g.category}>{g.category} ({g.count} script{g.count === 1 ? "" : "s"})</option>
+            ))}
+          </select>
+          {scriptGroups.length === 0 ? (
+            <span className="text-muted-foreground text-xs">No saved voicemail scripts yet. Add them on the Templates page under Voicemail scripts.</span>
+          ) : (
+            <span className="text-muted-foreground text-xs">Each lead hears one script from the group, picked for them and kept the same if the step retries.</span>
+          )}
+          {step.vm_template_category && !group ? <span className="text-destructive text-xs">This group has no saved voicemail scripts.</span> : null}
+          {group && group.problemCount > 0 ? (
+            <span className="text-destructive text-xs">
+              {group.problemCount} script{group.problemCount === 1 ? " in this group needs" : "s in this group need"} fixing on the Templates page (too long, single braces, or [this/that] choices). A lead picked for one will be paused.
+            </span>
+          ) : null}
+        </div>
+      ) : mode === "script" ? (
         <div className="flex flex-col gap-1 text-sm">
           <label htmlFor={scriptId} className="font-medium">Voicemail script</label>
           <textarea
@@ -477,6 +515,7 @@ function VoicemailDropEditor({ step, enabled, defaultVoiceId, onChange }: {
             </span>
           </span>
           {hasSingleBraceMergeField(script) ? <span className="text-destructive text-xs">Use double braces, like {"{{first_name}}"}, so Sandra fills them in.</span> : null}
+          {hasDropCowboyRandomVariant(script) ? <span className="text-destructive text-xs">Remove [this/that] choices. Sandra picks the script, so the voicemail provider must not pick words at random.</span> : null}
           {over ? <span className="text-destructive text-xs">Scripts can be at most {VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")} characters.</span> : null}
         </div>
       ) : (

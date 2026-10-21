@@ -98,3 +98,47 @@ describe("drip editor voicemail drop step", () => {
     expect(screen.getByRole("button", { name: "Save all steps" })).toBeEnabled();
   });
 });
+
+describe("drip editor voicemail drop step — rotating saved scripts", () => {
+  const withGroups: VoicemailDropEditorConfig = {
+    ...on,
+    scriptGroups: [
+      { category: "Group A", count: 3, problemCount: 0 },
+      { category: "Group B", count: 1, problemCount: 1 },
+    ],
+  };
+
+  it("switches a script step to rotate a group and saves only the group", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1", "step-2"] });
+    const user = userEvent.setup(); mount([smsStep, dropStep], withGroups);
+    await user.click(within(card(2)).getByRole("radio", { name: "Rotate between saved voicemail scripts" }));
+    const save = screen.getByRole("button", { name: "Save all steps" });
+    expect(save).toBeDisabled();
+    const group = within(card(2)).getByLabelText("Script group");
+    expect(within(group).getByRole("option", { name: "Group A (3 scripts)" })).toBeInTheDocument();
+    await user.selectOptions(group, "Group A");
+    await user.click(save);
+    expect(replace.mock.calls[0][0].steps[1]).toMatchObject({ id: "step-2", vm_template_category: "Group A",
+      vm_media_id: null, vm_tts_body: null, template_category: null, template_id: null, template_body: null,
+      vm_voice_id: "voice-x" });
+    expect(replace.mock.calls[0][0].steps[0]).toMatchObject({ vm_template_category: null });
+  });
+
+  it("warns when a chosen group has scripts the worker would refuse", () => {
+    mount([smsStep, { ...dropStep, vm_tts_body: null, vm_template_category: "Group B" }], withGroups);
+    expect(screen.getByText(/1 script in this group needs fixing/)).toBeInTheDocument();
+  });
+
+  it("points to the Templates page when there are no saved voicemail scripts", async () => {
+    const user = userEvent.setup(); mount([smsStep, dropStep], on);
+    await user.click(within(card(2)).getByRole("radio", { name: "Rotate between saved voicemail scripts" }));
+    expect(screen.getByText(/No saved voicemail scripts yet/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+  });
+
+  it("blocks [a/b] random-variant brackets in a single script", () => {
+    mount([smsStep, { ...dropStep, vm_tts_body: "[Hi/Hello] {{first_name}}" }], on);
+    expect(screen.getByText(/Remove \[this\/that\] choices/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+  });
+});
