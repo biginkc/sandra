@@ -33,7 +33,7 @@ const body = (eventId = "evt-1") =>
 beforeEach(() => {
   vi.stubEnv("DROPCOWBOY_WEBHOOK_SECRET", SECRET);
   fake = createFakeDropStore([
-    { id: "11111111-1111-4111-8111-111111111111", enrollment_id: "enr-1", status: "queued", drop_id: "dc-1", to_phone: "+18165550101", queued_at: new Date().toISOString() },
+    { id: "11111111-1111-4111-8111-111111111111", enrollment_id: "enr-1", step_run_id: "run-1", status: "queued", attempt_outcome: "queued", drop_id: "dc-1", to_phone: "+18165550101", queued_at: new Date().toISOString() },
   ]);
   holder.store = fake.store;
 });
