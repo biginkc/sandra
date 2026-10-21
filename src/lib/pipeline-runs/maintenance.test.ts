@@ -17,6 +17,8 @@ function sweepAdmin(runIds: string[], steps: Step[], opts: { error?: string } = 
       let isUpdate = false;
       let ids: string[] = [];
       b.select = () => b;
+      b.order = () => b;
+      b.range = () => b;
       b.update = (p: unknown) => ((isUpdate = true), (calls.payload = p), b);
       b.eq = (c: string, v: unknown) => (!isUpdate && table === "pipeline_runs" && calls.candidateFilters.push([c, v]), b);
       b.lt = (c: string, v: unknown) => (calls.candidateFilters.push([c, v]), b);
@@ -79,6 +81,48 @@ describe("sweepStalePipelineRuns", () => {
     ];
     const { admin } = sweepAdmin(["r"], steps);
     expect(await sweepStalePipelineRuns(admin, { now })).toEqual({ swept: 0 });
+  });
+
+  it("pages candidates and chunks ids so a large backlog is fully read", async () => {
+    const many = Array.from({ length: 1200 }, (_, i) => `r${i}`);
+    let candidatePages = 0;
+    const stepChunks: number[] = [];
+    const updateChunks: number[] = [];
+    const admin = {
+      from(table: string) {
+        const b: Record<string, unknown> = {};
+        let isUpdate = false;
+        let ids: string[] = [];
+        let range: [number, number] = [0, 0];
+        b.select = () => b;
+        b.order = () => b;
+        b.eq = () => b;
+        b.lt = () => b;
+        b.update = () => ((isUpdate = true), b);
+        b.range = (f: number, t: number) => ((range = [f, t]), b);
+        b.in = (c: string, v: unknown) => {
+          if (c !== "name") ids = v as string[];
+          return b;
+        };
+        b.then = (resolve: (v: unknown) => void) => {
+          if (table === "pipeline_run_steps") {
+            stepChunks.push(ids.length);
+            return resolve({ data: [], error: null });
+          }
+          if (isUpdate) {
+            updateChunks.push(ids.length);
+            return resolve({ data: ids.map((id) => ({ id })), error: null });
+          }
+          candidatePages += 1;
+          return resolve({ data: many.slice(range[0], range[1] + 1).map((id) => ({ id })), error: null });
+        };
+        return b;
+      },
+    } as never;
+    expect(await sweepStalePipelineRuns(admin, { now })).toEqual({ swept: 1200 });
+    expect(candidatePages).toBe(3);
+    expect(Math.max(...stepChunks)).toBeLessThanOrEqual(100);
+    expect(Math.max(...updateChunks)).toBeLessThanOrEqual(100);
   });
 
   it("throws on db error", async () => {

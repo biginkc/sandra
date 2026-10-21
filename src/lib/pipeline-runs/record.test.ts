@@ -213,6 +213,19 @@ describe("sanitizeStepDetail", () => {
   });
 });
 
+describe("reopen on wait", () => {
+  it("a wait step reopens a swept run; other steps do not", async () => {
+    const { admin, calls } = fakeAdmin();
+    const ctx = { runId: "run-1", orgId: "o", seq: 0 };
+    await recordStep(admin, ctx, { kind: "gate", name: "classified", result: "pass" });
+    expect(calls.some((c) => c.table === "pipeline_runs")).toBe(false);
+    await recordStep(admin, ctx, { kind: "action", name: "retry_scheduled", result: "applied" });
+    const reopen = calls.find((c) => c.table === "pipeline_runs" && c.op === "update");
+    expect(reopen?.payload).toEqual({ status: "running", reason: null, completed_at: null });
+    expect(reopen?.filter).toContainEqual(["id", "run-1"]);
+  });
+});
+
 describe("finishRun / updateRun / resumeRun", () => {
   it("finishRun writes terminal fields and ignores null ctx", async () => {
     const { admin, calls } = fakeAdmin();
@@ -359,7 +372,7 @@ describe("seam integrity (fix round 2)", () => {
   afterEach(() => reportError.mockClear());
 
   /** Stateful fake: enforces unique (run_id, seq) and a guarded status update. */
-  function statefulAdmin(initial: { steps: number[]; status: string; reason?: string | null }) {
+  function statefulAdmin(initial: { steps: number[]; status: string; reason?: string | null; claimId?: string | null }) {
     const state = {
       steps: [...initial.steps],
       status: initial.status,
@@ -400,8 +413,15 @@ describe("seam integrity (fix round 2)", () => {
             return chain;
           },
           is: () => chain,
-          or: () => chain,
+          or: (f: string) => {
+            filters.or = f;
+            return chain;
+          },
           select: async () => {
+            const claim = initial.claimId ?? null;
+            if (claim && !(typeof filters.or === "string" && filters.or.includes(`claim_id.eq.${claim}`))) {
+              return { data: [], error: null };
+            }
             if (filters.status === "running" && state.status === "running") {
               state.status = "terminal";
               state.payload = payload;
@@ -453,6 +473,13 @@ describe("seam integrity (fix round 2)", () => {
     expect(state.reason).toBeNull();
     expect(state.payload).toMatchObject({ final_outcome: "ai_replied", outbound_message_id: "m-9", reason: null });
     expect(state.inserted).toEqual([]);
+  });
+
+  it("never lets a caller with a different claim correct a swept row", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "stale_running", claimId: "cl-owner" });
+    await finishRun(admin, { runId: "run-1", orgId: "o", seq: 1 }, { status: "replied", claimId: "cl-other" });
+    expect(state.status).toBe("error");
+    expect(state.inserted.map((s) => s.name)).toEqual(["terminal_conflict"]);
   });
 
   it("does not overwrite a real error (not stale_running)", async () => {

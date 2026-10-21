@@ -30,33 +30,51 @@ export async function sweepStalePipelineRuns(
   const minutes = opts.olderThanMinutes ?? 30;
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - minutes * 60_000).toISOString();
-  const { data: candidates, error: candError } = await admin
-    .from("pipeline_runs")
-    .select("id")
-    .eq("status", "running")
-    .lt("started_at", cutoff);
-  if (candError) {
-    throw new Error(`sweep stale pipeline runs failed: ${candError.message}`);
+  const PAGE = 500;
+  const ids: string[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await admin
+      .from("pipeline_runs")
+      .select("id")
+      .eq("status", "running")
+      .lt("started_at", cutoff)
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`sweep stale pipeline runs failed: ${error.message}`);
+    ids.push(...(data ?? []).map((r) => r.id));
+    if (!data || data.length < PAGE) break;
   }
-  const ids = (candidates ?? []).map((r) => r.id);
   if (ids.length === 0) return { swept: 0 };
 
-  const { data: waits, error: waitError } = await admin
-    .from("pipeline_run_steps")
-    .select("run_id, created_at, detail")
-    .in("run_id", ids)
-    .in("name", [...WAIT_STEP_NAMES]);
-  if (waitError) {
-    throw new Error(`sweep stale pipeline runs failed: ${waitError.message}`);
-  }
-  // Latest wake time per run (max over its wait steps).
+  // Latest wake time per run (max over its wait steps). Ids go in small
+  // chunks (URL length) and each chunk is paged (response row cap) so no
+  // newer wait step is missed.
+  // A wait step without delaySeconds (e.g. the 20s fence re-dispatch) wakes
+  // at created_at; the margin covers the short delay.
+  const ID_CHUNK = 100;
   const wakeByRun = new Map<string, number>();
-  for (const w of waits ?? []) {
-    const detail = (w.detail ?? {}) as { delaySeconds?: unknown };
-    const delay = typeof detail.delaySeconds === "number" ? detail.delaySeconds : 0;
-    const wake = new Date(w.created_at).getTime() + delay * 1000;
-    if (!Number.isFinite(wake)) continue;
-    wakeByRun.set(w.run_id, Math.max(wakeByRun.get(w.run_id) ?? 0, wake));
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    for (let from = 0; ; from += PAGE) {
+      const { data: waits, error: waitError } = await admin
+        .from("pipeline_run_steps")
+        .select("id, run_id, created_at, detail")
+        .in("run_id", chunk)
+        .in("name", [...WAIT_STEP_NAMES])
+        .order("id", { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (waitError) {
+        throw new Error(`sweep stale pipeline runs failed: ${waitError.message}`);
+      }
+      for (const w of waits ?? []) {
+        const detail = (w.detail ?? {}) as { delaySeconds?: unknown };
+        const delay = typeof detail.delaySeconds === "number" ? detail.delaySeconds : 0;
+        const wake = new Date(w.created_at).getTime() + delay * 1000;
+        if (!Number.isFinite(wake)) continue;
+        wakeByRun.set(w.run_id, Math.max(wakeByRun.get(w.run_id) ?? 0, wake));
+      }
+      if (!waits || waits.length < PAGE) break;
+    }
   }
   const marginMs = WAIT_WAKE_MARGIN_MINUTES * 60_000;
   const stale = ids.filter((id) => {
@@ -65,18 +83,24 @@ export async function sweepStalePipelineRuns(
   });
   if (stale.length === 0) return { swept: 0 };
 
-  const { data, error } = await admin
-    .from("pipeline_runs")
-    .update({
-      status: "error",
-      reason: STALE_RUNNING_REASON,
-      completed_at: now.toISOString(),
-    })
-    .in("id", stale)
-    .eq("status", "running")
-    .select("id");
-  if (error) throw new Error(`sweep stale pipeline runs failed: ${error.message}`);
-  return { swept: data?.length ?? 0 };
+  // A wait step recorded after the read above reopens the run (recordStep),
+  // so a sweep racing a fresh schedule is undone immediately.
+  let swept = 0;
+  for (let i = 0; i < stale.length; i += ID_CHUNK) {
+    const { data, error } = await admin
+      .from("pipeline_runs")
+      .update({
+        status: "error",
+        reason: STALE_RUNNING_REASON,
+        completed_at: now.toISOString(),
+      })
+      .in("id", stale.slice(i, i + ID_CHUNK))
+      .eq("status", "running")
+      .select("id");
+    if (error) throw new Error(`sweep stale pipeline runs failed: ${error.message}`);
+    swept += data?.length ?? 0;
+  }
+  return { swept };
 }
 
 /**

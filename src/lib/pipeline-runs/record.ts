@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
-import { STALE_RUNNING_REASON } from "./maintenance";
+import { STALE_RUNNING_REASON, WAIT_STEP_NAMES } from "./maintenance";
 
 import type {
   MaybeRunContext,
@@ -216,7 +216,12 @@ export async function recordStep(
         result: step.result,
         detail: sanitizeStepDetail(step.detail ?? {}) as Json,
       });
-      if (!error) return;
+      if (!error) {
+        if ((WAIT_STEP_NAMES as readonly string[]).includes(step.name)) {
+          await reopenSweptRun(admin, ctx.runId);
+        }
+        return;
+      }
       const isSeqCollision =
         (error as { code?: string }).code === "23505" && attempt < 3;
       if (!isSeqCollision) {
@@ -236,6 +241,21 @@ export async function recordStep(
   } catch (error) {
     report("step", error);
   }
+}
+
+/**
+ * A run that records a new wait (retry / send-window deferral / reply delay)
+ * is alive. If the stale sweeper closed it in the meantime, put it back to
+ * running so the activity feed does not show a false error while it waits.
+ */
+async function reopenSweptRun(admin: Admin, runId: string): Promise<void> {
+  const { error } = await admin
+    .from("pipeline_runs")
+    .update({ status: "running", reason: null, completed_at: null })
+    .eq("id", runId)
+    .eq("status", "error")
+    .eq("reason", STALE_RUNNING_REASON);
+  if (error) report("reopen", error);
 }
 
 export type RunPatch = {
