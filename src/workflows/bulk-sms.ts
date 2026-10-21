@@ -27,6 +27,10 @@ import type {
   BulkSmsScheduleState,
 } from "@/lib/messaging/bulk-queue";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  runBatchedCadenceRpc,
+  type CampaignQueueRpcClient,
+} from "@/lib/campaigns/queue-batches";
 
 /* The queueing library's import graph reaches node:crypto (template-pool
  * hashing, provider HMAC verification) — Node built-ins are banned in the
@@ -55,18 +59,6 @@ type BulkSmsJobFailureArgs = {
   jobId: string;
   state: BulkSmsScheduleState;
   total: number;
-};
-
-type CampaignCadenceRepairRpcClient = {
-  rpc(
-    name: "apply_campaign_cadence_reschedule",
-    args: {
-      p_campaign_id: string;
-      p_pace_seconds: number;
-      p_start_after_seconds: number;
-      p_operator_confirmed: boolean;
-    },
-  ): Promise<{ error: { message: string } | null }>;
 };
 
 async function completeCampaign(
@@ -376,18 +368,20 @@ export async function repairCampaignQueueCadenceAfterChunk(
     return;
   }
 
-  const { error } = await (
-    supabase as unknown as CampaignCadenceRepairRpcClient
-  ).rpc("apply_campaign_cadence_reschedule", {
-    p_campaign_id: optsUsedForChunk.campaignId,
-    p_pace_seconds: currentPaceSeconds,
-    p_start_after_seconds: 300,
-    p_operator_confirmed: true,
-  });
+  const result = await runBatchedCadenceRpc(
+    supabase as unknown as CampaignQueueRpcClient,
+    "apply_campaign_cadence_reschedule",
+    {
+      p_campaign_id: optsUsedForChunk.campaignId,
+      p_pace_seconds: currentPaceSeconds,
+      p_start_after_seconds: 300,
+      p_operator_confirmed: true,
+    },
+  );
 
-  if (error) {
+  if (!result.ok) {
     throw new Error(
-      `bulk-sms workflow: failed to repair campaign ${optsUsedForChunk.campaignId} cadence after chunk: ${error.message}`,
+      `bulk-sms workflow: failed to repair campaign ${optsUsedForChunk.campaignId} cadence after chunk: ${result.message}`,
     );
   }
 }

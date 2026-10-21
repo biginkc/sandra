@@ -225,6 +225,8 @@ describe("campaign cadence actions", () => {
       p_pace_seconds: 8,
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
+      p_limit: 100,
+      p_run_id: expect.any(String),
     });
     expect(admin.campaignUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ pace_seconds: 8 }),
@@ -333,6 +335,7 @@ describe("campaign cadence actions", () => {
     expect(rpc).toHaveBeenCalledWith("pause_campaign_queue", {
       p_campaign_id: "campaign-1",
       p_operator_confirmed: true,
+      p_limit: 100,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
@@ -371,9 +374,145 @@ describe("campaign cadence actions", () => {
       p_pace_seconds: 2,
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
+      p_limit: 100,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("loops resume batches until nothing remains and aggregates the window", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [{ affected_count: 500, first_scheduled_for: "2026-06-30T18:05:00.000Z", last_scheduled_for: "2026-06-30T18:38:16.000Z", remaining_count: 700 }],
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: [{ affected_count: 500, first_scheduled_for: "2026-06-30T18:38:20.000Z", last_scheduled_for: "2026-06-30T19:11:36.000Z", remaining_count: 200 }],
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: [{ affected_count: 200, first_scheduled_for: "2026-06-30T19:11:40.000Z", last_scheduled_for: "2026-06-30T19:24:56.000Z", remaining_count: 0 }],
+        error: null,
+      });
+    const admin = adminCampaignClient({ rpc });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue(admin.client);
+
+    const result = await resumeCampaignSends("campaign-1", 4, true);
+
+    expect(rpc).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        affectedCount: 1200,
+        firstScheduledFor: "2026-06-30T18:05:00.000Z",
+        lastScheduledFor: "2026-06-30T19:24:56.000Z",
+        paceSeconds: 4,
+        startAfterSeconds: 300,
+      },
+    });
+  });
+
+  it("reuses one run id across cadence batches", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [{ ...rpcRow, remaining_count: 1 }], error: null })
+      .mockResolvedValueOnce({ data: [{ ...rpcRow, remaining_count: 0 }], error: null });
+    const admin = adminCampaignClient({ rpc });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue(admin.client);
+
+    const result = await applyCampaignCadenceChange("campaign-1", 8, true);
+
+    expect(result.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(rpc.mock.calls[0][1].p_run_id).toBe(rpc.mock.calls[1][1].p_run_id);
+  });
+
+  it("loops pause batches and reports the final counts", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [{ affected_count: 500, pending_count: 0, paused_count: 500, remaining_count: 100 }], error: null })
+      .mockResolvedValueOnce({ data: [{ affected_count: 100, pending_count: 1, paused_count: 600, remaining_count: 0 }], error: null });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue({ rpc });
+
+    const result = await pauseCampaignSends("campaign-1", true);
+
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      ok: true,
+      data: { affectedCount: 600, pendingCount: 1, pausedCount: 600 },
+    });
+  });
+
+  it("reports a mid-loop failure with how many batches already landed", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [{ ...rpcRow, remaining_count: 10 }], error: null })
+      .mockResolvedValueOnce({ data: null, error: { message: "canceling statement due to statement timeout" } });
+    const admin = adminCampaignClient({ rpc });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue(admin.client);
+
+    const result = await resumeCampaignSends("campaign-1", 4, true);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("CADENCE_CHANGE_FAILED");
+      expect(result.error.message).toContain("1 batch already applied; retry to finish the rest");
+    }
+  });
+
+  it("falls back to the single-shot RPC before the batching migration is applied", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: null, error: { code: "PGRST202", message: "Could not find the function" } })
+      .mockResolvedValueOnce({ data: [{ affected_count: 9, pending_count: 0, paused_count: 9 }], error: null });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue({ rpc });
+
+    const result = await pauseCampaignSends("campaign-1", true);
+
+    expect(rpc).toHaveBeenNthCalledWith(2, "pause_campaign_queue", {
+      p_campaign_id: "campaign-1",
+      p_operator_confirmed: true,
+    });
+    expect(result).toEqual({
+      ok: true,
+      data: { affectedCount: 9, pendingCount: 0, pausedCount: 9 },
+    });
+  });
+
+  it("stops after the max batch count instead of looping forever", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ ...rpcRow, remaining_count: 5 }], error: null });
+    const admin = adminCampaignClient({ rpc });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue(admin.client);
+
+    const result = await resumeCampaignSends("campaign-1", 4, true);
+
+    expect(result.ok).toBe(false);
+    expect(rpc).toHaveBeenCalledTimes(600);
   });
 });

@@ -152,6 +152,8 @@ describe("refreshCampaignScheduleForChunk", () => {
       p_pace_seconds: 4,
       p_start_after_seconds: 300,
       p_operator_confirmed: true,
+      p_limit: 100,
+      p_run_id: expect.any(String),
     });
   });
 
