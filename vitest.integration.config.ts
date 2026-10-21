@@ -47,6 +47,7 @@ export default defineConfig({
       "supabase/migrations/20261021200500_voicemail_drop_proof_copy.integration.test.ts",
       "src/lib/voicemail-drop/status-reconcile.integration.test.ts",
       "src/lib/voicemail-drop/reconcile-matrix.integration.test.ts",
+      "src/lib/voicemail-drop/service-role-grants.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",
       "supabase/migrations/20261002020000_direct_browser_watchdog.integration.test.ts",
