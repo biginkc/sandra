@@ -32,7 +32,7 @@ export const NINE_QUESTIONS: Record<NineQuestionId, string> = {
   asked_who: "Did the homeowner ask who is texting them or why?",
   not_interested: "Did the homeowner say they are not interested in selling?",
   wrong_person: "Did the homeowner say we have the wrong person, or that they don't own the property?",
-  asked_stop: "Did the homeowner ask to stop receiving texts?",
+  asked_stop: "Did the homeowner request that communication cease?",
   hostile: "Was the homeowner rude or hostile?",
   confirmed_owner: "Did the homeowner confirm they are the person or owner we asked about?",
   talked_price: "Did the homeowner mention a price or ask how much we would pay?",
