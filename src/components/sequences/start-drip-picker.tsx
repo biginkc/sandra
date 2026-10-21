@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { listDripChoices, type DripChoice } from "@/app/(dashboard)/sequences/actions";
+import type { DripChoice } from "@/lib/sequences/drip-choices";
+import { fetchDripChoices } from "@/lib/sequences/drip-choices-client";
 
 export type PickResult = { status: "enrolled" | "skipped" | "failed"; reason: string; saved?: boolean };
 
@@ -88,7 +89,7 @@ export function StartDripPicker({
     if (previewChoices) { setChoices(previewChoices); return; }
     setLoading(true);
     try {
-      const result = await listDripChoices();
+      const result = await fetchDripChoices();
       if (result.ok) setChoices(result.data);
       else setMessage(result.error.message);
     } catch {

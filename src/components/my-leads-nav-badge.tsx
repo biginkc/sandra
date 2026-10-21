@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+
+import { timeClientCall } from "@/lib/perf/client-action-timing";
 
 const REFRESH_WINDOW_MS = 60_000;
 
@@ -20,39 +22,17 @@ export function MyLeadsNavBadge({
   needsAttention?: boolean;
 }) {
   const [count, setCount] = useState(normalizeCount(initialCount));
-  const lastRefreshAt = useRef(0);
 
-  useEffect(() => {
+  const [seenInitial, setSeenInitial] = useState(initialCount);
+  if (seenInitial !== initialCount) {
+    setSeenInitial(initialCount);
     setCount(normalizeCount(initialCount));
-  }, [initialCount]);
-
-  const refresh = useCallback(async () => {
-    if (!onRefresh) return;
-    const now = Date.now();
-    if (now - lastRefreshAt.current < REFRESH_WINDOW_MS) return;
-    lastRefreshAt.current = now;
-
-    try {
-      const result = await onRefresh();
-      if (result.ok) setCount(normalizeCount(result.count));
-    } catch {
-      // Keep the last confirmed count visible when a foreground refresh fails.
-    }
-  }, [onRefresh]);
+  }
 
   useEffect(() => {
     if (!onRefresh) return;
-
-    const refreshWhenForeground = () => {
-      if (!document.hidden) void refresh();
-    };
-    document.addEventListener("visibilitychange", refreshWhenForeground);
-    window.addEventListener("focus", refreshWhenForeground);
-    return () => {
-      document.removeEventListener("visibilitychange", refreshWhenForeground);
-      window.removeEventListener("focus", refreshWhenForeground);
-    };
-  }, [onRefresh, refresh]);
+    return subscribeBadge(onRefresh, (next) => setCount(normalizeCount(next)));
+  }, [onRefresh]);
 
   if (count === null || count === 0) return null;
 
@@ -76,4 +56,48 @@ export function badgeLabel(count: number, needsAttention: boolean): string {
 function normalizeCount(value: number | null | undefined): number | null {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
   return Math.floor(value);
+}
+
+// Desktop and mobile nav both mount a badge; they share one focus listener and one
+// throttle per refresh source so a single foreground event triggers a single read.
+type BadgeSource = { listeners: Set<(count: number) => void>; lastRefreshAt: number; detach?: () => void };
+const badgeSources = new Map<MyLeadsBadgeRefresh, BadgeSource>();
+
+function subscribeBadge(onRefresh: MyLeadsBadgeRefresh, listener: (count: number) => void): () => void {
+  let source = badgeSources.get(onRefresh);
+  if (!source) {
+    source = { listeners: new Set(), lastRefreshAt: 0 };
+    badgeSources.set(onRefresh, source);
+  }
+  const current = source;
+  current.listeners.add(listener);
+  if (!current.detach) {
+    const refreshWhenForeground = () => {
+      if (!document.hidden) void refreshBadgeSource(onRefresh, current);
+    };
+    document.addEventListener("visibilitychange", refreshWhenForeground);
+    window.addEventListener("focus", refreshWhenForeground);
+    current.detach = () => {
+      document.removeEventListener("visibilitychange", refreshWhenForeground);
+      window.removeEventListener("focus", refreshWhenForeground);
+    };
+  }
+  return () => {
+    current.listeners.delete(listener);
+    if (current.listeners.size > 0) return;
+    current.detach?.();
+    current.detach = undefined;
+  };
+}
+
+async function refreshBadgeSource(onRefresh: MyLeadsBadgeRefresh, source: BadgeSource) {
+  const now = Date.now();
+  if (now - source.lastRefreshAt < REFRESH_WINDOW_MS) return;
+  source.lastRefreshAt = now;
+  try {
+    const result = await timeClientCall("refreshMyLeadsBadge", onRefresh)();
+    if (result.ok) for (const listener of source.listeners) listener(result.count);
+  } catch {
+    // Keep the last confirmed count visible when a foreground refresh fails.
+  }
 }

@@ -2454,3 +2454,9 @@ describe("InboxDetail Owns N houses badge", () => {
     expect(screen.queryByTestId("inbox-detail-houses")).not.toBeInTheDocument();
   });
 });
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

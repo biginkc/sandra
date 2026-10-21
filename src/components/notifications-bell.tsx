@@ -19,12 +19,13 @@ import {
   markRead,
   type NotificationRow,
 } from "@/app/(dashboard)/_actions/notifications";
+import { timeClientCall } from "@/lib/perf/client-action-timing";
 import { createClient } from "@/lib/supabase/client";
 
 /**
  * Top-nav bell icon with unread counter + recent-notifications dropdown.
  *
- * Realtime primary, 15s safety-net poll — mirrors the pattern from
+ * Realtime primary, 60s visible-only reconciliation poll — mirrors the pattern from
  * `src/app/(dashboard)/import/steps/step-progress.tsx:43-86`, including
  * the April 2026 auth-race fix (`supabase.realtime.setAuth()` MUST
  * resolve before `.subscribe()` or the socket opens as anon and RLS
@@ -34,6 +35,9 @@ import { createClient } from "@/lib/supabase/client";
  * needs the unread count, which comes through Realtime + poll without
  * loading rows.
  */
+const RECONCILE_INTERVAL_MS = 60_000;
+const timedUnreadCount = timeClientCall("getUnreadCount", getUnreadCount);
+
 export function NotificationsBell({ userId }: { userId: string }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [items, setItems] = useState<NotificationRow[]>([]);
@@ -46,10 +50,47 @@ export function NotificationsBell({ userId }: { userId: string }) {
     let pollId: ReturnType<typeof setInterval> | null = null;
     let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    const fetchCount = async () => {
-      const r = await getUnreadCount();
+    // One count read at a time; requests that land meanwhile (a "clear all"
+    // DELETE burst, a reconnect) collapse into one trailing read. Hidden tabs
+    // skip it — the visibility handler re-reads on return.
+    let inFlight: Promise<void> | null = null;
+    let trailing = false;
+    const fetchCount = (): Promise<void> => {
+      if (!mounted || document.hidden) return Promise.resolve();
+      if (inFlight) {
+        trailing = true;
+        return inFlight;
+      }
+      inFlight = (async () => {
+        try {
+          const r = await timedUnreadCount();
+          if (mounted && r.ok) setUnreadCount(r.data);
+        } finally {
+          inFlight = null;
+          if (trailing) {
+            trailing = false;
+            void fetchCount();
+          }
+        }
+      })();
+      return inFlight;
+    };
+
+    // Reconciliation poll runs only while the tab is visible; hidden tabs stay
+    // quiet and refresh once on return.
+    const stopPoll = () => {
+      if (pollId) clearInterval(pollId);
+      pollId = null;
+    };
+    const startPoll = () => {
+      stopPoll();
+      pollId = setInterval(() => void fetchCount(), RECONCILE_INTERVAL_MS);
+    };
+    const onVisibility = () => {
       if (!mounted) return;
-      if (r.ok) setUnreadCount(r.data);
+      if (document.hidden) return stopPoll();
+      void fetchCount();
+      startPoll();
     };
 
     const start = async () => {
@@ -58,9 +99,10 @@ export function NotificationsBell({ userId }: { userId: string }) {
       // JWT; subscribing as anon means RLS drops every event.
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? null;
-      if (token) supabase.realtime.setAuth(token);
+      if (token) await supabase.realtime.setAuth(token);
       if (!mounted) return;
 
+      let subscribedOnce = false;
       channel = supabase
         .channel(`notifications:${userId}`)
         .on(
@@ -92,19 +134,38 @@ export function NotificationsBell({ userId }: { userId: string }) {
             }
           },
         )
-        .subscribe();
+        .on(
+          "postgres_changes",
+          {
+            event: "DELETE",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${userId}`,
+          },
+          () => {
+            // DELETE payloads carry only the key, so re-read the authoritative count.
+            if (mounted) void fetchCount();
+          },
+        )
+        .subscribe((status) => {
+          if (status !== "SUBSCRIBED") return;
+          // First join is covered by the initial fetch; later joins are reconnects.
+          if (subscribedOnce && mounted) void fetchCount();
+          subscribedOnce = true;
+        });
 
       await fetchCount();
-
-      // Safety-net poll — low-frequency, catches rare socket drops.
-      pollId = setInterval(fetchCount, 15000);
+      if (!mounted) return;
+      document.addEventListener("visibilitychange", onVisibility);
+      if (!document.hidden) startPoll();
     };
 
     void start();
 
     return () => {
       mounted = false;
-      if (pollId) clearInterval(pollId);
+      stopPoll();
+      document.removeEventListener("visibilitychange", onVisibility);
       if (channel) void supabase.removeChannel(channel);
     };
   }, [userId]);
