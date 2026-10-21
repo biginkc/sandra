@@ -4,7 +4,7 @@
 -- rollback refuses while this function exists).
 begin;
 
-drop function if exists public.upgrade_temporary_pauses_for_inbound_call(uuid[]);
+drop function if exists public.pause_enrollments_for_inbound_call(uuid[]);
 drop function if exists public.resolve_voicemail_drop_outcome(uuid, text, text, text, text, text, numeric, text, jsonb);
 
 commit;

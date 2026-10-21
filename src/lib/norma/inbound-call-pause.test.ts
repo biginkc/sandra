@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { pauseContactEnrollments } = vi.hoisted(() => ({ pauseContactEnrollments: vi.fn() }));
-vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
+const { recordLeadEvents } = vi.hoisted(() => ({ recordLeadEvents: vi.fn() }));
+vi.mock("@/lib/events", () => ({ recordLeadEvents, LEAD_EVENT_TYPES: { SEQUENCE_PAUSED: "sequence_paused" } }));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -24,12 +24,14 @@ function fakeClient(
   const client = {
     async rpc(fn: string, args: Record<string, unknown>) {
       rpcCalls.push({ fn, args });
-      const ids = (args.p_property_ids as string[]) ?? [];
+      const contactIds = (args.p_contact_ids as string[]) ?? [];
+      const propertyIds = properties.filter((p) => contactIds.includes(p.homeowner_contact_id)).map((p) => p.id);
       const hit = enrollments.filter(
-        (e) => ids.includes(e.property_id) && e.status === "paused" && ["call_in_progress", "norma_call"].includes(e.pause_reason ?? ""),
+        (e) => propertyIds.includes(e.property_id) && (e.status === "active" || (e.status === "paused" &&
+          ["reconciliation_required", "call_in_progress", "norma_call"].includes(e.pause_reason ?? ""))),
       );
-      for (const e of hit) e.pause_reason = "inbound_call";
-      return { data: hit.length, error: null };
+      for (const e of hit) Object.assign(e, { status: "paused", pause_reason: "inbound_call" });
+      return { data: hit.map((e) => ({ id: e.id, property_id: e.property_id, sequence_id: "seq-1" })), error: null };
     },
     from(table: string) {
       const eq: Record<string, unknown> = {};
@@ -92,86 +94,68 @@ function fakeClient(
 }
 
 beforeEach(() => {
-  pauseContactEnrollments.mockReset();
-  pauseContactEnrollments.mockResolvedValue({ paused: 1 });
+  recordLeadEvents.mockReset();
 });
 
+const props = [{ id: "p-1", homeowner_contact_id: "c-1" }, { id: "p-2", homeowner_contact_id: "c-2" }];
+
 describe("pauseEnrollmentsForInboundCall", () => {
-  it("pauses every matched contact in the call's org with inbound_call", async () => {
-    const { client, contactQueries } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
+  it("pauses every matched contact in the call's org in one RPC call", async () => {
+    const enrollments: Enrollment[] = [
+      { id: "e-1", property_id: "p-1", status: "active", pause_reason: null },
+      { id: "e-2", property_id: "p-2", status: "active", pause_reason: null },
+    ];
+    const { client, contactQueries, rpcCalls } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
       { id: "c-1", org_id: "org-1", phone_1: "+18165550101" },
       { id: "c-2", org_id: "org-1", phone_3: "+18165550101" },
       { id: "c-other-org", org_id: "org-2", phone_1: "+18165550101" },
       { id: "c-other-phone", org_id: "org-1", phone_1: "+18165550999" },
       { id: "c-same-last4", org_id: "org-1", phone_1: "+19135550101" },
-    ]);
+    ], { properties: props, enrollments });
     const result = await pauseEnrollmentsForInboundCall(client, "call-row");
     expect(result).toEqual({ matchedContactIds: ["c-1", "c-2"], paused: 2 });
-    expect(pauseContactEnrollments.mock.calls.map((c) => c[1])).toEqual([
-      { contactId: "c-1", reason: "inbound_call" },
-      { contactId: "c-2", reason: "inbound_call" },
-    ]);
+    expect(rpcCalls).toEqual([{ fn: "pause_enrollments_for_inbound_call", args: { p_contact_ids: ["c-1", "c-2"] } }]);
     expect(contactQueries.every((q) => q.org_id === "org-1")).toBe(true);
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
   });
 
   it.each(["8165550101", "(816) 555-0101", "816.555.0101", "1-816-555-0101"])(
     "matches a %s slot against a +18165550101 caller",
     async (slot) => {
-      const { client } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
+      const { client, rpcCalls } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
         { id: "c-1", org_id: "org-1", phone_2: slot },
       ]);
       const result = await pauseEnrollmentsForInboundCall(client, "call-row");
       expect(result.matchedContactIds).toEqual(["c-1"]);
-      expect(pauseContactEnrollments).toHaveBeenCalledWith(client, { contactId: "c-1", reason: "inbound_call" });
+      expect(rpcCalls[0]).toEqual({ fn: "pause_enrollments_for_inbound_call", args: { p_contact_ids: ["c-1"] } });
     },
   );
 
-  it("pauses through pauseContactEnrollments only (its single UPDATE also takes over reconciliation holds)", async () => {
-    pauseContactEnrollments.mockResolvedValue({ paused: 1 });
+  it("active, reconciliation holds and temporary call pauses all become inbound_call; real stops are left", async () => {
     const enrollments: Enrollment[] = [
-      { id: "e-recon", property_id: "p-1", status: "paused", pause_reason: "reconciliation_required" },
+      { id: "e-a", property_id: "p-1", status: "active", pause_reason: null },
+      { id: "e-r", property_id: "p-1", status: "paused", pause_reason: "reconciliation_required" },
+      { id: "e-c", property_id: "p-1", status: "paused", pause_reason: "call_in_progress" },
+      { id: "e-n", property_id: "p-1", status: "paused", pause_reason: "norma_call" },
+      { id: "e-i", property_id: "p-1", status: "paused", pause_reason: "inbound_reply" },
     ];
-    const { client } = fakeClient(
-      { org_id: "org-1", from_e164: "+18165550101" },
-      [{ id: "c-1", org_id: "org-1", phone_1: "8165550101" }],
-      { properties: [{ id: "p-1", homeowner_contact_id: "c-1" }], enrollments },
-    );
-    const result = await pauseEnrollmentsForInboundCall(client, "call-row");
-    expect(result.paused).toBe(1);
-    expect(pauseContactEnrollments).toHaveBeenCalledTimes(1);
-    expect(pauseContactEnrollments).toHaveBeenCalledWith(client, { contactId: "c-1", reason: "inbound_call" });
-    // No second, separate takeover write from this module.
-    expect(enrollments[0].pause_reason).toBe("reconciliation_required");
-  });
-
-  it.each(["call_in_progress", "norma_call"])("upgrades a temporary %s pause to inbound_call before pausing", async (reason) => {
-    pauseContactEnrollments.mockResolvedValue({ paused: 0 });
-    const enrollments: Enrollment[] = [
-      { id: "e-1", property_id: "p-1", status: "paused", pause_reason: reason },
-      { id: "e-2", property_id: "p-1", status: "paused", pause_reason: "inbound_reply" },
-    ];
-    const { client, rpcCalls } = fakeClient(
-      { org_id: "org-1", from_e164: "+18165550101" },
-      [{ id: "c-1", org_id: "org-1", phone_1: "8165550101" }],
-      { properties: [{ id: "p-1", homeowner_contact_id: "c-1" }], enrollments },
-    );
-    const result = await pauseEnrollmentsForInboundCall(client, "call-row");
-    expect(result.paused).toBe(1);
-    expect(rpcCalls).toEqual([{ fn: "upgrade_temporary_pauses_for_inbound_call", args: { p_property_ids: ["p-1"] } }]);
-    expect(enrollments.map((e) => e.pause_reason)).toEqual(["inbound_call", "inbound_reply"]);
+    const { client } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" },
+      [{ id: "c-1", org_id: "org-1", phone_1: "8165550101" }], { properties: props, enrollments });
+    expect((await pauseEnrollmentsForInboundCall(client, "call-row")).paused).toBe(4);
+    expect(enrollments.map((e) => e.pause_reason)).toEqual(["inbound_call", "inbound_call", "inbound_call", "inbound_call", "inbound_reply"]);
   });
 
   it("pauses nothing when no contact matches the caller", async () => {
-    const { client } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
+    const { client, rpcCalls } = fakeClient({ org_id: "org-1", from_e164: "+18165550101" }, [
       { id: "c-1", org_id: "org-1", phone_1: "+18165550999" },
     ]);
     expect(await pauseEnrollmentsForInboundCall(client, "call-row")).toEqual({ matchedContactIds: [], paused: 0 });
-    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    expect(rpcCalls).toEqual([]);
   });
 
   it("pauses nothing when the call record is missing", async () => {
-    const { client } = fakeClient(null, []);
+    const { client, rpcCalls } = fakeClient(null, []);
     expect(await pauseEnrollmentsForInboundCall(client, "call-row")).toEqual({ matchedContactIds: [], paused: 0 });
-    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    expect(rpcCalls).toEqual([]);
   });
 });
