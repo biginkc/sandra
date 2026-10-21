@@ -92,6 +92,7 @@ export default defineConfig({
       "supabase/migrations/20261020130000_my_leads_work_new_lead_in_drip.integration.test.ts",
       "supabase/migrations/20261021090000_my_leads_work_classified_cached.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",
+      "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261016040000_homeowner_houses_first_page.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
