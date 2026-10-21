@@ -150,15 +150,12 @@ export async function checkVoicemailDropEligibility(
       .gt("talk_duration_seconds", 0)
       .order("started_at", { ascending: false })
       .limit(5),
-    client
-      .from("acquisition_attempts")
-      .select("call_activity_id, occurred_at")
-      .eq("org_id", params.orgId)
-      .eq("property_id", params.propertyId)
-      .eq("outcome", "reached")
-      .not("call_activity_id", "is", null)
-      .order("occurred_at", { ascending: false })
-      .limit(20),
+    // acquisition_attempts has no service-role table grant; read the reached
+    // attempts' facts through the definer RPC (20261021220000).
+    client.rpc("get_voicemail_drop_reached_attempt_facts", {
+      p_org_id: params.orgId,
+      p_property_id: params.propertyId,
+    }),
     client
       .from("messages")
       .select("from_address, created_at")

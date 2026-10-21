@@ -148,8 +148,6 @@ function makeClient(world: World) {
       case "call_activities":
         if (world.readError === "call_activities") return { data: null, error: { message: "boom" } };
         return { data: has("id") ? world.attemptCalls : world.calls, error: null };
-      case "acquisition_attempts":
-        return { data: world.attempts, error: null };
       case "messages":
         return { data: world.inbound, error: null };
       case "norma_call_requests":
@@ -221,6 +219,9 @@ function makeClient(world: World) {
       if (world.recordError) return Promise.resolve({ data: null, error: world.recordError });
       const result = name === "record_voicemail_drop_accepted" ? world.acceptedResult : world.unknownResult;
       return Promise.resolve({ data: result === undefined ? (name === "record_voicemail_drop_accepted" ? "advanced" : "held") : result, error: null });
+    }
+    if (name === "get_voicemail_drop_reached_attempt_facts") {
+      return Promise.resolve({ data: world.attempts, error: null });
     }
     if (name === "reserve_voicemail_drop_with_cap") {
       if (world.reserveError) return Promise.resolve({ data: null, error: world.reserveError });
