@@ -1006,52 +1006,6 @@ describe("sendSmsToContact (integration)", () => {
     });
   });
 
-  it("release holds a due campaign message while a batched cadence change is active", async () => {
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const { data: campaign } = await supabase
-      .from("campaigns")
-      .insert({
-        org_id: "00000000-0000-0000-0000-000000000bbb",
-        name: `Release Cadence Hold ${crypto.randomUUID()}`,
-      })
-      .select("id")
-      .single();
-    const queue = await sendSmsToContact(supabase, {
-      origin: "manual",
-      contactId,
-      propertyId,
-      body: "queued during cadence change Mel with BMH.",
-      queueOnly: true,
-      scheduledFor: new Date(Date.now() - 1000),
-      campaignId: campaign!.id,
-    });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    const ops = supabase as unknown as {
-      from: (t: string) => { insert: (row: Record<string, unknown>) => PromiseLike<{ error: unknown }> };
-    };
-    const { error } = await ops.from("campaign_queue_ops").insert({
-      id: crypto.randomUUID(),
-      campaign_id: campaign!.id,
-      kind: "cadence",
-      pace_seconds: 4,
-    });
-    expect(error).toBeNull();
-
-    const callsBefore = getMockMessageLog().length;
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-
-    expect(release.status).toBe("blocked_not_due");
-    expect(getMockMessageLog()).toHaveLength(callsBefore);
-    const { data: row } = await supabase
-      .from("messages")
-      .select("status")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.status).toBe("queued");
-  });
-
   it("reuses one conversation_id for repeated sends on the same contact/property thread", async () => {
     await withSafeSendWindow(async () => {
       const { contactId, propertyId } = await seed({ withConsent: true });

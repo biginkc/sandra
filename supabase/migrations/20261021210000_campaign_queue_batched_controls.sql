@@ -31,8 +31,18 @@
 --     not finished). It re-queues planned rows that are still paused (rows
 --     the sender re-paused mid-resume are re-applied with their planned
 --     time) and flips the campaign to 'completed' only on the final batch.
---   * While a cadence op is active, the sender holds the campaign's queued
---     rows (blocked_not_due), so rows not yet rescheduled cannot jump ahead.
+--   * Cadence holds the campaign for the whole pass with the existing pause
+--     gate: the first call sets the campaign 'paused' (remembering its prior
+--     status), each call first re-holds planned rows still queued on their
+--     old time, then releases planned rows at their new time; the prior
+--     status is restored on the final batch. An abandoned pass leaves the
+--     campaign paused (nothing sends on a half-written schedule) until a
+--     retry takes it over or an operator pauses/resumes.
+--   * A takeover (resume or cadence) re-times the inherited plan from now,
+--     in the same order, so a late retry never queues rows in the past.
+--   * Known pre-existing race (unchanged from the single-shot version): a
+--     sender that read 'paused' just before the final batch commits can
+--     re-pause one row after completion; pausing and resuming again fixes it.
 --
 -- p_limit null (the default) keeps the old unbounded single-statement
 -- behaviour for any caller still on the old argument list.
@@ -44,6 +54,7 @@ create table if not exists public.campaign_queue_ops (
   campaign_id uuid not null references public.campaigns (id) on delete cascade,
   kind text not null check (kind in ('resume', 'cadence')),
   pace_seconds integer not null,
+  prior_campaign_status text,
   state text not null default 'active'
     check (state in ('active', 'done', 'cancelled', 'superseded')),
   created_at timestamptz not null default now(),
@@ -129,8 +140,9 @@ begin
   end if;
 
   update public.campaign_queue_ops set state = 'superseded' where id = v_active.id;
-  insert into public.campaign_queue_ops (id, campaign_id, kind, pace_seconds, touched_at)
-  values (p_op_id, p_campaign_id, p_kind, p_pace, v_now);
+  insert into public.campaign_queue_ops (id, campaign_id, kind, pace_seconds, touched_at, prior_campaign_status)
+  values (p_op_id, p_campaign_id, p_kind, p_pace, v_now,
+          case when v_active.kind = p_kind then v_active.prior_campaign_status end);
 
   if v_active.kind = p_kind then
     update public.campaign_queue_plan set op_id = p_op_id where op_id = v_active.id;
@@ -184,6 +196,7 @@ declare
   v_remaining bigint := 0;
   v_ever_applied boolean;
   v_claim text;
+  v_held bigint := 0;
 begin
   if p_operator_confirmed is distinct from true then
     raise exception 'apply_campaign_cadence_reschedule: operator confirmation required'
@@ -229,31 +242,45 @@ begin
   end if;
 
   v_claim := public.campaign_queue_claim_op(p_campaign_id, 'cadence', v_op, p_pace_seconds);
-  if v_claim = 'inherit' then
-    -- Keep the abandoned pass's order; re-time every row at this pace.
-    update public.campaign_queue_plan p
-    set scheduled_for = v_start_at + (p.seq::double precision * make_interval(secs => p_pace_seconds)),
-        applied = false
-    where p.op_id = v_op;
-  elsif v_claim = 'new' then
+
+  if v_claim = 'new' then
     insert into public.campaign_queue_plan (op_id, seq, message_id, scheduled_for)
     select
       v_op,
-      (row_number() over (order by m.scheduled_for asc nulls first, m.created_at asc, m.id asc) - 1)::integer,
+      (row_number() over w - 1)::integer,
       m.id,
-      v_start_at + (
-        (row_number() over (order by m.scheduled_for asc nulls first, m.created_at asc, m.id asc) - 1)::double precision
-        * make_interval(secs => p_pace_seconds))
+      v_start_at + ((row_number() over w - 1)::double precision * make_interval(secs => p_pace_seconds))
     from public.messages m
     where m.campaign_id = p_campaign_id
       and m.org_id = v_org_id
       and m.channel = 'sms'
       and m.direction = 'outbound'
-      and m.status = 'queued';
+      and m.status = 'queued'
+    window w as (order by m.scheduled_for asc nulls first, m.created_at asc, m.id asc);
+
+    -- Hold the campaign for the whole pass with the existing pause gate: the
+    -- sender re-pauses any due queued row of a paused campaign, so no row can
+    -- send on its old time while the new cadence is being written. The
+    -- previous status comes back on the final batch.
+    update public.campaign_queue_ops o
+    set prior_campaign_status = c.status
+    from public.campaigns c
+    where o.id = v_op and c.id = p_campaign_id;
+    update public.campaigns c
+    set status = 'paused', updated_at = v_now
+    where c.id = p_campaign_id and c.status <> 'archived';
+  elsif v_claim = 'inherit' then
+    -- Keep the abandoned pass's order; re-time every row from now at this
+    -- pace and re-apply all of them (rows it already queued are re-held).
+    update public.campaign_queue_plan p
+    set scheduled_for = v_start_at + (p.seq::double precision * make_interval(secs => p_pace_seconds)),
+        applied = false
+    where p.op_id = v_op;
   end if;
 
+  -- Phase 1: hold planned rows still queued on their old time.
   with batch as (
-    select p.seq, p.message_id, p.scheduled_for
+    select p.message_id
     from public.campaign_queue_plan p
     join public.messages m on m.id = p.message_id
     where p.op_id = v_op
@@ -263,46 +290,83 @@ begin
     limit coalesce(p_limit, 2147483647)
     for update of m
   ),
-  updated as (
+  held as (
     update public.messages m
-    set scheduled_for = batch.scheduled_for
+    set status = 'paused',
+        scheduled_for = null,
+        metadata = coalesce(m.metadata, '{}'::jsonb) || jsonb_build_object(
+          'campaignPause',
+          jsonb_build_object(
+            'pausedAt', v_now,
+            'previousScheduledFor', m.scheduled_for,
+            'reason', 'cadence_change'
+          )
+        )
     from batch
     where m.id = batch.message_id
-      and m.status = 'queued'
-    returning m.id, m.scheduled_for
-  ),
-  marked as (
-    update public.campaign_queue_plan p
-    set applied = true
-    from updated
-    where p.op_id = v_op and p.message_id = updated.id
     returning 1
   )
-  select
-    count(updated.scheduled_for)::bigint,
-    min(updated.scheduled_for),
-    max(updated.scheduled_for)
-  into v_affected_count, v_first_scheduled_for, v_last_scheduled_for
-  from updated;
+  select count(*) into v_held from held;
+
+  -- Phase 2 (only once nothing is left to hold): release planned rows at
+  -- their planned time. Rows the sender re-paused get their slot back.
+  if v_held = 0 then
+    with batch as (
+      select p.seq, p.message_id, p.scheduled_for
+      from public.campaign_queue_plan p
+      join public.messages m on m.id = p.message_id
+      where p.op_id = v_op
+        and m.status = 'paused'
+      order by p.seq
+      limit coalesce(p_limit, 2147483647)
+      for update of m
+    ),
+    updated as (
+      update public.messages m
+      set status = 'queued',
+          scheduled_for = batch.scheduled_for,
+          metadata = coalesce(m.metadata, '{}'::jsonb) - 'campaignPause'
+      from batch
+      where m.id = batch.message_id
+        and m.status = 'paused'
+      returning m.id, m.scheduled_for
+    ),
+    marked as (
+      update public.campaign_queue_plan p
+      set applied = true
+      from updated
+      where p.op_id = v_op and p.message_id = updated.id
+      returning 1
+    )
+    select
+      count(updated.scheduled_for)::bigint,
+      min(updated.scheduled_for),
+      max(updated.scheduled_for)
+    into v_affected_count, v_first_scheduled_for, v_last_scheduled_for
+    from updated;
+  end if;
 
   select count(*)::bigint
   into v_remaining
   from public.campaign_queue_plan p
   join public.messages m on m.id = p.message_id
   where p.op_id = v_op
-    and not p.applied
-    and m.status = 'queued';
+    and ((not p.applied and m.status = 'queued') or m.status = 'paused');
 
   if v_remaining = 0 then
     select exists (select 1 from public.campaign_queue_plan p where p.op_id = v_op and p.applied)
     into v_ever_applied;
-    if v_ever_applied then
-      update public.campaigns c
-      set pace_seconds = p_pace_seconds,
-          updated_at = clock_timestamp()
-      where c.id = p_campaign_id
-        and c.org_id = v_org_id;
-    end if;
+    update public.campaigns c
+    set status = case
+          when c.status = 'paused' and o.prior_campaign_status is not null then o.prior_campaign_status
+          else c.status
+        end,
+        pace_seconds = case when v_ever_applied then p_pace_seconds else c.pace_seconds end,
+        updated_at = clock_timestamp()
+    from public.campaign_queue_ops o
+    where o.id = v_op
+      and c.id = p_campaign_id
+      and c.org_id = v_org_id;
     perform public.campaign_queue_finish_op(v_op, 'done');
   end if;
 
@@ -496,6 +560,7 @@ declare
   v_first_scheduled_for timestamptz;
   v_last_scheduled_for timestamptz;
   v_remaining bigint := 0;
+  v_claim text;
 begin
   if p_operator_confirmed is distinct from true then
     raise exception 'resume_campaign_queue: operator confirmation required'
@@ -550,7 +615,15 @@ begin
     end if;
   end if;
 
-  if public.campaign_queue_claim_op(p_campaign_id, 'resume', v_op, p_pace_seconds) = 'new' then
+  v_claim := public.campaign_queue_claim_op(p_campaign_id, 'resume', v_op, p_pace_seconds);
+  if v_claim = 'inherit' then
+    -- Re-time from now (same pace, same order) so a late retry never queues
+    -- rows in the past; rows the old op already queued are re-applied.
+    update public.campaign_queue_plan p
+    set scheduled_for = v_start_at + (p.seq::double precision * make_interval(secs => p_pace_seconds)),
+        applied = false
+    where p.op_id = v_op;
+  elsif v_claim = 'new' then
     if exists (
       select 1
       from public.messages m
@@ -591,7 +664,7 @@ begin
     from public.campaign_queue_plan p
     join public.messages m on m.id = p.message_id
     where p.op_id = v_op
-      and m.status = 'paused'
+      and (m.status = 'paused' or (m.status = 'queued' and not p.applied))
     order by p.seq
     limit coalesce(p_limit, 2147483647)
     for update of m
@@ -603,8 +676,15 @@ begin
         metadata = coalesce(m.metadata, '{}'::jsonb) - 'campaignPause'
     from batch
     where m.id = batch.message_id
-      and m.status = 'paused'
-    returning m.scheduled_for
+      and m.status in ('paused', 'queued')
+    returning m.id, m.scheduled_for
+  ),
+  marked as (
+    update public.campaign_queue_plan p
+    set applied = true
+    from updated
+    where p.op_id = v_op and p.message_id = updated.id
+    returning 1
   )
   select
     count(updated.scheduled_for)::bigint,
@@ -618,7 +698,7 @@ begin
   from public.campaign_queue_plan p
   join public.messages m on m.id = p.message_id
   where p.op_id = v_op
-    and m.status = 'paused';
+    and (m.status = 'paused' or (m.status = 'queued' and not p.applied));
 
   if v_remaining = 0 then
     update public.campaigns c

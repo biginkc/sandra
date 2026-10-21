@@ -210,8 +210,20 @@ it("two concurrent pausers converge without losing previousScheduledFor", async 
 it("reschedules 3,000 queued rows in batches with the single-shot order and spacing", async () => {
   await seed("queued");
   const reference = queuedReference(await rows());
-  expect(await loop(a, CADENCE, [campaign, 6, LIMIT])).toHaveLength(6);
-  expectContinuousCadence(await inOrder(reference), 6);
+  const op = randomUUID();
+  const statuses: string[] = [];
+  for (let i = 0; i < 100; i += 1) {
+    const r = await once(a, CADENCE, [campaign, 6, LIMIT], op);
+    statuses.push(await status());
+    if (Number(r.remaining_count) === 0) break;
+  }
+  // 6 hold batches + 6 release batches; held (paused) until the last one.
+  expect(statuses).toHaveLength(12);
+  expect(statuses.slice(0, 11).every((x) => x === "paused")).toBe(true);
+  expect(statuses[11]).toBe("active");
+  const ordered = await inOrder(reference);
+  expect(ordered.every((r) => r.status === "queued" && !("campaignPause" in r.metadata))).toBe(true);
+  expectContinuousCadence(ordered, 6);
   expect((await a.query("select pace_seconds from public.campaigns where id=$1", [campaign])).rows[0].pace_seconds).toBe(6);
 }, 120_000);
 
@@ -223,19 +235,21 @@ it("a second concurrent cadence change is refused; no row is rewritten twice", a
   expect(rejected).toHaveLength(1);
   expect(String(rejected[0].reason)).toMatch(/in progress/);
   const fulfilled = results.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<unknown[]>;
-  expect(fulfilled.value).toHaveLength(6);
+  expect(fulfilled.value).toHaveLength(12);
   expectContinuousCadence(await inOrder(reference), 6);
 }, 120_000);
 
-it("an abandoned cadence pass (3 batches of 100) is taken over at a new pace in the original order", async () => {
+it("an abandoned cadence pass (300 rows released) is taken over at a new pace in the original order", async () => {
   await seed("queued");
   const reference = queuedReference(await rows());
   const dead = randomUUID();
-  for (let i = 0; i < 3; i += 1) await once(a, CADENCE, [campaign, 6, 100], dead);
+  for (let i = 0; i < 33; i += 1) await once(a, CADENCE, [campaign, 6, 100], dead); // all held + 300 released
+  expect(await status()).toBe("paused"); // abandoned pass keeps the campaign held
   await expect(loop(a, CADENCE, [campaign, 8, 100])).rejects.toThrow(/in progress/);
   await ageOp();
   await loop(a, CADENCE, [campaign, 8, 100]);
   expectContinuousCadence(await inOrder(reference), 8);
+  expect(await status()).toBe("active");
 }, 120_000);
 
 it("an interrupted resume is finished by a retry at the same pace; a different pace is refused", async () => {
@@ -341,4 +355,20 @@ it("a second cadence pass after a completed one follows the current schedule ord
   const reference = queuedReference(await rows());
   await loop(a, CADENCE, [campaign, 8, LIMIT]);
   expectContinuousCadence(await inOrder(reference), 8);
+}, 120_000);
+
+it("a resume retried long after a crash is re-timed from now, never in the past", async () => {
+  await seed("paused");
+  const reference = pausedReference(await rows());
+  const dead = randomUUID();
+  await once(a, RESUME, [campaign, PACE, LIMIT], dead);
+  // Hours later: the old plan and the rows it queued are in the past.
+  await a.query("update public.campaign_queue_plan set scheduled_for = scheduled_for - interval '6 hours' where op_id=$1", [dead]);
+  await a.query("update public.messages set scheduled_for = scheduled_for - interval '6 hours' where org_id=$1 and status='queued'", [org]);
+  await ageOp();
+  const before = Date.now();
+  await loop(b, RESUME, [campaign, PACE, LIMIT]);
+  const ordered = await inOrder(reference);
+  expect(ordered.every((r) => r.status === "queued" && r.scheduled_for!.getTime() >= before)).toBe(true);
+  expectContinuousCadence(ordered, PACE);
 }, 120_000);
