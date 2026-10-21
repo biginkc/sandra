@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { AfterAttemptDripPicker } from "@/components/sequences/after-attempt-drip-picker";
+import { timeClientCall } from "@/lib/perf/client-action-timing";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -164,8 +165,10 @@ export function UnifiedQueue({
   const [detailTick, setDetailTick] = useState(0);
   const [clock, setClock] = useState(() => Date.now());
 
-  const loadPage = useCallback((member: string, query: WorkQuery) => actions.loadWorkPage({ memberId: member, query }), [actions]);
-  const loadFacts = useCallback((member: string, ids: string[]) => actions.loadWorkFacts({ memberId: member, ids }), [actions]);
+  const timedLoadWorkPage = useMemo(() => timeClientCall("loadWorkPage", actions.loadWorkPage), [actions]);
+  const timedLoadWorkFacts = useMemo(() => timeClientCall("loadWorkFacts", actions.loadWorkFacts), [actions]);
+  const loadPage = useCallback((member: string, query: WorkQuery) => timedLoadWorkPage({ memberId: member, query }), [timedLoadWorkPage]);
+  const loadFacts = useCallback((member: string, ids: string[]) => timedLoadWorkFacts({ memberId: member, ids }), [timedLoadWorkFacts]);
 
   const queue = useWorkQueue({
     initial,
