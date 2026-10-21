@@ -38,6 +38,11 @@ import {
   hasEffectiveAudience,
 } from "@/lib/prospects/effective-audience";
 import { decodeFilters, type FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  runBatchedCadenceRpc,
+  runBatchedPauseRpc,
+  type CampaignQueueRpcClient,
+} from "@/lib/campaigns/queue-batches";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -137,8 +142,6 @@ type CampaignCadenceRpcName =
   | "apply_campaign_cadence_reschedule"
   | "resume_campaign_queue";
 
-type CampaignPauseRpcName = "pause_campaign_queue";
-
 type CampaignCadenceRpcClient = {
   rpc: (
     fn: CampaignCadenceRpcName,
@@ -150,19 +153,6 @@ type CampaignCadenceRpcClient = {
     },
   ) => Promise<{
     data: CampaignCadenceRpcRow[] | null;
-    error: { message: string } | null;
-  }>;
-};
-
-type CampaignPauseRpcClient = {
-  rpc: (
-    fn: CampaignPauseRpcName,
-    args: {
-      p_campaign_id: string;
-      p_operator_confirmed: boolean;
-    },
-  ) => Promise<{
-    data: CampaignQueuePauseRpcRow[] | null;
     error: { message: string } | null;
   }>;
 };
@@ -640,14 +630,33 @@ async function runCadenceRpc(
   const rpc =
     rpcClient ??
     ((await createClient()) as unknown as CampaignCadenceRpcClient);
-  const { data, error } = await rpc.rpc(fn, {
+  const args = {
     p_campaign_id: campaignId,
     p_pace_seconds: paceSeconds,
     p_start_after_seconds: CADENCE_RESCHEDULE_START_AFTER_SECONDS,
     ...(operatorConfirmed === undefined
       ? {}
       : { p_operator_confirmed: operatorConfirmed }),
-  });
+  };
+
+  if (fn !== "preview_campaign_cadence_reschedule") {
+    // Write RPCs touch at most one batch per call (statement_timeout is 8s
+    // in prod); loop until nothing remains.
+    const batched = await runBatchedCadenceRpc(
+      rpc as unknown as CampaignQueueRpcClient,
+      fn,
+      args,
+    );
+    if (!batched.ok) {
+      return {
+        ok: false,
+        error: { code: "CADENCE_CHANGE_FAILED", message: batched.message },
+      };
+    }
+    return ok(normalizeCadenceRpcRow(batched.data, paceSeconds));
+  }
+
+  const { data, error } = await rpc.rpc(fn, args);
 
   if (error) {
     return {
@@ -768,23 +777,23 @@ export async function pauseCampaignSends(
     const access = await requireCampaignAccess(id.data);
     if (!access.ok) return access;
 
-    const rpc = createAdminClient() as unknown as CampaignPauseRpcClient;
-    const { data, error } = await rpc.rpc("pause_campaign_queue", {
+    const rpc = createAdminClient() as unknown as CampaignQueueRpcClient;
+    const batched = await runBatchedPauseRpc(rpc, {
       p_campaign_id: id.data,
       p_operator_confirmed: true,
     });
 
-    if (error) {
+    if (!batched.ok) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_PAUSE_FAILED", message: error.message },
+        error: { code: "CAMPAIGN_PAUSE_FAILED", message: batched.message },
       };
     }
 
     revalidatePath(`/campaigns/${id.data}`);
     revalidatePath("/campaigns");
     revalidatePath("/messages");
-    return ok(normalizePauseRpcRow(data?.[0]));
+    return ok(normalizePauseRpcRow(batched.data));
   } catch (e) {
     reportError(e, { tags: { surface: "pause_campaign_sends" } });
     return errFromUnknown(e, "CAMPAIGN_PAUSE_FAILED");

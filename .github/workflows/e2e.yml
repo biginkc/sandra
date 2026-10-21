@@ -195,10 +195,11 @@ jobs:
             "src/app/(dashboard)/properties/promote-leads-actions.ts" \
             "src/app/(dashboard)/properties/_actions/count.ts" \
             "src/app/(dashboard)/leads/actions.ts" \
-            "src/app/(dashboard)/campaigns/actions.ts" \
             src/lib/prospects/eligibility.ts \
-            src/lib/messaging/bulk-queue.ts \
-            src/workflows/bulk-sms.ts
+            src/lib/messaging/bulk-queue.ts
+          # campaigns/actions.ts and workflows/bulk-sms.ts left this list in
+          # #927: campaign pause/resume/cadence must loop batched RPCs (8s
+          # statement_timeout). Prospects/Search behaviour is unaffected.
 
       - name: Search oracle reference matcher (unit)
         run: npm run test:search-oracle
@@ -290,6 +291,14 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261021090000_my_leads_work_classified_cached.integration.test.ts
+
+      - name: Campaign queue pause/resume/cadence in bounded batches (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts
 
       - name: "Hot sellers: full dispatch with new_lead switch on (disposable DB)"
         env:
