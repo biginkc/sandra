@@ -86,9 +86,29 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client.storage.from(PROOF_BUCKET).remove([proofPath]);
-  await pg.query("delete from public.voicemail_drops where org_id = any($1)", [[orgA, orgB]]);
-  // Orgs and members stay behind (final-owner guard); every name is unique per run.
-  await pg.end();
+  // Remove every row this suite created, owners included. Deleting a sole
+  // owner trips the final-owner guard, so (as the Dialpad CTI suite does)
+  // cleanup runs with triggers off inside one transaction. Leftover owner
+  // memberships break later suites' orphan-membership prune in shared CI DBs.
+  await pg.query("begin");
+  try {
+    await pg.query("set local session_replication_role = replica");
+    const tables = await pg.query<{ table_name: string }>(
+      `select c.table_name from information_schema.columns c join information_schema.tables t using (table_schema, table_name)
+       where c.table_schema = 'public' and c.column_name = 'org_id' and t.table_type = 'BASE TABLE'`,
+    );
+    for (const { table_name } of tables.rows) {
+      await pg.query(`delete from public.${table_name} where org_id = any($1)`, [[orgA, orgB]]);
+    }
+    await pg.query("delete from public.organizations where id = any($1)", [[orgA, orgB]]);
+    await pg.query("delete from auth.users where id = any($1)", [[memberA, memberB]]);
+    await pg.query("commit");
+  } catch (error) {
+    await pg.query("rollback");
+    throw error;
+  } finally {
+    await pg.end();
+  }
 });
 
 describe("20261021200500_voicemail_drop_proof_copy", () => {
