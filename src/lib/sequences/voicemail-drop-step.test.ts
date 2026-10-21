@@ -83,6 +83,8 @@ type World = {
   authError: { message: string } | null;
   readError: string | null;
   failUpdate: string | null;
+  /** sequence_step_runs CAS updates match no row (already reconciled). */
+  runChanged?: boolean;
 };
 
 function baseWorld(over: Partial<World> = {}): World {
@@ -127,6 +129,7 @@ function makeClient(world: World) {
     const has = (col: string) => op.filters.some(([, c]) => c === col);
     if (op.kind === "update") {
       if (world.failUpdate === op.table) return { data: null, error: { message: "write failed" } };
+      if (world.runChanged && op.table === "sequence_step_runs" && (op.payload as { skipped_reason?: string }).skipped_reason === "provider_failed") return { data: null, error: null };
       return { data: { id: "row" }, error: null };
     }
     if (op.kind === "insert") {
@@ -317,6 +320,23 @@ describe("voicemail drop step — RULING RVM-4 failures", () => {
     expect(runUpdate).toMatchObject({ attempt_outcome: "unknown" });
     expect(runUpdate.claim_active).toBeUndefined();
     expect(updatesTo(ops, "sequence_enrollments")[0]).toMatchObject({ status: "paused", pause_reason: "reconciliation_required" });
+  });
+
+  it("unknown after a status event already reconciled the drop: no flip back, no re-pause", async () => {
+    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
+    const { outcome, ops } = await run(baseWorld({ runChanged: true }));
+    expect(outcome).toMatchObject({ status: "voicemail_queued", enrollmentId: "enr-1" });
+    const runWrite = ops.find((o) => o.table === "sequence_step_runs" && o.kind === "update" && (o.payload as { skipped_reason?: string }).skipped_reason === "provider_failed")!;
+    expect(runWrite.filters).toContainEqual(["eq", "attempt_outcome", "unknown"]);
+    expect(updatesTo(ops, "sequence_enrollments")).toHaveLength(0);
+    expect(updatesTo(ops, "voicemail_drops").some((u) => u.reason)).toBe(false);
+  });
+
+  it("the unknown drop-row write is CAS'd on attempt_outcome = 'unknown'", async () => {
+    setMockVoicemailDropResult({ outcome: "unknown", httpStatus: null, cause: "timeout", raw: null });
+    const { ops } = await run(baseWorld());
+    const dropWrite = ops.find((o) => o.table === "voicemail_drops" && o.kind === "update" && (o.payload as { reason?: string }).reason)!;
+    expect(dropWrite.filters).toContainEqual(["eq", "attempt_outcome", "unknown"]);
   });
 
   it("a thrown provider error is treated as unknown, never re-fired", async () => {
