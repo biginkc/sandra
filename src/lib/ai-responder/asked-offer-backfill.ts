@@ -40,6 +40,10 @@ import type { Database, Json } from "@/lib/supabase/types";
  *
  * History is read by property AND by the seller's phone across the org, so a
  * text, call or reply on another property with the same number counts.
+ *
+ * Fails closed: a send refused at the fence (or failed at the provider) leaves a
+ * failed row that keeps the key and counts as "texted since", so this script
+ * never retries that seller. Those show up in the apply report; follow up by hand.
  */
 
 export const ASKED_OFFER_BACKFILL_KIND = "asked_offer_backfill";
@@ -452,10 +456,14 @@ async function sendOne(
   if (!phone) return { status: "blocked_no_phone", detail: "inbound number does not normalize" };
   const lastLook = async (ctx?: { messageId: string }): Promise<boolean> => {
     if (!ctx?.messageId || !chicagoWindowOpen(now())) return false;
-    const { facts } = await loadLeadFacts(supabase, property.id, { ...factOptions, ignoreMessageId: ctx.messageId });
-    const ok = facts.latestInbound?.id === inbound.id && backfillSkipReason(facts) === null;
-    // The reads above take time: the window must still be open as permission is given.
-    return ok && chicagoWindowOpen(now());
+    try {
+      const { facts } = await loadLeadFacts(supabase, property.id, { ...factOptions, ignoreMessageId: ctx.messageId });
+      const ok = facts.latestInbound?.id === inbound.id && backfillSkipReason(facts) === null;
+      // The reads above take time: the window must still be open as permission is given.
+      return ok && chicagoWindowOpen(now());
+    } catch {
+      return false;
+    }
   };
   const outcome: SendSmsOutcome = await sendSmsToContact(supabase, {
     origin: "automated",

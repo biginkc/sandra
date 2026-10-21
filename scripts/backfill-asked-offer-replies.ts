@@ -99,12 +99,12 @@ function parse(argv: string[]): Options {
     else if (a === "--out") o.out = value(argv, ++i, a);
     else if (a === "--help" || a === "-h") {
       console.log(`Usage: tsx scripts/backfill-asked-offer-replies.ts [options]
-  --apply              Queue the approved text for every target (default: dry run, no writes).
+  --apply              Send the approved text now to every target, 08:00-21:00 Chicago only (default: dry run, no writes).
   --status <s>         Lead status to scan; repeatable. Default: new_lead.
   --since <iso>        Oldest inbound to consider. Default: ${DEFAULT_SINCE_DAYS} days ago.
   --before <iso>       Inbounds at or after this ran with the new reply. Default: ${DEFAULT_BEFORE}.
   --exclude <uuid>     Extra property to skip; repeatable (the six handled by hand are always skipped).
-  --only <uuid>        Limit to these properties; repeatable.
+  --only <uuid>        Limit to these properties; repeatable (still filtered by --status).
   --out <path>         Apply only: write the JSON report here (refuses to overwrite). Apply always writes one.`);
       process.exit(0);
     } else throw new Error(`Unknown option: ${a}`);
@@ -167,6 +167,8 @@ async function main(): Promise<void> {
     { classify: liveClassifier(apiKey), now: () => new Date() },
   );
   report(rows, o.apply);
+  const listed = new Set(rows.map((r) => r.propertyId));
+  for (const id of o.only) if (!listed.has(id)) console.log(`--only ${id}: not listed (other status, nothing waiting, or texted since).`);
   const outPath = o.out ?? (o.apply ? `tmp/asked-offer-backfill/apply-${new Date().toISOString().replace(/[:.]/g, "-")}.json` : null);
   if (!outPath) return;
   const out = resolve(outPath);

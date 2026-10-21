@@ -329,6 +329,22 @@ describe("runAskedOfferBackfill", () => {
     ])("refuses when %s", async (_why, change) => {
       expect(await lastLookAfter(change)).toBe(false);
     });
+    it("refuses when a fresh read fails", async () => {
+      expect(
+        await lastLookAfter((d) => {
+          // The fence's next read of calls fails once (later leads read normally).
+          const calls = d.tables.call_activities!;
+          let failed = false;
+          Object.defineProperty(d.tables, "call_activities", {
+            get: () => {
+              if (failed) return calls;
+              failed = true;
+              throw new Error("db down");
+            },
+          });
+        }),
+      ).toBe(false);
+    });
     it("refuses when the Chicago window closed before the last look", async () => {
       const times = [OPEN];
       expect(await lastLookAfter(() => {}, () => times.shift() ?? new Date("2026-10-22T02:00:00Z"))).toBe(false);
