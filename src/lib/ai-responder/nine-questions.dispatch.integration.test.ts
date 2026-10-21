@@ -1756,7 +1756,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     });
 
     /** A lead in the Not interested drip whose last text from us is `last`, then the seller replies. */
-    async function justOkAfter(last: { body: string; metadata?: Record<string, unknown>; status?: string }, reply = "Ok", beforeDispatch?: (propertyId: string) => Promise<void>) {
+    async function justOkAfter(last: { body: string; metadata?: Record<string, unknown>; status?: string }, reply = "Ok", beforeDispatch?: (propertyId: string) => Promise<void>, newerFirst?: string) {
       await seedOrg();
       const lead = await seedLead();
       const drip = await enrollNineDrip(supabase, { orgId, propertyId: lead.propertyId, dripName: "Not interested", skipFirstStep: false });
@@ -1772,6 +1772,9 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
         .insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: reply })
         .select("id, conversation_id")
         .single();
+      if (newerFirst) {
+        await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: newerFirst, created_at: new Date(Date.now() + 1000).toISOString() });
+      }
       // The inbound webhook pauses the drip (pause_reason inbound_reply) before dispatch runs.
       await pg.query("update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where id = $1 and status = 'active'", [enrollmentId]);
       jevProbabilities = { just_ok: 0.95 };
@@ -1846,6 +1849,12 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
           [orgId, propertyId, rows[0].c, ph[0].phone_1, MOCK_SENDER_PRIMARY],
         );
       });
+      expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      expect(r.enrollments).toEqual([{ name: "Not interested", status: "paused", step: 0 }]);
+    });
+
+    it("a newer text landed BEFORE the older 'Ok' was classified (inside the baseline): the drip is NOT resumed", async () => {
+      const r = await justOkAfter({ body: "Not interested one", metadata: DRIP_META }, "Ok", undefined, "how much would you pay");
       expect(r.outcome).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
       expect(r.enrollments).toEqual([{ name: "Not interested", status: "paused", step: 0 }]);
     });

@@ -8778,7 +8778,26 @@ async function routeNineJustOk(
       .maybeSingle();
     return revError || !data ? null : data.decision_context_revision;
   };
-  if ((await revisionNow()) !== evaluationRevision) {
+  // The revision baseline is read inside classification, so a newer inbound that landed just
+  // before it would be inside both reads. Also require THIS inbound to be the newest one.
+  const isStillNewest = async (): Promise<boolean> => {
+    if (!input.inboundMessageId) return false;
+    const { data: src } = await supabase.from("messages").select("created_at").eq("id", input.inboundMessageId).maybeSingle();
+    if (!src) return false;
+    let q = supabase
+      .from("messages")
+      .select("id")
+      .eq("property_id", input.propertyId)
+      .eq("direction", "inbound")
+      .neq("id", input.inboundMessageId)
+      .gte("created_at", src.created_at)
+      .limit(1);
+    q = input.conversationId ? q.eq("conversation_id", input.conversationId) : q.eq("contact_id", input.contactId);
+    const { data: newer, error: newerError } = await q;
+    return !newerError && (newer ?? []).length === 0;
+  };
+  const fresh = async () => (await revisionNow()) === evaluationRevision && (await isStillNewest());
+  if (!(await fresh())) {
     await trace(supabase, {
       kind: "action",
       name: "nine_just_ok",
@@ -8810,10 +8829,26 @@ async function routeNineJustOk(
   }
   // The resume RPC cannot check the lead's revision, so re-check after it: if anything moved the
   // lead during the resume, pause the drip again and let a person look.
-  if (resumed.length > 0 && (await revisionNow()) !== evaluationRevision) {
-    await pausePropertyEnrollments(supabase, { propertyId: input.propertyId, reason: "inbound_reply" }).catch((e) => {
-      reportError(e, { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId } });
-    });
+  if (resumed.length > 0 && !(await fresh())) {
+    // Re-pause and VERIFY; retried, because the hold flag alone does not stop the drip tick.
+    let repaused = false;
+    for (let attempt = 0; attempt < 3 && !repaused; attempt++) {
+      try {
+        await pausePropertyEnrollments(supabase, { propertyId: input.propertyId, reason: "inbound_reply" });
+        const { data: still, error: stillError } = await supabase
+          .from("sequence_enrollments")
+          .select("id")
+          .in("id", resumed)
+          .eq("status", "active");
+        repaused = !stillError && (still ?? []).length === 0;
+      } catch (e) {
+        reportError(e, { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId, attempt } });
+      }
+    }
+    if (!repaused) {
+      reportError(new Error("just_ok re-pause not verified"), { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId, resumed } });
+      return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+    }
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
   if (resumed.length > 0) {
