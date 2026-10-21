@@ -539,12 +539,7 @@ async function handleSendResult(
   const payload = (result.raw ?? null) as Database["public"]["Tables"]["voicemail_drops"]["Update"]["provider_payload"];
   switch (result.outcome) {
     case "accepted": {
-      const dropError = await updateDropRow(client, dropRowId, {
-        status: "queued",
-        attempt_outcome: "queued",
-        queued_at: new Date().toISOString(),
-        provider_payload: payload,
-      });
+      const dropError = await recordAcceptedDrop(client, dropRowId, payload);
       const { data: runWrite, error: runError } = await client
         .from("sequence_step_runs")
         .update({
@@ -651,8 +646,7 @@ async function handleSendResult(
         .select("id")
         .maybeSingle();
       if (!runWriteError && !heldRun) {
-        // Already reconciled: the drop was queued and the run accepted.
-        return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
+        return finishAlreadyReconciled(client, enrollment, step, claimId, dropRowId);
       }
       await client
         .from("voicemail_drops")
@@ -693,6 +687,68 @@ async function handleSendResult(
       return { status: "paused", enrollmentId: enrollment.id, reason: "provider_failed" };
     }
   }
+}
+
+/**
+ * Record the 202 on the drop row without undoing a terminal outcome: a
+ * callback or status event may already have marked it delivered/failed (and
+ * stored its payload) before the POST answered. Status and payload are only
+ * written while the drop is still 'queued'; otherwise just attempt_outcome.
+ */
+async function recordAcceptedDrop(
+  client: SupabaseClient<Database>,
+  dropRowId: string,
+  payload: Database["public"]["Tables"]["voicemail_drops"]["Update"]["provider_payload"],
+): Promise<string | null> {
+  const queuedAt = new Date().toISOString();
+  const { data: stillQueued, error } = await client
+    .from("voicemail_drops")
+    .update({ attempt_outcome: "queued", queued_at: queuedAt, provider_payload: payload })
+    .eq("id", dropRowId)
+    .eq("status", "queued")
+    .select("id");
+  if (error) return error.message;
+  if ((stillQueued ?? []).length > 0) return null;
+  const { error: outcomeError } = await client
+    .from("voicemail_drops")
+    .update({ attempt_outcome: "queued" })
+    .eq("id", dropRowId)
+    .neq("attempt_outcome", "queued");
+  return outcomeError?.message ?? null;
+}
+
+/**
+ * The POST answered unknown, but a Drop Cowboy event already reconciled the
+ * drop (run accepted) while the enrollment was still active, so reconcile had
+ * nothing to advance. Advance exactly like the 202 path; advanceEnrollment is
+ * fenced on status 'active' + current_step_index, so a repeat is a no-op.
+ */
+async function finishAlreadyReconciled(
+  client: SupabaseClient<Database>,
+  enrollment: DropEnrollment,
+  step: DropStep,
+  claimId: string,
+  dropRowId: string,
+): Promise<TickOutcome> {
+  const { data: runRow, error: readError } = await client
+    .from("sequence_step_runs")
+    .select("attempt_outcome, claim_active")
+    .eq("id", claimId)
+    .maybeSingle();
+  const row = runRow as { attempt_outcome: string | null; claim_active: boolean } | null;
+  if (readError || !row || row.attempt_outcome !== "accepted" || !row.claim_active) {
+    return {
+      status: "failed",
+      enrollmentId: enrollment.id,
+      message: `Voicemail drop ${dropRowId} outcome unknown and the run changed: ${readError?.message ?? `attempt_outcome ${row?.attempt_outcome ?? "missing"}`}`,
+    };
+  }
+  const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+  // "changed" = someone else already moved the enrollment off this step.
+  if (advanceError && !advanceError.startsWith("enrollment changed")) {
+    return { status: "failed", enrollmentId: enrollment.id, message: `Voicemail drop ${dropRowId} queued; ${advanceError}` };
+  }
+  return { status: "voicemail_queued", enrollmentId: enrollment.id, stepIndex: step.step_index, dropId: dropRowId };
 }
 
 /**
