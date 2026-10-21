@@ -119,12 +119,13 @@ begin
       and e.current_step_index = v_step_index and r.attempt_outcome = 'accepted'
     );
     if v_step_index is not null and v_eligible then
-      -- Consent replaces an existing stop reason; step_misconfigured keeps it
-      -- (the pointer still advances in place).
+      -- Consent replaces an existing stop reason; step_misconfigured keeps a
+      -- real stop reason (pointer still advances in place) but replaces a
+      -- temporary call_in_progress / norma_call pause.
       v_action := public.voicemail_drop_settle_enrollment(
         e.id, v_step_index, true,
         case when p_pause_reason = 'step_misconfigured' and e.status = 'paused'
-               and e.pause_reason is distinct from 'reconciliation_required'
+               and e.pause_reason not in ('reconciliation_required', 'call_in_progress', 'norma_call')
              then null else p_pause_reason end);
     elsif v_result <> 'conflict' then
       v_action := public.voicemail_drop_settle_enrollment(e.id, coalesce(v_step_index, -1), false, p_pause_reason);
@@ -138,5 +139,36 @@ revoke all on function public.resolve_voicemail_drop_outcome(uuid, text, text, t
   from public, anon, authenticated;
 grant execute on function public.resolve_voicemail_drop_outcome(uuid, text, text, text, text, text, numeric, text, jsonb)
   to service_role;
+
+-- A seller calling back must also override a temporary call pause
+-- (call_in_progress / norma_call), the way fn_norma_upgrade_pauses_for_reply
+-- does for a reply; otherwise the softphone / Norma release (which only
+-- resumes its own reason) would restart the drip. Returns rows upgraded.
+create or replace function public.upgrade_temporary_pauses_for_inbound_call(p_property_ids uuid[])
+returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_n integer := 0;
+begin
+  begin
+    update public.sequence_enrollments e
+       set pause_reason = 'inbound_call', updated_at = now()
+     where e.property_id = any(p_property_ids) and e.status = 'paused'
+       and e.pause_reason in ('call_in_progress', 'norma_call');
+    get diagnostics v_n = row_count;
+  exception when others then
+    -- Same as fn_norma_upgrade_pauses_for_reply: a DNC lock makes the lead
+    -- permanently opted out anyway, so there is nothing to upgrade.
+    if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
+    return 0;
+  end;
+  return v_n;
+end;
+$$;
+revoke all on function public.upgrade_temporary_pauses_for_inbound_call(uuid[]) from public, anon, authenticated;
+grant execute on function public.upgrade_temporary_pauses_for_inbound_call(uuid[]) to service_role;
 
 commit;
