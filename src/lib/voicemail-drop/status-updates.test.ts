@@ -217,12 +217,27 @@ describe("signed status webhook", () => {
       JSON.stringify({ event: "contact.rvm.receipt", event_id: eventId, data: { status: "success", proof_of_delivery_url: "https://proof.invalid/r", ...data } }),
     );
 
-  it("23: a receipt matched by drop_id changes only proof_url (never status, outcome or enrollment)", async () => {
+  it("23: a receipt matched by drop_id changes only the proof fields (never status, outcome or enrollment)", async () => {
     const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
     const before = { ...fake.drops[0] };
     expect(await handleDropStatusEvent(fake.store, receipt({ drop_id: "dc-1", to: "+18165550101", campaign_type: "rvm" }), NOW)).toBe("applied");
-    expect(fake.drops[0]).toEqual({ ...before, proof_url: "https://proof.invalid/r" });
+    expect(fake.drops[0]).toEqual({
+      ...before, proof_url: "https://proof.invalid/r", proof_url_at: NOW.toISOString(),
+      proof_copy_status: "pending", proof_copy_next_at: NOW.toISOString(),
+    });
     expect(fake.resolved).toEqual([]);
+  });
+
+  it("PR7: a failed receipt write throws and leaves the event errored for a retry", async () => {
+    const fake = createFakeDropStore([drop({ drop_id: "dc-1" })]);
+    fake.faults.receiptFailures = 1;
+    const onProofUrl = vi.fn(async () => {});
+    await expect(handleDropStatusEvent(fake.store, receipt({ drop_id: "dc-1", campaign_type: "rvm" }), NOW, { onProofUrl })).rejects.toThrow(/injected/);
+    expect([...fake.events.values()][0].status).toBe("error");
+    expect(fake.drops[0].proof_url).toBeUndefined();
+    expect(onProofUrl).not.toHaveBeenCalled();
+    expect(await handleDropStatusEvent(fake.store, receipt({ drop_id: "dc-1", campaign_type: "rvm" }), NOW, { onProofUrl })).toBe("applied");
+    expect(onProofUrl).toHaveBeenCalledWith(fake.drops[0].id);
   });
 
   it("23: a receipt with campaign_type voice is ignored even with a matching drop_id", async () => {

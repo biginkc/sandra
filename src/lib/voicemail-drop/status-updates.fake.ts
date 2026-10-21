@@ -23,7 +23,7 @@ export function createFakeDropStore(
   /** Every required pause the resolver applied. */
   const paused: Array<{ enrollmentId: string; reason: string }> = [];
   /** Set to make the next N resolveOutcome calls throw (nothing applied). */
-  const faults = { resolveFailures: 0 };
+  const faults = { resolveFailures: 0, receiptFailures: 0 };
   const STEP = 0;
   const LAST_STEP = 1;
 
@@ -64,6 +64,16 @@ export function createFakeDropStore(
   }
 
   const store: DropStatusStore = {
+    async saveReceiptProof(id, proofUrl, atIso) {
+      if (faults.receiptFailures > 0) {
+        faults.receiptFailures -= 1;
+        throw new Error("saveReceiptProof: injected failure");
+      }
+      const drop = drops.find((d) => d.id === id) as (FakeDrop & Record<string, unknown>) | undefined;
+      if (!drop) return;
+      Object.assign(drop, { proof_url: proofUrl, proof_url_at: atIso });
+      if (!drop.proof_storage_path) Object.assign(drop, { proof_copy_status: "pending", proof_copy_next_at: atIso });
+    },
     async findDropById(id) {
       return drops.find((d) => d.id === id) ?? null;
     },

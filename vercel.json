@@ -81,6 +81,10 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/cron/voicemail-proof-sweep",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/cron/norma-reconciliation",
       "schedule": "*/5 * * * *"
     },

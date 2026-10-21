@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CallActivityRollupRow } from "./lead-call-summary";
 import type { LeadEvent } from "./lead-events";
@@ -419,6 +419,12 @@ describe("<LeadActivityTimeline /> voicemail drops", () => {
     queued_at: "2026-10-20T14:00:00Z", completed_at: null, created_at: "2026-10-20T14:00:00Z", ...extra,
   });
 
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-21T12:00:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
   it("shows queued, delivered with proof link, and failed with a plain reason", () => {
     render(<LeadActivityTimeline {...props} initialVoicemailDrops={[
       drop("d1", "queued"),
@@ -429,7 +435,7 @@ describe("<LeadActivityTimeline /> voicemail drops", () => {
     expect(cards.map((card) => card.dataset.status)).toEqual(["failed", "delivered", "queued"]);
     expect(within(cards[0]).getByText("Voicemail not delivered")).toBeInTheDocument();
     expect(within(cards[0]).getByText("Voicemail box full.")).toBeInTheDocument();
-    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "https://proof.example/d2");
+    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "/api/voicemail-drops/d2/proof");
     expect(within(cards[2]).getByText("Voicemail queued")).toBeInTheDocument();
     expect(screen.queryByText(/No messages, notes, calls/)).not.toBeInTheDocument();
   });
@@ -437,5 +443,15 @@ describe("<LeadActivityTimeline /> voicemail drops", () => {
   it("hides a non-https proof link", () => {
     render(<LeadActivityTimeline {...props} initialVoicemailDrops={[drop("d1", "delivered", { proof_url: "javascript:alert(1)" })]} />);
     expect(screen.queryByRole("link", { name: /Proof of delivery/ })).not.toBeInTheDocument();
+  });
+
+  it("links a stored copy after the provider link expired, and hides an expired provider-only link", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[
+      drop("d1", "delivered", { completed_at: "2026-10-01T15:00:00Z", proof_url: "https://proof.example/d1", proof_url_at: "2026-10-01T15:00:00Z", proof_storage_path: "org/d1.mp3" }),
+      drop("d2", "delivered", { completed_at: "2026-10-01T16:00:00Z", proof_url: "https://proof.example/d2", proof_url_at: "2026-10-01T16:00:00Z" }),
+    ]} />);
+    const cards = screen.getAllByTestId("lead-voicemail-drop");
+    expect(within(cards[0]).queryByRole("link", { name: /Proof of delivery/ })).not.toBeInTheDocument();
+    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "/api/voicemail-drops/d1/proof");
   });
 });

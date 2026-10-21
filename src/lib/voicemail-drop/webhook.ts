@@ -148,3 +148,43 @@ export function parseDropCowboyCallback(rawBody: string): VoicemailDropCallbackE
     raw: body,
   };
 }
+
+/**
+ * Drop Cowboy gives every webhook subscription (one per event type) its own
+ * signing secret. A delivery is verified only with the secret of the event
+ * type it names, so a status event signed with the receipt secret (or the
+ * reverse) never verifies.
+ */
+export const DROPCOWBOY_EVENT_SECRET_ENV = {
+  "contact.rvm.status": "DROPCOWBOY_WEBHOOK_SECRET",
+  "contact.rvm.receipt": "DROPCOWBOY_RECEIPT_WEBHOOK_SECRET",
+} as const;
+
+export type DropCowboySignedEvent = keyof typeof DROPCOWBOY_EVENT_SECRET_ENV;
+
+export type DropCowboySecretSelection =
+  | { kind: "supported"; event: DropCowboySignedEvent; envName: string; secret: string | null }
+  | { kind: "unsupported"; event: string }
+  | { kind: "unparseable" };
+
+/** Read only the `event` field of an unverified body to pick its secret. */
+export function selectDropCowboyWebhookSecret(
+  rawBody: string,
+  env: Record<string, string | undefined> = process.env,
+): DropCowboySecretSelection {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return { kind: "unparseable" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "unparseable" };
+  const event = (parsed as Record<string, unknown>).event;
+  if (typeof event !== "string") return { kind: "unparseable" };
+  if (!Object.prototype.hasOwnProperty.call(DROPCOWBOY_EVENT_SECRET_ENV, event)) {
+    return { kind: "unsupported", event };
+  }
+  const envName = DROPCOWBOY_EVENT_SECRET_ENV[event as DropCowboySignedEvent];
+  const secret = env[envName] || null;
+  return { kind: "supported", event: event as DropCowboySignedEvent, envName, secret };
+}
