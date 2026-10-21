@@ -1,0 +1,223 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { Database } from "@/lib/supabase/types";
+
+/**
+ * Who gets a voicemail drop (plan RULING RVM-2 / RVM-3, build-order step 3).
+ *
+ * "Already spoken to", scoped to the same contact_id, any of:
+ *   - acquisition_attempts.outcome = 'reached' (scoped to the contact through
+ *     its call_activity_id; an attempt with no call activity cannot be tied to
+ *     a contact and does not count)
+ *   - call_activities.talk_duration_seconds > 0
+ *   - an inbound messages row
+ *   - an answered Norma (Bland) call (Jarrad, 2026-10-20). Norma calls never
+ *     write call_activities, so they are read explicitly:
+ *       norma_call_requests.outcome in NORMA_ANSWERED_OUTCOMES for the contact
+ *       norma_inbound_calls (seller called Norma) with completed = true, same
+ *       property, from_e164 saved on the contact
+ *
+ * Plus: a usable phone, do_not_contact false, sms_opted_out false. The
+ * outreach_dispo pause runs before the claim in tick.ts. Deliberately NOT
+ * call_activities.outcome = 'connected_human' and NOT getConsentState(voice).
+ *
+ * Number: the phone from the most recent qualifying event when it is still
+ * saved on the contact (non-landline), else the first mobile slot, else the
+ * first non-landline slot of unknown type (Drop Cowboy's mobile_only filter
+ * rejects landlines anyway).
+ */
+
+/** Norma outcomes that mean a person answered. wrong_number (wrong person),
+ * no_answer, unknown and reviewed (original outcome overwritten) do not. */
+export const NORMA_ANSWERED_OUTCOMES = [
+  "callback_requested",
+  "reached_no_callback",
+  "not_interested",
+] as const;
+
+export type SpokenToBasis =
+  | "acquisition_attempt_reached"
+  | "call_talk_time"
+  | "inbound_message"
+  | "norma_answered_call"
+  | "norma_inbound_call";
+
+export type VoicemailDropEligibility =
+  | { eligible: true; phone: string; basis: SpokenToBasis; phoneSource: "qualifying_event" | "contact_slot" }
+  | {
+      eligible: false;
+      reason: "contact_missing" | "do_not_contact" | "opted_out" | "no_phone" | "not_spoken_to";
+    };
+
+export function toE164(raw: string | null | undefined): string | null {
+  const digits = (raw ?? "").replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
+}
+
+type QualifyingEvent = { basis: SpokenToBasis; phone: string | null; at: string | null };
+
+export class EligibilityReadError extends Error {}
+
+function check<T>(result: { data: T | null; error: { message: string } | null }, what: string): T {
+  if (result.error) throw new EligibilityReadError(`${what}: ${result.error.message}`);
+  return (result.data ?? ([] as unknown)) as T;
+}
+
+/** Throws EligibilityReadError on any read failure (callers fail closed). */
+export async function checkVoicemailDropEligibility(
+  client: SupabaseClient<Database>,
+  params: { orgId: string; contactId: string; propertyId: string },
+): Promise<VoicemailDropEligibility> {
+  const contactResult = await client
+    .from("contacts")
+    .select("id, do_not_contact, sms_opted_out, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+    .eq("id", params.contactId)
+    .eq("org_id", params.orgId)
+    .maybeSingle();
+  if (contactResult.error) throw new EligibilityReadError(`contact: ${contactResult.error.message}`);
+  const contact = contactResult.data;
+  if (!contact) return { eligible: false, reason: "contact_missing" };
+  if (contact.do_not_contact) return { eligible: false, reason: "do_not_contact" };
+  if (contact.sms_opted_out) return { eligible: false, reason: "opted_out" };
+
+  const slots = [
+    { phone: toE164(contact.phone_1), type: contact.phone_1_type },
+    { phone: toE164(contact.phone_2), type: contact.phone_2_type },
+    { phone: toE164(contact.phone_3), type: contact.phone_3_type },
+  ].filter((s): s is { phone: string; type: string } => Boolean(s.phone) && s.type !== "landline");
+  if (slots.length === 0) return { eligible: false, reason: "no_phone" };
+  const slotPhones = slots.map((s) => s.phone);
+
+  const [calls, attempts, inbound, norma, normaInbound] = await Promise.all([
+    client
+      .from("call_activities")
+      .select("phone_e164, started_at")
+      .eq("org_id", params.orgId)
+      .eq("contact_id", params.contactId)
+      .gt("talk_duration_seconds", 0)
+      .order("started_at", { ascending: false })
+      .limit(5),
+    client
+      .from("acquisition_attempts")
+      .select("call_activity_id, occurred_at")
+      .eq("org_id", params.orgId)
+      .eq("property_id", params.propertyId)
+      .eq("outcome", "reached")
+      .not("call_activity_id", "is", null)
+      .order("occurred_at", { ascending: false })
+      .limit(20),
+    client
+      .from("messages")
+      .select("from_address, created_at")
+      .eq("org_id", params.orgId)
+      .eq("contact_id", params.contactId)
+      .eq("direction", "inbound")
+      .order("created_at", { ascending: false })
+      .limit(5),
+    client
+      .from("norma_call_requests")
+      .select("phone_e164, completed_at")
+      .eq("org_id", params.orgId)
+      .eq("contact_id", params.contactId)
+      .in("outcome", [...NORMA_ANSWERED_OUTCOMES])
+      .order("completed_at", { ascending: false })
+      .limit(5),
+    client
+      .from("norma_inbound_calls")
+      .select("from_e164, created_at")
+      .eq("org_id", params.orgId)
+      .eq("property_id", params.propertyId)
+      .eq("completed", true)
+      .order("created_at", { ascending: false })
+      .limit(20),
+  ]);
+
+  const events: QualifyingEvent[] = [];
+  for (const c of check(calls, "call_activities") as { phone_e164: string | null; started_at: string | null }[]) {
+    events.push({ basis: "call_talk_time", phone: toE164(c.phone_e164), at: c.started_at });
+  }
+  for (const m of check(inbound, "messages") as { from_address: string | null; created_at: string }[]) {
+    events.push({ basis: "inbound_message", phone: toE164(m.from_address), at: m.created_at });
+  }
+  for (const n of check(norma, "norma_call_requests") as { phone_e164: string; completed_at: string | null }[]) {
+    events.push({ basis: "norma_answered_call", phone: toE164(n.phone_e164), at: n.completed_at });
+  }
+  for (const n of check(normaInbound, "norma_inbound_calls") as { from_e164: string; created_at: string }[]) {
+    const phone = toE164(n.from_e164);
+    // Inbound Norma calls carry no contact_id; tie them by a saved phone.
+    if (phone && slotPhones.includes(phone)) {
+      events.push({ basis: "norma_inbound_call", phone, at: n.created_at });
+    }
+  }
+  const attemptRows = check(attempts, "acquisition_attempts") as {
+    call_activity_id: string | null;
+    occurred_at: string;
+  }[];
+  const attemptCallIds = attemptRows.map((a) => a.call_activity_id).filter((id): id is string => Boolean(id));
+  if (attemptCallIds.length > 0) {
+    const attemptCalls = check(
+      await client
+        .from("call_activities")
+        .select("id, phone_e164")
+        .eq("org_id", params.orgId)
+        .eq("contact_id", params.contactId)
+        .in("id", attemptCallIds),
+      "acquisition_attempt call_activities",
+    ) as { id: string; phone_e164: string | null }[];
+    const byId = new Map(attemptCalls.map((c) => [c.id, c.phone_e164]));
+    for (const a of attemptRows) {
+      if (a.call_activity_id && byId.has(a.call_activity_id)) {
+        events.push({
+          basis: "acquisition_attempt_reached",
+          phone: toE164(byId.get(a.call_activity_id)),
+          at: a.occurred_at,
+        });
+      }
+    }
+  }
+
+  if (events.length === 0) return { eligible: false, reason: "not_spoken_to" };
+
+  events.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
+  const fromEvent = events.find((e) => e.phone && slotPhones.includes(e.phone));
+  if (fromEvent?.phone) {
+    return { eligible: true, phone: fromEvent.phone, basis: fromEvent.basis, phoneSource: "qualifying_event" };
+  }
+  const primary = slots.find((s) => s.type === "mobile") ?? slots[0];
+  return { eligible: true, phone: primary.phone, basis: events[0].basis, phoneSource: "contact_slot" };
+}
+
+/** Plan: rendered script is at most 1,200 characters. */
+export const VOICEMAIL_DROP_SCRIPT_MAX_CHARS = 1200;
+
+/**
+ * Start (and next start) of the calendar day in America/Chicago, for the
+ * per-org daily cap. Day length is taken as 24h (DST days are an hour off,
+ * which only shifts when a capped drop retries).
+ */
+export function chicagoDayWindow(now: Date): { start: Date; next: Date } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+  const localAsUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  const offsetMs = localAsUtc - Math.floor(now.getTime() / 1000) * 1000;
+  const start = new Date(Date.UTC(get("year"), get("month") - 1, get("day")) - offsetMs);
+  return { start, next: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
+}
+
+/** VOICEMAIL_DROP_DAILY_CAP: positive integer, or null (unset/invalid = no cap). */
+export function readDailyCap(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.VOICEMAIL_DROP_DAILY_CAP?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  return Number(raw);
+}
