@@ -59,7 +59,7 @@ function fakeAdmin(opts: {
           done();
           // Awaitable (updateRun) and chainable (finishRun's guarded update).
           type Chain = Promise<unknown> & {
-            eq: () => Chain;
+            eq: (c: string, v: unknown) => Chain;
             or: (f: string) => Chain;
             is: (c: string, v: unknown) => Chain;
             select: () => Promise<unknown>;
@@ -67,7 +67,10 @@ function fakeAdmin(opts: {
           const chain: Chain = Object.assign(
             Promise.resolve({ error: null }),
             {
-              eq: () => chain,
+              eq: (c2: string, v2: unknown) => {
+                filters.push([c2, v2]);
+                return chain;
+              },
               or: (f: string) => {
                 filters.push(["or", f]);
                 return chain;
@@ -213,6 +216,21 @@ describe("sanitizeStepDetail", () => {
   });
 });
 
+describe("reopen on wait", () => {
+  it("a wait step reopens a swept run; other steps do not", async () => {
+    const { admin, calls } = fakeAdmin();
+    const ctx = { runId: "run-1", orgId: "o", seq: 0 };
+    await recordStep(admin, ctx, { kind: "gate", name: "classified", result: "pass" });
+    expect(calls.some((c) => c.table === "pipeline_runs")).toBe(false);
+    await recordStep(admin, ctx, { kind: "action", name: "retry_scheduled", result: "applied" });
+    const reopen = calls.find((c) => c.table === "pipeline_runs" && c.op === "update");
+    expect(reopen?.payload).toEqual({ status: "running", reason: null, completed_at: null });
+    expect(reopen?.filter).toContainEqual(["id", "run-1"]);
+    expect(reopen?.filter).toContainEqual(["status", "error"]);
+    expect(reopen?.filter).toContainEqual(["reason", "stale_running"]);
+  });
+});
+
 describe("finishRun / updateRun / resumeRun", () => {
   it("finishRun writes terminal fields and ignores null ctx", async () => {
     const { admin, calls } = fakeAdmin();
@@ -244,7 +262,10 @@ describe("finishRun / updateRun / resumeRun", () => {
     it("a caller presenting a claim may only finish a run with that claim or none", async () => {
       const { admin, calls } = fakeAdmin();
       await finishRun(admin, { ...base }, { status: "replied", claimId: "cl-1" });
-      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-1"]);
+      expect(calls[0].filter).toContainEqual([
+        "or",
+        "and(status.eq.running,claim_id.is.null),and(status.eq.error,reason.eq.stale_running,claim_id.is.null),and(status.eq.running,claim_id.eq.cl-1),and(status.eq.error,reason.eq.stale_running,claim_id.eq.cl-1)",
+      ]);
     });
 
     it("uses the claim the context won when none is passed", async () => {
@@ -254,13 +275,16 @@ describe("finishRun / updateRun / resumeRun", () => {
       expect(ctx).toMatchObject({ claimId: "cl-9" });
       calls.length = 0;
       await finishRun(admin, ctx, { status: "skipped" });
-      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-9"]);
+      expect(String((calls[0].filter as unknown[][]).find((f) => f[0] === "or")?.[1])).toContain("claim_id.eq.cl-9");
     });
 
     it("a context with no claim can only finish a run that has none", async () => {
       const { admin, calls } = fakeAdmin();
       await finishRun(admin, { ...base }, { status: "skipped" });
-      expect(calls[0].filter).toContainEqual(["is", "claim_id", null]);
+      expect(calls[0].filter).toContainEqual([
+        "or",
+        "and(status.eq.running,claim_id.is.null),and(status.eq.error,reason.eq.stale_running,claim_id.is.null)",
+      ]);
     });
 
     it("a duplicate dispatch records duplicate_dispatch and never writes a status", async () => {
@@ -359,8 +383,14 @@ describe("seam integrity (fix round 2)", () => {
   afterEach(() => reportError.mockClear());
 
   /** Stateful fake: enforces unique (run_id, seq) and a guarded status update. */
-  function statefulAdmin(initial: { steps: number[]; status: string }) {
-    const state = { steps: [...initial.steps], status: initial.status, inserted: [] as Array<{ seq: number; name: string }> };
+  function statefulAdmin(initial: { steps: number[]; status: string; reason?: string | null; claimId?: string | null }) {
+    const state = {
+      steps: [...initial.steps],
+      status: initial.status,
+      reason: initial.reason ?? null,
+      payload: null as Record<string, unknown> | null,
+      inserted: [] as Array<{ seq: number; name: string }>,
+    };
     const admin = {
       from(table: string) {
         if (table === "pipeline_run_steps") {
@@ -386,20 +416,37 @@ describe("seam integrity (fix round 2)", () => {
           };
         }
         const filters: Record<string, unknown> = {};
+        let payload: Record<string, unknown> = {};
         const chain = {
-          update: () => chain,
+          update: (p: Record<string, unknown>) => ((payload = p), chain),
           eq: (c: string, v: unknown) => {
             filters[c] = v;
             return chain;
           },
           is: () => chain,
-          or: () => chain,
+          or: (f: string) => {
+            filters.or = f;
+            return chain;
+          },
           select: async () => {
-            if (filters.status === "running" && state.status === "running") {
-              state.status = "terminal";
-              return { data: [{ id: "run-1" }], error: null };
-            }
-            return { data: [], error: null };
+            const row: Record<string, string | null> = {
+              status: state.status === "terminal" ? "terminal" : state.status,
+              reason: state.reason,
+              claim_id: initial.claimId ?? null,
+            };
+            const terms = [...String(filters.or ?? "").matchAll(/and\(([^)]*)\)/g)].map((m) => m[1].split(","));
+            const ok = terms.some((conds) =>
+              conds.every((c) => {
+                const [col, op, ...rest] = c.split(".");
+                const val = rest.join(".");
+                return op === "is" ? row[col] === null : row[col] === val;
+              }),
+            );
+            if (!ok) return { data: [], error: null };
+            state.status = state.status === "running" ? "terminal" : String(payload.status);
+            state.reason = (payload.reason as string | null) ?? null;
+            state.payload = payload;
+            return { data: [{ id: "run-1" }], error: null };
           },
         };
         return chain;
@@ -424,6 +471,30 @@ describe("seam integrity (fix round 2)", () => {
     await finishRun(admin, ctx, { status: "replied" });
     expect(state.status).toBe("terminal");
     expect(state.inserted).toEqual([{ seq: 2, name: "terminal_conflict" }]);
+  });
+
+  it("corrects a run the stale sweeper closed when the deferred re-dispatch finishes", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "stale_running" });
+    const ctx = { runId: "run-1", orgId: "o", seq: 1 };
+    await finishRun(admin, ctx, { status: "replied", finalOutcome: "ai_replied", outboundMessageId: "m-9" });
+    expect(state.status).toBe("replied");
+    expect(state.reason).toBeNull();
+    expect(state.payload).toMatchObject({ final_outcome: "ai_replied", outbound_message_id: "m-9", reason: null });
+    expect(state.inserted).toEqual([]);
+  });
+
+  it("never lets a caller with a different claim correct a swept row", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "stale_running", claimId: "cl-owner" });
+    await finishRun(admin, { runId: "run-1", orgId: "o", seq: 1 }, { status: "replied", claimId: "cl-other" });
+    expect(state.status).toBe("error");
+    expect(state.inserted.map((s) => s.name)).toEqual(["terminal_conflict"]);
+  });
+
+  it("does not overwrite a real error (not stale_running)", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "error", reason: "send_failed" });
+    await finishRun(admin, { runId: "run-1", orgId: "o", seq: 1 }, { status: "replied" });
+    expect(state.status).toBe("error");
+    expect(state.inserted.map((s) => s.name)).toEqual(["terminal_conflict"]);
   });
 
   it("stamps a running run exactly once", async () => {
