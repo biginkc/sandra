@@ -105,7 +105,12 @@ function baseContentType(header: string | null): string {
  * the short-lived audio URL it redirects to is not named in the spec. Every
  * hop, the first included, must stay on dropcowboy.com (exact or subdomain).
  */
-export const PROOF_URL_HOSTS = ["api-v2.dropcowboy.com"] as const;
+export const PROOF_URL_HOSTS = [
+  "api-v2.dropcowboy.com",
+  // Where the receipt link redirects for the audio (seen on the production
+  // canary). Exact host only: never any other bucket or amazonaws.com.
+  "dc-call-recordings.s3.amazonaws.com",
+] as const;
 export const PROOF_REDIRECT_DOMAIN = "dropcowboy.com";
 export const PROOF_MAX_REDIRECTS = 3;
 
