@@ -35,7 +35,19 @@ const baselineSql = (() => {
   if (!classifier.includes('my_leads_work_classified_baseline(') || !wrappers.includes('fn_my_leads_badge_v2_baseline(')) throw new Error('baseline build failed');
   return `${classifier}\n;\n${wrappers}`;
 })();
-const AFTER = `${NEW}\n;\n${baselineSql}`;
+// THE ONE ALLOWED DIFFERENCE: the approved same-moment, same-type tie-break (Jarrad, 2026-10-20). The baseline picks the last
+// touch with `order by u.lead_id, u.ts desc, u.pri` and nothing after it, so two touches with the same ts and pri but different
+// kinds pick an arbitrary winner. baselineTieSql is the baseline with ONLY that ORDER BY extended exactly as in NEW (*_baseline_tie).
+// A result that differs from the baseline is accepted only if (a) it equals the _baseline_tie result exactly and (b) it equals the
+// baseline once every lastTouch.kind is blanked. Since the two baselines differ only in that ORDER BY tail, (a) proves the
+// difference comes from a same-ts same-pri different-kind tie and nothing else; any other difference still fails.
+const OLD_LT = '  lt as (select distinct on (u.lead_id) u.lead_id, u.kind, u.ts from tu u order by u.lead_id, u.ts desc, u.pri),\n';
+const NEW_LT = (NEW.match(/ {2}lt as \(select distinct on \(u\.lead_id\)[\s\S]*?else 9 end\),\n/) ?? [''])[0];
+const baselineTieSql = (() => {
+  if (!NEW_LT.startsWith(OLD_LT.slice(0, -3)) || baselineSql.split(OLD_LT).length !== 2) throw new Error('baseline tie build failed');
+  return baselineSql.replace(OLD_LT, NEW_LT).replaceAll('_baseline(', '_baseline_tie(');
+})();
+const AFTER = `${NEW}\n;\n${baselineSql}\n;\n${baselineTieSql}`;
 // Lines of every shipped classifier migration a suite may re-apply. A re-applied text with any other line is a suite's own
 // MUTATION (a deliberately broken body proving a clause matters): that connection then keeps the mutated body, untouched and
 // unshadowed, so the mutation test still proves what it proves.
@@ -47,11 +59,18 @@ const CURRENT_MARK = '-- a snoozed offer follow-up is due at its snooze time';
 
 // Shadow every classifier read against the baseline.
 const CALL = /public\.(my_leads_work_classified|fn_my_leads_work_page|fn_my_leads_work_facts|fn_my_leads_badge_v2)\(/g;
-const stats = { compared: 0, errorsCompared: 0, mutationsSkipped: 0, earlierStates: 0, byFn: {} as Record<string, number> };
+const stats = { compared: 0, tieExempt: 0, errorsCompared: 0, mutationsSkipped: 0, earlierStates: 0, byFn: {} as Record<string, number> };
 type Q = (this: Client, ...args: unknown[]) => Promise<{ rows: unknown[] }>;
 const proto = Client.prototype as unknown as { query: Q };
 const original = proto.query;
-const canon = (rows: unknown[]) => rows.map((r) => JSON.stringify(r, (k, v) => (k === 'snapshotAt' ? undefined : v))).sort();
+const canon = (rows: unknown[], blankLtKind = false) => rows.map((r) => JSON.stringify(r, (k, v) => (k === 'snapshotAt' ? undefined
+  : blankLtKind && k === 'lastTouch' && v && typeof v === 'object' ? { ...v, kind: null } : v))).sort();
+const runShadow = async (c: Client, sql: string, params: unknown) => {
+  await original.call(c, 'savepoint parity_shadow');
+  try { return { ok: true as const, rows: (await original.call(c, sql, params)).rows }; }
+  catch (error) { return { ok: false as const, code: String((error as { code?: string }).code ?? error) }; }
+  finally { await original.call(c, 'rollback to savepoint parity_shadow'); await original.call(c, 'release savepoint parity_shadow'); }
+};
 proto.query = async function patched(this: Client, ...args: unknown[]) {
   const [text, params] = args;
   if (typeof text !== 'string' || (params !== undefined && !Array.isArray(params))) return original.apply(this, args);
@@ -66,7 +85,7 @@ proto.query = async function patched(this: Client, ...args: unknown[]) {
     return res;
   }
   const fns = [...text.matchAll(CALL)].map((m) => m[1]);
-  if (fns.length === 0 || unshadowed.has(this) || /create or replace|_baseline\(/i.test(text)) return original.apply(this, args);
+  if (fns.length === 0 || unshadowed.has(this) || /create or replace|_baseline(_tie)?\(/i.test(text)) return original.apply(this, args);
   const shadow = text.replace(CALL, (_m, fn: string) => `public.${fn}_baseline(`);
   let base: { ok: true; rows: unknown[] } | { ok: false; code: string } | null = null;
   try {
@@ -90,6 +109,13 @@ proto.query = async function patched(this: Client, ...args: unknown[]) {
   if (!base.ok) throw new Error(`PARITY: baseline failed (${base.code}) where new succeeded: ${text.slice(0, 200)}`);
   const a = canon(res.rows), b = canon(base.rows);
   if (JSON.stringify(a) !== JSON.stringify(b)) {
+    const tie = await runShadow(this, text.replace(CALL, (_m, fn: string) => `public.${fn}_baseline_tie(`), params);
+    if (tie.ok && JSON.stringify(canon(tie.rows)) === JSON.stringify(a)
+      && JSON.stringify(canon(res.rows, true)) === JSON.stringify(canon(base.rows, true))) {
+      stats.tieExempt += 1; stats.compared += 1;
+      for (const f of fns) stats.byFn[f] = (stats.byFn[f] ?? 0) + 1;
+      return res;
+    }
     const i = a.findIndex((x, j) => x !== b[j]);
     throw new Error(`PARITY MISMATCH in ${fns.join(',')} (${a.length} vs ${b.length} rows), first diff:\nNEW  ${a[i]}\nBASE ${b[i]}\nSQL ${text.slice(0, 300)}`);
   }
@@ -254,8 +280,133 @@ describe('20261021090000 parity: dedicated multi-lead, multi-org fixture', () =>
   }, 600_000);
 });
 
+// Approved tie rule (Jarrad, 2026-10-20, verbatim): "When two touches on a lead happen at the same moment and are the same type,
+// the last touch shown is: for texts, your text, then Sandra reply, then drip text, then campaign text; for calls, reached, then
+// voicemail, then no answer."
+type TextKind = 'your_text' | 'sandra_reply' | 'drip_text' | 'campaign_text' | 'other_text';
+type CallKind = 'reached' | 'voicemail' | 'no_answer' | 'ca_reached' | 'ca_no_answer';
+const TIE_CASES: Array<{ name: string; touches: Array<TextKind | CallKind>; want: string; unapproved?: true }> = [
+  { name: 'your text vs Sandra reply', touches: ['sandra_reply', 'your_text'], want: 'your_text' },
+  { name: 'your text vs drip', touches: ['drip_text', 'your_text'], want: 'your_text' },
+  { name: 'your text vs campaign', touches: ['campaign_text', 'your_text'], want: 'your_text' },
+  { name: 'Sandra reply vs drip', touches: ['drip_text', 'sandra_reply'], want: 'sandra_reply' },
+  { name: 'Sandra reply vs campaign', touches: ['campaign_text', 'sandra_reply'], want: 'sandra_reply' },
+  { name: 'drip vs campaign', touches: ['campaign_text', 'drip_text'], want: 'drip_text' },
+  { name: 'all four texts', touches: ['campaign_text', 'drip_text', 'sandra_reply', 'your_text'], want: 'your_text' },
+  { name: 'Sandra, drip, campaign', touches: ['campaign_text', 'drip_text', 'sandra_reply'], want: 'sandra_reply' },
+  { name: 'reached vs voicemail', touches: ['voicemail', 'reached'], want: 'call_reached' },
+  { name: 'reached vs no answer', touches: ['no_answer', 'reached'], want: 'call_reached' },
+  { name: 'voicemail vs no answer', touches: ['no_answer', 'voicemail'], want: 'voicemail' },
+  { name: 'all three calls', touches: ['no_answer', 'voicemail', 'reached'], want: 'call_reached' },
+  { name: 'call log reached vs no answer', touches: ['ca_no_answer', 'ca_reached'], want: 'call_reached' },
+  // NOT covered by the approved text: 'other' (e.g. a Norma pre-call text) ranks after named kinds only for determinism.
+  { name: 'UNAPPROVED other text vs your text', touches: ['other_text', 'your_text'], want: 'your_text', unapproved: true },
+];
+
+describe('20261021090000 approved same-moment same-type last-touch tie rule', () => {
+  it('picks the approved winner in the whole queue, page and every facts subset, stably', async () => {
+    if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
+    requireLoopbackPostgresUrl(url);
+    const db = new Client({ connectionString: url });
+    await db.connect();
+    const exemptBefore = stats.tieExempt;
+    // Every fixture before this one (all non-tie suites) matched the baseline exactly: the exemption was never used.
+    expect(exemptBefore).toBe(0);
+    try {
+      await db.query('begin');
+      await db.query(AFTER);
+      const iso = new Date(Date.UTC(2026, 9, 20, 17, 0, 0)).toISOString();
+      const when = new Date(Date.UTC(2026, 9, 18, 15, 0, 0)).toISOString();
+      const raw = async (sql: string, p: unknown[]) => {
+        await db.query("set local session_replication_role='replica'");
+        await db.query(sql, p);
+        await db.query("set local session_replication_role='origin'");
+      };
+      const owner = randomUUID(), sam = randomUUID(), org = randomUUID();
+      for (const id of [owner, sam]) await db.query('insert into auth.users(id) values ($1)', [id]);
+      await db.query("insert into public.organizations(id,name) values ($1,'Tie org')", [org]);
+      await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [owner, org]);
+      await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [sam, org]);
+      await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled,needs_sequence_owner_id) values ($1,true,$2)', [org, owner]);
+      await db.query("select set_config('request.jwt.claim.sub',$1,true)", [owner]);
+      for (const id of [owner, sam]) {
+        await db.query("select set_config('my_leads.designation_update',$1,true)", [`${owner}:${org}:${id}`]);
+        await db.query('update public.memberships set acquisitions_enabled=true where user_id=$1 and org_id=$2', [id, org]);
+      }
+      await db.query("select set_config('my_leads.designation_update','',true)");
+      await db.query("select set_config('request.jwt.claim.sub','',true)");
+      const add = async (p: string, contact: string, t: TextKind | CallKind) => {
+        if (t.endsWith('_text') || t === 'sandra_reply') {
+          const id = randomUUID();
+          const meta = t === 'sandra_reply' ? { generated_by: 'ai_responder_v1' } : t === 'other_text' ? { generated_by: 'norma_precall' } : {};
+          await raw(`insert into public.messages(id,org_id,channel,direction,body,status,property_id,contact_id,created_at,metadata,sent_at,campaign_id)
+                     values ($1,$2,'sms','outbound','hi','sent',$3,$4,$5,$6,$5,$7)`,
+            [id, org, p, contact, when, JSON.stringify(meta), t === 'campaign_text' ? randomUUID() : null]);
+          if (t === 'drip_text') await raw("insert into public.sequence_step_runs(enrollment_id,step_id,message_id,scheduled_for) values ($1,$2,$3,$4)", [randomUUID(), randomUUID(), id, when]);
+        } else if (t.startsWith('ca_')) {
+          await raw(`insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,provider,started_at,ended_at,talk_duration_seconds)
+                     values ($1,$2,$3,$4,$5,'dialpad',$6,$6,$7)`, [randomUUID(), org, p, contact, randomUUID(), when, t === 'ca_reached' ? 60 : 0]);
+        } else {
+          await raw("insert into public.acquisition_attempts(org_id,property_id,actor_user_id,attempt_kind,source,occurred_at,recorded_at,idempotency_key,outcome) values ($1,$2,$3,'outreach','manual',$4,$4,$5,$6)",
+            [org, p, sam, when, randomUUID(), t]);
+        }
+      };
+      // Each case twice: losers inserted first, then winner first, so neither insertion order nor id order can pick the winner.
+      const leads: Array<{ id: string; want: string; name: string }> = [];
+      for (const c of TIE_CASES) for (const order of [c.touches, [...c.touches].reverse()]) {
+        const id = randomUUID(), contact = randomUUID();
+        await db.query("insert into public.contacts(id,org_id,first_name,last_name,phone_1,phone_1_type) values ($1,$2,'T','Lead',$3,'mobile')",
+          [contact, org, `+1816880${String(leads.length).padStart(4, '0')}`]);
+        await db.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id,homeowner_contact_id) values ($1,$2,$3,'MO','new_lead',$4,$5)",
+          [id, org, `${leads.length} Tie St`, sam, contact]);
+        for (const t of order) await add(id, contact, t);
+        leads.push({ id, want: c.want, name: `${c.name} (${order.join(',')})` });
+      }
+      const as = async <T,>(run: () => Promise<T>) => {
+        await db.query('set local role authenticated');
+        await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+        await db.query("select set_config('request.jwt.claim.sub',$1,true)", [sam]);
+        try { return await run(); } finally { await db.query('reset role'); }
+      };
+      type F = { propertyId: string; lastTouch: { kind: string; at: string } | null };
+      const check = (rows: F[], ids: string[], label: string) => {
+        for (const id of ids) {
+          const l = leads.find((x) => x.id === id)!;
+          const r = rows.find((x) => x.propertyId === id);
+          expect(r?.lastTouch?.kind, `${label}: ${l.name}`).toBe(l.want);
+          expect(new Date(r!.lastTouch!.at).toISOString(), `${label} at: ${l.name}`).toBe(when);
+        }
+      };
+      const ids = leads.map((l) => l.id);
+      for (let rep = 0; rep < 3; rep += 1) {
+        const whole = (await db.query('select facts from public.my_leads_work_classified($1,$2,$3)', [org, sam, iso])).rows.map((r) => r.facts as F);
+        check(whole, ids, `whole queue #${rep}`);
+        const pageRows: F[] = [];
+        for (const page of [1, 2]) {
+          const r = await as(() => db.query('select public.fn_my_leads_work_page($1,$2,$3,null,null,null,$4,20,$5) as r', [org, sam, 'all', page, iso]));
+          pageRows.push(...(r.rows[0].r.rows as F[]));
+        }
+        check(pageRows, ids, `page #${rep}`);
+        for (const id of ids) {
+          const r = await as(() => db.query('select public.fn_my_leads_work_facts($1,$2,$3::uuid[],$4) as r', [org, sam, [id], iso]));
+          check(r.rows[0].r.rows as F[], [id], `facts singleton #${rep}`);
+        }
+        const subsets = [ids.filter((_x, i) => i % 2 === rep % 2), ids.slice().reverse().slice(0, 7), [randomUUID(), ...ids.slice(rep * 5, rep * 5 + 9)]];
+        for (const sub of subsets) {
+          const r = await as(() => db.query('select public.fn_my_leads_work_facts($1,$2,$3::uuid[],$4) as r', [org, sam, sub, iso]));
+          check(r.rows[0].r.rows as F[], sub.filter((x) => ids.includes(x)), `facts subset #${rep}`);
+        }
+        const part = (await db.query('select facts from public.my_leads_work_classified_ids($1,$2,$3,$4::uuid[])', [org, sam, iso, ids])).rows.map((r) => r.facts as F);
+        check(part, ids, `classified_ids #${rep}`);
+      }
+      // The harness compared every read above against the baseline; this fixture must have needed the tie exemption.
+      expect(stats.tieExempt - exemptBefore).toBeGreaterThan(0);
+    } finally { await db.query('rollback').catch(() => {}); await db.end(); }
+  }, 600_000);
+});
+
 afterAll(() => {
   const out = mkdtempSync(join(tmpdir(), 'parity-'));
   writeFileSync(join(out, 'stats.json'), JSON.stringify(stats));
-  console.log(`[parity] compared=${stats.compared} errorsCompared=${stats.errorsCompared} mutationsSkipped=${stats.mutationsSkipped} earlierStates=${stats.earlierStates} byFn=${JSON.stringify(stats.byFn)}`);
+  console.log(`[parity] compared=${stats.compared} tieExempt=${stats.tieExempt} errorsCompared=${stats.errorsCompared} mutationsSkipped=${stats.mutationsSkipped} earlierStates=${stats.earlierStates} byFn=${JSON.stringify(stats.byFn)}`);
 });
