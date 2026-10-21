@@ -356,6 +356,19 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(await enrollmentsFor(lead.propertyId)).toEqual([{ name: "Asked who is texting", status: "active", step: 1 }]);
   });
 
+  it("asked_who with AI_RESPONDER_LLM_AUTOSEND=0: the fixed approved identity reply still sends and the drip starts", async () => {
+    vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
+    try {
+      await seedOrg();
+      const { lead } = await run({ asked_who: 0.9 }, "who is this");
+      expect(await outboundBodies(lead.propertyId)).toEqual([IDENTITY_REPLY_BODY]);
+      expect(await enrollmentsFor(lead.propertyId)).toEqual([{ name: "Asked who is texting", status: "active", step: 1 }]);
+      expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("not_interested: approved text, Not interested drip, no terminal disposition", async () => {
     await seedOrg();
     const { lead } = await run({ not_interested: 0.85 }, "no thanks");

@@ -3935,6 +3935,12 @@ export type ReplySource = "approved_template" | "llm" | "human";
 export function resolveOutboundPolicy(args: {
   source: ReplySource;
   dbMode?: string | null;
+  /**
+   * The body is the fixed, human-approved identity text (IDENTITY_REPLY_BODY),
+   * not model-written. It is exempt ONLY from the LLM-autosend switch; every
+   * outbound-mode hold and every other guard still applies.
+   */
+  approvedFixedText?: boolean;
 }): { hold: false } | { hold: true; reason: "outbound_mode_hold" | "llm_autosend_off" } {
   // A human clicking Send on a held draft is the human decision the hold was
   // waiting for. The AI outbound policy (draft-only rollback, LLM autosend off)
@@ -3945,10 +3951,31 @@ export function resolveOutboundPolicy(args: {
   if (envMode === "hold" || args.dbMode === "hold") {
     return { hold: true, reason: "outbound_mode_hold" };
   }
-  if (args.source === "llm" && process.env.AI_RESPONDER_LLM_AUTOSEND?.trim() === "0") {
+  if (args.source === "llm" && !args.approvedFixedText && process.env.AI_RESPONDER_LLM_AUTOSEND?.trim() === "0") {
     return { hold: true, reason: "llm_autosend_off" };
   }
   return { hold: false };
+}
+
+/**
+ * The nine-question identity send is fixed approved text only when the caller
+ * opted in explicitly AND it runs with the recipient-window/Florida-cap guards
+ * (windowDeferrable) AND both its kind and its exact body match. The legacy
+ * identity interceptor and carried retries never opt in, so they stay governed
+ * by the LLM-autosend switch.
+ */
+export function isApprovedFixedText(args: {
+  approvedFixedText?: boolean;
+  windowDeferrable?: boolean;
+  replyKind?: string | null;
+  body: string;
+}): boolean {
+  return (
+    args.approvedFixedText === true &&
+    args.windowDeferrable === true &&
+    args.replyKind === "identity" &&
+    args.body === IDENTITY_REPLY_BODY
+  );
 }
 
 /**
@@ -4513,6 +4540,12 @@ type ResponderSendArgs = {
   onProviderAccepted?: (messageId: string) => Promise<void>;
   /** See runApprovedTemplateStep `windowDeferrable`; also makes the recipient window apply to an identity (llm) send. */
   windowDeferrable?: boolean;
+  /**
+   * Nine-question identity send only: the body is the fixed human-approved
+   * IDENTITY_REPLY_BODY, so the LLM-autosend switch does not hold it (see
+   * isApprovedFixedText). Every other guard still applies.
+   */
+  approvedFixedText?: boolean;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -5212,7 +5245,7 @@ async function fenceProviderSubmit(
     attempt.fenceRefusal = "abandoned";
     return false;
   }
-  if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
+  if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) }).hold) return refuse("fence:hold");
   if (args.windowDeferrable) {
     // The property's own window (business hours / quiet hours: the same checkQuietHours rule
     // sendSmsToContact applies at its step 4, which runs BEFORE several awaits). Re-checked
@@ -5530,6 +5563,7 @@ async function sendResponderMessageInner(
   const initialPolicy = resolveOutboundPolicy({
     source: args.source,
     dbMode: args.outboundMode,
+    approvedFixedText: isApprovedFixedText(args),
   });
   if (initialPolicy.hold) {
     const evaluation = await evaluateSendGate(supabase, args.input, {
@@ -6307,7 +6341,7 @@ async function leasedSend(
   // Re-read the policy immediately before the provider call.
   const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
   assertLive(attempt);
-  const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
+  const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) });
   if (livePolicy.hold) {
     return await holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
   }
@@ -6469,7 +6503,7 @@ async function deliverResponderMessage(
       if (stale) return stale;
       const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
       guard();
-      const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
+      const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) });
       if (livePolicy.hold) return holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
       return retryOrFailReply(supabase, args, "send_lease_lost", guard);
     }
@@ -8443,6 +8477,8 @@ export async function runNineQuestionsStep(
       // Recipient window re-checked in the send path and at the provider fence; a
       // window-only refusal comes back unflagged so it can be deferred below.
       windowDeferrable: true,
+      // Fixed approved text, not model-written: exempt from AI_RESPONDER_LLM_AUTOSEND=0 only.
+      approvedFixedText: true,
     });
     if (
       sent.outcome === "skipped" &&
