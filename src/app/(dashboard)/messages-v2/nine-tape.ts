@@ -18,6 +18,9 @@ const ANSWERS: ReadonlySet<string> = new Set<string>([...NINE_QUESTION_IDS, "nee
 const NINE_TONE: Record<NineAnswer, TapeTone> = {
   open_to_selling: "hot",
   talked_price: "hot",
+  asked_offer: "hot",
+  named_price: "hot",
+  asked_call: "hot",
   maybe_later: "later",
   asked_who: "who",
   confirmed_owner: "who",

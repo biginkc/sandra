@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { NINE_ANSWER_LABELS, NINE_QUESTION_IDS, type NineAnswer } from "@/lib/sms-classification/nine-questions";
+import { NINE_ANSWER_LABELS, NINE_HOT_REPLY_TEXTS, NINE_QUESTION_IDS, type NineAnswer } from "@/lib/sms-classification/nine-questions";
 
 import { RulesPanel } from "./rules-panel";
 import { deriveTape, reasonWord, tapeTagForRun, tapeTagForWord } from "./tape";
@@ -29,7 +29,7 @@ describe("nine-question tape tag", () => {
     expect(view.kind).toBe("decided");
   });
 
-  it("covers all ten answers", () => expect(answers).toHaveLength(10));
+  it("covers all thirteen answers (nine + three added 2026-10-20 + can't read it)", () => expect(answers).toHaveLength(13));
 
   it("old-engine runs keep today's mapping", () => {
     expect(tapeTagForRun(run([step({ outcome: "nurture" })]))?.label).toBe("Maybe later");
@@ -76,11 +76,13 @@ const open = async (props: Partial<Parameters<typeof RulesPanel>[0]> = {}) => {
 };
 
 describe("rules panel", () => {
-  it("nine_questions: nine rows in three groups plus the cutoff row", async () => {
+  it("nine_questions: twelve rows in three groups plus the cutoff row", async () => {
     const panel = await open({ classifierEngine: "nine_questions" });
-    expect(within(panel).getAllByTestId("rule-row")).toHaveLength(10);
+    expect(within(panel).getAllByTestId("rule-row")).toHaveLength(13);
     const group = (name: string) => within(within(panel).getByRole("region", { name })).getAllByTestId("rule-row").map((r) => within(r).getAllByText(/./)[0].textContent);
-    expect(group("Goes to Jarrad")).toEqual(["Wants an offer", "Talked price"]);
+    expect(group("Goes to Jarrad")).toEqual(["Asked for a call", "Asked for offer", "Named a price", "Talked price", "Wants an offer"]);
+    // The approved reply texts (Jarrad 2026-10-20) show under their rows.
+    for (const text of Object.values(NINE_HOT_REPLY_TEXTS)) expect(within(panel).getByText(text)).toBeTruthy();
     expect(group("Sandra handles alone")).toEqual(["Maybe later", "Asked who is texting", "Not interested", "Wrong person", "Confirmed owner"]);
     expect(group("Waits for a person")).toEqual(["Asked to stop", "Hostile"]);
     expect(within(panel).getByText("60% sure or more")).toBeTruthy();

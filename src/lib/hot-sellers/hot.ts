@@ -1,6 +1,8 @@
 /**
  * What counts as a HOT seller (Messages v2 redesign, PR 2; Jarrad 2026-10-14):
- * the seller wants an offer or talked price. Hot sellers go to Jarrad on My
+ * the seller wants an offer or talked price (nine-question engine: open_to_selling,
+ * talked_price, and since 2026-10-20 asked_offer / named_price / asked_call, which all
+ * store Jev outcome `new_lead`). Hot sellers go to Jarrad on My
  * Leads with one Slack DM and one text; nothing else pings.
  *
  * Hot = Jev outcome `new_lead`, OR escalation reason `hot_lead` /

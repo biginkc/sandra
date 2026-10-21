@@ -8,6 +8,7 @@ import { enrollLead } from "@/lib/sequences/enrollment";
 import type { Database } from "@/lib/supabase/types";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import {
+  actionForNineAnswer,
   classifyNineQuestions,
   type NineDripName,
   type NineQuestionResult,
@@ -110,7 +111,7 @@ function isDuplicateKeyError(message: string): boolean {
  * (insert-only) and recorded as a `jev/classify` step. Never throws; a failure
  * is returned so the caller holds the message for a person.
  *
- * A hot answer (open_to_selling / talked_price) stores `resolved_outcome =
+ * A hot answer (open_to_selling / talked_price / asked_offer / named_price / asked_call) stores `resolved_outcome =
  * 'new_lead'` because the existing promotion RPC verifies the run it cites; every
  * other answer stores null so no eight-answer view reads it as an outcome.
  */
@@ -193,7 +194,7 @@ export async function runNineClassification(
 
   if (!input.conversationId || !input.inboundMessageId) return failed("audit_persist_failed");
   const stateHash = createHash("sha256").update(JSON.stringify(state)).digest("hex");
-  const hot = result.answer === "open_to_selling" || result.answer === "talked_price";
+  const hot = actionForNineAnswer(result.answer).kind === "hot";
   const row = {
     org_id: input.orgId,
     property_id: input.propertyId,

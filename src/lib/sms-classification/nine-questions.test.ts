@@ -10,6 +10,8 @@ import {
   NINE_QUESTION_GROUPS,
   NINE_QUESTION_IDS,
   NINE_QUESTIONS,
+  NINE_HOT_REPLY_NAMES,
+  NINE_HOT_REPLY_TEXTS,
   type NineAnswer,
   type NineQuestionId,
 } from "./nine-questions";
@@ -30,22 +32,39 @@ describe("approved text is pinned byte for byte", () => {
     hostile: "Was the homeowner rude or hostile?",
     confirmed_owner: "Did the homeowner confirm they are the person or owner we asked about?",
     talked_price: "Did the homeowner mention a price or ask how much we would pay?",
+    // Approved verbatim by Jarrad 2026-10-20.
+    asked_offer: "Did the homeowner ask what our offer is or how much we would pay?",
+    named_price: "Did the homeowner name a price or amount they want?",
+    asked_call: "Did the homeowner ask us to call them or give a time to talk?",
   };
 
-  it("nine questions, exactly", () => {
+  it("the nine plus the three added 2026-10-20, exactly", () => {
     expect(Object.keys(NINE_QUESTIONS).sort()).toEqual(Object.keys(APPROVED).sort());
     for (const id of NINE_QUESTION_IDS) expect(NINE_QUESTIONS[id]).toBe(APPROVED[id]);
-    expect(NINE_QUESTION_IDS).toHaveLength(9);
+    expect(NINE_QUESTION_IDS).toHaveLength(12);
+  });
+
+  it("hot reply texts, approved verbatim by Jarrad 2026-10-20", () => {
+    expect(NINE_HOT_REPLY_TEXTS).toEqual({
+      asked_offer:
+        "Thanks for your reply. I'm not authorized to provide offers via SMS, but I'd love to put you in touch with an acquisitions manager. When's a good time to chat?",
+      said_yes: "Fantastic. When's a good time for a quick call with an acquisitions manager?",
+      named_price: "Thanks, I'll update our records. When's a good time for a quick call with an acquisitions manager?",
+    });
+    expect(NINE_HOT_REPLY_NAMES).toEqual({ asked_offer: "Asked for offer", said_yes: "Said yes", named_price: "Named a price" });
   });
 
   it("cutoff is 0.6", () => {
     expect(NINE_QUESTION_CUTOFF).toBe(0.6);
   });
 
-  it("group order is stop/hostile > wrong person > price > open > maybe later > not interested > asked who > confirmed owner", () => {
+  it("group order (2026-10-20): stop/hostile > wrong person > asked call > asked offer > named price > talked price > open > maybe later > not interested > asked who > confirmed owner", () => {
     expect(NINE_QUESTION_GROUPS).toEqual([
       ["asked_stop", "hostile"],
       ["wrong_person"],
+      ["asked_call"],
+      ["asked_offer"],
+      ["named_price"],
       ["talked_price"],
       ["open_to_selling"],
       ["maybe_later"],
@@ -112,8 +131,11 @@ describe("decideNineQuestions", () => {
 
 describe("actionForNineAnswer", () => {
   const cases: Array<[NineAnswer, unknown]> = [
-    ["open_to_selling", { kind: "hot" }],
-    ["talked_price", { kind: "hot" }],
+    ["open_to_selling", { kind: "hot", reply: "said_yes" }],
+    ["talked_price", { kind: "hot", reply: null }],
+    ["asked_offer", { kind: "hot", reply: "asked_offer" }],
+    ["named_price", { kind: "hot", reply: "named_price" }],
+    ["asked_call", { kind: "hot", reply: null }],
     ["maybe_later", { kind: "reply_and_drip", reply: "nurture", drip: "Maybe later", skipFirstStep: false }],
     ["asked_who", { kind: "reply_and_drip", reply: "identity", drip: "Asked who is texting", skipFirstStep: true }],
     ["not_interested", { kind: "reply_and_drip", reply: "not_interested", drip: "Not interested", skipFirstStep: false }],
@@ -126,8 +148,34 @@ describe("actionForNineAnswer", () => {
   it.each(cases)("%s", (answer, action) => {
     expect(actionForNineAnswer(answer)).toEqual(action);
   });
-  it("covers all ten answers", () => {
+  it("covers every answer", () => {
     expect(cases.map(([a]) => a).sort()).toEqual([...NINE_QUESTION_IDS, "needs_person"].sort());
+  });
+});
+
+describe("new tie-breaker on real replies (2026-10-20)", () => {
+  // Real seller replies from the 252-reply replay; probabilities shaped like Jev's reads.
+  const cases: Array<[string, Partial<Record<NineQuestionId, number>>, NineAnswer]> = [
+    ["What's your offer?", { asked_offer: 0.97, talked_price: 0.95, open_to_selling: 0.8 }, "asked_offer"],
+    ["I was just offered $395k. What's your offer", { asked_offer: 0.95, named_price: 0.7, talked_price: 0.97, open_to_selling: 0.85 }, "asked_offer"],
+    ["Would you consider $450,000?", { named_price: 0.96, talked_price: 0.97, open_to_selling: 0.9, asked_offer: 0.3 }, "named_price"],
+    ["Now is fine", { asked_call: 0.93, open_to_selling: 0.7 }, "asked_call"],
+    ["Make an offer", { asked_offer: 0.45, open_to_selling: 0.92, talked_price: 0.4 }, "open_to_selling"],
+    ["STOP 5 million", { asked_stop: 0.96, named_price: 0.9, talked_price: 0.9, hostile: 0.3 }, "asked_stop"],
+  ];
+  it.each(cases)("%s", (_reply, p, expected) => {
+    const d = decideNineQuestions({ ...none(), ...p });
+    expect(d.answer).toBe(expected);
+  });
+  it("what each one does", () => {
+    expect(actionForNineAnswer("asked_offer")).toEqual({ kind: "hot", reply: "asked_offer" });
+    expect(actionForNineAnswer("named_price")).toEqual({ kind: "hot", reply: "named_price" });
+    expect(actionForNineAnswer("asked_call")).toEqual({ kind: "hot", reply: null });
+    expect(actionForNineAnswer("open_to_selling")).toEqual({ kind: "hot", reply: "said_yes" });
+    expect(actionForNineAnswer("asked_stop")).toEqual({ kind: "wait_for_person", reason: "asked_stop" });
+  });
+  it("wrong person beats a call request and a price", () => {
+    expect(decideNineQuestions({ ...none(), wrong_person: 0.7, asked_call: 0.99, named_price: 0.99 }).answer).toBe("wrong_person");
   });
 });
 
@@ -154,6 +202,9 @@ describe("recorded matrix (30 scenarios x 3 wordings, synthetic)", () => {
     const expectedKind = {
       open_to_selling: "hot",
       talked_price: "hot",
+      asked_offer: "hot",
+      named_price: "hot",
+      asked_call: "hot",
       maybe_later: "reply_and_drip",
       asked_who: "reply_and_drip",
       not_interested: "reply_and_drip",

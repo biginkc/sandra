@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,12 +11,13 @@ import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 import {
   NINE_QUESTION_IDS,
   NINE_QUESTIONS,
+  NINE_HOT_REPLY_TEXTS,
   type NineAnswer,
   type NineQuestionId,
 } from "@/lib/sms-classification/nine-questions";
 
 import { startRun } from "@/lib/pipeline-runs";
-import { HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
+import { HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
 import { dispatchAiResponse, NINE_DEFER_MAX } from "./dispatch";
 import { enrollNineDrip } from "./nine-questions-engine";
 import type { AnthropicLike } from "./generate";
@@ -44,6 +46,8 @@ const windows = vi.hoisted(() => ({
   /** The same for the property window: the first N live checks (no `at`) see it open. */
   businessOpenCalls: null as number | null,
   businessCalls: 0,
+  /** Side effect run on each live recipient-window check (a person acting in that instant). */
+  onRecipientCheck: null as (() => void) | null,
 }));
 const openAt = (closedUntil: Date | null, at?: Date) => !closedUntil || (at ?? new Date()).getTime() >= closedUntil.getTime();
 vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
@@ -57,6 +61,7 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
   checkRecipientQuietHours: (_phone: unknown, at?: Date) => {
+    if (!at && windows.onRecipientCheck) windows.onRecipientCheck();
     if (windows.recipientUnknown) return { ok: false, reason: "unknown_recipient_state", state: null, localTime: null };
     if (!at && windows.recipientOpenCalls !== null && ++windows.recipientCalls <= windows.recipientOpenCalls) {
       return { ok: true, state: "MO", localTime: "20:59", florida: false };
@@ -242,6 +247,11 @@ async function hotTextRecords(propertyId: string): Promise<number> {
   return rows[0].n as number;
 }
 
+async function hotHandoffRecords(propertyId: string): Promise<number> {
+  const { rows } = await pg.query("select count(*)::int as n from public.lead_events where property_id = $1 and source_type = $2", [propertyId, HOT_HANDOFF_SOURCE_TYPE]);
+  return rows[0].n as number;
+}
+
 async function run(answer: Partial<Record<NineQuestionId, number>>, reply = "ok", lead?: Awaited<ReturnType<typeof seedLead>>) {
   const l = lead ?? (await seedLead());
   jevProbabilities = answer;
@@ -320,6 +330,7 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     windows.floridaCapped = false;
     windows.businessOpenCalls = null;
     windows.businessCalls = 0;
+    windows.onRecipientCheck = null;
     // A schema-only throwaway database has no tenant rows: make sure the canonical org exists.
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (nine questions test)" });
     expect(orgError).toBeNull();
@@ -424,15 +435,22 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
     expect(row.last_ai_escalation_reason).toMatch(/^hostile_needs_confirm/);
   });
 
-  for (const [answer, probs] of [
-    ["open_to_selling", { open_to_selling: 0.9 }],
-    ["talked_price", { talked_price: 0.9 }],
-  ] as Array<[NineAnswer, Partial<Record<NineQuestionId, number>>]>) {
-    it(`${answer}: today's new_lead promotion (switch on), no automatic text`, async () => {
+  for (const [answer, probs, text] of [
+    ["open_to_selling", { open_to_selling: 0.9 }, NINE_HOT_REPLY_TEXTS.said_yes],
+    ["talked_price", { talked_price: 0.9 }, null],
+    ["asked_offer", { asked_offer: 0.9, talked_price: 0.9 }, NINE_HOT_REPLY_TEXTS.asked_offer],
+    ["named_price", { named_price: 0.9, talked_price: 0.9 }, NINE_HOT_REPLY_TEXTS.named_price],
+    ["asked_call", { asked_call: 0.9, open_to_selling: 0.8 }, null],
+  ] as Array<[NineAnswer, Partial<Record<NineQuestionId, number>>, string | null]>) {
+    it(`${answer}: today's new_lead promotion (switch on) and hot alert; ${text ? "the approved reply once" : "no text"}`, async () => {
       await seedOrg();
       const owner = await seedOwner();
-      const { lead } = await run(probs, "yes I would sell");
-      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      const { lead, outcome } = await run(probs, "yes I would sell");
+      expect(outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(await outboundBodies(lead.propertyId)).toEqual(text ? [text] : []);
+      expect(getMockMessageLog()).toHaveLength(text ? 1 : 0);
+      expect(await hotHandoffRecords(lead.propertyId)).toBe(1); // the hot alert's event
+      expect((await propertyRow(lead.propertyId)).needs_human_attention).toBe(false);
       expect((await propertyRow(lead.propertyId)).status).toBe("new_lead");
       const { data: assigned } = await supabase.from("properties").select("assigned_user_id").eq("id", lead.propertyId).single();
       expect(assigned!.assigned_user_id).toBe(owner); // PR 2's hand-off to Jarrad
@@ -444,6 +462,204 @@ describe("nine questions through dispatchAiResponse (disposable local stack)", (
       expect(runs![0]!.decision).toMatchObject({ engine: "nine_questions", answer });
     });
   }
+
+  describe("hot reply texts (approved verbatim by Jarrad 2026-10-20)", () => {
+    async function inbound(lead: Awaited<ReturnType<typeof seedLead>>, reply: string, probs: Partial<Record<NineQuestionId, number>>) {
+      jevProbabilities = probs;
+      const m = await seedThread(lead, reply);
+      return dispatchAiResponse(supabase, {
+        propertyId: lead.propertyId,
+        contactId: lead.contactId,
+        conversationId: m.conversationId,
+        inboundMessageId: m.id,
+        inboundBody: reply,
+        inboundFromPhone: lead.phone,
+        inboundToPhone: MOCK_SENDER_PRIMARY,
+      }, { anthropic: NO_ANTHROPIC });
+    }
+
+    it("the same inbound dispatched twice: one text, one alert", async () => {
+      await seedOrg();
+      await seedOwner();
+      const first = await run({ asked_offer: 0.95 }, "What's your offer?");
+      await dispatchAiResponse(supabase, first.input, { anthropic: NO_ANTHROPIC });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([NINE_HOT_REPLY_TEXTS.asked_offer]);
+      expect(await hotHandoffRecords(first.lead.propertyId)).toBe(1);
+    });
+
+    it("a repeat inbound asking again: the text is not sent twice, the lead stays hot", async () => {
+      await seedOrg();
+      await seedOwner();
+      const first = await run({ asked_offer: 0.95 }, "What's your offer?");
+      await inbound(first.lead, "Hello? What's your offer", { asked_offer: 0.95 });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([NINE_HOT_REPLY_TEXTS.asked_offer]);
+      expect((await propertyRow(first.lead.propertyId)).status).toBe("new_lead");
+    });
+
+    it("the same text is never sent twice to a property even if it is a prospect again", async () => {
+      await seedOrg();
+      await seedOwner();
+      const first = await run({ named_price: 0.95 }, "Would you consider $450,000?");
+      await pg.query("update public.properties set status = 'prospect', assigned_user_id = null where id = $1", [first.lead.propertyId]);
+      await inbound(first.lead, "450 is my number", { named_price: 0.95 });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([NINE_HOT_REPLY_TEXTS.named_price]);
+    });
+
+    it("stop beats a price: STOP 5 million waits for a person, nothing sent, not hot", async () => {
+      await seedOrg();
+      await seedOwner();
+      const { lead } = await run({ asked_stop: 0.96, named_price: 0.9, talked_price: 0.9 }, "STOP 5 million");
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("nine_asked_stop");
+      expect((await propertyRow(lead.propertyId)).status).toBe("prospect");
+      expect(await hotHandoffRecords(lead.propertyId)).toBe(0);
+    });
+
+    it("hostile wording + an offer question: the hostile hold wins, nothing sent", async () => {
+      await seedOrg();
+      await seedOwner();
+      const { lead } = await run({ asked_offer: 0.9 }, "you scammers, what's your offer");
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      expect(getMockMessageLog()).toHaveLength(0);
+    });
+
+    it("quiet hours: the lead is hot and alerted now; the text waits, then goes once when the window opens", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      const first = await run({ open_to_selling: 0.9 }, "Make an offer");
+      const o = first.outcome as AiRetryOutcome;
+      expect(o.outcome).toBe("retry");
+      expect(o.reason).toBe("nine_reply_deferred");
+      expect(o.nineDeferral?.hotReply).toBe(true);
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
+      expect((await propertyRow(first.lead.propertyId)).status).toBe("new_lead");
+      expect(await hotHandoffRecords(first.lead.propertyId)).toBe(1);
+      windows.recipientClosedUntil = null;
+      const jevBefore = jevCalls.length;
+      const again = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      expect(again).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(jevCalls.length).toBe(jevBefore);
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([NINE_HOT_REPLY_TEXTS.said_yes]);
+      expect(await hotHandoffRecords(first.lead.propertyId)).toBe(1);
+      // A replay of the same deferral sends nothing more.
+      await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([NINE_HOT_REPLY_TEXTS.said_yes]);
+    });
+
+    it("quiet hours, then the lead changed while the text waited: the text is dropped, the lead stays hot", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      const first = await run({ asked_offer: 0.9 }, "What's your offer?");
+      const o = first.outcome as AiRetryOutcome;
+      expect(o.nineDeferral?.hotReply).toBe(true);
+      // Jarrad texts the seller himself meanwhile.
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: first.lead.propertyId, contact_id: first.lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: first.lead.phone, body: "Hi, Jarrad here" });
+      windows.recipientClosedUntil = null;
+      await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual(["Hi, Jarrad here"]);
+      expect((await propertyRow(first.lead.propertyId)).status).toBe("new_lead");
+    });
+
+    it("deferred twice, a person reassigned the lead in between: the text is dropped, never re-based", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      const first = await run({ named_price: 0.9 }, "Would you consider $450,000?");
+      const o1 = first.outcome as AiRetryOutcome;
+      expect(o1.nineDeferral?.hotReply).toBe(true);
+      // The deferred run passes its early revision check; at the recipient-window check (still
+      // closed) a person reassigns the lead, which moves its revision.
+      // Synchronous (the window check is synchronous), so the change has landed before the run goes on.
+      let bumped = false;
+      windows.onRecipientCheck = () => {
+        if (bumped) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${first.lead.propertyId}'`]);
+      };
+      const second = await dispatchAiResponse(supabase, { ...first.input, nineDeferral: o1.nineDeferral }, { anthropic: NO_ANTHROPIC });
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      // Not deferred again on top of the person's change: the text is dropped.
+      expect(second).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(await outboundBodies(first.lead.propertyId)).toEqual([]);
+      expect(getMockMessageLog()).toHaveLength(0);
+    });
+
+    it("first deferral, a person reassigned the lead during the window check: the text is dropped, not deferred", async () => {
+      await seedOrg();
+      await seedOwner();
+      windows.recipientClosedUntil = new Date(Date.now() + 2 * 3600_000);
+      let bumped = false;
+      let leadId = "";
+      windows.onRecipientCheck = () => {
+        if (bumped || !leadId) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${leadId}'`]);
+      };
+      const lead = await seedLead();
+      leadId = lead.propertyId;
+      const first = await run({ asked_offer: 0.9 }, "What's your offer?", lead);
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      expect(first.outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+      expect(await hotHandoffRecords(lead.propertyId)).toBe(1);
+    });
+
+    it("a person acts on the lead between the hand-off and the send: the text is dropped", async () => {
+      await seedOrg();
+      await seedOwner();
+      let bumped = false;
+      let leadId = "";
+      windows.onRecipientCheck = () => {
+        if (bumped || !leadId) return;
+        bumped = true;
+        execFileSync("psql", [process.env.TEST_SUPABASE_DB_URL!, "-qc", `update public.properties set decision_context_revision = decision_context_revision + 1 where id = '${leadId}'`]);
+      };
+      const lead = await seedLead();
+      leadId = lead.propertyId;
+      const first = await run({ named_price: 0.9 }, "Would you consider $450,000?", lead);
+      windows.onRecipientCheck = null;
+      expect(bumped).toBe(true);
+      expect(first.outcome).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(getMockMessageLog()).toHaveLength(0);
+      expect((await propertyRow(lead.propertyId)).status).toBe("new_lead");
+    });
+
+    it("outbound hold mode: no text goes out, the lead is still promoted and alerted", async () => {
+      await seedOrg({ outboundMode: "hold" });
+      await seedOwner();
+      const { lead } = await run({ named_price: 0.9 }, "Would you consider $450,000?");
+      expect(getMockMessageLog()).toHaveLength(0);
+      expect((await propertyRow(lead.propertyId)).status).toBe("new_lead");
+      expect(await hotHandoffRecords(lead.propertyId)).toBe(1);
+    });
+
+    it("already a lead (a person has it): hot as today, no text", async () => {
+      await seedOrg();
+      await seedOwner();
+      const lead = await seedLead();
+      await pg.query("update public.properties set status = 'new_lead' where id = $1", [lead.propertyId]);
+      await run({ asked_offer: 0.9 }, "What's your offer?", lead);
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    });
+
+    it("hot with the new_lead switch off: held for a person as hot_lead, no text", async () => {
+      await seedOrg({ newLeadAuto: false });
+      const { lead } = await run({ asked_offer: 0.9 }, "What's your offer?");
+      expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("hot_lead");
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    });
+
+    it("hand-off failed (no owner): hot hold, no text", async () => {
+      await seedOrg();
+      const { lead } = await run({ asked_offer: 0.9 }, "What's your offer?");
+      expect((await propertyRow(lead.propertyId)).last_ai_escalation_reason).toBe("hot_lead_assign_failed");
+      expect(await outboundBodies(lead.propertyId)).toEqual([]);
+    });
+  });
 
   it("hot with the new_lead switch off: held for a person as hot_lead, nothing promoted", async () => {
     await seedOrg({ newLeadAuto: false });

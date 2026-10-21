@@ -105,7 +105,13 @@ import {
   runNineClassification,
   type NineDripResult,
 } from "./nine-questions-engine";
-import { actionForNineAnswer, NINE_REPEAT_NOT_INTERESTED_RULE, type NineQuestionResult } from "@/lib/sms-classification/nine-questions";
+import {
+  actionForNineAnswer,
+  NINE_HOT_REPLY_TEXTS,
+  NINE_REPEAT_NOT_INTERESTED_RULE,
+  type NineHotReply,
+  type NineQuestionResult,
+} from "@/lib/sms-classification/nine-questions";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
 import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
@@ -3750,7 +3756,7 @@ async function deliverRoutedReply(
     responseClaim: { claimId: string | null; startedAt?: string };
     runCtx?: MaybeRunContext;
     reply: {
-      kind: "send_reply" | "deescalate_close" | "identity";
+      kind: "send_reply" | "deescalate_close" | "identity" | "nine_hot_reply";
       body: string;
       confidence: number;
       sentiment: AiMessageMetadata["sentiment"];
@@ -3970,12 +3976,11 @@ export function isApprovedFixedText(args: {
   replyKind?: string | null;
   body: string;
 }): boolean {
-  return (
-    args.approvedFixedText === true &&
-    args.windowDeferrable === true &&
-    args.replyKind === "identity" &&
-    args.body === IDENTITY_REPLY_BODY
-  );
+  if (args.approvedFixedText !== true || args.windowDeferrable !== true) return false;
+  if (args.replyKind === "identity") return args.body === IDENTITY_REPLY_BODY;
+  // The three hot reply texts Jarrad approved verbatim 2026-10-20 (sendNineHotReply only).
+  if (args.replyKind === "nine_hot_reply") return (Object.values(NINE_HOT_REPLY_TEXTS) as string[]).includes(args.body);
+  return false;
 }
 
 /**
@@ -7802,6 +7807,8 @@ type NineStepArgs = {
   now?: Date;
 };
 
+/** A hot reply whose lead changed after the hand-off (someone acted on it): the text is dropped. */
+const NINE_HOT_REPLY_CONTEXT_CHANGED = "nine_hot_reply_context_changed";
 /** A deferred nine-question reply whose lead changed while it waited: a person looks. */
 export const NINE_DEFERRED_CONTEXT_CHANGED = "nine_deferred_context_changed";
 /** The repeat-no rule could not stop the drip after marking the lead not interested. */
@@ -7957,7 +7964,7 @@ async function routeNineHot(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
   r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
-): Promise<AiDispatchOutcome> {
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const { input } = a;
   const chosen = r.result.chosen!;
   const thresholds = await loadOrgThresholdMap(supabase, a.property.org_id);
@@ -7986,8 +7993,39 @@ async function routeNineHot(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
-      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx, input.inboundMessageId);
+      let handoffStatus: string | null = null;
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx, input.inboundMessageId, (s) => {
+        handoffStatus = s;
+      });
+      // A failed hand-off is a hot hold for a person: no reply text (the alert still fires).
       if (handoffEscalation) return handoffEscalation;
+      // The approved hot reply (2026-10-20) goes out only AFTER the promotion and hand-off
+      // above, so it can never delay or block the alert. It is skipped when the lead was
+      // already a lead (already_qualified: a person already has it) or belongs to someone
+      // else; either way the lead stays hot exactly as before.
+      const action = actionForNineAnswer(r.result.answer);
+      if (
+        action.kind === "hot" &&
+        action.reply &&
+        applyResult.status !== "already_qualified" &&
+        handoffStatus !== "owned_by_someone_else"
+      ) {
+        // The baseline every later check compares against: read right after the hand-off.
+        const { data: afterHandoff } = await supabase
+          .from("properties")
+          .select("decision_context_revision")
+          .eq("id", input.propertyId)
+          .maybeSingle();
+        if (afterHandoff) return sendNineHotReply(supabase, a, action.reply, r, afterHandoff.decision_context_revision);
+      }
+      if (action.kind === "hot" && action.reply) {
+        await trace(supabase, {
+          kind: "reply",
+          name: "nine_hot_reply",
+          result: "skipped",
+          detail: { engine: "nine_questions", reply: action.reply, why: applyResult.status === "already_qualified" ? "already_a_lead" : handoffStatus === "owned_by_someone_else" ? "owned_by_someone_else" : "revision_unreadable" },
+        }, a.runCtx);
+      }
       await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
       return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
     }
@@ -8021,6 +8059,8 @@ async function maybeDeferNineReply(
   a: NineStepArgs,
   why: string,
   decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+  /** Hot reply only: the revision verified right after the hand-off (or carried by the hot deferral). */
+  opts: { hotBaseline?: number } = {},
 ): Promise<AiRetryOutcome | null> {
   if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
   // A dispatch running without the reply delay (none configured, lookup failed, workflow
@@ -8037,7 +8077,15 @@ async function maybeDeferNineReply(
     .select("decision_context_revision")
     .eq("id", a.input.propertyId)
     .maybeSingle();
-  if (liveRevError || !liveRev || liveRev.decision_context_revision !== decision.evaluationRevision + ownRowBumps) return null;
+  if (liveRevError || !liveRev) return null;
+  // A hot reply waits AFTER the promotion / hand-off, which move the revision themselves:
+  // the deferred run instead requires the revision read here to be unchanged.
+  // A hot reply: promotion and hand-off already moved the revision, so the baseline is the one
+  // read right after the hand-off (or carried by the previous hot deferral). Only this attempt's
+  // own refused pending row may have moved it since; anything else (a reassignment, a person
+  // texting) drops the text instead of becoming the new baseline.
+  const expected = opts.hotBaseline !== undefined ? opts.hotBaseline : decision.evaluationRevision;
+  if (liveRev.decision_context_revision !== expected + ownRowBumps) return null;
   const phone = await resolveSendDestinationPhone(supabase, a.input);
   const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
   if (delaySeconds === null) return null;
@@ -8077,8 +8125,109 @@ async function maybeDeferNineReply(
       revision: liveRev.decision_context_revision,
       result: decision.result,
       classificationRunId: decision.classificationRunId,
+      ...(opts.hotBaseline !== undefined ? { hotReply: true } : {}),
     },
   };
+}
+
+/**
+ * The approved hot reply (Jarrad 2026-10-20) for asked_offer / named_price / open_to_selling.
+ * Called only after the hot promotion + hand-off succeeded (or, on a deferred run, after the
+ * revision check proved nothing changed since). Sent as fixed approved text through the same
+ * send path as the nine identity reply, so every guard applies: consent / opt-out / suppression
+ * and the send gates in sendResponderMessage, the outbound-mode hold, business hours and the
+ * recipient's window + Florida cap (a closed window defers, never holds), the repeat guard
+ * (the same text never goes twice to a property) and the provider fence.
+ *
+ * Never an extra hold: whatever happens to the text, the lead is already hot and on My Leads,
+ * so a text that cannot go out is traced and the claim is closed (the send path's own guards
+ * keep any flag they write themselves, e.g. the outbound-mode draft hold).
+ */
+async function sendNineHotReply(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  key: NineHotReply,
+  r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
+  /** The lead's revision right after the hot hand-off (or carried by the hot deferral). */
+  baseline: number,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  const body = NINE_HOT_REPLY_TEXTS[key];
+  const promoted: AiDispatchOutcome = { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+  const notSent = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // A deferred run whose lead changed at the fence: someone acted on the lead, so drop the text.
+    if (why !== NINE_DEFERRED_CONTEXT_CHANGED && why !== NINE_HOT_REPLY_CONTEXT_CHANGED) {
+      const deferred = await maybeDeferNineReply(supabase, a, why, r, { hotBaseline: baseline });
+      if (deferred) return deferred;
+    }
+    await trace(supabase, {
+      kind: "reply",
+      name: "nine_hot_reply",
+      result: "skipped",
+      detail: { engine: "nine_questions", reply: key, why },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", errorMessage: `nine_hot_reply_not_sent:${why}` });
+    return promoted;
+  };
+  if (!templateCtx) return notSent("reply_ineligible");
+  if (input.replyDelayBypassed) return notSent(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
+  const safety = validateAiReplyBody(body);
+  if (!safety.ok) return notSent(`safety:${safety.reason}`);
+  // Repeat guard: this exact text already went (or may have gone) to this property: never again.
+  const repeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, body);
+  if (repeat !== "no") return notSent(repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT);
+  // Fixed text, not a library template: check the recipient's clock and the Florida cap here
+  // (the send path and the provider fence check them again).
+  const window = await evaluateRecipientWindow(supabase, input);
+  if (!window.ok) return notSent(`quiet_hours_recipient:${window.why}`);
+  // Last look before sending: anyone who touched the lead since the hand-off (a reassignment,
+  // a person texting) owns the conversation now, so the text is dropped.
+  const { data: live, error: liveError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (liveError || !live || live.decision_context_revision !== baseline) return notSent(NINE_HOT_REPLY_CONTEXT_CHANGED);
+  const sent = await sendResponderMessage(supabase, {
+    runContext: runCtx,
+    input,
+    body,
+    model: templateCtx.model,
+    confidence: 1,
+    sentiment: "neutral",
+    turn: templateCtx.currentTurn + 1,
+    source: "llm",
+    orgId: property.org_id,
+    claimStartedAt: templateCtx.claimStartedAt,
+    outboundMode: templateCtx.outboundMode,
+    replyKind: "nine_hot_reply",
+    windowDeferrable: true,
+    approvedFixedText: true,
+  });
+  if (sent.outcome === "sent") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "nine_hot_reply",
+      result: "applied",
+      detail: { engine: "nine_questions", reply: key },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", outboundMessageId: sent.messageId });
+    return promoted;
+  }
+  if (sent.outcome === "skipped" && (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE || sent.reason === NINE_DEFERRED_CONTEXT_CHANGED)) {
+    return notSent(sent.reason);
+  }
+  // Not sent and nothing stored (a transient provider problem): never re-run the hot path for
+  // a text. A repeat dispatch would find the lead already promoted and send nothing anyway.
+  if (sent.outcome === "retry") return notSent(`send_retry:${sent.reason}`);
+  // escalated / skipped by a guard: the send path already settled its own flag, if any.
+  await trace(supabase, {
+    kind: "reply",
+    name: "nine_hot_reply",
+    result: "skipped",
+    detail: { engine: "nine_questions", reply: key, why: `send_${sent.outcome}`, reason: sent.reason },
+  }, runCtx);
+  return settleClaimForSendOutcome(supabase, claim.claimId, sent, { orgId: property.org_id, input, body, runContext: runCtx });
 }
 
 /**
@@ -8207,6 +8356,33 @@ export async function runNineQuestionsStep(
   a: NineStepArgs,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const { input, property, claim, runCtx, templateCtx } = a;
+  if (input.nineDeferral?.hotReply) {
+    // Only the approved hot reply text is waiting: the promotion, hand-off and alert already
+    // happened. Send it only if nothing about the lead changed while it waited (a person
+    // texting, calling, a status change...); otherwise drop the text, never re-decide.
+    const deferral = input.nineDeferral;
+    const { data: current, error: revisionError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    const action = actionForNineAnswer(deferral.result.answer);
+    if (revisionError || !current || current.decision_context_revision !== deferral.revision || action.kind !== "hot" || !action.reply) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "nine_hot_reply",
+        result: "skipped",
+        detail: { engine: "nine_questions", why: "context_changed" },
+      }, runCtx);
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: NINE_HOT_REPLY_CONTEXT_CHANGED });
+      return { outcome: "skipped", reason: "nine_hot_reply_context_changed" };
+    }
+    return sendNineHotReply(supabase, a, action.reply, {
+      classificationRunId: deferral.classificationRunId,
+      evaluationRevision: deferral.revision,
+      result: deferral.result,
+    }, deferral.revision);
+  }
   if (input.nineDeferral) {
     // A deferred reply: act only if nothing about the lead changed while it waited
     // (a new text, a takeover, a status / dispo change all move the revision).
@@ -8579,8 +8755,10 @@ async function handOffHotLead(
   claim: { claimId: string | null },
   runCtx?: MaybeRunContext,
   inboundMessageId?: string | null,
+  onStatus?: (status: string) => void,
 ): Promise<AiDispatchOutcome | null> {
   const handoff = await assignHotLeadToOwner(supabase, propertyId, { inboundMessageId });
+  onStatus?.(handoff.status);
   await trace(supabase, {
     kind: "action",
     name: "assign_hot_lead",
