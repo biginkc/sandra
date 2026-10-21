@@ -329,6 +329,8 @@ export async function processVoicemailDropStep(
   }
   // Rotation: pick one saved voicemail script per enrollment + step. The seed
   // is stable, so a retry of this claim reads the same script.
+  // Pool membership changes (add/soft-delete) can change the pick on a
+  // not_queued retry; rendered_script records what went out — same as SMS pools.
   let ttsTemplate = stepScript;
   if (rotationGroup) {
     const picked = await pickVoicemailFromPool(
