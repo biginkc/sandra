@@ -119,7 +119,13 @@ begin
       and e.current_step_index = v_step_index and r.attempt_outcome = 'accepted'
     );
     if v_step_index is not null and v_eligible then
-      v_action := public.voicemail_drop_settle_enrollment(e.id, v_step_index, true, p_pause_reason);
+      -- Consent replaces an existing stop reason; step_misconfigured keeps it
+      -- (the pointer still advances in place).
+      v_action := public.voicemail_drop_settle_enrollment(
+        e.id, v_step_index, true,
+        case when p_pause_reason = 'step_misconfigured' and e.status = 'paused'
+               and e.pause_reason is distinct from 'reconciliation_required'
+             then null else p_pause_reason end);
     elsif v_result <> 'conflict' then
       v_action := public.voicemail_drop_settle_enrollment(e.id, coalesce(v_step_index, -1), false, p_pause_reason);
     end if;

@@ -132,7 +132,11 @@ export function createFakeDropStore(
       if (enrollment && run && run.claim_active) {
         const eligible = owner || (enrollment.status === "paused" && enrollment.pause_reason === "reconciliation_required" &&
           enrollment.current_step_index === STEP && run.attempt_outcome === "accepted");
-        if (eligible) enrollmentAction = settle(drop.enrollment_id!, enrollment, true, input.pauseReason);
+        if (eligible) {
+          const keepStop = input.pauseReason === "step_misconfigured" && enrollment.status === "paused" &&
+            enrollment.pause_reason !== "reconciliation_required";
+          enrollmentAction = settle(drop.enrollment_id!, enrollment, true, keepStop ? null : input.pauseReason);
+        }
         else if (dropResult !== "conflict") enrollmentAction = settle(drop.enrollment_id!, enrollment, false, input.pauseReason);
       }
       return { dropResult, enrollmentAction };
