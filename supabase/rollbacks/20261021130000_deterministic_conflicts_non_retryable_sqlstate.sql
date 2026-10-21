@@ -36,7 +36,7 @@ begin
     ('fn_finalize_dialpad_recording_provider_window', 'DPR01', 1),
     ('fn_finalize_dialpad_recording_shadow', 'DPR01', 1),
     ('fn_finish_dialpad_recording_timing', 'DPR01', 1),
-    ('fn_mark_dialpad_recording_eof', 'DPR01', 3),
+    ('fn_mark_dialpad_recording_eof', 'DPR01', 2),
     ('fn_mint_dialpad_recording_ingest_grant', 'DPR01', 1),
     ('fn_mint_dialpad_recording_next_epoch', 'DPR01', 1),
     ('fn_record_dialpad_recording_chunk', 'DPR01', 5),

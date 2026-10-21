@@ -30,7 +30,7 @@ const CHANGED: ReadonlyArray<[string, string, number]> = [
   ["fn_finalize_dialpad_recording_provider_window", "DPR01", 1],
   ["fn_finalize_dialpad_recording_shadow", "DPR01", 1],
   ["fn_finish_dialpad_recording_timing", "DPR01", 1],
-  ["fn_mark_dialpad_recording_eof", "DPR01", 3],
+  ["fn_mark_dialpad_recording_eof", "DPR01", 2],
   ["fn_mint_dialpad_recording_ingest_grant", "DPR01", 1],
   ["fn_mint_dialpad_recording_next_epoch", "DPR01", 1],
   ["fn_record_dialpad_recording_chunk", "DPR01", 5],
@@ -49,6 +49,11 @@ const CHANGED: ReadonlyArray<[string, string, number]> = [
   ["fn_save_offer_calculation", "NRT01", 1],
   ["save_unverified_lead_phone", "NRT01", 1],
 ];
+// A partial keep: EOF ahead of a still-committing chunk can succeed on retry.
+const KEPT: Record<string, string> = {
+  fn_mark_dialpad_recording_eof:
+    "raise exception 'EOF_NOT_LAST_ACKNOWLEDGED_CHUNK' using errcode = '40001', detail = 'eof_not_last_acknowledged_chunk';",
+};
 const TRANSIENT = [
   "claim_verified_esign_webhook_receipt",
   "register_dropbox_website_esign_template",
@@ -90,7 +95,8 @@ describe("deterministic conflict SQLSTATEs (20261021130000)", () => {
     const text = await def(name);
     expect(count(text, `'${code}'`)).toBe(expected);
     expect(text.match(new RegExp(`errcode\\s*=\\s*'${code}'`, "g"))?.length).toBe(expected);
-    expect(text).not.toContain("'40001'");
+    expect(count(text, "'40001'")).toBe(KEPT[name] ? 1 : 0);
+    if (KEPT[name]) expect(text).toContain(KEPT[name]);
   });
 
   it("leaves the genuinely transient races on 40001", async () => {
@@ -110,7 +116,7 @@ describe("deterministic conflict SQLSTATEs (20261021130000)", () => {
     await db.query(rollbackSql.replace(/^[\s\S]*?\bbegin;\s*/i, "").replace(/\s*commit;\s*$/i, ""));
     for (const [name, code, expected] of CHANGED) {
       const text = await def(name);
-      expect(count(text, "'40001'"), name).toBe(expected);
+      expect(count(text, "'40001'"), name).toBe(expected + (KEPT[name] ? 1 : 0));
       expect(text, name).not.toContain(`'${code}'`);
     }
   });

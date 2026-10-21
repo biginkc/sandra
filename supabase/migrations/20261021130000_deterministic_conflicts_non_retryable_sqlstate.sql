@@ -16,8 +16,10 @@
 --   DPC01  Dialpad call-intent idempotency (src/lib/dialpad-cti/contracts.ts maps it to 'idempotency_conflict')
 --   RSM01  Rep SMS delivery / obligation ledger, including the transition-guard trigger
 --   NRT01  Other deterministic conflicts: call facts lease/token, offer calculation and lead phone idempotency
--- Left on 40001 on purpose (a re-run can succeed once a competing transaction commits): claim_verified_esign_webhook_receipt,
--- register_dropbox_website_esign_template, create_promote_leads_job, retry_promote_leads_job, process_promote_leads_item.
+-- Left on 40001 on purpose: fn_mark_dialpad_recording_eof's EOF_NOT_LAST_ACKNOWLEDGED_CHUNK (an EOF ahead of a still-committing
+-- chunk can succeed on retry); claim_verified_esign_webhook_receipt, register_dropbox_website_esign_template and
+-- retry_promote_leads_job (a re-run sees the competing committed row); create_promote_leads_job and process_promote_leads_item
+-- (defensive, normally unreachable checks left unchanged; no regression).
 -- Message texts are unchanged; app callers match on message text, except the two Dialpad classifiers updated alongside.
 -- Rollback: supabase/rollbacks/20261021130000_deterministic_conflicts_non_retryable_sqlstate.sql.
 begin;
@@ -34,6 +36,10 @@ declare
   v_to text;
   v_lit integer;
   v_raises integer;
+  -- Left on 40001 on purpose: max_seq <> p_eof_seq also covers an EOF that arrives ahead of a chunk still committing
+  -- (the chunk waits on this transaction's lock; after rollback it commits and an identical EOF retry succeeds).
+  v_keep constant text := $q$raise exception 'EOF_NOT_LAST_ACKNOWLEDGED_CHUNK' using errcode = '40001', detail = 'eof_not_last_acknowledged_chunk';$q$;
+  v_mask constant text := '<<keep-40001-eof-not-last>>';
 begin
   for r in
     select * from (values
@@ -55,7 +61,7 @@ begin
     ('fn_finalize_dialpad_recording_provider_window', 'DPR01', 1),
     ('fn_finalize_dialpad_recording_shadow', 'DPR01', 1),
     ('fn_finish_dialpad_recording_timing', 'DPR01', 1),
-    ('fn_mark_dialpad_recording_eof', 'DPR01', 3),
+    ('fn_mark_dialpad_recording_eof', 'DPR01', 2),
     ('fn_mint_dialpad_recording_ingest_grant', 'DPR01', 1),
     ('fn_mint_dialpad_recording_next_epoch', 'DPR01', 1),
     ('fn_record_dialpad_recording_chunk', 'DPR01', 5),
@@ -89,6 +95,12 @@ begin
     v_from := $q$'40001'$q$;
     v_to := quote_literal(r.code);
     v_def := pg_get_functiondef(v_oid);
+    if r.name = 'fn_mark_dialpad_recording_eof' then
+      if (length(v_def) - length(replace(v_def, v_keep, ''))) / length(v_keep) <> 1 then
+        raise exception 'expected exactly one retained EOF_NOT_LAST_ACKNOWLEDGED_CHUNK 40001 raise';
+      end if;
+      v_def := replace(v_def, v_keep, v_mask);
+    end if;
     v_lit := (length(v_def) - length(replace(v_def, v_from, ''))) / length(v_from);
     select count(*) into v_raises from regexp_matches(v_def, 'errcode\s*=\s*' || v_from, 'g');
     -- Every occurrence of the code literal must be a raise errcode, and the count must be exactly as reviewed.
@@ -96,7 +108,7 @@ begin
       raise exception 'public.%: expected % 40001 raises, found % literals / % raises', r.name, r.expected, v_lit, v_raises;
     end if;
 
-    execute replace(v_def, v_from, v_to);
+    execute replace(replace(v_def, v_from, v_to), v_mask, v_keep);
   end loop;
 end;
 $migration$;
