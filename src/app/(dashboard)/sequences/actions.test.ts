@@ -533,4 +533,32 @@ describe("replaceSequenceSteps voicemail drop voice", () => {
     expect(client.rpc.mock.calls[0][1].p_steps[0].vm_voice_id).toBe("voice-own");
     expect(client.rpc.mock.calls[0][1].p_steps[1].vm_voice_id).toBeNull();
   });
+
+  it("saves a rotation step with the default voice and only its group", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "voice-default");
+    const client = adminClient();
+    const rotation = { ...scriptStep, vm_tts_body: null, vm_template_category: "Group A" };
+    const result = await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [rotation] });
+    expect(result.ok).toBe(true);
+    expect(client.rpc.mock.calls[0][1].p_steps[0]).toMatchObject({ vm_template_category: "Group A", vm_voice_id: "voice-default" });
+  });
+
+  it("rejects a rotation step with no voice, and one that also has a script", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "");
+    const client = adminClient();
+    const rotation = { ...scriptStep, vm_tts_body: null, vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [rotation] })).ok).toBe(false);
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "voice-default");
+    const both = { ...scriptStep, vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [both] })).ok).toBe(false);
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a rotation group on an SMS step", async () => {
+    const client = adminClient();
+    const sms = { ...scriptStep, action_type: "send_sms" as const, template_body: "Hi", vm_tts_body: null, vm_phone_line_id: null,
+      vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [sms] })).ok).toBe(false);
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
 });

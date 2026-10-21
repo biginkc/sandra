@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  hasDropCowboyRandomVariant,
+  voicemailScriptProblem,
+  voicemailStepIsSpoken,
   hasVoicemailFields,
   isValidVoicemailDropStep,
   visibleVoicemailDrops,
@@ -50,5 +53,34 @@ describe("voicemail drop step rules", () => {
       { id: "c", attempt_outcome: "unknown" },
     ];
     expect(visibleVoicemailDrops(rows).map((r) => r.id)).toEqual(["a", "c"]);
+  });
+  it("rotation is a third source: exactly one of recording / script / group", () => {
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "Group A" })).toBe(true);
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "Group A", vm_tts_body: "Hi" })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "Group A", vm_media_id: "m1" })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "  " })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "Group A", vm_voice_id: null })).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_template_category: "Group A", template_category: "SMS pool" })).toBe(false);
+  });
+  it("a rotation group on a non-drop step counts as a voicemail field", () => {
+    expect(hasVoicemailFields({ action_type: "send_sms", vm_template_category: "Group A" })).toBe(true);
+  });
+  it("scripts and rotations are spoken; recordings are not", () => {
+    expect(voicemailStepIsSpoken({ ...base, vm_template_category: "Group A" })).toBe(true);
+    expect(voicemailStepIsSpoken({ ...base, vm_tts_body: "Hi" })).toBe(true);
+    expect(voicemailStepIsSpoken({ ...base, vm_media_id: "m1" })).toBe(false);
+  });
+  it("blocks Drop Cowboy [a/b] random variants in scripts", () => {
+    expect(hasDropCowboyRandomVariant("[Hi/Hello] there")).toBe(true);
+    expect(hasDropCowboyRandomVariant("Hi [Norma] here")).toBe(false);
+    expect(hasDropCowboyRandomVariant("Hi a/b")).toBe(false);
+    expect(isValidVoicemailDropStep({ ...base, vm_tts_body: "[Hi/Hello] {{first_name}}" })).toBe(false);
+  });
+  it("names the problem with one script", () => {
+    expect(voicemailScriptProblem("Hi {{first_name}}")).toBeNull();
+    expect(voicemailScriptProblem(" ")).toMatch(/Write the script/);
+    expect(voicemailScriptProblem("a".repeat(1201))).toMatch(/1,200/);
+    expect(voicemailScriptProblem("Hi {first_name}")).toMatch(/double braces/);
+    expect(voicemailScriptProblem("[Hi/Hello]")).toMatch(/\[this\/that\]/);
   });
 });

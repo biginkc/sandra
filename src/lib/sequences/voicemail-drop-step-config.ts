@@ -5,6 +5,10 @@
  * reject bad steps before the RPC does.
  */
 
+import { hasDropCowboyRandomVariant } from "@/lib/voicemail-drop/eligibility";
+
+export { hasDropCowboyRandomVariant };
+
 /** Drop Cowboy rejects longer TTS scripts (reason code 3021). */
 export const VOICEMAIL_SCRIPT_MAX_CHARS = 1200;
 
@@ -18,6 +22,8 @@ export type VoicemailDropStepFields = {
   vm_tts_body?: string | null;
   vm_voice_id?: string | null;
   vm_phone_line_id?: string | null;
+  /** Rotate among saved voicemail scripts (voicemail_templates.category). */
+  vm_template_category?: string | null;
 };
 
 /** Single-brace tokens like {first_name} are never filled in; the engine uses {{first_name}}. */
@@ -26,6 +32,29 @@ export function hasSingleBraceMergeField(text: string | null | undefined): boole
 }
 
 const filled = (value: string | null | undefined) => Boolean(value?.trim());
+
+/**
+ * Problem with one voicemail script (a step script or a saved voicemail
+ * template), or null when it is fine to read aloud.
+ */
+export function voicemailScriptProblem(text: string | null | undefined): string | null {
+  const script = (text ?? "").trim();
+  if (!script) return "Write the script.";
+  if (script.length > VOICEMAIL_SCRIPT_MAX_CHARS) {
+    return `Scripts can be at most ${VOICEMAIL_SCRIPT_MAX_CHARS.toLocaleString("en-US")} characters.`;
+  }
+  if (hasSingleBraceMergeField(script)) return "Use double braces, like {{first_name}}, so Sandra fills them in.";
+  if (hasDropCowboyRandomVariant(script)) {
+    return "Remove [this/that] choices. Sandra picks the script, so the voicemail provider must not pick words at random.";
+  }
+  return null;
+}
+
+/** The step reads text aloud (one script, or a rotation of saved scripts). */
+export function voicemailStepIsSpoken(step: VoicemailDropStepFields): boolean {
+  return step.action_type === "send_voicemail_drop" && !filled(step.vm_media_id) &&
+    (filled(step.vm_tts_body) || filled(step.vm_template_category));
+}
 
 /**
  * A script is read aloud by a provider voice: the step's vm_voice_id, or the
@@ -40,16 +69,17 @@ export const VOICEMAIL_VOICE_REQUIRED_MESSAGE =
   "A voicemail script needs a voice. Enter a voice ID, or set a default voice for voicemail drops.";
 
 /**
- * Exactly one of recording / script, script within the limit and with a
- * voice (own or default), no SMS or status fields.
+ * Exactly one of recording / script / saved-script rotation, script within
+ * the limit and with a voice (own or default), no SMS or status fields. Each
+ * rotated template is checked where it is saved and again by the worker.
  */
 export function isValidVoicemailDropStep(step: VoicemailDropStepFields, defaultVoiceId?: string | null): boolean {
   if (step.action_type !== "send_voicemail_drop") return false;
   const media = filled(step.vm_media_id);
   const tts = filled(step.vm_tts_body);
-  if (Number(media) + Number(tts) !== 1) return false;
-  if (tts && (step.vm_tts_body ?? "").trim().length > VOICEMAIL_SCRIPT_MAX_CHARS) return false;
-  if (tts && hasSingleBraceMergeField(step.vm_tts_body)) return false;
+  const rotation = filled(step.vm_template_category);
+  if (Number(media) + Number(tts) + Number(rotation) !== 1) return false;
+  if (tts && voicemailScriptProblem(step.vm_tts_body)) return false;
   if (voicemailScriptNeedsVoice(step, defaultVoiceId)) return false;
   return !filled(step.template_body) && !step.template_id && !filled(step.template_category) &&
     !filled(step.target_status);
@@ -58,7 +88,7 @@ export function isValidVoicemailDropStep(step: VoicemailDropStepFields, defaultV
 /** Non-drop steps must carry no voicemail fields (database check). */
 export function hasVoicemailFields(step: VoicemailDropStepFields): boolean {
   return filled(step.vm_media_id) || filled(step.vm_tts_body) || filled(step.vm_voice_id) ||
-    filled(step.vm_phone_line_id);
+    filled(step.vm_phone_line_id) || filled(step.vm_template_category);
 }
 
 export type VoicemailDropTimelineRow = {

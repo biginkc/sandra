@@ -616,6 +616,7 @@ describe('20261007190000_call_facts', () => {
     'public.esign_request_signers.signer_name': 'covered_by_fn_call_known_names',
     'public.lead_comps.owner_of_record': 'covered_by_fn_call_known_names',
     'auth.custom_oauth_providers.name': 'not_a_person (auth provider label)',
+    'public.voicemail_templates.name': 'not_a_person (voicemail drop script label chosen by the team; never a contact name)',
     'public.pipeline_run_steps.name': 'not_a_person (Messages v2 pipeline step label, e.g. classify/send_timeout; never a contact name)',
     'public.replay_row_tags.table_name': 'not_a_person (replay harness: name of the seeded table a tagged row belongs to; never a contact name)',
     'auth.mfa_factors.friendly_name': 'not_a_person (device label)',

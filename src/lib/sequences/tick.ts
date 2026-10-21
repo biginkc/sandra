@@ -85,7 +85,7 @@ export async function processEnrollmentTick(
   // 1. Load current step.
   const { data: step, error: stepErr } = await client
     .from("sequence_steps")
-    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id")
+    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category")
     .eq("sequence_id", enrollment.sequence_id)
     .eq("step_index", enrollment.current_step_index)
     .maybeSingle();
