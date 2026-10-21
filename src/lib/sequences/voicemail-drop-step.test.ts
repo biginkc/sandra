@@ -239,6 +239,7 @@ describe("voicemail drop step — 202 accepted", () => {
       mobileOnly: true,
       maxAttempts: 1,
       postalCode: "64111",
+      brandId: null,
     });
 
     const insert = ops.find((o) => o.table === "voicemail_drops" && o.kind === "insert")!.payload as Record<string, unknown>;
@@ -629,6 +630,35 @@ describe("voicemail drop step — merge fields reach Drop Cowboy rendered", () =
       expect(getMockVoicemailDropLog()).toHaveLength(0);
     },
   );
+});
+
+describe("voicemail drop step — Drop Cowboy random variants are blocked", () => {
+  it.each(["[Hi/Hello] {{first_name}}, this is Norma.", "Hi {{first_name}}, [call/text] me back."])(
+    "random-variant brackets (%s) pause step_misconfigured and send nothing",
+    async (body) => {
+      const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_tts_body: body });
+      expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+      expect(getMockVoicemailDropLog()).toHaveLength(0);
+    },
+  );
+
+  it("plain brackets without a slash still send", async () => {
+    const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_tts_body: "Hi {{first_name}} [Norma] here." });
+    expect(outcome).not.toMatchObject({ status: "paused" });
+    expect(getMockVoicemailDropLog()).toHaveLength(1);
+  });
+});
+
+describe("voicemail drop step — DROPCOWBOY_BRAND_ID", () => {
+  it("sends brandId when set, null when unset", async () => {
+    await run(baseWorld(), TTS_STEP, { ...ENV, DROPCOWBOY_BRAND_ID: " brand_9 " } as never);
+    expect(getMockVoicemailDropLog()[0].input.brandId).toBe("brand_9");
+  });
+
+  it("unset brand id sends null", async () => {
+    await run(baseWorld(), TTS_STEP);
+    expect(getMockVoicemailDropLog()[0].input.brandId).toBeNull();
+  });
 });
 
 describe("voicemail drop helpers", () => {

@@ -278,6 +278,23 @@ export function chicagoDayWindow(now: Date): { start: Date; next: Date } {
  * DROPCOWBOY_CALLER_ID: BYOC caller ID (the dedicated Telnyx number). Unset =
  * null (use the step's phone line). Set but not E.164 = throws.
  */
+/**
+ * DROPCOWBOY_BRAND_ID: optional registered brand, sent as `brand_id`.
+ * Unset/blank = null (not sent).
+ */
+export function readDropBrandId(env: NodeJS.ProcessEnv = process.env): string | null {
+  return env.DROPCOWBOY_BRAND_ID?.trim() || null;
+}
+
+/**
+ * Drop Cowboy spins "[Hi/Hello/Hey]" into one random option per message.
+ * Sandra controls script choice, so square brackets holding a "/" must never
+ * reach it.
+ */
+export function hasDropCowboyRandomVariant(text: string): boolean {
+  return /\[[^\[\]]*\/[^\[\]]*\]/.test(text);
+}
+
 export function readDropCallerId(env: NodeJS.ProcessEnv = process.env): string | null {
   const raw = env.DROPCOWBOY_CALLER_ID?.trim();
   if (!raw) return null;
