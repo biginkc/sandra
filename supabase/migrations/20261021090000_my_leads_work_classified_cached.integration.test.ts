@@ -35,19 +35,85 @@ const baselineSql = (() => {
   if (!classifier.includes('my_leads_work_classified_baseline(') || !wrappers.includes('fn_my_leads_badge_v2_baseline(')) throw new Error('baseline build failed');
   return `${classifier}\n;\n${wrappers}`;
 })();
-// THE ONE ALLOWED DIFFERENCE: the approved same-moment, same-type tie-break (Jarrad, 2026-10-20). The baseline picks the last
-// touch with `order by u.lead_id, u.ts desc, u.pri` and nothing after it, so two touches with the same ts and pri but different
-// kinds pick an arbitrary winner. baselineTieSql is the baseline with ONLY that ORDER BY extended exactly as in NEW (*_baseline_tie).
-// A result that differs from the baseline is accepted only if (a) it equals the _baseline_tie result exactly and (b) it equals the
-// baseline once every lastTouch.kind is blanked. Since the two baselines differ only in that ORDER BY tail, (a) proves the
-// difference comes from a same-ts same-pri different-kind tie and nothing else; any other difference still fails.
-const OLD_LT = '  lt as (select distinct on (u.lead_id) u.lead_id, u.kind, u.ts from tu u order by u.lead_id, u.ts desc, u.pri),\n';
-const NEW_LT = (NEW.match(/ {2}lt as \(select distinct on \(u\.lead_id\)[\s\S]*?else 9 end\),\n/) ?? [''])[0];
-const baselineTieSql = (() => {
-  if (!NEW_LT.startsWith(OLD_LT.slice(0, -3)) || baselineSql.split(OLD_LT).length !== 2) throw new Error('baseline tie build failed');
-  return baselineSql.replace(OLD_LT, NEW_LT).replaceAll('_baseline(', '_baseline_tie(');
-})();
-const AFTER = `${NEW}\n;\n${baselineSql}\n;\n${baselineTieSql}`;
+// THE ONE ALLOWED DIFFERENCE: the approved same-moment tie rules (Jarrad, 2026-10-20, verbatim):
+//   "When two touches on a lead happen at the same moment and are the same type, the last touch shown is: for texts, your text,
+//    then Sandra reply, then drip text, then campaign text; for calls, reached, then voicemail, then no answer."
+//   "For calls, this order applies no matter which system recorded the call."
+//   "If a touch is not one of the types named above (an "other" text or call), it loses the tie to any named type."
+// The baseline breaks those ties arbitrarily (or by source). A result that differs from the baseline is accepted only when
+// (a) it equals the baseline once every lastTouch.kind is blanked, and (b) for every lead whose lastTouch.kind differs, the
+// baseline's pick was one of several different-kind touches at that same moment in the same type, and the new kind is the winner
+// computed by referenceWinner below: written here from the rule texts and the raw tables, sharing no code with the migration.
+const REF_TIER: Record<string, number> = { text: 1, call: 2, note: 3 };
+const REF_RANK: Record<string, string[]> = {
+  text: ['your_text', 'sandra_reply', 'drip_text', 'campaign_text'],
+  call: ['call_reached', 'voicemail', 'call_no_answer'],
+  note: [],
+};
+type RefTouch = { tier: string; kind: string };
+// The touches of one lead at exactly `at` (all sources), classified independently of the migration.
+const referenceTouches = async (c: Client, propertyId: string, at: string): Promise<RefTouch[]> => {
+  // read the raw tables as the connecting superuser (a page call may be running as authenticated under RLS), then restore
+  const role = ((await original.call(c, 'select current_user as r')).rows[0] as { r: string }).r;
+  await original.call(c, 'reset role');
+  try { return await referenceTouchesRaw(c, propertyId, at); }
+  finally { await original.call(c, `set local role ${role === 'postgres' ? 'none' : role}`); }
+};
+const referenceTouchesRaw = async (c: Client, propertyId: string, at: string): Promise<RefTouch[]> => {
+  const out: RefTouch[] = [];
+  const texts = (await original.call(c, `select m.metadata, m.campaign_id,
+        exists (select 1 from public.sequence_step_runs r where r.message_id = m.id) as drip
+      from public.properties p join public.messages m on m.org_id = p.org_id and m.channel = 'sms' and m.direction = 'outbound'
+        and m.status in ('sent', 'delivered')
+        and (m.property_id = p.id or (m.property_id is null and m.contact_id = p.homeowner_contact_id))
+      where p.id = $1 and coalesce(m.sent_at, m.delivered_at, m.created_at) = $2::timestamptz`, [propertyId, at])).rows as Array<{ metadata: Record<string, unknown> | null; campaign_id: string | null; drip: boolean }>;
+  for (const t of texts) {
+    const md = t.metadata ?? {};
+    const gen = md.generated_by;
+    const kind = t.drip ? 'drip_text' : t.campaign_id ? 'campaign_text' : gen === 'norma_precall' ? 'other'
+      : md.approved_by_user_id != null ? 'your_text' : gen === 'ai_responder_v1' || md.reply_source === 'approved_template' ? 'sandra_reply'
+        : gen == null ? 'your_text' : 'other';
+    out.push({ tier: 'text', kind });
+  }
+  const attempts = (await original.call(c, 'select outcome from public.acquisition_attempts where property_id = $1 and occurred_at = $2::timestamptz', [propertyId, at])).rows as Array<{ outcome: string }>;
+  for (const a of attempts) out.push({ tier: 'call', kind: ({ reached: 'call_reached', voicemail: 'voicemail', no_answer: 'call_no_answer' } as Record<string, string>)[a.outcome] ?? 'other' });
+  const calls = (await original.call(c, `select talk_duration_seconds from public.call_activities where property_id = $1 and started_at = $2::timestamptz
+      and direction is distinct from 'inbound'`, [propertyId, at])).rows as Array<{ talk_duration_seconds: number | null }>;
+  for (const k of calls) out.push({ tier: 'call', kind: (k.talk_duration_seconds ?? 0) > 0 ? 'call_reached' : 'call_no_answer' });
+  const notes = (await original.call(c, 'select 1 from public.lead_notes where property_id = $1 and created_at = $2::timestamptz', [propertyId, at])).rows;
+  for (const _n of notes) out.push({ tier: 'note', kind: 'note' });
+  return out;
+};
+const refRank = (t: RefTouch) => { const i = REF_RANK[t.tier].indexOf(t.kind); return i < 0 ? 99 : i; };
+const referenceWinner = (ts: RefTouch[]) => [...ts].sort((x, y) => REF_TIER[x.tier] - REF_TIER[y.tier] || refRank(x) - refRank(y))[0];
+const lastTouches = (rows: unknown[]) => {
+  const m = new Map<string, { kind: string; at: string }>();
+  const walk = (v: unknown) => {
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    if (typeof o.propertyId === 'string' && o.lastTouch && typeof o.lastTouch === 'object') m.set(o.propertyId, o.lastTouch as { kind: string; at: string });
+    Object.values(o).forEach(walk);
+  };
+  walk(rows);
+  return m;
+};
+const tieExplained = async (c: Client, newRows: unknown[], baseRows: unknown[]) => {
+  const n = lastTouches(newRows), b = lastTouches(baseRows);
+  let diffs = 0;
+  for (const [pid, nt] of n) {
+    const bt = b.get(pid);
+    if (!bt || bt.kind === nt.kind) continue;
+    diffs += 1;
+    if (bt.at !== nt.at) return false;
+    const touches = await referenceTouches(c, pid, nt.at);
+    const win = referenceWinner(touches);
+    // the old pick must be a real same-moment, same-type, different-kind rival of the approved winner
+    if (!win || win.kind !== nt.kind || !touches.some((t) => t.tier === win.tier && t.kind === bt.kind)) return false;
+  }
+  return diffs > 0;
+};
+const AFTER = `${NEW}\n;\n${baselineSql}`;
 // Lines of every shipped classifier migration a suite may re-apply. A re-applied text with any other line is a suite's own
 // MUTATION (a deliberately broken body proving a clause matters): that connection then keeps the mutated body, untouched and
 // unshadowed, so the mutation test still proves what it proves.
@@ -65,12 +131,6 @@ const proto = Client.prototype as unknown as { query: Q };
 const original = proto.query;
 const canon = (rows: unknown[], blankLtKind = false) => rows.map((r) => JSON.stringify(r, (k, v) => (k === 'snapshotAt' ? undefined
   : blankLtKind && k === 'lastTouch' && v && typeof v === 'object' ? { ...v, kind: null } : v))).sort();
-const runShadow = async (c: Client, sql: string, params: unknown) => {
-  await original.call(c, 'savepoint parity_shadow');
-  try { return { ok: true as const, rows: (await original.call(c, sql, params)).rows }; }
-  catch (error) { return { ok: false as const, code: String((error as { code?: string }).code ?? error) }; }
-  finally { await original.call(c, 'rollback to savepoint parity_shadow'); await original.call(c, 'release savepoint parity_shadow'); }
-};
 proto.query = async function patched(this: Client, ...args: unknown[]) {
   const [text, params] = args;
   if (typeof text !== 'string' || (params !== undefined && !Array.isArray(params))) return original.apply(this, args);
@@ -85,7 +145,7 @@ proto.query = async function patched(this: Client, ...args: unknown[]) {
     return res;
   }
   const fns = [...text.matchAll(CALL)].map((m) => m[1]);
-  if (fns.length === 0 || unshadowed.has(this) || /create or replace|_baseline(_tie)?\(/i.test(text)) return original.apply(this, args);
+  if (fns.length === 0 || unshadowed.has(this) || /create or replace|_baseline\(/i.test(text)) return original.apply(this, args);
   const shadow = text.replace(CALL, (_m, fn: string) => `public.${fn}_baseline(`);
   let base: { ok: true; rows: unknown[] } | { ok: false; code: string } | null = null;
   try {
@@ -109,9 +169,7 @@ proto.query = async function patched(this: Client, ...args: unknown[]) {
   if (!base.ok) throw new Error(`PARITY: baseline failed (${base.code}) where new succeeded: ${text.slice(0, 200)}`);
   const a = canon(res.rows), b = canon(base.rows);
   if (JSON.stringify(a) !== JSON.stringify(b)) {
-    const tie = await runShadow(this, text.replace(CALL, (_m, fn: string) => `public.${fn}_baseline_tie(`), params);
-    if (tie.ok && JSON.stringify(canon(tie.rows)) === JSON.stringify(a)
-      && JSON.stringify(canon(res.rows, true)) === JSON.stringify(canon(base.rows, true))) {
+    if (JSON.stringify(canon(res.rows, true)) === JSON.stringify(canon(base.rows, true)) && await tieExplained(this, res.rows, base.rows)) {
       stats.tieExempt += 1; stats.compared += 1;
       for (const f of fns) stats.byFn[f] = (stats.byFn[f] ?? 0) + 1;
       return res;
@@ -280,12 +338,11 @@ describe('20261021090000 parity: dedicated multi-lead, multi-org fixture', () =>
   }, 600_000);
 });
 
-// Approved tie rule (Jarrad, 2026-10-20, verbatim): "When two touches on a lead happen at the same moment and are the same type,
-// the last touch shown is: for texts, your text, then Sandra reply, then drip text, then campaign text; for calls, reached, then
-// voicemail, then no answer."
+// Approved tie rules (Jarrad, 2026-10-20): see THE ONE ALLOWED DIFFERENCE above for the three verbatim texts.
 type TextKind = 'your_text' | 'sandra_reply' | 'drip_text' | 'campaign_text' | 'other_text';
-type CallKind = 'reached' | 'voicemail' | 'no_answer' | 'ca_reached' | 'ca_no_answer';
-const TIE_CASES: Array<{ name: string; touches: Array<TextKind | CallKind>; want: string; unapproved?: true }> = [
+// reached/voicemail/no_answer/other_call are acquisition attempts; ca_* are call_activities rows (another recording system).
+type CallKind = 'reached' | 'voicemail' | 'no_answer' | 'other_call' | 'ca_reached' | 'ca_no_answer';
+const TIE_CASES: Array<{ name: string; touches: Array<TextKind | CallKind>; want: string }> = [
   { name: 'your text vs Sandra reply', touches: ['sandra_reply', 'your_text'], want: 'your_text' },
   { name: 'your text vs drip', touches: ['drip_text', 'your_text'], want: 'your_text' },
   { name: 'your text vs campaign', touches: ['campaign_text', 'your_text'], want: 'your_text' },
@@ -299,8 +356,16 @@ const TIE_CASES: Array<{ name: string; touches: Array<TextKind | CallKind>; want
   { name: 'voicemail vs no answer', touches: ['no_answer', 'voicemail'], want: 'voicemail' },
   { name: 'all three calls', touches: ['no_answer', 'voicemail', 'reached'], want: 'call_reached' },
   { name: 'call log reached vs no answer', touches: ['ca_no_answer', 'ca_reached'], want: 'call_reached' },
-  // NOT covered by the approved text: 'other' (e.g. a Norma pre-call text) ranks after named kinds only for determinism.
-  { name: 'UNAPPROVED other text vs your text', touches: ['other_text', 'your_text'], want: 'your_text', unapproved: true },
+  // "For calls, this order applies no matter which system recorded the call."
+  { name: 'call log reached vs no-answer attempt', touches: ['no_answer', 'ca_reached'], want: 'call_reached' },
+  { name: 'voicemail attempt vs call log reached', touches: ['voicemail', 'ca_reached'], want: 'call_reached' },
+  { name: 'call log no answer vs voicemail attempt', touches: ['ca_no_answer', 'voicemail'], want: 'voicemail' },
+  { name: 'same kind from both systems', touches: ['ca_reached', 'reached'], want: 'call_reached' },
+  // "If a touch is not one of the types named above (an "other" text or call), it loses the tie to any named type."
+  { name: 'other attempt vs no-answer attempt', touches: ['other_call', 'no_answer'], want: 'call_no_answer' },
+  { name: 'other attempt vs call log no answer', touches: ['other_call', 'ca_no_answer'], want: 'call_no_answer' },
+  { name: 'other text vs your text', touches: ['other_text', 'your_text'], want: 'your_text' },
+  { name: 'other text vs campaign', touches: ['other_text', 'campaign_text'], want: 'campaign_text' },
 ];
 
 describe('20261021090000 approved same-moment same-type last-touch tie rule', () => {
@@ -348,7 +413,7 @@ describe('20261021090000 approved same-moment same-type last-touch tie rule', ()
                      values ($1,$2,$3,$4,$5,'dialpad',$6,$6,$7)`, [randomUUID(), org, p, contact, randomUUID(), when, t === 'ca_reached' ? 60 : 0]);
         } else {
           await raw("insert into public.acquisition_attempts(org_id,property_id,actor_user_id,attempt_kind,source,occurred_at,recorded_at,idempotency_key,outcome) values ($1,$2,$3,'outreach','manual',$4,$4,$5,$6)",
-            [org, p, sam, when, randomUUID(), t]);
+            [org, p, sam, when, randomUUID(), t === 'other_call' ? 'wrong_number' : t]);
         }
       };
       // Each case twice: losers inserted first, then winner first, so neither insertion order nor id order can pick the winner.
@@ -382,7 +447,7 @@ describe('20261021090000 approved same-moment same-type last-touch tie rule', ()
         const whole = (await db.query('select facts from public.my_leads_work_classified($1,$2,$3)', [org, sam, iso])).rows.map((r) => r.facts as F);
         check(whole, ids, `whole queue #${rep}`);
         const pageRows: F[] = [];
-        for (const page of [1, 2]) {
+        for (const page of [1, 2, 3]) {
           const r = await as(() => db.query('select public.fn_my_leads_work_page($1,$2,$3,null,null,null,$4,20,$5) as r', [org, sam, 'all', page, iso]));
           pageRows.push(...(r.rows[0].r.rows as F[]));
         }

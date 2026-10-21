@@ -306,12 +306,16 @@ begin
       select n.property_id, n.created_at, n.created_at, 4, 'note'
       from public.lead_notes n
       where n.org_id = p_org and n.property_id in (select property_id from base) and n.created_at <= p_at),
-  -- Same-moment, same-type ties (approved by Jarrad 2026-10-20, verbatim): "When two touches on a lead happen at the same
-  -- moment and are the same type, the last touch shown is: for texts, your text, then Sandra reply, then drip text, then
-  -- campaign text; for calls, reached, then voicemail, then no answer."
-  -- 'other' ranks after every named kind only so the pick is deterministic (NOT part of the approved rule; pending approval).
-  -- Rows still tied after this share the same kind and ts, so the visible lastTouch is identical whichever wins.
-  lt as (select distinct on (u.lead_id) u.lead_id, u.kind, u.ts from tu u order by u.lead_id, u.ts desc, u.pri,
+  -- Same-moment ties, approved by Jarrad 2026-10-20 (verbatim):
+  --   "When two touches on a lead happen at the same moment and are the same type, the last touch shown is: for texts, your
+  --    text, then Sandra reply, then drip text, then campaign text; for calls, reached, then voicemail, then no answer."
+  --   "For calls, this order applies no matter which system recorded the call."
+  --   "If a touch is not one of the types named above (an "other" text or call), it loses the tie to any named type."
+  -- So the type tier is texts, then calls (attempts and call_activities together, not by source), then notes; within a tier the
+  -- kind rank above, 'other' last. pri keeps its other uses (tf's last_call_at). A tie still left (same ts, tier and kind, e.g.
+  -- a reached attempt and a reached call_activity, or two notes) has the same kind and ts, so the visible lastTouch is identical.
+  lt as (select distinct on (u.lead_id) u.lead_id, u.kind, u.ts from tu u order by u.lead_id, u.ts desc,
+    case when u.pri = 1 then 1 when u.pri in (2, 3) then 2 else 4 end,
     case u.kind when 'your_text' then 1 when 'sandra_reply' then 2 when 'drip_text' then 3 when 'campaign_text' then 4
       when 'call_reached' then 1 when 'voicemail' then 2 when 'call_no_answer' then 3 else 9 end),
   -- The touch facts of my_leads_touch_facts (20261005150000) from tu, without re-projecting the queue: last_touch_at is the
