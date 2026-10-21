@@ -65,7 +65,8 @@ describe("Norma stress gate migration replay", () => {
     const firstOther = r.findIndex((f) => !f.includes("_norma_"));
     expect(r.slice(firstOther).every((f) => !f.includes("_norma_"))).toBe(true);
     expect(r).toContain("20261015040000_my_leads_approved_snooze_multi_house.sql");
-    expect(r.at(-1)).toBe("20261020130000_my_leads_work_new_lead_in_drip.sql");
+    expect(r).toContain("20261020130000_my_leads_work_new_lead_in_drip.sql");
+    expect(r.at(-1)).toBe("20261021090000_my_leads_work_classified_cached.sql");
     expect(replayMigrations(["20261015040000_my_leads_approved_x.sql", "20260101000000_norma_a.sql", "20250101000000_my_leads_work_b.sql"]))
       .toEqual(["20260101000000_norma_a.sql", "20250101000000_my_leads_work_b.sql", "20261015040000_my_leads_approved_x.sql"]);
   });
