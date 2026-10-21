@@ -31,6 +31,8 @@ const REASONS: Record<string, string> = {
   no_phone: "Lead has no phone number for texts.",
   no_approved_sender: "No approved sender is available for the first text.",
   not_interested: "Lead is not interested.",
+  inbound_call: "Lead called back.",
+  voicemail_drop_consent_blocked: "Voicemail drop was blocked by a do-not-call or consent check.",
   "no approved sender for first-touch sequence send": "No approved sender is available for the first text.",
 };
 
