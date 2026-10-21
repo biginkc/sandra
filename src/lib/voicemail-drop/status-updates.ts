@@ -56,7 +56,8 @@ export type DropPatch = Partial<{
 export interface DropStatusStore {
   findDropById(id: string): Promise<DropRow | null>;
   findDropsByDropId(dropId: string): Promise<DropRow[]>;
-  findQueuedDropsByPhone(phone: string, sinceIso: string): Promise<DropRow[]>;
+  /** With `dropId`, drops already holding a different drop_id are excluded. */
+  findQueuedDropsByPhone(phone: string, sinceIso: string, dropId?: string | null): Promise<DropRow[]>;
   /**
    * Patch a drop. With `onlyIfStatusIn`, the write is a compare-and-set on the
    * drop's current status; returns false when nothing matched.
@@ -106,31 +107,32 @@ function outcomePatch(o: Outcome, nowIso: string): DropPatch {
   };
 }
 
-async function applyFailure(store: DropStatusStore, drop: DropRow, o: Outcome, surface: string) {
-  if (o.status !== "failure") return;
+function pauseReasonFor(o: Outcome): string | null {
+  if (o.status !== "failure") return null;
   const action = failureActionFor(o.reasonCode, o.reasonClass);
-  if (action === "pause_misconfigured" || action === "pause_consent") {
-    if (drop.enrollment_id) {
-      await store.pauseEnrollment(
-        drop.enrollment_id,
-        action === "pause_misconfigured" ? PAUSE_STEP_MISCONFIGURED : PAUSE_VOICEMAIL_DROP_CONSENT,
-      );
-    }
-    return;
-  }
-  if (action === "mark_failed_and_report") {
-    reportError(new Error(`voicemail drop failed with unclassified reason code ${o.reasonCode ?? "none"}`), {
-      tags: { surface },
-      extra: { dropRowId: drop.id, reasonCode: o.reasonCode, reason: o.reason },
-    });
-  }
+  if (action === "pause_misconfigured") return PAUSE_STEP_MISCONFIGURED;
+  if (action === "pause_consent") return PAUSE_VOICEMAIL_DROP_CONSENT;
+  return null;
+}
+
+function reportUnclassified(drop: DropRow, o: Outcome, surface: string) {
+  if (o.status !== "failure" || failureActionFor(o.reasonCode, o.reasonClass) !== "mark_failed_and_report") return;
+  reportError(new Error(`voicemail drop failed with unclassified reason code ${o.reasonCode ?? "none"}`), {
+    tags: { surface },
+    extra: { dropRowId: drop.id, reasonCode: o.reasonCode, reason: o.reason },
+  });
 }
 
 /**
  * Apply a terminal outcome only while the drop is still queued (or already in
  * that same terminal state, for a replay). A late or replayed event never
- * flips delivered ↔ failed. Failure side effects run only on the
- * queued → failed transition.
+ * flips delivered ↔ failed.
+ *
+ * A required pause (consent / misconfigured) runs BEFORE the queued → failed
+ * write and again on a same-state replay. pauseEnrollment only touches active
+ * enrollments, so it is idempotent; if it throws, the drop stays queued (or
+ * the replay errors) and the webhook retry re-attempts it. The pause is never
+ * lost behind an already-failed drop.
  */
 async function applyTerminalOutcome(
   store: DropStatusStore,
@@ -149,10 +151,10 @@ async function applyTerminalOutcome(
     if (Object.keys(facts).length > 0) await store.updateDrop(drop.id, facts);
     return;
   }
-  // queued → terminal is the only transition that runs side effects; a
-  // same-state replay just refreshes the row.
+  const pauseReason = pauseReasonFor(o);
+  if (pauseReason && drop.enrollment_id) await store.pauseEnrollment(drop.enrollment_id, pauseReason);
   if (await store.updateDrop(drop.id, patch, ["queued"])) {
-    await applyFailure(store, drop, o, surface);
+    reportUnclassified(drop, o, surface);
     return;
   }
   await store.updateDrop(drop.id, patch, [target]);
@@ -181,21 +183,33 @@ export async function handleDropCallback(
   return { status: 200, body: { ok: true } };
 }
 
-/** RVM-5 correlation: drop_id first, then a unique recent queued drop to that phone, else none. */
+/** Drop Cowboy reports RVM, voice broadcast and AI broadcast outcomes on contact.rvm.status; campaign_type tells them apart. */
+export const RVM_CAMPAIGN_TYPE = "rvm";
+
+/**
+ * RVM-5 correlation: drop_id first, then a unique recent queued drop to that
+ * phone, else none. Status events for another channel (voice/AI broadcast) are
+ * never correlated, the phone fallback needs campaign_type 'rvm', and it never
+ * picks a drop whose stored drop_id differs from the event's.
+ */
 export async function correlateStatusEvent(
   store: DropStatusStore,
   event: VoicemailDropStatusEvent,
   now: Date,
 ): Promise<DropRow | null> {
+  if (event.kind === "status" && event.campaignType !== null && event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
   if (event.dropId) {
     const byDropId = await store.findDropsByDropId(event.dropId);
     if (byDropId.length === 1) return byDropId[0];
     if (byDropId.length > 1) return null;
   }
+  if (event.kind === "status" && event.campaignType !== RVM_CAMPAIGN_TYPE) return null;
   const phone = normalizePhone(event.to);
   if (!phone) return null;
   const since = new Date(now.getTime() - PHONE_CORRELATION_WINDOW_MS).toISOString();
-  const byPhone = await store.findQueuedDropsByPhone(phone, since);
+  const byPhone = (await store.findQueuedDropsByPhone(phone, since, event.dropId)).filter(
+    (d) => !d.drop_id || !event.dropId || d.drop_id === event.dropId,
+  );
   return byPhone.length === 1 ? byPhone[0] : null;
 }
 
@@ -249,16 +263,18 @@ export function supabaseDropStatusStore(client: SupabaseClient<Database>): DropS
       if (error) throw new Error(`findDropsByDropId: ${error.message}`);
       return data ?? [];
     },
-    async findQueuedDropsByPhone(phone, sinceIso) {
-      const { data, error } = await client
+    async findQueuedDropsByPhone(phone, sinceIso, dropId) {
+      let query = client
         .from("voicemail_drops")
         .select(DROP_COLUMNS)
         .eq("to_phone", phone)
         .eq("status", "queued")
         // A drop held at attempt_outcome 'unknown' has no queued_at yet; its
         // window starts at created_at so a status event can still reconcile it.
-        .or(`queued_at.gte.${sinceIso},and(queued_at.is.null,created_at.gte.${sinceIso})`)
-        .limit(2);
+        .or(`queued_at.gte.${sinceIso},and(queued_at.is.null,created_at.gte.${sinceIso})`);
+      // Never a drop that already holds a different drop_id.
+      if (dropId) query = query.or(`drop_id.is.null,drop_id.eq."${dropId.replace(/["\\,()]/g, "")}"`);
+      const { data, error } = await query.limit(2);
       if (error) throw new Error(`findQueuedDropsByPhone: ${error.message}`);
       return data ?? [];
     },
