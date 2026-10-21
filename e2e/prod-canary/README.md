@@ -118,3 +118,22 @@ Current coverage:
   dialer batch through the UI, registers a canary Jitter writeback consumer,
   verifies signed batch fetch/claim/writeback endpoints, confirms the call
   appears on the lead, and cleans up dialer/webhook/contact/property artifacts
+
+## Voicemail drop canary (owner-run, not Playwright)
+
+`scripts/canary-voicemail-drop.ts` exercises one `send_voicemail_drop` step end to end against production. It only ever targets `+13107540662` and only touches rows named `PROD-CANARY RVM-DROP <run-id>` (guards: `scripts/canary-voicemail-drop-guards.ts`).
+
+Env (from `.env.prod-canary.local` / `.env.local`): `RUN_PROD_CANARIES=1`, production `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, `RVM_CANARY_ORG_ID` (falls back to `SEQUENCE_CANARY_ORG_ID`), `DROPCOWBOY_VOICE_ID`, optional `DROPCOWBOY_PHONE_LINE_ID` (needed only when production has no `DROPCOWBOY_CALLER_ID`), optional `CRON_SECRET` for `--kick`.
+
+```bash
+# 1. Create lead + "spoken to" fact + one-step drip, enroll. Script text is required and must be Jarrad-approved.
+RUN_PROD_CANARIES=1 npx tsx scripts/canary-voicemail-drop.ts --script "<approved text>"   # prints the run id
+# 2. Watch until the drop is terminal / proof is stored (--kick runs the tick now instead of waiting for cron).
+RUN_PROD_CANARIES=1 npx tsx scripts/canary-voicemail-drop.ts --watch --run-id rvm-... [--kick]
+# 3. After calling the drop number back: enrollment must be paused with pause_reason=inbound_call.
+RUN_PROD_CANARIES=1 npx tsx scripts/canary-voicemail-drop.ts --after-callback --run-id rvm-...
+# 4. Remove this run's rows (archives property/contact if another table still references them).
+RUN_PROD_CANARIES=1 npx tsx scripts/canary-voicemail-drop.ts --cleanup --run-id rvm-...
+```
+
+The "spoken to" fact is a `call_activities` row with `provider = 'prod_canary'` and 30s talk time. Every trigger and enqueue on that table is gated on `provider` `sandra_softphone` / `dialpad`, so no recording fetch, reconciliation, AI responder, Norma queue or alert fires. `--kick` runs the real production tick for every due enrollment, same as cron.
