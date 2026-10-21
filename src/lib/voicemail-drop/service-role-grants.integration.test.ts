@@ -17,6 +17,7 @@ vi.mock("@/lib/events", async (importOriginal) => ({
 
 import { pauseEnrollmentsForInboundCall } from "@/lib/norma/inbound-call-pause";
 import { processVoicemailDropStep } from "@/lib/sequences/voicemail-drop-step";
+import { getMockVoicemailDropLog, resetMockVoicemailDropState } from "@/lib/voicemail-drop/providers/mock";
 
 import { checkVoicemailDropEligibility } from "./eligibility";
 import { handleDropCallback, handleDropStatusEvent, supabaseDropStatusStore } from "./status-updates";
@@ -121,6 +122,7 @@ it("the RPC is org-, property- and deleted-scoped", async () => {
 });
 
 it("worker drop path, status/receipt handlers and the call-back pause all run under the service role", async () => {
+  resetMockVoicemailDropState();
   const enrollment = randomUUID();
   ok(await client.from("sequence_enrollments").insert({
     id: enrollment, org_id: org, sequence_id: sequence, property_id: property, contact_id: contact,
@@ -128,6 +130,7 @@ it("worker drop path, status/receipt handlers and the call-back pause all run un
   }));
   const run = ok(await client.from("sequence_step_runs").insert({
     enrollment_id: enrollment, step_id: step0, scheduled_for: new Date().toISOString(), claim_active: true,
+    attempt_outcome: "not_attempted",
   }).select("id").single()).data!.id;
 
   const env = {
@@ -143,11 +146,15 @@ it("worker drop path, status/receipt handlers and the call-back pause all run un
     run,
     env,
   );
-  expect(outcome.status).not.toBe("failed");
-  const drop = ok(await client.from("voicemail_drops").select("id, to_phone").eq("step_run_id", run).single()).data!;
-  expect(drop.to_phone).toBe(PHONE);
-  const runRow = ok(await client.from("sequence_step_runs").select("failure_reason").eq("id", run).single()).data!;
-  expect(runRow.failure_reason ?? "").not.toMatch(/eligibility/);
+  expect(outcome).toMatchObject({ status: "voicemail_queued", enrollmentId: enrollment, stepIndex: 0 });
+  expect(getMockVoicemailDropLog()).toHaveLength(1);
+  expect(getMockVoicemailDropLog()[0].input).toMatchObject({ to: PHONE });
+  const drop = ok(await client.from("voicemail_drops").select("id, to_phone, status, attempt_outcome").eq("step_run_id", run).single()).data!;
+  expect(drop).toMatchObject({ to_phone: PHONE, status: "queued", attempt_outcome: "queued" });
+  const runRow = ok(await client.from("sequence_step_runs").select("attempt_outcome, failure_reason, skipped_reason").eq("id", run).single()).data!;
+  expect(runRow).toMatchObject({ attempt_outcome: "accepted", failure_reason: null, skipped_reason: null });
+  expect(ok(await client.from("sequence_enrollments").select("status, current_step_index").eq("id", enrollment).single()).data)
+    .toMatchObject({ status: "active", current_step_index: 1 });
 
   const store = supabaseDropStatusStore(client);
   const cb = parseDropCowboyCallback(JSON.stringify({ foreign_id: drop.id, drop_id: `rg-${org}`, status: "success", reason_code: 0 }));
@@ -156,10 +163,9 @@ it("worker drop path, status/receipt handlers and the call-back pause all run un
     event: "contact.rvm.status", event_id: `rg-${org}-1`,
     data: { to: PHONE, drop_id: `rg-${org}`, campaign_type: "rvm", status: "success", reason_code: 0 },
   }));
-  expect(["applied", "duplicate", "unmatched"]).toContain(await handleDropStatusEvent(store, event));
-  // The mock provider's accepted drop is recorded "skipped"; the handlers'
-  // reads and writes above are what this test guards.
-  expect(ok(await client.from("voicemail_drops").select("status").eq("id", drop.id).single()).data!.status).toBeTruthy();
+  expect(ok(await client.from("voicemail_drops").select("status").eq("id", drop.id).single()).data!.status).toBe("delivered");
+  expect(await handleDropStatusEvent(store, event)).toBe("applied");
+  expect(ok(await client.from("voicemail_drops").select("status").eq("id", drop.id).single()).data!.status).toBe("delivered");
 
   await client.from("sequence_enrollments").update({ status: "active", pause_reason: null }).eq("id", enrollment);
   const call = ok(await client.from("norma_inbound_calls")
