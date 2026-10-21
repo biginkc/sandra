@@ -16,10 +16,10 @@ export const LEGACY_FILES = [
   "src/app/(dashboard)/properties/promote-leads-actions.ts",
   "src/app/(dashboard)/properties/_actions/count.ts",
   "src/app/(dashboard)/leads/actions.ts",
-  "src/app/(dashboard)/campaigns/actions.ts",
   "src/lib/prospects/eligibility.ts",
   "src/lib/messaging/bulk-queue.ts",
-  "src/workflows/bulk-sms.ts",
+  // campaigns/actions.ts and workflows/bulk-sms.ts removed in #927 (batched
+  // campaign queue RPCs); they are campaign code, not Prospects/Search.
 ];
 
 function git(...args: string[]): string | null {

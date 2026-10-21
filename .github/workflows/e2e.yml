@@ -195,10 +195,11 @@ jobs:
             "src/app/(dashboard)/properties/promote-leads-actions.ts" \
             "src/app/(dashboard)/properties/_actions/count.ts" \
             "src/app/(dashboard)/leads/actions.ts" \
-            "src/app/(dashboard)/campaigns/actions.ts" \
             src/lib/prospects/eligibility.ts \
-            src/lib/messaging/bulk-queue.ts \
-            src/workflows/bulk-sms.ts
+            src/lib/messaging/bulk-queue.ts
+          # campaigns/actions.ts and workflows/bulk-sms.ts left this list in
+          # #927: campaign pause/resume/cadence must loop batched RPCs (8s
+          # statement_timeout). Prospects/Search behaviour is unaffected.
 
       - name: Search oracle reference matcher (unit)
         run: npm run test:search-oracle
