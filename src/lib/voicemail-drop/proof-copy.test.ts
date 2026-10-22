@@ -161,6 +161,32 @@ describe("downloadProof", () => {
     expect((await downloadProof("https://media.dropcowboy.com/r/t", audio(3), 1000, 1000, pub)).bytes.byteLength).toBe(3);
   });
 
+  it("accepts Drop Cowboy's recording bucket exactly, at hop 0 and as a redirect; never other S3 hosts", async () => {
+    const S3 = "https://dc-call-recordings.s3.amazonaws.com/rec/abc.mp3?X-Amz-Signature=x";
+    expect((await downloadProof(S3, audio(3), 1000, 1000, pub)).bytes.byteLength).toBe(3);
+    const viaRedirect = vi.fn(async (url: string) => url === U
+      ? new Response(null, { status: 302, headers: { location: S3 } })
+      : new Response(new Uint8Array(5), { headers: { "content-type": "audio/mpeg" } }));
+    expect((await downloadProof(U, viaRedirect, 1000, 1000, pub)).bytes.byteLength).toBe(5);
+    expect(viaRedirect.mock.calls[1][0]).toBe(S3);
+    for (const bad of ["https://other-bucket.s3.amazonaws.com/x", "https://s3.amazonaws.com/dc-call-recordings/x",
+      "https://dc-call-recordings.s3.amazonaws.com.evil.com/x", "http://dc-call-recordings.s3.amazonaws.com/x"]) {
+      await expect(downloadProof(bad, audio(), 1000, 1000, pub)).rejects.toThrow(/not allowed|not https/);
+      const hop = vi.fn(async () => new Response(null, { status: 302, headers: { location: bad } }));
+      await expect(downloadProof(U, hop, 1000, 1000, pub)).rejects.toThrow(/not allowed|not https/);
+    }
+    await expect(downloadProof(S3, audio(), 1000, 1000, async () => ["169.254.169.254"])).rejects.toThrow(/blocked address/);
+  });
+
+  it("a canary row pending after host rejections still has retries left and is stored by the sweep", async () => {
+    const { store, drop } = fakeStore({ proof_url_at: NOW.toISOString(), proof_copy_attempts: 3, proof_copy_status: "pending" });
+    const fetcher = vi.fn(async (url: string) => url.includes("dropcowboy")
+      ? new Response(null, { status: 302, headers: { location: "https://dc-call-recordings.s3.amazonaws.com/r.mp3" } })
+      : new Response(new Uint8Array(7), { headers: { "content-type": "audio/mpeg" } }));
+    expect((await sweepPendingProofCopies(store, { fetcher, now: NOW, resolve: pub })).stored).toBe(1);
+    expect(drop.proof_copy_status).toBe("stored");
+  });
+
   it("maps wav to .wav", async () => {
     expect((await downloadProof(U, audio(5, "audio/x-wav"), 1000, 1000, pub)).ext).toBe("wav");
   });
