@@ -158,6 +158,9 @@ export function parseDropCowboyCallback(rawBody: string): VoicemailDropCallbackE
 export const DROPCOWBOY_EVENT_SECRET_ENV = {
   "contact.rvm.status": "DROPCOWBOY_WEBHOOK_SECRET",
   "contact.rvm.receipt": "DROPCOWBOY_RECEIPT_WEBHOOK_SECRET",
+  // Fires when a call to the drop line reaches its Forward step; carries the
+  // real caller (data.call.from), which forwarding hides from Norma.
+  "contact.call.ringing": "DROPCOWBOY_CALL_WEBHOOK_SECRET",
 } as const;
 
 export type DropCowboySignedEvent = keyof typeof DROPCOWBOY_EVENT_SECRET_ENV;

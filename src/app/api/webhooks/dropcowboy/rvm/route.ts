@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  DROPCOWBOY_CALL_RINGING_EVENT,
+  handleDropCowboyInboundCall,
+  parseDropCowboyCallEvent,
+  supabaseInboundCallPauseStore,
+} from "@/lib/voicemail-drop/inbound-call";
 import { copyDropProof, supabaseProofCopyStore } from "@/lib/voicemail-drop/proof-copy";
 import { handleDropStatusEvent, supabaseDropStatusStore } from "@/lib/voicemail-drop/status-updates";
 import {
@@ -19,7 +25,10 @@ export const maxDuration = 60;
  * Signed Drop Cowboy webhook: contact.rvm.status and contact.rvm.receipt.
  * Each event type's subscription has its own signing secret
  * (DROPCOWBOY_WEBHOOK_SECRET for status, DROPCOWBOY_RECEIPT_WEBHOOK_SECRET for
- * receipts); the body's `event` field picks which one verifies it.
+ * receipts, DROPCOWBOY_CALL_WEBHOOK_SECRET for contact.call.ringing); the
+ * body's `event` field picks which one verifies it. contact.call.ringing
+ * carries the real caller of a call-back to the drop line and pauses their
+ * drips (the forward to Norma hides it).
  */
 export async function POST(request: Request) {
   const rawBody = await request.text();
@@ -42,6 +51,8 @@ export async function POST(request: Request) {
   }
   const check = verifyDropCowboySignature(selection.secret, rawBody, request.headers);
   if (!check.valid) return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
+
+  if (selection.event === DROPCOWBOY_CALL_RINGING_EVENT) return handleInboundCall(rawBody);
 
   let event;
   try {
@@ -66,6 +77,36 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, outcome });
   } catch (error) {
     reportError(error, { tags: { surface: "dropcowboy_rvm_webhook" } });
+    return NextResponse.json({ error: "internal" }, { status: 500 });
+  }
+}
+
+async function handleInboundCall(rawBody: string) {
+  let event;
+  try {
+    event = parseDropCowboyCallEvent(rawBody);
+  } catch (error) {
+    reportError(error, { tags: { surface: "dropcowboy_call_webhook_parse" } });
+    return NextResponse.json({ error: "unrecognized_payload" }, { status: 400 });
+  }
+  const phoneLineId = process.env.DROPCOWBOY_PHONE_LINE_ID?.trim();
+  if (!phoneLineId) {
+    reportError(new Error("dropcowboy webhook: DROPCOWBOY_PHONE_LINE_ID is not set for contact.call.ringing"), {
+      tags: { surface: "dropcowboy_call_webhook_config" },
+    });
+    return NextResponse.json({ error: "not_configured" }, { status: 500 });
+  }
+  try {
+    const admin = createAdminClient();
+    const outcome = await handleDropCowboyInboundCall(
+      supabaseDropStatusStore(admin),
+      supabaseInboundCallPauseStore(admin),
+      event,
+      phoneLineId,
+    );
+    return NextResponse.json({ ok: true, outcome });
+  } catch (error) {
+    reportError(error, { tags: { surface: "dropcowboy_call_webhook" } });
     return NextResponse.json({ error: "internal" }, { status: 500 });
   }
 }

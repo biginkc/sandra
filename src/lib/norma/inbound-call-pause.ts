@@ -21,8 +21,22 @@ export async function pauseEnrollmentsForInboundCall(
     .eq("id", inboundCallId)
     .maybeSingle();
   if (error) throw new Error(`pauseEnrollmentsForInboundCall call: ${error.message}`);
-  const phone = normalizePhone(call?.from_e164);
-  if (!call || !phone) return { matchedContactIds: [], paused: 0 };
+  if (!call) return { matchedContactIds: [], paused: 0 };
+  return pauseEnrollmentsForCallerPhone(client, call.org_id, call.from_e164);
+}
+
+/**
+ * Pause the drips of every contact in `orgId` whose phone_1..3 matches the
+ * caller. Shared by Norma's inbound call record and Drop Cowboy's inbound
+ * call webhook (which carries the real caller when the drop line forwards).
+ */
+export async function pauseEnrollmentsForCallerPhone(
+  client: SupabaseClient<Database>,
+  orgId: string,
+  rawCallerPhone: string | null | undefined,
+): Promise<{ matchedContactIds: string[]; paused: number }> {
+  const phone = normalizePhone(rawCallerPhone);
+  if (!phone) return { matchedContactIds: [], paused: 0 };
 
   // Slots are stored as typed (raw 10-digit, punctuation, +1...), so narrow
   // by the last four digits (contiguous in every format) and compare after
@@ -31,7 +45,7 @@ export async function pauseEnrollmentsForInboundCall(
   const { data: candidates, error: contactsError } = await client
     .from("contacts")
     .select("id, phone_1, phone_2, phone_3")
-    .eq("org_id", call.org_id)
+    .eq("org_id", orgId)
     .or(`phone_1.like.%${last4}%,phone_2.like.%${last4}%,phone_3.like.%${last4}%`);
   if (contactsError) throw new Error(`pauseEnrollmentsForInboundCall contacts: ${contactsError.message}`);
   const contactIds = new Set<string>();

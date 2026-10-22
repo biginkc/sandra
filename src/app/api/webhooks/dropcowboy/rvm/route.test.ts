@@ -2,8 +2,12 @@ import { createHmac } from "node:crypto";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { holder, admin, copy } = vi.hoisted(() => ({
+const { holder, admin, copy, pauses } = vi.hoisted(() => ({
   holder: { store: null as unknown },
+  pauses: {
+    orgs: [] as string[],
+    calls: [] as Array<{ orgId: string; phone: string }>,
+  },
   admin: vi.fn(),
   copy: vi.fn(async () => "stored"),
 }));
@@ -18,6 +22,17 @@ vi.mock("@/lib/voicemail-drop/status-updates", async (importOriginal) => ({
   supabaseDropStatusStore: () => holder.store,
 }));
 
+vi.mock("@/lib/voicemail-drop/inbound-call", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/voicemail-drop/inbound-call")>()),
+  supabaseInboundCallPauseStore: () => ({
+    orgIdsForDropRecipient: async () => pauses.orgs,
+    pauseForCaller: async (orgId: string, phone: string) => {
+      pauses.calls.push({ orgId, phone });
+      return { matchedContactIds: ["c-1"], paused: 1 };
+    },
+  }),
+}));
+
 import { reportError } from "@/lib/errors/report";
 import { createFakeDropStore } from "@/lib/voicemail-drop/status-updates.fake";
 
@@ -25,6 +40,8 @@ import { POST } from "./route";
 
 const SECRET = "wh-secret";
 const RECEIPT_SECRET = "wh-receipt-secret";
+const CALL_SECRET = "wh-call-secret";
+const LINE = "ae93c88d-4ebd-40c5-ae82-13e352848b9f";
 let fake: ReturnType<typeof createFakeDropStore>;
 
 function signed(body: string, opts: { ts?: number; secret?: string } = {}) {
@@ -43,6 +60,10 @@ const body = (eventId = "evt-1") =>
 beforeEach(() => {
   vi.stubEnv("DROPCOWBOY_WEBHOOK_SECRET", SECRET);
   vi.stubEnv("DROPCOWBOY_RECEIPT_WEBHOOK_SECRET", RECEIPT_SECRET);
+  vi.stubEnv("DROPCOWBOY_CALL_WEBHOOK_SECRET", CALL_SECRET);
+  vi.stubEnv("DROPCOWBOY_PHONE_LINE_ID", LINE);
+  pauses.orgs = ["org-1"];
+  pauses.calls = [];
   copy.mockClear();
   vi.mocked(reportError).mockClear();
   fake = createFakeDropStore([
@@ -159,6 +180,72 @@ describe("dropcowboy rvm webhook route", () => {
       const res = await POST(signed(receipt(), { secret: RECEIPT_SECRET }));
       expect(await res.json()).toEqual({ ok: true, outcome: "applied" });
       expect(fake.drops[0].proof_url).toBe("https://proof.example/r/abc");
+    });
+  });
+
+  describe("contact.call.ringing (call-back to the drop line)", () => {
+    const ringing = (o: { eventId?: string; ivr?: string | null; from?: string | null; direction?: string } = {}) =>
+      JSON.stringify({
+        event: "contact.call.ringing",
+        event_id: o.eventId ?? "evt-c1",
+        event_at: Date.now(),
+        data: {
+          call_id: "call-1",
+          team_id: "team-1",
+          ivr_id: o.ivr === undefined ? LINE : o.ivr,
+          call: { call_id: "call-1", from: o.from === undefined ? "(816) 555-0142" : o.from, to: "+18162032828", call_direction: o.direction ?? "inbound" },
+        },
+      });
+
+    it("verifies with the call secret and pauses the real caller's drips", async () => {
+      const res = await POST(signed(ringing(), { secret: CALL_SECRET }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, outcome: "paused" });
+      expect(pauses.calls).toEqual([{ orgId: "org-1", phone: "+18165550142" }]);
+      expect(fake.events.get("contact.call.ringing:evt-c1")?.status).toBe("processed");
+    });
+
+    it("never accepts a call event signed with the status or receipt secret", async () => {
+      expect((await POST(signed(ringing()))).status).toBe(401);
+      expect((await POST(signed(ringing(), { secret: RECEIPT_SECRET }))).status).toBe(401);
+      expect(pauses.calls).toEqual([]);
+    });
+
+    it("401s and reports when DROPCOWBOY_CALL_WEBHOOK_SECRET is unset", async () => {
+      vi.stubEnv("DROPCOWBOY_CALL_WEBHOOK_SECRET", "");
+      expect((await POST(signed(ringing(), { secret: CALL_SECRET }))).status).toBe(401);
+      expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("DROPCOWBOY_CALL_WEBHOOK_SECRET") }), expect.anything());
+    });
+
+    it("ignores calls to another line, dialer calls and outbound legs without recording them", async () => {
+      for (const b of [ringing({ ivr: "other-line" }), ringing({ ivr: null }), ringing({ direction: "outbound" })]) {
+        const res = await POST(signed(b, { secret: CALL_SECRET }));
+        expect(res.status).toBe(200);
+        expect((await res.json()).outcome).toMatch(/^ignored_/);
+      }
+      expect(pauses.calls).toEqual([]);
+      expect(fake.events.size).toBe(0);
+    });
+
+    it("pauses nothing for an unmatched or missing caller", async () => {
+      pauses.orgs = [];
+      expect(await (await POST(signed(ringing({ eventId: "e-u1" }), { secret: CALL_SECRET }))).json()).toEqual({ ok: true, outcome: "unmatched" });
+      pauses.orgs = ["org-1"];
+      expect(await (await POST(signed(ringing({ eventId: "e-u2", from: null }), { secret: CALL_SECRET }))).json()).toEqual({ ok: true, outcome: "unmatched" });
+      expect(pauses.calls).toEqual([]);
+    });
+
+    it("dedupes a replayed event_id", async () => {
+      await POST(signed(ringing(), { secret: CALL_SECRET }));
+      const res = await POST(signed(ringing(), { secret: CALL_SECRET }));
+      expect(await res.json()).toEqual({ ok: true, outcome: "duplicate" });
+      expect(pauses.calls).toHaveLength(1);
+    });
+
+    it("500s when DROPCOWBOY_PHONE_LINE_ID is unset", async () => {
+      vi.stubEnv("DROPCOWBOY_PHONE_LINE_ID", "");
+      expect((await POST(signed(ringing(), { secret: CALL_SECRET }))).status).toBe(500);
+      expect(pauses.calls).toEqual([]);
     });
   });
 });
