@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { selectDropCowboyWebhookSecret } from "./webhook";
 
-const env = { DROPCOWBOY_WEBHOOK_SECRET: "status-secret", DROPCOWBOY_RECEIPT_WEBHOOK_SECRET: "receipt-secret" };
+const env = { DROPCOWBOY_WEBHOOK_SECRET: "status-secret", DROPCOWBOY_RECEIPT_WEBHOOK_SECRET: "receipt-secret", DROPCOWBOY_CALL_WEBHOOK_SECRET: "call-secret" };
 const body = (event: unknown) => JSON.stringify({ event, event_id: "e", data: {} });
 
 describe("selectDropCowboyWebhookSecret", () => {
@@ -16,6 +16,14 @@ describe("selectDropCowboyWebhookSecret", () => {
     expect(selectDropCowboyWebhookSecret(body("contact.rvm.receipt"), env)).toEqual({
       kind: "supported", event: "contact.rvm.receipt", envName: "DROPCOWBOY_RECEIPT_WEBHOOK_SECRET", secret: "receipt-secret",
     });
+  });
+
+  it("uses the call secret for contact.call.ringing and never another event's", () => {
+    expect(selectDropCowboyWebhookSecret(body("contact.call.ringing"), env)).toEqual({
+      kind: "supported", event: "contact.call.ringing", envName: "DROPCOWBOY_CALL_WEBHOOK_SECRET", secret: "call-secret",
+    });
+    expect(selectDropCowboyWebhookSecret(body("contact.call.ringing"), { DROPCOWBOY_WEBHOOK_SECRET: "s", DROPCOWBOY_RECEIPT_WEBHOOK_SECRET: "r" }))
+      .toMatchObject({ kind: "supported", secret: null });
   });
 
   it("never falls back to the other event's secret when one is unset", () => {
