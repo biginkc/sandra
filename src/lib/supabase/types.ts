@@ -8721,6 +8721,17 @@ export type Database = {
           property_id: string
         }[]
       }
+      upsert_dealmachine_property_contact: {
+        Args: {
+          p_contact: Json
+          p_org_id: string
+          p_property_id: string
+          p_source_attributes: Json
+          p_source_identity: string
+          p_source_position: number
+        }
+        Returns: string
+      }
       upsert_assigns_property_contact: {
         Args: {
           p_contact: Json

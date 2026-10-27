@@ -105,7 +105,7 @@ export function StepMap({ state, dispatch }: Props) {
         <SectionCard
           title="Source adapter"
           description="Lossless source-specific fields. These are set by the recognized adapter and retain data that does not fit Sandra's standard columns."
-          fields={SOURCE_ADAPTER_FIELDS}
+          fields={SOURCE_ADAPTER_FIELDS.filter((field) => !!state.mapping[field.id])}
           state={state}
           dispatch={dispatch}
         />
