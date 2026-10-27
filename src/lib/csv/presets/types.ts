@@ -25,7 +25,8 @@ export type VendorPresetId =
   | "bmh_outreach"
   | "permits"
   | "cnam"
-  | "assigns";
+  | "assigns"
+  | "dealmachine_contacts";
 
 export type DetectionResult = {
   id: VendorPresetId;

@@ -15,6 +15,8 @@ import { ALL_FIELDS } from "./schema";
 
 export const HEADER_ALIASES: Record<string, string> = {
   // ---------- Source-specific adapter payloads ----------
+  "dealmachine person id": "dealmachine_person_id",
+  "dealmachine source row": "dealmachine_source_row",
   "assigns contact blocks": "assigns_contact_blocks",
   "assigns source record id": "assigns_source_id",
   "assigns source row": "assigns_source_row",

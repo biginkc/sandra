@@ -1,3 +1,4 @@
+import { parseDealMachineContact } from "./dealmachine-contact";
 import { normalizeAddress } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
@@ -49,6 +50,10 @@ function emptyGroups(): Record<PreflightGroup, number[]> {
   };
 }
 
+function safeDealMachineContact(value: unknown) {
+  try { return parseDealMachineContact(value); } catch { return null; }
+}
+
 function normalizedPhones(
   normalized: Readonly<Record<string, unknown>>,
 ): string[] {
@@ -57,6 +62,8 @@ function normalizedPhones(
     .filter(
       (phone): phone is string => typeof phone === "string" && phone.length > 0,
     );
+  const person = safeDealMachineContact(normalized.dealmachine_source_row);
+  if (person) phones.push(...person.phones.flatMap((p) => p.value ? [p.value] : []));
   const identityOnly = normalized.homeowner_dnc_phones;
   if (typeof identityOnly === "string") {
     phones.push(
@@ -105,7 +112,7 @@ export function buildLocalPreflight(
     }
 
     const phones = normalizedPhones(normalized);
-    const email = normalized.homeowner_email;
+    const email = normalized.homeowner_email ?? safeDealMachineContact(normalized.dealmachine_source_row)?.contact.email;
     if (
       phones.length === 0 &&
       !(typeof email === "string" && email.length > 0)

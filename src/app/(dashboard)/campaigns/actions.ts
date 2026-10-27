@@ -1507,14 +1507,14 @@ async function fetchRecipientSeedRows(
       homeownerByProperty.set(row.id, row.homeowner_contact_id ?? null);
     }
 
-    // Assigns explicitly provides independent source contacts. Preserve every
+    // Supported contact-centric exports provide independent source contacts. Preserve every
     // one as a recipient rather than guessing which contact is the homeowner.
     for (let from = 0; ; from += RECIPIENT_PAGE) {
       const { data: relationRows, error: relationError } = await supabase
         .from("property_contacts")
         .select("property_id, contact_id, source_identity")
         .in("property_id", chunk)
-        .eq("relationship", "assigns_contact")
+        .in("relationship", ["assigns_contact", "dealmachine_contact"])
         .order("property_id", { ascending: true })
         .order("contact_id", { ascending: true })
         .order("source_identity", { ascending: true })

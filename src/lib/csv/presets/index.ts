@@ -17,6 +17,7 @@ import { reisiftPreset } from "./reisift";
 import { bmhAgentOutreachPreset } from "./bmh-agent-outreach";
 import { permitsPreset } from "./permits";
 import { cnamPreset } from "./cnam";
+import { dealmachinePreset } from "./dealmachine";
 import { assignsPreset } from "./assigns";
 import type { DetectionResult, VendorPreset, VendorPresetId } from "./types";
 
@@ -28,6 +29,7 @@ export const PRESETS: readonly VendorPreset[] = [
   permitsPreset,
   cnamPreset,
   assignsPreset,
+  dealmachinePreset,
 ];
 
 export const MIN_CONFIDENCE = 0.7;

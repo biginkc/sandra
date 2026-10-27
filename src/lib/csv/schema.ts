@@ -124,6 +124,8 @@ export const AGENT_FIELDS: readonly TargetField[] = [
  * without pretending that every source has Sandra's one-homeowner layout.
  */
 export const SOURCE_ADAPTER_FIELDS: readonly TargetField[] = [
+  { id: "dealmachine_person_id", label: "DealMachine Person ID", section: "source", type: "text", required: true },
+  { id: "dealmachine_source_row", label: "DealMachine Source Row", section: "source", type: "text", required: true },
   {
     id: "assigns_source_id",
     label: "Assigns source record ID",

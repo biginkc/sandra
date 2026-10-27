@@ -32,6 +32,11 @@ type VendorEntry = {
 };
 
 const VENDORS: VendorEntry[] = [
+  { id: "dealmachine_contacts", label: "DealMachine Person Contacts",
+    description: "Person-centric DealMachine exports with one contact per property row.",
+    autoFixes: ["Parse comma-separated addresses and retain parcel identifiers", "Retain all source columns, phone types, emails and DNC flags", "Link every source person independently; DNC contacts remain excluded from SMS"],
+    signatureHeaders: ["internal_person_id", "person_full_name", "property_address_full", "parcel_number_raw", "is_phone_1_dnc", "people_phone_1_type_id"], importable: true,
+  },
   {
     id: "propstream",
     label: "PropStream Property Export",
