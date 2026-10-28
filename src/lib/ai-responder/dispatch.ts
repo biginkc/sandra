@@ -1644,6 +1644,7 @@ async function classifyAndHandleNonRouteOutcomes(
       if (!classification.askedHowNumberObtained) {
         await runNurtureAutoDripStep(supabase, {
           propertyId: input.propertyId,
+          contactId: input.contactId,
           cfg: dripCfg,
           route: dripRoute,
           replySent: templateMessageId !== null && templateReplyKey === "nurture",
@@ -3671,6 +3672,8 @@ async function runNurtureAutoDripStep(
   supabase: SupabaseClient<Database>,
   a: {
     propertyId: string;
+    /** The inbound's sender: enrolled when the lead has no saved homeowner. */
+    contactId: string;
     cfg: NurtureAutoDripConfig;
     route: NurtureRoute | null;
     replySent: boolean;
@@ -3697,6 +3700,7 @@ async function runNurtureAutoDripStep(
       sequenceId: a.cfg.sequences[drip],
       delayDays,
       route: drip,
+      contactId: a.contactId,
     });
   } catch (error) {
     reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });
@@ -8487,6 +8491,7 @@ export async function runNineQuestionsStep(
     const dripResult = await enrollNineDrip(supabase, {
       orgId: property.org_id,
       propertyId: input.propertyId,
+      contactId: input.contactId,
       dripName: action.drip,
       skipFirstStep: false,
     });
@@ -8723,6 +8728,7 @@ export async function runNineQuestionsStep(
   const dripResult = await enrollNineDrip(supabase, {
     orgId: property.org_id,
     propertyId: input.propertyId,
+    contactId: input.contactId,
     dripName: action.drip,
     skipFirstStep: action.skipFirstStep,
   });

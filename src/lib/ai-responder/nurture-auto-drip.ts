@@ -77,7 +77,14 @@ function refusalReason(outcome: Exclude<EnrollmentOutcome, { status: "enrolled" 
 
 export async function enrollNurtureInDrip(
   supabase: SupabaseClient<Database>,
-  a: { propertyId: string; sequenceId: string | null; delayDays?: number; route?: NurtureDripKey },
+  a: {
+    propertyId: string;
+    sequenceId: string | null;
+    delayDays?: number;
+    route?: NurtureDripKey;
+    /** The contact who sent the inbound; texted only when the lead has no saved homeowner (see `enrollLead`). */
+    contactId?: string;
+  },
 ): Promise<NurtureAutoDripResult> {
   if (!a.sequenceId) return { status: "refused", reason: "no_drip_configured" };
   const { propertyId, sequenceId } = a;
@@ -125,7 +132,14 @@ export async function enrollNurtureInDrip(
 
   let outcome: EnrollmentOutcome;
   try {
-    outcome = await enrollLead(supabase, { propertyId, sequenceId, enrolledByUserId: null, firstSendNotBefore, ...(a.route ? { autoRoute: a.route } : {}) });
+    outcome = await enrollLead(supabase, {
+      propertyId,
+      sequenceId,
+      enrolledByUserId: null,
+      firstSendNotBefore,
+      ...(a.route ? { autoRoute: a.route } : {}),
+      ...(a.contactId ? { contactId: a.contactId } : {}),
+    });
   } catch (error) {
     reportError(error, { tags: { surface: "nurture_auto_drip_enroll" }, extra: { propertyId, sequenceId } });
     await revert();

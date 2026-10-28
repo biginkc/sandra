@@ -63,6 +63,17 @@ export async function enrollLead(
      */
     skipFirstStep?: boolean;
     autoRoute?: "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
+    /**
+     * The person to text when the lead has no saved homeowner (imports that
+     * link people only through `property_contacts`). Used ONLY when
+     * `homeowner_contact_id` is empty, and only if this contact is linked to
+     * the property in the same org; otherwise the enrolment is refused
+     * `no_phone` as before. Suppression, line type and consent are checked on
+     * this contact, and it is the enrolment's recipient. With a saved
+     * homeowner this is ignored. Never inferred: the caller names the contact
+     * (e.g. the one who just replied).
+     */
+    contactId?: string;
   },
 ): Promise<EnrollmentOutcome> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
@@ -174,7 +185,7 @@ export async function enrollLead(
   };
   const rawHomeowner = prop.homeowner as unknown as
     HomeownerJoin | HomeownerJoin[] | null;
-  const homeowner = Array.isArray(rawHomeowner)
+  let homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
   if (prop.is_dnc_locked) {
@@ -187,6 +198,15 @@ export async function enrollLead(
       status: "suppressed",
       message: `A rep is handling this lead personally (${label[0]!.toUpperCase()}${label.slice(1)}). Change the outcome to start a drip.`,
     };
+  }
+  if (!prop.homeowner_contact_id && params.contactId) {
+    const explicit = await loadLinkedContact(client, {
+      orgId: prop.org_id,
+      propertyId: params.propertyId,
+      contactId: params.contactId,
+    });
+    if (explicit.status === "failed") return explicit;
+    homeowner = explicit.contact;
   }
   if (!homeowner && prop.homeowner_contact_id) {
     return { status: "suppressed", message: "Contact details could not be verified." };
@@ -688,4 +708,59 @@ export async function retrySequenceStep(
     },
   });
   return { status: "retried" };
+}
+
+type LinkedContact = {
+  id: string;
+  phone_1: string | null;
+  phone_1_type: string | null;
+  phone_2: string | null;
+  phone_2_type: string | null;
+  phone_3: string | null;
+  phone_3_type: string | null;
+  do_not_contact: boolean;
+  sms_opted_out: boolean;
+};
+
+/**
+ * The explicit contact, only when it belongs to this org and is linked to this
+ * property through `property_contacts`. `contact: null` (not linked, not found,
+ * other org) falls through to the existing `no_phone` refusal.
+ */
+async function loadLinkedContact(
+  client: SupabaseClient<Database>,
+  a: { orgId: string; propertyId: string; contactId: string },
+): Promise<{ status: "ok"; contact: LinkedContact | null } | { status: "failed"; message: string }> {
+  const { data: link, error: linkErr } = await client
+    .from("property_contacts")
+    .select("contact_id")
+    .eq("org_id", a.orgId)
+    .eq("property_id", a.propertyId)
+    .eq("contact_id", a.contactId)
+    .limit(1)
+    .maybeSingle();
+  if (linkErr) return { status: "failed", message: linkErr.message };
+  if (!link) return { status: "ok", contact: null };
+  const { data: contact, error: contactErr } = await client
+    .from("contacts")
+    .select("id, org_id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
+    .eq("id", a.contactId)
+    .eq("org_id", a.orgId)
+    .maybeSingle();
+  if (contactErr) return { status: "failed", message: contactErr.message };
+  if (!contact || contact.id !== a.contactId || contact.org_id !== a.orgId) return { status: "ok", contact: null };
+  return {
+    status: "ok",
+    contact: {
+      id: contact.id,
+      phone_1: contact.phone_1,
+      phone_1_type: contact.phone_1_type,
+      phone_2: contact.phone_2,
+      phone_2_type: contact.phone_2_type,
+      phone_3: contact.phone_3,
+      phone_3_type: contact.phone_3_type,
+      do_not_contact: contact.do_not_contact,
+      sms_opted_out: contact.sms_opted_out,
+    },
+  };
 }
