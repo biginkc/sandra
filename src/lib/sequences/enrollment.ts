@@ -188,15 +188,6 @@ export async function enrollLead(
   let homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
-  if (!prop.homeowner_contact_id && params.contactId) {
-    const explicit = await loadLinkedContact(client, {
-      orgId: prop.org_id,
-      propertyId: params.propertyId,
-      contactId: params.contactId,
-    });
-    if (explicit.status === "failed") return explicit;
-    homeowner = explicit.contact;
-  }
   if (prop.is_dnc_locked) {
     return { status: "suppressed", message: "This lead is locked as do not contact." };
   }
@@ -207,6 +198,15 @@ export async function enrollLead(
       status: "suppressed",
       message: `A rep is handling this lead personally (${label[0]!.toUpperCase()}${label.slice(1)}). Change the outcome to start a drip.`,
     };
+  }
+  if (!prop.homeowner_contact_id && params.contactId) {
+    const explicit = await loadLinkedContact(client, {
+      orgId: prop.org_id,
+      propertyId: params.propertyId,
+      contactId: params.contactId,
+    });
+    if (explicit.status === "failed") return explicit;
+    homeowner = explicit.contact;
   }
   if (!homeowner && prop.homeowner_contact_id) {
     return { status: "suppressed", message: "Contact details could not be verified." };

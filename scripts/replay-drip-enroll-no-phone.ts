@@ -19,8 +19,9 @@
  * - still flagged, reason exactly `drip_enroll_failed:no_phone`, no saved homeowner;
  * - its newest `drip_enrolled` error step says `no_phone`, on a run that names the
  *   contact who replied (`pipeline_runs.contact_id`);
- * - no inbound text on the lead after that run's inbound (a newer reply is a
- *   person's call, not a replay);
+ * - no inbound text on the lead after that run's inbound, and no outbound text
+ *   after it other than that run's own reply (a newer reply, or a rep already
+ *   texting, is a person's call, not a replay);
  * - the route is recoverable: nine-questions runs map the recorded answer back to
  *   its drip (and must match the recorded route); nurture runs only for routes
  *   with one fixed delay (`check_in_60`, `listed_not_selling`), since
@@ -40,7 +41,7 @@ import {
   type NurtureDripKey,
 } from "../src/lib/ai-responder/nurture-auto-drip";
 import { enrollNineDrip } from "../src/lib/ai-responder/nine-questions-engine";
-import { actionForNineAnswer, type NineAnswer } from "../src/lib/sms-classification/nine-questions";
+import { actionForNineAnswer, type NineAnswer, type NineDripName } from "../src/lib/sms-classification/nine-questions";
 import { createAdminClient } from "../src/lib/supabase/admin";
 
 const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
@@ -89,7 +90,7 @@ type Plan =
       kind: "nine";
       contactId: string;
       route: string;
-      drip: "Maybe later" | "Asked who is texting" | "Not interested" | "Confirmed owner";
+      drip: NineDripName;
       skipFirstStep: boolean;
     }
   | { kind: "nurture"; contactId: string; route: NurtureDripKey; delayDays: number };
@@ -124,7 +125,7 @@ async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
   // Newest run on this lead whose drip step failed.
   const { data: runs, error: runsError } = await supabase
     .from("pipeline_runs")
-    .select("id, contact_id, inbound_message_id, started_at")
+    .select("id, contact_id, inbound_message_id, outbound_message_id, started_at")
     .eq("org_id", BMH_ORG_ID)
     .eq("property_id", propertyId)
     .order("started_at", { ascending: false })
@@ -162,6 +163,18 @@ async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
       .gt("created_at", inbound.created_at);
     if (newerError) throw new Error(newerError.message);
     if ((count ?? 0) > 0) return { kind: "skip", why: "seller texted again after the failed run" };
+    // So does any text we sent after it other than this run's own reply (a rep
+    // texting from the lead page, a campaign): a drip would land on top of it.
+    let outbound = supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound")
+      .gt("created_at", inbound.created_at);
+    if (run.outbound_message_id) outbound = outbound.neq("id", run.outbound_message_id);
+    const { count: outCount, error: outError } = await outbound;
+    if (outError) throw new Error(outError.message);
+    if ((outCount ?? 0) > 0) return { kind: "skip", why: "another text was sent to the lead after the failed run" };
 
     const route = typeof detail.route === "string" ? detail.route : null;
     if (!route) return { kind: "skip", why: "no route recorded" };
