@@ -34,8 +34,12 @@
  * as dispatch, with the replier as the explicit contact, so every consent,
  * suppression, line-type and link check applies again. On success the hold is
  * cleared only if its reason still equals `drip_enroll_failed:no_phone`.
- * The first drip text is held at least 15 minutes (FIRST_SEND_FLOOR_MINUTES), so the
- * check right after enrolling always runs before anything can be sent.
+ * The enrolment is written parked (first text ~100 years out) and is armed only
+ * after the post-enrol check passes; any error before arming leaves it parked,
+ * so a failed check can never let it send. Armed, the first text goes out at the
+ * later of its step delay and 15 minutes (nurture: the route's delay). After the
+ * hold is cleared the check runs once more: a reply that slipped in while the
+ * hold was still set gets the hold back and the drip paused.
  */
 
 import { reportError } from "../src/lib/errors/report";
@@ -48,12 +52,15 @@ import {
 } from "../src/lib/ai-responder/nurture-auto-drip";
 import { enrollNineDrip } from "../src/lib/ai-responder/nine-questions-engine";
 import { actionForNineAnswer, type NineAnswer, type NineDripName } from "../src/lib/sms-classification/nine-questions";
+import { delayToDate } from "../src/lib/sequences/delays";
 import { createAdminClient } from "../src/lib/supabase/admin";
 
 const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
 const BMH_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 const HOLD_REASON = "drip_enroll_failed:no_phone";
 const FIRST_SEND_FLOOR_MINUTES = 15;
+/** A replay enrolment is written parked this far out and armed only after its checks pass. */
+const PARK_DAYS = 36_500;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Nurture routes whose first-text delay is a single fixed value. */
 const FIXED_NURTURE_DELAY: Partial<Record<NurtureDripKey, number>> = {
@@ -243,7 +250,12 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
   if (!(await stillHeld(supabase, propertyId))) return "skipped: hold changed since the dry read";
   const staleBefore = await staleReason(supabase, propertyId, plan.fence);
   if (staleBefore) return `skipped: ${staleBefore}`;
-  const firstSendNotBefore = new Date(Date.now() + FIRST_SEND_FLOOR_MINUTES * 60_000);
+  const enrolledAt = Date.now();
+  // Born parked: nothing can be sent until the checks below pass and arm it.
+  const parkedUntil = new Date(enrolledAt + PARK_DAYS * 86_400_000);
+  // When the first text may go out once armed: the replay floor, or the
+  // nurture route's own delay.
+  const floor = new Date(enrolledAt + (plan.kind === "nurture" ? plan.delayDays * 1440 : FIRST_SEND_FLOOR_MINUTES) * 60_000);
   let result: { status: "enrolled"; enrollmentId: string } | { status: "already_enrolled" } | { status: "refused"; reason: string };
   if (plan.kind === "nine") {
     if (plan.drip === "Maybe later" && !(await loadNurtureAutoDripConfig(supabase, BMH_ORG_ID)).enabled) {
@@ -255,7 +267,7 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
       dripName: plan.drip,
       skipFirstStep: plan.skipFirstStep,
       contactId: plan.contactId,
-      firstSendNotBefore,
+      firstSendNotBefore: parkedUntil,
     });
   } else {
     const cfg = await loadNurtureAutoDripConfig(supabase, BMH_ORG_ID);
@@ -263,7 +275,7 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
     result = await enrollNurtureInDrip(supabase, {
       propertyId,
       sequenceId: cfg.sequences[plan.route],
-      delayDays: plan.delayDays,
+      delayDays: PARK_DAYS,
       route: plan.route,
       contactId: plan.contactId,
     });
@@ -272,20 +284,24 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
   // Nothing was enrolled before (checked above), so a live drip now is one a
   // person or another run started meanwhile: leave the hold for a person.
   if (result.status !== "enrolled") return "skipped: a drip went live meanwhile (hold kept)";
+  const enrollmentId = result.enrollmentId;
 
-  // A reply that landed while the enrolment was written may have run its pause
-  // before the row existed. The first text is at least FIRST_SEND_FLOOR_MINUTES
-  // out, so pausing now is in time.
-  const staleAfter = await staleReason(supabase, propertyId, plan.fence, result.enrollmentId);
-  if (staleAfter) {
-    const { error: pauseError } = await supabase
-      .from("sequence_enrollments")
-      .update({ status: "paused", pause_reason: "inbound_reply", updated_at: new Date().toISOString() })
-      .eq("id", result.enrollmentId)
-      .eq("status", "active");
-    return pauseError
-      ? `ENROLLED BUT NOT PAUSED (${staleAfter}): pause failed: ${pauseError.message}; check enrolment ${result.enrollmentId} now`
-      : `enrolled then paused (${staleAfter}); hold kept`;
+  try {
+    // A reply that landed while the enrolment was written may have run its
+    // pause before the row existed.
+    const staleAfter = await staleReason(supabase, propertyId, plan.fence, enrollmentId);
+    if (staleAfter) {
+      await pauseOwn(supabase, enrollmentId, floor);
+      return `enrolled parked then paused (${staleAfter}); hold kept`;
+    }
+    const armedStatus = await arm(supabase, enrollmentId, floor, enrolledAt);
+    if (armedStatus !== "active") return `enrolled, ${armedStatus ?? "not armed"} meanwhile; hold kept`;
+  } catch (e) {
+    // Fail closed: the enrolment stays parked (no text for PARK_DAYS). Best
+    // effort, also pause it with its real floor so a person who resumes it
+    // later gets a working drip.
+    await pauseOwn(supabase, enrollmentId, floor).catch(() => undefined);
+    return `ENROLLED BUT LEFT PARKED (${e instanceof Error ? e.message : String(e)}): enrolment ${enrollmentId} sends nothing; hold kept, a person must review`;
   }
 
   const now = new Date().toISOString();
@@ -296,8 +312,23 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
     .eq("needs_human_attention", true)
     .eq("last_ai_escalation_reason", HOLD_REASON)
     .select("id");
-  if (error) return `${result.status}; hold NOT cleared: ${error.message}`;
-  if (!cleared?.length) return `${result.status}; hold changed meanwhile, left as is`;
+  if (error) return `enrolled; hold NOT cleared: ${error.message}`;
+  if (!cleared?.length) return "enrolled; hold changed meanwhile, left as is";
+
+  // A reply stored before the clear found the hold still set, so its dispatch
+  // left it for a person: put the hold back and stop the drip. A reply stored
+  // after this check runs its normal dispatch against the cleared lead.
+  let staleAfterClear: string | null;
+  try {
+    staleAfterClear = await staleReason(supabase, propertyId, plan.fence, enrollmentId);
+  } catch (e) {
+    staleAfterClear = `freshness unreadable after clearing: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  if (staleAfterClear) {
+    const restored = await restoreHold(supabase, propertyId);
+    const paused = await pauseOwn(supabase, enrollmentId).then(() => "paused", (e: unknown) => `NOT paused: ${e instanceof Error ? e.message : String(e)}`);
+    return `enrolled then ${paused}, hold ${restored ? "restored" : "NOT restored"} (${staleAfterClear})`;
+  }
   try {
     await recordLeadEvent({
       propertyId,
@@ -308,7 +339,66 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
   } catch (e) {
     reportError(e, { tags: { surface: "replay_drip_enroll_no_phone_event" }, extra: { propertyId } });
   }
-  return `${result.status}; hold cleared`;
+  return "enrolled; hold cleared";
+}
+
+/** Pause the replay's own enrolment; `floor` also un-parks it so a later resume can send. */
+async function pauseOwn(supabase: Supabase, enrollmentId: string, floor?: Date): Promise<void> {
+  const { error } = await supabase
+    .from("sequence_enrollments")
+    .update({
+      status: "paused",
+      pause_reason: "inbound_reply",
+      ...(floor ? { first_send_not_before: floor.toISOString() } : {}),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", enrollmentId)
+    .eq("status", "active");
+  if (error) throw new Error(`pause failed: ${error.message}`);
+}
+
+/**
+ * Un-park the replay's own enrolment: the first text at the later of `floor`
+ * and its starting step's own delay (what `enrollLead` would have set).
+ * Returns the row's status after the update (null if the row was not parked).
+ */
+async function arm(supabase: Supabase, enrollmentId: string, floor: Date, enrolledAt: number): Promise<string | null> {
+  const { data: row, error: rowError } = await supabase
+    .from("sequence_enrollments")
+    .select("sequence_id, current_step_index")
+    .eq("id", enrollmentId)
+    .maybeSingle();
+  if (rowError) throw new Error(rowError.message);
+  if (!row) throw new Error("enrolment row not found");
+  const { data: step, error: stepError } = await supabase
+    .from("sequence_steps")
+    .select("delay_after_previous_minutes")
+    .eq("sequence_id", row.sequence_id)
+    .eq("step_index", row.current_step_index)
+    .maybeSingle();
+  if (stepError) throw new Error(stepError.message);
+  if (!step) throw new Error("starting step not found");
+  const stepAt = delayToDate(step.delay_after_previous_minutes, new Date(enrolledAt));
+  const runAt = stepAt.getTime() > floor.getTime() ? stepAt : floor;
+  const { data: armed, error } = await supabase
+    .from("sequence_enrollments")
+    .update({ first_send_not_before: floor.toISOString(), next_run_at: runAt.toISOString(), updated_at: new Date().toISOString() })
+    .eq("id", enrollmentId)
+    .gt("first_send_not_before", new Date(enrolledAt + (PARK_DAYS / 2) * 86_400_000).toISOString())
+    .select("status");
+  if (error) throw new Error(`arm failed: ${error.message}`);
+  return armed?.[0]?.status ?? null;
+}
+
+async function restoreHold(supabase: Supabase, propertyId: string): Promise<boolean> {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("properties")
+    .update({ needs_human_attention: true, last_ai_escalation_reason: HOLD_REASON, last_ai_escalation_at: now, updated_at: now })
+    .eq("id", propertyId)
+    .eq("needs_human_attention", false)
+    .select("id");
+  return !error && Boolean(data?.length);
 }
 
 async function main(): Promise<void> {

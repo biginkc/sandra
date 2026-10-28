@@ -26,17 +26,28 @@ const PLAN: Exclude<Plan, { kind: "skip" }> = {
 };
 
 type Filter = [op: string, column: string, value: unknown];
-type Call = { table: string; filters: Filter[]; update?: Record<string, unknown> };
+type Call = { table: string; filters: Filter[]; update?: Record<string, unknown>; at: number };
 
+let clock = 0;
 /**
- * Fake client. `counts(table, filters)` answers every `head` count; the
- * property row answers `maybeSingle`; updates are recorded and succeed.
+ * Fake client. `counts(call)` answers every `head` count (a thrown error comes
+ * back as a query error); `maybeSingle` answers per table; updates are recorded
+ * and return one row (`armStatus` for the enrolment arm).
  */
-function fakeClient(opts: { counts: (call: Call) => number; property?: Record<string, unknown> }) {
+function fakeClient(opts: {
+  counts: (call: Call) => number | Error;
+  property?: Record<string, unknown>;
+  armStatus?: string;
+}) {
   const calls: Call[] = [];
+  const single: Record<string, unknown> = {
+    properties: opts.property ?? { needs_human_attention: true, last_ai_escalation_reason: "drip_enroll_failed:no_phone", homeowner_contact_id: null },
+    sequence_enrollments: { sequence_id: "seq", current_step_index: 0 },
+    sequence_steps: { delay_after_previous_minutes: 2 * 1440 },
+  };
   const client = {
     from(table: string) {
-      const call: Call = { table, filters: [] };
+      const call: Call = { table, filters: [], at: 0 };
       let head = false;
       const b = {
         select: (_cols?: string, o?: { head?: boolean }) => { head = Boolean(o?.head); return b; },
@@ -45,13 +56,18 @@ function fakeClient(opts: { counts: (call: Call) => number; property?: Record<st
         neq: (c: string, v: unknown) => { call.filters.push(["neq", c, v]); return b; },
         gt: (c: string, v: unknown) => { call.filters.push(["gt", c, v]); return b; },
         gte: (c: string, v: unknown) => { call.filters.push(["gte", c, v]); return b; },
-        maybeSingle: async () => ({
-          data: opts.property ?? { needs_human_attention: true, last_ai_escalation_reason: "drip_enroll_failed:no_phone", homeowner_contact_id: null },
-          error: null,
-        }),
+        maybeSingle: async () => ({ data: single[table], error: null }),
         then: (resolve: (v: unknown) => void) => {
+          call.at = ++clock;
           calls.push(call);
-          resolve(head ? { count: opts.counts(call), error: null } : { data: call.update ? [{ id: "x" }] : [], error: null });
+          if (head) {
+            const n = opts.counts(call);
+            return resolve(n instanceof Error ? { count: null, error: { message: n.message } } : { count: n, error: null });
+          }
+          const row = table === "sequence_enrollments" && call.update && "next_run_at" in call.update
+            ? { status: opts.armStatus ?? "active" }
+            : { id: "x" };
+          resolve({ data: call.update ? [row] : [], error: null });
         },
       };
       return b;
@@ -62,9 +78,12 @@ function fakeClient(opts: { counts: (call: Call) => number; property?: Record<st
 
 const has = (call: Call, op: string, column: string, value?: unknown) =>
   call.filters.some(([o, c, v]) => o === op && c === column && (value === undefined || v === value));
+const updates = (calls: Call[], table: string) => calls.filter((c) => c.table === table && c.update);
+const isInbound = (c: Call) => c.table === "messages" && has(c, "eq", "direction", "inbound");
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clock = 0;
   h.loadNurtureAutoDripConfig.mockResolvedValue({ enabled: true, sequences: {} });
   h.enrollNineDrip.mockResolvedValue({ status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" });
 });
@@ -93,34 +112,66 @@ describe("staleReason", () => {
 });
 
 describe("apply", () => {
-  it("enrols with the replier, holds the first text, and clears the hold when still fresh", async () => {
+  const YEAR = 365 * 86_400_000;
+
+  it("enrols the replier parked, arms it after the check, then clears the hold", async () => {
     const { client, calls } = fakeClient({ counts: () => 0 });
     const before = Date.now();
     expect(await apply(client as never, PROPERTY, PLAN)).toBe("enrolled; hold cleared");
     const args = h.enrollNineDrip.mock.calls[0]![1] as { contactId: string; firstSendNotBefore: Date };
     expect(args.contactId).toBe("contact-replier");
-    expect(args.firstSendNotBefore.getTime() - before).toBeGreaterThanOrEqual(15 * 60_000 - 1000);
-    const clear = calls.find((c) => c.table === "properties" && c.update)!;
+    expect(args.firstSendNotBefore.getTime() - before).toBeGreaterThan(50 * YEAR);
+    const [armCall] = updates(calls, "sequence_enrollments");
+    // Armed at the later of the step delay (2 days) and the 15-minute floor.
+    const runAt = Date.parse(armCall!.update!.next_run_at as string);
+    expect(runAt - before).toBeGreaterThanOrEqual(2 * 86_400_000 - 1000);
+    expect(has(armCall!, "eq", "id", "enr-new")).toBe(true);
+    const clear = updates(calls, "properties")[0]!;
     expect(has(clear, "eq", "last_ai_escalation_reason", "drip_enroll_failed:no_phone")).toBe(true);
+    expect(armCall!.at).toBeLessThan(clear.at);
   });
 
-  it("a seller reply that lands while enrolling pauses the new drip and keeps the hold", async () => {
+  it("a seller reply that lands while enrolling pauses the parked drip and keeps the hold", async () => {
     let enrolled = false;
     h.enrollNineDrip.mockImplementation(async () => { enrolled = true; return { status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" }; });
+    const { client, calls } = fakeClient({ counts: (c) => (enrolled && isInbound(c) ? 1 : 0) });
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled parked then paused \(seller texted again/);
+    const [pause] = updates(calls, "sequence_enrollments");
+    expect(pause!.update).toMatchObject({ status: "paused", pause_reason: "inbound_reply" });
+    expect(pause!.update).not.toHaveProperty("next_run_at");
+    expect(updates(calls, "properties")).toHaveLength(0);
+  });
+
+  it("a failed check after enrolling leaves the drip parked and the hold set (fails closed)", async () => {
+    let enrolled = false;
+    h.enrollNineDrip.mockImplementation(async () => { enrolled = true; return { status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" }; });
+    const { client, calls } = fakeClient({ counts: (c) => (enrolled && isInbound(c) ? new Error("db down") : 0) });
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^ENROLLED BUT LEFT PARKED \(db down\)/);
+    // Never armed: no update sets a real next_run_at.
+    expect(updates(calls, "sequence_enrollments").some((c) => "next_run_at" in c.update!)).toBe(false);
+    expect(updates(calls, "properties")).toHaveLength(0);
+  });
+
+  it("a reply that paused the drip before arming keeps the hold", async () => {
+    const { client, calls } = fakeClient({ counts: () => 0, armStatus: "paused" });
+    expect(await apply(client as never, PROPERTY, PLAN)).toBe("enrolled, paused meanwhile; hold kept");
+    expect(updates(calls, "properties")).toHaveLength(0);
+  });
+
+  it("a reply that slipped in before the hold was cleared gets the hold back and the drip paused", async () => {
     const { client, calls } = fakeClient({
-      counts: (c) => (enrolled && c.table === "messages" && has(c, "eq", "direction", "inbound") ? 1 : 0),
+      counts: (c) => (isInbound(c) && updates(calls, "properties").length > 0 ? 1 : 0),
     });
-    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled then paused \(seller texted again/);
-    const pause = calls.find((c) => c.table === "sequence_enrollments" && c.update)!;
-    expect(pause.update).toMatchObject({ status: "paused", pause_reason: "inbound_reply" });
-    expect(has(pause, "eq", "id", "enr-new")).toBe(true);
-    expect(calls.some((c) => c.table === "properties" && c.update)).toBe(false);
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled then paused, hold restored \(seller texted again/);
+    const [clear, restore] = updates(calls, "properties");
+    expect(clear!.update).toMatchObject({ needs_human_attention: false });
+    expect(restore!.update).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "drip_enroll_failed:no_phone" });
+    expect(updates(calls, "sequence_enrollments").at(-1)!.update).toMatchObject({ status: "paused" });
   });
 
   it("the post-enrol check does not count the run's own new enrolment", async () => {
     let enrolled = false;
     h.enrollNineDrip.mockImplementation(async () => { enrolled = true; return { status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" }; });
-    // After enrolling, the new row exists; it only counts if not excluded by id.
     const { client } = fakeClient({ counts: (c) => (enrolled && c.table === "sequence_enrollments" && !has(c, "neq", "id", "enr-new") ? 1 : 0) });
     expect(await apply(client as never, PROPERTY, PLAN)).toBe("enrolled; hold cleared");
   });
@@ -135,7 +186,7 @@ describe("apply", () => {
     h.enrollNineDrip.mockResolvedValueOnce({ status: "already_enrolled", sequenceId: "seq" });
     const { client, calls } = fakeClient({ counts: () => 0 });
     expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^skipped: a drip went live meanwhile/);
-    expect(calls.some((c) => c.table === "properties" && c.update)).toBe(false);
+    expect(updates(calls, "properties")).toHaveLength(0);
   });
 });
 
