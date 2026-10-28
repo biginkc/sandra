@@ -51,6 +51,7 @@ type JobRow = Pick<
   | "succeeded_items"
   | "failed_items"
   | "error_message"
+  | "result_summary"
 >;
 
 export default async function CampaignDetailPage({
@@ -175,7 +176,7 @@ async function loadLatestCampaignBulkSmsJob(
   const { data, error } = await supabase
     .from("jobs")
     .select(
-      "id, status, total_items, processed_items, succeeded_items, failed_items, error_message",
+      "id, status, total_items, processed_items, succeeded_items, failed_items, error_message, result_summary",
     )
     .eq("type", "bulk_sms")
     .contains("input_params", { opts: { campaignId } })
@@ -194,6 +195,7 @@ async function loadLatestCampaignBulkSmsJob(
       processedItems: row.processed_items,
       succeededItems: row.succeeded_items,
       failedItems: row.failed_items,
+      skippedItems: row.result_summary && typeof row.result_summary === "object" && !Array.isArray(row.result_summary) && typeof row.result_summary.skipped === "number" ? row.result_summary.skipped : null,
       errorMessage: row.error_message,
     },
     error: null,

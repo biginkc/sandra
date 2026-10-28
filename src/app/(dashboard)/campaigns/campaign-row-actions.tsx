@@ -64,6 +64,10 @@ export function CampaignRowActions({
         );
       }
       const blocked: string[] = [];
+      if (p.dncCount > 0) blocked.push(`${p.dncCount.toLocaleString()} marked do-not-contact`);
+      if (p.propertySuppressedCount > 0) blocked.push(`${p.propertySuppressedCount.toLocaleString()} property suppressed or unavailable`);
+      if (p.phoneSuppressedCount > 0) blocked.push(`${p.phoneSuppressedCount.toLocaleString()} suppressed phone`);
+      if (p.duplicateDestinationCount > 0) blocked.push(`${p.duplicateDestinationCount.toLocaleString()} repeated phone destination`);
       if (p.missingContactCount > 0) {
         blocked.push(`${p.missingContactCount.toLocaleString()} missing contact/phone`);
       }
@@ -79,7 +83,7 @@ export function CampaignRowActions({
       if (blocked.length > 0) {
         lines.push(`Other expected skips: ${blocked.join(", ")}.`);
       }
-      lines.push("", "Quiet hours and opt-outs are re-checked again before each send.");
+      lines.push("", "All contacts remain in the campaign. Skipped entries do not create messages. Eligibility and quiet hours are re-checked before each send.");
 
       if (!window.confirm(lines.join("\n"))) {
         return;

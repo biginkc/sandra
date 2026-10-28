@@ -30,8 +30,7 @@ import {
   validateSmsPaceSeconds,
 } from "@/lib/messaging/pacing";
 import {
-  classifySmsPhoneAvailability,
-  type SmsPhoneContact,
+  selectBestSmsPhone,
 } from "@/lib/messaging/sms-phone";
 import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
@@ -46,6 +45,9 @@ import {
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
+
+import { assessCampaignLaunch, type PreviewContact, type PreviewProperty } from "@/lib/campaigns/launch-assessment";
+import { loadSuppressedSmsPhoneSet } from "@/lib/messaging/phone-suppression-read";
 
 const PROPERTY_CHUNK = 250;
 const RECIPIENT_PAGE = 1000;
@@ -109,6 +111,10 @@ export type CampaignLaunchPreview = {
   landlineCount: number;
   unknownLineTypeCount: number;
   optedOutCount: number;
+  dncCount: number;
+  propertySuppressedCount: number;
+  phoneSuppressedCount: number;
+  duplicateDestinationCount: number;
 };
 
 export type CampaignCadenceChangeResult = {
@@ -1362,16 +1368,16 @@ async function resolvePreviewRecipientRows(
 
 async function fetchContactsForPreview(
   contactIds: string[],
-): Promise<Result<Map<string, SmsPhoneContact>>> {
+): Promise<Result<Map<string, PreviewContact>>> {
   const supabase = await createClient();
-  const contacts = new Map<string, SmsPhoneContact>();
+  const contacts = new Map<string, PreviewContact>();
 
   for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
     const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
     const { data, error } = await supabase
       .from("contacts")
       .select(
-        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
       )
       .in("id", chunk);
 
@@ -1386,6 +1392,8 @@ async function fetchContactsForPreview(
     }
     for (const row of data ?? []) {
       contacts.set(row.id, {
+        do_not_contact: row.do_not_contact,
+        sms_opted_out: row.sms_opted_out,
         phone_1: row.phone_1 ?? null,
         phone_1_type: row.phone_1_type ?? null,
         phone_2: row.phone_2 ?? null,
@@ -1853,56 +1861,35 @@ export async function previewCampaignLaunch(
     ).filter((propertyId) => !successfulPriorContacts.has(propertyId)).length;
     const optedOutContacts = optedOutResult.data;
 
-    let estimatedQueueableCount = 0;
-    let successfulPriorContactCount = 0;
-    let missingContactCount = 0;
-    let landlineCount = 0;
-    let unknownLineTypeCount = 0;
-    let optedOutCount = 0;
-
-    for (const row of rows) {
-      if (
-        campaign.skip_if_contacted &&
-        successfulPriorContacts.has(row.propertyId)
-      ) {
-        successfulPriorContactCount += 1;
-        continue;
-      }
-
-      const contact = row.contactId ? contacts.get(row.contactId) : null;
-      const lineType = classifySmsPhoneAvailability(contact);
-      if (!row.contactId || lineType === "none") {
-        missingContactCount += 1;
-        continue;
-      }
-
-      if (lineType === "landline") {
-        landlineCount += 1;
-        continue;
-      }
-      if (lineType === "unknown") {
-        unknownLineTypeCount += 1;
-        continue;
-      }
-
-      if (optedOutContacts.has(row.contactId)) {
-        optedOutCount += 1;
-        continue;
-      }
-
-      estimatedQueueableCount += 1;
+    const supabase = await createClient();
+    const properties = new Map<string, PreviewProperty>();
+    const uniquePropertyIds = Array.from(new Set(propertyIds));
+    for (let i = 0; i < uniquePropertyIds.length; i += PROPERTY_CHUNK) {
+      const { data, error } = await supabase.from("properties")
+        .select("id, org_id, outreach_dispo, is_dnc_locked, deleted_at")
+        .in("id", uniquePropertyIds.slice(i, i + PROPERTY_CHUNK));
+      if (error) throw new Error(`Campaign property assessment: ${error.message}`);
+      for (const property of data ?? []) properties.set(property.id, property);
     }
-
+    const suppressedPhonesByOrg = new Map<string, Set<string>>();
+    const phonesByOrg = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const orgId = properties.get(row.propertyId)?.org_id;
+      const phone = selectBestSmsPhone(row.contactId ? contacts.get(row.contactId) : null)?.phone;
+      if (!orgId || !phone) continue;
+      const phones = phonesByOrg.get(orgId) ?? new Set<string>();
+      phones.add(phone);
+      phonesByOrg.set(orgId, phones);
+    }
+    for (const [orgId, phones] of phonesByOrg) {
+      suppressedPhonesByOrg.set(orgId, await loadSuppressedSmsPhoneSet(supabase, phones, orgId));
+    }
     return ok({
-      recipientCount: rows.length,
-      estimatedQueueableCount,
+      ...assessCampaignLaunch({ rows, contacts, properties, optedOut: optedOutContacts,
+        suppressedPhonesByOrg, priorSuccessful: successfulPriorContacts,
+        skipIfContacted: campaign.skip_if_contacted }),
       skipIfContacted: campaign.skip_if_contacted,
-      successfulPriorContactCount,
       priorFailedAttemptCount: priorFailedWithoutSuccessCount,
-      missingContactCount,
-      landlineCount,
-      unknownLineTypeCount,
-      optedOutCount,
     });
   } catch (e) {
     reportError(e, {
