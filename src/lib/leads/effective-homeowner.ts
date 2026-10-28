@@ -22,6 +22,7 @@ export async function resolveEffectiveHomeownerContactId(
     .select("contact_id")
     .eq("property_id", input.propertyId)
     .eq("direction", "inbound")
+    .eq("channel", "sms")
     .not("contact_id", "is", null)
     .order("created_at", { ascending: false })
     .limit(1)

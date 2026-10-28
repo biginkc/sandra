@@ -231,11 +231,17 @@ export default async function LeadDetailPage({
       return null;
     });
     if (fallbackContactId) {
-      const { data: fallbackHomeowner } = await supabase
+      const { data: fallbackHomeowner, error: fallbackHomeownerError } = await supabase
         .from("contacts")
         .select("*, homeowner_details!homeowner_details_contact_org_fkey(*)")
         .eq("id", fallbackContactId)
         .maybeSingle();
+      if (fallbackHomeownerError) {
+        console.error("[leads] homeowner fallback contact read failed", {
+          message: fallbackHomeownerError.message,
+          code: fallbackHomeownerError.code,
+        });
+      }
       lead.homeowner = (fallbackHomeowner as DetailedLead["homeowner"]) ?? null;
     }
   }

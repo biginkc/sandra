@@ -1,7 +1,6 @@
 "use server";
 
 import { assertNotTrainingTarget } from "@/lib/leads/training";
-import { resolveEffectiveHomeownerContactId } from "@/lib/leads/effective-homeowner";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
@@ -2174,11 +2173,7 @@ export async function sendSmsFromLead(
         error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
       };
     }
-    const homeownerContactId = await resolveEffectiveHomeownerContactId(supabase, {
-      propertyId,
-      homeownerContactId: property.homeowner_contact_id,
-    });
-    if (!homeownerContactId) {
+    if (!property.homeowner_contact_id) {
       return {
         ok: false,
         error: {
@@ -2190,7 +2185,7 @@ export async function sendSmsFromLead(
 
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
-      contactId: homeownerContactId,
+      contactId: property.homeowner_contact_id,
       propertyId,
       body: trimmed,
       from: from ?? undefined,
@@ -2640,10 +2635,7 @@ export async function loadLeadVars(
     //    reads run on the session client (RLS-scoped).
     const vars = await loadTemplateVars(supabase, {
       propertyId,
-      contactId: await resolveEffectiveHomeownerContactId(supabase, {
-        propertyId,
-        homeownerContactId: property.homeowner_contact_id,
-      }),
+      contactId: property.homeowner_contact_id,
     });
 
     return ok(vars);
