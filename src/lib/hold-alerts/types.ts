@@ -47,7 +47,7 @@ export type HotPromotion = {
   /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply";
+  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply" | "selling_opportunity";
   /** lead_reply: the inbound text this alert is about (dedupes against hot alerts on the same text). */
   inboundId?: string;
   /** hot_text on a lead that already needs a person: may be unassigned. */
