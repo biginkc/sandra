@@ -262,7 +262,14 @@ export type NineDripResult =
  */
 export async function enrollNineDrip(
   supabase: SupabaseClient<Database>,
-  a: { orgId: string; propertyId: string; dripName: NineDripName; skipFirstStep: boolean },
+  a: {
+    orgId: string;
+    propertyId: string;
+    dripName: NineDripName;
+    skipFirstStep: boolean;
+    /** The contact who sent the inbound; texted only when the lead has no saved homeowner (see `enrollLead`). */
+    contactId?: string;
+  },
 ): Promise<NineDripResult> {
   try {
     const { data: sequences, error } = await supabase
@@ -281,6 +288,7 @@ export async function enrollNineDrip(
       sequenceId,
       enrolledByUserId: null,
       ...(a.skipFirstStep ? { skipFirstStep: true } : {}),
+      ...(a.contactId ? { contactId: a.contactId } : {}),
     });
     if (outcome.status === "enrolled") return { status: "enrolled", sequenceId, enrollmentId: outcome.enrollmentId };
     if (outcome.status !== "duplicate_active") {

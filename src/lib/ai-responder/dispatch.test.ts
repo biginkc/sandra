@@ -7253,7 +7253,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
       expect(order).toEqual(["send", "enroll(dispo=nurture)"]);
       expect(nurtureDrip.enroll).toHaveBeenCalledTimes(1);
-      expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-60", delayDays: 60, route: "check_in_60" });
+      expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: "seq-60", delayDays: 60, route: "check_in_60", contactId: CONTACT_ID });
       expect(state.property.needs_human_attention).toBe(false);
     });
 
@@ -7378,7 +7378,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           await runNurture(state, `inbound-route-${name.replaceAll(" ", "-")}`);
 
           expect(sendSmsToContact).toHaveBeenCalledTimes(1);
-          expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: seq, delayDays: days, route: expect.any(String) });
+          expect(nurtureDrip.enroll).toHaveBeenCalledWith(expect.anything(), { propertyId: PROPERTY_ID, sequenceId: seq, delayDays: days, route: expect.any(String), contactId: CONTACT_ID });
           expect(hotEnroll.enrollLead).not.toHaveBeenCalled();
         });
       }
