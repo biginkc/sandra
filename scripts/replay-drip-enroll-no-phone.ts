@@ -13,15 +13,19 @@
  * Usage
  *   vercel env pull --environment=production <scratch>/.env.sandra-prod
  *   env $(grep -v '^#' <scratch>/.env.sandra-prod | xargs) \
- *     npx tsx scripts/replay-drip-enroll-no-phone.ts [--apply] [--only <propertyId>]...
+ *     node --conditions=react-server --import tsx scripts/replay-drip-enroll-no-phone.ts [--apply] [--only <propertyId>]...
+ * (`--conditions=react-server` lets the `server-only` imports load outside Next.)
  *
  * What a lead needs to be replayed (anything else is listed as skipped):
  * - still flagged, reason exactly `drip_enroll_failed:no_phone`, no saved homeowner;
  * - its newest `drip_enrolled` error step says `no_phone`, on a run that names the
  *   contact who replied (`pipeline_runs.contact_id`);
- * - no inbound text on the lead after that run's inbound, and no outbound text
- *   after it other than that run's own reply (a newer reply, or a rep already
- *   texting, is a person's call, not a replay);
+ * - nothing happened on the lead since: no inbound text after that run's inbound,
+ *   no outbound text after it other than that run's own reply, and no drip
+ *   enrolment (any status, so a drip a person cancelled is never restarted, and a
+ *   second run never repeats a first run's enrolment). Checked when planning,
+ *   again just before enrolling, and again right after: a reply that lands while
+ *   the enrolment is written pauses the new drip and keeps the hold;
  * - the route is recoverable: nine-questions runs map the recorded answer back to
  *   its drip (and must match the recorded route); nurture runs only for routes
  *   with one fixed delay (`check_in_60`, `listed_not_selling`), since
@@ -30,6 +34,8 @@
  * as dispatch, with the replier as the explicit contact, so every consent,
  * suppression, line-type and link check applies again. On success the hold is
  * cleared only if its reason still equals `drip_enroll_failed:no_phone`.
+ * The first drip text is held at least 15 minutes (FIRST_SEND_FLOOR_MINUTES), so the
+ * check right after enrolling always runs before anything can be sent.
  */
 
 import { reportError } from "../src/lib/errors/report";
@@ -47,6 +53,7 @@ import { createAdminClient } from "../src/lib/supabase/admin";
 const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
 const BMH_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 const HOLD_REASON = "drip_enroll_failed:no_phone";
+const FIRST_SEND_FLOOR_MINUTES = 15;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Nurture routes whose first-text delay is a single fixed value. */
 const FIXED_NURTURE_DELAY: Partial<Record<NurtureDripKey, number>> = {
@@ -84,16 +91,20 @@ function assertProd(): void {
 
 type Supabase = ReturnType<typeof createAdminClient>;
 
-type Plan =
+/** What "nothing happened since the failure" is measured against. */
+export type Fence = { inboundAt: string; ownOutboundId: string | null; failedAt: string };
+
+export type Plan =
   | { kind: "skip"; why: string }
   | {
       kind: "nine";
+      fence: Fence;
       contactId: string;
       route: string;
       drip: NineDripName;
       skipFirstStep: boolean;
     }
-  | { kind: "nurture"; contactId: string; route: NurtureDripKey; delayDays: number };
+  | { kind: "nurture"; fence: Fence; contactId: string; route: NurtureDripKey; delayDays: number };
 
 type Held = { id: string; address: string | null };
 
@@ -121,7 +132,7 @@ function detailOf(d: unknown): Record<string, unknown> {
   return d && typeof d === "object" && !Array.isArray(d) ? (d as Record<string, unknown>) : {};
 }
 
-async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
+export async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
   // Newest run on this lead whose drip step failed.
   const { data: runs, error: runsError } = await supabase
     .from("pipeline_runs")
@@ -147,7 +158,6 @@ async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
     }
     if (!run.contact_id) return { kind: "skip", why: "run has no contact" };
 
-    // A newer reply on the lead belongs to a person.
     const { data: inbound, error: inboundError } = await supabase
       .from("messages")
       .select("id, created_at")
@@ -155,26 +165,9 @@ async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
       .maybeSingle();
     if (inboundError) throw new Error(inboundError.message);
     if (!inbound) return { kind: "skip", why: "run's inbound message not found" };
-    const { count, error: newerError } = await supabase
-      .from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("property_id", propertyId)
-      .eq("direction", "inbound")
-      .gt("created_at", inbound.created_at);
-    if (newerError) throw new Error(newerError.message);
-    if ((count ?? 0) > 0) return { kind: "skip", why: "seller texted again after the failed run" };
-    // So does any text we sent after it other than this run's own reply (a rep
-    // texting from the lead page, a campaign): a drip would land on top of it.
-    let outbound = supabase
-      .from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("property_id", propertyId)
-      .eq("direction", "outbound")
-      .gt("created_at", inbound.created_at);
-    if (run.outbound_message_id) outbound = outbound.neq("id", run.outbound_message_id);
-    const { count: outCount, error: outError } = await outbound;
-    if (outError) throw new Error(outError.message);
-    if ((outCount ?? 0) > 0) return { kind: "skip", why: "another text was sent to the lead after the failed run" };
+    const fence: Fence = { inboundAt: inbound.created_at, ownOutboundId: run.outbound_message_id, failedAt: run.started_at };
+    const stale = await staleReason(supabase, propertyId, fence);
+    if (stale) return { kind: "skip", why: stale };
 
     const route = typeof detail.route === "string" ? detail.route : null;
     if (!route) return { kind: "skip", why: "no route recorded" };
@@ -184,21 +177,59 @@ async function planFor(supabase: Supabase, propertyId: string): Promise<Plan> {
       if (typeof answer !== "string") return { kind: "skip", why: "nine answer not recorded" };
       const action = actionForNineAnswer(answer as NineAnswer);
       if (action.kind === "reply_and_drip" && action.drip === route) {
-        return { kind: "nine", contactId: run.contact_id, route, drip: action.drip, skipFirstStep: action.skipFirstStep };
+        return { kind: "nine", fence, contactId: run.contact_id, route, drip: action.drip, skipFirstStep: action.skipFirstStep };
       }
       if (action.kind === "drip_only" && action.drip === route) {
-        return { kind: "nine", contactId: run.contact_id, route, drip: action.drip, skipFirstStep: false };
+        return { kind: "nine", fence, contactId: run.contact_id, route, drip: action.drip, skipFirstStep: false };
       }
       return { kind: "skip", why: `answer ${answer} does not map to route ${route}` };
     }
     const delayDays = FIXED_NURTURE_DELAY[route as NurtureDripKey];
     if (delayDays === undefined) return { kind: "skip", why: `nurture route ${route}: first-text delay not recorded` };
-    return { kind: "nurture", contactId: run.contact_id, route: route as NurtureDripKey, delayDays };
+    return { kind: "nurture", fence, contactId: run.contact_id, route: route as NurtureDripKey, delayDays };
   }
   return { kind: "skip", why: "no failed drip step found" };
 }
 
-async function stillHeld(supabase: Supabase, propertyId: string): Promise<boolean> {
+/**
+ * Why the lead is no longer the one that failed, or null. A newer reply, a text
+ * someone sent, or any drip enrolment since the failure (other than the one this
+ * run just wrote) is a person's call, not a replay.
+ */
+export async function staleReason(supabase: Supabase, propertyId: string, fence: Fence, ownEnrollmentId?: string): Promise<string | null> {
+  const { count: inCount, error: inError } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("property_id", propertyId)
+    .eq("direction", "inbound")
+    .gt("created_at", fence.inboundAt);
+  if (inError) throw new Error(inError.message);
+  if ((inCount ?? 0) > 0) return "seller texted again after the failed run";
+
+  let outbound = supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .gt("created_at", fence.inboundAt);
+  if (fence.ownOutboundId) outbound = outbound.neq("id", fence.ownOutboundId);
+  const { count: outCount, error: outError } = await outbound;
+  if (outError) throw new Error(outError.message);
+  if ((outCount ?? 0) > 0) return "another text was sent to the lead after the failed run";
+
+  let enrollments = supabase
+    .from("sequence_enrollments")
+    .select("id", { count: "exact", head: true })
+    .eq("property_id", propertyId)
+    .gte("enrolled_at", fence.failedAt);
+  if (ownEnrollmentId) enrollments = enrollments.neq("id", ownEnrollmentId);
+  const { count: enrCount, error: enrError } = await enrollments;
+  if (enrError) throw new Error(enrError.message);
+  if ((enrCount ?? 0) > 0) return "a drip was started (or cancelled) on the lead after the failed run";
+  return null;
+}
+
+export async function stillHeld(supabase: Supabase, propertyId: string): Promise<boolean> {
   const { data, error } = await supabase
     .from("properties")
     .select("needs_human_attention, last_ai_escalation_reason, homeowner_contact_id")
@@ -208,9 +239,12 @@ async function stillHeld(supabase: Supabase, propertyId: string): Promise<boolea
   return Boolean(data?.needs_human_attention && data.last_ai_escalation_reason === HOLD_REASON && !data.homeowner_contact_id);
 }
 
-async function apply(supabase: Supabase, propertyId: string, plan: Exclude<Plan, { kind: "skip" }>): Promise<string> {
+export async function apply(supabase: Supabase, propertyId: string, plan: Exclude<Plan, { kind: "skip" }>): Promise<string> {
   if (!(await stillHeld(supabase, propertyId))) return "skipped: hold changed since the dry read";
-  let result: { status: "enrolled" | "already_enrolled" } | { status: "refused"; reason: string };
+  const staleBefore = await staleReason(supabase, propertyId, plan.fence);
+  if (staleBefore) return `skipped: ${staleBefore}`;
+  const firstSendNotBefore = new Date(Date.now() + FIRST_SEND_FLOOR_MINUTES * 60_000);
+  let result: { status: "enrolled"; enrollmentId: string } | { status: "already_enrolled" } | { status: "refused"; reason: string };
   if (plan.kind === "nine") {
     if (plan.drip === "Maybe later" && !(await loadNurtureAutoDripConfig(supabase, BMH_ORG_ID)).enabled) {
       return "skipped: nurture auto-drip switch is off";
@@ -221,6 +255,7 @@ async function apply(supabase: Supabase, propertyId: string, plan: Exclude<Plan,
       dripName: plan.drip,
       skipFirstStep: plan.skipFirstStep,
       contactId: plan.contactId,
+      firstSendNotBefore,
     });
   } else {
     const cfg = await loadNurtureAutoDripConfig(supabase, BMH_ORG_ID);
@@ -234,6 +269,24 @@ async function apply(supabase: Supabase, propertyId: string, plan: Exclude<Plan,
     });
   }
   if (result.status === "refused") return `refused: ${result.reason} (hold kept)`;
+  // Nothing was enrolled before (checked above), so a live drip now is one a
+  // person or another run started meanwhile: leave the hold for a person.
+  if (result.status !== "enrolled") return "skipped: a drip went live meanwhile (hold kept)";
+
+  // A reply that landed while the enrolment was written may have run its pause
+  // before the row existed. The first text is at least FIRST_SEND_FLOOR_MINUTES
+  // out, so pausing now is in time.
+  const staleAfter = await staleReason(supabase, propertyId, plan.fence, result.enrollmentId);
+  if (staleAfter) {
+    const { error: pauseError } = await supabase
+      .from("sequence_enrollments")
+      .update({ status: "paused", pause_reason: "inbound_reply", updated_at: new Date().toISOString() })
+      .eq("id", result.enrollmentId)
+      .eq("status", "active");
+    return pauseError
+      ? `ENROLLED BUT NOT PAUSED (${staleAfter}): pause failed: ${pauseError.message}; check enrolment ${result.enrollmentId} now`
+      : `enrolled then paused (${staleAfter}); hold kept`;
+  }
 
   const now = new Date().toISOString();
   const { data: cleared, error } = await supabase
@@ -282,7 +335,9 @@ async function main(): Promise<void> {
   console.log(`\nTotals: ${JSON.stringify(tally)}`);
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+if (process.argv[1]?.endsWith("replay-drip-enroll-no-phone.ts")) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}
