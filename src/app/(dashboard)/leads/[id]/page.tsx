@@ -56,6 +56,7 @@ import {
 
 import { listTemplates } from "../../templates/actions";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { resolveEffectiveHomeownerContactId } from "@/lib/leads/effective-homeowner";
 import { renderTemplate } from "@/lib/templates/render";
 import { AiAttentionBanner } from "./ai-attention-banner";
 import { AiResponderToggle } from "./ai-responder-toggle";
@@ -219,6 +220,31 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  if (!lead.homeowner) {
+    // Newer imports link people only through property_contacts; fall back to
+    // whoever texted in, else the first linked person, so the lead is workable.
+    const fallbackContactId = await resolveEffectiveHomeownerContactId(supabase, {
+      propertyId: lead.id,
+      homeownerContactId: null,
+    }).catch((fallbackError: unknown) => {
+      console.error("[leads] homeowner fallback failed", fallbackError);
+      return null;
+    });
+    if (fallbackContactId) {
+      const { data: fallbackHomeowner, error: fallbackHomeownerError } = await supabase
+        .from("contacts")
+        .select("*, homeowner_details!homeowner_details_contact_org_fkey(*)")
+        .eq("id", fallbackContactId)
+        .maybeSingle();
+      if (fallbackHomeownerError) {
+        console.error("[leads] homeowner fallback contact read failed", {
+          message: fallbackHomeownerError.message,
+          code: fallbackHomeownerError.code,
+        });
+      }
+      lead.homeowner = (fallbackHomeowner as DetailedLead["homeowner"]) ?? null;
+    }
+  }
   // One request-captured instant keeps every appointment action boundary
   // stable between server render and client hydration.
   // eslint-disable-next-line react-hooks/purity -- this async Server Component intentionally serializes one request instant to the client

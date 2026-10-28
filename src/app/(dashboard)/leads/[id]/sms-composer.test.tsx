@@ -13,7 +13,9 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("../actions", () => ({
   listFromNumbers: mocks.listFromNumbers,
-  sendSmsFromLead: mocks.sendSmsFromLead,
+}));
+vi.mock("../send-sms-stamped", () => ({
+  sendSmsFromLeadStamped: mocks.sendSmsFromLead,
 }));
 vi.mock("sonner", () => ({
   toast: {
