@@ -34,12 +34,13 @@
  * as dispatch, with the replier as the explicit contact, so every consent,
  * suppression, line-type and link check applies again. On success the hold is
  * cleared only if its reason still equals `drip_enroll_failed:no_phone`.
- * The enrolment is written parked (first text ~100 years out) and is armed only
- * after the post-enrol check passes; any error before arming leaves it parked,
- * so a failed check can never let it send. Armed, the first text goes out at the
- * later of its step delay and 15 minutes (nurture: the route's delay). After the
- * hold is cleared the check runs once more: a reply that slipped in while the
- * hold was still set gets the hold back and the drip paused.
+ * The enrolment is written parked (first text ~100 years out) and armed as the
+ * very last step: the post-enrol check, the hold clear and a second check after
+ * the clear (a reply that slipped in while the hold was still set) all run while
+ * it is parked, and any failure on the way leaves it parked (and tries to put
+ * the hold back), so an unverified decision can never send. Armed, the first
+ * text goes out at the later of its step delay and 15 minutes (nurture: the
+ * route's delay).
  */
 
 import { reportError } from "../src/lib/errors/report";
@@ -286,48 +287,66 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
   if (result.status !== "enrolled") return "skipped: a drip went live meanwhile (hold kept)";
   const enrollmentId = result.enrollmentId;
 
+  // Every check below runs while the enrolment is still parked; it is armed
+  // last. Any failure before arming leaves it parked, so nothing can be sent
+  // on an unverified decision.
+  const failClosed = async (why: string): Promise<string> => {
+    const restored = await restoreHold(supabase, propertyId).catch(() => false);
+    const paused = await pauseOwn(supabase, enrollmentId, floor).then(() => "paused", () => "NOT paused");
+    return `ENROLLED BUT LEFT PARKED (${why}): enrolment ${enrollmentId} sends nothing, ${paused}; hold ${restored ? "set" : "NOT restored"}, a person must review`;
+  };
+  const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  // A reply that landed while the enrolment was written may have run its
+  // pause before the row existed.
+  let staleAfter: string | null;
   try {
-    // A reply that landed while the enrolment was written may have run its
-    // pause before the row existed.
-    const staleAfter = await staleReason(supabase, propertyId, plan.fence, enrollmentId);
-    if (staleAfter) {
-      await pauseOwn(supabase, enrollmentId, floor);
-      return `enrolled parked then paused (${staleAfter}); hold kept`;
-    }
-    const armedStatus = await arm(supabase, enrollmentId, floor, enrolledAt);
-    if (armedStatus !== "active") return `enrolled, ${armedStatus ?? "not armed"} meanwhile; hold kept`;
+    staleAfter = await staleReason(supabase, propertyId, plan.fence, enrollmentId);
   } catch (e) {
-    // Fail closed: the enrolment stays parked (no text for PARK_DAYS). Best
-    // effort, also pause it with its real floor so a person who resumes it
-    // later gets a working drip.
-    await pauseOwn(supabase, enrollmentId, floor).catch(() => undefined);
-    return `ENROLLED BUT LEFT PARKED (${e instanceof Error ? e.message : String(e)}): enrolment ${enrollmentId} sends nothing; hold kept, a person must review`;
+    return failClosed(errorText(e));
+  }
+  if (staleAfter) {
+    const paused = await pauseOwn(supabase, enrollmentId, floor).then(() => "paused", (e: unknown) => `left parked, NOT paused: ${errorText(e)}`);
+    return `enrolled then ${paused} (${staleAfter}); hold kept`;
   }
 
-  const now = new Date().toISOString();
   const { data: cleared, error } = await supabase
     .from("properties")
-    .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: now })
+    .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: new Date().toISOString() })
     .eq("id", propertyId)
     .eq("needs_human_attention", true)
     .eq("last_ai_escalation_reason", HOLD_REASON)
     .select("id");
-  if (error) return `enrolled; hold NOT cleared: ${error.message}`;
-  if (!cleared?.length) return "enrolled; hold changed meanwhile, left as is";
+  if (error) return failClosed(`hold not cleared: ${error.message}`);
+  if (!cleared?.length) {
+    // Someone else changed the hold: leave their state alone, just stop ours.
+    const paused = await pauseOwn(supabase, enrollmentId, floor).then(() => "paused", () => "left parked");
+    return `enrolled then ${paused}; hold changed meanwhile, left as is`;
+  }
 
   // A reply stored before the clear found the hold still set, so its dispatch
   // left it for a person: put the hold back and stop the drip. A reply stored
-  // after this check runs its normal dispatch against the cleared lead.
+  // after this check runs its normal pipeline (pause, then dispatch) against
+  // the cleared lead.
   let staleAfterClear: string | null;
   try {
     staleAfterClear = await staleReason(supabase, propertyId, plan.fence, enrollmentId);
   } catch (e) {
-    staleAfterClear = `freshness unreadable after clearing: ${e instanceof Error ? e.message : String(e)}`;
+    return failClosed(`freshness unreadable after clearing: ${errorText(e)}`);
   }
-  if (staleAfterClear) {
-    const restored = await restoreHold(supabase, propertyId);
-    const paused = await pauseOwn(supabase, enrollmentId).then(() => "paused", (e: unknown) => `NOT paused: ${e instanceof Error ? e.message : String(e)}`);
-    return `enrolled then ${paused}, hold ${restored ? "restored" : "NOT restored"} (${staleAfterClear})`;
+  if (staleAfterClear) return failClosed(staleAfterClear);
+
+  let armedStatus: string | null;
+  try {
+    armedStatus = await arm(supabase, enrollmentId, floor, enrolledAt);
+  } catch (e) {
+    return failClosed(errorText(e));
+  }
+  if (armedStatus !== "active") {
+    // A reply's pause got there after the last check; its own dispatch ran on
+    // the cleared lead. Make sure the paused row is un-parked for a resume.
+    await pauseOwn(supabase, enrollmentId, floor).catch(() => undefined);
+    return `enrolled, ${armedStatus ?? "not armed"} meanwhile; hold cleared (the reply was handled normally)`;
   }
   try {
     await recordLeadEvent({
@@ -342,16 +361,25 @@ export async function apply(supabase: Supabase, propertyId: string, plan: Exclud
   return "enrolled; hold cleared";
 }
 
-/** Pause the replay's own enrolment; `floor` also un-parks it so a later resume can send. */
+/**
+ * Pause the replay's own enrolment. With `floor`, first un-park it on its own
+ * (no status guard: a reply's pause usually got there first, and a person who
+ * resumes it later must get a working drip, not one floored ~100 years out).
+ * Un-parking alone leaves `next_run_at` parked, so an active row still cannot
+ * send before the status flip below.
+ */
 async function pauseOwn(supabase: Supabase, enrollmentId: string, floor?: Date): Promise<void> {
+  if (floor) {
+    const { error: unparkError } = await supabase
+      .from("sequence_enrollments")
+      .update({ first_send_not_before: floor.toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", enrollmentId)
+      .gt("first_send_not_before", new Date(Date.now() + (PARK_DAYS / 2) * 86_400_000).toISOString());
+    if (unparkError) throw new Error(`un-park failed: ${unparkError.message}`);
+  }
   const { error } = await supabase
     .from("sequence_enrollments")
-    .update({
-      status: "paused",
-      pause_reason: "inbound_reply",
-      ...(floor ? { first_send_not_before: floor.toISOString() } : {}),
-      updated_at: new Date().toISOString(),
-    })
+    .update({ status: "paused", pause_reason: "inbound_reply", updated_at: new Date().toISOString() })
     .eq("id", enrollmentId)
     .eq("status", "active");
   if (error) throw new Error(`pause failed: ${error.message}`);

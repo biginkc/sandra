@@ -114,31 +114,40 @@ describe("staleReason", () => {
 describe("apply", () => {
   const YEAR = 365 * 86_400_000;
 
-  it("enrols the replier parked, arms it after the check, then clears the hold", async () => {
+  it("enrols the replier parked, clears the hold, re-checks, and arms it last", async () => {
     const { client, calls } = fakeClient({ counts: () => 0 });
     const before = Date.now();
     expect(await apply(client as never, PROPERTY, PLAN)).toBe("enrolled; hold cleared");
     const args = h.enrollNineDrip.mock.calls[0]![1] as { contactId: string; firstSendNotBefore: Date };
     expect(args.contactId).toBe("contact-replier");
     expect(args.firstSendNotBefore.getTime() - before).toBeGreaterThan(50 * YEAR);
-    const [armCall] = updates(calls, "sequence_enrollments");
+    const enr = updates(calls, "sequence_enrollments");
+    expect(enr).toHaveLength(1);
+    const [armCall] = enr;
     // Armed at the later of the step delay (2 days) and the 15-minute floor.
     const runAt = Date.parse(armCall!.update!.next_run_at as string);
     expect(runAt - before).toBeGreaterThanOrEqual(2 * 86_400_000 - 1000);
     expect(has(armCall!, "eq", "id", "enr-new")).toBe(true);
     const clear = updates(calls, "properties")[0]!;
     expect(has(clear, "eq", "last_ai_escalation_reason", "drip_enroll_failed:no_phone")).toBe(true);
-    expect(armCall!.at).toBeLessThan(clear.at);
+    // Armed only after the hold clear and the check that follows it.
+    const lastCheck = calls.filter(isInbound).at(-1)!;
+    expect(clear.at).toBeLessThan(lastCheck.at);
+    expect(lastCheck.at).toBeLessThan(armCall!.at);
   });
 
   it("a seller reply that lands while enrolling pauses the parked drip and keeps the hold", async () => {
     let enrolled = false;
     h.enrollNineDrip.mockImplementation(async () => { enrolled = true; return { status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" }; });
     const { client, calls } = fakeClient({ counts: (c) => (enrolled && isInbound(c) ? 1 : 0) });
-    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled parked then paused \(seller texted again/);
-    const [pause] = updates(calls, "sequence_enrollments");
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled then paused \(seller texted again/);
+    const [unpark, pause] = updates(calls, "sequence_enrollments");
+    // Un-parked with no status guard (a reply's own pause may have run first), so a later resume can send.
+    expect(unpark!.update).toHaveProperty("first_send_not_before");
+    expect(unpark!.update).not.toHaveProperty("status");
+    expect(unpark!.filters.some(([, c]) => c === "status")).toBe(false);
     expect(pause!.update).toMatchObject({ status: "paused", pause_reason: "inbound_reply" });
-    expect(pause!.update).not.toHaveProperty("next_run_at");
+    expect(updates(calls, "sequence_enrollments").some((c) => "next_run_at" in c.update!)).toBe(false);
     expect(updates(calls, "properties")).toHaveLength(0);
   });
 
@@ -147,22 +156,34 @@ describe("apply", () => {
     h.enrollNineDrip.mockImplementation(async () => { enrolled = true; return { status: "enrolled", sequenceId: "seq", enrollmentId: "enr-new" }; });
     const { client, calls } = fakeClient({ counts: (c) => (enrolled && isInbound(c) ? new Error("db down") : 0) });
     expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^ENROLLED BUT LEFT PARKED \(db down\)/);
-    // Never armed: no update sets a real next_run_at.
+    // Never armed: no update sets a real next_run_at; the hold is never cleared.
     expect(updates(calls, "sequence_enrollments").some((c) => "next_run_at" in c.update!)).toBe(false);
-    expect(updates(calls, "properties")).toHaveLength(0);
+    expect(updates(calls, "properties").some((c) => c.update!.needs_human_attention === false)).toBe(false);
   });
 
-  it("a reply that paused the drip before arming keeps the hold", async () => {
+  it("a reply whose pause lands after the last check: the drip stays paused and is un-parked for a resume", async () => {
     const { client, calls } = fakeClient({ counts: () => 0, armStatus: "paused" });
-    expect(await apply(client as never, PROPERTY, PLAN)).toBe("enrolled, paused meanwhile; hold kept");
-    expect(updates(calls, "properties")).toHaveLength(0);
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled, paused meanwhile; hold cleared/);
+    const unpark = updates(calls, "sequence_enrollments").at(-2)!;
+    expect(unpark.update).toHaveProperty("first_send_not_before");
+    expect(unpark.filters.some(([, c]) => c === "status")).toBe(false);
+  });
+
+  it("a failed check after clearing the hold never arms the drip and puts the hold back", async () => {
+    const { client, calls } = fakeClient({
+      counts: (c) => (isInbound(c) && updates(calls, "properties").length > 0 ? new Error("connection lost") : 0),
+    });
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^ENROLLED BUT LEFT PARKED \(freshness unreadable after clearing: connection lost\)/);
+    expect(updates(calls, "sequence_enrollments").some((c) => "next_run_at" in c.update!)).toBe(false);
+    expect(updates(calls, "properties").at(-1)!.update).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "drip_enroll_failed:no_phone" });
   });
 
   it("a reply that slipped in before the hold was cleared gets the hold back and the drip paused", async () => {
     const { client, calls } = fakeClient({
       counts: (c) => (isInbound(c) && updates(calls, "properties").length > 0 ? 1 : 0),
     });
-    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^enrolled then paused, hold restored \(seller texted again/);
+    expect(await apply(client as never, PROPERTY, PLAN)).toMatch(/^ENROLLED BUT LEFT PARKED \(seller texted again.*paused; hold set/);
+    expect(updates(calls, "sequence_enrollments").some((c) => "next_run_at" in c.update!)).toBe(false);
     const [clear, restore] = updates(calls, "properties");
     expect(clear!.update).toMatchObject({ needs_human_attention: false });
     expect(restore!.update).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "drip_enroll_failed:no_phone" });
