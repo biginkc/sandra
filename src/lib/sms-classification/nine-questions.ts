@@ -50,6 +50,10 @@ export const NINE_QUESTIONS: Record<NineQuestionId, string> = {
   just_ok: "Did the homeowner just acknowledge or agree to our message without adding anything new?",
 };
 
+/** Supplemental signal approved by Jarrad 2026-10-26; never participates in intent ordering. */
+export const SELLING_OPPORTUNITY_QUESTION =
+  "Did the person indicate that they or someone they know is interested in selling a property?";
+
 /** A "yes" needs at least this probability (Jarrad 2026-10-14). */
 export const NINE_QUESTION_CUTOFF = 0.6;
 
@@ -124,15 +128,17 @@ export function decideNineQuestions(
 
 export function buildNineQuestionRequest(state: NineQuestionState): {
   state: NineQuestionState;
-  questions: Record<NineQuestionId, JevNoulQuestion>;
+  questions: Record<NineQuestionId | "selling_opportunity", JevNoulQuestion>;
 } {
   const questions = Object.fromEntries(
     NINE_QUESTION_IDS.map((id) => [id, { type: "noul", instructions: NINE_QUESTIONS[id] }]),
   ) as Record<NineQuestionId, JevNoulQuestion>;
-  return { state, questions };
+  return { state, questions: { ...questions, selling_opportunity: { type: "noul", instructions: SELLING_OPPORTUNITY_QUESTION } } };
 }
 
 export type NineQuestionResult = NineQuestionDecision & {
+  /** Optional for old persisted retries; null means the supplemental answer was unusable. */
+  sellingOpportunity?: { probability: number | null; cutoff: number };
   latencyMs: number;
   model: string | null;
   usage: { inputTokens: number | null; outputTokens: number | null } | null;
@@ -154,6 +160,8 @@ export async function classifyNineQuestions(
   }
   return {
     ...decideNineQuestions(raw),
+    // A missing supplemental answer cannot weaken the original stop/hostile checks.
+    sellingOpportunity: { probability: probability(answers.selling_opportunity?.noul), cutoff: NINE_QUESTION_CUTOFF },
     latencyMs: result.latencyMs,
     model: result.model ?? null,
     usage: result.usage

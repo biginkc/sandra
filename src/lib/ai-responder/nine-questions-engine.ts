@@ -28,7 +28,7 @@ export type ClassifierEngine = (typeof CLASSIFIER_ENGINES)[number];
 
 /** `sms_classification_runs.schema_version` of rows written by this engine. */
 export const NINE_SCHEMA_VERSION = "nine_questions_v1";
-export const NINE_POLICY_VERSION = "2026-10-15-nine-questions";
+export const NINE_POLICY_VERSION = "2026-10-28-selling-opportunity";
 
 /** Hold reason when the engine switch cannot be read: neither engine runs, a person looks. */
 export const CLASSIFIER_ENGINE_UNREADABLE = "classifier_engine_unreadable";
@@ -75,6 +75,7 @@ export function nineDecisionRecord(result: NineQuestionResult, shadowMode = fals
     probabilities: result.probabilities,
     chosen: result.chosen,
     cutoff: result.cutoff,
+    ...(result.sellingOpportunity ? { sellingOpportunity: result.sellingOpportunity } : {}),
   };
 }
 

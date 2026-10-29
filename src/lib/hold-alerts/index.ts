@@ -7,6 +7,7 @@ import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
+import { loadSellingOpportunities } from "./selling-opportunities";
 import { createChannelSenders } from "./channels";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
@@ -288,7 +289,13 @@ export function createHoldAlertDeps(
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadHotPromotions(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
-      return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      const opportunities = await loadSellingOpportunities(db, orgId, alertsSince, now().getTime(), owner);
+      const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      return {
+        promotions: [...hot.promotions, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete,
+      };
     },
     async loadLeadReplies(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
