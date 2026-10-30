@@ -16,6 +16,7 @@ export default defineConfig({
       "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
       "supabase/migrations/20261030300000_routing_v2_outbox_provider_fence.integration.test.ts",
       "supabase/migrations/20261030310000_routing_v2_live_transition_alerts_survive.integration.test.ts",
+      "supabase/migrations/20261030320000_routing_v2_live_hold_alerts.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",

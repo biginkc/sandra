@@ -122,6 +122,26 @@ import {
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
+import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
+import { classifyV2, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
+import { isV2Eligible, readRoutingV2Flags, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-decisions";
+import {
+  DEALMACHINE_NO_KEY,
+  liveHoldReason,
+  liveStepFor,
+  V2_JEV_FAILED,
+  queueLiveHoldAlerts,
+  readLiveV2Evidence,
+  type StoredLiveEvidence,
+} from "@/lib/sms-classification/routing-v2/live-dispatch";
+import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
+import {
+  lookupDealMachineValue,
+  supabaseDealMachineCacheStore,
+  type ValueLookupResult,
+} from "@/lib/sms-classification/routing-v2/dealmachine-value";
+import { fetchDealMachineEstimatedValue } from "@/lib/comps/providers/dealmachine";
 import { SOLD_NEEDS_HUMAN_REASON, isSoldInbound } from "./sold";
 import {
   hasSendableNumberSourceTemplate,
@@ -1360,6 +1380,18 @@ async function classifyAndHandleNonRouteOutcomes(
   // Messages v2 PR 3: per-org engine switch (default outcome_v1 = today's path).
   if (config?.classifier_provider === "jev" && config.classifier_engine === "nine_questions") {
     if (config.classifier_mode === "automatic") {
+      // Routing v2 cutover: an eligible property (questions_live + canary) runs the v2 engine
+      // instead. Flag off / not eligible / unreadable flags = null = today's nine-question step.
+      const v2 = await runRoutingV2LiveStep(supabase, {
+        input,
+        property,
+        claim: responseClaim,
+        runCtx,
+        templateCtx,
+        escalationKeywords: config.escalation_keywords ?? null,
+        ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+      });
+      if (v2) return { handled: true, outcome: v2 };
       return {
         handled: true,
         outcome: await runNineQuestionsStep(supabase, {
@@ -8371,6 +8403,180 @@ async function redispatchNineFresh(
       fresh: true,
     },
   };
+}
+
+/**
+ * Routing v2 cutover (a): the live v2 engine for one inbound, behind routing_v2_flags.
+ *
+ * Returns null (= run today's nine-question step, byte for byte) unless the org's flags read
+ * questions_live AND this property is canary-eligible. Otherwise:
+ *   classify (Jev, Haiku per policy, DealMachine per price_check)
+ *   -> immutable live decision row (routing_v2_live_decisions)
+ *   -> one atomic transition from the STORED row (retire drip, enroll, queue reply + alerts)
+ * Seller texts and owner alerts are queued in routing_v2_outbox and delivered by the outbox
+ * consumer, which re-checks flags, newer replies, takeover and suppression at send time.
+ * Anything that cannot be carried out exactly holds for a person with an existing reason.
+ */
+export async function runRoutingV2LiveStep(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
+  const { input, property, runCtx } = a;
+  // A legacy deferral already owns this inbound's decision.
+  if (input.nineDeferral || !input.inboundMessageId) return null;
+  let flags: RoutingV2Flags;
+  try {
+    flags = await readRoutingV2Flags(supabase, property.org_id);
+  } catch {
+    return null;
+  }
+  if (!flags.questions_live || !isV2Eligible(flags, input.propertyId)) return null;
+  const inboundMessageId = input.inboundMessageId;
+
+  const { data: revisionRow, error: revisionError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (revisionError || !revisionRow) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  const expectedRevision = revisionRow.decision_context_revision;
+
+  let classification: Exclude<V2Classification, { kind: "off" }>;
+  try {
+    const { data: source } = await supabase.from("messages").select("created_at").eq("id", inboundMessageId).maybeSingle();
+    const thread = await buildTwoWayThreadState(supabase, {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      excludeMessageId: inboundMessageId,
+      sourceCreatedAt: source?.created_at ?? null,
+    });
+    const result = await classifyV2(
+      { flags, propertyId: input.propertyId, reply: input.inboundBody, thread },
+      v2ProviderDeps({
+        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", maxRetries: 0, timeoutMs: 8000 },
+        haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
+        lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
+      }),
+    );
+    // classifyV2 only returns off when the flags say so; they were just read as on.
+    classification = result.kind === "off" ? V2_JEV_FAILED : result;
+  } catch {
+    classification = V2_JEV_FAILED;
+  }
+
+  const recorded = await recordLiveV2Decision(
+    supabase,
+    { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision },
+    classification,
+  );
+  // A duplicate never acts on this run's classification: only the stored original does.
+  const evidence = recorded === "failed" ? null : await readLiveV2Evidence(supabase, inboundMessageId);
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_live_decision",
+    result: evidence ? "applied" : "error",
+    detail: { engine: "routing_v2", recorded, road: evidence?.road ?? null, status: evidence?.status ?? null },
+  }, runCtx);
+  if (!evidence || evidence.property_id !== input.propertyId || evidence.org_id !== property.org_id) {
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
+}
+
+/** Carry out one stored live v2 decision. Exported for the stage tests via the step above only. */
+async function applyRoutingV2LiveEvidence(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const inboundMessageId = input.inboundMessageId!;
+  const step = liveStepFor(evidence);
+  const holdWithAlerts = async (reason: "nine_asked_stop" | "nine_needs_person") => {
+    // Owner alerts first (exactly once, no reply, no drip), then today's hold.
+    const queued = await queueLiveHoldAlerts(supabase, evidence, {
+      flags, propertyId: input.propertyId, contactId: input.contactId, inboundMessageId,
+    });
+    await trace(supabase, {
+      kind: "hold",
+      name: "routing_v2_hold",
+      result: "held",
+      detail: { engine: "routing_v2", road: evidence.road, alertsQueued: queued },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, reason);
+  };
+
+  if (step.kind === "failed") {
+    // Same as today's nine engine on a failed classification: hostile wording waits for a
+    // person's confirmation; otherwise the classifier-failure hold.
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${step.reason}`);
+  }
+  if (step.kind === "stop") {
+    // Today's human-review path (model_stop_suppression wiring lands in step c).
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    return holdWithAlerts("nine_asked_stop");
+  }
+  if (step.kind === "wrong_number" || step.kind === "bad_number") {
+    // Phone-wide / bounce adapters land in step c; until then a person closes it.
+    return holdWithAlerts("nine_needs_person");
+  }
+  if (step.kind === "hold") return holdWithAlerts(liveHoldReason(step.reason));
+
+  const applied = await applyStoredV2Transition(supabase, {
+    orgId: evidence.org_id,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    inboundMessageId,
+  });
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_transition",
+    result: applied.kind === "applied" ? "applied" : "skipped",
+    detail: {
+      engine: "routing_v2",
+      road: evidence.road,
+      ...(applied.kind === "applied"
+        ? { outcome: applied.transition.outcome ?? null }
+        : { reason: applied.reason, alertsQueued: applied.alertsQueued ?? null }),
+    },
+  }, runCtx);
+  if (applied.kind === "applied") {
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+    return { outcome: "auto_closed", reason: `routing_v2:${evidence.road}` };
+  }
+  if (applied.reason === "superseded") {
+    // A newer seller text owns the thread; this one's owner alerts were still queued.
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:superseded" });
+    return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
+  }
+  // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
+  return nineHoldAndComplete(supabase, a, "nine_needs_person");
+}
+
+/**
+ * PR-E value lookup for the price check (only called while price_check is on). No API key
+ * configured = no value (the approved fair-price reply + alert path). Ledger hooks are
+ * always passed, so every HTTP attempt is accounted before it is sent.
+ */
+async function routingV2PropertyValue(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<ValueLookupResult> {
+  const apiKey = process.env.DEALMACHINE_API_KEY ?? "";
+  if (!apiKey) return DEALMACHINE_NO_KEY;
+  const { data } = await supabase.from("properties").select("address, city, state, zip").eq("id", propertyId).maybeSingle();
+  const row = data as { address?: string | null; city?: string | null; state?: string | null; zip?: string | null } | null;
+  return lookupDealMachineValue(
+    { orgId, propertyId, address: row ? { street: row.address ?? "", city: row.city ?? "", state: row.state ?? "", zip: row.zip ?? null } : null },
+    {
+      store: supabaseDealMachineCacheStore(supabase),
+      callProvider: (address, hooks) => fetchDealMachineEstimatedValue(address, { apiKey, ...hooks }),
+    },
+  );
 }
 
 export async function runNineQuestionsStep(
