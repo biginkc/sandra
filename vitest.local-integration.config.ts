@@ -149,6 +149,7 @@ export default defineConfig({
       "supabase/migrations/20261030180000_routing_v2_dealmachine_value_cache.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
+      "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",
       "supabase/migrations/20261030230000_routing_v2_outbox_delivery_recheck.integration.test.ts",

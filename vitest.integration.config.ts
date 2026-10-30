@@ -178,6 +178,7 @@ export default defineConfig({
       "supabase/migrations/20261030350000_routing_v2_one_canary_check.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
+      "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
       "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",
       "src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts",
