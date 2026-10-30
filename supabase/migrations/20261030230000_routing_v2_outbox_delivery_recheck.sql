@@ -20,7 +20,7 @@
 --    Alerts to the owner are still allowed after a newer reply, a takeover or suppression; the
 --    flag / canary / engine / slice checks apply to them as to every row.
 -- 4. Newer-reply supersession cancels ONLY auto replies to the seller: route_reply_transition
---    step 6 and routing_v2_claim_outbox (PR-C, 20261030140000) are re-created with that one
+--    step 6 and routing_v2_claim_outbox (PR-C, 20261030181000) are re-created with that one
 --    change each (a "Tuesday 3pm" call-me alert is never lost because the seller adds "Thanks").
 --    routing_v2_cancel_for_takeover is re-created to cancel auto replies only, never alerts.
 --    The rollback restores PR-C's definitions byte-for-byte.
@@ -104,6 +104,17 @@ begin
   --   refuse a reply whose inbound is not newer than last_person_takeover_at);
   -- * a short row-lock wait at most (lock_timeout 50ms for the cancel, restored after);
   -- * any error is swallowed (the cancel rolls back alone, the takeover commits).
+  -- The trigger names no column (no pg_depend on last_person_takeover_at, like PR-C's
+  -- functions), so it fires on every properties update and returns at once unless the
+  -- takeover marker moved forward; a missing column (schema rolled back) is a no-op.
+  begin
+    if new.last_person_takeover_at is null
+       or new.last_person_takeover_at is not distinct from old.last_person_takeover_at then
+      return new;
+    end if;
+  exception when others then
+    return new;
+  end;
   begin
     if to_regclass('public.routing_v2_outbox') is null then
       return new;
@@ -134,10 +145,8 @@ revoke all on function public.routing_v2_takeover_fence() from public, anon, aut
 
 drop trigger if exists trg_routing_v2_takeover_fence on public.properties;
 create trigger trg_routing_v2_takeover_fence
-  after update of last_person_takeover_at on public.properties
+  after update on public.properties
   for each row
-  when (new.last_person_takeover_at is not null
-        and new.last_person_takeover_at is distinct from old.last_person_takeover_at)
   execute function public.routing_v2_takeover_fence();
 
 -- 4. PR-C functions, re-created with alerts exempt from newer-reply supersession.

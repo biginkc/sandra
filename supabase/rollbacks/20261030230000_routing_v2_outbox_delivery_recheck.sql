@@ -8,7 +8,7 @@ drop trigger if exists trg_routing_v2_takeover_fence on public.properties;
 drop function if exists public.routing_v2_takeover_fence();
 drop function if exists public.routing_v2_authorize_outbox_send(uuid);
 alter table public.routing_v2_outbox drop column if exists authorized_at;
--- PR-C (20261030140000) definitions, byte-for-byte.
+-- PR-C (20261030181000) definitions, byte-for-byte.
 create or replace function public.route_reply_transition(
   p_inbound_message_id uuid,
   p_property_id uuid,

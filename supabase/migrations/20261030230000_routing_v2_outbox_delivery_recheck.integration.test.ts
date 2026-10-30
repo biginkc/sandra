@@ -17,8 +17,8 @@ const url = requireLoopbackPostgresUrl(
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
 const read = (rel: string) => readFileSync(path.join(__dirname, rel), "utf8");
-const PRC_MIGRATION = strip(read("20261030140000_routing_v2_versioned_drips.sql"));
-const PRC_ROLLBACK = strip(read("../rollbacks/20261030140000_routing_v2_versioned_drips.sql")).replace(
+const PRC_MIGRATION = strip(read("20261030181000_routing_v2_versioned_drips.sql"));
+const PRC_ROLLBACK = strip(read("../rollbacks/20261030181000_routing_v2_versioned_drips.sql")).replace(
   /raise exception 'routing v2 enrollments exist[^']*';/,
   "null;",
 );
@@ -347,6 +347,28 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
     expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [t.new_enrollment_id])).rows[0].status).toBe("active");
   });
 
+  it("the fence adds no dependency on properties.last_person_takeover_at (older rollbacks can still drop it)", async () => {
+    const deps = (await db.query(
+      `select count(*)::int as n from pg_depend d
+       join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+       where d.refobjid = 'public.properties'::regclass and a.attname = 'last_person_takeover_at'
+         and d.classid = 'pg_trigger'::regclass`,
+    )).rows[0].n;
+    expect(deps).toBe(0);
+    // Dropping the column (what the 20261012010000 rollback does) succeeds, and later
+    // property updates still work with the fence in place.
+    await db.query(`alter table public.properties drop column last_person_takeover_at`);
+    await db.query(`update public.properties set address = address where id = $1`, [ctx.property]);
+  });
+
+  it("an ordinary property update (no takeover) leaves queued v2 rows alone", async () => {
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+    const [reply] = await outbox(db, id);
+    await db.query(`update public.properties set address = '2 Test St' where id = $1`, [ctx.property]);
+    expect(await row(db, reply!.id)).toMatchObject({ status: "pending" });
+  });
+
   it("rollback removes every PR-F object; re-apply is idempotent; takeovers still work with PR-C rolled back", async () => {
     await db.query(MIGRATION);
     await db.query(ROLLBACK);
@@ -401,7 +423,7 @@ describe("routing v2 PR-F races (committed data, two connections)", () => {
       ctx = await seedOrg(db);
       await db.query("set local session_replication_role = origin");
       await db.query("commit");
-      await db.query(read("20261030140000_routing_v2_versioned_drips.sql"));
+      await db.query(read("20261030181000_routing_v2_versioned_drips.sql"));
       await db.query(MIGRATION_RAW);
       await setFlags(db, ctx.org, FLAGS_ON);
       for (let round = 0; round < 5; round++) {
@@ -431,7 +453,7 @@ describe("routing v2 PR-F races (committed data, two connections)", () => {
       ctx = await seedOrg(db);
       await db.query("set local session_replication_role = origin");
       await db.query("commit");
-      await db.query(read("20261030140000_routing_v2_versioned_drips.sql"));
+      await db.query(read("20261030181000_routing_v2_versioned_drips.sql"));
       await db.query(MIGRATION_RAW);
       await setFlags(db, ctx.org, FLAGS_ON);
       const pendingId = await inbound(db, ctx, "2026-10-30T15:00:00Z");
@@ -514,7 +536,7 @@ describe("routing v2 PR-F races (committed data, two connections)", () => {
       ctx = await seedOrg(db);
       await db.query("set local session_replication_role = origin");
       await db.query("commit");
-      await db.query(read("20261030140000_routing_v2_versioned_drips.sql"));
+      await db.query(read("20261030181000_routing_v2_versioned_drips.sql"));
       await db.query(MIGRATION_RAW);
       await setFlags(db, ctx.org, FLAGS_ON);
       for (let round = 0; round < 5; round++) {

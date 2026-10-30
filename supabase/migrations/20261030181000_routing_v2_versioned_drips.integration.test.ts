@@ -10,7 +10,7 @@ import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/rout
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * Routing v2 PR-C (20261030140000): versioned drip seed + route_reply_transition (§14) +
+ * Routing v2 PR-C (20261030181000): versioned drip seed + route_reply_transition (§14) +
  * send-time checks. Local-only; each test runs in a rolled-back transaction except the
  * concurrency test, which commits and cleans up its own org.
  */
@@ -18,10 +18,10 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION_RAW = readFileSync(path.join(__dirname, "20261030140000_routing_v2_versioned_drips.sql"), "utf8");
+const MIGRATION_RAW = readFileSync(path.join(__dirname, "20261030181000_routing_v2_versioned_drips.sql"), "utf8");
 const MIGRATION = strip(MIGRATION_RAW);
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261030140000_routing_v2_versioned_drips.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261030181000_routing_v2_versioned_drips.sql"), "utf8"),
 );
 const DAY = 1440;
 const FLAGS_ON = { questions_live: true, drips: true, replies: true, alert_on_time_only: true, canary_property_ids: [] as string[], canary_percent: 100 };

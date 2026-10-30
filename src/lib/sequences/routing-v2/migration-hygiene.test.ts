@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
  * (d) every new table: RLS on, API roles revoked; (e) every SECURITY DEFINER function pins
  * search_path and revokes public execute; (f) the rollback drops or restores every object.
  */
-const MIG = readFileSync(path.join(process.cwd(), "supabase/migrations/20261030140000_routing_v2_versioned_drips.sql"), "utf8");
-const RB = readFileSync(path.join(process.cwd(), "supabase/rollbacks/20261030140000_routing_v2_versioned_drips.sql"), "utf8");
+const MIG = readFileSync(path.join(process.cwd(), "supabase/migrations/20261030181000_routing_v2_versioned_drips.sql"), "utf8");
+const RB = readFileSync(path.join(process.cwd(), "supabase/rollbacks/20261030181000_routing_v2_versioned_drips.sql"), "utf8");
 
 const functions = [...new Set([...MIG.matchAll(/create or replace function public\.(\w+)\(/g)].map((m) => m[1]!))];
 const tables = [...MIG.matchAll(/create table if not exists public\.(\w+)/g)].map((m) => m[1]!);
