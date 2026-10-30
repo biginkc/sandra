@@ -138,6 +138,43 @@ create trigger trg_sequence_enrollments_routing_v2_pause_token
   for each row when (old.routing_v2_pause_token is not null and new.status in ('active', 'paused'))
   execute function public.routing_v2_clear_pause_token();
 
+-- Provenance guard (PR-C's pattern, 20261030181000): nobody but A may SET a pause token. A
+-- non-null token that differs from OLD is accepted only when current_user is the owner role of
+-- PR-G's SECURITY DEFINER functions AND A's transaction-local marker routing_v2.pausing = 'on'
+-- is set (a caller can set the marker but cannot become the owner). Clearing a token is always
+-- allowed (it only takes away undo's ability to resume), so the clear-on-resume trigger, a
+-- person's resume and any DNC/compliance transition never trip it; an opt-out leaves the token
+-- untouched (r12).
+create or replace function public.routing_v2_pause_token_guard()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if new.routing_v2_pause_token is not null
+     and (tg_op = 'INSERT' or new.routing_v2_pause_token is distinct from old.routing_v2_pause_token)
+     and (coalesce(current_setting('routing_v2.pausing', true), '') <> 'on'
+          or current_user::text is distinct from (
+            select pg_get_userbyid(p.proowner)::text from pg_proc p
+            where p.oid = 'public.fn_routing_v2_phone_action_apply_all(uuid,text,text,jsonb,bigint)'::regprocedure)) then
+    raise exception using errcode = 'P0001',
+      message = 'ROUTING_V2_PAUSE_TOKEN_LOCKED: only the routing v2 phone action sets a pause token';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.routing_v2_pause_token_guard() from public, anon, authenticated, service_role;
+drop trigger if exists trg_sequence_enrollments_routing_v2_pause_token_guard_ins on public.sequence_enrollments;
+create trigger trg_sequence_enrollments_routing_v2_pause_token_guard_ins
+  before insert on public.sequence_enrollments
+  for each row when (new.routing_v2_pause_token is not null)
+  execute function public.routing_v2_pause_token_guard();
+drop trigger if exists trg_sequence_enrollments_routing_v2_pause_token_guard_upd on public.sequence_enrollments;
+create trigger trg_sequence_enrollments_routing_v2_pause_token_guard_upd
+  before update on public.sequence_enrollments
+  for each row when (new.routing_v2_pause_token is not null and new.routing_v2_pause_token is distinct from old.routing_v2_pause_token)
+  execute function public.routing_v2_pause_token_guard();
+
 alter table public.routing_v2_phone_actions enable row level security;
 alter table public.routing_v2_phone_action_properties enable row level security;
 revoke all on public.routing_v2_phone_actions from public, anon, authenticated, service_role;
@@ -643,6 +680,8 @@ begin
       -- Each pause carries this action's token and a unique stamp; undo resumes only rows that
       -- still carry both (any later resume/re-pause clears the token, see the trigger below).
       v_pause_at := clock_timestamp();
+      -- Provenance marker for routing_v2_pause_token_guard (transaction-local; reset below).
+      perform set_config('routing_v2.pausing', 'on', true);
       with paused as (
         update public.sequence_enrollments e
         set status = 'paused', pause_reason = 'inbound_reply', updated_at = v_pause_at,
@@ -651,6 +690,7 @@ begin
         returning e.id, e.sequence_id
       )
       select coalesce(array_agg(id order by id), '{}') into v_paused from paused;
+      perform set_config('routing_v2.pausing', '', true);
       if cardinality(v_paused) = 0 then v_pause_at := null; end if;
       if cardinality(v_paused) > 0 then
         insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)

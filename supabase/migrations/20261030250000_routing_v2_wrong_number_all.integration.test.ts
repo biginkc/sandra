@@ -27,7 +27,7 @@ const Y = "+18165550202"; // a different person's phone
 const Z = "+18165550303"; // a second phone on a contact that also holds X
 
 /** Every function this migration creates (exact names; other PRs add routing_v2_phone* functions too). */
-const PRG_FUNCTIONS = ["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply", "fn_routing_v2_phone_action_release_fence", "fn_routing_v2_phone_action_reply", "fn_routing_v2_phone_action_send_allowed", "fn_routing_v2_phone_action_unsettled_replies", "fn_undo_routing_v2_phone_action", "routing_v2_clear_pause_token", "routing_v2_phone_action_eligible", "routing_v2_phone_action_hold_superseded", "routing_v2_phone_action_newer_inbound", "routing_v2_phone_action_restamp_after_reply", "routing_v2_phone_action_undo_core", "routing_v2_phone_digits", "routing_v2_phone_lock"];
+const PRG_FUNCTIONS = ["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply", "fn_routing_v2_phone_action_release_fence", "fn_routing_v2_phone_action_reply", "fn_routing_v2_phone_action_send_allowed", "fn_routing_v2_phone_action_unsettled_replies", "fn_undo_routing_v2_phone_action", "routing_v2_clear_pause_token", "routing_v2_phone_action_eligible", "routing_v2_phone_action_hold_superseded", "routing_v2_phone_action_newer_inbound", "routing_v2_phone_action_restamp_after_reply", "routing_v2_phone_action_undo_core", "routing_v2_phone_digits", "routing_v2_phone_lock", "routing_v2_pause_token_guard"];
 
 const db = new Client({ connectionString: url });
 let orgId: string;
@@ -883,6 +883,42 @@ describe("C. undo", () => {
     expect(await dispo(ids.p1)).toBe("wrong_number");
   });
 
+  it("pause-token provenance: an authenticated member, service_role or a direct writer cannot set a token; clearing stays allowed", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    const tok = (await db.query(`select updated_at from public.sequence_enrollments where id = $1`, [ids.e2])).rows[0];
+    // A person resumes it (clears the token, allowed for anyone).
+    await db.query(`update public.sequence_enrollments set status = 'active', pause_reason = null, updated_at = now() where id = $1`, [ids.e2]);
+    expect((await db.query(`select routing_v2_pause_token from public.sequence_enrollments where id = $1`, [ids.e2])).rows[0].routing_v2_pause_token).toBeNull();
+    const forge = `update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply', routing_v2_pause_token = $2, updated_at = $3 where id = $1`;
+    // Authenticated org member (table-wide UPDATE grant + RLS).
+    await expect(asUser(ownerId, async () => db.query(forge, [ids.e2, r.actionId, tok.updated_at]))).rejects.toThrow(/ROUTING_V2_PAUSE_TOKEN_LOCKED/);
+    // Authenticated even with the marker set (cannot become the definer's owner).
+    await expect(
+      asUser(ownerId, async () => {
+        await db.query("select set_config('routing_v2.pausing', 'on', true)");
+        return db.query(forge, [ids.e2, r.actionId, tok.updated_at]);
+      }),
+    ).rejects.toThrow(/ROUTING_V2_PAUSE_TOKEN_LOCKED/);
+    // service_role direct write.
+    await expect(asService(async () => db.query(forge, [ids.e2, r.actionId, tok.updated_at]))).rejects.toThrow(/ROUTING_V2_PAUSE_TOKEN_LOCKED|permission denied/);
+    // A direct writer without A's marker (even the owner role).
+    await db.query("savepoint direct");
+    await expect(db.query(forge, [ids.e2, r.actionId, tok.updated_at])).rejects.toThrow(/ROUTING_V2_PAUSE_TOKEN_LOCKED/);
+    await db.query("rollback to savepoint direct");
+    // Insert with a token is refused too.
+    await db.query("savepoint ins");
+    await expect(
+      db.query(`insert into public.sequence_enrollments (org_id, sequence_id, property_id, status, routing_v2_pause_token) values ($1, $2, $3, 'paused', $4)`, [orgId, ids.seq, ids.p4, r.actionId]),
+    ).rejects.toThrow(/ROUTING_V2_PAUSE_TOKEN_LOCKED/);
+    await db.query("rollback to savepoint ins");
+    // The drip stays active; undo does not touch it.
+    expect((await enrollment(ids.e2)).status).toBe("active");
+    const u = await undo(ownerId, r.actionId);
+    expect(u.resumed).toBe(0);
+    expect(u.notResumed).toEqual([{ enrollmentId: ids.e2, outcome: "not_this_actions_pause" }]);
+  });
+
   it("undo never resumes a later pause with the same reason (person resumed, a later inbound re-paused)", async () => {
     await setFlags(ON);
     const r = await applyAll();
@@ -1067,6 +1103,23 @@ describe("B0. post-commit fence and undo/send serialization", () => {
   describe("global DNC concurrency (committed fixtures, two connections)", () => {
     const BARRIER_NOTE = "both orders: A first, DNC first";
     type Seed = { org: string; consumer: string; contact: string; property: string; inbound: string; phone: string; enrollment: string };
+    const committedOrgs: string[] = [];
+    afterAll(async () => {
+      // Remove every committed fixture row of these test orgs (all org-scoped public tables;
+      // replica role skips the append-only registry guard and FK order).
+      if (committedOrgs.length === 0) return;
+      await admin.query("begin");
+      await admin.query("set local session_replication_role = replica");
+      const tables = (await admin.query(`
+        select c.table_name from information_schema.columns c
+        join information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name and t.table_type = 'BASE TABLE'
+        where c.table_schema = 'public' and c.column_name = 'org_id' and c.table_name <> 'organizations'`)).rows;
+      for (const { table_name } of tables) {
+        await admin.query(`delete from public.${table_name} where org_id = any($1::uuid[])`, [committedOrgs]);
+      }
+      await admin.query(`delete from public.organizations where id = any($1::uuid[])`, [committedOrgs]);
+      await admin.query("commit");
+    });
     const seedCommitted = async (): Promise<Seed> => {
       // Release this file's per-test transaction (its in-transaction migration DDL holds table
       // locks the two real connections need); afterEach's rollback then ends the fresh one.
@@ -1076,6 +1129,7 @@ describe("B0. post-commit fence and undo/send serialization", () => {
         org: randomUUID(), consumer: randomUUID(), contact: randomUUID(), property: randomUUID(), inbound: randomUUID(), enrollment: randomUUID(),
         phone: `+1913${String(Math.floor(Math.random() * 10_000_000)).padStart(7, "0")}`,
       };
+      committedOrgs.push(sd.org);
       await admin.query("begin");
       await admin.query("insert into public.organizations (id, name) values ($1, $2)", [sd.org, `prg dnc race ${sd.org}`]);
       await admin.query(
@@ -1455,7 +1509,7 @@ describe("self-sweep", () => {
     }
     expect(await can("authenticated", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(true);
     expect(await can("anon", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(false);
-    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid)", "public.routing_v2_phone_action_newer_inbound(uuid)", "public.routing_v2_phone_action_hold_superseded(uuid, uuid, text)", "public.routing_v2_phone_action_restamp_after_reply(uuid, uuid)"]) {
+    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid)", "public.routing_v2_phone_action_newer_inbound(uuid)", "public.routing_v2_phone_action_hold_superseded(uuid, uuid, text)", "public.routing_v2_phone_action_restamp_after_reply(uuid, uuid)", "public.routing_v2_pause_token_guard()"]) {
       for (const role of ["anon", "authenticated", "service_role"]) expect(await can(role, fn), `${role} ${fn}`).toBe(false);
     }
     const tables = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties')`)).rows;
@@ -1484,7 +1538,7 @@ describe("self-sweep", () => {
     expect(Number(fns)).toBe(0);
     const col = (await db.query(`select count(*) from information_schema.columns where table_name = 'sequence_enrollments' and column_name = 'routing_v2_pause_token'`)).rows[0].count;
     expect(Number(col)).toBe(0);
-    const trg = (await db.query(`select count(*) from pg_trigger where tgname = 'trg_sequence_enrollments_routing_v2_pause_token'`)).rows[0].count;
+    const trg = (await db.query(`select count(*) from pg_trigger where tgname like 'trg_sequence_enrollments_routing_v2_pause_token%'`)).rows[0].count;
     expect(Number(trg)).toBe(0);
   });
 });
