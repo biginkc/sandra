@@ -258,7 +258,10 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
     await transition(db, id, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
     const row = (await db.query(`select id from public.routing_v2_outbox where inbound_message_id = $1`, [id])).rows[0].id;
     await db.query(`update public.properties set last_person_takeover_at = now() + interval '1 day' where id = $1`, [ctx.property]);
-    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [row])).rows[0].r).toBe("human_takeover");
+    // PR-C's claim refuses it ("human_takeover"); once PR-F's takeover fence (20261030230000)
+    // is on the stack the takeover itself already cancelled it ("not_pending"). Same end state.
+    expect(["human_takeover", "not_pending"]).toContain((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [row])).rows[0].r);
+    expect((await db.query(`select status, cancel_reason from public.routing_v2_outbox where id = $1`, [row])).rows[0]).toEqual({ status: "cancelled", cancel_reason: "human_takeover" });
   });
 
   it("suppressed seller: drips retired, nothing enrolled", async () => {

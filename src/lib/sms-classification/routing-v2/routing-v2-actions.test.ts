@@ -102,7 +102,7 @@ describe("road -> action table", () => {
 
   it.each<[V2Road, unknown]>([
     ["stop", [{ kind: "hold", reason: "asked_stop" }]],
-    ["ALERT_call_me", [{ kind: "alert", reason: "call_me" }]],
+    ["ALERT_call_me", [{ kind: "alert", reason: "call_me" }, { kind: "stop_drip", whenTimeOnlyOn: true }]],
     ["wrong_number_close", [{ kind: "wrong_number_close" }]],
     ["vacant_land_drip", [{ kind: "drip", drip: "Vacant land", skipFirstStep: false }]],
     ["ALERT_land_price", [{ kind: "alert", reason: "land_price" }]],
@@ -187,7 +187,7 @@ describe("road -> action table", () => {
       { kind: "drip", drip: "Not interested", skipFirstStep: false },
     ]);
     expect(actionForV2Decision(jevDecision("stop"), { askedHowNumber: true }).steps).toEqual([{ kind: "hold", reason: "asked_stop" }]);
-    expect(actionForV2Decision(jevDecision("ALERT_call_me"), { askedHowNumber: true }).steps).toEqual([{ kind: "alert", reason: "call_me" }]);
+    expect(actionForV2Decision(jevDecision("ALERT_call_me"), { askedHowNumber: true }).steps).toEqual([{ kind: "alert", reason: "call_me" }, { kind: "stop_drip", whenTimeOnlyOn: true }]);
   });
 
   it("no Jev answer -> hold + Haiku-unsure alert; Haiku error and Haiku-decided stop have their own clear reasons", () => {
