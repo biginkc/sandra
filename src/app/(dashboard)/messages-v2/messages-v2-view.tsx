@@ -52,6 +52,9 @@ export type MessagesV2ViewProps = {
   /** Undo a Jev-applied action (server actions); both omitted = no Undo button. */
   undoJevAction?: (undoId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
   findJevUndo?: (inboundMessageId: string) => Promise<string | null>;
+  /** Routing v2 (PR-I): lift an automatic model_stop suppression; both omitted = no button. */
+  liftModelStop?: (suppressionId: string) => Promise<{ ok: true; data: unknown } | { ok: false; error: { code?: string; message: string } }>;
+  findModelStop?: (inboundMessageId: string) => Promise<string | null>;
   /** Replay org only: newest replay batch id, shown to owners. */
   replayBatchId?: string | null;
   runs: RunWithSteps[];
@@ -192,6 +195,21 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           }
         : undefined,
     [undoJevAction, findJevUndo],
+  );
+  const { liftModelStop, findModelStop } = props;
+  const stopUndoControls = useMemo<UndoControls | undefined>(
+    () =>
+      liftModelStop && findModelStop
+        ? {
+            find: findModelStop,
+            undo: async (id) => {
+              const r = await liftModelStop(id);
+              // The lift action's own (existing) messages: carrier STOP / DNC stay blocked.
+              return r.ok ? { ok: true } : { ok: false, message: r.error.message };
+            },
+          }
+        : undefined,
+    [liftModelStop, findModelStop],
   );
   const [nowMs, setNowMs] = useState(props.nowMs);
   const [live, setLive] = useState(false);
@@ -647,6 +665,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                   flagPinned={snapshotRuns.has(item.run.id)}
                   // Undo is offered on today's texts only; an earlier day is history.
                   undoControls={dayKey(Date.parse(item.run.started_at)) === dayKey(nowMs) ? undoControls : undefined}
+                  // A model_stop suppression can be lifted on any day (it stays in force until a person lifts it).
+                  stopUndoControls={stopUndoControls}
                 />
               ),
             )

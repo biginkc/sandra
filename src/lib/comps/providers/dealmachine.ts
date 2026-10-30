@@ -1,6 +1,5 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
 
 /**
  * DealMachine estimated-value lookup (routing v2 PR-E, BUILD-PLAN §15).
@@ -58,13 +57,14 @@ export type DealMachineOptions = {
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
-  newCallId?: () => string;
   /**
-   * Called before EVERY HTTP request. Returns the ledger call id, or null when the shared rate
-   * limit is full. Throwing = the ledger write failed. Either way no request is sent.
+   * REQUIRED (cutover TODO d): called before EVERY HTTP request. Returns the ledger call id, or
+   * null when the shared rate limit is full. Throwing = the ledger write failed. Either way no
+   * request is sent. There is no un-ledgered path to the provider.
    */
-  beforeAttempt?: () => Promise<string | null>;
-  onAttempt?: (attempt: DealMachineAttempt) => Promise<void> | void;
+  beforeAttempt: () => Promise<string | null>;
+  /** REQUIRED: settles the ledger row for every attempt that was sent. */
+  onAttempt: (attempt: DealMachineAttempt) => Promise<void> | void;
 };
 
 type Json = Record<string, unknown>;
@@ -122,19 +122,15 @@ export async function fetchDealMachineEstimatedValue(
 
   let last: { reason: string; retryAfterSeconds: number } = { reason: "not_attempted", retryAfterSeconds: 60 };
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    let callId: string;
-    if (opts.beforeAttempt) {
-      let slot: string | null;
-      try {
-        slot = await opts.beforeAttempt();
-      } catch {
-        return { kind: "accounting_failed" };
-      }
-      if (!slot) return attempt === 0 ? { kind: "rate_limited" } : { kind: "retryable_error", reason: "rate_limited", retryAfterSeconds: 60 };
-      callId = slot;
-    } else {
-      callId = (opts.newCallId ?? randomUUID)();
+    if (typeof opts.beforeAttempt !== "function" || typeof opts.onAttempt !== "function") return { kind: "accounting_failed" };
+    let slot: string | null;
+    try {
+      slot = await opts.beforeAttempt();
+    } catch {
+      return { kind: "accounting_failed" };
     }
+    if (!slot) return attempt === 0 ? { kind: "rate_limited" } : { kind: "retryable_error", reason: "rate_limited", retryAfterSeconds: 60 };
+    const callId: string = slot;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEALMACHINE_TIMEOUT_MS);
     let res: Response | null = null;
@@ -154,7 +150,7 @@ export async function fetchDealMachineEstimatedValue(
       clearTimeout(timer);
     }
     try {
-      await opts.onAttempt?.({ callId, httpStatus: res?.status ?? null, creditsUsed: res ? creditsUsed(parsed) : null });
+      await opts.onAttempt({ callId, httpStatus: res?.status ?? null, creditsUsed: res ? creditsUsed(parsed) : null });
     } catch {
       // The row was written before the request (attempt_started), so it is still counted.
     }

@@ -407,10 +407,23 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
     });
   });
 
+  /** Ledger hooks are required on the raw fetch; tests that check other behaviour pass these. */
+  const LEDGER = () => ({ beforeAttempt: async () => crypto.randomUUID(), onAttempt: async () => {} });
+
+  it("refuses to reach the provider without both ledger hooks (no un-ledgered path)", async () => {
+    const fetchImpl = vi.fn(async () => ok(1));
+    const f = fetchImpl as unknown as typeof fetch;
+    // @ts-expect-error ledger hooks are required
+    expect(await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: f })).toEqual({ kind: "accounting_failed" });
+    // @ts-expect-error onAttempt is required
+    expect(await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: f, beforeAttempt: async () => "id" })).toEqual({ kind: "accounting_failed" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("posts to /v1/enrichment/address with a bearer key and reads estimated_value", async () => {
     const fetchImpl = vi.fn(async () => ok(210000));
     const attempts: DealMachineAttempt[] = [];
-    const r = await fetchDealMachineEstimatedValue(ADDR, {
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(),
       apiKey: "test-key",
       baseUrl: "https://dm.invalid",
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -439,7 +452,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
     const fetchImpl = vi.fn(async () => resp(429, { error: { code: "rate_limit_exceeded" } }, { "retry-after": "1" }));
     const sleep = vi.fn(async () => {});
     const attempts: DealMachineAttempt[] = [];
-    const r = await fetchDealMachineEstimatedValue(ADDR, {
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(),
       apiKey: "k",
       fetchImpl: fetchImpl as unknown as typeof fetch,
       sleep,
@@ -455,7 +468,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
   it("long Retry-After is not waited inline: returned as backoff", async () => {
     const fetchImpl = vi.fn(async () => resp(429, {}, { "retry-after": "120" }));
     const sleep = vi.fn(async () => {});
-    const r = await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch, sleep });
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(), apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch, sleep });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
     expect(r).toEqual({ kind: "retryable_error", reason: "http_429", retryAfterSeconds: 120 });
@@ -464,7 +477,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
   it("5xx then success: exponential backoff with jitter", async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(resp(503, {})).mockResolvedValueOnce(ok(100000));
     const sleep = vi.fn(async () => {});
-    const r = await fetchDealMachineEstimatedValue(ADDR, {
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(),
       apiKey: "k",
       fetchImpl: fetchImpl as unknown as typeof fetch,
       sleep,
@@ -479,7 +492,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
       (_u: string, init: RequestInit) =>
         new Promise<Response>((_r, reject) => init.signal!.addEventListener("abort", () => reject(new Error("aborted")))),
     );
-    const r = await fetchDealMachineEstimatedValue(ADDR, {
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(),
       apiKey: "k",
       fetchImpl: fetchImpl as unknown as typeof fetch,
       timeoutMs: 5,
@@ -491,7 +504,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
 
   it("400/401 → error, no retry", async () => {
     const fetchImpl = vi.fn(async () => resp(401, { error: { code: "invalid_api_key" } }));
-    const r = await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const r = await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(), apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(r).toEqual({ kind: "error", reason: "http_401" });
   });
@@ -499,9 +512,9 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
   it("beforeAttempt: no slot → rate_limited, write failure → accounting_failed; no request either way", async () => {
     const fetchImpl = vi.fn(async () => ok(1));
     const f = fetchImpl as unknown as typeof fetch;
-    expect(await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: f, beforeAttempt: async () => null })).toEqual({ kind: "rate_limited" });
+    expect(await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(), apiKey: "k", fetchImpl: f, beforeAttempt: async () => null })).toEqual({ kind: "rate_limited" });
     expect(
-      await fetchDealMachineEstimatedValue(ADDR, {
+      await fetchDealMachineEstimatedValue(ADDR, { ...LEDGER(),
         apiKey: "k",
         fetchImpl: f,
         beforeAttempt: async () => {

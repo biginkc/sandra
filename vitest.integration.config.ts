@@ -175,6 +175,7 @@ export default defineConfig({
       "supabase/migrations/20261030320000_routing_v2_live_hold_alerts.integration.test.ts",
       "supabase/migrations/20261030330000_routing_v2_outbox_delivery.integration.test.ts",
       "supabase/migrations/20261030340000_routing_v2_phone_action_live_evidence.integration.test.ts",
+      "supabase/migrations/20261030350000_routing_v2_one_canary_check.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
