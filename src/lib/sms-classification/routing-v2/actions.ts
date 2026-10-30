@@ -72,7 +72,8 @@ export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision, opts: V2Acti
   ALERT_reason_to_sell: () => [a("reason_to_sell")],
   // price_check flag off (PR-E not merged) = today's price alert + named-price reply.
   price_check: () => [r("named_price"), a("named_price")],
-  book_appointment: (dec, o) => [r(bookReply(dec)), ...hotUnlessTimeOnly(o), d("Book appointment")],
+  // hot_yes goes BEFORE the reply: a reply that cannot send (template unapproved) must never lose the alert.
+  book_appointment: (dec, o) => [...hotUnlessTimeOnly(o), r(bookReply(dec)), d("Book appointment")],
   maybe_later_drip: () => [r("nurture"), d("Maybe later")],
   not_interested_drip: () => [r("not_interested"), d("Not interested")],
   who_reply_drip: () => [r("identity"), d("Asked who is texting", true)],
@@ -80,7 +81,7 @@ export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision, opts: V2Acti
   location_reply: () => [r("where_located")],
   confirmed_owner_drip: () => [d("Confirmed owner")],
   "reaction+book_appointment": (_dec, o) => [...hotUnlessTimeOnly(o), d("Book appointment")],
-  "driving_reply+book_appointment": (_dec, o) => [r("driving"), ...hotUnlessTimeOnly(o), d("Book appointment")],
+  "driving_reply+book_appointment": (_dec, o) => [...hotUnlessTimeOnly(o), r("driving"), d("Book appointment")],
   bad_number: () => [{ kind: "hold", reason: "bad_number" }],
 };
 
@@ -129,6 +130,11 @@ export type V2ExecDeps = {
   sendReply: (key: V2AnyReplyKey, expectedText: string) => Promise<{ sent: boolean; reason?: string }>;
   hold: (reason: Extract<V2Step, { kind: "hold" }>["reason"]) => Promise<void>;
   wrongNumberClose: () => Promise<void>;
+  /**
+   * Fan-out through the existing hold-alerts/hot machinery. When wired at cutover,
+   * `hot_yes` MUST use the delivery key hotTextKey(inboundId) so today's classifier hot
+   * alert and v2's hot_yes dedupe to one alert for the same inbound.
+   */
   alert: (reason: V2AlertReason, label: string) => Promise<void>;
   drip: V2DripTransition;
   /** Flag flipped off mid-flight: hand the inbound back to the human queue (needs_reply). */
