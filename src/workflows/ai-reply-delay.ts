@@ -16,6 +16,7 @@ import {
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
 import { markInboundMessageState } from "@/lib/messaging/inbound-state";
 import { finishRunFromOutcome, resumeRun } from "@/lib/pipeline-runs";
+import { runRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type AiReplyDelayParams = {
@@ -98,6 +99,31 @@ async function dispatchStep(
   return outcome;
 }
 
+/**
+ * Routing v2 PR-A: record-only shadow as its OWN step, run only after `dispatchStep`
+ * has finished the run and stamped the inbound. Never throws, so it cannot fail or
+ * retry the live step; a slow shadow only delays this step, never the live stamping.
+ */
+export async function routingV2ShadowStep(
+  params: AiReplyDelayParams,
+  liveOutcome: string,
+): Promise<void> {
+  "use step";
+
+  await runRoutingV2Shadow(
+    createAdminClient(),
+    {
+      propertyId: params.propertyId,
+      contactId: params.contactId,
+      conversationId: params.conversationId,
+      inboundMessageId: params.inboundMessageId,
+      inboundBody: params.inboundBody,
+      liveOutcome,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+  ).catch(() => undefined);
+}
+
 export async function aiReplyDelayWorkflow(
   params: AiReplyDelayParams,
 ): Promise<AiDispatchOutcome> {
@@ -126,5 +152,6 @@ export async function aiReplyDelayWorkflow(
     };
     outcome = await dispatchStep(current);
   }
+  await routingV2ShadowStep(current, outcome.outcome);
   return outcome;
 }
