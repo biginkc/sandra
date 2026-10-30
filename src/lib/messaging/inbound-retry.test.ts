@@ -34,7 +34,7 @@ const mocks = vi.hoisted(() => ({
   scheduleShadow: vi.fn((..._a: unknown[]) => undefined),
 }));
 
-vi.mock("@/lib/ai-responder/routing-v2-shadow", () => ({
+vi.mock("@/lib/sms-classification/routing-v2/shadow", () => ({
   scheduleRoutingV2Shadow: mocks.scheduleShadow,
 }));
 
@@ -450,6 +450,23 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
       inboundBody: INPUT.body,
       liveOutcome: "sent",
     });
+    mocks.markState.mockImplementation(async () => undefined);
+  });
+
+  it("routing v2 shadow: when the retry cannot be scheduled, the terminal escalation is shadowed after its stamp", async () => {
+    const order: string[] = [];
+    mocks.markState.mockImplementation((async (_s: unknown, _id: unknown, patch: { aiResponder?: { outcome?: string } }) => {
+      if (patch?.aiResponder) order.push(`stamp:${patch.aiResponder.outcome}`);
+    }) as never);
+    mocks.scheduleShadow.mockImplementationOnce(() => {
+      order.push("shadow");
+    });
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    await runWebhook();
+    expect(order).toEqual(["stamp:escalated", "shadow"]);
+    expect(mocks.scheduleShadow).toHaveBeenCalledTimes(1);
+    expect((mocks.scheduleShadow.mock.calls[0] as unknown[])[1]).toMatchObject({ inboundMessageId: "message-1", liveOutcome: "escalated" });
     mocks.markState.mockImplementation(async () => undefined);
   });
 

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 import { PROPERTY_TYPE_OPTIONS, V2_QUESTION_IDS } from "./questions";
-import { runRoutingV2Shadow, scheduleRoutingV2Shadow } from "./shadow";
+import { runRoutingV2Shadow, scheduleRoutingV2Shadow, shadowFailureReason } from "./shadow";
 
 const ON = { routing_v2_flags: { shadow: true }, classifier_provider: "jev", classifier_engine: "nine_questions", classifier_mode: "automatic" };
 
@@ -76,6 +76,27 @@ describe("routing v2 shadow hook", () => {
     );
     expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
     expect(calls.find((c) => c.op === "insert")?.payload).toMatchObject({ status: "failed" });
+  });
+
+  it.each([
+    [() => new Response("echo: homeowner said SECRET", { status: 502 }), "jev_http_502"],
+    [() => new Response("echo: homeowner said SECRET", { status: 400 }), "jev_http_400"],
+    [() => new Response("not json SECRET", { status: 200 }), "jev_invalid_response"],
+    [() => { throw Object.assign(new Error("aborted SECRET"), { name: "AbortError" }); }, "jev_timeout"],
+    [() => { throw new TypeError("fetch failed SECRET"); }, "jev_network_error"],
+  ])("stores only a sanitized failure category, never raw error text (%#)", async (respond, reason) => {
+    const fetch = vi.fn(async () => respond());
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
+    );
+    expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
+    const payload = calls.find((c) => c.op === "insert")?.payload as Record<string, unknown>;
+    expect(payload.failure_reason).toBe(reason);
+    expect(JSON.stringify(payload)).not.toContain("SECRET");
+  });
+
+  it("a database failure is stored as db_error", () => {
+    expect(shadowFailureReason(new Error("relation messages SECRET"))).toBe("db_error");
   });
 
   it("never throws even when the database itself throws", async () => {
