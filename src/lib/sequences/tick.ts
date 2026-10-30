@@ -21,6 +21,7 @@ import {
   routingV2AdvanceAfterSend,
   routingV2ClaimDripSend,
   routingV2MarkDripClaimSent,
+  routingV2RecordProviderOutcome,
   routingV2TickGate,
 } from "./routing-v2/tick-gate";
 
@@ -525,6 +526,14 @@ export async function processEnrollmentTick(
     // may have reached the seller (accepted, or accepted-but-receipt-failed, or unknown), so a
     // failed write or a reply landing before the bookkeeping can never report it as cancelled.
     // Provider definitely not reached -> "not_sent" (terminal), so no claim is left open.
+    // R5: record the provider acceptance on the claim itself FIRST (own small write, before the
+    // run write), so a failed run write can never make this send look like a no-attempt. If
+    // this write fails too, the claim stays open and the reconcile reads the run's provider
+    // intent (unknown + message id) -> 'unknown', never 'not_sent'.
+    if (isRoutingV2 && (outcome.status === "sent" || outcome.status === "queued")) {
+      const recordError = await routingV2RecordProviderOutcome(client, claim.id, "accepted", outcome.messageId ?? null);
+      if (recordError) reportError(new Error(recordError), { tags: { context: "routing_v2_record_provider_outcome" }, extra: { enrollmentId: enrollment.id } });
+    }
     // sent/queued are closed together with the advance (one RPC, below); every other outcome
     // is closed here.
     const v2ClaimOutcome =

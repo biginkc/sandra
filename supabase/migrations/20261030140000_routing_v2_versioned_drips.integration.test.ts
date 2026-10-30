@@ -802,6 +802,68 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [e, run.id])).rows[0].r).toBe("changed");
   });
 
+  it("R5: accepted send + failed run write -> reconcile 'sent' -> resume advances past the step; the SMS is never sent twice", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const e = r.new_enrollment_id;
+    const run = await stepRun(db, e); // step 0
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [e, run.id])).rows[0].r).toBe("ok");
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','step 1','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(true);
+    // Provider accepted -> the tick's own small write onto the claim...
+    expect((await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', $2) as ok`, [run.id, msg])).rows[0].ok).toBe(true);
+    // ...then the sequence_step_runs write FAILS (run left as authorize wrote it) and the tick holds.
+    await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'reconciliation_required' where id = $1`, [e]);
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toMatchObject({ sent: 1, not_sent: 0 });
+    // Even a late not_sent can't overwrite the recorded acceptance.
+    expect((await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'not_sent') as id`, [run.id])).rows[0].id).toBeNull();
+    // Resume (operator / service): advances past the sent step instead of retrying it.
+    await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+    const resumed = (await db.query(`select * from public.resume_sequence_enrollment($1)`, [e])).rows[0];
+    expect(resumed.outcome).toBe("resumed");
+    expect((await db.query(`select status, current_step_index from public.sequence_enrollments where id = $1`, [e])).rows[0])
+      .toEqual({ status: "active", current_step_index: 1 });
+    // The old step cannot be claimed or authorized again (no duplicate SMS)...
+    await db.query("savepoint r5");
+    await expect(stepRun(db, e).then(() => db.query(
+      `insert into public.sequence_step_runs (enrollment_id, step_id, scheduled_for, attempt_outcome) values ($1, $2, now(), 'not_attempted')`, [e, run.step_id],
+    ))).rejects.toThrow(/duplicate key|unique/i);
+    await db.query("rollback to savepoint r5");
+    expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(false);
+    // ...and the drip moves on: the next step claims and authorizes normally.
+    const next = await stepRun(db, e);
+    expect(next.step_id).not.toBe(run.step_id);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [e, next.id])).rows[0].r).toBe("ok");
+    const msg2 = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','step 2','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, e, next, msg2)).authorized).toBe(true);
+    // Exactly one provider attempt was ever authorized for the first step.
+    expect((await db.query(`select attempt_count, attempt_outcome from public.sequence_step_runs where id = $1`, [run.id])).rows[0])
+      .toEqual({ attempt_count: 1, attempt_outcome: "accepted" });
+  });
+
+  it("R5: the claim acceptance write ALSO failed -> reconcile 'unknown' (never not_sent) -> resume refuses", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const e = r.new_enrollment_id;
+    const run = await stepRun(db, e);
+    await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [e, run.id]);
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','step 1','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(true);
+    await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'reconciliation_required' where id = $1`, [e]);
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 1, not_sent: 0 });
+    await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+    expect((await db.query(`select * from public.resume_sequence_enrollment($1)`, [e])).rows[0].outcome).toBe("reconciliation_required");
+    expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [e])).rows[0].status).toBe("paused");
+  });
+
   it("R3: reconcile maps step-run truth: unknown -> unknown, not attempted -> not_sent; young claims untouched", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });

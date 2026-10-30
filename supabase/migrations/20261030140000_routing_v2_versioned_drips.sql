@@ -641,7 +641,7 @@ begin
     -- Provider definitely not reached (quiet hours, consent, suppression, no sender,
     -- authorization refused, not attempted / definitive reject): terminal, only from open.
     update public.routing_v2_drip_send_claims set status = 'not_sent'
-    where step_run_id = p_step_run_id and status = 'open'
+    where step_run_id = p_step_run_id and status = 'open' and provider_outcome is null
     returning id into v_id;
     return v_id;
   end if;
@@ -1142,6 +1142,33 @@ grant execute on function public.routing_v2_stop_disabled() to service_role;
 -- (accepted -> sent, unknown -> unknown; anything else -> not_sent) and stamped reconciled_at.
 -- Covers a crash / RPC error between the provider call and the claim close.
 alter table public.routing_v2_drip_send_claims add column if not exists reconciled_at timestamptz;
+-- R5: provider acceptance recorded on the claim itself, in its own small write right after the
+-- provider returns (before the step-run write), so it can't be lost with that write.
+alter table public.routing_v2_drip_send_claims
+  add column if not exists provider_outcome text check (provider_outcome is null or provider_outcome in ('accepted','unknown')),
+  add column if not exists provider_message_id uuid,
+  add column if not exists provider_recorded_at timestamptz;
+
+create or replace function public.routing_v2_record_provider_outcome(p_step_run_id uuid, p_outcome text, p_message_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_outcome not in ('accepted','unknown') then
+    raise exception 'ROUTING_V2_BAD_PROVIDER_OUTCOME: %', p_outcome;
+  end if;
+  update public.routing_v2_drip_send_claims
+  set provider_outcome = case when provider_outcome = 'accepted' then 'accepted' else p_outcome end,
+      provider_message_id = coalesce(p_message_id, provider_message_id),
+      provider_recorded_at = coalesce(provider_recorded_at, now())
+  where step_run_id = p_step_run_id;
+  return found;
+end;
+$$;
+revoke all on function public.routing_v2_record_provider_outcome(uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.routing_v2_record_provider_outcome(uuid, text, uuid) to service_role;
 create or replace function public.routing_v2_reconcile_claims(p_older_than interval default interval '10 minutes')
 returns jsonb
 language plpgsql
@@ -1156,16 +1183,18 @@ declare
   v_not_sent integer := 0;
 begin
   for r in
-    select c.id, c.property_id, c.step_run_id, sr.attempt_outcome, sr.message_id
+    select c.id, c.property_id, c.step_run_id, c.provider_outcome, sr.attempt_outcome, sr.message_id
     from public.routing_v2_drip_send_claims c
     left join public.sequence_step_runs sr on sr.id = c.step_run_id
     where c.status = 'open' and c.created_at < now() - p_older_than
     order by c.property_id, c.created_at
   loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || r.property_id::text));
+    -- The claim's own provider record wins; not_sent only with no evidence of an attempt at all.
     v_status := case
-      when r.attempt_outcome = 'accepted' then 'sent'
-      when r.attempt_outcome = 'unknown' or r.message_id is not null then 'unknown'
+      when r.provider_outcome = 'accepted' or r.attempt_outcome = 'accepted' then 'sent'
+      when r.provider_outcome = 'unknown' or r.attempt_outcome = 'unknown' or r.message_id is not null
+           or r.attempt_outcome is null then 'unknown'
       else 'not_sent' end;
     update public.routing_v2_drip_send_claims
     set status = v_status, reconciled_at = now()
@@ -1181,6 +1210,154 @@ end;
 $$;
 revoke all on function public.routing_v2_reconcile_claims(interval) from public, anon, authenticated;
 grant execute on function public.routing_v2_reconcile_claims(interval) to service_role;
+
+-- R5: resume never treats an accepted/unknown v2 drip send as a no-attempt. Same body as
+-- 20261008143600 plus the routing v2 block (accepted -> advance past the step; unknown -> refuse).
+create or replace function public.resume_sequence_enrollment(
+  p_enrollment_id uuid,
+  p_actor_user_id uuid default null,
+  p_expected_pause_reason text default null
+)
+returns table (outcome text, next_run_at timestamptz)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e public.sequence_enrollments%rowtype;
+  s public.sequence_steps%rowtype;
+  r public.sequence_step_runs%rowtype;
+  next_at timestamptz;
+  v2_status text;
+  v2_provider text;
+begin
+  select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
+  if e.id is null then
+    return query select 'not_found', null::timestamptz;
+    return;
+  end if;
+  if (coalesce(auth.role(), '') = 'service_role' and p_actor_user_id is not null)
+     or (coalesce(auth.role(), '') <> 'service_role' and (
+       auth.uid() is null
+       or (p_actor_user_id is not null and p_actor_user_id <> auth.uid())
+       or not exists (
+         select 1 from public.memberships m
+          where m.org_id = e.org_id and m.user_id = auth.uid()
+       )
+     )) then
+    return query select 'not_authorized', null::timestamptz;
+    return;
+  end if;
+  if e.status <> 'paused' then
+    return query select 'not_paused', e.next_run_at;
+    return;
+  end if;
+  -- [I1] The caller decided to resume based on a read of the pause reason. A
+  -- reply, takeover or Norma conversion may have changed it since.
+  if p_expected_pause_reason is not null
+     and e.pause_reason is distinct from p_expected_pause_reason then
+    return query select 'pause_reason_changed', e.next_run_at;
+    return;
+  end if;
+  -- [G2] An open Norma request holds every enrollment on the property.
+  if public.fn_norma_hold_active(e.property_id) then
+    return query select 'norma_hold', e.next_run_at;
+    return;
+  end if;
+  -- consent_unavailable is deliberately NOT in this list: the tick retired the
+  -- claim as not_attempted before pausing (no text was attempted), so a plain
+  -- resume is the correct and only recovery.
+  -- Routing v2 (R5): the drip send claim is the durable record of provider acceptance.
+  -- Accepted -> advance past the step (never a second send of it); unknown -> refuse.
+  if e.routing_v2_engine = 'v2' then
+    select * into s from public.sequence_steps
+     where sequence_id = e.sequence_id and step_index = e.current_step_index;
+    select sr.* into r from public.sequence_step_runs sr
+     where sr.enrollment_id = e.id and sr.step_id = s.id and sr.claim_active
+     order by sr.created_at desc limit 1
+     for update;
+    if r.id is not null then
+      select c.status, c.provider_outcome into v2_status, v2_provider
+        from public.routing_v2_drip_send_claims c where c.step_run_id = r.id;
+      if v2_status = 'sent' or v2_provider = 'accepted' or r.attempt_outcome = 'accepted' then
+        update public.sequence_step_runs
+           set attempt_outcome = 'accepted', run_at = coalesce(run_at, now()),
+               recovery_actor_user_id = coalesce(p_actor_user_id, auth.uid()),
+               recovery_action = 'resume_advanced_v2',
+               recovery_evidence = 'routing v2 claim records provider acceptance'
+         where id = r.id;
+        update public.routing_v2_drip_send_claims set status = 'sent' where step_run_id = r.id and status <> 'sent';
+        select * into s from public.sequence_steps
+         where sequence_id = e.sequence_id and step_index = e.current_step_index + 1;
+        if s.id is null then
+          update public.sequence_enrollments
+             set status = 'completed', completed_at = now(), pause_reason = null, next_run_at = null, updated_at = now()
+           where id = e.id and status = 'paused';
+          return query select 'resumed', null::timestamptz;
+          return;
+        end if;
+        next_at := now() + make_interval(mins => s.delay_after_previous_minutes);
+        update public.sequence_enrollments
+           set status = 'active', pause_reason = null, current_step_index = e.current_step_index + 1,
+               next_run_at = next_at, updated_at = now()
+         where id = e.id and status = 'paused';
+        return query select 'resumed', next_at;
+        return;
+      end if;
+      if v2_status = 'unknown' or v2_provider = 'unknown' or r.attempt_outcome = 'unknown' or r.message_id is not null then
+        return query select 'reconciliation_required', e.next_run_at;
+        return;
+      end if;
+    end if;
+    s := null;
+    r := null;
+  end if;
+  if coalesce(e.pause_reason, '') in ('reconciliation_required', 'provider_failed') then
+    return query select 'retry_required', e.next_run_at;
+    return;
+  end if;
+
+  select * into s from public.sequence_steps
+   where sequence_id = e.sequence_id and step_index = e.current_step_index;
+  if s.id is not null then
+    select * into r from public.sequence_step_runs
+     where enrollment_id = e.id and step_id = s.id and claim_active
+     order by created_at desc limit 1
+     for update;
+    if r.id is not null then
+      if r.attempt_outcome not in ('not_attempted', 'definitively_rejected') then
+        return query select 'reconciliation_required', e.next_run_at;
+        return;
+      end if;
+      update public.sequence_step_runs
+         set claim_active = false,
+             recovery_actor_user_id = coalesce(p_actor_user_id, auth.uid()),
+             recovery_action = 'resume',
+             recovery_evidence = 'paused enrollment resumed with a proven no-attempt claim'
+       where id = r.id and claim_active;
+    end if;
+    next_at := now() + make_interval(mins => s.delay_after_previous_minutes);
+  else
+    next_at := now();
+  end if;
+
+  -- A new consent-check budget starts at every resume: relabel this
+  -- enrollment's deferred consent_unavailable rows so the tick's consecutive
+  -- count (which counts only 'consent_unavailable_deferred') ignores them.
+  update public.sequence_step_runs
+     set recovery_action = 'consent_unavailable_resumed'
+   where enrollment_id = e.id
+     and recovery_action = 'consent_unavailable_deferred';
+
+  update public.sequence_enrollments
+     set status = 'active', pause_reason = null, next_run_at = next_at, updated_at = now()
+   where id = e.id and status = 'paused';
+  return query select 'resumed', next_at;
+end;
+$$;
+
+revoke all on function public.resume_sequence_enrollment(uuid, uuid, text) from public, anon;
+grant execute on function public.resume_sequence_enrollment(uuid, uuid, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
 -- 9. v2 drips are never a copy source (their {{slot_time}} has no value outside v2). Same body

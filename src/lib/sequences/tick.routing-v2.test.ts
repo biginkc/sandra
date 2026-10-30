@@ -158,6 +158,10 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     const { client, rpc, writes } = fixture({ runWriteFails: true });
     const outcome = await processEnrollmentTick(client, ENROLLMENT);
+    // R5: provider acceptance was written onto the claim BEFORE the (failed) run write.
+    expect(rpc).toHaveBeenCalledWith("routing_v2_record_provider_outcome", { p_step_run_id: "run-1", p_outcome: "accepted", p_message_id: "msg-1" });
+    const recAt = rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === "routing_v2_record_provider_outcome")]!;
+    expect(recAt).toBeLessThan(writeOrder.accepted!);
     expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("run write failed") });
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_advance_after_send", expect.anything());
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());

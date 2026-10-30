@@ -160,6 +160,25 @@ export async function routingV2MarkDripClaimSent(
   }
 }
 
+/** R5: provider acceptance onto the claim row (own write). Returns an error message or null. */
+export async function routingV2RecordProviderOutcome(
+  client: SupabaseClient<Database>,
+  stepRunId: string,
+  outcome: "accepted" | "unknown",
+  messageId: string | null,
+): Promise<string | null> {
+  try {
+    const { error } = await loose(client).rpc("routing_v2_record_provider_outcome", {
+      p_step_run_id: stepRunId,
+      p_outcome: outcome,
+      p_message_id: messageId,
+    });
+    return error ? `routing v2 provider outcome write failed: ${error.message}` : null;
+  } catch (err) {
+    return `routing v2 provider outcome write failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 /**
  * v2 only: advance after an accepted send, or complete + chain atomically in SQL. Returns null
  * on success, or an error string (RPC error, or the enrollment changed before the write).
