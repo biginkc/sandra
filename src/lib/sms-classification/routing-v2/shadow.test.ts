@@ -97,4 +97,56 @@ describe("routing v2 shadow hook", () => {
     expect(String(payload.failure_reason)).toContain("asked_stop");
     expect(payload).not.toHaveProperty("road");
   });
+
+  describe("PR-D Haiku (flags.haiku)", () => {
+    const on = (haiku: boolean) =>
+      stub((table) =>
+        table === "ai_responder_configs" ? { data: { routing_v2_flags: { shadow: true, haiku } }, error: null } : { data: [], error: null },
+      );
+    const jev = (over: Record<string, number>) => new Response(JSON.stringify({ answers: jevAnswers(over), model: "jev" }), { status: 200 });
+    const haikuMsg = (text: string) =>
+      new Response(JSON.stringify({ content: [{ type: "text", text }], usage: { input_tokens: 900, output_tokens: 15 } }), { status: 200 });
+    const deps = (fetch: unknown) => ({ fetch: fetch as never, typesafeApiKey: "k", anthropicApiKey: "a", haikuSleep: async () => {} });
+
+    it("flag off: an eligible decision does not call Haiku and writes no haiku column", async () => {
+      const fetch = vi.fn().mockResolvedValueOnce(jev({ asked_stop: 0.65 }));
+      const { client, calls } = on(false);
+      expect(await runRoutingV2Shadow(client, INPUT, deps(fetch))).toBe("decided");
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(calls.find((c) => c.op === "insert")?.payload).not.toHaveProperty("haiku");
+    });
+
+    it("flag on + eligible: records Haiku's pick and the held stop alert, record only", async () => {
+      const fetch = vi.fn().mockResolvedValueOnce(jev({ asked_stop: 0.65 })).mockResolvedValueOnce(haikuMsg('{"road":"asked_stop","confidence":0.9}'));
+      const { client, calls } = on(true);
+      expect(await runRoutingV2Shadow(client, INPUT, deps(fetch))).toBe("decided");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      const inserts = calls.filter((c) => c.op === "insert");
+      expect(inserts.map((c) => c.table)).toEqual(["routing_v2_shadow_decisions"]);
+      expect(inserts[0].payload).toMatchObject({
+        road: "stop",
+        haiku_eligibility: "decider_band",
+        haiku: { asked: true, option: "asked_stop", confidence: 0.9, input_tokens: 900, output_tokens: 15, final_road: "stop", final_by: "haiku", hold: true, alert: "Possible stop request — please check" },
+      });
+      const body = JSON.parse(String((fetch.mock.calls[1] as unknown as [string, RequestInit])[1].body));
+      expect(body.messages[0].content).toContain("SELLER: Call me tomorrow");
+    });
+
+    it("flag on + Haiku failure: records the failure reason and escalation, still decided", async () => {
+      const fetch = vi.fn().mockResolvedValueOnce(jev({})).mockResolvedValue(new Response("x", { status: 500 }));
+      const { client, calls } = on(true);
+      expect(await runRoutingV2Shadow(client, INPUT, deps(fetch))).toBe("decided");
+      expect(calls.find((c) => c.op === "insert")?.payload).toMatchObject({
+        haiku: { asked: true, failure_reason: "haiku_invalid:http_500", attempts: 2, final_road: null, final_by: "haiku_failed", hold: true, alert: "Haiku error — please check" },
+      });
+    });
+
+    it("flag on + confident Jev answer: no Haiku call", async () => {
+      const fetch = vi.fn().mockResolvedValueOnce(jev({ asked_who: 0.91, inbound_call: 0.51 }));
+      const { client, calls } = on(true);
+      expect(await runRoutingV2Shadow(client, INPUT, deps(fetch))).toBe("decided");
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(calls.find((c) => c.op === "insert")?.payload).toMatchObject({ road: "who_reply_drip", haiku: { asked: false, final_road: "who_reply_drip" } });
+    });
+  });
 });
