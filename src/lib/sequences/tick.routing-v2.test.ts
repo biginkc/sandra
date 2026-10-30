@@ -36,11 +36,15 @@ function fixture(opts: {
   routingV2Key?: string | null;
   appendOptOut?: boolean;
   runWriteFails?: boolean;
+  markError?: string;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "routing_v2_enrollment_send_check") return { data: opts.sendCheck ?? "ok", error: null };
     if (fn === "routing_v2_claim_drip_send") return { data: opts.claimResult ?? "ok", error: null };
+    if (fn === "routing_v2_mark_drip_claim_sent") {
+      return opts.markError ? { data: null, error: { message: opts.markError } } : { data: "claim-1", error: null };
+    }
     return { data: [{ outcome: "active" }], error: null };
   });
   const from = vi.fn((table: string) => {
@@ -129,7 +133,7 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     expect(order("routing_v2_claim_drip_send")).toBeLessThan(sendAt);
     // After the accepted send the claim is consumed.
     expect(order("routing_v2_mark_drip_claim_sent")).toBeGreaterThan(sendAt);
-    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1" });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: "sent" });
   });
 
   it("accepted send: the claim is consumed BEFORE the run write, even when the run write fails", async () => {
@@ -137,11 +141,50 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     const { client, rpc, writes } = fixture({ runWriteFails: true });
     const outcome = await processEnrollmentTick(client, ENROLLMENT);
     expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("run write failed") });
-    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1" });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: "sent" });
     const markAt = rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === "routing_v2_mark_drip_claim_sent")]!;
     expect(markAt).toBeGreaterThan(vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!);
     expect(writes.find((w) => w.table === "sequence_step_runs" && w.payload.attempt_outcome === "accepted")).toBeTruthy();
     expect(markAt).toBeLessThan(writeOrder.accepted!);
+  });
+
+  it.each([
+    ["db_error after provider acceptance", { status: "db_error", messageId: "m1", externalId: "p1", deliveryOutcome: "accepted", error: "receipt write failed" }, "sent"],
+    ["db_error with an external id only", { status: "db_error", messageId: "m1", externalId: "p1", error: "receipt write failed" }, "sent"],
+    ["provider_unknown", { status: "provider_unknown", messageId: "m1", error: "timeout" }, "unknown"],
+    ["provider_failed, outcome unknown", { status: "provider_failed", messageId: "m1", error: "x", deliveryOutcome: "unknown" }, "unknown"],
+  ] as const)("%s: the claim is closed right after the provider call (%s)", async (_label, sendResult, expected) => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    vi.mocked(sendSmsToContact).mockResolvedValue(sendResult as never);
+    const { client, rpc, writes } = fixture();
+    const outcome = await processEnrollmentTick(client, ENROLLMENT);
+    expect(outcome.status).toBe("failed");
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: expected });
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ pause_reason: "reconciliation_required" }),
+    }));
+  });
+
+  it("provider never reached (definitive rejection / not attempted): the claim is not closed as sent", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "provider_failed", messageId: "m1", error: "x", providerAttempted: false } as never);
+    const { client, rpc } = fixture();
+    await processEnrollmentTick(client, ENROLLMENT);
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
+  });
+
+  it("a claim-close failure after an accepted send is surfaced and held for reconciliation, not swallowed", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, writes } = fixture({ markError: "db down" });
+    const outcome = await processEnrollmentTick(client, ENROLLMENT);
+    expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("routing v2 claim close failed: db down") });
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ pause_reason: "reconciliation_required" }),
+    }));
+    // The accepted run is still recorded (never released for a resend).
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_step_runs", payload: expect.objectContaining({ attempt_outcome: "accepted" }),
+    }));
   });
 
   it("wait: a slot outside the window reschedules (no claim, no send)", async () => {

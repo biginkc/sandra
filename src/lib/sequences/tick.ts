@@ -509,13 +509,18 @@ export async function processEnrollmentTick(
       },
     });
 
+    // Routing v2: close the claim with the provider outcome IMMEDIATELY, for every outcome that
+    // may have reached the seller (accepted, or accepted-but-receipt-failed, or unknown), so a
+    // failed write or a reply landing before the bookkeeping can never report it as cancelled.
+    const v2ClaimOutcome = isRoutingV2 ? routingV2ProviderClaimOutcome(outcome) : null;
+    const v2ClaimCloseError = v2ClaimOutcome
+      ? await routingV2MarkDripClaimSent(client, claim.id, v2ClaimOutcome)
+      : null;
+
     switch (outcome.status) {
       case "sent":
       case "queued": {
         const messageId = outcome.messageId;
-        // Routing v2: consume the claim first, so a failed run write or a reply landing
-        // before the bookkeeping can never report this accepted text as cancelled.
-        if (isRoutingV2) await routingV2MarkDripClaimSent(client, claim.id);
         const { data: runWrite, error: runError } = await client
           .from("sequence_step_runs")
           .update({
@@ -540,6 +545,15 @@ export async function processEnrollmentTick(
             status: "failed",
             enrollmentId: enrollment.id,
             message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
+          };
+        }
+        if (v2ClaimCloseError) {
+          // The text went out but the claim could not be closed: hold for reconciliation.
+          const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message: `Message ${messageId} accepted; ${v2ClaimCloseError}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
         const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
@@ -860,15 +874,16 @@ export async function processEnrollmentTick(
         if (pauseError) {
           return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
         }
+        const baseMessage =
+          "reason" in outcome
+            ? outcome.reason
+            : "error" in outcome
+              ? outcome.error
+              : outcome.status;
         return {
           status: "failed",
           enrollmentId: enrollment.id,
-          message:
-            "reason" in outcome
-              ? outcome.reason
-              : "error" in outcome
-                ? outcome.error
-                : outcome.status,
+          message: v2ClaimCloseError ? `${baseMessage}; ${v2ClaimCloseError}` : baseMessage,
         };
       }
     }
@@ -1045,6 +1060,31 @@ export async function advanceEnrollment(
     : advanced
       ? null
       : "enrollment changed before advancement";
+}
+
+/** Which v2 claim outcome a send result implies; null = provider definitely not reached. */
+export function routingV2ProviderClaimOutcome(
+  outcome: Awaited<ReturnType<typeof sendSmsToContact>>,
+): "sent" | "unknown" | null {
+  switch (outcome.status) {
+    case "sent":
+    case "queued":
+      return "sent";
+    case "db_error":
+      if (outcome.deliveryOutcome === "accepted" || (!outcome.deliveryOutcome && outcome.externalId)) return "sent";
+      return outcome.deliveryOutcome === "unknown" ? "unknown" : null;
+    case "provider_unknown":
+      return "unknown";
+    case "provider_failed":
+      if (outcome.providerAttempted === false) return null;
+      return outcome.deliveryOutcome === "accepted"
+        ? "sent"
+        : outcome.deliveryOutcome === "unknown" || outcome.deliveryOutcome === undefined
+          ? "unknown"
+          : null;
+    default:
+      return null;
+  }
 }
 
 /**

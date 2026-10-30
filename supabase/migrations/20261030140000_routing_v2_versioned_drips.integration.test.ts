@@ -23,7 +23,7 @@ const ROLLBACK = strip(
   readFileSync(path.join(__dirname, "../rollbacks/20261030140000_routing_v2_versioned_drips.sql"), "utf8"),
 );
 const DAY = 1440;
-const FLAGS_ON = { questions_live: true, drips: true, replies: true, canary_property_ids: [] as string[], canary_percent: 100 };
+const FLAGS_ON = { questions_live: true, drips: true, replies: true, alert_on_time_only: true, canary_property_ids: [] as string[], canary_percent: 100 };
 
 const db = new Client({ connectionString: url });
 beforeAll(async () => {
@@ -478,6 +478,105 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select public.routing_v2_enrollment_send_check($1) as r`, [foreign])).rows[0].r).toBe("not_active");
     const fence = await authorize(db, ctx, foreign, run);
     expect(fence.authorized).toBe(false);
+  });
+
+  it("provenance: a caller-supplied routing_v2_engine='v2' is refused outside route_reply_transition", async () => {
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'price_too_high'`, [ctx.org])).rows[0].id;
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
+    await db.query("savepoint p");
+    // Direct insert (even with full table privileges) claiming to be v2.
+    await expect(db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at, routing_v2_engine)
+       values ($1,$2,$3,$4,'active',0, now(), 'v2')`,
+      [ctx.org, v2, ctx.property, ctx.contact],
+    )).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED: routing v2 enrollments are created by route_reply_transition only/);
+    await db.query("rollback to savepoint p");
+    // Same insert as the authenticated API role.
+    await db.query("set local role authenticated");
+    await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ sub: randomUUID(), role: "authenticated" })]);
+    await expect(db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at, routing_v2_engine)
+       values ($1,$2,$3,$4,'active',0, now(), 'v2')`,
+      [ctx.org, v2, ctx.property, ctx.contact],
+    )).rejects.toThrow();
+    await db.query("rollback to savepoint p");
+    await db.query("reset role");
+    // Re-marking a legacy row as v2 is refused too.
+    await expect(db.query(`update public.sequence_enrollments set routing_v2_engine = 'v2' where id = $1`, [ctx.legacyEnrollment]))
+      .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint p");
+    expect((await db.query(`select count(*)::int as n from public.sequence_enrollments where routing_v2_engine = 'v2' and org_id = $1`, [ctx.org])).rows[0].n).toBe(0);
+    // The route function still enrolls (it sets the transaction-local marker itself)...
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "price_too_high" });
+    expect(r.outcome).toBe("applied");
+    expect(r.new_enrollment_id).toBeTruthy();
+    // ...and clears it afterwards, so a later direct insert in the same transaction is still refused.
+    expect((await db.query(`select coalesce(current_setting('routing_v2.enrolling', true), '') as v`)).rows[0].v).toBe("");
+    await db.query("savepoint q");
+    await expect(db.query(`update public.sequence_enrollments set routing_v2_inbound_id = $2 where id = $1`, [r.new_enrollment_id, randomUUID()]))
+      .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint q");
+  });
+
+  it("a reply that cancelled a claim while the provider call was in flight is corrected when the provider accepted", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
+    const t = await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });
+    expect(t.cancelled_drip_claim_ids).toHaveLength(1);
+    const claimId = (await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent') as id`, [run.id])).rows[0].id;
+    expect(claimId).toBe(t.cancelled_drip_claim_ids[0]);
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where id = $1`, [claimId])).rows[0].status).toBe("sent");
+    expect((await db.query(`select cancelled_drip_claim_ids from public.routing_v2_reply_transitions where inbound_message_id = $1`, [reply])).rows[0].cancelled_drip_claim_ids).toEqual([]);
+    // 'unknown' is recorded as unknown; bad outcomes are rejected; legacy step runs have no claim.
+    await db.query("savepoint m");
+    await expect(db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'cancelled')`, [run.id])).rejects.toThrow(/ROUTING_V2_BAD_CLAIM_OUTCOME/);
+    await db.query("rollback to savepoint m");
+    expect((await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent') as id`, [randomUUID()])).rows[0].id).toBeNull();
+  });
+
+  it("outbox items store engine + slice, and EVERY kind (alerts too) is re-checked at claim time", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, {
+      outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }, { kind: "alert", slice: "alert_on_time_only", payload: {} }],
+    });
+    const rows = (await db.query(
+      `select id, kind, engine, slice from public.routing_v2_outbox where inbound_message_id = $1 order by kind, slice`, [id],
+    )).rows;
+    expect(rows.map(({ kind, engine, slice }) => ({ kind, engine, slice }))).toEqual([
+      { kind: "alert", engine: "v2", slice: "alert_on_time_only" },
+      { kind: "alert", engine: "v2", slice: "drips" },
+      { kind: "reply", engine: "v2", slice: "replies" },
+    ]);
+    const claim = async (rowId: string) => (await db.query(`select public.routing_v2_claim_outbox($1) as r`, [rowId])).rows[0].r;
+    // questions_live off -> nothing sends, alerts included.
+    await setFlags(db, ctx.org, { ...FLAGS_ON, questions_live: false });
+    for (const row of rows) expect(await claim(row.id)).toBe("flag_off");
+  });
+
+  it("an alert's own slice gates it: slice off -> flag_off, slice on -> ok", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, {
+      outbox: [{ kind: "alert", payload: {} }, { kind: "alert", slice: "alert_on_time_only", payload: {} }],
+    });
+    const bySlice = Object.fromEntries((await db.query(
+      `select slice, id from public.routing_v2_outbox where inbound_message_id = $1`, [id],
+    )).rows.map((r) => [r.slice, r.id]));
+    await setFlags(db, ctx.org, { ...FLAGS_ON, alert_on_time_only: false }); // drips stays on
+    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [bySlice.alert_on_time_only])).rows[0].r).toBe("flag_off");
+    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [bySlice.drips])).rows[0].r).toBe("ok");
+    await db.query("savepoint o");
+    await expect(db.query(`select public.route_reply_transition($1,$2,$3::jsonb)`, [
+      await inbound(db, ctx, "2026-10-30T15:05:00Z"), ctx.property, JSON.stringify({ outbox: [{ kind: "alert", slice: "bogus", payload: {} }] }),
+    ])).rejects.toThrow();
+    await db.query("rollback to savepoint o");
   });
 
   it("a sent claim is consumed: a later reply does not report it as cancelled", async () => {

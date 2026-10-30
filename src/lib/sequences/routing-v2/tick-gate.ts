@@ -101,16 +101,24 @@ export async function routingV2ClaimDripSend(
   return { ok: false, reason: String(data), error: false };
 }
 
-/** Accepted send: consume the claim so later replies only cancel unsent claims. Best effort. */
+/**
+ * After the provider call: close the v2 claim with the real outcome ("sent" = accepted,
+ * "unknown" = may have sent). Returns an error message instead of swallowing it, so the tick
+ * can hold the enrollment for reconciliation.
+ */
 export async function routingV2MarkDripClaimSent(
   client: SupabaseClient<Database>,
   stepRunId: string,
-): Promise<void> {
+  outcome: "sent" | "unknown" = "sent",
+): Promise<string | null> {
   try {
-    const { error } = await loose(client).rpc("routing_v2_mark_drip_claim_sent", { p_step_run_id: stepRunId });
-    if (error) console.warn(`routing v2 claim close failed: ${error.message}`);
+    const { error } = await loose(client).rpc("routing_v2_mark_drip_claim_sent", {
+      p_step_run_id: stepRunId,
+      p_outcome: outcome,
+    });
+    return error ? `routing v2 claim close failed: ${error.message}` : null;
   } catch (err) {
-    console.warn(`routing v2 claim close failed: ${err instanceof Error ? err.message : String(err)}`);
+    return `routing v2 claim close failed: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 

@@ -21,7 +21,7 @@ drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 drop function if exists public.routing_v2_reject_drip_edit();
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
 drop function if exists public.routing_v2_reject_foreign_enrollment();
-drop function if exists public.routing_v2_mark_drip_claim_sent(uuid);
+drop function if exists public.routing_v2_mark_drip_claim_sent(uuid, text);
 drop function if exists public.routing_v2_chain_after_completion(uuid);
 drop function if exists public.routing_v2_claim_drip_send(uuid, uuid);
 drop function if exists public.routing_v2_enrollment_send_check(uuid);

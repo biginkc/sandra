@@ -97,6 +97,11 @@ create table if not exists public.routing_v2_outbox (
   inbound_message_id uuid not null,
   transition_seq bigint not null,
   kind text not null check (kind in ('reply','alert')),
+  -- Which engine queued it and which routing_v2_flags slice gates it; both are re-checked at
+  -- claim time for every kind (questions_live is always required too).
+  engine text not null default 'v2' check (engine = 'v2'),
+  slice text not null check (slice in ('replies','drips','haiku','price_check','alert_on_time_only',
+                                       'wrong_number_all','model_stop_suppression')),
   payload jsonb not null default '{}'::jsonb,
   status text not null default 'pending' check (status in ('pending','claimed','sent','cancelled')),
   cancel_reason text,
@@ -117,7 +122,7 @@ create table if not exists public.routing_v2_drip_send_claims (
   property_id uuid not null,
   enrollment_id uuid not null,
   step_run_id uuid not null unique,
-  status text not null default 'open' check (status in ('open','cancelled','sent')),
+  status text not null default 'open' check (status in ('open','cancelled','sent','unknown')),
   cancel_reason text,
   cancelled_at timestamptz,
   created_at timestamptz not null default now()
@@ -218,6 +223,10 @@ begin
   if v_delay is null then
     raise exception 'ROUTING_V2_EMPTY_SEQUENCE: % has no step 0', p_sequence_id;
   end if;
+  -- Provenance: the enrollment guard only accepts a v2 row while this transaction-local
+  -- marker is set, and only this SECURITY DEFINER function sets it (a caller-supplied
+  -- routing_v2_engine = 'v2' alone is refused).
+  perform set_config('routing_v2.enrolling', 'on', true);
   insert into public.sequence_enrollments
     (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at,
      routing_v2_engine, routing_v2_inbound_id)
@@ -225,6 +234,7 @@ begin
     (p_org_id, p_sequence_id, p_property_id, p_contact_id, 'active', 0,
      now() + make_interval(mins => v_delay), 'v2', p_inbound_id)
   returning id into v_id;
+  perform set_config('routing_v2.enrolling', '', true);
   return v_id;
 end;
 $$;
@@ -360,8 +370,10 @@ begin
     -- 5. Outbound intents. Takeover / suppression: alerts only, never an auto reply.
     for v_item in select * from jsonb_array_elements(coalesce(p_decision->'outbox', '[]'::jsonb)) loop
       if (v_item->>'kind') = 'alert' or v_outcome in ('applied','no_sequence') then
-        insert into public.routing_v2_outbox (org_id, property_id, inbound_message_id, transition_seq, kind, payload)
-        values (v_org, p_property_id, p_inbound_message_id, v_seq, v_item->>'kind', coalesce(v_item->'payload','{}'::jsonb));
+        insert into public.routing_v2_outbox (org_id, property_id, inbound_message_id, transition_seq, kind, engine, slice, payload)
+        values (v_org, p_property_id, p_inbound_message_id, v_seq, v_item->>'kind', 'v2',
+                coalesce(nullif(v_item->>'slice',''), case v_item->>'kind' when 'reply' then 'replies' else 'drips' end),
+                coalesce(v_item->'payload','{}'::jsonb));
       end if;
     end loop;
   end if;
@@ -424,7 +436,8 @@ begin
     v_reason := 'superseded';
   elsif v.kind = 'reply' and v_takeover is not null and v_takeover >= v_inbound_at then
     v_reason := 'human_takeover';
-  elsif v.kind = 'reply' and not public.routing_v2_slice_enabled(v.property_id, 'replies') then
+  elsif v.engine is distinct from 'v2' or not public.routing_v2_slice_enabled(v.property_id, v.slice) then
+    -- Every kind (alerts too): questions_live + the item's own slice + canary eligibility.
     v_reason := 'flag_off';
   end if;
 
@@ -544,14 +557,34 @@ end;
 $$;
 
 -- After an accepted send: the claim is consumed, so later replies only cancel unsent claims.
-create or replace function public.routing_v2_mark_drip_claim_sent(p_step_run_id uuid)
-returns void
-language sql
+-- p_outcome: 'sent' (provider accepted) or 'unknown' (provider may have sent). A reply that
+-- cancelled the claim while the provider call was in flight is corrected: the claim takes the
+-- real outcome and leaves the transition's cancelled_drip_claim_ids. Returns the claim id
+-- (null when the step run has no v2 claim, e.g. a legacy drip).
+create or replace function public.routing_v2_mark_drip_claim_sent(p_step_run_id uuid, p_outcome text default 'sent')
+returns uuid
+language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
-  update public.routing_v2_drip_send_claims set status = 'sent'
-  where step_run_id = p_step_run_id and status = 'open';
+declare
+  v_id uuid;
+begin
+  if p_outcome not in ('sent','unknown') then
+    raise exception 'ROUTING_V2_BAD_CLAIM_OUTCOME: %', p_outcome;
+  end if;
+  update public.routing_v2_drip_send_claims
+  set status = p_outcome,
+      cancel_reason = case when status = 'cancelled' then 'provider_accepted_after:' || coalesce(cancel_reason, '') else cancel_reason end
+  where step_run_id = p_step_run_id and status in ('open','cancelled','unknown')
+  returning id into v_id;
+  if v_id is not null then
+    update public.routing_v2_reply_transitions
+    set cancelled_drip_claim_ids = array_remove(cancelled_drip_claim_ids, v_id)
+    where v_id = any(cancelled_drip_claim_ids);
+  end if;
+  return v_id;
+end;
 $$;
 
 -- Chain at the end of a v2 drip (Said they'd call -> Book appointment v2). Only when the
@@ -600,8 +633,8 @@ revoke all on function public.routing_v2_claim_outbox(uuid) from public, anon, a
 revoke all on function public.routing_v2_enrollment_send_check(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_chain_after_completion(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_claim_drip_send(uuid, uuid) from public, anon, authenticated;
-revoke all on function public.routing_v2_mark_drip_claim_sent(uuid) from public, anon, authenticated;
-grant execute on function public.routing_v2_mark_drip_claim_sent(uuid) to service_role;
+revoke all on function public.routing_v2_mark_drip_claim_sent(uuid, text) from public, anon, authenticated;
+grant execute on function public.routing_v2_mark_drip_claim_sent(uuid, text) to service_role;
 grant execute on function public.routing_v2_claim_drip_send(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_slice_enabled(uuid, text) to service_role;
 grant execute on function public.routing_v2_contact_suppressed(uuid, uuid) to service_role;
@@ -819,9 +852,19 @@ language plpgsql
 set search_path = public, pg_temp
 as $$
 begin
+  if tg_op = 'UPDATE'
+     and new.sequence_id is not distinct from old.sequence_id
+     and new.routing_v2_engine is not distinct from old.routing_v2_engine
+     and new.routing_v2_inbound_id is not distinct from old.routing_v2_inbound_id then
+    return new;
+  end if;
+  -- A v2-marked row (new, or re-marked / re-pointed) must come from routing_v2_enroll.
+  if new.routing_v2_engine = 'v2'
+     and coalesce(current_setting('routing_v2.enrolling', true), '') <> 'on' then
+    raise exception using errcode = 'P0001',
+      message = 'ROUTING_V2_DRIP_LOCKED: routing v2 enrollments are created by route_reply_transition only';
+  end if;
   if new.routing_v2_engine is distinct from 'v2'
-     and (tg_op = 'INSERT' or new.sequence_id is distinct from old.sequence_id
-          or new.routing_v2_engine is distinct from old.routing_v2_engine)
      and exists (select 1 from public.sequences s where s.id = new.sequence_id and s.routing_v2_key is not null) then
     raise exception using errcode = 'P0001',
       message = 'ROUTING_V2_DRIP_LOCKED: only routing v2 enrolls leads into routing v2 drips';
@@ -830,7 +873,7 @@ begin
 end;
 $$;
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
-create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id, routing_v2_engine on public.sequence_enrollments
+create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id, routing_v2_engine, routing_v2_inbound_id on public.sequence_enrollments
   for each row execute function public.routing_v2_reject_foreign_enrollment();
 
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;

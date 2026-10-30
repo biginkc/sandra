@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { routingV2ClaimDripSend, routingV2TickGate } from "./tick-gate";
+import { routingV2ClaimDripSend, routingV2MarkDripClaimSent, routingV2TickGate } from "./tick-gate";
 
 function client(opts: { key: string | null; check?: string; slotWindow?: string | null }) {
   const rpc = vi.fn(async () => ({ data: opts.check ?? "ok", error: null }));
@@ -72,5 +72,19 @@ describe("routingV2ClaimDripSend", () => {
     expect(await routingV2ClaimDripSend(c, "e1", "r1")).toEqual({ ok: false, reason: "not_active", error: false });
     rpc.mockResolvedValueOnce({ data: null, error: { message: "x" } });
     expect(await routingV2ClaimDripSend(c, "e1", "r1")).toEqual({ ok: false, reason: "routing_v2_claim_failed: x", error: true });
+  });
+});
+
+describe("routingV2MarkDripClaimSent", () => {
+  it("returns errors instead of swallowing them", async () => {
+    const rpc = vi.fn();
+    const c = { rpc } as never;
+    rpc.mockResolvedValueOnce({ data: "claim-1", error: null });
+    expect(await routingV2MarkDripClaimSent(c, "r1")).toBeNull();
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "r1", p_outcome: "sent" });
+    rpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+    expect(await routingV2MarkDripClaimSent(c, "r1", "unknown")).toBe("routing v2 claim close failed: boom");
+    rpc.mockRejectedValueOnce(new Error("net"));
+    expect(await routingV2MarkDripClaimSent(c, "r1")).toBe("routing v2 claim close failed: net");
   });
 });
