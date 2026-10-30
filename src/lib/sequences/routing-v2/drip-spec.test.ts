@@ -11,7 +11,7 @@ import { OPT_OUT_PHRASES } from "../opt-out";
 import { smsSegments } from "./sms-segments";
 
 const MIGRATION = readFileSync(
-  path.join(process.cwd(), "supabase/migrations/20261030140000_routing_v2_versioned_drips.sql"),
+  path.join(process.cwd(), "supabase/migrations/20261030181000_routing_v2_versioned_drips.sql"),
   "utf8",
 );
 

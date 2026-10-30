@@ -162,7 +162,7 @@ export default defineConfig({
       "supabase/migrations/20261030131000_auto_reply_templates_routing_v2_keys.integration.test.ts",
       "supabase/migrations/20261030180000_routing_v2_dealmachine_value_cache.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
-      "supabase/migrations/20261030140000_routing_v2_versioned_drips.integration.test.ts",
+      "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
