@@ -202,10 +202,24 @@ describe("routing v2 — deterministic fixtures", () => {
     ["I'm Driving\n\n- Sent from My Car", "driving_reply+book_appointment"],
     ["The number you are sending an SMS to,currently has no SMS capabilities.", "bad_number"],
   ])("code pre-check: %s", (reply, road) => {
-    const d = routeV2(input({ asked_stop: 0.99 }, reply));
+    const d = routeV2(input({ asked_call: 0.99 }, reply));
     expect(d.road).toBe(road);
     expect(d.provenance.by).toBe("code");
     expect(d.haiku).toBeNull();
+  });
+
+  it.each([
+    ["STOP, I'm driving", { asked_stop: 0.99 }, "asked_stop"],
+    ["Loved “F off”", { hostile: 0.9 }, "hostile"],
+    ["The number you are sending an SMS to,currently has no SMS capabilities. lawyer", { legal: 0.8 }, "legal"],
+  ] as const)("stop/legal/hostile beat code pre-checks: %s", (reply, p, signal) => {
+    const d = routeV2(input({ ...p }, reply));
+    expect(d.road).toBe("stop");
+    expect(d.provenance).toMatchObject({ by: "jev", signal });
+  });
+
+  it("code pre-check still wins when stop signals sit below cutoff", () => {
+    expect(routeV2(input({ asked_stop: 0.59, hostile: 0.59, legal: 0.59 }, "I'm driving")).road).toBe("driving_reply+book_appointment");
   });
 
   it("plain text is not a code pre-check", () => {

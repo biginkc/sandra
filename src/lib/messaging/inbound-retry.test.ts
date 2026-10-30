@@ -31,6 +31,11 @@ const mocks = vi.hoisted(() => ({
   optOut: vi.fn(async () => undefined),
   applyKeyword: vi.fn(async (..._a: unknown[]) => ({ escalated: false }) as unknown),
   checkHot: vi.fn(async (..._a: unknown[]) => undefined),
+  scheduleShadow: vi.fn((..._a: unknown[]) => undefined),
+}));
+
+vi.mock("@/lib/sms-classification/routing-v2/shadow", () => ({
+  scheduleRoutingV2Shadow: mocks.scheduleShadow,
 }));
 
 vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => ({
@@ -423,6 +428,52 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
       "message-1",
       { aiResponder: expect.objectContaining({ outcome: "escalated", reason: "send_reserved_elsewhere" }) },
     );
+  });
+
+  it("routing v2 shadow: scheduled only AFTER the inline terminal stamp, with the live outcome and inbound ids", async () => {
+    const order: string[] = [];
+    mocks.markState.mockImplementation((async (_s: unknown, _id: unknown, patch: { aiResponder?: { outcome?: string } }) => {
+      if (patch?.aiResponder) order.push(`stamp:${patch.aiResponder.outcome}`);
+    }) as never);
+    mocks.scheduleShadow.mockImplementationOnce(() => {
+      order.push("shadow");
+    });
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "sent", messageId: "out-1", confidence: 0.9 } as never);
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(order).toEqual(["stamp:sent", "shadow"]);
+    expect((mocks.scheduleShadow.mock.calls[0] as unknown[])[1]).toEqual({
+      propertyId: "property-1",
+      contactId: "contact-1",
+      conversationId: "conversation-1",
+      inboundMessageId: "message-1",
+      inboundBody: INPUT.body,
+      liveOutcome: "sent",
+    });
+    mocks.markState.mockImplementation(async () => undefined);
+  });
+
+  it("routing v2 shadow: when the retry cannot be scheduled, the terminal escalation is shadowed after its stamp", async () => {
+    const order: string[] = [];
+    mocks.markState.mockImplementation((async (_s: unknown, _id: unknown, patch: { aiResponder?: { outcome?: string } }) => {
+      if (patch?.aiResponder) order.push(`stamp:${patch.aiResponder.outcome}`);
+    }) as never);
+    mocks.scheduleShadow.mockImplementationOnce(() => {
+      order.push("shadow");
+    });
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    await runWebhook();
+    expect(order).toEqual(["stamp:escalated", "shadow"]);
+    expect(mocks.scheduleShadow).toHaveBeenCalledTimes(1);
+    expect((mocks.scheduleShadow.mock.calls[0] as unknown[])[1]).toMatchObject({ inboundMessageId: "message-1", liveOutcome: "escalated" });
+    mocks.markState.mockImplementation(async () => undefined);
+  });
+
+  it("routing v2 shadow: a retry outcome is not shadowed inline (the delay workflow shadows its terminal outcome)", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    await runWebhook();
+    expect(mocks.scheduleShadow).not.toHaveBeenCalled();
   });
 
   it("an immediate silent exit stamps skipped:rule_<n> (not bare skipped), and a redelivery then skips dispatch", async () => {

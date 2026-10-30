@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 import { PROPERTY_TYPE_OPTIONS, V2_QUESTION_IDS } from "./questions";
-import { runRoutingV2Shadow } from "./shadow";
+import { runRoutingV2Shadow, scheduleRoutingV2Shadow, shadowFailureReason } from "./shadow";
+
+const ON = { routing_v2_flags: { shadow: true }, classifier_provider: "jev", classifier_engine: "nine_questions", classifier_mode: "automatic" };
 
 type Call = { table: string; op: string; payload?: unknown };
 
@@ -57,8 +59,8 @@ describe("routing v2 shadow hook", () => {
 
   it("writes the v2 decision to the shadow log only", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ answers: jevAnswers({ asked_call: 0.9 }), model: "jev" }), { status: 200 }));
-    const { client, calls } = stub((table) =>
-      table === "ai_responder_configs" ? { data: { routing_v2_flags: { shadow: true } }, error: null } : { data: [], error: null },
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
     );
     expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("decided");
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -69,18 +71,39 @@ describe("routing v2 shadow hook", () => {
 
   it("never throws into the live path: Jev failure is logged and swallowed", async () => {
     const fetch = vi.fn(async () => new Response("boom", { status: 401 }));
-    const { client, calls } = stub((table) =>
-      table === "ai_responder_configs" ? { data: { routing_v2_flags: { shadow: true } }, error: null } : { data: [], error: null },
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
     );
     expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
     expect(calls.find((c) => c.op === "insert")?.payload).toMatchObject({ status: "failed" });
+  });
+
+  it.each([
+    [() => new Response("echo: homeowner said SECRET", { status: 502 }), "jev_http_502"],
+    [() => new Response("echo: homeowner said SECRET", { status: 400 }), "jev_http_400"],
+    [() => new Response("not json SECRET", { status: 200 }), "jev_invalid_response"],
+    [() => { throw Object.assign(new Error("aborted SECRET"), { name: "AbortError" }); }, "jev_timeout"],
+    [() => { throw new TypeError("fetch failed SECRET"); }, "jev_network_error"],
+  ])("stores only a sanitized failure category, never raw error text (%#)", async (respond, reason) => {
+    const fetch = vi.fn(async () => respond());
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
+    );
+    expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
+    const payload = calls.find((c) => c.op === "insert")?.payload as Record<string, unknown>;
+    expect(payload.failure_reason).toBe(reason);
+    expect(JSON.stringify(payload)).not.toContain("SECRET");
+  });
+
+  it("a database failure is stored as db_error", () => {
+    expect(shadowFailureReason(new Error("relation messages SECRET"))).toBe("db_error");
   });
 
   it("never throws even when the database itself throws", async () => {
     const fetch = vi.fn();
     const { client } = stub(() => new Error("db down"));
     await expect(runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).resolves.toBe("off");
-    const flagOn = stub((table) => (table === "ai_responder_configs" ? { data: { routing_v2_flags: { shadow: true } }, error: null } : new Error("db down")));
+    const flagOn = stub((table) => (table === "ai_responder_configs" ? { data: ON, error: null } : new Error("db down")));
     await expect(runRoutingV2Shadow(flagOn.client, INPUT, { fetch, typesafeApiKey: "k" })).resolves.toBe("failed");
   });
 
@@ -88,13 +111,85 @@ describe("routing v2 shadow hook", () => {
     const answers = jevAnswers();
     delete answers.asked_stop;
     const fetch = vi.fn(async () => new Response(JSON.stringify({ answers }), { status: 200 }));
-    const { client, calls } = stub((table) =>
-      table === "ai_responder_configs" ? { data: { routing_v2_flags: { shadow: true } }, error: null } : { data: [], error: null },
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
     );
     expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
     const payload = calls.find((c) => c.op === "insert")?.payload as Record<string, unknown>;
     expect(payload.status).toBe("failed");
     expect(String(payload.failure_reason)).toContain("asked_stop");
     expect(payload).not.toHaveProperty("road");
+  });
+
+  it("only shadows orgs on the automatic nine-questions engine", async () => {
+    const fetch = vi.fn();
+    for (const cfg of [
+      { ...ON, classifier_mode: "shadow" },
+      { ...ON, classifier_engine: "outcome_v1" },
+      { ...ON, classifier_provider: "openai" },
+    ]) {
+      const { client } = stub((table) => (table === "ai_responder_configs" ? { data: cfg, error: null } : { data: null, error: null }));
+      expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("off");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("skips Jev when a shadow row already exists for this inbound (retry / deferral / redelivery)", async () => {
+    const fetch = vi.fn();
+    const { client, calls } = stub((table, op) =>
+      table === "ai_responder_configs"
+        ? { data: ON, error: null }
+        : table === "routing_v2_shadow_decisions" && op === "select"
+          ? { data: { id: "existing" }, error: null }
+          : { data: [], error: null },
+    );
+    expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("skipped");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.op === "insert")).toEqual([]);
+  });
+
+  it("does not call Jev when the existing-row check itself fails", async () => {
+    const fetch = vi.fn();
+    const { client } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: { message: "boom" } } : { data: [], error: null },
+    );
+    expect(await runRoutingV2Shadow(client, INPUT, { fetch, typesafeApiKey: "k" })).toBe("failed");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("resolves the org from the property when the caller has no org id", async () => {
+    const fetch = vi.fn();
+    const { client, calls } = stub((table) =>
+      table === "properties" ? { data: { org_id: "o2" }, error: null } : { data: { routing_v2_flags: { shadow: false } }, error: null },
+    );
+    const noOrg = { ...INPUT, orgId: null };
+    expect(await runRoutingV2Shadow(client, noOrg, { fetch, typesafeApiKey: "k" })).toBe("off");
+    expect(calls.map((c) => c.table)).toEqual(["properties", "ai_responder_configs"]);
+  });
+});
+
+describe("scheduleRoutingV2Shadow (inline webhook path)", () => {
+  it("returns immediately: a hanging shadow never holds the caller", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const neverFetch = vi.fn(() => new Promise<Response>(() => {}));
+    const { client } = stub((table, op) =>
+      table === "ai_responder_configs" ? { data: ON, error: null } : table === "routing_v2_shadow_decisions" && op === "select" ? { data: null, error: null } : { data: [], error: null },
+    );
+    const ret = scheduleRoutingV2Shadow(client, INPUT, { fetch: neverFetch, typesafeApiKey: "k" }, (t) => {
+      tasks.push(t);
+    });
+    expect(ret).toBeUndefined();
+    expect(tasks).toHaveLength(1); // deferred to after(), not run inline
+    expect(neverFetch).not.toHaveBeenCalled();
+    void tasks[0](); // runs (and hangs) after the response; nothing awaits it
+  });
+
+  it("falls back to a detached run when after() is unavailable, and never throws", () => {
+    const { client } = stub(() => new Error("db down"));
+    expect(() =>
+      scheduleRoutingV2Shadow(client, INPUT, { fetch: vi.fn(), typesafeApiKey: "k" }, () => {
+        throw new Error("after() outside request scope");
+      }),
+    ).not.toThrow();
   });
 });

@@ -74,6 +74,7 @@ import {
   startRun,
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
+import { scheduleRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
@@ -1839,6 +1840,7 @@ async function dispatchAndStampAiResponder(
       outcome: terminal,
       runContext,
     });
+    scheduleShadowAfterStamp(supabase, input, terminal.outcome);
     return terminal;
   }
   await stampAiResponderTerminalOutcome(supabase, {
@@ -1847,7 +1849,32 @@ async function dispatchAndStampAiResponder(
     outcome,
     runContext,
   });
+  scheduleShadowAfterStamp(supabase, input, outcome.outcome);
   return outcome;
+}
+
+/**
+ * Routing v2 PR-A: record-only shadow, scheduled only after the live terminal stamp and run
+ * after the webhook response (after()); it never delays or alters the live path. A successfully
+ * scheduled retry is not shadowed here: the delay workflow shadows after its own stamp.
+ */
+function scheduleShadowAfterStamp(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  liveOutcome: AiDispatchOutcome["outcome"],
+): void {
+  scheduleRoutingV2Shadow(
+    supabase,
+    {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+      liveOutcome,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+  );
 }
 
 async function scheduleReplyRetry(
