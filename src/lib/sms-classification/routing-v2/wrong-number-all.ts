@@ -57,7 +57,10 @@ export function phoneActionCandidate(
   if (p.signal !== "wrong_person") return { kind: null, reason: "not_wrong_person" };
   if (!(p.probability >= WRONG_NUMBER_ALL_MIN_PROBABILITY)) return { kind: null, reason: "below_cutoff" };
   if (wrongScope !== "all") return { kind: null, reason: "scope_not_all" };
-  // A Jev answer in the 0.50–0.70 band goes to Haiku first; only a confirmed road may act.
+  // ORDER-TABLE: the Jev ≥0.60 road wins; in the 0.50–0.70 band Haiku decides; if Haiku is
+  // unsure, Jev's road stands (applyHaikuPolicy → road wrong_number_close, by jev_haiku_unsure).
+  // A Haiku hold/failure or a different Haiku road does not qualify. The SQL re-derives this from
+  // the persisted decision row; this check only saves a round trip.
   if (shouldAskHaiku(decision)) {
     if (!final) return { kind: null, reason: "haiku_pending" };
     if (final.hold || final.road !== "wrong_number_close") return { kind: null, reason: "haiku_not_confirmed" };
@@ -316,7 +319,7 @@ export type UndoRoutingV2PhoneActionResult =
       resumed: number;
       notResumed: Array<{ enrollmentId: string; outcome: string }>;
     }
-  | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "FAILED"; message: string };
+  | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "BUSY" | "FAILED"; message: string };
 
 /**
  * C. A person undoes the action, in one transaction under the phone lock: each property goes
@@ -347,6 +350,7 @@ export async function undoRoutingV2PhoneAction(
     resumed?: number;
     notResumed?: Array<{ enrollmentId: string; outcome: string }>;
   };
+  if (r.status === "busy") return { ok: false, code: "BUSY", message: "Busy right now. Try again in a moment." };
   const status = r.status === "already_undone" ? "already_undone" : r.status === "partial" ? "partial" : "undone";
   return {
     ok: true,

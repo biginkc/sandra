@@ -217,6 +217,7 @@ declare
   v_applied uuid[] := '{}';
   v_skipped jsonb := '[]'::jsonb;
   v_skips jsonb := '{}'::jsonb;
+  v_dec record;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -225,7 +226,7 @@ begin
     raise exception 'unsupported routing v2 phone action: %', p_action using errcode = '22023';
   end if;
 
-  select m.id, m.org_id, m.property_id, m.from_address, m.created_at
+  select m.id, m.org_id, m.property_id, m.from_address, m.created_at, m.body
   into v_message
   from public.messages m
   where m.id = p_source_inbound_message_id and m.channel = 'sms' and m.direction = 'inbound';
@@ -234,6 +235,50 @@ begin
   end if;
   if length(v_digits) <> 10 or v_digits <> public.routing_v2_phone_digits(v_message.from_address) then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'phone_mismatch');
+  end if;
+
+  -- Never trust the caller's description of the decision: re-derive it from the persisted
+  -- v2 decision for THIS inbound (routing_v2_shadow_decisions, PR-A/PR-D). Only the scope is a
+  -- caller input (the v2 question set has no scope question; the cutover PR supplies it).
+  select d.road, d.provenance, d.haiku_eligibility, d.haiku
+  into v_dec
+  from public.routing_v2_shadow_decisions d
+  where d.inbound_message_id = p_source_inbound_message_id
+    and d.org_id = v_message.org_id and d.property_id = v_message.property_id
+    and d.status = 'decided';
+  if not found then
+    return jsonb_build_object('status', 'not_applicable', 'reason', 'no_decision_record');
+  end if;
+  if p_action = 'wrong_number_all' then
+    -- ORDER-TABLE: a Jev wrong-person answer >= 0.60 is the road; in the 0.50-0.70 band Haiku
+    -- decides, and if Haiku is unsure Jev's road stands (applyHaikuPolicy final_road).
+    if v_dec.road is distinct from 'wrong_number_close'
+       or v_dec.provenance->>'by' is distinct from 'jev'
+       or v_dec.provenance->>'signal' is distinct from 'wrong_person'
+       or jsonb_typeof(v_dec.provenance->'probability') is distinct from 'number'
+       or (v_dec.provenance->>'probability')::numeric < 0.6 then
+      return jsonb_build_object('status', 'not_applicable', 'reason', 'decision_not_wrong_person');
+    end if;
+    if v_dec.haiku_eligibility is not null and (
+         v_dec.haiku is null
+      or jsonb_typeof(v_dec.haiku->'hold') is distinct from 'boolean'
+      or (v_dec.haiku->>'hold')::boolean
+      or v_dec.haiku->>'final_road' is distinct from 'wrong_number_close'
+    ) then
+      return jsonb_build_object('status', 'not_applicable', 'reason', 'haiku_not_confirmed');
+    end if;
+    if coalesce(p_decision->>'wrong_scope', '') <> 'all' then
+      return jsonb_build_object('status', 'not_applicable', 'reason', 'scope_not_all');
+    end if;
+  else
+    -- The bounce code check (PR-A route.ts codePreCheck) recorded on the decision, and the
+    -- inbound text itself still matches that detector.
+    if v_dec.road is distinct from 'bad_number'
+       or v_dec.provenance->>'by' is distinct from 'code'
+       or v_dec.provenance->>'check' is distinct from 'bad_number'
+       or coalesce(v_message.body, '') !~* '(no sms capabilit|unable to receive)' then
+      return jsonb_build_object('status', 'not_applicable', 'reason', 'decision_not_bounce');
+    end if;
   end if;
 
   -- Serialize every v2 phone action and undo for this phone.
@@ -547,6 +592,8 @@ returns jsonb
 language plpgsql
 security definer
 set search_path = public, pg_temp
+-- Undo waits at most this long for the suppression table lock, then reports busy.
+set lock_timeout = '3s'
 as $$
 declare
   v_actor uuid := auth.uid();
@@ -588,11 +635,30 @@ begin
       'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
   end if;
 
-  perform 1 from public.sms_phone_suppressions sp
-  where sp.org_id = v_action.org_id and sp.channel = 'sms'
-    and public.routing_v2_phone_digits(sp.phone_e164) = public.routing_v2_phone_digits(v_action.phone_e164)
-  for update;
-  v_phone_suppressed := found;
+  -- Undo is rare and short: SHARE mode blocks every concurrent suppression insert/update
+  -- (from any writer, lock or not) until this transaction commits, so the check below cannot
+  -- be overtaken. Held only for this undo transaction (milliseconds; at most lock_timeout
+  -- waiting to get it). Busy = nothing changed; retry later.
+  begin
+    lock table public.sms_phone_suppressions in share mode;
+  exception when lock_not_available then
+    return jsonb_build_object('status', 'busy', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
+      'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
+  end;
+  v_phone_suppressed := exists (
+    select 1 from public.sms_phone_suppressions sp
+    where sp.org_id = v_action.org_id and sp.channel = 'sms'
+      and public.routing_v2_phone_digits(sp.phone_e164) = public.routing_v2_phone_digits(v_action.phone_e164)
+  );
+  -- The only contact data undo reads is each homeowner contact's opt-out flags (existing
+  -- rows): share-lock those rows so an opt-out cannot commit between check and restore.
+  perform 1 from public.contacts c
+  where c.id in (
+    select p.homeowner_contact_id from public.properties p
+    join public.routing_v2_phone_action_properties ap on ap.property_id = p.id
+    where ap.action_id = v_action.id and ap.outcome = 'applied' and ap.undone_at is null
+  )
+  order by c.id for share;
 
   for v_row in
     select * from public.routing_v2_phone_action_properties

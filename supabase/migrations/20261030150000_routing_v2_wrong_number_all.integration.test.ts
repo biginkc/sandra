@@ -49,6 +49,27 @@ async function setFlags(flags: Record<string, unknown>) {
 
 const ON = { questions_live: true, wrong_number_all: true, canary_percent: 100 };
 
+/** Insert the persisted v2 decision row for an inbound (routing_v2_shadow_decisions). */
+async function decide(
+  msg: string,
+  over: { road?: string | null; provenance?: unknown; haikuEligibility?: string | null; haiku?: unknown; propertyId?: string; status?: string } = {},
+) {
+  await db.query(
+    `insert into public.routing_v2_shadow_decisions (org_id, property_id, inbound_message_id, status, road, provenance, haiku_eligibility, haiku)
+     values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb)`,
+    [
+      orgId,
+      over.propertyId ?? ids.p1,
+      msg,
+      over.status ?? "decided",
+      "road" in over ? over.road : "wrong_number_close",
+      JSON.stringify(over.provenance ?? { by: "jev", row: "3", step: "wrong", signal: "wrong_person", probability: 0.9 }),
+      over.haikuEligibility ?? null,
+      over.haiku === undefined ? null : JSON.stringify(over.haiku),
+    ],
+  );
+}
+
 beforeEach(async () => {
   await db.query("begin");
   await db.query(MIGRATION);
@@ -84,6 +105,8 @@ beforeEach(async () => {
      values ($1, $2, $3, $4, 'sms', 'inbound', 'wrong number', $5, now() - interval '1 minute')`,
     [inbound, orgId, ids.p1, ids.conv, X],
   );
+  // The persisted v2 decision for the inbound (PR-A shadow log): wrong person at 0.9, no Haiku band.
+  await decide(inbound);
   // Drips: active on p2 (target), p4 (other phone) and p5 (skipped); already paused on p3.
   for (const k of ["e2", "e4", "e5", "e3", "seq"]) ids[k] = randomUUID();
   await db.query(`insert into public.sequences (id, org_id, name) values ($1, $2, 'prg drip')`, [ids.seq, orgId]);
@@ -138,10 +161,17 @@ async function asUser<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const applyAll = (action = "wrong_number_all", msg = inbound, phone = X, expectedRevision: number | null = null) =>
+const applyAll = (action = "wrong_number_all", msg = inbound, phone = X, expectedRevision: number | null = null, decision: unknown = { wrong_scope: "all" }) =>
   asService(async () =>
-    (await db.query(`select public.fn_routing_v2_phone_action_apply_all($1, $2, $3, '{}'::jsonb, $4) as r`, [msg, action, phone, expectedRevision])).rows[0].r,
+    (await db.query(`select public.fn_routing_v2_phone_action_apply_all($1, $2, $3, $4::jsonb, $5) as r`, [msg, action, phone, JSON.stringify(decision), expectedRevision])).rows[0].r,
   );
+/** Make the source inbound a "no SMS capabilities" bounce, with its persisted code-check decision. */
+const asBounce = async () => {
+  await db.query("set local session_replication_role = replica");
+  await db.query(`update public.messages set body = 'This number has no SMS capabilities' where id = $1`, [inbound]);
+  await db.query("set local session_replication_role = origin");
+  await db.query(`update public.routing_v2_shadow_decisions set road = 'bad_number', provenance = '{"by":"code","check":"bad_number"}' where inbound_message_id = $1`, [inbound]);
+};
 const reply = (actionId: string, sendId: string, to: string, messageId: string | null = null) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_reply($1, $2, $3, $4, null) as r`, [actionId, sendId, to, messageId])).rows[0].r);
 const recover = (actionId: string) =>
@@ -232,6 +262,7 @@ describe("A. atomic apply", () => {
   it("D. an older inbound from the same phone is superseded (any property); only the newest applies", async () => {
     await setFlags(ON);
     const newer = await insertInbound(ids.p2, "now()");
+    await decide(newer, { propertyId: ids.p2 });
     const before = await everything();
     expect(await applyAll("wrong_number_all", inbound)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
     expect(await everything()).toEqual(before);
@@ -241,6 +272,7 @@ describe("A. atomic apply", () => {
   it("D. the newest inbound applies once; the older one stays superseded afterwards", async () => {
     await setFlags(ON);
     const older = await insertInbound(ids.p1, "now() - interval '10 minutes'");
+    await decide(older);
     expect((await applyAll("wrong_number_all", inbound)).status).toBe("applied");
     expect(await applyAll("wrong_number_all", older)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
     expect(await count("routing_v2_phone_actions")).toBe(1);
@@ -304,6 +336,59 @@ describe("A. atomic apply", () => {
     expect((await applyAll()).status).toBe("applied");
   });
 
+  it("never trusts the caller's decision: re-derived from the persisted v2 decision row", async () => {
+    await setFlags(ON);
+    const before = await everything();
+    // Caller passes {} (no scope) → refused.
+    expect(await applyAll("wrong_number_all", inbound, X, null, {})).toEqual({ status: "not_applicable", reason: "scope_not_all" });
+    // Caller claims a bounce that the decision row does not show → refused.
+    expect(await applyAll("bad_number")).toEqual({ status: "not_applicable", reason: "decision_not_bounce" });
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ road: "not_interested_drip" }, "decision_not_wrong_person"],
+      [{ provenance: { by: "jev", signal: "already_sold", probability: 0.9 } }, "decision_not_wrong_person"],
+      [{ provenance: { by: "jev", signal: "wrong_person", probability: 0.59 } }, "decision_not_wrong_person"],
+      [{ provenance: { by: "jev", signal: "wrong_person", probability: "0.9" } }, "decision_not_wrong_person"],
+      [{ provenance: { by: "code", check: "bad_number" } }, "decision_not_wrong_person"],
+      [{ haikuEligibility: "decider_band" }, "haiku_not_confirmed"], // band, Haiku never asked
+      [{ haikuEligibility: "decider_band", haiku: { final_road: "not_interested_drip", hold: false } }, "haiku_not_confirmed"],
+      [{ haikuEligibility: "decider_band", haiku: { final_road: null, hold: true } }, "haiku_not_confirmed"],
+      [{ status: "failed", road: null }, "no_decision_record"],
+    ];
+    for (const [over, reason] of cases) {
+      await db.query(`delete from public.routing_v2_shadow_decisions where inbound_message_id = $1`, [inbound]);
+      await decide(inbound, over);
+      expect(await applyAll(), JSON.stringify(over)).toEqual({ status: "not_applicable", reason });
+    }
+    // Missing decision row.
+    await db.query(`delete from public.routing_v2_shadow_decisions where inbound_message_id = $1`, [inbound]);
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "no_decision_record" });
+    // A decision row for another property is not this inbound's.
+    await decide(inbound, { propertyId: ids.p2 });
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "no_decision_record" });
+    expect(await everything()).toEqual(before);
+  });
+
+  it("band rule: Jev 0.65 + Haiku unsure (Jev's road stands) qualifies; 0.55 + unsure does not", async () => {
+    await setFlags(ON);
+    await db.query(`delete from public.routing_v2_shadow_decisions where inbound_message_id = $1`, [inbound]);
+    await decide(inbound, {
+      provenance: { by: "jev", signal: "wrong_person", probability: 0.55 },
+      haikuEligibility: "decider_band",
+      haiku: { asked: true, option: "needs_person", final_road: "wrong_number_close", final_by: "jev_haiku_unsure", hold: false },
+    });
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "decision_not_wrong_person" });
+    await db.query(`update public.routing_v2_shadow_decisions set provenance = jsonb_set(provenance, '{probability}', '0.65') where inbound_message_id = $1`, [inbound]);
+    expect((await applyAll()).status).toBe("applied");
+  });
+
+  it("bounce needs both the recorded code check and the bounce text", async () => {
+    await setFlags(ON);
+    await db.query(`update public.routing_v2_shadow_decisions set road = 'bad_number', provenance = '{"by":"code","check":"bad_number"}' where inbound_message_id = $1`, [inbound]);
+    expect(await applyAll("bad_number")).toEqual({ status: "not_applicable", reason: "decision_not_bounce" }); // body is "wrong number"
+    await asBounce();
+    expect((await applyAll("bad_number")).status).toBe("applied");
+  });
+
   it("phone mismatch and non-service callers are refused", async () => {
     await setFlags(ON);
     expect(await applyAll("wrong_number_all", inbound, Y)).toEqual({ status: "not_applicable", reason: "phone_mismatch" });
@@ -316,6 +401,7 @@ describe("A. atomic apply", () => {
 
   it("bad_number (bounce): only the landed property, no drip pause, reply not needed", async () => {
     await setFlags(ON);
+    await asBounce();
     const r = await applyAll("bad_number");
     expect(r).toMatchObject({ status: "applied", applied: [ids.p1], skipped: [], replyState: "not_needed" });
     expect(await dispo(ids.p1)).toBe("bad_number");
@@ -452,6 +538,33 @@ describe("C. undo", () => {
     expect(feed).not.toContain(r.actionId);
   });
 
+  it("undo takes a SHARE lock on sms_phone_suppressions: concurrent inserts wait; a held conflicting lock = busy, nothing changed", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    const other = new Client({ connectionString: url });
+    await other.connect();
+    try {
+      // 1. Another writer is mid-insert (ROW EXCLUSIVE held): undo gives up after lock_timeout, changes nothing.
+      await other.query("begin");
+      await other.query("lock table public.sms_phone_suppressions in row exclusive mode");
+      const t0 = Date.now();
+      expect(await undo(ownerId, r.actionId)).toMatchObject({ status: "busy", restored: [] });
+      expect(Date.now() - t0).toBeLessThan(10_000);
+      expect(await dispo(ids.p1)).toBe("wrong_number");
+      await other.query("rollback");
+      // 2. Undo holds SHARE until its transaction ends: another writer's insert cannot slip in.
+      expect((await undo(ownerId, r.actionId)).status).toBe("undone");
+      await other.query("begin");
+      await other.query("set local lock_timeout = '300ms'");
+      await expect(
+        other.query(`insert into public.sms_phone_suppressions (org_id, phone_e164, source) values ($1, $2, 'stop')`, [randomUUID(), X]),
+      ).rejects.toThrow(/lock timeout/);
+      await other.query("rollback");
+    } finally {
+      await other.end();
+    }
+  });
+
   it("refuses a user without org access", async () => {
     await setFlags(ON);
     const r = await applyAll();
@@ -461,6 +574,7 @@ describe("C. undo", () => {
   it("bad_number undo restores the landed property", async () => {
     await setFlags(ON);
     const before = await snapshot();
+    await asBounce();
     const r = await applyAll("bad_number");
     await undo(ownerId, r.actionId);
     expect(await snapshot()).toEqual(before);

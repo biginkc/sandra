@@ -57,6 +57,13 @@ describe("phoneActionCandidate (scope)", () => {
     expect(phoneActionCandidate(d, "all", final({ road: null, hold: true, by: "haiku_failed" }))).toEqual({ kind: null, reason: "haiku_not_confirmed" });
     expect(phoneActionCandidate(d, "all", final({ by: "jev_haiku_unsure" })).kind).toBe("wrong_number_all");
   });
+  it("ORDER-TABLE band rule: Jev 0.65 + Haiku unsure → Jev's road stands → qualifies; Jev 0.55 + unsure → below 0.60, not", () => {
+    const unsure = final({ by: "jev_haiku_unsure", road: "wrong_number_close" });
+    expect(phoneActionCandidate(jev("wrong_person", 0.65, "wrong_number_close", "decider_band"), "all", unsure)).toEqual({
+      kind: "wrong_number_all", signal: "wrong_person", probability: 0.65,
+    });
+    expect(phoneActionCandidate(jev("wrong_person", 0.55, "wrong_number_close", "decider_band"), "all", unsure)).toEqual({ kind: null, reason: "below_cutoff" });
+  });
   it("no SMS capabilities bounce (code check) → bad_number", () => {
     expect(phoneActionCandidate(bounce, null)).toEqual({ kind: "bad_number", signal: "code:bad_number", probability: null });
   });
@@ -339,6 +346,8 @@ describe("undoRoutingV2PhoneAction", () => {
       const { db } = fakeDb({ rpc: { fn_undo_routing_v2_phone_action: () => ({ error: { message: m } }) } });
       expect(await undoRoutingV2PhoneAction(db, "a1")).toMatchObject({ ok: false, code });
     }
+    const { db } = fakeDb({ rpc: { fn_undo_routing_v2_phone_action: () => ({ data: { status: "busy" } }) } });
+    expect(await undoRoutingV2PhoneAction(db, "a1")).toMatchObject({ ok: false, code: "BUSY" });
   });
 });
 
