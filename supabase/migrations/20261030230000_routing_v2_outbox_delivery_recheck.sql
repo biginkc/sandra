@@ -22,11 +22,13 @@
 -- 4. Newer-reply supersession cancels ONLY auto replies to the seller: route_reply_transition
 --    step 6 and routing_v2_claim_outbox (PR-C, 20261030140000) are re-created with that one
 --    change each (a "Tuesday 3pm" call-me alert is never lost because the seller adds "Thanks").
+--    routing_v2_cancel_for_takeover is re-created to cancel auto replies only, never alerts.
 --    The rollback restores PR-C's definitions byte-for-byte.
 -- 3. A takeover (properties.last_person_takeover_at moving forward: manual text, confirmed
---    new_lead, person assignment) cancels the property's still-PENDING v2 reply rows under the
---    same routing_v2 property lock, in the same transaction as the takeover marker. Claimed
---    rows are left to the delivery re-check above (they may already be in flight).
+--    new_lead, person assignment) best-effort cancels the property's still-PENDING v2 reply
+--    rows, in the same transaction as the takeover marker, only if it gets the routing_v2
+--    property lock WITHOUT waiting; errors are swallowed, so a takeover never blocks or fails.
+--    Anything it skips (lock busy, claimed rows) is refused by the delivery re-checks above.
 --
 -- Rollback: supabase/rollbacks/20261030230000_routing_v2_outbox_delivery_recheck.sql
 begin;
@@ -93,19 +95,37 @@ language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
+declare
+  v_lock_timeout text;
 begin
-  -- Never break a takeover: if the PR-C outbox is gone (schema rolled back), do nothing.
-  if to_regclass('public.routing_v2_outbox') is null then
-    return new;
-  end if;
-  if not exists (select 1 from public.routing_v2_outbox o
-                 where o.property_id = new.id and o.kind = 'reply' and o.status = 'pending') then
-    return new;
-  end if;
-  perform pg_advisory_xact_lock(hashtext('routing_v2:' || new.id::text));
-  update public.routing_v2_outbox o
-  set status = 'cancelled', cancel_reason = 'human_takeover'
-  where o.property_id = new.id and o.kind = 'reply' and o.status = 'pending';
+  -- A person's takeover must never block or fail because of routing v2. Best-effort only:
+  -- * no wait: try the property lock; if a routing step holds it, skip. The queued auto reply
+  --   is still refused later (routing_v2_claim_outbox / routing_v2_authorize_outbox_send both
+  --   refuse a reply whose inbound is not newer than last_person_takeover_at);
+  -- * a short row-lock wait at most (lock_timeout 50ms for the cancel, restored after);
+  -- * any error is swallowed (the cancel rolls back alone, the takeover commits).
+  begin
+    if to_regclass('public.routing_v2_outbox') is null then
+      return new;
+    end if;
+    if not exists (select 1 from public.routing_v2_outbox o
+                   where o.property_id = new.id and o.kind = 'reply' and o.status = 'pending') then
+      return new;
+    end if;
+    if not pg_try_advisory_xact_lock(hashtext('routing_v2:' || new.id::text)) then
+      return new;
+    end if;
+    v_lock_timeout := current_setting('lock_timeout');
+    perform set_config('lock_timeout', '50ms', true);
+    update public.routing_v2_outbox o
+    set status = 'cancelled', cancel_reason = 'human_takeover'
+    where o.property_id = new.id and o.kind = 'reply' and o.status = 'pending';
+    perform set_config('lock_timeout', v_lock_timeout, true);
+  exception when others then
+    if v_lock_timeout is not null then
+      perform set_config('lock_timeout', v_lock_timeout, true);
+    end if;
+  end;
   return new;
 end;
 $$;
@@ -320,6 +340,23 @@ begin
   end if;
   update public.routing_v2_outbox set status = 'claimed', claimed_at = now() where id = v.id;
   return 'ok';
+end;
+$$;
+
+create or replace function public.routing_v2_cancel_for_takeover(p_property_id uuid)
+returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare v_n integer;
+begin
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || p_property_id::text));
+  update public.routing_v2_outbox set status = 'cancelled', cancel_reason = 'human_takeover'
+  -- (PR-F) Auto replies to the seller only; an alert to the owner is never cancelled.
+  where property_id = p_property_id and status in ('pending','claimed') and kind = 'reply';
+  get diagnostics v_n = row_count;
+  return v_n;
 end;
 $$;
 

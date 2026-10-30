@@ -208,4 +208,20 @@ begin
 end;
 $$;
 
+create or replace function public.routing_v2_cancel_for_takeover(p_property_id uuid)
+returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare v_n integer;
+begin
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || p_property_id::text));
+  update public.routing_v2_outbox set status = 'cancelled', cancel_reason = 'human_takeover'
+  where property_id = p_property_id and status in ('pending','claimed');
+  get diagnostics v_n = row_count;
+  return v_n;
+end;
+$$;
+
 commit;

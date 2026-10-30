@@ -65,8 +65,9 @@ export const V2_YES_FAMILY_ROADS: readonly string[] = [
 /**
  * isHotSeller with routing v2's alert_on_time_only applied. `alertOnTimeOnly` must be the
  * send-time value for the property (`alertOnTimeOnlyInForce`). Off, or not a yes-family road:
- * exactly `isHotSeller`. On + yes-family road: the yes triggers are dropped; only the
- * price-keyword HOT tier (`keyword:price_offer`, untouched by PR-F) still makes it hot.
+ * exactly `isHotSeller`. On + yes-family road: the yes triggers are dropped; the
+ * price-keyword HOT tier (`keyword:price_offer`, untouched by PR-F) and every hand-off
+ * failure reason (`HOT_HANDOFF_FAILED_REASONS`) still make it hot.
  */
 export function isHotSellerUnderV2(input: {
   jevOutcome?: string | null;
@@ -77,7 +78,12 @@ export function isHotSellerUnderV2(input: {
   if (!input.alertOnTimeOnly || !input.v2Road || !V2_YES_FAMILY_ROADS.includes(input.v2Road)) {
     return isHotSeller(input);
   }
-  return (input.reasons ?? []).some((r) => typeof r === "string" && r.trim() === `keyword:${HOT_KEYWORD_TIER}`);
+  // A failed hot hand-off always alerts, whatever alert_on_time_only says.
+  return (input.reasons ?? []).some((r) => {
+    if (typeof r !== "string") return false;
+    const v = r.trim();
+    return v === `keyword:${HOT_KEYWORD_TIER}` || HOT_HANDOFF_FAILED_REASONS.includes(v);
+  });
 }
 
 /*

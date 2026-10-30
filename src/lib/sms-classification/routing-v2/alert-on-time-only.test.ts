@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HOT_KEYWORD_TIER, hotTextKey, isHotSeller, isHotSellerUnderV2, V2_YES_FAMILY_ROADS } from "@/lib/hot-sellers/hot";
+import { HOT_HANDOFF_FAILED_REASONS, HOT_KEYWORD_TIER, hotTextKey, isHotSeller, isHotSellerUnderV2, V2_YES_FAMILY_ROADS } from "@/lib/hot-sellers/hot";
 
 import { actionForV2Decision, executeV2Action, V2_ROAD_ACTIONS, type V2Action, type V2ExecDeps } from "./actions";
 import type { V2DripTransition, V2DripTransitionRequest } from "./drip-transition";
@@ -307,6 +307,8 @@ describe("PR-F hot.ts: yes-family triggers dropped only behind the flag", () => 
     { reasons: [`keyword:${HOT_KEYWORD_TIER}`] },
     { reasons: ["jev_below_threshold:new_lead"] },
     { reasons: ["jev_new_lead_promotion_failed"] },
+    { reasons: ["hot_lead_assign_failed"] },
+    { jevOutcome: "new_lead", reasons: ["hot_alert_event_failed"] },
     { reasons: ["price_quoted", null, undefined] },
     {},
   ];
@@ -322,12 +324,22 @@ describe("PR-F hot.ts: yes-family triggers dropped only behind the flag", () => 
     for (const input of inputs) for (const v2Road of roads) {
       const got = isHotSellerUnderV2({ ...input, v2Road, alertOnTimeOnly: true });
       if (v2Road && V2_YES_FAMILY_ROADS.includes(v2Road)) {
-        expect(got, `${v2Road} ${JSON.stringify(input)}`).toBe(input.reasons?.includes(`keyword:${HOT_KEYWORD_TIER}`) ?? false);
+        const keep = (input.reasons ?? []).some((r) => r === `keyword:${HOT_KEYWORD_TIER}` || (typeof r === "string" && HOT_HANDOFF_FAILED_REASONS.includes(r)));
+        expect(got, `${v2Road} ${JSON.stringify(input)}`).toBe(keep);
       } else {
         expect(got, `${v2Road} ${JSON.stringify(input)}`).toBe(isHotSeller(input));
       }
     }
     expect(isHotSellerUnderV2({ jevOutcome: "new_lead", v2Road: "ALERT_call_me", alertOnTimeOnly: true })).toBe(true);
+  });
+
+  it("a failed hot hand-off after a yes always alerts, whatever alert_on_time_only says", () => {
+    expect(HOT_HANDOFF_FAILED_REASONS.length).toBeGreaterThan(0);
+    for (const reason of HOT_HANDOFF_FAILED_REASONS) for (const v2Road of V2_YES_FAMILY_ROADS) for (const alertOnTimeOnly of [true, false]) {
+      expect(isHotSellerUnderV2({ jevOutcome: "new_lead", reasons: [reason], v2Road, alertOnTimeOnly }), `${reason} ${v2Road} ${alertOnTimeOnly}`).toBe(true);
+      expect(isHotSellerUnderV2({ reasons: [` ${reason} `], v2Road, alertOnTimeOnly })).toBe(true);
+    }
+    expect(isHotSellerUnderV2({ jevOutcome: "new_lead", reasons: ["hot_lead"], v2Road: "book_appointment", alertOnTimeOnly: true })).toBe(false);
   });
 
   it("the yes-family list is exactly the roads that carry the conditional hot alert", () => {

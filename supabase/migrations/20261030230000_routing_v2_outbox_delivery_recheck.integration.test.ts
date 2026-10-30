@@ -296,6 +296,32 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
     expect(await authorize(db, randomUUID())).toBe("missing");
   });
 
+  it("routing_v2_cancel_for_takeover cancels auto replies only, never owner alerts", async () => {
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, { outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }, { kind: "reply", payload: { n: 2 } }] });
+    const rows = await outbox(db, id);
+    const claimedReply = rows.find((r) => r.kind === "reply")!;
+    expect(await claim(db, claimedReply.id)).toBe("ok");
+    const n = (await db.query(`select public.routing_v2_cancel_for_takeover($1) as n`, [ctx.property])).rows[0].n;
+    expect(n).toBe(2);
+    const after = await outbox(db, id);
+    expect(after.filter((r) => r.kind === "reply").map((r) => [r.status, r.cancel_reason])).toEqual([["cancelled", "human_takeover"], ["cancelled", "human_takeover"]]);
+    expect(after.filter((r) => r.kind === "alert").map((r) => r.status)).toEqual(["pending"]);
+  });
+
+  it("a failing cancel never fails the takeover: it commits and the reply is still refused at delivery", async () => {
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+    const [reply] = await outbox(db, id);
+    await db.query(`create function pg_temp.rv2f_boom() returns trigger language plpgsql as $f$ begin raise exception 'boom'; end $f$`);
+    await db.query(`create trigger rv2f_boom before update on public.routing_v2_outbox for each row execute function pg_temp.rv2f_boom()`);
+    await takeover(db, ctx.property); // must not raise
+    await db.query(`drop trigger rv2f_boom on public.routing_v2_outbox`);
+    expect((await db.query(`select last_person_takeover_at is not null as t from public.properties where id = $1`, [ctx.property])).rows[0].t).toBe(true);
+    expect(await row(db, reply!.id)).toMatchObject({ status: "pending" });
+    expect(await claim(db, reply!.id)).toBe("human_takeover");
+  });
+
   it("takeover with nothing queued (every flag off): the fence changes nothing", async () => {
     await setFlags(db, ctx.org, {});
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
@@ -334,6 +360,8 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
     const src = (await db.query(`select prosrc from pg_proc where proname = 'routing_v2_claim_outbox'`)).rows[0].prosrc as string;
     expect(src).toContain("if v_latest is distinct from v.transition_seq then");
     expect(src).not.toContain("v.kind = 'reply' and v_latest");
+    const cancelSrc = (await db.query(`select prosrc from pg_proc where proname = 'routing_v2_cancel_for_takeover'`)).rows[0].prosrc as string;
+    expect(cancelSrc).not.toContain("kind = 'reply'");
     await db.query(MIGRATION);
     await db.query(PRC_ROLLBACK);
     await takeover(db, ctx.property); // the fence must never fail a takeover
@@ -388,6 +416,89 @@ describe("routing v2 PR-F races (committed data, two connections)", () => {
       if (ctx) await cleanupOrg(ctx.org);
       await a.end();
       await b.end();
+    }
+  });
+
+  it("a takeover while another connection holds the routing lock commits at once; the queued reply is still refused at delivery", async () => {
+    const holder = new Client({ connectionString: url });
+    const person = new Client({ connectionString: url });
+    await holder.connect();
+    await person.connect();
+    let ctx: Ctx | null = null;
+    try {
+      await db.query("begin");
+      await db.query("set local session_replication_role = replica");
+      ctx = await seedOrg(db);
+      await db.query("set local session_replication_role = origin");
+      await db.query("commit");
+      await db.query(read("20261030140000_routing_v2_versioned_drips.sql"));
+      await db.query(MIGRATION_RAW);
+      await setFlags(db, ctx.org, FLAGS_ON);
+      const pendingId = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+      await transition(db, pendingId, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+      const [pendingRow] = await outbox(db, pendingId);
+      const claimedId = await inbound(db, ctx, "2026-10-30T15:00:30Z");
+      await transition(db, claimedId, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+      const [claimedRow] = await outbox(db, claimedId);
+      expect(await claim(db, claimedRow!.id)).toBe("ok");
+
+      await holder.query("begin");
+      await holder.query(`select pg_advisory_xact_lock(hashtext('routing_v2:' || $1::text))`, [ctx.property]);
+      await person.query("set statement_timeout = '3s'");
+      const t0 = Date.now();
+      await takeover(person, ctx.property); // autocommit: must not wait on the holder
+      expect(Date.now() - t0).toBeLessThan(2000);
+      await holder.query("commit");
+      // Lock was busy, so the fence skipped: the delivery re-checks refuse both replies.
+      expect(await row(db, pendingRow!.id)).toMatchObject({ status: "cancelled", cancel_reason: `superseded_by=${claimedId}` });
+      expect(await authorize(db, claimedRow!.id)).toBe("human_takeover");
+
+      // A fresh reply queued BEFORE a later takeover (inbound older than the takeover).
+      const later = await inbound(db, ctx, "2026-10-30T15:01:00Z");
+      await db.query(`update public.properties set last_person_takeover_at = null where id = $1`, [ctx.property]);
+      await transition(db, later, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+      const [laterRow] = await outbox(db, later);
+      await holder.query("begin");
+      await holder.query(`select pg_advisory_xact_lock(hashtext('routing_v2:' || $1::text))`, [ctx.property]);
+      await takeover(person, ctx.property);
+      await holder.query("commit");
+      expect(await row(db, laterRow!.id)).toMatchObject({ status: "pending" });
+      expect(await claim(db, laterRow!.id)).toBe("human_takeover");
+    } finally {
+      await holder.query("rollback").catch(() => undefined);
+      if (ctx) await cleanupOrg(ctx.org);
+      await holder.end();
+      await person.end();
+    }
+  });
+
+  it("a takeover with no v2 rows does no work: takes no routing lock and touches no outbox row", async () => {
+    const person = new Client({ connectionString: url });
+    await person.connect();
+    let ctx: Ctx | null = null;
+    try {
+      await db.query("begin");
+      await db.query("set local session_replication_role = replica");
+      ctx = await seedOrg(db);
+      await db.query("set local session_replication_role = origin");
+      await db.query("commit");
+      await db.query(MIGRATION_RAW);
+      await person.query("begin");
+      await takeover(person, ctx.property);
+      // Only the routing v2 property key counts (other property triggers take their own locks).
+      const locks = (await person.query(
+        `select count(*)::int as n from pg_locks
+         where locktype = 'advisory' and pid = pg_backend_pid() and objsubid = 1
+           and objid::bigint = (hashtext('routing_v2:' || $1::text)::bigint & 4294967295)`,
+        [ctx.property],
+      )).rows[0].n;
+      expect(locks).toBe(0);
+      await person.query("commit");
+      expect((await db.query(`select count(*)::int as n from public.routing_v2_outbox where org_id = $1`, [ctx.org])).rows[0].n).toBe(0);
+    } finally {
+      await person.query("rollback").catch(() => undefined);
+      if (ctx) await cleanupOrg(ctx.org);
+      await person.end();
     }
   });
 
