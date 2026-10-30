@@ -3,7 +3,7 @@ import { SLOT_TIME_TOKEN, type SlotWindow } from "./slot-time";
 
 /**
  * Routing v2 versioned drips (PR-C). The seed migration
- * `20261030140000_routing_v2_versioned_drips.sql` must match this spec exactly
+ * `20261030181000_routing_v2_versioned_drips.sql` must match this spec exactly
  * (pinned by drip-spec.test.ts). Texts come from APPROVED_DRIPS; the only change is the
  * booking texts' fixed clock time ("2:00") becoming {{slot_time}}, filled at send time.
  */
