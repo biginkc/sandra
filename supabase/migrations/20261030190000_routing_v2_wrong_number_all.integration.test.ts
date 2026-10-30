@@ -567,7 +567,7 @@ describe("C. undo", () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it("never overwrites a property a person changed, nor a later hold (both audited)", async () => {
+  it("never overwrites a property a person changed, nor one that is held now (both audited)", async () => {
     await setFlags(ON);
     const r = await applyAll();
     await db.query(`update public.properties set outreach_dispo = 'callback_requested' where id = $1`, [ids.p3]);
@@ -576,7 +576,7 @@ describe("C. undo", () => {
     expect(u.status).toBe("partial");
     expect(u.skipped).toEqual(expect.arrayContaining([
       { propertyId: ids.p3, reason: "state_changed" },
-      { propertyId: ids.p2, reason: "hold_changed" },
+      { propertyId: ids.p2, reason: "held" },
     ]));
     expect(await dispo(ids.p3)).toBe("callback_requested");
     const p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason from public.properties where id = $1`, [ids.p2])).rows[0];
@@ -584,9 +584,32 @@ describe("C. undo", () => {
     expect((await enrollment(ids.e2)).status).toBe("paused"); // skipped property: its drip stays paused
     const audit = (await db.query(`select count(*) from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_undo_skipped'`, [orgId])).rows[0].count;
     expect(Number(audit)).toBe(2);
-    // A reason alone (no flag) is also a later hold.
+    // Once the hold is dismissed, undo restores the dispo and leaves the hold fields as they are now.
     await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = 'x' where id = $1`, [ids.p2]);
-    expect((await undo(ownerId, r.actionId)).skipped).toEqual(expect.arrayContaining([{ propertyId: ids.p2, reason: "hold_changed" }]));
+    const again = await undo(ownerId, r.actionId);
+    expect(again.restored).toEqual([ids.p2]);
+    const p2b = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason from public.properties where id = $1`, [ids.p2])).rows[0];
+    expect(p2b).toEqual({ outreach_dispo: "not_interested", needs_human_attention: false, last_ai_escalation_reason: "x" });
+  });
+
+  it("ABA: a pre-existing reason, A, then a VA raises and dismisses a hold → A and undo never touch the hold fields", async () => {
+    await setFlags(ON);
+    // p2 starts with last_ai_escalation_reason = 'old_reason' (fixture) and no hold.
+    const r = await applyAll();
+    let p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at from public.properties where id = $1`, [ids.p2])).rows[0];
+    expect(p2).toMatchObject({ outreach_dispo: "wrong_number", needs_human_attention: false, last_ai_escalation_reason: "old_reason" }); // A left it alone
+    // A VA raises a hold, then dismisses it (fields cleared, as the dismiss flow does).
+    await db.query(`update public.properties set needs_human_attention = true, last_ai_escalation_reason = 'va_hold', last_ai_escalation_at = now() where id = $1`, [ids.p2]);
+    await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = null where id = $1`, [ids.p2]);
+    const atAfterVa = (await db.query(`select last_ai_escalation_at from public.properties where id = $1`, [ids.p2])).rows[0].last_ai_escalation_at;
+    const u = await undo(ownerId, r.actionId);
+    expect(u.restored).toEqual(expect.arrayContaining([ids.p2]));
+    p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason, last_ai_escalation_at from public.properties where id = $1`, [ids.p2])).rows[0];
+    // Dispo restored; the stale 'old_reason' is NOT brought back; hold fields exactly as the VA left them.
+    expect(p2.outreach_dispo).toBe("not_interested");
+    expect(p2.needs_human_attention).toBe(false);
+    expect(p2.last_ai_escalation_reason).toBeNull();
+    expect(p2.last_ai_escalation_at).toEqual(atAfterVa);
   });
 
   it("phone suppressed now: restores nothing and resumes no drips", async () => {

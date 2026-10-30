@@ -397,10 +397,10 @@ describe("runRoutingV2PhoneAction", () => {
 describe("undoRoutingV2PhoneAction", () => {
   it("passes through the single undo RPC (restore + resume happen inside it)", async () => {
     const { db, rpcs } = fakeDb({
-      rpc: { fn_undo_routing_v2_phone_action: () => ({ data: { status: "partial", restored: [P1], stateChanged: [P2], skipped: [{ propertyId: P2, reason: "hold_changed" }], resumed: 2, notResumed: [] } }) },
+      rpc: { fn_undo_routing_v2_phone_action: () => ({ data: { status: "partial", restored: [P1], stateChanged: [P2], skipped: [{ propertyId: P2, reason: "held" }], resumed: 2, notResumed: [] } }) },
     });
     expect(await undoRoutingV2PhoneAction(db, "a1")).toEqual({
-      ok: true, status: "partial", restored: [P1], stateChanged: [P2], skipped: [{ propertyId: P2, reason: "hold_changed" }], resumed: 2, notResumed: [],
+      ok: true, status: "partial", restored: [P1], stateChanged: [P2], skipped: [{ propertyId: P2, reason: "held" }], resumed: 2, notResumed: [],
     });
     expect(rpcs()).toEqual(["fn_undo_routing_v2_phone_action"]);
   });

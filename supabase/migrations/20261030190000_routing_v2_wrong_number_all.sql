@@ -78,8 +78,6 @@ create table if not exists public.routing_v2_phone_action_properties (
   applied_dispo text,
   prior_outreach_dispo text,
   prior_follow_up_at timestamptz,
-  prior_needs_human_attention boolean,
-  prior_last_ai_escalation_reason text,
   applied_follow_up_at timestamptz,
   recorded_revision bigint,
   paused_enrollment_ids uuid[] not null default '{}',
@@ -476,7 +474,7 @@ begin
   returning id, send_id into v_action_id, v_send_id;
 
   for r in
-    select p.id, p.outreach_dispo, p.follow_up_at, p.needs_human_attention, p.last_ai_escalation_reason,
+    select p.id, p.outreach_dispo, p.follow_up_at,
            p.id = v_message.property_id as is_source
     from public.properties p where p.id = any(v_ids) order by p.id
   loop
@@ -488,7 +486,9 @@ begin
     end if;
 
     update public.properties
-    set outreach_dispo = v_dispo, needs_human_attention = false, last_ai_escalation_reason = null, updated_at = now()
+    -- Only the disposition. Hold fields (needs_human_attention, last_ai_escalation_*) are never
+    -- written by A or by undo, so undo can't restore a stale hold (no ABA hazard).
+    set outreach_dispo = v_dispo, updated_at = now()
     where id = r.id and org_id = v_message.org_id
     returning decision_context_revision, follow_up_at into v_after;
 
@@ -517,11 +517,11 @@ begin
 
     insert into public.routing_v2_phone_action_properties (
       action_id, org_id, property_id, is_source, outcome, applied_dispo,
-      prior_outreach_dispo, prior_follow_up_at, prior_needs_human_attention, prior_last_ai_escalation_reason,
+      prior_outreach_dispo, prior_follow_up_at,
       applied_follow_up_at, recorded_revision, paused_enrollment_ids, paused_at
     ) values (
       v_action_id, v_message.org_id, r.id, r.is_source, 'applied', v_dispo,
-      r.outreach_dispo, r.follow_up_at, r.needs_human_attention, r.last_ai_escalation_reason,
+      r.outreach_dispo, r.follow_up_at,
       v_after.follow_up_at, v_after.decision_context_revision, v_paused, v_pause_at
     )
     returning id into v_row_id;
@@ -675,7 +675,9 @@ grant execute on function public.fn_routing_v2_phone_action_unsettled_replies(in
 -- C. Undo core: caller holds the phone lock and the action row lock. p_mode 'user' (a person)
 -- or 'superseded_after_commit' (the post-commit fence found a newer inbound). In the fence mode
 -- the decision-revision check is skipped, because the newer inbound itself moves it; dispo,
--- follow-up, hold and suppression checks still apply. Internal only.
+-- follow-up, currently-held and suppression checks still apply. Restores ONLY what A changed
+-- (dispo, follow-up, A's own paused enrollments); hold fields are never read for restore or
+-- written. Internal only.
 create or replace function public.routing_v2_phone_action_undo_core(p_action_id uuid, p_actor uuid, p_mode text)
 returns jsonb
 language plpgsql
@@ -740,7 +742,7 @@ begin
   loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_row.property_id::text));
     select p.outreach_dispo, p.follow_up_at, p.decision_context_revision,
-           p.needs_human_attention, p.last_ai_escalation_reason,
+           p.needs_human_attention,
            coalesce(c.sms_opted_out, false) or coalesce(c.do_not_contact, false) as contact_suppressed
     into v_cur
     from public.properties p
@@ -755,8 +757,9 @@ begin
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo
         or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
         or (p_mode = 'user' and v_cur.decision_context_revision is distinct from v_row.recorded_revision) then 'state_changed'
-      -- A left needs_human_attention = false and no reason; anything else is a later hold.
-      when v_cur.needs_human_attention is distinct from false or v_cur.last_ai_escalation_reason is not null then 'hold_changed'
+      -- Held now (a person must look): leave it alone. Undo never reads or writes the hold
+      -- fields beyond this current-state guard.
+      when v_cur.needs_human_attention then 'held'
       when v_cur.contact_suppressed then 'contact_suppressed'
       else null
     end;
@@ -775,8 +778,6 @@ begin
     update public.properties
     set outreach_dispo = v_row.prior_outreach_dispo,
         follow_up_at = v_row.prior_follow_up_at,
-        needs_human_attention = v_row.prior_needs_human_attention,
-        last_ai_escalation_reason = v_row.prior_last_ai_escalation_reason,
         updated_at = now()
     where id = v_row.property_id and org_id = v_action.org_id;
 
