@@ -5,6 +5,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { APPROVED_REPLY_TEXTS } from "@/lib/ai-responder/approved-reply-texts";
 import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
@@ -123,12 +124,26 @@ async function asUser<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const claim = (action = "wrong_number_all", msg = inbound, phone = X) =>
+const claim = (action = "wrong_number_all", msg = inbound, phone = X, leaseSeconds = 120) =>
   asService(async () =>
-    (await db.query(`select public.fn_routing_v2_phone_action_claim($1, $2, $3, '{}'::jsonb) as r`, [msg, action, phone])).rows[0].r,
+    (await db.query(`select public.fn_routing_v2_phone_action_claim($1, $2, $3, '{}'::jsonb, $4) as r`, [msg, action, phone, leaseSeconds])).rows[0].r,
   );
-const apply = (actionId: string, reply: string | null = null) =>
-  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_apply($1, $2) as r`, [actionId, reply])).rows[0].r);
+const step = (actionId: string, name: string, reply: string | null = null, reason: string | null = null) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_step($1, $2, $3, $4) as r`, [actionId, name, reply, reason])).rows[0].r);
+const applyOnly = (actionId: string) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_apply($1) as r`, [actionId])).rows[0].r);
+/** wrong_number_all: begin_send + sent(reply) first (the durable send record), then apply. */
+const apply = async (actionId: string, reply: string | null = null) => {
+  if (reply) {
+    await step(actionId, "begin_send");
+    await step(actionId, "sent", reply);
+  }
+  return applyOnly(actionId);
+};
+const takeLease = (actionId: string) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_take_lease($1, $2) as r`, [actionId, APPROVED_REPLY_TEXTS.wrong_number])).rows[0].r);
+const expireLease = (actionId: string) =>
+  db.query(`update public.routing_v2_phone_actions set lease_expires_at = now() - interval '1 second' where id = $1`, [actionId]);
 const undo = (userId: string, actionId: string) =>
   asUser(userId, async () => (await db.query(`select public.fn_undo_routing_v2_phone_action($1) as r`, [actionId])).rows[0].r);
 
@@ -225,6 +240,115 @@ describe("routing v2 PR-G phone actions", () => {
     expect(await dispo(ids.p2)).toBe("not_interested");
   });
 
+  it("undo never erases a hold raised after the action (audited skip)", async () => {
+    await setFlags(ON);
+    const c = await claim();
+    await apply(c.actionId, randomUUID());
+    await db.query(`update public.properties set needs_human_attention = true, last_ai_escalation_reason = 'person_needs_to_look' where id = $1`, [ids.p2]);
+    const u = await undo(ownerId, c.actionId);
+    expect(u.status).toBe("partial");
+    expect(u.skipped).toEqual([{ propertyId: ids.p2, reason: "hold_changed" }]);
+    const p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason from public.properties where id = $1`, [ids.p2])).rows[0];
+    expect(p2).toEqual({ outreach_dispo: "wrong_number", needs_human_attention: true, last_ai_escalation_reason: "person_needs_to_look" });
+    const audit = (await db.query(`select payload from public.lead_events where property_id = $1 and event_type = 'routing_v2_phone_action_undo_skipped'`, [ids.p2])).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].payload.reason).toBe("hold_changed");
+    // A reason alone (no flag) also counts as a later hold.
+    await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = 'x' where id = $1`, [ids.p2]);
+    expect((await undo(ownerId, c.actionId)).skipped).toEqual([{ propertyId: ids.p2, reason: "hold_changed" }]);
+  });
+
+  it("undo with the phone suppressed now restores nothing and resumes no drips (audited)", async () => {
+    await setFlags(ON);
+    const c = await claim();
+    await apply(c.actionId, randomUUID());
+    await db.query(`update public.routing_v2_phone_action_properties set paused_enrollment_ids = $2 where action_id = $1`, [c.actionId, [randomUUID()]]);
+    await db.query(`insert into public.sms_phone_suppressions (org_id, phone_e164, source) values ($1, $2, 'stop')`, [orgId, X]);
+    const u = await undo(ownerId, c.actionId);
+    expect(u.status).toBe("partial");
+    expect(u.restored).toEqual([]);
+    expect(u.enrollmentIds).toEqual([]);
+    expect(u.skipped).toHaveLength(3);
+    expect(u.skipped.every((s: { reason: string }) => s.reason === "phone_suppressed")).toBe(true);
+    for (const id of [ids.p1, ids.p2, ids.p3]) expect(await dispo(id)).toBe("wrong_number");
+    expect(await count("sms_phone_suppressions")).toBe(1);
+  });
+
+  it("apply refuses until the reply is durably sent (wrong_number_all)", async () => {
+    await setFlags(ON);
+    const c = await claim();
+    expect(await applyOnly(c.actionId)).toMatchObject({ status: "reply_pending", replyState: "pending" });
+    await step(c.actionId, "begin_send");
+    expect(await applyOnly(c.actionId)).toMatchObject({ status: "reply_pending", replyState: "sending" });
+    expect(await step(c.actionId, "begin_send")).toMatchObject({ ok: false, replyState: "sending" }); // never twice
+    await step(c.actionId, "sent", randomUUID());
+    expect((await applyOnly(c.actionId)).status).toBe("applied");
+  });
+
+  describe("crash recovery (lease)", () => {
+    it("a live lease is never taken; an expired one is", async () => {
+      await setFlags(ON);
+      const c = await claim();
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "lease_held" });
+      await expireLease(c.actionId);
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "claimed", replyState: "pending" });
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "lease_held" }); // re-leased
+    });
+
+    it("crash while sending, reply on the thread: recorded as sent with that message, then applies", async () => {
+      await setFlags(ON);
+      const c = await claim();
+      await step(c.actionId, "begin_send");
+      const out = randomUUID();
+      await db.query(
+        `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6)`,
+        [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X],
+      );
+      await expireLease(c.actionId);
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "claimed", replyState: "sent" });
+      const row = (await db.query(`select reply_message_id from public.routing_v2_phone_actions where id = $1`, [c.actionId])).rows[0];
+      expect(row.reply_message_id).toBe(out);
+      expect((await applyOnly(c.actionId)).status).toBe("applied");
+    });
+
+    it("crash while sending, no reply on the thread: closed send_outcome_unknown, nothing applied", async () => {
+      await setFlags(ON);
+      const before = await snapshot();
+      const c = await claim();
+      await step(c.actionId, "begin_send");
+      await expireLease(c.actionId);
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "not_applied", reason: "send_outcome_unknown" });
+      expect(await applyOnly(c.actionId)).toMatchObject({ status: "replayed", actionStatus: "not_applied" });
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it("crash after apply before pause: stale until paused, then finished", async () => {
+      await setFlags(ON);
+      const c = await claim();
+      await apply(c.actionId, randomUUID());
+      const stale = async () =>
+        (await asService(async () => (await db.query(`select action_id from public.fn_routing_v2_phone_action_list_stale(50)`)).rows)).map((r) => r.action_id);
+      expect(await stale()).not.toContain(c.actionId); // lease still held
+      await expireLease(c.actionId);
+      expect(await stale()).toContain(c.actionId);
+      const t = await takeLease(c.actionId);
+      expect(t).toMatchObject({ taken: true, status: "applied" });
+      expect([...t.applied].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
+      expect(await step(c.actionId, "paused")).toMatchObject({ ok: true });
+      await expireLease(c.actionId);
+      expect(await stale()).not.toContain(c.actionId);
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "finished" });
+    });
+
+    it("a bounce is finished when applied (nothing to pause)", async () => {
+      await setFlags(ON);
+      const c = await claim("bad_number");
+      await applyOnly(c.actionId);
+      await expireLease(c.actionId);
+      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "finished" });
+    });
+  });
+
   it("undo refuses a user without org access", async () => {
     await setFlags(ON);
     const c = await claim();
@@ -312,7 +436,7 @@ describe("routing v2 PR-G phone actions", () => {
     await setFlags(ON);
     expect(await claim("wrong_number_all", inbound, Y)).toEqual({ status: "not_applicable", reason: "phone_mismatch" });
     await expect(
-      asUser(ownerId, async () => db.query(`select public.fn_routing_v2_phone_action_claim($1, 'wrong_number_all', $2)`, [inbound, X])),
+      asUser(ownerId, async () => db.query(`select public.fn_routing_v2_phone_action_claim($1, 'wrong_number_all', $2, '{}'::jsonb, 120)`, [inbound, X])),
     ).rejects.toThrow(/permission denied|service role required/);
   });
 

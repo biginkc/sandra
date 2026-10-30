@@ -31,7 +31,12 @@ create table if not exists public.routing_v2_phone_actions (
   not_applied_reason text,
   property_ids uuid[] not null default '{}',
   claimed_revision bigint,
+  -- Durable send/apply state (crash recovery): pending -> sending -> sent; bad_number = not_needed.
+  reply_state text not null default 'not_needed' check (reply_state in ('pending', 'sending', 'sent', 'not_needed')),
   reply_message_id uuid,
+  -- A worker owns the row until the lease expires; a later webhook or the sweeper resumes it.
+  lease_expires_at timestamptz,
+  paused_at timestamptz,
   decision jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   applied_at timestamptz,
@@ -46,6 +51,9 @@ create unique index if not exists routing_v2_phone_actions_inbound_uidx
   on public.routing_v2_phone_actions (source_inbound_message_id);
 create index if not exists routing_v2_phone_actions_org_created_idx
   on public.routing_v2_phone_actions (org_id, created_at desc);
+create index if not exists routing_v2_phone_actions_unfinished_idx
+  on public.routing_v2_phone_actions (lease_expires_at)
+  where status = 'claimed' or (status = 'applied' and paused_at is null);
 
 create table if not exists public.routing_v2_phone_action_properties (
   id uuid primary key default gen_random_uuid(),
@@ -215,6 +223,9 @@ begin
   end if;
 
   if p_lock then
+    -- Serializes this phone's own v2 actions (claim/apply/undo). Other writers of contact
+    -- phones or suppressions do not take it; the apply re-check covers what they change.
+    perform pg_advisory_xact_lock(hashtext('routing_v2_phone:' || public.routing_v2_phone_digits(p_phone)));
     foreach v_id in array v_ids loop
       perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_id::text));
     end loop;
@@ -281,12 +292,15 @@ end;
 $$;
 revoke all on function public.routing_v2_phone_action_plan(uuid, text, text, uuid, boolean) from public, anon, authenticated, service_role;
 
+
 -- Step 1: claim (before the reply is sent). Not applicable = no row at all (today's path runs).
+-- The claimer holds a lease; a crash leaves the row resumable once the lease expires.
 create or replace function public.fn_routing_v2_phone_action_claim(
   p_source_inbound_message_id uuid,
   p_action text,
   p_phone text,
-  p_decision jsonb default '{}'::jsonb
+  p_decision jsonb default '{}'::jsonb,
+  p_lease_seconds integer default 120
 )
 returns jsonb
 language plpgsql
@@ -335,10 +349,12 @@ begin
 
   insert into public.routing_v2_phone_actions (
     org_id, source_property_id, source_inbound_message_id, action, phone_e164, status,
-    property_ids, claimed_revision, decision
+    property_ids, claimed_revision, decision, reply_state, lease_expires_at
   ) values (
     v_message.org_id, v_message.property_id, p_source_inbound_message_id, p_action, p_phone, 'claimed',
-    array(select jsonb_array_elements_text(v_plan->'property_ids')::uuid), v_revision, coalesce(p_decision, '{}'::jsonb)
+    array(select jsonb_array_elements_text(v_plan->'property_ids')::uuid), v_revision, coalesce(p_decision, '{}'::jsonb),
+    case p_action when 'wrong_number_all' then 'pending' else 'not_needed' end,
+    now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 1))
   )
   on conflict (source_inbound_message_id) do nothing
   returning id into v_id;
@@ -347,18 +363,158 @@ begin
     where a.source_inbound_message_id = p_source_inbound_message_id;
     return jsonb_build_object('status', 'replayed', 'actionId', v_existing.id, 'actionStatus', v_existing.status);
   end if;
-  return jsonb_build_object('status', 'claimed', 'actionId', v_id, 'propertyIds', v_plan->'property_ids');
+  return jsonb_build_object(
+    'status', 'claimed', 'actionId', v_id, 'propertyIds', v_plan->'property_ids',
+    'replyState', case p_action when 'wrong_number_all' then 'pending' else 'not_needed' end
+  );
 end;
 $$;
-revoke all on function public.fn_routing_v2_phone_action_claim(uuid, text, text, jsonb) from public, anon, authenticated;
-grant execute on function public.fn_routing_v2_phone_action_claim(uuid, text, text, jsonb) to service_role;
+revoke all on function public.fn_routing_v2_phone_action_claim(uuid, text, text, jsonb, integer) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_claim(uuid, text, text, jsonb, integer) to service_role;
 
--- Step 2: apply (after the approved reply was accepted, or straight after the claim for a
--- bounce). Re-checks everything under the locks; any change = not_applied, nothing written.
-create or replace function public.fn_routing_v2_phone_action_apply(
+-- Durable step transitions, each atomic on the locked row. Callers act only when ok = true.
+--   begin_send : claimed + pending  -> sending (BEFORE the provider call; a crash after this
+--                point is never re-sent, see take_lease)
+--   sent       : claimed + sending  -> sent (+ reply message id)
+--   close      : claimed + pending/sending/sent/not_needed -> not_applied (reason)
+--   paused     : applied, paused_at null -> paused_at = now()
+create or replace function public.fn_routing_v2_phone_action_step(
   p_action_id uuid,
-  p_reply_message_id uuid default null
+  p_step text,
+  p_reply_message_id uuid default null,
+  p_reason text default null,
+  p_lease_seconds integer default 120
 )
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v public.routing_v2_phone_actions%rowtype;
+  v_ok boolean := false;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if p_step = 'begin_send' and v.status = 'claimed' and v.reply_state = 'pending' then
+    update public.routing_v2_phone_actions
+    set reply_state = 'sending', lease_expires_at = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 1))
+    where id = v.id;
+    v_ok := true;
+  elsif p_step = 'sent' and v.status = 'claimed' and v.reply_state = 'sending' and p_reply_message_id is not null then
+    update public.routing_v2_phone_actions set reply_state = 'sent', reply_message_id = p_reply_message_id where id = v.id;
+    v_ok := true;
+  elsif p_step = 'close' and v.status = 'claimed' then
+    update public.routing_v2_phone_actions
+    set status = 'not_applied', not_applied_reason = coalesce(nullif(btrim(p_reason), ''), 'closed')
+    where id = v.id;
+    v_ok := true;
+  elsif p_step = 'paused' and v.status = 'applied' and v.paused_at is null then
+    update public.routing_v2_phone_actions set paused_at = now() where id = v.id;
+    v_ok := true;
+  elsif p_step not in ('begin_send', 'sent', 'close', 'paused') then
+    raise exception 'unsupported step: %', p_step using errcode = '22023';
+  end if;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
+  return jsonb_build_object('ok', v_ok, 'status', v.status, 'replyState', v.reply_state, 'pausedAt', v.paused_at);
+end;
+$$;
+revoke all on function public.fn_routing_v2_phone_action_step(uuid, text, uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_step(uuid, text, uuid, text, integer) to service_role;
+
+-- Resume an unfinished action whose lease expired (duplicate webhook or sweeper).
+-- A row stuck in `sending` is never re-sent: if the approved reply (p_reply_body, passed by
+-- the app so the text lives in one place) is on the thread after the claim, it is recorded as
+-- sent; otherwise the action closes as send_outcome_unknown and a person looks.
+create or replace function public.fn_routing_v2_phone_action_take_lease(
+  p_action_id uuid,
+  p_reply_body text,
+  p_lease_seconds integer default 120
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v public.routing_v2_phone_actions%rowtype;
+  v_msg uuid;
+  v_applied jsonb;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if not (v.status = 'claimed' or (v.status = 'applied' and v.paused_at is null)) then
+    return jsonb_build_object('taken', false, 'status', v.status, 'reason', 'finished');
+  end if;
+  if v.lease_expires_at is not null and v.lease_expires_at > now() then
+    return jsonb_build_object('taken', false, 'status', v.status, 'reason', 'lease_held');
+  end if;
+  update public.routing_v2_phone_actions
+  set lease_expires_at = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 1))
+  where id = v.id;
+
+  if v.status = 'claimed' and v.reply_state = 'sending' then
+    select m.id into v_msg
+    from public.messages m
+    where m.org_id = v.org_id and m.property_id = v.source_property_id
+      and m.channel = 'sms' and m.direction = 'outbound'
+      and m.created_at >= v.created_at
+      and p_reply_body is not null and m.body = p_reply_body
+    order by m.created_at
+    limit 1;
+    if v_msg is not null then
+      update public.routing_v2_phone_actions set reply_state = 'sent', reply_message_id = v_msg where id = v.id;
+    else
+      update public.routing_v2_phone_actions
+      set status = 'not_applied', not_applied_reason = 'send_outcome_unknown'
+      where id = v.id;
+    end if;
+  end if;
+
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
+  select coalesce(jsonb_agg(ap.property_id order by ap.property_id), '[]'::jsonb) into v_applied
+  from public.routing_v2_phone_action_properties ap
+  where ap.action_id = v.id and ap.outcome = 'applied';
+  return jsonb_build_object(
+    'taken', true, 'status', v.status, 'replyState', v.reply_state, 'action', v.action,
+    'propertyIds', to_jsonb(v.property_ids), 'applied', v_applied, 'reason', v.not_applied_reason
+  );
+end;
+$$;
+revoke all on function public.fn_routing_v2_phone_action_take_lease(uuid, text, integer) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_take_lease(uuid, text, integer) to service_role;
+
+-- Sweeper feed: unfinished actions whose lease expired.
+create or replace function public.fn_routing_v2_phone_action_list_stale(p_limit integer default 25)
+returns table (action_id uuid)
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select a.id
+  from public.routing_v2_phone_actions a
+  where (a.status = 'claimed' or (a.status = 'applied' and a.paused_at is null))
+    and (a.lease_expires_at is null or a.lease_expires_at <= now())
+  order by a.lease_expires_at nulls first
+  limit greatest(coalesce(p_limit, 25), 1);
+$$;
+revoke all on function public.fn_routing_v2_phone_action_list_stale(integer) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_list_stale(integer) to service_role;
+
+-- Step 2: apply, only once the reply is durably `sent` (or not needed for a bounce).
+-- Re-checks everything under the locks; any change = not_applied, nothing written.
+create or replace function public.fn_routing_v2_phone_action_apply(p_action_id uuid)
 returns jsonb
 language plpgsql
 security definer
@@ -389,6 +545,9 @@ begin
   if v_action.status <> 'claimed' then
     return jsonb_build_object('status', 'replayed', 'actionId', v_action.id, 'actionStatus', v_action.status);
   end if;
+  if v_action.reply_state not in ('sent', 'not_needed') then
+    return jsonb_build_object('status', 'reply_pending', 'actionId', v_action.id, 'replyState', v_action.reply_state);
+  end if;
 
   v_plan := public.routing_v2_phone_action_plan(v_action.org_id, v_action.action, v_action.phone_e164, v_action.source_property_id, true);
   v_reason := case when not (v_plan->>'ok')::boolean then v_plan->>'reason' end;
@@ -418,14 +577,14 @@ begin
     -- Our own approved reply is one outbound row and may move the revision by exactly one.
     select p.decision_context_revision into v_revision from public.properties p where p.id = v_action.source_property_id;
     if v_revision is distinct from v_action.claimed_revision
-       and not (p_reply_message_id is not null and v_revision = v_action.claimed_revision + 1) then
+       and not (v_action.reply_state = 'sent' and v_revision = v_action.claimed_revision + 1) then
       v_reason := 'stale_decision_context';
     end if;
   end if;
 
   if v_reason is not null then
     update public.routing_v2_phone_actions
-    set status = 'not_applied', not_applied_reason = v_reason, reply_message_id = p_reply_message_id
+    set status = 'not_applied', not_applied_reason = v_reason
     where id = v_action.id;
     return jsonb_build_object('status', 'not_applied', 'actionId', v_action.id, 'reason', v_reason);
   end if;
@@ -479,17 +638,23 @@ begin
   end loop;
 
   update public.routing_v2_phone_actions
-  set status = 'applied', applied_at = now(), reply_message_id = p_reply_message_id
+  set status = 'applied', applied_at = now(),
+      -- A bounce pauses nothing, so it is finished as soon as it is applied.
+      paused_at = case when v_action.action = 'bad_number' then now() else null end
   where id = v_action.id;
 
   return jsonb_build_object('status', 'applied', 'actionId', v_action.id, 'applied', to_jsonb(v_applied), 'skipped', v_skipped);
 end;
 $$;
-revoke all on function public.fn_routing_v2_phone_action_apply(uuid, uuid) from public, anon, authenticated;
-grant execute on function public.fn_routing_v2_phone_action_apply(uuid, uuid) to service_role;
+revoke all on function public.fn_routing_v2_phone_action_apply(uuid) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_apply(uuid) to service_role;
 
--- Undo (a person, from the app): restores each applied property's exact prior state, unless a
--- person or a later decision changed that property since (never overwritten; reported).
+-- Undo (a person, from the app): restores each applied property's exact prior state, unless
+-- something changed since. Never restored (skipped + audited):
+--   * the action's phone is suppressed now (opt-out wins: nothing restored, no drip resumed);
+--   * the disposition, follow-up date or decision revision moved (a person or a later decision);
+--   * a hold was raised since (needs_human_attention / reason differ from what the action left);
+--   * the homeowner contact is opted out or do-not-contact now.
 create or replace function public.fn_undo_routing_v2_phone_action(p_action_id uuid)
 returns jsonb
 language plpgsql
@@ -501,8 +666,11 @@ declare
   v_action public.routing_v2_phone_actions%rowtype;
   v_row public.routing_v2_phone_action_properties%rowtype;
   v_cur record;
+  v_reason text;
+  v_phone_suppressed boolean;
   v_restored jsonb := '[]'::jsonb;
   v_changed jsonb := '[]'::jsonb;
+  v_skipped jsonb := '[]'::jsonb;
   v_enrollments uuid[] := '{}';
   v_remaining integer;
 begin
@@ -522,11 +690,18 @@ begin
     raise exception 'FORBIDDEN' using errcode = '42501';
   end if;
   if v_action.status = 'undone' then
-    return jsonb_build_object('status', 'already_undone', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb, 'enrollmentIds', '[]'::jsonb);
+    return jsonb_build_object('status', 'already_undone', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb, 'skipped', '[]'::jsonb, 'enrollmentIds', '[]'::jsonb);
   end if;
   if v_action.status <> 'applied' then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+
+  perform pg_advisory_xact_lock(hashtext('routing_v2_phone:' || public.routing_v2_phone_digits(v_action.phone_e164)));
+  v_phone_suppressed := exists (
+    select 1 from public.sms_phone_suppressions sp
+    where sp.org_id = v_action.org_id and sp.channel = 'sms'
+      and public.routing_v2_phone_digits(sp.phone_e164) = public.routing_v2_phone_digits(v_action.phone_e164)
+  );
 
   for v_row in
     select * from public.routing_v2_phone_action_properties
@@ -535,18 +710,35 @@ begin
   loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_row.property_id::text));
     select p.outreach_dispo, p.follow_up_at, p.decision_context_revision,
+           p.needs_human_attention, p.last_ai_escalation_reason,
            coalesce(c.sms_opted_out, false) or coalesce(c.do_not_contact, false) as contact_suppressed
     into v_cur
     from public.properties p
     left join public.contacts c on c.id = p.homeowner_contact_id
     where p.id = v_row.property_id and p.org_id = v_action.org_id
     for update of p;
-    if not found
-       or v_cur.outreach_dispo is distinct from v_row.applied_dispo
-       or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
-       or v_cur.decision_context_revision is distinct from v_row.recorded_revision
-       or v_cur.contact_suppressed then
+
+    v_reason := case
+      when not found then 'property_missing'
+      when v_phone_suppressed then 'phone_suppressed'
+      when v_cur.outreach_dispo is distinct from v_row.applied_dispo
+        or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
+        or v_cur.decision_context_revision is distinct from v_row.recorded_revision then 'state_changed'
+      -- The action left needs_human_attention = false and no reason; anything else is a later hold.
+      when v_cur.needs_human_attention is distinct from false
+        or v_cur.last_ai_escalation_reason is not null then 'hold_changed'
+      when v_cur.contact_suppressed then 'contact_suppressed'
+      else null
+    end;
+
+    if v_reason is not null then
       v_changed := v_changed || to_jsonb(v_row.property_id);
+      v_skipped := v_skipped || jsonb_build_object('propertyId', v_row.property_id, 'reason', v_reason);
+      insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload)
+      values (
+        v_action.org_id, v_row.property_id, 'user', v_actor, 'routing_v2_phone_action_undo_skipped',
+        jsonb_build_object('reason', v_reason, 'phone_action_id', v_action.id, 'action', v_action.action)
+      );
       continue;
     end if;
 
@@ -591,6 +783,7 @@ begin
     'status', case when v_remaining = 0 then 'undone' else 'partial' end,
     'restored', v_restored,
     'stateChanged', v_changed,
+    'skipped', v_skipped,
     'enrollmentIds', to_jsonb(v_enrollments)
   );
 end;

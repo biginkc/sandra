@@ -66,6 +66,11 @@ export function phoneActionCandidate(
 export type SendWrongNumberReply = (args: {
   templateKey: typeof WRONG_NUMBER_REPLY_KEY;
   requiredBody: typeof WRONG_NUMBER_REPLY_BODY;
+  /**
+   * Final send-boundary check (§13.2): fresh flags + canary for every claimed property. The
+   * template step must call it immediately before the provider call and send nothing if false.
+   */
+  stillAllowed: () => Promise<boolean>;
 }) => Promise<{ sent: true; outboundMessageId: string } | { sent: false; reason: string }>;
 
 export type PauseEnrollments = (propertyId: string) => Promise<string[]>;
@@ -86,6 +91,8 @@ export type RoutingV2PhoneActionDeps = {
   sendWrongNumberReply: SendWrongNumberReply;
   /** Existing sequence pause (pausePropertyEnrollments, reason inbound_reply, not permanent); returns paused ids. */
   pauseEnrollments: PauseEnrollments;
+  /** Lease length for one worker (default 120 s). A crashed worker's row is resumable after it. */
+  leaseSeconds?: number;
 };
 
 export type RoutingV2PhoneActionResult =
@@ -108,6 +115,175 @@ type Loose = {
   rpc: (fn: string, args?: Record<string, unknown>) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
 };
 
+type ActionState = {
+  actionId: string;
+  kind: PhoneActionKind;
+  status: string;
+  replyState: string;
+  propertyIds: string[];
+  /** Already-applied properties (resume after a crash between apply and pause). */
+  applied: string[];
+};
+
+async function stillAllowed(supabase: SupabaseClient<Database>, orgId: string, propertyIds: readonly string[]): Promise<boolean> {
+  try {
+    return v2SliceAllowedForAll(await readRoutingV2Flags(supabase, orgId), "wrong_number_all", propertyIds);
+  } catch {
+    return false;
+  }
+}
+
+async function step(db: Loose, actionId: string, name: "begin_send" | "sent" | "close" | "paused", extra: { reply?: string; reason?: string; lease?: number } = {}) {
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_step", {
+    p_action_id: actionId,
+    p_step: name,
+    p_reply_message_id: extra.reply ?? null,
+    p_reason: extra.reason ?? null,
+    p_lease_seconds: extra.lease ?? 120,
+  });
+  if (error) throw new Error(String(error.message));
+  return (data ?? {}) as { ok?: boolean; status?: string; replyState?: string };
+}
+
+/**
+ * Drives one action from wherever it stopped. Every transition is durable before its side
+ * effect: `sending` is recorded BEFORE the provider call, so a crash there is never re-sent
+ * (take_lease reconciles it from the thread or closes it for a person).
+ */
+async function drive(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  st: ActionState,
+  deps: RoutingV2PhoneActionDeps,
+): Promise<RoutingV2PhoneActionResult> {
+  const db = supabase as unknown as Loose;
+  const lease = deps.leaseSeconds ?? 120;
+  let applied: string[] = st.applied;
+  let skipped: Array<{ propertyId: string; reason: string }> = [];
+
+  if (st.status === "claimed") {
+    if (st.replyState === "pending") {
+      // Fresh read after the claim (never the pre-claim snapshot).
+      if (!(await stillAllowed(supabase, orgId, st.propertyIds))) {
+        await step(db, st.actionId, "close", { reason: "flag_or_canary_off_before_send" });
+        return { outcome: "not_applicable", reason: "flag_or_canary_off_before_send" };
+      }
+      const begun = await step(db, st.actionId, "begin_send", { lease });
+      if (!begun.ok) return { outcome: "replayed", actionId: st.actionId, actionStatus: begun.status ?? "unknown" };
+      let sent: Awaited<ReturnType<SendWrongNumberReply>>;
+      try {
+        sent = await deps.sendWrongNumberReply({
+          templateKey: WRONG_NUMBER_REPLY_KEY,
+          requiredBody: WRONG_NUMBER_REPLY_BODY,
+          stillAllowed: () => stillAllowed(supabase, orgId, st.propertyIds),
+        });
+      } catch (e) {
+        reportError(e, { tags: { surface: "routing_v2_phone_action_reply" }, extra: { actionId: st.actionId } });
+        sent = { sent: false, reason: "send_threw" };
+      }
+      if (!sent.sent) {
+        await step(db, st.actionId, "close", { reason: `reply_not_sent:${sent.reason}` });
+        return { outcome: "reply_not_sent", actionId: st.actionId, reason: sent.reason };
+      }
+      await step(db, st.actionId, "sent", { reply: sent.outboundMessageId });
+    } else if (st.replyState === "sending") {
+      // Only take_lease may settle a `sending` row; never send again from here.
+      return { outcome: "replayed", actionId: st.actionId, actionStatus: st.status };
+    }
+
+    const { data, error } = await db.rpc("fn_routing_v2_phone_action_apply", { p_action_id: st.actionId });
+    if (error) {
+      reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_apply" }, extra: { actionId: st.actionId } });
+      return { outcome: "not_applied", actionId: st.actionId, reason: "apply_failed" };
+    }
+    const a = (data ?? {}) as { status?: string; actionStatus?: string; reason?: string; applied?: string[]; skipped?: Array<{ propertyId: string; reason: string }> };
+    if (a.status === "replayed") return { outcome: "replayed", actionId: st.actionId, actionStatus: a.actionStatus ?? "unknown" };
+    if (a.status !== "applied") return { outcome: "not_applied", actionId: st.actionId, reason: a.reason ?? a.status ?? "apply_unexpected" };
+    applied = a.applied ?? [];
+    skipped = a.skipped ?? [];
+  } else if (st.status !== "applied") {
+    return { outcome: "replayed", actionId: st.actionId, actionStatus: st.status };
+  }
+
+  // As setResponderDispo does for a wrong_number: pause the property's drips and keep the ids for undo.
+  if (st.kind === "wrong_number_all") {
+    for (const propertyId of applied) {
+      try {
+        const ids = await deps.pauseEnrollments(propertyId);
+        if (ids.length === 0) continue;
+        const { error } = await db
+          .from("routing_v2_phone_action_properties")
+          .update({ paused_enrollment_ids: ids })
+          .eq("action_id", st.actionId)
+          .eq("property_id", propertyId)
+          .is("undone_at", null);
+        if (error) throw new Error(String(error.message));
+      } catch (e) {
+        reportError(e, { tags: { surface: "routing_v2_phone_action_pause" }, extra: { actionId: st.actionId, propertyId } });
+      }
+    }
+    await step(db, st.actionId, "paused");
+  }
+  return { outcome: "applied", kind: st.kind, actionId: st.actionId, applied, skipped };
+}
+
+/** Resume an unfinished action once its lease expired (duplicate webhook or sweeper). */
+export async function resumeRoutingV2PhoneAction(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  actionId: string,
+  deps: RoutingV2PhoneActionDeps,
+): Promise<RoutingV2PhoneActionResult> {
+  const db = supabase as unknown as Loose;
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_take_lease", {
+    p_action_id: actionId,
+    p_reply_body: WRONG_NUMBER_REPLY_BODY,
+    p_lease_seconds: deps.leaseSeconds ?? 120,
+  });
+  if (error) {
+    reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_lease" }, extra: { actionId } });
+    return { outcome: "replayed", actionId, actionStatus: "unknown" };
+  }
+  const t = (data ?? {}) as { taken?: boolean; status?: string; replyState?: string; action?: string; propertyIds?: string[]; applied?: string[]; reason?: string };
+  if (!t.taken) return { outcome: "replayed", actionId, actionStatus: t.status ?? "unknown" };
+  if (t.status === "not_applied") return { outcome: "not_applied", actionId, reason: t.reason ?? "closed" };
+  if (t.action !== "wrong_number_all" && t.action !== "bad_number") return { outcome: "replayed", actionId, actionStatus: t.status ?? "unknown" };
+  return drive(supabase, orgId, {
+    actionId,
+    kind: t.action,
+    status: t.status ?? "unknown",
+    replyState: t.replyState ?? "unknown",
+    propertyIds: t.propertyIds ?? [],
+    applied: t.applied ?? [],
+  }, deps);
+}
+
+/** Sweeper: resume every unfinished action whose lease expired. Never sends a reply twice. */
+export async function reconcileRoutingV2PhoneActions(
+  supabase: SupabaseClient<Database>,
+  deps: RoutingV2PhoneActionDeps,
+  limit = 25,
+): Promise<RoutingV2PhoneActionResult[]> {
+  const db = supabase as unknown as Loose;
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_list_stale", { p_limit: limit });
+  if (error) {
+    reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_sweep" } });
+    return [];
+  }
+  const out: RoutingV2PhoneActionResult[] = [];
+  for (const row of (data ?? []) as Array<{ action_id: string }>) {
+    const { data: a } = await db.from("routing_v2_phone_actions").select("org_id").eq("id", row.action_id).maybeSingle();
+    const orgId = (a as { org_id?: string } | null)?.org_id;
+    if (!orgId) continue;
+    try {
+      out.push(await resumeRoutingV2PhoneAction(supabase, orgId, row.action_id, deps));
+    } catch (e) {
+      reportError(e, { tags: { surface: "routing_v2_phone_action_sweep" }, extra: { actionId: row.action_id } });
+    }
+  }
+  return out;
+}
+
 export async function runRoutingV2PhoneAction(
   supabase: SupabaseClient<Database>,
   input: RoutingV2PhoneActionInput,
@@ -129,6 +305,7 @@ export async function runRoutingV2PhoneAction(
     p_action: candidate.kind,
     p_phone: phone,
     p_decision: { signal: candidate.signal, probability: candidate.probability, wrong_scope: input.wrongScope },
+    p_lease_seconds: deps.leaseSeconds ?? 120,
   });
   if (claimError) {
     reportError(new Error(String(claimError.message)), {
@@ -137,87 +314,37 @@ export async function runRoutingV2PhoneAction(
     });
     return { outcome: "not_applicable", reason: "claim_failed" };
   }
-  const c = claim as { status?: string; actionId?: string; actionStatus?: string; reason?: string; propertyIds?: string[] } | null;
+  const c = claim as { status?: string; actionId?: string; actionStatus?: string; reason?: string; propertyIds?: string[]; replyState?: string } | null;
   if (c?.status === "replayed" && c.actionId) {
+    // Duplicate webhook: finish an abandoned action (lease expired), otherwise a no-op.
+    if (c.actionStatus === "claimed" || c.actionStatus === "applied") {
+      return resumeRoutingV2PhoneAction(supabase, input.orgId, c.actionId, deps);
+    }
     return { outcome: "replayed", actionId: c.actionId, actionStatus: c.actionStatus ?? "unknown" };
   }
   if (c?.status !== "claimed" || !c.actionId) {
     return { outcome: "not_applicable", reason: c?.reason ?? "claim_unexpected" };
   }
-  const actionId = c.actionId;
-
-  // Belt and braces: the DB already checked canary eligibility (its SQL twin is pinned to
-  // flags.ts); re-check every claimed property with the canonical TS helper before any send.
-  if (!v2SliceAllowedForAll(flags, "wrong_number_all", c.propertyIds ?? [])) {
-    await db
-      .from("routing_v2_phone_actions")
-      .update({ status: "not_applied", not_applied_reason: "canary_excluded" })
-      .eq("id", actionId)
-      .eq("status", "claimed");
-    return { outcome: "not_applicable", reason: "canary_excluded" };
-  }
-
-  let replyMessageId: string | null = null;
-  if (candidate.kind === "wrong_number_all") {
-    let sent: Awaited<ReturnType<SendWrongNumberReply>>;
-    try {
-      sent = await deps.sendWrongNumberReply({ templateKey: WRONG_NUMBER_REPLY_KEY, requiredBody: WRONG_NUMBER_REPLY_BODY });
-    } catch (e) {
-      reportError(e, { tags: { surface: "routing_v2_phone_action_reply" }, extra: { actionId } });
-      sent = { sent: false, reason: "send_threw" };
-    }
-    if (!sent.sent) {
-      await db
-        .from("routing_v2_phone_actions")
-        .update({ status: "not_applied", not_applied_reason: `reply_not_sent:${sent.reason}` })
-        .eq("id", actionId)
-        .eq("status", "claimed");
-      return { outcome: "reply_not_sent", actionId, reason: sent.reason };
-    }
-    replyMessageId = sent.outboundMessageId;
-  }
-
-  const { data: applied, error: applyError } = await db.rpc("fn_routing_v2_phone_action_apply", {
-    p_action_id: actionId,
-    p_reply_message_id: replyMessageId,
-  });
-  if (applyError) {
-    reportError(new Error(String(applyError.message)), { tags: { surface: "routing_v2_phone_action_apply" }, extra: { actionId } });
-    return { outcome: "not_applied", actionId, reason: "apply_failed" };
-  }
-  const a = applied as {
-    status?: string;
-    actionStatus?: string;
-    reason?: string;
-    applied?: string[];
-    skipped?: Array<{ propertyId: string; reason: string }>;
-  } | null;
-  if (a?.status === "replayed") return { outcome: "replayed", actionId, actionStatus: a.actionStatus ?? "unknown" };
-  if (a?.status !== "applied") return { outcome: "not_applied", actionId, reason: a?.reason ?? "apply_unexpected" };
-
-  // As setResponderDispo does for a wrong_number: pause the property's drips and keep the ids for undo.
-  if (candidate.kind === "wrong_number_all") {
-    for (const propertyId of a.applied ?? []) {
-      try {
-        const ids = await deps.pauseEnrollments(propertyId);
-        if (ids.length === 0) continue;
-        const { error } = await db
-          .from("routing_v2_phone_action_properties")
-          .update({ paused_enrollment_ids: ids })
-          .eq("action_id", actionId)
-          .eq("property_id", propertyId)
-          .is("undone_at", null);
-        if (error) throw new Error(String(error.message));
-      } catch (e) {
-        reportError(e, { tags: { surface: "routing_v2_phone_action_pause" }, extra: { actionId, propertyId } });
-      }
-    }
-  }
-  return { outcome: "applied", kind: candidate.kind, actionId, applied: a.applied ?? [], skipped: a.skipped ?? [] };
+  return drive(supabase, input.orgId, {
+    actionId: c.actionId,
+    kind: candidate.kind,
+    status: "claimed",
+    replyState: c.replyState ?? (candidate.kind === "wrong_number_all" ? "pending" : "not_needed"),
+    propertyIds: c.propertyIds ?? [],
+    applied: [],
+  }, deps);
 }
 
 export type UndoRoutingV2PhoneActionResult =
-  | { ok: true; status: "undone" | "partial" | "already_undone"; restored: string[]; stateChanged: string[]; resumed: number; resumeFailed: number }
+  | {
+      ok: true;
+      status: "undone" | "partial" | "already_undone";
+      restored: string[];
+      stateChanged: string[];
+      skipped: Array<{ propertyId: string; reason: string }>;
+      resumed: number;
+      resumeFailed: number;
+    }
   | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "FAILED"; message: string };
 
 /**
@@ -240,7 +367,13 @@ export async function undoRoutingV2PhoneAction(
     reportError(new Error(m), { tags: { surface: "routing_v2_phone_action_undo" }, extra: { actionId } });
     return { ok: false, code: "FAILED", message: "Could not undo. Try again." };
   }
-  const r = (data ?? {}) as { status?: string; restored?: string[]; stateChanged?: string[]; enrollmentIds?: string[] };
+  const r = (data ?? {}) as {
+    status?: string;
+    restored?: string[];
+    stateChanged?: string[];
+    skipped?: Array<{ propertyId: string; reason: string }>;
+    enrollmentIds?: string[];
+  };
   let resumed = 0;
   let resumeFailed = 0;
   for (const enrollmentId of r.enrollmentIds ?? []) {
@@ -256,5 +389,5 @@ export async function undoRoutingV2PhoneAction(
     if ((rows as Array<{ outcome?: string }> | null)?.[0]?.outcome === "resumed") resumed += 1;
   }
   const status = r.status === "already_undone" ? "already_undone" : r.status === "partial" ? "partial" : "undone";
-  return { ok: true, status, restored: r.restored ?? [], stateChanged: r.stateChanged ?? [], resumed, resumeFailed };
+  return { ok: true, status, restored: r.restored ?? [], stateChanged: r.stateChanged ?? [], skipped: r.skipped ?? [], resumed, resumeFailed };
 }
