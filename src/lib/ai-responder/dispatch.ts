@@ -112,6 +112,7 @@ import {
   type NineHotReply,
   type NineQuestionResult,
 } from "@/lib/sms-classification/nine-questions";
+import { runRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
 import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
 import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
 import {
@@ -1360,18 +1361,32 @@ async function classifyAndHandleNonRouteOutcomes(
   // Messages v2 PR 3: per-org engine switch (default outcome_v1 = today's path).
   if (config?.classifier_provider === "jev" && config.classifier_engine === "nine_questions") {
     if (config.classifier_mode === "automatic") {
-      return {
-        handled: true,
-        outcome: await runNineQuestionsStep(supabase, {
-          input,
-          property,
-          claim: responseClaim,
-          runCtx,
-          templateCtx,
-          escalationKeywords: config.escalation_keywords ?? null,
-          ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
-        }),
-      };
+      const outcome = await runNineQuestionsStep(supabase, {
+        input,
+        property,
+        claim: responseClaim,
+        runCtx,
+        templateCtx,
+        escalationKeywords: config.escalation_keywords ?? null,
+        ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+      });
+      // Routing v2 PR-A: record-only shadow AFTER the live engine acted. Off unless
+      // routing_v2_flags.shadow is true; never throws, never sends (routing-v2/shadow.ts).
+      if (!input.nineDeferral) {
+        await runRoutingV2Shadow(
+          supabase,
+          {
+            orgId: property.org_id,
+            propertyId: input.propertyId,
+            contactId: input.contactId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            inboundBody: input.inboundBody,
+          },
+          { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+        );
+      }
+      return { handled: true, outcome };
     }
     // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
     const shadow = await runNineClassification(

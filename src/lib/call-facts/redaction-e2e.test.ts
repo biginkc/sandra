@@ -80,8 +80,8 @@ describe("one TypeSafe path for call facts", () => {
       const p = join(dir, f);
       return statSync(p).isDirectory() ? walk(p) : /\.(ts|tsx)$/.test(f) && !/\.test\./.test(f) ? [p] : [];
     });
-  it("askJev( is called only by jev-facts.ts (facts) its own gateway and the nine-question engine (SMS classification)", () => {
+  it("askJev( is called only by jev-facts.ts (facts) its own gateway, the nine-question engine and the routing v2 shadow (SMS classification)", () => {
     const hits = walk(join(process.cwd(), "src")).filter((f) => /\baskJev\(/.test(readFileSync(f, "utf8"))).map((f) => f.replace(process.cwd() + "/", ""));
-    expect(hits.sort()).toEqual(["src/lib/call-facts/jev-facts.ts", "src/lib/sms-classification/nine-questions.ts", "src/lib/sms-classification/providers/jev-gateway.ts"]);
+    expect(hits.sort()).toEqual(["src/lib/call-facts/jev-facts.ts", "src/lib/sms-classification/nine-questions.ts", "src/lib/sms-classification/providers/jev-gateway.ts", "src/lib/sms-classification/routing-v2/shadow.ts"]);
   });
 });
