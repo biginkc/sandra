@@ -1,3 +1,5 @@
+import { OPT_OUT_PHRASES } from "@/lib/sequences/opt-out";
+
 import { V2_PRICE_CHECK_ACTIONS, V2_ROAD_ACTIONS, type V2Action } from "./actions";
 import type { ValueLookupResult } from "./dealmachine-value";
 import { v2SliceAllowed, type RoutingV2Flags } from "./flags";
@@ -112,7 +114,12 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
  * Exact match against the approved text (whitespace-trimmed), never a fuzzy match.
  */
 export function isAfterRepairsReply(ourLastText: string | null | undefined): boolean {
-  return typeof ourLastText === "string" && ourLastText.trim() === v2ReplyText("price_too_high");
+  if (typeof ourLastText !== "string") return false;
+  const body = ourLastText.trim();
+  const approved = v2ReplyText("price_too_high");
+  if (body === approved) return true;
+  // Only Sandra's exact appended phrases; arbitrary trailing seller text is not stripped.
+  return OPT_OUT_PHRASES.some((footer) => body === `${approved} ${footer}`);
 }
 
 /**
