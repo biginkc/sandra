@@ -76,8 +76,17 @@ export function isV2Opportunity(
   });
 }
 
-/** Send-time re-check for one opportunity alert: fresh flags + eligibility. Any error = false. */
-export async function v2OpportunityStillAllowed(db: LooseSupabase, orgId: string, propertyId: string): Promise<boolean> {
+/**
+ * Send-time re-check for one opportunity alert. One fresh flags read is the single source of
+ * truth: shadow + replies slice + canary eligibility, AND the inbound's latest decision is
+ * re-read and re-judged with that snapshot's alert_on_time_only. Any error = false.
+ */
+export async function v2OpportunityStillAllowed(
+  db: LooseSupabase,
+  orgId: string,
+  propertyId: string,
+  inboundId: string | undefined,
+): Promise<boolean> {
   try {
     const { data, error } = await db
       .from("ai_responder_configs")
@@ -87,7 +96,19 @@ export async function v2OpportunityStillAllowed(db: LooseSupabase, orgId: string
       .maybeSingle();
     if (error) return false;
     const flags = parseRoutingV2Flags((data as { routing_v2_flags?: unknown } | null)?.routing_v2_flags);
-    return flags.shadow && v2SliceAllowed(flags, "replies", propertyId);
+    if (!inboundId || !flags.shadow || !v2SliceAllowed(flags, "replies", propertyId)) return false;
+    const { data: rows, error: rowError } = await db
+      .from("routing_v2_shadow_decisions")
+      .select("id, property_id, inbound_message_id, created_at, status, road, opportunity_alert, probabilities")
+      .eq("org_id", orgId)
+      .eq("inbound_message_id", inboundId)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(1);
+    if (rowError) return false;
+    const latest = ((rows ?? []) as V2DecisionRow[])[0];
+    if (!latest || latest.property_id !== propertyId) return false;
+    return isV2Opportunity(latest, { alertOnTimeOnly: flags.alert_on_time_only });
   } catch {
     return false;
   }

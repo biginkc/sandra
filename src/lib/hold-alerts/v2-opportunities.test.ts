@@ -124,6 +124,36 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
     expect(t4.sent).toHaveLength(2);
   });
 
+  it("send-time check re-judges the latest decision with fresh alert_on_time_only, both ways", async () => {
+    const yes = (flags: unknown) => fixtures(row("book_appointment"), flags);
+    // loaded while ON (eligible), flipped OFF before send -> not sent (today's hot alert owns it)
+    expect(await v2OpportunityStillAllowed(dbFor(yes({ ...FLAGS_ON, alert_on_time_only: true })).db, ORG, P1, "m1")).toBe(true);
+    expect(await v2OpportunityStillAllowed(dbFor(yes({ ...FLAGS_ON, alert_on_time_only: false })).db, ORG, P1, "m1")).toBe(false);
+    // non-yes road is unaffected by the flip
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row("stop"), { ...FLAGS_ON, alert_on_time_only: false })).db, ORG, P1, "m1")).toBe(true);
+    // a newer decision for the inbound that says no wins at send time
+    const f = fixtures(); f.routing_v2_shadow_decisions!.push({ ...row(), id: "r2", created_at: "2026-10-28T11:30:00.000Z", opportunity_alert: false });
+    expect(await v2OpportunityStillAllowed(dbFor(f).db, ORG, P1, "m1")).toBe(false);
+    // no inbound id, decision lookup error, property mismatch -> false
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, P1, undefined)).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "routing_v2_shadow_decisions").db, ORG, P1, "m1")).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, "22222222-2222-4222-8222-222222222222", "m1")).toBe(false);
+  });
+
+  it("end to end: flip alert_on_time_only between load and send, both ways", async () => {
+    const tables = fixtures(row("book_appointment"), { ...FLAGS_ON, alert_on_time_only: true });
+    const { promotions } = await load(tables);
+    expect(promotions).toHaveLength(1);
+    tables.ai_responder_configs![0]!.routing_v2_flags = { ...FLAGS_ON, alert_on_time_only: false };
+    const t = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: (o, p, i) => v2OpportunityStillAllowed(dbFor(tables).db, o, p, i) });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    tables.ai_responder_configs![0]!.routing_v2_flags = { ...FLAGS_ON, alert_on_time_only: true };
+    const t2 = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: (o, p, i) => v2OpportunityStillAllowed(dbFor(tables).db, o, p, i) });
+    await runHoldAlertsForOrg(t2.deps, ORG);
+    expect(t2.sent).toHaveLength(2);
+  });
+
   it("the send-time check never touches today's hot alerts", async () => {
     const hot = { propertyId: P1, assigneeUserId: OWNER.userId, name: "Jonathan", assignedAt: AT, kind: "hot_text" as const, inboundId: "m9", key: "hot_text:m9" };
     const check = vi.fn(async () => false);
@@ -134,10 +164,10 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   });
 
   it("v2OpportunityStillAllowed reads fresh flags and fails closed", async () => {
-    expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, P1)).toBe(true);
-    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, replies: false })).db, ORG, P1)).toBe(false);
-    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, canary_property_ids: [] })).db, ORG, P1)).toBe(false);
-    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "ai_responder_configs").db, ORG, P1)).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, P1, "m1")).toBe(true);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, replies: false })).db, ORG, P1, "m1")).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, canary_property_ids: [] })).db, ORG, P1, "m1")).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "ai_responder_configs").db, ORG, P1, "m1")).toBe(false);
   });
 
   it("either question alone qualifies", () => {

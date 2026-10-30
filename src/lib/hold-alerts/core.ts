@@ -278,7 +278,7 @@ export async function runHoldAlertsForOrg(
           if (p.kind === "selling_opportunity") {
             let allowed = false;
             try {
-              allowed = (await deps.v2OpportunityStillAllowed?.(orgId, p.propertyId)) === true;
+              allowed = (await deps.v2OpportunityStillAllowed?.(orgId, p.propertyId, p.inboundId)) === true;
             } catch {
               allowed = false;
             }

@@ -198,7 +198,7 @@ export interface HoldAlertDeps {
    * flags + canary eligibility right before the Slack/SMS send. Absent or false = not sent.
    * Never consulted for any other alert kind.
    */
-  v2OpportunityStillAllowed?(orgId: string, propertyId: string): Promise<boolean>;
+  v2OpportunityStillAllowed?(orgId: string, propertyId: string, inboundId: string | undefined): Promise<boolean>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */

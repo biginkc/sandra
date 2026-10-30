@@ -307,7 +307,7 @@ export function createHoldAlertDeps(
       return loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
-    v2OpportunityStillAllowed: (orgId, propertyId) => v2OpportunityStillAllowed(db, orgId, propertyId),
+    v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")
