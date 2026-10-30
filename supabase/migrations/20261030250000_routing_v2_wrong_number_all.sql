@@ -285,6 +285,53 @@ end;
 $$;
 revoke all on function public.routing_v2_phone_action_hold_superseded(uuid, uuid, text) from public, anon, authenticated, service_role;
 
+-- PR-G's own approved reply is one outbound SMS row on the source property, and the existing
+-- message trigger (trg_messages_bump_decision_context_revision) moves that property's
+-- decision_context_revision by exactly one. When the reply is recorded `sent` (normal or
+-- recovery path, matched by send_id), re-stamp the source row's applied revision so undo's
+-- unchanged revision check still works. Only when the bump provably came from that message
+-- alone: the message is ours (this send_id, the source property, outbound SMS), the property
+-- is not DNC-locked, and the revision moved by exactly one since A. Anything else = no
+-- re-stamp, and undo keeps refusing. Caller holds the phone lock and the action row lock.
+create or replace function public.routing_v2_phone_action_restamp_after_reply(p_action_id uuid, p_message_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v public.routing_v2_phone_actions%rowtype;
+  v_row public.routing_v2_phone_action_properties%rowtype;
+  v_rev bigint;
+  v_locked boolean;
+begin
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
+  if not found or p_message_id is null then
+    return false;
+  end if;
+  if not exists (
+    select 1 from public.messages m
+    where m.id = p_message_id and m.org_id = v.org_id and m.property_id = v.source_property_id
+      and m.channel = 'sms' and m.direction = 'outbound' and m.idempotency_key = v.send_id
+  ) then
+    return false;
+  end if;
+  select * into v_row from public.routing_v2_phone_action_properties
+  where action_id = v.id and property_id = v.source_property_id and outcome = 'applied' and undone_at is null;
+  if not found then
+    return false;
+  end if;
+  select p.decision_context_revision, p.is_dnc_locked into v_rev, v_locked
+  from public.properties p where p.id = v.source_property_id and p.org_id = v.org_id;
+  if v_locked or v_rev is distinct from v_row.recorded_revision + 1 then
+    return false;
+  end if;
+  update public.routing_v2_phone_action_properties set recorded_revision = v_rev where id = v_row.id;
+  return true;
+end;
+$$;
+revoke all on function public.routing_v2_phone_action_restamp_after_reply(uuid, uuid) from public, anon, authenticated, service_role;
+
 -- A. The whole action except the SMS, in one transaction.
 create or replace function public.fn_routing_v2_phone_action_apply_all(
   p_source_inbound_message_id uuid,
@@ -714,6 +761,9 @@ begin
         sending_at = case when p_to = 'sending' then clock_timestamp() else sending_at end
     where id = v.id;
     v_ok := true;
+    if p_to = 'sent' then
+      perform public.routing_v2_phone_action_restamp_after_reply(v.id, p_message_id);
+    end if;
   end if;
   select * into v from public.routing_v2_phone_actions where id = p_action_id;
   return jsonb_build_object('ok', v_ok, 'replyState', v.reply_state, 'sendId', v.send_id);
@@ -796,6 +846,9 @@ begin
   update public.routing_v2_phone_actions
   set reply_state = v_to, reply_message_id = m.id, reply_reason = v_reason, reply_updated_at = now()
   where id = v.id;
+  if v_to = 'sent' then
+    perform public.routing_v2_phone_action_restamp_after_reply(v.id, m.id);
+  end if;
   return jsonb_build_object('replyState', v_to, 'sendId', v.send_id, 'messageId', m.id, 'reason', v_reason);
 end;
 $$;

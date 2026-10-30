@@ -27,7 +27,7 @@ const Y = "+18165550202"; // a different person's phone
 const Z = "+18165550303"; // a second phone on a contact that also holds X
 
 /** Every function this migration creates (exact names; other PRs add routing_v2_phone* functions too). */
-const PRG_FUNCTIONS = ["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply", "fn_routing_v2_phone_action_release_fence", "fn_routing_v2_phone_action_reply", "fn_routing_v2_phone_action_send_allowed", "fn_routing_v2_phone_action_unsettled_replies", "fn_undo_routing_v2_phone_action", "routing_v2_clear_pause_token", "routing_v2_phone_action_eligible", "routing_v2_phone_action_hold_superseded", "routing_v2_phone_action_newer_inbound", "routing_v2_phone_action_undo_core", "routing_v2_phone_digits", "routing_v2_phone_lock"];
+const PRG_FUNCTIONS = ["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply", "fn_routing_v2_phone_action_release_fence", "fn_routing_v2_phone_action_reply", "fn_routing_v2_phone_action_send_allowed", "fn_routing_v2_phone_action_unsettled_replies", "fn_undo_routing_v2_phone_action", "routing_v2_clear_pause_token", "routing_v2_phone_action_eligible", "routing_v2_phone_action_hold_superseded", "routing_v2_phone_action_newer_inbound", "routing_v2_phone_action_restamp_after_reply", "routing_v2_phone_action_undo_core", "routing_v2_phone_digits", "routing_v2_phone_lock"];
 
 const db = new Client({ connectionString: url });
 let orgId: string;
@@ -207,6 +207,16 @@ const registerGlobalDnc = async (phone = X) => {
 };
 const sendAllowed = (actionId: string) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_send_allowed($1) as ok`, [actionId])).rows[0].ok);
+/** PR-G's own reply as the template step stores it: outbound SMS on the source with idempotency_key = send id. */
+const insertOurReply = async (sendId: string, status: string, externalId: string | null) => {
+  const id = randomUUID();
+  await db.query(
+    `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status, external_id)
+     values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, $8, $9)`,
+    [id, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, sendId, status, externalId],
+  );
+  return id;
+};
 const recover = (actionId: string) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_recover_reply($1) as r`, [actionId])).rows[0].r);
 const undo = (userId: string, actionId: string) =>
@@ -803,6 +813,76 @@ describe("C. undo", () => {
     expect(await enrollment(ids.e2)).toEqual({ status: "opted_out", pause_reason: "dnc" });
   });
 
+  it("normal send then undo: the reply's own revision bump is accounted for, undo restores every property", async () => {
+    await setFlags(ON);
+    const before = await snapshot();
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    const out = await insertOurReply(r.sendId, "sent", "SM-n");
+    expect(await reply(r.actionId, r.sendId, "sent", out)).toMatchObject({ ok: true, replyState: "sent" });
+    const u = await undo(ownerId, r.actionId);
+    expect(u.status).toBe("undone");
+    expect([...u.restored].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("recovery-path send then undo: restores", async () => {
+    await setFlags(ON);
+    const before = await snapshot();
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    await insertOurReply(r.sendId, "sent", "SM-r");
+    await expireSendLease(r.actionId);
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "sent" });
+    expect((await undo(ownerId, r.actionId)).status).toBe("undone");
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("send plus a human change on the source: no re-stamp, undo refuses the source (others restored)", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    const out = await insertOurReply(r.sendId, "sent", "SM-h");
+    await db.query(`update public.properties set status = 'contacted' where id = $1`, [ids.p1]); // a person, bumps the revision
+    await reply(r.actionId, r.sendId, "sent", out);
+    const u = await undo(ownerId, r.actionId);
+    expect(u.status).toBe("partial");
+    expect(u.skipped).toEqual([{ propertyId: ids.p1, reason: "state_changed" }]);
+    expect(await dispo(ids.p1)).toBe("wrong_number");
+  });
+
+  it("a message without our send id (or another property's) is never accounted for: undo refuses the source", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    const foreign = randomUUID();
+    await db.query(
+      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, status, external_id)
+       values ($1, $2, $3, $4, 'sms', 'outbound', 'x', $5, 'sent', 'SM-f')`,
+      [foreign, orgId, ids.p1, ids.conv, X],
+    );
+    await reply(r.actionId, r.sendId, "sent", foreign);
+    expect((await undo(ownerId, r.actionId)).skipped).toEqual([{ propertyId: ids.p1, reason: "state_changed" }]);
+  });
+
+  it("send still unknown: in flight = busy; recorded unknown with the message on the thread = undo refuses the source", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    await insertOurReply(r.sendId, "pending", null); // provider outcome not known yet
+    expect(await undo(ownerId, r.actionId)).toMatchObject({ status: "busy", reason: "reply_in_flight" });
+    await expireSendLease(r.actionId);
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "unknown" });
+    const u = await undo(ownerId, r.actionId);
+    expect(u.skipped).toEqual([{ propertyId: ids.p1, reason: "state_changed" }]);
+    expect(await dispo(ids.p1)).toBe("wrong_number");
+  });
+
   it("undo never resumes a later pause with the same reason (person resumed, a later inbound re-paused)", async () => {
     await setFlags(ON);
     const r = await applyAll();
@@ -1375,7 +1455,7 @@ describe("self-sweep", () => {
     }
     expect(await can("authenticated", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(true);
     expect(await can("anon", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(false);
-    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid)", "public.routing_v2_phone_action_newer_inbound(uuid)", "public.routing_v2_phone_action_hold_superseded(uuid, uuid, text)"]) {
+    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid)", "public.routing_v2_phone_action_newer_inbound(uuid)", "public.routing_v2_phone_action_hold_superseded(uuid, uuid, text)", "public.routing_v2_phone_action_restamp_after_reply(uuid, uuid)"]) {
       for (const role of ["anon", "authenticated", "service_role"]) expect(await can(role, fn), `${role} ${fn}`).toBe(false);
     }
     const tables = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties')`)).rows;
