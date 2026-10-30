@@ -111,6 +111,16 @@ describe("PR-F: alert only when a time is picked (alert_on_time_only ON)", () =>
     expect(drips.state.calls.at(-1)).toMatchObject({ drip: null, road: "ALERT_call_me", inboundMessageId: "m2" });
   });
 
+  it('"Tuesday 3pm" then quickly "Thanks": exactly one call-me alert across both texts', async () => {
+    const drips = fakeDrips();
+    const sink = alertSink();
+    const a = deps(TIME_ONLY_ON, "m2", drips.t, { alert: async (_r, _l, key) => sink.deliver("m2", key ?? "x") });
+    await executeV2Action(actionForV2Decision(decide("Tuesday 3pm", { asked_call: 0.9 })), a.d);
+    const b = deps(TIME_ONLY_ON, "m3", drips.t, { alert: async (_r, _l, key) => sink.deliver("m3", key ?? "x") });
+    await executeV2Action(actionForV2Decision(decide("Thanks", { just_ok: 0.8 })), b.d);
+    expect([...sink.delivered.entries()]).toEqual([["m2", [hotTextKey("m2")]]]);
+  });
+
   it("every yes-family road (Yes / Maybe / offer / future action / Okay / reaction / driving) sends no alert", async () => {
     const yes: Array<[string, Partial<Record<V2QuestionId, number>>]> = [
       ["Yes", { open_to_selling: 0.95 }],

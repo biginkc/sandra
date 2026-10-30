@@ -159,6 +159,60 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
     expect(await row(db, alert!.id)).toMatchObject({ status: "claimed", authorized: true });
   });
 
+  it('"Tuesday 3pm" then quickly "Thanks": exactly one call-me alert is delivered; the newer reply never cancels it', async () => {
+    const time = await inbound(db, ctx, "2026-10-30T15:00:00Z", "Tuesday 3pm");
+    await transition(db, time, ctx.property, TIME_DECISION);
+    const thanks = await inbound(db, ctx, "2026-10-30T15:00:20Z", "Thanks");
+    // "Thanks" = Okay = a yes: under alert_on_time_only, reply + Book appointment, no alert.
+    const t2 = await transition(db, thanks, ctx.property, SURE_DECISION);
+    expect(t2.outcome).toBe("applied");
+    expect(t2.cancelled_outbox_ids).toEqual([]);
+    const all = (await db.query(`select id, kind, status, inbound_message_id from public.routing_v2_outbox where property_id = $1`, [ctx.property])).rows;
+    const alertRows = all.filter((r) => r.kind === "alert");
+    expect(alertRows).toHaveLength(1);
+    expect(alertRows[0]).toMatchObject({ status: "pending", inbound_message_id: time });
+    expect(await claim(db, alertRows[0].id)).toBe("ok");
+    expect(await authorize(db, alertRows[0].id)).toBe("ok");
+    const [thanksReply] = await outbox(db, thanks);
+    expect(await claim(db, thanksReply!.id)).toBe("ok");
+    expect(await authorize(db, thanksReply!.id)).toBe("ok");
+  });
+
+  it("a newer reply cancels a queued auto reply but keeps a queued alert (pending and claimed)", async () => {
+    const r1 = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, r1, ctx.property, { outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }] });
+    const [alert1, reply1] = await outbox(db, r1);
+    const r2 = await inbound(db, ctx, "2026-10-30T15:01:00Z");
+    const t2 = await transition(db, r2, ctx.property, { outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }] });
+    expect(t2.cancelled_outbox_ids).toEqual([reply1!.id]);
+    expect(await row(db, reply1!.id)).toMatchObject({ status: "cancelled", cancel_reason: `superseded_by=${r2}` });
+    expect(await row(db, alert1!.id)).toMatchObject({ status: "pending" });
+    expect(await claim(db, alert1!.id)).toBe("ok");
+    // Claimed alert, then a third reply: the delivery re-check still lets it through.
+    const r3 = await inbound(db, ctx, "2026-10-30T15:02:00Z");
+    await transition(db, r3, ctx.property, { outbox: [{ kind: "reply", payload: {} }] });
+    expect(await authorize(db, alert1!.id)).toBe("ok");
+    // r2's alert survived r3 too; its reply did not.
+    const [alert2, reply2] = await outbox(db, r2);
+    expect(await claim(db, reply2!.id)).toBe("not_pending");
+    expect(await claim(db, alert2!.id)).toBe("ok");
+  });
+
+  it("alerts still obey flag-off / canary-out at claim and at delivery", async () => {
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, TIME_DECISION);
+    const [a] = await outbox(db, id);
+    await setFlags(db, ctx.org, { ...FLAGS_ON, canary_percent: 0 });
+    expect(await claim(db, a!.id)).toBe("flag_off");
+    const id2 = await inbound(db, ctx, "2026-10-30T15:01:00Z");
+    await setFlags(db, ctx.org, FLAGS_ON);
+    await transition(db, id2, ctx.property, TIME_DECISION);
+    const [b] = await outbox(db, id2);
+    expect(await claim(db, b!.id)).toBe("ok");
+    await setFlags(db, ctx.org, { ...FLAGS_ON, replies: false });
+    expect(await authorize(db, b!.id)).toBe("flag_off");
+  });
+
   it("takeover after the inbound: no auto send (no reply queued, no drip), the alert intent stays", async () => {
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
     await takeover(db, ctx.property);
@@ -276,6 +330,10 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
               (select count(*)::int from information_schema.columns where table_name = 'routing_v2_outbox' and column_name = 'authorized_at') as col`,
     )).rows[0];
     expect(objs).toEqual({ fns: 0, trg: 0, col: 0 });
+    // PR-C's definitions are back byte-for-byte.
+    const src = (await db.query(`select prosrc from pg_proc where proname = 'routing_v2_claim_outbox'`)).rows[0].prosrc as string;
+    expect(src).toContain("if v_latest is distinct from v.transition_seq then");
+    expect(src).not.toContain("v.kind = 'reply' and v_latest");
     await db.query(MIGRATION);
     await db.query(PRC_ROLLBACK);
     await takeover(db, ctx.property); // the fence must never fail a takeover
