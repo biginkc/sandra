@@ -144,6 +144,7 @@ import {
   readLiveV2Evidence,
   storedFinalDecision,
   storedV2Decision,
+  withNumberSourceReply,
   type StoredLiveEvidence,
 } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
@@ -8498,6 +8499,13 @@ export async function runRoutingV2LiveStep(
     );
     // classifyV2 only returns off when the flags say so; they were just read as on.
     classification = result.kind === "off" ? V2_JEV_FAILED : result;
+    // "How did you get my number?": the v2 question set has no such question, so the EXISTING
+    // live detector (the eight-answer classification's askedHowNumberObtained, the same signal
+    // the identity interceptor uses) is asked, only when the v2 road would send a reply.
+    if (classification.kind === "decided" && classification.action.steps.some((step) => step.kind === "reply")
+        && (await routingV2AskedHowNumber(supabase, input, property.org_id, runCtx))) {
+      classification = { ...classification, action: withNumberSourceReply(classification.action) };
+    }
   } catch {
     classification = V2_JEV_FAILED;
   }
@@ -8590,6 +8598,21 @@ async function applyRoutingV2LiveEvidence(
   }
   // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
   return nineHoldAndComplete(supabase, a, "nine_needs_person");
+}
+
+/** The existing number-source detector (eight-answer Jev classification). Any failure = false. */
+async function routingV2AskedHowNumber(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  runCtx?: MaybeRunContext,
+): Promise<boolean> {
+  try {
+    const c = await classifyInboundOnce(supabase, { input, orgId, runCtx });
+    return "askedHowNumberObtained" in c && c.askedHowNumberObtained === true;
+  } catch {
+    return false;
+  }
 }
 
 /** The seller's number for a phone-level action: the inbound's own from address. */

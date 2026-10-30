@@ -16,6 +16,11 @@ const h = vi.hoisted(() => ({
   transition: vi.fn(),
   stop: vi.fn(),
   phone: vi.fn(),
+  legacy: vi.fn(),
+}));
+vi.mock("@/lib/sms-classification/dispatch-bridge", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/sms-classification/dispatch-bridge")>()),
+  classifyForDispatch: h.legacy,
 }));
 vi.mock("@/lib/sms-classification/routing-v2/model-stop-suppression", () => ({ executeV2Stop: h.stop }));
 vi.mock("@/lib/sms-classification/routing-v2/wrong-number-all", () => ({ runRoutingV2PhoneAction: h.phone }));
@@ -80,10 +85,11 @@ const WHO = { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }
 
 beforeEach(() => {
   h.flags = ON;
-  for (const f of [h.classify, h.record, h.evidence, h.transition, h.stop, h.phone]) f.mockReset();
+  for (const f of [h.classify, h.record, h.evidence, h.transition, h.stop, h.phone, h.legacy]) f.mockReset();
+  h.legacy.mockResolvedValue({ kind: "jev_no_action", askedHowNumberObtained: undefined });
   h.stop.mockResolvedValue({ kind: "human_review", reason: "flag_off" });
   h.phone.mockResolvedValue({ outcome: "flag_off" });
-  h.classify.mockResolvedValue({ kind: "decided" });
+  h.classify.mockResolvedValue({ kind: "decided", action: { road: "ALERT_call_me", steps: [{ kind: "alert", reason: "call_me" }] } });
   h.record.mockResolvedValue("recorded");
   h.evidence.mockResolvedValue(evidence(WHO));
   h.transition.mockResolvedValue({ kind: "applied", transition: { outcome: "applied" } });
@@ -116,7 +122,7 @@ describe("routing v2 live dispatch hook", () => {
     const { client } = fakeSupabase();
     expect(await runRoutingV2LiveStep(client, args())).toEqual({ outcome: "auto_closed", reason: "routing_v2:who_reply_drip" });
     expect(h.classify).toHaveBeenCalledOnce();
-    expect(h.record).toHaveBeenCalledWith(client, expect.objectContaining({ expectedRevision: 7, inboundMessageId: "in1" }), { kind: "decided" });
+    expect(h.record).toHaveBeenCalledWith(client, expect.objectContaining({ expectedRevision: 7, inboundMessageId: "in1" }), expect.objectContaining({ kind: "decided" }));
     expect(h.transition).toHaveBeenCalledExactlyOnceWith(client, { orgId: "org1", propertyId: PROPERTY, contactId: "c1", inboundMessageId: "in1" });
   });
 
@@ -199,6 +205,35 @@ describe("routing v2 live dispatch hook", () => {
       expect(await runRoutingV2LiveStep(fakeSupabase().client, args("This number has no SMS capabilities"))).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
       h.phone.mockResolvedValue({ outcome: "not_settled", retryable: true, retryAfterSeconds: 30 });
       expect(await runRoutingV2LiveStep(fakeSupabase().client, args("This number has no SMS capabilities"))).toMatchObject({ outcome: "retry", reason: "reply_pending", attempt: 1 });
+    });
+  });
+
+  describe("number source (existing legacy detector)", () => {
+    const decided = (steps: unknown[]) => ({ kind: "decided", action: { road: "who_reply_drip", steps } });
+    it("a reply road + 'how did you get my number' (legacy askedHowNumberObtained): the approved number_source reply replaces the road's reply", async () => {
+      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }, { kind: "drip", drip: "Asked who is texting", skipFirstStep: true }]));
+      h.legacy.mockResolvedValue({ kind: "jev_nurture", askedHowNumberObtained: true });
+      await runRoutingV2LiveStep(fakeSupabase().client, args("Who is this and how did you get my number?"));
+      expect(h.legacy).toHaveBeenCalledOnce();
+      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
+        action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "number_source" }, { kind: "drip", drip: "Asked who is texting", skipFirstStep: true }] },
+      }));
+    });
+    it("not asked: the road's own reply stays", async () => {
+      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }]));
+      await runRoutingV2LiveStep(fakeSupabase().client, args("Who is this?"));
+      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }] } }));
+    });
+    it("a road with no reply never asks the legacy detector (no extra Jev call)", async () => {
+      h.classify.mockResolvedValue(decided([{ kind: "alert", reason: "call_me" }]));
+      await runRoutingV2LiveStep(fakeSupabase().client, args("Call me"));
+      expect(h.legacy).not.toHaveBeenCalled();
+    });
+    it("the legacy detector failing keeps the road's own reply", async () => {
+      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }]));
+      h.legacy.mockRejectedValue(new Error("jev down"));
+      await runRoutingV2LiveStep(fakeSupabase().client, args("how did you get my number"));
+      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }] } }));
     });
   });
 });
