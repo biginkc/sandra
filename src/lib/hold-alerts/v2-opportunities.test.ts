@@ -10,7 +10,7 @@ import { isV2Opportunity, loadV2Opportunities, v2OpportunityStillAllowed } from 
 
 /**
  * #937 equivalence suite: every case of PR #937's selling-opportunities.test.ts, re-run
- * against the v2 decision source (routing_v2_shadow_decisions, two approved questions),
+ * against the v2 decision source (routing_v2_live_decisions, two approved questions),
  * plus the v2 flag gate.
  */
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -18,7 +18,7 @@ const NOW = "2026-10-28T12:00:00.000Z";
 const SINCE = "2026-10-28T00:00:00.000Z";
 const AT = "2026-10-28T11:00:00.000Z";
 const P1 = "11111111-1111-4111-8111-111111111111";
-const FLAGS_ON = { shadow: true, questions_live: true, replies: true, canary_property_ids: [P1] };
+const FLAGS_ON = { shadow: false, drips: true, questions_live: true, replies: true, canary_property_ids: [P1] };
 /** alert_on_time_only ON: yes-family roads are non-hot. */
 const TOO = { alertOnTimeOnly: true };
 const probs = (own: unknown = 0.98, other: unknown = 0) => ({ own_other_property: own, someone_else_property: other });
@@ -49,7 +49,7 @@ function dbFor(tables: Record<string, Row[]>, fail?: string) {
 function fixtures(r: Row = row(), flags: unknown = FLAGS_ON): Record<string, Row[]> {
   return {
     ai_responder_configs: [{ org_id: ORG, active: true, routing_v2_flags: flags }],
-    routing_v2_shadow_decisions: [r],
+    routing_v2_live_decisions: [r],
     messages: [{ id: "m1", org_id: ORG, property_id: P1, direction: "inbound", channel: "sms", created_at: AT }],
     properties: [{ id: P1, org_id: ORG, deleted_at: null, contacts: { first_name: "Jonathan" } }],
     hold_alert_deliveries: [],
@@ -67,7 +67,7 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   });
 
   it("flag gate: off, questions_live off, not eligible, or config error = nothing, and no decision query", async () => {
-    for (const flags of [{}, { shadow: true, replies: true, canary_property_ids: [P1] }, { shadow: true, questions_live: true, canary_property_ids: [P1] }, { questions_live: true, replies: true, canary_property_ids: [P1] }, null]) {
+    for (const flags of [{}, { shadow: true, replies: true, canary_property_ids: [P1] }, { shadow: true, questions_live: true, canary_property_ids: [P1] }, null]) {
       const { db, queries } = dbFor(fixtures(row(), flags));
       expect(await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId)).toEqual({ promotions: [], complete: true });
       expect(queries).toEqual(["ai_responder_configs"]);
@@ -132,11 +132,11 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
     // non-yes road is unaffected by the flip
     expect(await v2OpportunityStillAllowed(dbFor(fixtures(row("stop"), { ...FLAGS_ON, alert_on_time_only: false })).db, ORG, P1, "m1")).toBe(true);
     // a newer decision for the inbound that says no wins at send time
-    const f = fixtures(); f.routing_v2_shadow_decisions!.push({ ...row(), id: "r2", created_at: "2026-10-28T11:30:00.000Z", opportunity_alert: false });
+    const f = fixtures(); f.routing_v2_live_decisions!.push({ ...row(), id: "r2", created_at: "2026-10-28T11:30:00.000Z", opportunity_alert: false });
     expect(await v2OpportunityStillAllowed(dbFor(f).db, ORG, P1, "m1")).toBe(false);
     // no inbound id, decision lookup error, property mismatch -> false
     expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, P1, undefined)).toBe(false);
-    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "routing_v2_shadow_decisions").db, ORG, P1, "m1")).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "routing_v2_live_decisions").db, ORG, P1, "m1")).toBe(false);
     expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, "22222222-2222-4222-8222-222222222222", "m1")).toBe(false);
   });
 
@@ -209,7 +209,7 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   it("is read-only: only selects, never writes", async () => {
     const { db, queries } = dbFor(fixtures());
     await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId);
-    expect(new Set(queries)).toEqual(new Set(["ai_responder_configs", "routing_v2_shadow_decisions", "messages", "properties", "pipeline_runs", "hold_alert_deliveries"]));
+    expect(new Set(queries)).toEqual(new Set(["ai_responder_configs", "routing_v2_live_decisions", "messages", "properties", "pipeline_runs", "hold_alert_deliveries"]));
   });
 
   it("a generic lead reply in the same pass does not send a second alert", async () => {
@@ -224,15 +224,15 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   });
 
   it("uses message arrival time (7-day lookback), rejects cross-property, deleted, outbound, and other-org rows", async () => {
-    for (const [table, field, value] of [["messages", "created_at", "2026-10-01"], ["messages", "property_id", "other"], ["messages", "direction", "outbound"], ["properties", "deleted_at", AT], ["properties", "org_id", "other"], ["routing_v2_shadow_decisions", "org_id", "other"]] as const) {
+    for (const [table, field, value] of [["messages", "created_at", "2026-10-01"], ["messages", "property_id", "other"], ["messages", "direction", "outbound"], ["properties", "deleted_at", AT], ["properties", "org_id", "other"], ["routing_v2_live_decisions", "org_id", "other"]] as const) {
       const f = fixtures(); f[table]![0]![field] = value;
       expect((await load(f)).promotions).toEqual([]);
     }
-    const old = fixtures(); old.routing_v2_shadow_decisions![0]!.created_at = "2026-10-20T00:00:00.000Z";
+    const old = fixtures(); old.routing_v2_live_decisions![0]!.created_at = "2026-10-20T00:00:00.000Z";
     expect((await loadV2Opportunities(dbFor(old).db, ORG, "2026-10-01T00:00:00.000Z", Date.parse(NOW), OWNER.userId)).promotions).toEqual([]);
   });
 
-  it.each(["routing_v2_shadow_decisions", "messages", "properties", "hold_alert_deliveries", "pipeline_runs"])("fails closed on %s lookup errors", async (table) => {
+  it.each(["routing_v2_live_decisions", "messages", "properties", "hold_alert_deliveries", "pipeline_runs"])("fails closed on %s lookup errors", async (table) => {
     expect(await load(fixtures(), table)).toEqual({ promotions: [], complete: false });
   });
 
@@ -261,9 +261,32 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
 
   it("pages tied timestamps and uses the newest decision including a newer negative", async () => {
     const f = fixtures();
-    f.routing_v2_shadow_decisions = Array.from({ length: 201 }, (_, i) => ({ ...row(), id: `r${String(i).padStart(3, "0")}`, probabilities: probs(i === 200 ? 0 : 0.98) }));
+    f.routing_v2_live_decisions = Array.from({ length: 201 }, (_, i) => ({ ...row(), id: `r${String(i).padStart(3, "0")}`, probabilities: probs(i === 200 ? 0 : 0.98) }));
     expect((await load(f)).promotions).toEqual([]);
-    f.routing_v2_shadow_decisions[200]!.probabilities = probs();
+    f.routing_v2_live_decisions[200]!.probabilities = probs();
     expect((await load(f)).promotions).toHaveLength(1);
+  });
+});
+
+
+describe("live-only opportunity evidence", () => {
+  it("shadow-only evidence never produces or authorizes an alert", async () => {
+    const tables = fixtures();
+    tables.routing_v2_shadow_decisions = tables.routing_v2_live_decisions!;
+    tables.routing_v2_live_decisions = [];
+    const { db, queries } = dbFor(tables);
+    expect((await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId)).promotions).toEqual([]);
+    expect(await v2OpportunityStillAllowed(db, ORG, P1, "m1")).toBe(false);
+    expect(queries).not.toContain("routing_v2_shadow_decisions");
+  });
+  it("live evidence works with shadow disabled", async () => {
+    const { db } = dbFor(fixtures());
+    expect((await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId)).promotions).toHaveLength(1);
+    expect(await v2OpportunityStillAllowed(db, ORG, P1, "m1")).toBe(true);
+  });
+  it("drips-off retains the normal hot alert and prevents a duplicate opportunity alert", async () => {
+    const { db } = dbFor(fixtures(row("book_appointment"), { ...FLAGS_ON, drips: false, alert_on_time_only: true }));
+    expect((await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId)).promotions).toEqual([]);
+    expect(await v2OpportunityStillAllowed(db, ORG, P1, "m1")).toBe(false);
   });
 });

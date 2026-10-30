@@ -20,6 +20,7 @@ const env = loadTestEnv();
 export default defineConfig({
   test: {
     include: [
+      "supabase/migrations/20261030260000_routing_v2_live_decision_log.integration.test.ts",
       "src/**/*.integration.test.ts",
       // Migration integration tests live alongside the migration SQL files.
       // Added in phase 02-05 to include 046_backfill*.integration.test.ts.
