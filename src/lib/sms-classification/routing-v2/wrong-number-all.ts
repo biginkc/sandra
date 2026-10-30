@@ -15,16 +15,18 @@ import type { V2Decision } from "./route";
 /**
  * Routing v2 PR-G (flag `wrong_number_all`, default off; also needs `questions_live`).
  *
- * - Wrong person, scope = all, Jev ≥0.60 → the EXISTING approved wrong-number reply
+ * - Wrong person, scope = all, Jev ≥0.60 → (A, one transaction) the existing wrong_number
+ *   disposition on every property for that phone, drips paused, auto-accepted, one audit row per
+ *   property, undoable; then (B) the EXISTING approved wrong-number reply
  *   (`APPROVED_REPLY_TEXTS.wrong_number`, template key `wrong_number`; sent by the caller's
- *   existing template step, never reworded here), then the existing wrong_number disposition on
- *   every property for that phone, auto-accepted, one audit row per property, undoable.
+ *   existing template step with the durable send id, never reworded here).
  * - "No SMS capabilities" bounce (code pre-check) → the existing bad_number disposition on the
  *   property it landed on. No reply.
  *
  * NOT WIRED into live dispatch: the cutover PR (BUILD-PLAN §6.3) calls `runRoutingV2PhoneAction`.
- * Any result other than `applied` / `replayed` means "run today's path" (flag_off,
- * not_applicable) or "hold for a person" (reply_not_sent, not_applied).
+ * `flag_off` / `not_applicable` mean "run today's path"; `superseded` means a newer text from
+ * the phone owns the thread; `apply_failed` wrote nothing and may be retried; `applied` /
+ * `replayed` carry the reply state (failed / unknown / skipped = a person should look).
  *
  * The v2 question set has no wrong-number scope question: the caller must supply `wrongScope`
  * from an existing source. Without it (null) nothing runs.
@@ -67,13 +69,22 @@ export type SendWrongNumberReply = (args: {
   templateKey: typeof WRONG_NUMBER_REPLY_KEY;
   requiredBody: typeof WRONG_NUMBER_REPLY_BODY;
   /**
-   * Final send-boundary check (§13.2): fresh flags + canary for every claimed property. The
-   * template step must call it immediately before the provider call and send nothing if false.
+   * Durable send id. The template step MUST use it as the provider idempotency key and store
+   * it on the outbound message as `messages.idempotency_key`: crash recovery finds the reply
+   * by this id only.
+   */
+  sendId: string;
+  /**
+   * Final send-boundary check (§13.2): fresh flags + canary for every target property. Call it
+   * immediately before the provider call; if false, send nothing and return
+   * `{ sent: false, reason: "not_allowed_at_send", reachedProvider: false }`.
    */
   stillAllowed: () => Promise<boolean>;
-}) => Promise<{ sent: true; outboundMessageId: string } | { sent: false; reason: string }>;
-
-export type PauseEnrollments = (propertyId: string) => Promise<string[]>;
+}) => Promise<
+  | { sent: true; outboundMessageId: string }
+  /** reachedProvider false = provably never handed to the provider (recorded as skipped/failed). */
+  | { sent: false; reason: string; reachedProvider: boolean }
+>;
 
 export type RoutingV2PhoneActionInput = {
   orgId: string;
@@ -84,45 +95,36 @@ export type RoutingV2PhoneActionInput = {
   wrongScope: AiWrongScope | null;
   /** applyHaikuPolicy result when the decision was Haiku-eligible. */
   final?: FinalDecision | null;
+  /** properties.decision_context_revision the decision was made against (optional). */
+  expectedRevision?: number | null;
 };
 
 export type RoutingV2PhoneActionDeps = {
   /** The existing approved-template step (dispatch's runApprovedTemplateStep, wired by the cutover PR). */
   sendWrongNumberReply: SendWrongNumberReply;
-  /** Existing sequence pause (pausePropertyEnrollments, reason inbound_reply, not permanent); returns paused ids. */
-  pauseEnrollments: PauseEnrollments;
-  /** Lease length for one worker (default 120 s). A crashed worker's row is resumable after it. */
-  leaseSeconds?: number;
 };
+
+export type ReplyState = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped" | "not_needed";
 
 export type RoutingV2PhoneActionResult =
   | { outcome: "flag_off" }
   | { outcome: "not_applicable"; reason: string }
-  | { outcome: "replayed"; actionId: string; actionStatus: string }
-  | { outcome: "reply_not_sent"; actionId: string; reason: string }
-  | { outcome: "not_applied"; actionId: string; reason: string }
+  | { outcome: "superseded"; reason: string }
+  /** The atomic apply failed and rolled back: nothing was written; safe to retry. */
+  | { outcome: "apply_failed"; retryable: true }
+  | { outcome: "replayed"; actionId: string; actionStatus: string; replyState: ReplyState }
   | {
       outcome: "applied";
       kind: PhoneActionKind;
       actionId: string;
       applied: string[];
       skipped: Array<{ propertyId: string; reason: string }>;
+      replyState: ReplyState;
     };
 
 // New tables/functions are not in the generated types yet; keep the loose access in one place.
 type Loose = {
-  from: (t: string) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
   rpc: (fn: string, args?: Record<string, unknown>) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
-};
-
-type ActionState = {
-  actionId: string;
-  kind: PhoneActionKind;
-  status: string;
-  replyState: string;
-  propertyIds: string[];
-  /** Already-applied properties (resume after a crash between apply and pause). */
-  applied: string[];
 };
 
 async function stillAllowed(supabase: SupabaseClient<Database>, orgId: string, propertyIds: readonly string[]): Promise<boolean> {
@@ -133,155 +135,63 @@ async function stillAllowed(supabase: SupabaseClient<Database>, orgId: string, p
   }
 }
 
-async function step(db: Loose, actionId: string, name: "begin_send" | "sent" | "close" | "paused", extra: { reply?: string; reason?: string; lease?: number } = {}) {
-  const { data, error } = await db.rpc("fn_routing_v2_phone_action_step", {
+async function setReply(db: Loose, actionId: string, sendId: string, to: ReplyState, extra: { messageId?: string; reason?: string } = {}) {
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_reply", {
     p_action_id: actionId,
-    p_step: name,
-    p_reply_message_id: extra.reply ?? null,
+    p_send_id: sendId,
+    p_to: to,
+    p_message_id: extra.messageId ?? null,
     p_reason: extra.reason ?? null,
-    p_lease_seconds: extra.lease ?? 120,
   });
   if (error) throw new Error(String(error.message));
-  return (data ?? {}) as { ok?: boolean; status?: string; replyState?: string };
+  return (data ?? {}) as { ok?: boolean; replyState?: ReplyState };
 }
 
 /**
- * Drives one action from wherever it stopped. Every transition is durable before its side
- * effect: `sending` is recorded BEFORE the provider call, so a crash there is never re-sent
- * (take_lease reconciles it from the thread or closes it for a person).
+ * B. Send the approved reply AFTER the apply committed. At most once: `pending → sending` is an
+ * atomic transition taken before the provider call, and a `sending` row is only ever settled by
+ * its send id (recover_reply), never re-sent. Properties stay closed whatever happens here, as
+ * today's wrong-number path does.
  */
-async function drive(
+export async function settleRoutingV2PhoneActionReply(
   supabase: SupabaseClient<Database>,
-  orgId: string,
-  st: ActionState,
+  args: { orgId: string; actionId: string; sendId: string; replyState: ReplyState; propertyIds: readonly string[] },
   deps: RoutingV2PhoneActionDeps,
-): Promise<RoutingV2PhoneActionResult> {
+): Promise<ReplyState> {
   const db = supabase as unknown as Loose;
-  const lease = deps.leaseSeconds ?? 120;
-  let applied: string[] = st.applied;
-  let skipped: Array<{ propertyId: string; reason: string }> = [];
-
-  if (st.status === "claimed") {
-    if (st.replyState === "pending") {
-      // Fresh read after the claim (never the pre-claim snapshot).
-      if (!(await stillAllowed(supabase, orgId, st.propertyIds))) {
-        await step(db, st.actionId, "close", { reason: "flag_or_canary_off_before_send" });
-        return { outcome: "not_applicable", reason: "flag_or_canary_off_before_send" };
-      }
-      const begun = await step(db, st.actionId, "begin_send", { lease });
-      if (!begun.ok) return { outcome: "replayed", actionId: st.actionId, actionStatus: begun.status ?? "unknown" };
-      let sent: Awaited<ReturnType<SendWrongNumberReply>>;
-      try {
-        sent = await deps.sendWrongNumberReply({
-          templateKey: WRONG_NUMBER_REPLY_KEY,
-          requiredBody: WRONG_NUMBER_REPLY_BODY,
-          stillAllowed: () => stillAllowed(supabase, orgId, st.propertyIds),
-        });
-      } catch (e) {
-        reportError(e, { tags: { surface: "routing_v2_phone_action_reply" }, extra: { actionId: st.actionId } });
-        sent = { sent: false, reason: "send_threw" };
-      }
-      if (!sent.sent) {
-        await step(db, st.actionId, "close", { reason: `reply_not_sent:${sent.reason}` });
-        return { outcome: "reply_not_sent", actionId: st.actionId, reason: sent.reason };
-      }
-      await step(db, st.actionId, "sent", { reply: sent.outboundMessageId });
-    } else if (st.replyState === "sending") {
-      // Only take_lease may settle a `sending` row; never send again from here.
-      return { outcome: "replayed", actionId: st.actionId, actionStatus: st.status };
-    }
-
-    const { data, error } = await db.rpc("fn_routing_v2_phone_action_apply", { p_action_id: st.actionId });
-    if (error) {
-      reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_apply" }, extra: { actionId: st.actionId } });
-      return { outcome: "not_applied", actionId: st.actionId, reason: "apply_failed" };
-    }
-    const a = (data ?? {}) as { status?: string; actionStatus?: string; reason?: string; applied?: string[]; skipped?: Array<{ propertyId: string; reason: string }> };
-    if (a.status === "replayed") return { outcome: "replayed", actionId: st.actionId, actionStatus: a.actionStatus ?? "unknown" };
-    if (a.status !== "applied") return { outcome: "not_applied", actionId: st.actionId, reason: a.reason ?? a.status ?? "apply_unexpected" };
-    applied = a.applied ?? [];
-    skipped = a.skipped ?? [];
-  } else if (st.status !== "applied") {
-    return { outcome: "replayed", actionId: st.actionId, actionStatus: st.status };
+  if (args.replyState === "sending") {
+    const { data, error } = await db.rpc("fn_routing_v2_phone_action_recover_reply", { p_action_id: args.actionId });
+    if (error) throw new Error(String(error.message));
+    return ((data ?? {}) as { replyState?: ReplyState }).replyState ?? "sending";
   }
+  if (args.replyState !== "pending") return args.replyState;
 
-  // As setResponderDispo does for a wrong_number: pause the property's drips and keep the ids for undo.
-  if (st.kind === "wrong_number_all") {
-    for (const propertyId of applied) {
-      try {
-        const ids = await deps.pauseEnrollments(propertyId);
-        if (ids.length === 0) continue;
-        const { error } = await db
-          .from("routing_v2_phone_action_properties")
-          .update({ paused_enrollment_ids: ids })
-          .eq("action_id", st.actionId)
-          .eq("property_id", propertyId)
-          .is("undone_at", null);
-        if (error) throw new Error(String(error.message));
-      } catch (e) {
-        reportError(e, { tags: { surface: "routing_v2_phone_action_pause" }, extra: { actionId: st.actionId, propertyId } });
-      }
-    }
-    await step(db, st.actionId, "paused");
+  // E. Flags/canary off after the apply committed: record skipped, send nothing.
+  if (!(await stillAllowed(supabase, args.orgId, args.propertyIds))) {
+    const r = await setReply(db, args.actionId, args.sendId, "skipped", { reason: "flag_or_canary_off_before_send" });
+    return r.replyState ?? "skipped";
   }
-  return { outcome: "applied", kind: st.kind, actionId: st.actionId, applied, skipped };
-}
+  const begun = await setReply(db, args.actionId, args.sendId, "sending");
+  if (!begun.ok) return begun.replyState ?? "sending"; // another worker owns the send
 
-/** Resume an unfinished action once its lease expired (duplicate webhook or sweeper). */
-export async function resumeRoutingV2PhoneAction(
-  supabase: SupabaseClient<Database>,
-  orgId: string,
-  actionId: string,
-  deps: RoutingV2PhoneActionDeps,
-): Promise<RoutingV2PhoneActionResult> {
-  const db = supabase as unknown as Loose;
-  const { data, error } = await db.rpc("fn_routing_v2_phone_action_take_lease", {
-    p_action_id: actionId,
-    p_reply_body: WRONG_NUMBER_REPLY_BODY,
-    p_lease_seconds: deps.leaseSeconds ?? 120,
-  });
-  if (error) {
-    reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_lease" }, extra: { actionId } });
-    return { outcome: "replayed", actionId, actionStatus: "unknown" };
+  let sent: Awaited<ReturnType<SendWrongNumberReply>>;
+  try {
+    sent = await deps.sendWrongNumberReply({
+      templateKey: WRONG_NUMBER_REPLY_KEY,
+      requiredBody: WRONG_NUMBER_REPLY_BODY,
+      sendId: args.sendId,
+      stillAllowed: () => stillAllowed(supabase, args.orgId, args.propertyIds),
+    });
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_phone_action_reply" }, extra: { actionId: args.actionId } });
+    // We cannot prove the provider never got it: recorded as unknown, never re-sent.
+    return (await setReply(db, args.actionId, args.sendId, "unknown", { reason: "send_threw" })).replyState ?? "unknown";
   }
-  const t = (data ?? {}) as { taken?: boolean; status?: string; replyState?: string; action?: string; propertyIds?: string[]; applied?: string[]; reason?: string };
-  if (!t.taken) return { outcome: "replayed", actionId, actionStatus: t.status ?? "unknown" };
-  if (t.status === "not_applied") return { outcome: "not_applied", actionId, reason: t.reason ?? "closed" };
-  if (t.action !== "wrong_number_all" && t.action !== "bad_number") return { outcome: "replayed", actionId, actionStatus: t.status ?? "unknown" };
-  return drive(supabase, orgId, {
-    actionId,
-    kind: t.action,
-    status: t.status ?? "unknown",
-    replyState: t.replyState ?? "unknown",
-    propertyIds: t.propertyIds ?? [],
-    applied: t.applied ?? [],
-  }, deps);
-}
-
-/** Sweeper: resume every unfinished action whose lease expired. Never sends a reply twice. */
-export async function reconcileRoutingV2PhoneActions(
-  supabase: SupabaseClient<Database>,
-  deps: RoutingV2PhoneActionDeps,
-  limit = 25,
-): Promise<RoutingV2PhoneActionResult[]> {
-  const db = supabase as unknown as Loose;
-  const { data, error } = await db.rpc("fn_routing_v2_phone_action_list_stale", { p_limit: limit });
-  if (error) {
-    reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_sweep" } });
-    return [];
+  if (sent.sent) {
+    return (await setReply(db, args.actionId, args.sendId, "sent", { messageId: sent.outboundMessageId })).replyState ?? "sent";
   }
-  const out: RoutingV2PhoneActionResult[] = [];
-  for (const row of (data ?? []) as Array<{ action_id: string }>) {
-    const { data: a } = await db.from("routing_v2_phone_actions").select("org_id").eq("id", row.action_id).maybeSingle();
-    const orgId = (a as { org_id?: string } | null)?.org_id;
-    if (!orgId) continue;
-    try {
-      out.push(await resumeRoutingV2PhoneAction(supabase, orgId, row.action_id, deps));
-    } catch (e) {
-      reportError(e, { tags: { surface: "routing_v2_phone_action_sweep" }, extra: { actionId: row.action_id } });
-    }
-  }
-  return out;
+  const to: ReplyState = sent.reachedProvider ? "unknown" : "failed";
+  return (await setReply(db, args.actionId, args.sendId, to, { reason: sent.reason })).replyState ?? to;
 }
 
 export async function runRoutingV2PhoneAction(
@@ -300,39 +210,100 @@ export async function runRoutingV2PhoneAction(
   if (!phone) return { outcome: "not_applicable", reason: "phone_unusable" };
 
   const db = supabase as unknown as Loose;
-  const { data: claim, error: claimError } = await db.rpc("fn_routing_v2_phone_action_claim", {
+  // A. Everything except the SMS, atomically (the RPC re-reads flags + canary itself).
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_apply_all", {
     p_source_inbound_message_id: input.inboundMessageId,
     p_action: candidate.kind,
     p_phone: phone,
     p_decision: { signal: candidate.signal, probability: candidate.probability, wrong_scope: input.wrongScope },
-    p_lease_seconds: deps.leaseSeconds ?? 120,
+    p_expected_revision: input.expectedRevision ?? null,
   });
-  if (claimError) {
-    reportError(new Error(String(claimError.message)), {
-      tags: { surface: "routing_v2_phone_action_claim" },
+  if (error) {
+    reportError(new Error(String(error.message)), {
+      tags: { surface: "routing_v2_phone_action_apply" },
       extra: { inboundMessageId: input.inboundMessageId },
     });
-    return { outcome: "not_applicable", reason: "claim_failed" };
+    return { outcome: "apply_failed", retryable: true };
   }
-  const c = claim as { status?: string; actionId?: string; actionStatus?: string; reason?: string; propertyIds?: string[]; replyState?: string } | null;
-  if (c?.status === "replayed" && c.actionId) {
-    // Duplicate webhook: finish an abandoned action (lease expired), otherwise a no-op.
-    if (c.actionStatus === "claimed" || c.actionStatus === "applied") {
-      return resumeRoutingV2PhoneAction(supabase, input.orgId, c.actionId, deps);
+  const a = (data ?? {}) as {
+    status?: string;
+    reason?: string;
+    actionId?: string;
+    actionStatus?: string;
+    sendId?: string;
+    replyState?: ReplyState;
+    applied?: string[];
+    skipped?: Array<{ propertyId: string; reason: string }>;
+    propertyIds?: string[];
+  };
+  if (a.status === "superseded") return { outcome: "superseded", reason: a.reason ?? "superseded" };
+  if (a.status === "not_applicable") return { outcome: "not_applicable", reason: a.reason ?? "not_applicable" };
+  if ((a.status !== "applied" && a.status !== "replayed") || !a.actionId || !a.sendId || !a.replyState) {
+    return { outcome: "apply_failed", retryable: true };
+  }
+
+  // B. Duplicate webhook of a committed action: only an unfinished reply is settled.
+  let replyState = a.replyState;
+  if (a.status === "replayed" && a.actionStatus !== "applied") {
+    return { outcome: "replayed", actionId: a.actionId, actionStatus: a.actionStatus ?? "unknown", replyState };
+  }
+  if (replyState === "pending" || replyState === "sending") {
+    try {
+      replyState = await settleRoutingV2PhoneActionReply(
+        supabase,
+        { orgId: input.orgId, actionId: a.actionId, sendId: a.sendId, replyState, propertyIds: a.propertyIds ?? [] },
+        deps,
+      );
+    } catch (e) {
+      // The apply is committed; the reply stays pending/sending for the settler. Never swallowed silently.
+      reportError(e, { tags: { surface: "routing_v2_phone_action_reply_state" }, extra: { actionId: a.actionId } });
     }
-    return { outcome: "replayed", actionId: c.actionId, actionStatus: c.actionStatus ?? "unknown" };
   }
-  if (c?.status !== "claimed" || !c.actionId) {
-    return { outcome: "not_applicable", reason: c?.reason ?? "claim_unexpected" };
+  if (a.status === "replayed") {
+    return { outcome: "replayed", actionId: a.actionId, actionStatus: a.actionStatus ?? "applied", replyState };
   }
-  return drive(supabase, input.orgId, {
-    actionId: c.actionId,
-    kind: candidate.kind,
-    status: "claimed",
-    replyState: c.replyState ?? (candidate.kind === "wrong_number_all" ? "pending" : "not_needed"),
-    propertyIds: c.propertyIds ?? [],
-    applied: [],
-  }, deps);
+  return { outcome: "applied", kind: candidate.kind, actionId: a.actionId, applied: a.applied ?? [], skipped: a.skipped ?? [], replyState };
+}
+
+/** Settler (cron): finishes replies left pending/sending by a crash. Sends at most once. */
+export async function settleUnsettledRoutingV2PhoneReplies(
+  supabase: SupabaseClient<Database>,
+  deps: RoutingV2PhoneActionDeps,
+  options: { olderThanSeconds?: number; limit?: number } = {},
+): Promise<Array<{ actionId: string; replyState: ReplyState | "error" }>> {
+  const db = supabase as unknown as Loose & { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const { data, error } = await db.rpc("fn_routing_v2_phone_action_unsettled_replies", {
+    p_older_than_seconds: options.olderThanSeconds ?? 120,
+    p_limit: options.limit ?? 25,
+  });
+  if (error) {
+    reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_phone_action_settler" } });
+    return [];
+  }
+  const out: Array<{ actionId: string; replyState: ReplyState | "error" }> = [];
+  for (const row of (data ?? []) as Array<{ action_id: string; org_id: string; reply_state: ReplyState }>) {
+    try {
+      const { data: action, error: readError } = await db
+        .from("routing_v2_phone_actions")
+        .select("send_id, property_ids")
+        .eq("id", row.action_id)
+        .maybeSingle();
+      if (readError || !action) throw new Error(readError ? String(readError.message) : "action not found");
+      const act = action as { send_id: string; property_ids: string[] };
+      out.push({
+        actionId: row.action_id,
+        replyState: await settleRoutingV2PhoneActionReply(
+          supabase,
+          { orgId: row.org_id, actionId: row.action_id, sendId: act.send_id, replyState: row.reply_state, propertyIds: act.property_ids },
+          deps,
+        ),
+      });
+    } catch (e) {
+      reportError(e, { tags: { surface: "routing_v2_phone_action_settler" }, extra: { actionId: row.action_id } });
+      out.push({ actionId: row.action_id, replyState: "error" });
+    }
+  }
+  return out;
 }
 
 export type UndoRoutingV2PhoneActionResult =
@@ -343,14 +314,15 @@ export type UndoRoutingV2PhoneActionResult =
       stateChanged: string[];
       skipped: Array<{ propertyId: string; reason: string }>;
       resumed: number;
-      resumeFailed: number;
+      notResumed: Array<{ enrollmentId: string; outcome: string }>;
     }
   | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "FAILED"; message: string };
 
 /**
- * A person undoes the action: each property goes back to its exact prior state unless someone
- * changed it since (left alone, listed in `stateChanged`); then the drips this action paused are
- * resumed (the resume RPC re-checks the pause reason, so a person's own pause is kept).
+ * C. A person undoes the action, in one transaction under the phone lock: each property goes
+ * back to its exact prior state unless something changed since (left alone, listed in
+ * `skipped`), nothing is restored while the phone is suppressed, and exactly the drips this
+ * action paused are resumed (each re-checked by resume_sequence_enrollment).
  */
 export async function undoRoutingV2PhoneAction(
   userClient: SupabaseClient<Database>,
@@ -372,22 +344,17 @@ export async function undoRoutingV2PhoneAction(
     restored?: string[];
     stateChanged?: string[];
     skipped?: Array<{ propertyId: string; reason: string }>;
-    enrollmentIds?: string[];
+    resumed?: number;
+    notResumed?: Array<{ enrollmentId: string; outcome: string }>;
   };
-  let resumed = 0;
-  let resumeFailed = 0;
-  for (const enrollmentId of r.enrollmentIds ?? []) {
-    const { data: rows, error: resumeError } = await db.rpc("resume_sequence_enrollment", {
-      p_enrollment_id: enrollmentId,
-      p_expected_pause_reason: "inbound_reply",
-    });
-    if (resumeError) {
-      resumeFailed += 1;
-      reportError(new Error(String(resumeError.message)), { tags: { surface: "routing_v2_phone_action_undo_resume" }, extra: { actionId, enrollmentId } });
-      continue;
-    }
-    if ((rows as Array<{ outcome?: string }> | null)?.[0]?.outcome === "resumed") resumed += 1;
-  }
   const status = r.status === "already_undone" ? "already_undone" : r.status === "partial" ? "partial" : "undone";
-  return { ok: true, status, restored: r.restored ?? [], stateChanged: r.stateChanged ?? [], skipped: r.skipped ?? [], resumed, resumeFailed };
+  return {
+    ok: true,
+    status,
+    restored: r.restored ?? [],
+    stateChanged: r.stateChanged ?? [],
+    skipped: r.skipped ?? [],
+    resumed: r.resumed ?? 0,
+    notResumed: r.notResumed ?? [],
+  };
 }

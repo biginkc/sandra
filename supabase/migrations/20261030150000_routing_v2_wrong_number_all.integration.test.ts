@@ -84,6 +84,20 @@ beforeEach(async () => {
      values ($1, $2, $3, $4, 'sms', 'inbound', 'wrong number', $5, now() - interval '1 minute')`,
     [inbound, orgId, ids.p1, ids.conv, X],
   );
+  // Drips: active on p2 (target), p4 (other phone) and p5 (skipped); already paused on p3.
+  for (const k of ["e2", "e4", "e5", "e3", "seq"]) ids[k] = randomUUID();
+  await db.query(`insert into public.sequences (id, org_id, name) values ($1, $2, 'prg drip')`, [ids.seq, orgId]);
+  for (const [e, pid, status, reason] of [
+    [ids.e2, ids.p2, "active", null],
+    [ids.e4, ids.p4, "active", null],
+    [ids.e5, ids.p5, "active", null],
+    [ids.e3, ids.p3, "paused", "manual"],
+  ] as const) {
+    await db.query(
+      `insert into public.sequence_enrollments (id, org_id, sequence_id, property_id, status, pause_reason) values ($1, $2, $3, $4, $5, $6)`,
+      [e, orgId, ids.seq, pid, status, reason],
+    );
+  }
   await db.query("set local session_replication_role = origin");
 });
 afterEach(async () => {
@@ -124,26 +138,14 @@ async function asUser<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const claim = (action = "wrong_number_all", msg = inbound, phone = X, leaseSeconds = 120) =>
+const applyAll = (action = "wrong_number_all", msg = inbound, phone = X, expectedRevision: number | null = null) =>
   asService(async () =>
-    (await db.query(`select public.fn_routing_v2_phone_action_claim($1, $2, $3, '{}'::jsonb, $4) as r`, [msg, action, phone, leaseSeconds])).rows[0].r,
+    (await db.query(`select public.fn_routing_v2_phone_action_apply_all($1, $2, $3, '{}'::jsonb, $4) as r`, [msg, action, phone, expectedRevision])).rows[0].r,
   );
-const step = (actionId: string, name: string, reply: string | null = null, reason: string | null = null) =>
-  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_step($1, $2, $3, $4) as r`, [actionId, name, reply, reason])).rows[0].r);
-const applyOnly = (actionId: string) =>
-  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_apply($1) as r`, [actionId])).rows[0].r);
-/** wrong_number_all: begin_send + sent(reply) first (the durable send record), then apply. */
-const apply = async (actionId: string, reply: string | null = null) => {
-  if (reply) {
-    await step(actionId, "begin_send");
-    await step(actionId, "sent", reply);
-  }
-  return applyOnly(actionId);
-};
-const takeLease = (actionId: string) =>
-  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_take_lease($1, $2) as r`, [actionId, APPROVED_REPLY_TEXTS.wrong_number])).rows[0].r);
-const expireLease = (actionId: string) =>
-  db.query(`update public.routing_v2_phone_actions set lease_expires_at = now() - interval '1 second' where id = $1`, [actionId]);
+const reply = (actionId: string, sendId: string, to: string, messageId: string | null = null) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_reply($1, $2, $3, $4, null) as r`, [actionId, sendId, to, messageId])).rows[0].r);
+const recover = (actionId: string) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_recover_reply($1) as r`, [actionId])).rows[0].r);
 const undo = (userId: string, actionId: string) =>
   asUser(userId, async () => (await db.query(`select public.fn_undo_routing_v2_phone_action($1) as r`, [actionId])).rows[0].r);
 
@@ -154,292 +156,318 @@ const snapshot = async () =>
       [orgId],
     )
   ).rows;
+const enrollments = async () =>
+  (await db.query(`select id, status, pause_reason from public.sequence_enrollments where org_id = $1 order by id`, [orgId])).rows;
 const contacts = async () =>
   (await db.query(`select id, phone_1, phone_2, phone_3, sms_opted_out, do_not_contact from public.contacts where org_id = $1 order by id`, [orgId])).rows;
 const dispo = async (id: string) =>
   (await db.query(`select outreach_dispo from public.properties where id = $1`, [id])).rows[0].outreach_dispo;
+const enrollment = async (id: string) => (await db.query(`select status, pause_reason from public.sequence_enrollments where id = $1`, [id])).rows[0];
 const count = async (table: string) => Number((await db.query(`select count(*) from public.${table} where org_id = $1`, [orgId])).rows[0].count);
+const everything = async () => ({
+  props: await snapshot(),
+  enr: await enrollments(),
+  actions: await count("routing_v2_phone_actions"),
+  audit: await count("routing_v2_phone_action_properties"),
+  events: await count("lead_events"),
+});
+const insertInbound = async (propertyId: string, at: string, body = "hi") => {
+  const id = randomUUID();
+  await db.query(
+    `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, from_address, created_at)
+     values ($1, $2, $3, $4, 'sms', 'inbound', $5, $6, ${at})`,
+    [id, orgId, propertyId, randomUUID(), body, X],
+  );
+  return id;
+};
 
-describe("routing v2 PR-G phone actions", () => {
-  it("flag off (default): not applicable, writes nothing, changes nothing", async () => {
-    const before = await snapshot();
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "flag_off" });
-    await setFlags({ wrong_number_all: true }); // questions_live still false
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "flag_off" });
+describe("A. atomic apply", () => {
+  it("flag off (default): not applicable, writes nothing", async () => {
+    const before = await everything();
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "flag_off" });
+    await setFlags({ wrong_number_all: true });
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "flag_off" });
     await setFlags({ questions_live: true, wrong_number_all: false, canary_percent: 100 });
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "flag_off" });
-    expect(await count("routing_v2_phone_actions")).toBe(0);
-    expect(await snapshot()).toEqual(before);
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "flag_off" });
+    expect(await everything()).toEqual(before);
   });
 
-  it("marks every property for the phone wrong_number; other phones, other contacts and mixed-phone properties untouched", async () => {
+  it("closes every property for the phone, pauses their drips, audits each, leaves other phones/contacts alone", async () => {
     await setFlags(ON);
     const contactsBefore = await contacts();
-    const c = await claim();
-    expect(c.status).toBe("claimed");
-    expect(await dispo(ids.p1)).toBeNull(); // nothing applied before the reply
-    const r = await apply(c.actionId, randomUUID());
+    const r = await applyAll();
     expect(r.status).toBe("applied");
+    expect(r.replyState).toBe("pending");
+    expect(r.sendId).toMatch(/^[0-9a-f-]{36}$/);
     expect([...r.applied].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
     expect(r.skipped).toEqual([{ propertyId: ids.p5, reason: "other_phones_on_contact" }]);
-    expect(await dispo(ids.p1)).toBe("wrong_number");
-    expect(await dispo(ids.p2)).toBe("wrong_number");
-    expect(await dispo(ids.p3)).toBe("wrong_number");
+    for (const id of [ids.p1, ids.p2, ids.p3]) expect(await dispo(id)).toBe("wrong_number");
     expect(await dispo(ids.p4)).toBeNull();
     expect(await dispo(ids.p5)).toBeNull();
     expect(await contacts()).toEqual(contactsBefore);
     expect(await count("sms_phone_suppressions")).toBe(0);
-    const audit = (await db.query(`select property_id, outcome, skip_reason from public.routing_v2_phone_action_properties where action_id = $1`, [c.actionId])).rows;
+    // Drips: only the target's ACTIVE drip paused; recorded in the same transaction.
+    expect(await enrollment(ids.e2)).toEqual({ status: "paused", pause_reason: "inbound_reply" });
+    expect(await enrollment(ids.e3)).toEqual({ status: "paused", pause_reason: "manual" });
+    expect((await enrollment(ids.e4)).status).toBe("active");
+    expect((await enrollment(ids.e5)).status).toBe("active");
+    const audit = (await db.query(`select property_id, outcome, skip_reason, paused_enrollment_ids from public.routing_v2_phone_action_properties where action_id = $1 order by property_id`, [r.actionId])).rows;
     expect(audit).toHaveLength(4);
+    expect(audit.find((a) => a.property_id === ids.p2)?.paused_enrollment_ids).toEqual([ids.e2]);
     const events = (await db.query(`select payload from public.lead_events where org_id = $1 and event_type = 'dispo_set'`, [orgId])).rows;
     expect(events).toHaveLength(3);
     expect(events.every((e) => e.payload.auto_accepted === true && e.payload.to === "wrong_number")).toBe(true);
-    // No pending human review is created (auto-accepted).
     expect(Number((await db.query(`select count(*) from public.ai_disposition_reviews where org_id = $1`, [orgId])).rows[0].count)).toBe(0);
   });
 
-  it("is idempotent under duplicate webhooks: second claim and second apply are replays", async () => {
+  it("idempotent under duplicate webhooks: replay returns the same action and send id, writes nothing", async () => {
     await setFlags(ON);
-    const c = await claim();
-    expect(await claim()).toMatchObject({ status: "replayed", actionId: c.actionId, actionStatus: "claimed" });
-    await apply(c.actionId, randomUUID());
-    expect(await claim()).toMatchObject({ status: "replayed", actionStatus: "applied" });
-    expect(await apply(c.actionId, randomUUID())).toMatchObject({ status: "replayed", actionStatus: "applied" });
+    const r = await applyAll();
+    const after = await everything();
+    const again = await applyAll();
+    expect(again).toMatchObject({ status: "replayed", actionId: r.actionId, sendId: r.sendId, actionStatus: "applied", replyState: "pending" });
+    expect(await everything()).toEqual(after);
+  });
+
+  it("D. an older inbound from the same phone is superseded (any property); only the newest applies", async () => {
+    await setFlags(ON);
+    const newer = await insertInbound(ids.p2, "now()");
+    const before = await everything();
+    expect(await applyAll("wrong_number_all", inbound)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
+    expect(await everything()).toEqual(before);
+    expect((await applyAll("wrong_number_all", newer)).status).toBe("applied"); // the newest one (on p2) applies
+  });
+
+  it("D. the newest inbound applies once; the older one stays superseded afterwards", async () => {
+    await setFlags(ON);
+    const older = await insertInbound(ids.p1, "now() - interval '10 minutes'");
+    expect((await applyAll("wrong_number_all", inbound)).status).toBe("applied");
+    expect(await applyAll("wrong_number_all", older)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
     expect(await count("routing_v2_phone_actions")).toBe(1);
-    expect(await count("routing_v2_phone_action_properties")).toBe(4);
   });
 
-  it("undo restores every property exactly, and is idempotent", async () => {
+  it("canary: one property on the phone not eligible, or a malformed canary = nothing", async () => {
+    const before = await everything();
+    for (const flags of [
+      { questions_live: true, wrong_number_all: true, canary_percent: 0, canary_property_ids: [ids.p1, ids.p2] },
+      { canary_percent: 100, canary_property_ids: [ids.p1, "bad"] },
+      { canary_property_ids: [], canary_percent: "100" },
+    ]) {
+      await setFlags(flags);
+      expect(await applyAll()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
+    }
+    expect(await everything()).toEqual(before);
+    await setFlags({ canary_percent: 0, canary_property_ids: [ids.p1, ids.p2, ids.p3, ids.p5] });
+    expect((await applyAll()).status).toBe("applied");
+  });
+
+  it("suppression: a suppressed phone does nothing; DNC property and opted-out contact are skipped", async () => {
     await setFlags(ON);
-    const before = await snapshot();
-    const c = await claim();
-    await apply(c.actionId, randomUUID());
-    await db.query(`update public.routing_v2_phone_action_properties set paused_enrollment_ids = $2 where action_id = $1 and property_id = $3`, [
-      c.actionId,
-      [ids.c1],
-      ids.p2,
-    ]);
-    const u = await undo(ownerId, c.actionId);
-    expect(u.status).toBe("undone");
-    expect([...u.restored].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
-    expect(u.enrollmentIds).toEqual([ids.c1]);
-    expect(await snapshot()).toEqual(before);
-    expect(await undo(ownerId, c.actionId)).toMatchObject({ status: "already_undone", restored: [] });
-    expect(await snapshot()).toEqual(before);
-  });
-
-  it("undo never overwrites a property a person changed since; the rest are restored", async () => {
-    await setFlags(ON);
-    const c = await claim();
-    await apply(c.actionId, randomUUID());
-    await db.query(`update public.properties set outreach_dispo = 'callback_requested' where id = $1`, [ids.p3]);
-    const u = await undo(ownerId, c.actionId);
-    expect(u.status).toBe("partial");
-    expect(u.stateChanged).toEqual([ids.p3]);
-    expect(await dispo(ids.p3)).toBe("callback_requested");
-    expect(await dispo(ids.p2)).toBe("not_interested");
-  });
-
-  it("undo never erases a hold raised after the action (audited skip)", async () => {
-    await setFlags(ON);
-    const c = await claim();
-    await apply(c.actionId, randomUUID());
-    await db.query(`update public.properties set needs_human_attention = true, last_ai_escalation_reason = 'person_needs_to_look' where id = $1`, [ids.p2]);
-    const u = await undo(ownerId, c.actionId);
-    expect(u.status).toBe("partial");
-    expect(u.skipped).toEqual([{ propertyId: ids.p2, reason: "hold_changed" }]);
-    const p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason from public.properties where id = $1`, [ids.p2])).rows[0];
-    expect(p2).toEqual({ outreach_dispo: "wrong_number", needs_human_attention: true, last_ai_escalation_reason: "person_needs_to_look" });
-    const audit = (await db.query(`select payload from public.lead_events where property_id = $1 and event_type = 'routing_v2_phone_action_undo_skipped'`, [ids.p2])).rows;
-    expect(audit).toHaveLength(1);
-    expect(audit[0].payload.reason).toBe("hold_changed");
-    // A reason alone (no flag) also counts as a later hold.
-    await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = 'x' where id = $1`, [ids.p2]);
-    expect((await undo(ownerId, c.actionId)).skipped).toEqual([{ propertyId: ids.p2, reason: "hold_changed" }]);
-  });
-
-  it("undo with the phone suppressed now restores nothing and resumes no drips (audited)", async () => {
-    await setFlags(ON);
-    const c = await claim();
-    await apply(c.actionId, randomUUID());
-    await db.query(`update public.routing_v2_phone_action_properties set paused_enrollment_ids = $2 where action_id = $1`, [c.actionId, [randomUUID()]]);
-    await db.query(`insert into public.sms_phone_suppressions (org_id, phone_e164, source) values ($1, $2, 'stop')`, [orgId, X]);
-    const u = await undo(ownerId, c.actionId);
-    expect(u.status).toBe("partial");
-    expect(u.restored).toEqual([]);
-    expect(u.enrollmentIds).toEqual([]);
-    expect(u.skipped).toHaveLength(3);
-    expect(u.skipped.every((s: { reason: string }) => s.reason === "phone_suppressed")).toBe(true);
-    for (const id of [ids.p1, ids.p2, ids.p3]) expect(await dispo(id)).toBe("wrong_number");
-    expect(await count("sms_phone_suppressions")).toBe(1);
-  });
-
-  it("apply refuses until the reply is durably sent (wrong_number_all)", async () => {
-    await setFlags(ON);
-    const c = await claim();
-    expect(await applyOnly(c.actionId)).toMatchObject({ status: "reply_pending", replyState: "pending" });
-    await step(c.actionId, "begin_send");
-    expect(await applyOnly(c.actionId)).toMatchObject({ status: "reply_pending", replyState: "sending" });
-    expect(await step(c.actionId, "begin_send")).toMatchObject({ ok: false, replyState: "sending" }); // never twice
-    await step(c.actionId, "sent", randomUUID());
-    expect((await applyOnly(c.actionId)).status).toBe("applied");
-  });
-
-  describe("crash recovery (lease)", () => {
-    it("a live lease is never taken; an expired one is", async () => {
-      await setFlags(ON);
-      const c = await claim();
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "lease_held" });
-      await expireLease(c.actionId);
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "claimed", replyState: "pending" });
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "lease_held" }); // re-leased
-    });
-
-    it("crash while sending, reply on the thread: recorded as sent with that message, then applies", async () => {
-      await setFlags(ON);
-      const c = await claim();
-      await step(c.actionId, "begin_send");
-      const out = randomUUID();
-      await db.query(
-        `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6)`,
-        [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X],
-      );
-      await expireLease(c.actionId);
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "claimed", replyState: "sent" });
-      const row = (await db.query(`select reply_message_id from public.routing_v2_phone_actions where id = $1`, [c.actionId])).rows[0];
-      expect(row.reply_message_id).toBe(out);
-      expect((await applyOnly(c.actionId)).status).toBe("applied");
-    });
-
-    it("crash while sending, no reply on the thread: closed send_outcome_unknown, nothing applied", async () => {
-      await setFlags(ON);
-      const before = await snapshot();
-      const c = await claim();
-      await step(c.actionId, "begin_send");
-      await expireLease(c.actionId);
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: true, status: "not_applied", reason: "send_outcome_unknown" });
-      expect(await applyOnly(c.actionId)).toMatchObject({ status: "replayed", actionStatus: "not_applied" });
-      expect(await snapshot()).toEqual(before);
-    });
-
-    it("crash after apply before pause: stale until paused, then finished", async () => {
-      await setFlags(ON);
-      const c = await claim();
-      await apply(c.actionId, randomUUID());
-      const stale = async () =>
-        (await asService(async () => (await db.query(`select action_id from public.fn_routing_v2_phone_action_list_stale(50)`)).rows)).map((r) => r.action_id);
-      expect(await stale()).not.toContain(c.actionId); // lease still held
-      await expireLease(c.actionId);
-      expect(await stale()).toContain(c.actionId);
-      const t = await takeLease(c.actionId);
-      expect(t).toMatchObject({ taken: true, status: "applied" });
-      expect([...t.applied].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
-      expect(await step(c.actionId, "paused")).toMatchObject({ ok: true });
-      await expireLease(c.actionId);
-      expect(await stale()).not.toContain(c.actionId);
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "finished" });
-    });
-
-    it("a bounce is finished when applied (nothing to pause)", async () => {
-      await setFlags(ON);
-      const c = await claim("bad_number");
-      await applyOnly(c.actionId);
-      await expireLease(c.actionId);
-      expect(await takeLease(c.actionId)).toMatchObject({ taken: false, reason: "finished" });
-    });
-  });
-
-  it("undo refuses a user without org access", async () => {
-    await setFlags(ON);
-    const c = await claim();
-    await apply(c.actionId, randomUUID());
-    await expect(undo(outsiderId, c.actionId)).rejects.toThrow(/FORBIDDEN/);
-  });
-
-  it("canary: one property on the phone not eligible = nothing at all", async () => {
-    await setFlags({ questions_live: true, wrong_number_all: true, canary_percent: 0, canary_property_ids: [ids.p1, ids.p2] });
-    const before = await snapshot();
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
-    await setFlags({ canary_property_ids: [ids.p1, ids.p2, ids.p3, ids.p5] });
-    expect((await claim()).status).toBe("claimed");
-    expect(await snapshot()).toEqual(before);
-  });
-
-  it("respects suppression: a suppressed phone does nothing; an opted-out/DNC property is skipped", async () => {
-    await setFlags(ON);
-    await db.query(`update public.properties set outreach_dispo = 'dnc' where id = $1`, [ids.p3]);
     await db.query(`insert into public.sms_phone_suppressions (org_id, phone_e164, source) values ($1, $2, 'test')`, [orgId, X]);
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "phone_suppressed" });
+    const before = await everything();
+    expect(await applyAll()).toEqual({ status: "not_applicable", reason: "phone_suppressed" });
+    expect(await everything()).toEqual(before);
     await db.query(`delete from public.sms_phone_suppressions where org_id = $1`, [orgId]);
-    const c = await claim();
-    const r = await apply(c.actionId, randomUUID());
-    // Setting dnc also DNC-locks the row (existing trigger): it is skipped either way.
-    expect(r.skipped.find((s: { propertyId: string }) => s.propertyId === ids.p3)?.reason).toMatch(/^(dnc_locked|opted_out_or_dnc)$/);
-    expect(await dispo(ids.p3)).toBe("dnc");
-  });
-
-  it("an opted-out homeowner contact on another property is skipped, never closed", async () => {
-    await setFlags(ON);
+    await db.query(`update public.properties set outreach_dispo = 'dnc' where id = $1`, [ids.p3]);
     const c4 = randomUUID();
     const p6 = randomUUID();
     await db.query("set local session_replication_role = replica");
     await db.query(`insert into public.contacts (id, org_id, phone_3, sms_opted_out) values ($1, $2, $3, true)`, [c4, orgId, X]);
     await db.query(`insert into public.properties (id, org_id, address, state, status, homeowner_contact_id) values ($1, $2, 'Six', 'MO', 'prospect', $3)`, [p6, orgId, c4]);
     await db.query("set local session_replication_role = origin");
-    const c = await claim();
-    const r = await apply(c.actionId, randomUUID());
+    const r = await applyAll();
+    expect(r.skipped.find((s: { propertyId: string }) => s.propertyId === ids.p3)?.reason).toMatch(/^(dnc_locked|opted_out_or_dnc)$/);
     expect(r.skipped).toEqual(expect.arrayContaining([{ propertyId: p6, reason: "contact_suppressed" }]));
+    expect(await dispo(ids.p3)).toBe("dnc");
     expect(await dispo(p6)).toBeNull();
   });
 
-  it("source property held or human-owned = not applicable", async () => {
+  it("source held, or a stale decision revision = not applicable, nothing written", async () => {
     await setFlags(ON);
+    const rev = Number((await db.query(`select decision_context_revision from public.properties where id = $1`, [ids.p1])).rows[0].decision_context_revision);
+    expect(await applyAll("wrong_number_all", inbound, X, rev + 5)).toEqual({ status: "not_applicable", reason: "stale_decision_context" });
     await db.query(`update public.properties set needs_human_attention = true where id = $1`, [ids.p1]);
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "source_held" });
+    expect(await applyAll("wrong_number_all", inbound, X, null)).toEqual({ status: "not_applicable", reason: "source_held" });
+    expect(await count("routing_v2_phone_actions")).toBe(0);
   });
 
-  it("a newer seller text between claim and apply = not applied, nothing changed", async () => {
+  it("crash during A: any failure rolls back EVERYTHING and the call is retryable", async () => {
     await setFlags(ON);
-    const before = await snapshot();
-    const c = await claim();
-    await db.query(
-      `insert into public.messages (org_id, property_id, conversation_id, channel, direction, body, from_address)
-       values ($1, $2, $3, 'sms', 'inbound', 'actually wait', $4)`,
-      [orgId, ids.p1, ids.conv, X],
-    );
-    expect(await apply(c.actionId, randomUUID())).toMatchObject({ status: "not_applied", reason: "superseded_by_newer_inbound" });
-    expect(await snapshot()).toEqual(before);
+    const before = await everything();
+    await db.query(`
+      create or replace function pg_temp.prg_fail() returns trigger language plpgsql as $f$
+      begin if new.property_id = '${ids.p3}' then raise exception 'injected failure'; end if; return new; end $f$;
+      create trigger prg_fail before insert on public.routing_v2_phone_action_properties for each row execute function pg_temp.prg_fail();`);
+    await expect(applyAll()).rejects.toThrow(/injected failure/);
+    expect(await everything()).toEqual(before); // no dispo, no pause, no audit, no action, no events
+    await db.query(`drop trigger prg_fail on public.routing_v2_phone_action_properties`);
+    expect((await applyAll()).status).toBe("applied");
   });
 
-  it("a property joining the phone between claim and apply = not applied", async () => {
+  it("phone mismatch and non-service callers are refused", async () => {
     await setFlags(ON);
-    const c = await claim();
-    await db.query("set local session_replication_role = replica");
-    await db.query(`insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1, 'New', 'MO', 'prospect', $2)`, [orgId, ids.c1]);
-    await db.query("set local session_replication_role = origin");
-    expect(await apply(c.actionId, randomUUID())).toMatchObject({ status: "not_applied", reason: "property_set_changed" });
+    expect(await applyAll("wrong_number_all", inbound, Y)).toEqual({ status: "not_applicable", reason: "phone_mismatch" });
+    await expect(
+      asUser(ownerId, async () => db.query(`select public.fn_routing_v2_phone_action_apply_all($1, 'wrong_number_all', $2)`, [inbound, X])),
+    ).rejects.toThrow(/permission denied|service role required/);
+    await expect(asUser(ownerId, async () => db.query(`select * from public.routing_v2_phone_actions`))).resolves.toBeTruthy();
+    await expect(asUser(ownerId, async () => db.query(`insert into public.routing_v2_phone_actions (org_id) values ($1)`, [orgId]))).rejects.toThrow(/permission denied/);
   });
 
-  it("bad_number (bounce) marks only the property it landed on; undo restores it", async () => {
+  it("bad_number (bounce): only the landed property, no drip pause, reply not needed", async () => {
     await setFlags(ON);
-    const before = await snapshot();
-    const c = await claim("bad_number");
-    const r = await apply(c.actionId, null);
-    expect(r).toMatchObject({ status: "applied", applied: [ids.p1], skipped: [] });
+    const r = await applyAll("bad_number");
+    expect(r).toMatchObject({ status: "applied", applied: [ids.p1], skipped: [], replyState: "not_needed" });
     expect(await dispo(ids.p1)).toBe("bad_number");
     expect(await dispo(ids.p2)).toBe("not_interested");
-    await undo(ownerId, c.actionId);
+    expect((await enrollment(ids.e2)).status).toBe("active");
+  });
+});
+
+describe("B. reply after commit, keyed by the send id", () => {
+  it("pending -> sending happens once; sent needs sending; a wrong send id changes nothing", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    expect(await reply(r.actionId, randomUUID(), "sending")).toMatchObject({ ok: false, replyState: "pending" });
+    expect(await reply(r.actionId, r.sendId, "sent", randomUUID())).toMatchObject({ ok: false, replyState: "pending" });
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: true, replyState: "sending" });
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false, replyState: "sending" });
+    expect(await reply(r.actionId, r.sendId, "skipped")).toMatchObject({ ok: false, replyState: "sending" });
+    const out = randomUUID();
+    expect(await reply(r.actionId, r.sendId, "sent", out)).toMatchObject({ ok: true, replyState: "sent" });
+    expect(await reply(r.actionId, r.sendId, "unknown")).toMatchObject({ ok: false, replyState: "sent" });
+    // The properties stay closed whatever happens to the reply.
+    expect(await dispo(ids.p1)).toBe("wrong_number");
+  });
+
+  it("crash during the send: recovered ONLY by the send id on the source property, never by body or time", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await reply(r.actionId, r.sendId, "sending");
+    // Same approved body, same property, after the action — but no send id: not ours.
+    await db.query(
+      `insert into public.messages (org_id, property_id, conversation_id, channel, direction, body, to_address) values ($1, $2, $3, 'sms', 'outbound', $4, $5)`,
+      [orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X],
+    );
+    // The send id on ANOTHER property: not ours either.
+    await db.query(
+      `insert into public.messages (org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key) values ($1, $2, $3, 'sms', 'outbound', 'x', $4, $5)`,
+      [orgId, ids.p4, randomUUID(), Y, r.sendId],
+    );
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "unknown", messageId: null });
+  });
+
+  it("crash during the send, our row exists: recorded sent with that message", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await reply(r.actionId, r.sendId, "sending");
+    const out = randomUUID();
+    await db.query(
+      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7)`,
+      [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, r.sendId],
+    );
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "sent", messageId: out });
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "sent" }); // settled, idempotent
+  });
+
+  it("unsettled feed lists only pending/sending replies past the age", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    const feed = async (age: number) =>
+      (await asService(async () => (await db.query(`select action_id, reply_state from public.fn_routing_v2_phone_action_unsettled_replies($1, 50)`, [age])).rows)).map((x) => x.action_id);
+    expect(await feed(0)).toContain(r.actionId);
+    expect(await feed(3600)).not.toContain(r.actionId);
+    await reply(r.actionId, r.sendId, "skipped");
+    expect(await feed(0)).not.toContain(r.actionId);
+  });
+});
+
+describe("C. undo", () => {
+  it("restores every property exactly and resumes exactly the recorded drips; idempotent", async () => {
+    await setFlags(ON);
+    const before = await snapshot();
+    const r = await applyAll();
+    const u = await undo(ownerId, r.actionId);
+    expect(u.status).toBe("undone");
+    expect([...u.restored].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
+    expect(u.resumed).toBe(1);
+    expect(await snapshot()).toEqual(before);
+    expect((await enrollment(ids.e2)).status).toBe("active");
+    expect(await enrollment(ids.e3)).toEqual({ status: "paused", pause_reason: "manual" }); // not ours: untouched
+    expect(await undo(ownerId, r.actionId)).toMatchObject({ status: "already_undone", restored: [], resumed: 0 });
     expect(await snapshot()).toEqual(before);
   });
 
-  it("phone mismatch with the inbound and non-service callers are refused", async () => {
+  it("never overwrites a property a person changed, nor a later hold (both audited)", async () => {
     await setFlags(ON);
-    expect(await claim("wrong_number_all", inbound, Y)).toEqual({ status: "not_applicable", reason: "phone_mismatch" });
-    await expect(
-      asUser(ownerId, async () => db.query(`select public.fn_routing_v2_phone_action_claim($1, 'wrong_number_all', $2, '{}'::jsonb, 120)`, [inbound, X])),
-    ).rejects.toThrow(/permission denied|service role required/);
+    const r = await applyAll();
+    await db.query(`update public.properties set outreach_dispo = 'callback_requested' where id = $1`, [ids.p3]);
+    await db.query(`update public.properties set needs_human_attention = true, last_ai_escalation_reason = 'person_needs_to_look' where id = $1`, [ids.p2]);
+    const u = await undo(ownerId, r.actionId);
+    expect(u.status).toBe("partial");
+    expect(u.skipped).toEqual(expect.arrayContaining([
+      { propertyId: ids.p3, reason: "state_changed" },
+      { propertyId: ids.p2, reason: "hold_changed" },
+    ]));
+    expect(await dispo(ids.p3)).toBe("callback_requested");
+    const p2 = (await db.query(`select outreach_dispo, needs_human_attention, last_ai_escalation_reason from public.properties where id = $1`, [ids.p2])).rows[0];
+    expect(p2).toEqual({ outreach_dispo: "wrong_number", needs_human_attention: true, last_ai_escalation_reason: "person_needs_to_look" });
+    expect((await enrollment(ids.e2)).status).toBe("paused"); // skipped property: its drip stays paused
+    const audit = (await db.query(`select count(*) from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_undo_skipped'`, [orgId])).rows[0].count;
+    expect(Number(audit)).toBe(2);
+    // A reason alone (no flag) is also a later hold.
+    await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = 'x' where id = $1`, [ids.p2]);
+    expect((await undo(ownerId, r.actionId)).skipped).toEqual(expect.arrayContaining([{ propertyId: ids.p2, reason: "hold_changed" }]));
   });
 
+  it("phone suppressed now: restores nothing and resumes no drips", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await db.query(`insert into public.sms_phone_suppressions (org_id, phone_e164, source) values ($1, $2, 'stop')`, [orgId, X]);
+    const u = await undo(ownerId, r.actionId);
+    expect(u).toMatchObject({ status: "partial", restored: [], resumed: 0 });
+    expect(u.skipped.every((s: { reason: string }) => s.reason === "phone_suppressed")).toBe(true);
+    for (const id of [ids.p1, ids.p2, ids.p3]) expect(await dispo(id)).toBe("wrong_number");
+    expect((await enrollment(ids.e2)).status).toBe("paused");
+  });
+
+  it("a drip someone else re-paused is not resumed", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await db.query(`update public.sequence_enrollments set pause_reason = 'manual' where id = $1`, [ids.e2]);
+    const u = await undo(ownerId, r.actionId);
+    expect(u.resumed).toBe(0);
+    expect(u.notResumed).toEqual([{ enrollmentId: ids.e2, outcome: "pause_reason_changed" }]);
+    expect(await enrollment(ids.e2)).toEqual({ status: "paused", pause_reason: "manual" });
+  });
+
+  it("undo before the reply was sent: the reply is skipped and can never start", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await undo(ownerId, r.actionId);
+    const row = (await db.query(`select reply_state, reply_reason from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0];
+    expect(row).toEqual({ reply_state: "skipped", reply_reason: "undone_before_send" });
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false });
+    const feed = (await asService(async () => (await db.query(`select action_id from public.fn_routing_v2_phone_action_unsettled_replies(0, 50)`)).rows)).map((x) => x.action_id);
+    expect(feed).not.toContain(r.actionId);
+  });
+
+  it("refuses a user without org access", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await expect(undo(outsiderId, r.actionId)).rejects.toThrow(/FORBIDDEN/);
+  });
+
+  it("bad_number undo restores the landed property", async () => {
+    await setFlags(ON);
+    const before = await snapshot();
+    const r = await applyAll("bad_number");
+    await undo(ownerId, r.actionId);
+    expect(await snapshot()).toEqual(before);
+  });
+});
+
+describe("canary twin + rollback", () => {
   it("SQL canary eligibility matches flags.ts isV2Eligible exactly, including malformed configs (fail closed)", async () => {
     const propertyIds = Array.from({ length: 400 }, () => randomUUID());
     const listed = propertyIds.slice(0, 5);
@@ -494,14 +522,6 @@ describe("routing v2 PR-G phone actions", () => {
     ).rows[0].c;
     expect(Number(half)).toBeGreaterThan(120);
     expect(Number(half)).toBeLessThan(280);
-  });
-
-  it("a malformed canary config makes the whole phone action not applicable", async () => {
-    await setFlags({ questions_live: true, wrong_number_all: true, canary_percent: 100, canary_property_ids: [ids.p1, "bad"] });
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
-    await setFlags({ canary_property_ids: [], canary_percent: "100" });
-    expect(await claim()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
-    expect(await count("routing_v2_phone_actions")).toBe(0);
   });
 
   it("rollback removes every object", async () => {

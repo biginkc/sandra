@@ -4,12 +4,11 @@
 -- undo any you want reversed BEFORE dropping the audit tables, which hold the prior state.
 begin;
 drop function if exists public.fn_undo_routing_v2_phone_action(uuid);
-drop function if exists public.fn_routing_v2_phone_action_apply(uuid);
-drop function if exists public.fn_routing_v2_phone_action_list_stale(integer);
-drop function if exists public.fn_routing_v2_phone_action_take_lease(uuid, text, integer);
-drop function if exists public.fn_routing_v2_phone_action_step(uuid, text, uuid, text, integer);
-drop function if exists public.fn_routing_v2_phone_action_claim(uuid, text, text, jsonb, integer);
-drop function if exists public.routing_v2_phone_action_plan(uuid, text, text, uuid, boolean);
+drop function if exists public.fn_routing_v2_phone_action_unsettled_replies(integer, integer);
+drop function if exists public.fn_routing_v2_phone_action_recover_reply(uuid);
+drop function if exists public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text);
+drop function if exists public.fn_routing_v2_phone_action_apply_all(uuid, text, text, jsonb, bigint);
+drop function if exists public.routing_v2_phone_lock(uuid, text);
 drop function if exists public.routing_v2_phone_digits(text);
 drop function if exists public.routing_v2_phone_action_eligible(jsonb, uuid);
 drop table if exists public.routing_v2_phone_action_properties;
