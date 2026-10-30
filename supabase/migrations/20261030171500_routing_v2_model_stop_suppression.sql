@@ -149,14 +149,13 @@ $$;
 -- properties whose homeowner contact has the phone, and properties linked to such a
 -- contact through property_contacts. Phone-level actions need ALL of them eligible.
 --
--- Raw contacts.phone_1..3 are compared AFTER normalizing with the repo's US normalizer
--- (dialpad_cti_normalize_us_phone, the SQL twin of csv/normalize.ts normalizePhone):
--- legacy rows can hold "(816) 555-0101" or "816.555.0101", and contact_phone_numbers
--- was never backfilled for every contact, so it is only an extra source, never the only one.
--- Returns NULL (fail closed → not eligible) when:
---   - the phone itself is not a normalized US number, or
---   - some contact slot in the org cannot be normalized but its digits contain this
---     phone's 10 digits (e.g. "816-555-0101 x2"), so membership cannot be decided.
+-- Contacts are found ONLY through the contact_phone_numbers index (org_id, digits10).
+-- That table is maintained by the contact_phone_numbers_sync_insert / _update triggers
+-- with dialpad_cti_normalize_us_phone (the SQL twin of csv/normalize.ts normalizePhone),
+-- so formatted legacy values ("(816) 555-0101", "816.555.0101", "1 816 555 0101") are
+-- already normalized there. Every step is an index lookup; no org-wide scan.
+-- DEPENDENCY: the routing v2 cutover relies on those sync triggers staying in place.
+-- Returns NULL (fail closed → not eligible) when the phone is not a normalized US number.
 create or replace function public.fn_model_stop_phone_property_ids(p_org_id uuid, p_phone_e164 text, p_property_id uuid)
 returns uuid[]
 language plpgsql
@@ -165,50 +164,31 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-  v_digits10 text;
   v_ids uuid[];
 begin
   if p_org_id is null or p_phone_e164 is null
      or public.dialpad_cti_normalize_us_phone(p_phone_e164) is distinct from p_phone_e164 then
     return null;
   end if;
-  v_digits10 := right(p_phone_e164, 10);
-
-  if exists (
-    select 1
-    from public.contacts ct
-    cross join lateral (values (ct.phone_1), (ct.phone_2), (ct.phone_3)) slot(raw)
-    where ct.org_id = p_org_id
-      and nullif(btrim(slot.raw), '') is not null
-      and public.dialpad_cti_normalize_us_phone(slot.raw) is null
-      and position(v_digits10 in regexp_replace(slot.raw, '[^0-9]', '', 'g')) > 0
-  ) then
-    return null;
-  end if;
 
   with c as (
-    select ct.id
-    from public.contacts ct
-    cross join lateral (values (ct.phone_1), (ct.phone_2), (ct.phone_3)) slot(raw)
-    where ct.org_id = p_org_id
-      and slot.raw is not null
-      and public.dialpad_cti_normalize_us_phone(slot.raw) = p_phone_e164
+    select n.contact_id as id
+    from public.contact_phone_numbers n
+    where n.org_id = p_org_id and n.digits10 = right(p_phone_e164, 10)
+  ), ids as (
+    select p.id from public.properties p
+    where p.id = p_property_id and p.org_id = p_org_id and p.deleted_at is null
     union
-    select n.contact_id from public.contact_phone_numbers n
-    where n.org_id = p_org_id and n.e164 = p_phone_e164
+    select p.id from public.properties p
+    where p.homeowner_contact_id in (select id from c) and p.org_id = p_org_id and p.deleted_at is null
+    union
+    select p.id
+    from public.property_contacts pc
+    join public.properties p on p.id = pc.property_id
+    where pc.org_id = p_org_id and pc.contact_id in (select id from c)
+      and p.org_id = p_org_id and p.deleted_at is null
   )
-  select coalesce(array_agg(p.id order by p.id), '{}') into v_ids
-  from public.properties p
-  where p.org_id = p_org_id
-    and p.deleted_at is null
-    and (
-      p.id = p_property_id
-      or p.homeowner_contact_id in (select id from c)
-      or exists (
-        select 1 from public.property_contacts pc
-        where pc.org_id = p_org_id and pc.property_id = p.id and pc.contact_id in (select id from c)
-      )
-    );
+  select coalesce(array_agg(id order by id), '{}') into v_ids from ids;
   return v_ids;
 end;
 $$;
@@ -243,6 +223,8 @@ declare
   v_config_count integer;
   v_flags jsonb;
   v_phone_properties uuid[];
+  v_started timestamptz := clock_timestamp();
+  v_budget_ms integer := coalesce(nullif(current_setting('sandra.model_stop_budget_ms', true), '')::integer, 2000);
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'FORBIDDEN' using errcode = '42501';
@@ -252,9 +234,21 @@ begin
     raise exception 'INVALID_REQUEST' using errcode = '22023';
   end if;
 
+  -- Execution-time guard (never let a stop write approach the 8s API timeout and hold up
+  -- live sends). Postgres does not re-arm statement_timeout inside a running function, so:
+  --   - lock waits are capped with lock_timeout (honoured mid-function) → not_eligible;
+  --   - every lookup below is an index lookup, and the elapsed time is checked before the
+  --     write → over budget = not_eligible (nothing written; today's hold path runs).
+  -- sandra.model_stop_budget_ms (default 2000) exists so tests can force the budget path.
+  set local lock_timeout = '2s';
+
   -- Serialize per inbound (duplicate webhooks) and per phone (concurrent replies).
-  perform pg_advisory_xact_lock(hashtext('model_stop_inbound:' || p_inbound_message_id::text));
-  perform pg_advisory_xact_lock(hashtext('model_stop_phone:' || p_org_id::text || ':' || p_phone_e164));
+  begin
+    perform pg_advisory_xact_lock(hashtext('model_stop_inbound:' || p_inbound_message_id::text));
+    perform pg_advisory_xact_lock(hashtext('model_stop_phone:' || p_org_id::text || ':' || p_phone_e164));
+  exception when lock_not_available then
+    return jsonb_build_object('status', 'not_eligible', 'reason', 'lock_timeout');
+  end;
 
   select * into v_prior
   from public.routing_v2_model_stop_events e
@@ -279,8 +273,11 @@ begin
 
   -- Write-time canary re-check (§13.1/§13.2): every property on this phone must be
   -- eligible right now, under the same formula as routing-v2/flags.ts.
-  -- NULL = the phone set cannot be decided (un-normalizable phone data): fail closed.
+  -- NULL = the phone is not a normalized US number: fail closed.
   v_phone_properties := public.fn_model_stop_phone_property_ids(p_org_id, p_phone_e164, p_property_id);
+  if clock_timestamp() - v_started > make_interval(secs => v_budget_ms / 1000.0) then
+    return jsonb_build_object('status', 'not_eligible', 'reason', 'time_budget');
+  end if;
   if v_phone_properties is null or cardinality(v_phone_properties) = 0 or exists (
     select 1 from unnest(v_phone_properties) x
     where not public.fn_routing_v2_property_eligible(v_flags, x)
