@@ -63,7 +63,8 @@ export async function deliverV2Outbox(intent: V2OutboxIntent, deps: V2OutboxDeps
   }
   let result: V2DeliveryResult;
   try {
-    result = await prepared.send(`routing-v2:${intent.id}`);
+    // The outbox id itself (a uuid) is the provider idempotency key (messages.idempotency_key).
+    result = await prepared.send(intent.id);
   } catch {
     result = { kind: "unknown", reason: "provider_outcome_unknown" };
   }

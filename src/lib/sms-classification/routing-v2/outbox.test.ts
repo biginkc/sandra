@@ -18,7 +18,7 @@ describe("v2 outbox delivery", () => {
     const { deps, send } = fixture();
     const results = await Promise.all([deliverV2Outbox(intent, deps), deliverV2Outbox(intent, deps)]);
     expect(results.map((r) => r.kind).sort()).toEqual(["sent", "skipped"]);
-    expect(send).toHaveBeenCalledExactlyOnceWith("routing-v2:outbox-1");
+    expect(send).toHaveBeenCalledExactlyOnceWith("outbox-1");
     expect(deps.accepted).toHaveBeenCalledWith(intent, "provider-1");
   });
   it("quiet hours leaves the intent unclaimed for later delivery", async () => {

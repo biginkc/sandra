@@ -1,0 +1,107 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Routing v2 cutover (b): the seller-reply consumer, mocked (no database). The SQL claim /
+ * authorize / provider-check / sent bookkeeping is proven by the 330000 DB suite; outbox.ts's
+ * ordering (never retry an unknown outcome) by outbox.test.ts.
+ */
+const h = vi.hoisted(() => ({ reply: vi.fn(), send: vi.fn(), closed: false }));
+vi.mock("@/lib/sms-classification/routing-v2/reply-template", () => ({ resolveV2Reply: h.reply }));
+vi.mock("@/lib/messaging/send", () => ({ sendSmsToContact: h.send }));
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
+  checkRecipientQuietHours: () => (h.closed ? { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" } : { ok: true, state: "MO", localTime: "12:00", florida: false }),
+}));
+
+import { deliverRoutingV2OutboxReply, ROUTING_V2_REPLY_MAX_AGE_MS } from "./dispatch";
+
+const ROW = {
+  id: "0b8f3c1e-6a2b-4c3d-8e4f-5a6b7c8d9e0f", org_id: "org1", property_id: "p1", inbound_message_id: "in1",
+  kind: "reply" as const, payload: { key: "where_located" }, created_at: new Date().toISOString(),
+};
+
+function fakeSupabase(rpc: Record<string, unknown>) {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const updates: Array<{ table: string; values: unknown }> = [];
+  const chain = (table: string) => {
+    const rows = table === "messages" ? [{ contact_id: "c1", conversation_id: "conv1", from_address: "+18165550100", to_address: "+18165550199", body: "Where are you?" }]
+      : table === "ai_responder_configs" ? [{ model: "m", outbound_mode: "automatic" }] : [];
+    const c: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "neq", "in", "is", "not", "or", "ilike", "gte", "gt", "lt", "lte", "order", "limit", "insert", "upsert", "delete", "contains", "filter", "match", "range"]) c[m] = () => c;
+    c.update = (values: unknown) => { updates.push({ table, values }); return c; };
+    c.maybeSingle = async () => ({ data: rows[0] ?? null, error: null });
+    c.single = async () => ({ data: rows[0] ?? null, error: null });
+    // List reads (repeat-text guard, turn count) see no prior outbound texts.
+    c.then = (res: (v: unknown) => unknown) => res({ data: table === "messages" ? [] : rows, error: null });
+    return c;
+  };
+  const client = {
+    from: (t: string) => chain(t),
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, args });
+      return { data: name in rpc ? rpc[name] : null, error: null };
+    },
+  };
+  return { client: client as never, calls, updates };
+}
+const names = (calls: Array<{ name: string }>) => calls.map((c) => c.name).filter((n) => n.startsWith("routing_v2_"));
+
+beforeEach(() => {
+  h.reply.mockReset(); h.send.mockReset(); h.closed = false;
+  h.reply.mockResolvedValue({ kind: "ready", body: "We're based in the Kansas City metro, but we buy properties throughout the Midwest.", source: "x", templateId: "t1", fixed: false });
+});
+
+describe("routing v2 outbox reply consumer", () => {
+  it("quiet hours: waits BEFORE any claim (no claim, no send)", async () => {
+    h.closed = true;
+    const { client, calls } = fakeSupabase({});
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toMatchObject({ kind: "waiting" });
+    expect(names(calls)).toEqual([]);
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("a superseded / taken-over row refused at claim: nothing sent, no hold", async () => {
+    const { client, calls, updates } = fakeSupabase({ routing_v2_claim_outbox: "superseded" });
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "superseded" });
+    expect(names(calls)).toEqual(["routing_v2_claim_outbox"]);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  it("a slice switched off at authorize: nothing sent, inbound back to the human queue (§13.3)", async () => {
+    const { client, calls, updates } = fakeSupabase({ routing_v2_claim_outbox: "ok", routing_v2_authorize_outbox_send: "flag_off" });
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "flag_off" });
+    expect(names(calls)).toEqual(["routing_v2_claim_outbox", "routing_v2_authorize_outbox_send"]);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(JSON.stringify(updates)).toContain("needs_reply");
+  });
+
+  it("an authorization whose answer was lost goes to reconcile, never to the provider", async () => {
+    const { client } = fakeSupabase({ routing_v2_claim_outbox: "ok" });
+    (client as unknown as { rpc: unknown }).rpc = async (name: string) =>
+      name === "routing_v2_authorize_outbox_send" ? { data: null, error: { message: "timeout" } } : { data: name === "routing_v2_claim_outbox" ? "ok" : "ok", error: null };
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "reconcile", reason: "authorization_unknown" });
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("a reply that is not approved / not ready is cancelled before any claim and a person looks", async () => {
+    h.reply.mockResolvedValue({ kind: "none", reason: "reply_text_not_approved" });
+    const { client, calls, updates } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok" });
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "reply_text_not_approved" });
+    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent"]);
+    expect(JSON.stringify(updates)).toContain("nine_reply_not_sent:reply_text_not_approved");
+  });
+
+  it("an old queued reply is never sent late", async () => {
+    const { client, calls } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok" });
+    const old = { ...ROW, created_at: new Date(Date.now() - ROUTING_V2_REPLY_MAX_AGE_MS - 1000).toISOString() };
+    expect(await deliverRoutingV2OutboxReply(client, old)).toEqual({ kind: "skipped", reason: "expired" });
+    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent"]);
+    expect(h.reply).not.toHaveBeenCalled();
+  });
+
+  it("alerts are not delivered here", async () => {
+    expect(await deliverRoutingV2OutboxReply(fakeSupabase({}).client, { ...ROW, kind: "alert" })).toEqual({ kind: "skipped", reason: "not_a_reply" });
+  });
+});

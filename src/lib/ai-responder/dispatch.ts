@@ -128,6 +128,7 @@ import { isV2Eligible, readRoutingV2Flags, type RoutingV2Flags } from "@/lib/sms
 import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-decisions";
 import {
   DEALMACHINE_NO_KEY,
+  V2_OUTBOX_REASON,
   liveHoldReason,
   liveStepFor,
   V2_JEV_FAILED,
@@ -136,6 +137,9 @@ import {
   type StoredLiveEvidence,
 } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
+import { deliverV2Outbox, type V2OutboxIntent, type V2OutboxResult } from "@/lib/sms-classification/routing-v2/outbox";
+import { resolveV2Reply } from "@/lib/sms-classification/routing-v2/reply-template";
+import type { V2AnyReplyKey } from "@/lib/sms-classification/routing-v2/reply-texts";
 import {
   lookupDealMachineValue,
   supabaseDealMachineCacheStore,
@@ -6472,6 +6476,9 @@ async function deliverResponderMessage(
     from: inboundToPhone ?? undefined,
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
+    // Routing v2: the provider submission is keyed by the outbox id, so a replay of the same
+    // intent returns the durable original and never reaches the provider twice.
+    ...(args.routingV2OutboxId ? { idempotencyKey: args.routingV2OutboxId } : {}),
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     // Fired inside the send, right after the provider accepts and before its
     // receipt persistence / reconciliation.
@@ -8545,6 +8552,10 @@ async function applyRoutingV2LiveEvidence(
   }, runCtx);
   if (applied.kind === "applied") {
     await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+    // Deliver this property's queued reply now; the cron consumer is the backstop.
+    runAfterResponse(async () => {
+      await runRoutingV2OutboxReplies(supabase, { propertyId: input.propertyId, limit: 5 });
+    });
     return { outcome: "auto_closed", reason: `routing_v2:${evidence.road}` };
   }
   if (applied.reason === "superseded") {
@@ -8577,6 +8588,176 @@ async function routingV2PropertyValue(
       callProvider: (address, hooks) => fetchDealMachineEstimatedValue(address, { apiKey, ...hooks }),
     },
   );
+}
+
+/** A queued v2 reply older than this is never sent late; a person looks instead. */
+export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
+
+type RoutingV2OutboxRow = {
+  id: string; org_id: string; property_id: string; inbound_message_id: string;
+  kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
+};
+type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
+
+/**
+ * Routing v2 cutover (b): deliver ONE queued seller reply, at most once.
+ * claim -> authorize (sets authorized_at once) -> sendResponderMessage, whose provider fence
+ * calls routing_v2_check_authorized_outbox_send and whose provider submission is keyed by the
+ * outbox id -> mark sent with the outbound message id as the receipt. A timeout / unknown
+ * outcome is recorded and NEVER retried (reconcile settles it from the keyed message row).
+ * Quiet hours / the Florida cap wait BEFORE any claim. Replies only: alerts go through the
+ * hold-alert fan-out (routing_v2_alert_delivery_gate).
+ */
+export async function deliverRoutingV2OutboxReply(
+  supabase: SupabaseClient<Database>,
+  row: RoutingV2OutboxRow,
+  now: () => number = Date.now,
+): Promise<V2OutboxResult> {
+  const db = supabase as unknown as LooseRpc;
+  const rpcText = async (fn: string, args: Record<string, unknown>): Promise<string> => {
+    const { data, error } = await db.rpc(fn, args);
+    if (error) throw new Error(`${fn}: ${error.message}`);
+    return typeof data === "string" ? data : "unexpected_result";
+  };
+  const holdFor = async (why: string) => {
+    await holdWithRetry(supabase, row.property_id, `nine_reply_not_sent:${why}`);
+  };
+  const intent: V2OutboxIntent = {
+    id: row.id, orgId: row.org_id, propertyId: row.property_id, inboundMessageId: row.inbound_message_id,
+    kind: row.kind, payload: row.payload,
+  };
+  if (row.kind !== "reply") return { kind: "skipped", reason: V2_OUTBOX_REASON.notAReply };
+  const result = await deliverRoutingV2OutboxIntent(intent, row, supabase, rpcText, holdFor, now);
+  // §13.3: a reply cancelled because its slice was switched off goes back to the human queue.
+  if (result.kind === "skipped" && result.reason === "flag_off") {
+    await holdWithRetry(supabase, row.property_id, "needs_reply");
+  }
+  return result;
+}
+
+async function deliverRoutingV2OutboxIntent(
+  intent: V2OutboxIntent,
+  row: RoutingV2OutboxRow,
+  supabase: SupabaseClient<Database>,
+  rpcText: (fn: string, args: Record<string, unknown>) => Promise<string>,
+  holdFor: (why: string) => Promise<void>,
+  now: () => number,
+): Promise<V2OutboxResult> {
+  return deliverV2Outbox(intent, {
+    async prepare() {
+      if (now() - Date.parse(row.created_at) > ROUTING_V2_REPLY_MAX_AGE_MS) return { kind: "refused", reason: V2_OUTBOX_REASON.expired };
+      const key = row.payload.key;
+      if (typeof key !== "string") return { kind: "refused", reason: V2_OUTBOX_REASON.malformedIntent };
+      const { data: msg } = await supabase
+        .from("messages")
+        .select("contact_id, conversation_id, from_address, to_address, body")
+        .eq("id", row.inbound_message_id)
+        .maybeSingle();
+      if (!msg?.contact_id) return { kind: "refused", reason: V2_OUTBOX_REASON.inboundUnreadable };
+      const input: AiDispatchInput = {
+        propertyId: row.property_id,
+        contactId: msg.contact_id,
+        conversationId: msg.conversation_id ?? null,
+        inboundFromPhone: msg.from_address ?? null,
+        inboundToPhone: msg.to_address ?? null,
+        inboundBody: msg.body ?? "",
+        inboundMessageId: row.inbound_message_id,
+      };
+      const reply = await resolveV2Reply(supabase, { orgId: row.org_id, propertyId: row.property_id, contactId: msg.contact_id, key: key as V2AnyReplyKey });
+      if (reply.kind !== "ready") return { kind: "refused", reason: reply.reason };
+      const repeat = await templateAlreadySentToProperty(supabase, row.org_id, row.property_id, reply.templateId, reply.body);
+      if (repeat !== "no") return { kind: "refused", reason: repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT };
+      const window = await evaluateRecipientWindow(supabase, input);
+      if (!window.ok) return { kind: "wait", reason: V2_OUTBOX_REASON.quietHours(window.why) };
+      const { data: config } = await supabase
+        .from("ai_responder_configs")
+        .select("model, outbound_mode")
+        .eq("org_id", row.org_id)
+        .eq("active", true)
+        .maybeSingle();
+      if (!config) return { kind: "refused", reason: V2_OUTBOX_REASON.configUnreadable };
+      const turns = await countAiTurnsInThread(supabase, row.property_id, msg.contact_id, msg.conversation_id ?? null);
+      return {
+        kind: "ready",
+        async send() {
+          const sent = await sendResponderMessage(supabase, {
+            routingV2OutboxId: row.id,
+            input,
+            body: reply.body,
+            model: config.model,
+            confidence: 1,
+            sentiment: "neutral",
+            turn: (turns ?? 0) + 1,
+            orgId: row.org_id,
+            claimStartedAt: null,
+            outboundMode: config.outbound_mode,
+            windowDeferrable: true,
+            ...(reply.fixed
+              // The fixed approved texts (identity, the three hot replies): same guards as today.
+              ? { source: "llm" as const, approvedFixedText: true, replyKind: key === "identity" ? "identity" as const : "nine_hot_reply" as const }
+              : { source: "approved_template" as const, templateId: reply.templateId, templateSource: reply.source, replyKey: key, replyKind: "send_reply" as const }),
+          });
+          if (sent.outcome === "sent") return { kind: "accepted", receiptId: sent.messageId };
+          if (sent.outcome !== "retry" && sent.reason.startsWith("send_timeout")) return { kind: "unknown", reason: sent.reason };
+          return { kind: "not_sent", reason: sent.reason };
+        },
+      };
+    },
+    claim: (id) => rpcText("routing_v2_claim_outbox", { p_outbox_id: id }),
+    authorize: (id) => rpcText("routing_v2_authorize_outbox_send", { p_outbox_id: id }),
+    async accepted(i, receiptId) {
+      const r = await rpcText("routing_v2_mark_outbox_sent", { p_outbox_id: i.id, p_receipt: receiptId });
+      if (r !== "ok") throw new Error(`routing_v2_mark_outbox_sent: ${r}`);
+    },
+    async reconcile(i, reason) {
+      await rpcText("routing_v2_mark_outbox_unknown", { p_outbox_id: i.id, p_reason: reason });
+    },
+    async notSent(i, reason) {
+      await rpcText("routing_v2_mark_outbox_not_sent", { p_outbox_id: i.id, p_reason: reason });
+      // The seller did not get the reply: a person looks (today's nine-question hold family).
+      // The send path already flagged its own refusals (escalated); this is idempotent.
+      await holdFor(reason.replace(/\s+/g, "_"));
+    },
+  });
+}
+
+/** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
+export async function runRoutingV2OutboxReplies(
+  supabase: SupabaseClient<Database>,
+  opts: { propertyId?: string; limit?: number } = {},
+): Promise<{ released: number; reconciled: unknown; results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> }> {
+  const db = supabase as unknown as LooseRpc;
+  let released = 0;
+  let reconciled: unknown = null;
+  if (!opts.propertyId) {
+    const rel = await db.rpc("routing_v2_release_stale_outbox_claims", { p_older_than_seconds: 300 });
+    if (rel.error) reportError(new Error(rel.error.message), { tags: { surface: "routing_v2_outbox_release" } });
+    else released = typeof rel.data === "number" ? rel.data : 0;
+    const rec = await db.rpc("routing_v2_reconcile_outbox", { p_older_than_seconds: 180 });
+    if (rec.error) reportError(new Error(rec.error.message), { tags: { surface: "routing_v2_outbox_reconcile" } });
+    else reconciled = rec.data;
+  }
+  const { data, error } = await db.rpc("routing_v2_due_outbox_replies", {
+    p_limit: opts.limit ?? 20,
+    p_property_id: opts.propertyId ?? null,
+  });
+  if (error) {
+    // Deployed ahead of the migration, or unreadable: nothing is sent.
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_due" } });
+    }
+    return { released, reconciled, results: [] };
+  }
+  const results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> = [];
+  for (const row of (data ?? []) as RoutingV2OutboxRow[]) {
+    try {
+      results.push({ id: row.id, result: await deliverRoutingV2OutboxReply(supabase, row) });
+    } catch (e) {
+      reportError(e, { tags: { surface: "routing_v2_outbox_deliver" }, extra: { outboxId: row.id } });
+      results.push({ id: row.id, result: { kind: "error" } });
+    }
+  }
+  return { released, reconciled, results };
 }
 
 export async function runNineQuestionsStep(

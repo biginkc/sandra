@@ -17,6 +17,19 @@ export const V2_JEV_FAILED: Extract<V2Classification, { kind: "failed" }> = Obje
 export const DEALMACHINE_NO_KEY: ValueLookupResult = Object.freeze({ kind: "no_value", reason: "no_api_key" });
 
 /**
+ * Outbox delivery refusal reasons (not hold reasons: a refused reply holds as
+ * `nine_reply_not_sent:<reason>`, an existing registered family).
+ */
+export const V2_OUTBOX_REASON = Object.freeze({
+  notAReply: "not_a_reply",
+  expired: "expired",
+  malformedIntent: "malformed_intent",
+  inboundUnreadable: "inbound_unreadable",
+  configUnreadable: "config_unreadable",
+  quietHours: (why: string) => `quiet_hours_recipient:${why}`,
+});
+
+/**
  * Routing v2 cutover (a): the live dispatch glue that is independent of dispatch.ts.
  *
  * Every live effect is driven by the STORED decision row (routing_v2_live_decisions), never
