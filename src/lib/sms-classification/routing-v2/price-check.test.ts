@@ -388,7 +388,27 @@ describe("repairs follow-ups", () => {
       expect(route("no repairs needed. stop texting me", { asked_stop: 0.95, no_repairs: 0.9 })).toBeNull();
       expect(route("lawyer. no repairs", { legal: 0.9, no_repairs: 0.9 })).toBeNull();
       expect(route("no repairs, call me tomorrow at 3", { asked_call: 0.9, no_repairs: 0.9 })).toBeNull();
-      expect(REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS).toEqual(new Set(["stop", "ALERT_call_me"]));
+      expect(REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS).toEqual(new Set(["stop", "ALERT_call_me", "wrong_number_close", "bad_number"]));
+    });
+
+    // After-repairs precedence: Jarrad 2026-10-30 — row-3/bounce roads close normally.
+    it.each([
+      ["wrong person", "wrong number, I don't own that", { wrong_person: 0.92 }],
+      ["already sold", "I sold it last year", { already_sold: 0.9 }],
+      ["tenant", "I just rent here", { tenant: 0.9 }],
+    ] as const)("%s after the repairs reply → its normal wrong-number road, not the Price too high drip", (_l, reply, jev) => {
+      expect(route(reply, { ...jev, needs_repairs: 0.02, no_repairs: 0.02 })).toBeNull();
+      const probabilities = { ...zeroQs(), ...jev };
+      const main = routeV2({ reply, probabilities, propertyType: PT() });
+      expect(main.road).toBe("wrong_number_close");
+      expect(actionForV2Decision(main).steps).toEqual([{ kind: "wrong_number_close" }]);
+    });
+    it("a \"no SMS capabilities\" bounce after the repairs reply → bad number, not the Price too high drip", () => {
+      const reply = "This number has no SMS capabilities";
+      expect(route(reply, {})).toBeNull();
+      const main = routeV2({ reply, probabilities: zeroQs(), propertyType: PT() });
+      expect(main.road).toBe("bad_number");
+      expect(actionForV2Decision(main).road).toBe("bad_number");
     });
   });
 });

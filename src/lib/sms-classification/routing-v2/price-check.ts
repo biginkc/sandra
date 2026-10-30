@@ -148,8 +148,13 @@ export type RepairsFollowUpOutcome = "follow_up_yes" | "no_repairs" | "listed" |
  * when the regular v2 decision for this inbound is one of these, the follow-ups do not apply
  * and that road stands, unchanged ("Call me should always take precedence over everything",
  * stop stays first).
+ * After-repairs precedence: Jarrad 2026-10-30 — row-3/bounce roads close normally. Wrong
+ * person / already sold / tenant (wrong_number_close) and the "no SMS capabilities" bounce
+ * (bad_number) take their normal road instead of the Price too high drip.
  */
-export const REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS: ReadonlySet<string> = new Set(["stop", "ALERT_call_me"]);
+export const REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS: ReadonlySet<string> = new Set([
+  "stop", "ALERT_call_me", "wrong_number_close", "bad_number",
+]);
 
 export type RepairsFollowUpInput = {
   flags: RoutingV2Flags;
