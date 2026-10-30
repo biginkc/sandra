@@ -3,7 +3,7 @@ import type { ValueLookupResult } from "./dealmachine-value";
 import { v2SliceAllowed, type RoutingV2Flags } from "./flags";
 import { DEFAULT_CUTOFF } from "./order";
 import { askAboveEightyPercent, extractDollarAmount, type ExtractedPrice } from "./price-amount";
-import { REPAIRS_FOLLOW_UP_IDS, type PropertyTypeOption, type RepairsFollowUpId } from "./questions";
+import { REPAIRS_ALERT_IDS, REPAIRS_FOLLOW_UP_IDS, type PropertyTypeOption, type RepairsFollowUpId } from "./questions";
 import { v2ReplyText } from "./reply-texts";
 import type { V2Decision } from "./route";
 
@@ -118,11 +118,11 @@ export function isAfterRepairsReply(ourLastText: string | null | undefined): boo
 /**
  * Follow-up yes cutoff: the same 0.60 default as every other v2 yes/no question
  * (`DEFAULT_CUTOFF`, order.ts; BUILD-PLAN §16 "Cutoffs unchanged (60%)"). The plan names no
- * other cutoff for these three; only reason_to_sell differs (0.40).
+ * other cutoff for these four; only reason_to_sell differs (0.40).
  */
 export const REPAIRS_FOLLOW_UP_CUTOFF = DEFAULT_CUTOFF;
 
-/** Pull the three follow-up probabilities out of a Jev answer map (invalid/missing omitted). */
+/** Pull the four follow-up probabilities out of a Jev answer map (invalid/missing omitted). */
 export function readRepairsFollowUps(
   answers: Record<string, { noul?: unknown } | undefined>,
 ): Partial<Record<RepairsFollowUpId, number>> {
@@ -136,38 +136,49 @@ export function readRepairsFollowUps(
 
 export type RepairsFollowUpOutcome = "follow_up_yes" | "no_repairs" | "listed" | "other" | "unavailable";
 
+/**
+ * ORDER-TABLE rows 1, 2 and 2b (legal/hostile, stop, asked us to call) beat the follow-ups:
+ * when the regular v2 decision for this inbound is one of these, the follow-ups do not apply
+ * and that road stands, unchanged ("Call me should always take precedence over everything",
+ * stop stays first).
+ */
+export const REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS: ReadonlySet<string> = new Set(["stop", "ALERT_call_me"]);
+
 export type RepairsFollowUpInput = {
   flags: RoutingV2Flags;
   propertyId: string;
-  /** Probabilities for the three follow-ups. null/missing/invalid = not answered (fail closed). */
+  /** The regular routeV2 decision for this same inbound (stop / call-me win first). */
+  mainDecision: V2Decision;
+  /** Probabilities for the four follow-ups. null/missing/invalid = not answered (fail closed). */
   followUps: Partial<Record<RepairsFollowUpId, number>> | null;
   /** The existing v2 `listed` answer for this inbound. */
   listedProbability: number | null;
-  /**
-   * Seller said no repairs are needed. There is NO approved question for this (pending
-   * Jarrad), so nothing detects it yet; defaults to false so the realtor reply never fires on
-   * a guess.
-   */
-  noRepairs?: boolean;
 };
 
+const ALERT_ONLY = V2_PRICE_CHECK_ACTIONS.fair_or_no_value.filter((s) => s.kind === "alert");
+
 /**
- * Next inbound after the repairs reply. Order as approved: any follow-up yes → alert;
- * "no repairs" → realtor reply; listed yes → Listed drip; anything else → Price too high drip.
- * Returns null when the price_check slice is off (normal routing applies). If the follow-up
- * answers are missing, a person looks (alert) instead of guessing a drip.
+ * Next inbound after the repairs reply, in the plan's order:
+ *   1. stop / legal / call-me (regular decision) → null: that road stands, unchanged;
+ *   2. any yes on needs_repairs, flexible_price or original_portion → alert;
+ *   3. no_repairs yes → the approved no_repairs_realtor reply;
+ *   4. listed yes → Listed drip;
+ *   5. anything else → Price too high drip.
+ * "No repairs" is ONLY the no_repairs answer at the cutoff: a low needs_repairs, silence or an
+ * unclear reply never counts. Returns null when the price_check slice is off (normal routing).
+ * Missing follow-up answers → alert (a person looks) instead of guessing.
  */
 export function decideRepairsFollowUp(input: RepairsFollowUpInput): { outcome: RepairsFollowUpOutcome; action: V2Action } | null {
   if (!v2SliceAllowed(input.flags, "price_check", input.propertyId)) return null;
+  if (input.mainDecision.road !== null && REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS.has(input.mainDecision.road)) return null;
   const fu = input.followUps;
   const complete = fu !== null && REPAIRS_FOLLOW_UP_IDS.every((id) => valid(fu[id]));
-  if (!complete) return { outcome: "unavailable", action: priceAction(V2_PRICE_CHECK_ACTIONS.fair_or_no_value.filter((s) => s.kind === "alert")) };
-  if (REPAIRS_FOLLOW_UP_IDS.some((id) => (fu[id] as number) >= REPAIRS_FOLLOW_UP_CUTOFF)) {
-    return { outcome: "follow_up_yes", action: priceAction(V2_PRICE_CHECK_ACTIONS.fair_or_no_value.filter((s) => s.kind === "alert")) };
-  }
-  if (input.noRepairs === true) return { outcome: "no_repairs", action: priceAction(V2_PRICE_CHECK_ACTIONS.no_repairs) };
+  if (!complete) return { outcome: "unavailable", action: priceAction(ALERT_ONLY) };
+  const yes = (id: RepairsFollowUpId) => (fu[id] as number) >= REPAIRS_FOLLOW_UP_CUTOFF;
+  if (REPAIRS_ALERT_IDS.some(yes)) return { outcome: "follow_up_yes", action: priceAction(ALERT_ONLY) };
+  if (yes("no_repairs")) return { outcome: "no_repairs", action: priceAction(V2_PRICE_CHECK_ACTIONS.no_repairs) };
   if (valid(input.listedProbability) && input.listedProbability >= DEFAULT_CUTOFF) {
-    return { outcome: "listed", action: { road: "listed_drip", steps: V2_ROAD_ACTIONS.listed_drip(null as never) } };
+    return { outcome: "listed", action: { road: "listed_drip", steps: V2_ROAD_ACTIONS.listed_drip(input.mainDecision) } };
   }
   return { outcome: "other", action: priceAction(V2_PRICE_CHECK_ACTIONS.other) };
 }

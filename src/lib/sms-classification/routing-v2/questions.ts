@@ -81,19 +81,24 @@ export const V2_QUESTIONS: Record<V2QuestionId, string> = {
 };
 
 /**
- * The three repairs follow-up questions (PR-E). Asked ONLY on the next inbound after our
- * repairs reply (`price_too_high`); never part of the regular v2 call, so the pinned v7
- * replay set above is unchanged. Source, byte for byte: vault note "2026-10-29 — Sandra SMS
- * reply routing plan (Jev + Haiku)", line 60 ("After repairs reply"), under "Every rule and
- * text below was approved by Jarrad word for word". Pinned by `price-check.test.ts`.
+ * The repairs follow-up questions (PR-E). Asked ONLY on the next inbound after our repairs
+ * reply (`price_too_high`); never part of the regular v2 call, so the pinned v7 replay set
+ * above is unchanged. Pinned by `price-check.test.ts`. Sources, byte for byte:
+ * - needs_repairs / flexible_price / original_portion: vault note "2026-10-29 — Sandra SMS
+ *   reply routing plan (Jev + Haiku)", line 60 ("After repairs reply"), under "Every rule and
+ *   text below was approved by Jarrad word for word". Any yes → alert.
+ * - no_repairs: Master A-006 (Jarrad-delegated, 2026-10-30 overnight text authority; logged
+ *   for his morning review). A yes needs explicit no-repairs evidence → realtor reply.
  */
-export const REPAIRS_FOLLOW_UP_IDS = ["needs_repairs", "flexible_price", "original_portion"] as const;
+export const REPAIRS_ALERT_IDS = ["needs_repairs", "flexible_price", "original_portion"] as const;
+export const REPAIRS_FOLLOW_UP_IDS = [...REPAIRS_ALERT_IDS, "no_repairs"] as const;
 export type RepairsFollowUpId = (typeof REPAIRS_FOLLOW_UP_IDS)[number];
 
 export const REPAIRS_FOLLOW_UP_QUESTIONS: Record<RepairsFollowUpId, string> = {
   needs_repairs: "Did the seller say the property needs repairs?",
   flexible_price: "Did the seller say they're flexible on price, willing to negotiate, or not firm?",
   original_portion: "Did the seller indicate any portion of the house was original?",
+  no_repairs: "Did the seller explicitly say the property needs no repairs?",
 };
 
 /** The pick-one property type question and its five approved choices. */
@@ -118,7 +123,7 @@ export type V2State = {
 /**
  * One Jev call: every v2 yes/no question plus the property type choice (same shape as the v7
  * replay). `repairsFollowUps: true` (only for the next inbound after the repairs reply) also
- * asks the three follow-ups; the default leaves the request byte-identical to before.
+ * asks the four follow-ups; the default leaves the request byte-identical to before.
  */
 export function buildV2JevRequest(
   state: V2State,

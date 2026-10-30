@@ -19,6 +19,7 @@ import { ALL_OFF, type RoutingV2Flags } from "./flags";
 import { askAboveEightyPercent, extractDollarAmount } from "./price-amount";
 import {
   REPAIRS_FOLLOW_UP_CUTOFF,
+  REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS,
   decideRepairsFollowUp,
   readRepairsFollowUps,
   isAfterRepairsReply,
@@ -26,14 +27,17 @@ import {
   v2PriceCheckFlagOffAction,
 } from "./price-check";
 import {
+  REPAIRS_ALERT_IDS,
   REPAIRS_FOLLOW_UP_IDS,
   REPAIRS_FOLLOW_UP_QUESTIONS,
   V2_QUESTION_IDS,
   buildV2JevRequest,
   type PropertyTypeOption,
+  type RepairsFollowUpId,
+  type V2QuestionId,
 } from "./questions";
 import { v2ReplyText } from "./reply-texts";
-import type { V2Decision } from "./route";
+import { routeV2, type V2Decision } from "./route";
 
 const PROP = "11111111-1111-4111-8111-111111111111";
 const ORG = "22222222-2222-4222-8222-222222222222";
@@ -213,24 +217,30 @@ describe("runV2PriceCheck", () => {
 });
 
 describe("repairs follow-up questions (byte pins)", () => {
-  // Approved by Jarrad word for word (vault plan line 60). A diff here needs his approval of that exact text.
+  // needs_repairs / flexible_price / original_portion: approved by Jarrad word for word (vault plan line 60).
+  // no_repairs: Master A-006 (Jarrad-delegated). A diff here needs approval of that exact text.
   const PINNED = {
     needs_repairs: "Did the seller say the property needs repairs?",
     flexible_price: "Did the seller say they're flexible on price, willing to negotiate, or not firm?",
     original_portion: "Did the seller indicate any portion of the house was original?",
+    no_repairs: "Did the seller explicitly say the property needs no repairs?",
   };
   const VAULT_LINE_60 =
     '- After repairs reply: "Did the seller say the property needs repairs?" · "Did the seller say they\'re flexible on price, willing to negotiate, or not firm?" · "Did the seller indicate any portion of the house was original?"';
 
   it("pins every byte, straight apostrophe, ids in order", () => {
-    expect(REPAIRS_FOLLOW_UP_IDS).toEqual(["needs_repairs", "flexible_price", "original_portion"]);
+    expect(REPAIRS_ALERT_IDS).toEqual(["needs_repairs", "flexible_price", "original_portion"]);
+    expect(REPAIRS_FOLLOW_UP_IDS).toEqual(["needs_repairs", "flexible_price", "original_portion", "no_repairs"]);
     expect(REPAIRS_FOLLOW_UP_QUESTIONS).toEqual(PINNED);
+    expect(Buffer.from(REPAIRS_FOLLOW_UP_QUESTIONS.no_repairs, "utf8")).toEqual(
+      Buffer.from("Did the seller explicitly say the property needs no repairs?", "utf8"),
+    );
     expect(Buffer.from(REPAIRS_FOLLOW_UP_QUESTIONS.flexible_price, "utf8").includes(Buffer.from("they'r"))).toBe(true);
-    expect(Object.values(REPAIRS_FOLLOW_UP_QUESTIONS).join("")).not.toMatch(/[\u2018\u2019\u201c\u201d]/);
+    expect(Object.values(REPAIRS_FOLLOW_UP_QUESTIONS).join("")).not.toMatch(/[‘’“”]/);
   });
 
-  it("each text is quoted verbatim in the approved vault line", () => {
-    for (const t of Object.values(REPAIRS_FOLLOW_UP_QUESTIONS)) expect(VAULT_LINE_60).toContain(`"${t}"`);
+  it("the three alert questions are quoted verbatim in the approved vault line", () => {
+    for (const id of REPAIRS_ALERT_IDS) expect(VAULT_LINE_60).toContain(`"${REPAIRS_FOLLOW_UP_QUESTIONS[id]}"`);
   });
 
   const vault = join(homedir(), "BMH-OS/_inbox/2026-10-29 — Sandra SMS reply routing plan (Jev + Haiku).md");
@@ -238,7 +248,7 @@ describe("repairs follow-up questions (byte pins)", () => {
     expect(readFileSync(vault, "utf8").split("\n")[59]).toBe(VAULT_LINE_60);
   });
 
-  it("are not in the regular v2 call; asked only when opted in", () => {
+  it("are not in the regular v2 call; all four asked only when opted in", () => {
     for (const id of REPAIRS_FOLLOW_UP_IDS) expect(V2_QUESTION_IDS as readonly string[]).not.toContain(id);
     const state = { our_last_text_to_homeowner: v2ReplyText("price_too_high"), homeowner_reply: "it needs a roof" };
     const plain = buildV2JevRequest(state);
@@ -248,7 +258,7 @@ describe("repairs follow-up questions (byte pins)", () => {
     for (const id of REPAIRS_FOLLOW_UP_IDS) {
       expect(withFu.questions[id]).toEqual({ type: "noul", instructions: PINNED[id] });
     }
-    expect(Object.keys(withFu.questions)).toHaveLength(V2_QUESTION_IDS.length + 4);
+    expect(Object.keys(withFu.questions)).toHaveLength(V2_QUESTION_IDS.length + 1 + 4);
   });
 
   it("cutoff is the 0.60 default", () => {
@@ -257,20 +267,30 @@ describe("repairs follow-up questions (byte pins)", () => {
 
   it("readRepairsFollowUps keeps only valid probabilities", () => {
     expect(
-      readRepairsFollowUps({ needs_repairs: { noul: 0.7 }, flexible_price: { noul: "x" }, original_portion: undefined, listed: { noul: 1 } }),
-    ).toEqual({ needs_repairs: 0.7 });
+      readRepairsFollowUps({
+        needs_repairs: { noul: 0.7 },
+        flexible_price: { noul: "x" },
+        original_portion: undefined,
+        no_repairs: { noul: 0.2 },
+        listed: { noul: 1 },
+      }),
+    ).toEqual({ needs_repairs: 0.7, no_repairs: 0.2 });
   });
 });
 
 describe("repairs follow-ups", () => {
-  const probs = (o: Partial<Record<(typeof REPAIRS_FOLLOW_UP_IDS)[number], number>> = {}) => ({
+  const probs = (o: Partial<Record<RepairsFollowUpId, number>> = {}) => ({
     needs_repairs: 0.1,
     flexible_price: 0.1,
     original_portion: 0.1,
+    no_repairs: 0.1,
     ...o,
   });
   const decide = (o: Partial<Parameters<typeof decideRepairsFollowUp>[0]> = {}) =>
-    decideRepairsFollowUp({ flags: ON, propertyId: PROP, followUps: probs(), listedProbability: 0.1, ...o });
+    decideRepairsFollowUp({ flags: ON, propertyId: PROP, mainDecision: DECISION, followUps: probs(), listedProbability: 0.1, ...o });
+  const ALERT = { road: "price_check", steps: [{ kind: "alert", reason: "named_price" }] };
+  const REALTOR = { road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.no_repairs };
+  const PRICE_TOO_HIGH_DRIP = { road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.other };
 
   it("runs only after the exact approved repairs reply", () => {
     expect(isAfterRepairsReply(v2ReplyText("price_too_high"))).toBe(true);
@@ -283,25 +303,23 @@ describe("repairs follow-ups", () => {
     expect(decide({ flags: ALL_OFF })).toBeNull();
   });
 
-  it.each(REPAIRS_FOLLOW_UP_IDS)("any yes (%s) → alert, beats no-repairs and listed", (id) => {
-    const r = decide({ followUps: probs({ [id]: 0.6 }), noRepairs: true, listedProbability: 0.9 });
-    expect(r).toEqual({ outcome: "follow_up_yes", action: { road: "price_check", steps: [{ kind: "alert", reason: "named_price" }] } });
+  it.each(REPAIRS_ALERT_IDS)("any yes (%s) → alert, beats no_repairs and listed", (id) => {
+    expect(decide({ followUps: probs({ [id]: 0.6, no_repairs: 0.95 }), listedProbability: 0.9 })).toEqual({ outcome: "follow_up_yes", action: ALERT });
   });
 
-  it("yes cutoff: 0.59 is not a yes, 0.60 is", () => {
+  it("yes cutoff: 0.59 is not a yes, 0.60 is (alert and no_repairs alike)", () => {
     expect(decide({ followUps: probs({ needs_repairs: 0.59 }) })?.outcome).toBe("other");
     expect(decide({ followUps: probs({ needs_repairs: 0.6 }) })?.outcome).toBe("follow_up_yes");
+    expect(decide({ followUps: probs({ no_repairs: 0.59 }) })?.outcome).toBe("other");
+    expect(decide({ followUps: probs({ no_repairs: 0.6 }) })?.outcome).toBe("no_repairs");
   });
 
-  it("noRepairs defaults to false: the realtor reply never fires on a guess", () => {
-    expect(decide()?.outcome).toBe("other");
+  it("no_repairs yes → approved realtor reply (beats listed)", () => {
+    expect(decide({ followUps: probs({ no_repairs: 0.9 }), listedProbability: 0.9 })).toEqual({ outcome: "no_repairs", action: REALTOR });
   });
 
-  it("no repairs → realtor reply", () => {
-    expect(decide({ noRepairs: true, listedProbability: 0.9 })).toEqual({
-      outcome: "no_repairs",
-      action: { road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.no_repairs },
-    });
+  it("a low needs_repairs alone is never treated as no repairs", () => {
+    expect(decide({ followUps: probs({ needs_repairs: 0.01, no_repairs: 0.3 }) })).toEqual({ outcome: "other", action: PRICE_TOO_HIGH_DRIP });
   });
 
   it("listed yes → Listed drip", () => {
@@ -312,14 +330,66 @@ describe("repairs follow-ups", () => {
   });
 
   it("anything else → Price too high drip", () => {
-    expect(decide({ listedProbability: 0.59 })).toEqual({ outcome: "other", action: { road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.other } });
+    expect(decide({ listedProbability: 0.59 })).toEqual({ outcome: "other", action: PRICE_TOO_HIGH_DRIP });
     expect(decide({ listedProbability: null })?.outcome).toBe("other");
   });
 
-  it("missing follow-up answers → alert (a person looks), never a drip", () => {
-    for (const followUps of [null, { needs_repairs: 0.1 }, probs({ flexible_price: Number.NaN })]) {
-      expect(decide({ followUps })?.action.steps).toEqual([{ kind: "alert", reason: "named_price" }]);
+  it("missing follow-up answers (incl. no_repairs) → alert (a person looks), never a drip", () => {
+    const { no_repairs: _omit, ...withoutNoRepairs } = probs({ no_repairs: 0.9 });
+    void _omit;
+    for (const followUps of [null, { needs_repairs: 0.1 }, probs({ flexible_price: Number.NaN }), withoutNoRepairs]) {
+      expect(decide({ followUps })?.action).toEqual(ALERT);
     }
+  });
+
+  // Regression cases with mocked Jev answers (no real Jev call): the full answer map goes
+  // through routeV2 (regular order) and readRepairsFollowUps, then decideRepairsFollowUp.
+  describe("regressions (mocked Jev answers)", () => {
+    const zeroQs = () => Object.fromEntries(V2_QUESTION_IDS.map((id) => [id, 0.02])) as Record<V2QuestionId, number>;
+    function route(reply: string, jev: Partial<Record<V2QuestionId | RepairsFollowUpId, number>>) {
+      const probabilities = { ...zeroQs(), ...pick(jev, V2_QUESTION_IDS) };
+      const main = routeV2({ reply, probabilities, propertyType: PT() });
+      const answers = Object.fromEntries(REPAIRS_FOLLOW_UP_IDS.map((id) => [id, { noul: jev[id] ?? 0.02 }]));
+      return decideRepairsFollowUp({
+        flags: ON,
+        propertyId: PROP,
+        mainDecision: main,
+        followUps: readRepairsFollowUps(answers),
+        listedProbability: probabilities.listed,
+      });
+    }
+    function pick<T extends string>(o: Partial<Record<string, number>>, ids: readonly T[]): Partial<Record<T, number>> {
+      return Object.fromEntries(ids.filter((id) => o[id] !== undefined).map((id) => [id, o[id]])) as Partial<Record<T, number>>;
+    }
+
+    it('positive: "no repairs needed, it\'s move-in ready" → realtor reply', () => {
+      expect(route("no repairs needed, it's move-in ready", { no_repairs: 0.93, needs_repairs: 0.03 })).toEqual({ outcome: "no_repairs", action: REALTOR });
+    });
+
+    it('negated: "it needs a lot of repairs" → alert', () => {
+      expect(route("it needs a lot of repairs", { needs_repairs: 0.96, no_repairs: 0.02 })).toEqual({ outcome: "follow_up_yes", action: ALERT });
+    });
+
+    it('ambiguous: "it\'s in okay shape" → Price too high drip, not the realtor reply', () => {
+      expect(route("it's in okay shape", { needs_repairs: 0.2, no_repairs: 0.35 })).toEqual({ outcome: "other", action: PRICE_TOO_HIGH_DRIP });
+    });
+
+    it('silence on repairs: "what\'s your offer" → Price too high drip, not the realtor reply', () => {
+      // asked_offer would route Book appointment in the regular order; the follow-up step only
+      // yields to stop/legal/call-me, so it decides here.
+      expect(route("what's your offer", { asked_offer: 0.9, needs_repairs: 0.02, no_repairs: 0.02 })).toEqual({ outcome: "other", action: PRICE_TOO_HIGH_DRIP });
+    });
+
+    it("no_repairs yes together with needs_repairs yes → the alert wins", () => {
+      expect(route("no repairs, well the roof needs work", { no_repairs: 0.8, needs_repairs: 0.8 })).toEqual({ outcome: "follow_up_yes", action: ALERT });
+    });
+
+    it("stop + no_repairs → stop wins (follow-ups do not apply)", () => {
+      expect(route("no repairs needed. stop texting me", { asked_stop: 0.95, no_repairs: 0.9 })).toBeNull();
+      expect(route("lawyer. no repairs", { legal: 0.9, no_repairs: 0.9 })).toBeNull();
+      expect(route("no repairs, call me tomorrow at 3", { asked_call: 0.9, no_repairs: 0.9 })).toBeNull();
+      expect(REPAIRS_FOLLOW_UP_PRECEDENCE_ROADS).toEqual(new Set(["stop", "ALERT_call_me"]));
+    });
   });
 });
 
