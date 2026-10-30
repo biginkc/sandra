@@ -19,6 +19,28 @@ end $$;
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 drop function if exists public.routing_v2_reject_drip_edit();
+-- Restore pause_enrollments_for_inbound_call exactly as 20261021200300 defined it.
+create or replace function public.pause_enrollments_for_inbound_call(p_contact_ids uuid[])
+returns table (id uuid, property_id uuid, sequence_id uuid)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  return query
+  update public.sequence_enrollments e
+     set status = 'paused', pause_reason = 'inbound_call', updated_at = now()
+   where e.property_id in (
+           select pr.id from public.properties pr where pr.homeowner_contact_id = any(p_contact_ids)
+         )
+     and (e.status = 'active'
+          or (e.status = 'paused'
+              and e.pause_reason in ('reconciliation_required', 'call_in_progress', 'norma_call')))
+  returning e.id, e.property_id, e.sequence_id;
+end;
+$$;
+revoke all on function public.pause_enrollments_for_inbound_call(uuid[]) from public, anon, authenticated;
+grant execute on function public.pause_enrollments_for_inbound_call(uuid[]) to service_role;
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
 drop function if exists public.routing_v2_reject_foreign_enrollment();
 drop function if exists public.routing_v2_mark_drip_claim_sent(uuid, text);

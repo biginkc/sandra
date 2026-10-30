@@ -88,3 +88,13 @@ describe("routingV2MarkDripClaimSent", () => {
     expect(await routingV2MarkDripClaimSent(c, "r1")).toBe("routing v2 claim close failed: net");
   });
 });
+
+describe("routingV2TickGate non-SMS steps", () => {
+  it("a v2 voicemail / status step is refused before any RPC", async () => {
+    const { c, rpc } = client({ key: "book_appointment" });
+    for (const actionType of ["send_voicemail_drop", "change_status"]) {
+      expect(await routingV2TickGate(c, { ...base, actionType })).toEqual({ kind: "blocked", reason: "non_sms_step" });
+    }
+    expect(rpc).not.toHaveBeenCalled();
+  });
+});

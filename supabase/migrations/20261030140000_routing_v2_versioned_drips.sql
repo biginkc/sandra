@@ -372,7 +372,7 @@ begin
       if (v_item->>'kind') = 'alert' or v_outcome in ('applied','no_sequence') then
         insert into public.routing_v2_outbox (org_id, property_id, inbound_message_id, transition_seq, kind, engine, slice, payload)
         values (v_org, p_property_id, p_inbound_message_id, v_seq, v_item->>'kind', 'v2',
-                coalesce(nullif(v_item->>'slice',''), case v_item->>'kind' when 'reply' then 'replies' else 'drips' end),
+                coalesce(nullif(v_item->>'slice',''), 'replies'),
                 coalesce(v_item->'payload','{}'::jsonb));
       end if;
     end loop;
@@ -729,6 +729,14 @@ begin
           raise notice 'routing v2 seed: org % has no existing % drip, version 2 skipped', r.org_id, v_key;
           continue;
         end if;
+        -- v2 drips are SMS-only (the v2 send path, check-and-claim and slot times exist only
+        -- for send_sms). Never silently drop an approved non-SMS step: skip the version instead.
+        if exists (select 1 from public.sequence_steps st
+                   where st.sequence_id = v_src and st.action_type <> 'send_sms'
+                     and (v_key = 'listed_not_selling' or st.step_index >= 6)) then
+          raise notice 'routing v2 seed: org % existing % drip has non-SMS steps, version 2 skipped', r.org_id, v_key;
+          continue;
+        end if;
       end if;
 
       v_then := case v_key when 'said_theyd_call' then 'book_appointment' else null end;
@@ -815,6 +823,14 @@ as $$
 declare
   v_seq uuid;
 begin
+  if tg_table_name = 'sequence_steps' and tg_op <> 'DELETE' then
+    -- Nested: NEW only has action_type on sequence_steps rows.
+    if new.action_type <> 'send_sms'
+       and exists (select 1 from public.sequences where id = new.sequence_id and routing_v2_key is not null) then
+      raise exception using errcode = 'P0001',
+        message = 'ROUTING_V2_DRIP_LOCKED: routing v2 drips are SMS-only';
+    end if;
+  end if;
   if coalesce(current_setting('routing_v2.allow_drip_edit', true), '') = 'on' then
     return case when tg_op = 'DELETE' then old else new end;
   end if;
@@ -858,9 +874,20 @@ begin
      and new.routing_v2_inbound_id is not distinct from old.routing_v2_inbound_id then
     return new;
   end if;
-  -- A v2-marked row (new, or re-marked / re-pointed) must come from routing_v2_enroll.
+  -- A v2 row can never lose its engine (whatever else the update changes).
+  if tg_op = 'UPDATE' and old.routing_v2_engine = 'v2' and new.routing_v2_engine is distinct from 'v2' then
+    raise exception using errcode = 'P0001',
+      message = 'ROUTING_V2_DRIP_LOCKED: a routing v2 enrollment cannot drop its engine';
+  end if;
+  -- A v2-marked row (new, or re-marked / re-pointed) must come from routing_v2_enroll: the
+  -- caller must BE the definer's owner role (current_user inside the SECURITY DEFINER
+  -- function; never anon / authenticated / service_role) AND the function's transaction-local
+  -- marker must be set. A caller can set the marker but cannot become the owner.
   if new.routing_v2_engine = 'v2'
-     and coalesce(current_setting('routing_v2.enrolling', true), '') <> 'on' then
+     and (coalesce(current_setting('routing_v2.enrolling', true), '') <> 'on'
+          or current_user::text is distinct from (
+            select pg_get_userbyid(p.proowner)::text from pg_proc p
+            where p.oid = 'public.routing_v2_enroll(uuid,uuid,uuid,uuid,uuid)'::regprocedure)) then
     raise exception using errcode = 'P0001',
       message = 'ROUTING_V2_DRIP_LOCKED: routing v2 enrollments are created by route_reply_transition only';
   end if;
@@ -872,6 +899,14 @@ begin
   return new;
 end;
 $$;
+do $$
+begin
+  if (select pg_get_userbyid(p.proowner) from pg_proc p
+      where p.oid = 'public.routing_v2_enroll(uuid,uuid,uuid,uuid,uuid)'::regprocedure)
+     in ('anon','authenticated','service_role') then
+    raise exception 'routing_v2_enroll must not be owned by an API role';
+  end if;
+end $$;
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
 create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id, routing_v2_engine, routing_v2_inbound_id on public.sequence_enrollments
   for each row execute function public.routing_v2_reject_foreign_enrollment();
@@ -879,6 +914,34 @@ create trigger routing_v2_reject_foreign_enrollment before insert or update of s
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 create trigger routing_v2_reject_drip_step_edit before insert or update or delete on public.sequence_steps
   for each row execute function public.routing_v2_reject_drip_edit();
+
+-- ---------------------------------------------------------------------------
+-- 7. Inbound calls do not pause routing v2 drips (Jarrad: "Incoming calls should not pause
+--    drips"). Same function as 20261021200300 with v2 enrollments excluded; legacy rows keep
+--    the exact previous behaviour.
+-- ---------------------------------------------------------------------------
+create or replace function public.pause_enrollments_for_inbound_call(p_contact_ids uuid[])
+returns table (id uuid, property_id uuid, sequence_id uuid)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  return query
+  update public.sequence_enrollments e
+     set status = 'paused', pause_reason = 'inbound_call', updated_at = now()
+   where e.property_id in (
+           select pr.id from public.properties pr where pr.homeowner_contact_id = any(p_contact_ids)
+         )
+     and e.routing_v2_engine is distinct from 'v2'
+     and (e.status = 'active'
+          or (e.status = 'paused'
+              and e.pause_reason in ('reconciliation_required', 'call_in_progress', 'norma_call')))
+  returning e.id, e.property_id, e.sequence_id;
+end;
+$$;
+revoke all on function public.pause_enrollments_for_inbound_call(uuid[]) from public, anon, authenticated;
+grant execute on function public.pause_enrollments_for_inbound_call(uuid[]) to service_role;
 
 comment on column public.sequences.routing_v2_key is
   'Routing v2 drip identity (PR-C). Null for every pre-existing / human-made drip.';

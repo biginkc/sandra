@@ -520,6 +520,108 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("rollback to savepoint q");
   });
 
+  it("generic alerts are gated on replies: drips=true, replies=false -> the alert does not send", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await transition(db, id, ctx.property, { outbox: [{ kind: "alert", payload: {} }] });
+    const row = (await db.query(`select id, slice from public.routing_v2_outbox where inbound_message_id = $1`, [id])).rows[0];
+    expect(row.slice).toBe("replies");
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: true, replies: false });
+    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [row.id])).rows[0].r).toBe("flag_off");
+  });
+
+  it("provenance cannot be spoofed: authenticated and service_role setting the marker themselves are refused", async () => {
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'price_too_high'`, [ctx.org])).rows[0].id;
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
+    const insertV2 = () => db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at, routing_v2_engine)
+       values ($1,$2,$3,$4,'active',0, now(), 'v2')`,
+      [ctx.org, v2, ctx.property, ctx.contact],
+    );
+    for (const role of ["service_role", "authenticated"]) {
+      await db.query("savepoint sp");
+      await db.query(`set local role ${role}`);
+      await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ sub: randomUUID(), role })]);
+      await db.query(`select set_config('routing_v2.enrolling', 'on', true)`); // the spoof
+      if (role === "service_role") {
+        await expect(insertV2()).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED: routing v2 enrollments are created by route_reply_transition only/);
+      } else {
+        await expect(insertV2()).rejects.toThrow();
+      }
+      await db.query("rollback to savepoint sp");
+    }
+    await db.query("reset role");
+    expect((await db.query(`select count(*)::int as n from public.sequence_enrollments where org_id = $1 and routing_v2_engine = 'v2'`, [ctx.org])).rows[0].n).toBe(0);
+    // The route function, called as service_role, still enrolls.
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    await db.query("set local role service_role");
+    const r = (await db.query(`select public.route_reply_transition($1,$2,$3::jsonb) as r`, [id, ctx.property, JSON.stringify({ sequence_key: "price_too_high" })])).rows[0].r;
+    await db.query("reset role");
+    expect(r.outcome).toBe("applied");
+    expect(r.new_enrollment_id).toBeTruthy();
+  });
+
+  it("a v2 enrollment can never drop its engine, even while re-pointing to a legacy drip", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "price_too_high" });
+    await db.query("savepoint e");
+    await expect(db.query(
+      `update public.sequence_enrollments set sequence_id = $2, routing_v2_engine = null where id = $1`,
+      [r.new_enrollment_id, ctx.bookSrc],
+    )).rejects.toThrow(/cannot drop its engine/);
+    await db.query("rollback to savepoint e");
+    await expect(db.query(`update public.sequence_enrollments set routing_v2_engine = null where id = $1`, [r.new_enrollment_id]))
+      .rejects.toThrow(/cannot drop its engine/);
+    await db.query("rollback to savepoint e");
+  });
+
+  it("v2 drips are SMS-only: a non-SMS step is refused even with the migration opt-in", async () => {
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'book_appointment'`, [ctx.org])).rows[0].id;
+    await db.query("set local routing_v2.allow_drip_edit = 'on'");
+    await db.query("savepoint v");
+    await expect(db.query(
+      `insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes, action_type, target_status) values ($1, 50, 0, 'change_status', 'contacted')`,
+      [v2],
+    )).rejects.toThrow(/SMS-only/);
+    await db.query("rollback to savepoint v");
+    await db.query("set local routing_v2.allow_drip_edit = ''");
+  });
+
+  it("inbound calls do not pause v2 drips; legacy drips still pause exactly as before", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    // Second property of the same homeowner keeps a legacy drip.
+    const p2 = (await db.query(
+      `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1,'2 Test St','MO','new_lead',$2) returning id`,
+      [ctx.org, ctx.contact],
+    )).rows[0].id;
+    const legacy2 = (await db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at)
+       values ($1,$2,$3,$4,'active',0, now() + interval '1 day') returning id`,
+      [ctx.org, ctx.listedSrc, p2, ctx.contact],
+    )).rows[0].id;
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "said_theyd_call" });
+    const paused = (await db.query(`select * from public.pause_enrollments_for_inbound_call($1::uuid[])`, [[ctx.contact]])).rows;
+    expect(paused.map((x) => x.id)).toEqual([legacy2]);
+    const st = async (e: string) => (await db.query(`select status, pause_reason from public.sequence_enrollments where id = $1`, [e])).rows[0];
+    expect(await st(r.new_enrollment_id)).toEqual({ status: "active", pause_reason: null });
+    expect(await st(legacy2)).toEqual({ status: "paused", pause_reason: "inbound_call" });
+  });
+
+  it("seed: an org whose existing Book appointment has a non-SMS later step gets NO Book v2 (never a silently dropped step)", async () => {
+    await db.query("set local routing_v2.allow_drip_edit = 'on'");
+    await db.query(ROLLBACK.replace(/raise exception 'routing v2 enrollments exist[^']*';/, "null;").replace(/raise exception 'enrollments point at routing v2 drips[^']*';/, "null;"));
+    await db.query(
+      `update public.sequence_steps set action_type = 'change_status', template_body = null, target_status = 'contacted' where sequence_id = $1 and step_index = 7`,
+      [ctx.bookSrc],
+    );
+    await db.query(MIGRATION);
+    const keys = (await db.query(`select routing_v2_key from public.sequences where org_id = $1 and routing_v2_key is not null order by 1`, [ctx.org])).rows.map((x) => x.routing_v2_key);
+    expect(keys).toEqual(["listed_not_selling", "price_too_high", "said_theyd_call", "vacant_land"]);
+  });
+
   it("a reply that cancelled a claim while the provider call was in flight is corrected when the provider accepted", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
@@ -551,7 +653,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     )).rows;
     expect(rows.map(({ kind, engine, slice }) => ({ kind, engine, slice }))).toEqual([
       { kind: "alert", engine: "v2", slice: "alert_on_time_only" },
-      { kind: "alert", engine: "v2", slice: "drips" },
+      { kind: "alert", engine: "v2", slice: "replies" },
       { kind: "reply", engine: "v2", slice: "replies" },
     ]);
     const claim = async (rowId: string) => (await db.query(`select public.routing_v2_claim_outbox($1) as r`, [rowId])).rows[0].r;
@@ -569,9 +671,9 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     const bySlice = Object.fromEntries((await db.query(
       `select slice, id from public.routing_v2_outbox where inbound_message_id = $1`, [id],
     )).rows.map((r) => [r.slice, r.id]));
-    await setFlags(db, ctx.org, { ...FLAGS_ON, alert_on_time_only: false }); // drips stays on
+    await setFlags(db, ctx.org, { ...FLAGS_ON, alert_on_time_only: false });
     expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [bySlice.alert_on_time_only])).rows[0].r).toBe("flag_off");
-    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [bySlice.drips])).rows[0].r).toBe("ok");
+    expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [bySlice.replies])).rows[0].r).toBe("ok");
     await db.query("savepoint o");
     await expect(db.query(`select public.route_reply_transition($1,$2,$3::jsonb)`, [
       await inbound(db, ctx, "2026-10-30T15:05:00Z"), ctx.property, JSON.stringify({ outbox: [{ kind: "alert", slice: "bogus", payload: {} }] }),

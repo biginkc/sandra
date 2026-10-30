@@ -58,6 +58,8 @@ export async function routingV2TickGate(
 ): Promise<RoutingV2TickGate> {
   const key = await loadRoutingV2Key(client, input.sequenceId);
   if (!key) return { kind: "legacy" };
+  // v2 drips are SMS-only (DB guard); a non-SMS step would bypass check-and-claim, so refuse it.
+  if (input.actionType !== "send_sms") return { kind: "blocked", reason: "non_sms_step" };
 
   const { data: check, error } = await loose(client).rpc("routing_v2_enrollment_send_check", {
     p_enrollment_id: input.enrollmentId,
@@ -65,7 +67,7 @@ export async function routingV2TickGate(
   if (error) return { kind: "error", message: `routing_v2_send_check_failed: ${error.message}` };
   if (check !== "ok") return { kind: "blocked", reason: String(check) };
 
-  if (input.actionType !== "send_sms" || !input.templateBody || !hasSlotToken(input.templateBody)) {
+  if (!input.templateBody || !hasSlotToken(input.templateBody)) {
     return { kind: "send", slotLabel: null };
   }
   const { data: stepRow, error: stepErr } = await loose(client)
