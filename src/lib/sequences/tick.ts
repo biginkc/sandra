@@ -513,6 +513,9 @@ export async function processEnrollmentTick(
       case "sent":
       case "queued": {
         const messageId = outcome.messageId;
+        // Routing v2: consume the claim first, so a failed run write or a reply landing
+        // before the bookkeeping can never report this accepted text as cancelled.
+        if (isRoutingV2) await routingV2MarkDripClaimSent(client, claim.id);
         const { data: runWrite, error: runError } = await client
           .from("sequence_step_runs")
           .update({
@@ -539,7 +542,6 @@ export async function processEnrollmentTick(
             message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
-        if (isRoutingV2) await routingV2MarkDripClaimSent(client, claim.id);
         const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
           const pauseError = await pauseEnrollment(

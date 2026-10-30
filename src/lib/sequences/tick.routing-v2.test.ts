@@ -10,6 +10,10 @@ vi.mock("@/lib/messaging/send", () => ({ sendSmsToContact: vi.fn() }));
 const BOOKING_BODY =
   "Hey, Mel again. Our calendar is pretty full, but I can get you in at {{slot_time}} today to talk about {{property_address}}. Want it?";
 
+// vi.fn invocation orders are global, so a probe call stamps a write in the same order as the RPCs.
+const probe = vi.fn();
+const writeOrder: { accepted?: number } = {};
+
 const ENROLLMENT = {
   id: "enrollment-1",
   org_id: "org-1",
@@ -31,6 +35,7 @@ function fixture(opts: {
   slotWindow?: "any" | "morning" | "afternoon";
   routingV2Key?: string | null;
   appendOptOut?: boolean;
+  runWriteFails?: boolean;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
   const rpc = vi.fn(async (fn: string) => {
@@ -65,7 +70,14 @@ function fixture(opts: {
       if (table === "sequences") {
         return ok({ routing_v2_key: opts.routingV2Key === undefined ? "book_appointment" : opts.routingV2Key, append_opt_out: opts.appendOptOut ?? false });
       }
-      if (table === "sequence_step_runs") return ok({ id: "run-1" });
+      if (table === "sequence_step_runs") {
+        if (op === "update" && payload.attempt_outcome === "accepted") {
+          probe();
+          writeOrder.accepted = probe.mock.invocationCallOrder.at(-1);
+          if (opts.runWriteFails) return { data: null, error: { message: "run write failed" } };
+        }
+        return ok({ id: "run-1" });
+      }
       if (table === "sequence_enrollments") return ok({ id: "enrollment-1" });
       throw new Error(`Unexpected table: ${table}`);
     };
@@ -118,6 +130,18 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     // After the accepted send the claim is consumed.
     expect(order("routing_v2_mark_drip_claim_sent")).toBeGreaterThan(sendAt);
     expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1" });
+  });
+
+  it("accepted send: the claim is consumed BEFORE the run write, even when the run write fails", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, rpc, writes } = fixture({ runWriteFails: true });
+    const outcome = await processEnrollmentTick(client, ENROLLMENT);
+    expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("run write failed") });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1" });
+    const markAt = rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === "routing_v2_mark_drip_claim_sent")]!;
+    expect(markAt).toBeGreaterThan(vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!);
+    expect(writes.find((w) => w.table === "sequence_step_runs" && w.payload.attempt_outcome === "accepted")).toBeTruthy();
+    expect(markAt).toBeLessThan(writeOrder.accepted!);
   });
 
   it("wait: a slot outside the window reschedules (no claim, no send)", async () => {

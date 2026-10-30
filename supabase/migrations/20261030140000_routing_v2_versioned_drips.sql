@@ -820,7 +820,8 @@ set search_path = public, pg_temp
 as $$
 begin
   if new.routing_v2_engine is distinct from 'v2'
-     and (tg_op = 'INSERT' or new.sequence_id is distinct from old.sequence_id)
+     and (tg_op = 'INSERT' or new.sequence_id is distinct from old.sequence_id
+          or new.routing_v2_engine is distinct from old.routing_v2_engine)
      and exists (select 1 from public.sequences s where s.id = new.sequence_id and s.routing_v2_key is not null) then
     raise exception using errcode = 'P0001',
       message = 'ROUTING_V2_DRIP_LOCKED: only routing v2 enrolls leads into routing v2 drips';
@@ -829,7 +830,7 @@ begin
 end;
 $$;
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
-create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id on public.sequence_enrollments
+create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id, routing_v2_engine on public.sequence_enrollments
   for each row execute function public.routing_v2_reject_foreign_enrollment();
 
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;

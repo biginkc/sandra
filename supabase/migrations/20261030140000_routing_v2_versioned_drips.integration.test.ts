@@ -437,7 +437,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("not_active");
   });
 
-  it("only routing v2 can enroll into a v2 drip: manual insert and change-drip are refused", async () => {
+  it("only routing v2 can enroll into a v2 drip: manual insert, change-drip and clearing the engine are refused", async () => {
     const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'price_too_high'`, [ctx.org])).rows[0].id;
     await db.query("savepoint s");
     await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
@@ -450,6 +450,14 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await expect(db.query(`update public.sequence_enrollments set sequence_id = $2 where id = $1`, [ctx.legacyEnrollment, v2]))
       .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
     await db.query("rollback to savepoint s");
+    // Clearing routing_v2_engine on a real v2 enrollment is refused too.
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "price_too_high" });
+    await db.query("savepoint s2");
+    await expect(db.query(`update public.sequence_enrollments set routing_v2_engine = null where id = $1`, [r.new_enrollment_id]))
+      .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s2");
   });
 
   it("a non-v2 enrollment that reached a v2 drip anyway (pre-existing / guard bypassed) is stopped as flag_off, never sent", async () => {
