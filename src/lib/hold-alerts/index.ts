@@ -291,7 +291,10 @@ export function createHoldAlertDeps(
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
       const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
       // Routing v2 opportunity alert: returns nothing unless routing_v2_flags.questions_live + replies.
-      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner);
+      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner).catch(
+        // Never let the v2 opportunity alert break today's hot alerts.
+        () => ({ promotions: [], complete: true }),
+      );
       if (opportunities.promotions.length === 0 && opportunities.complete) return hot;
       const existingKeys = new Set(hot.promotions.map((p) => p.key));
       return {

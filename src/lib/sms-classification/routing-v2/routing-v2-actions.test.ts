@@ -27,6 +27,8 @@ import { V2_MULTI_SEGMENT_KEYS, V2_REPLY_NAMES, V2_REPLY_TEXTS, V2_REUSED_REPLY_
 import { seedV2ReplyTemplates } from "./seed-v2-reply-templates";
 
 const P1 = "11111111-1111-4111-8111-111111111111";
+const OFF = { alertOnTimeOnly: true } as const; // table tests below: alert_on_time_only ON (no hot alert)
+const TODAY = { alertOnTimeOnly: false } as const;
 
 describe("approved v2 reply texts (byte pins — change only with Jarrad's verbatim approval)", () => {
   it("pins every text exactly", () => {
@@ -118,26 +120,49 @@ describe("road -> action table", () => {
     ["driving_reply+book_appointment", [{ kind: "reply", key: "driving" }, { kind: "drip", drip: "Book appointment", skipFirstStep: false }]],
     ["bad_number", [{ kind: "hold", reason: "bad_number" }]],
   ])("%s", (road, steps) => {
-    expect(actionForV2Decision(jevDecision(road)).steps).toEqual(steps);
+    expect(actionForV2Decision(jevDecision(road), OFF).steps).toEqual(steps);
+  });
+
+  it("alert_on_time_only OFF (today): yes-family roads send the reply AND today's hot alert", () => {
+    expect(actionForV2Decision(jevDecision("book_appointment"), TODAY).steps).toEqual([
+      { kind: "reply", key: "asked_offer" }, { kind: "alert", reason: "hot_yes" }, { kind: "drip", drip: "Book appointment", skipFirstStep: false },
+    ]);
+    expect(actionForV2Decision(jevDecision("reaction+book_appointment"), TODAY).steps).toEqual([
+      { kind: "alert", reason: "hot_yes" }, { kind: "drip", drip: "Book appointment", skipFirstStep: false },
+    ]);
+    expect(actionForV2Decision(jevDecision("driving_reply+book_appointment"), TODAY).steps).toEqual([
+      { kind: "reply", key: "driving" }, { kind: "alert", reason: "hot_yes" }, { kind: "drip", drip: "Book appointment", skipFirstStep: false },
+    ]);
+    // Every other road is the same in both flag states.
+    for (const road of Object.keys(V2_ROAD_ACTIONS) as V2Road[]) {
+      if (["book_appointment", "reaction+book_appointment", "driving_reply+book_appointment"].includes(road)) continue;
+      expect(actionForV2Decision(jevDecision(road), TODAY).steps, road).toEqual(actionForV2Decision(jevDecision(road), OFF).steps);
+    }
+  });
+
+  it("alert_on_time_only ON: no hot alert on a yes (alert only when a time is picked)", () => {
+    for (const road of ["book_appointment", "reaction+book_appointment", "driving_reply+book_appointment"] as V2Road[]) {
+      expect(actionForV2Decision(jevDecision(road), OFF).steps.some((s) => s.kind === "alert"), road).toBe(false);
+    }
   });
 
   it("book_appointment uses the said-yes text for every yes except asked_offer", () => {
     for (const s of ["open_to_selling", "future_action", "just_ok"]) {
-      expect(actionForV2Decision(jevDecision("book_appointment", s)).steps[0]).toEqual({ kind: "reply", key: "said_yes" });
+      expect(actionForV2Decision(jevDecision("book_appointment", s), OFF).steps[0]).toEqual({ kind: "reply", key: "said_yes" });
     }
   });
 
   it("number source replaces (never adds to) a road's reply, and never adds a reply to a no-reply road", () => {
-    expect(actionForV2Decision(jevDecision("not_interested_drip"), { askedHowNumber: true }).steps).toEqual([
+    expect(actionForV2Decision(jevDecision("not_interested_drip"), { ...OFF, askedHowNumber: true }).steps).toEqual([
       { kind: "reply", key: "number_source" },
       { kind: "drip", drip: "Not interested", skipFirstStep: false },
     ]);
-    expect(actionForV2Decision(jevDecision("stop"), { askedHowNumber: true }).steps).toEqual([{ kind: "hold", reason: "asked_stop" }]);
-    expect(actionForV2Decision(jevDecision("ALERT_call_me"), { askedHowNumber: true }).steps).toEqual([{ kind: "alert", reason: "call_me" }]);
+    expect(actionForV2Decision(jevDecision("stop"), { ...OFF, askedHowNumber: true }).steps).toEqual([{ kind: "hold", reason: "asked_stop" }]);
+    expect(actionForV2Decision(jevDecision("ALERT_call_me"), { ...OFF, askedHowNumber: true }).steps).toEqual([{ kind: "alert", reason: "call_me" }]);
   });
 
   it("no Jev answer -> hold + Haiku-unsure alert; Haiku error and Haiku-decided stop have their own clear reasons", () => {
-    expect(actionForV2Decision({ ...jevDecision("stop"), road: null }).steps).toEqual([{ kind: "hold", reason: "needs_person" }, { kind: "alert", reason: "haiku_unsure" }]);
+    expect(actionForV2Decision({ ...jevDecision("stop"), road: null }, OFF).steps).toEqual([{ kind: "hold", reason: "needs_person" }, { kind: "alert", reason: "haiku_unsure" }]);
     expect(actionForHaikuOutcome("error").steps).toContainEqual({ kind: "alert", reason: "haiku_error" });
     expect(actionForHaikuOutcome("haiku_decided_stop").steps).toEqual([{ kind: "hold", reason: "asked_stop" }, { kind: "alert", reason: "possible_stop" }]);
     expect(V2_ALERT_LABELS.possible_stop).toBe("Possible stop request — please check");
@@ -154,7 +179,7 @@ describe("road -> action table", () => {
     const probs = Object.fromEntries(V2_QUESTION_IDS.map((id) => [id, 0.95])) as Record<(typeof V2_QUESTION_IDS)[number], number>;
     const pt = { house: 0.9, lot: 0.9, commercial: 0.9, multi_family: 0, unknown: 0 } as never;
     const d = routeV2({ reply: "I'm driving STOP", probabilities: probs, propertyType: pt });
-    expect(actionForV2Decision(d).steps).toEqual([{ kind: "hold", reason: "asked_stop" }]);
+    expect(actionForV2Decision(d, TODAY).steps).toEqual([{ kind: "hold", reason: "asked_stop" }]);
   });
 });
 
@@ -212,7 +237,7 @@ function execDeps(allowed: (slice: string, call: number) => boolean, over: Parti
     hold: vi.fn(async (r) => void log.push(`hold:${r}`)),
     wrongNumberClose: vi.fn(async () => void log.push("close")),
     alert: vi.fn(async (r) => void log.push(`alert:${r}`)),
-    drip: { transition: vi.fn(async (req) => (log.push(`drip:${req.drip}`), NOOP_DRIP_TRANSITION.transition(req))) },
+    drip: { transition: vi.fn(async (req) => (log.push(`drip:${req.drip}`), { kind: "enrolled" as const, enrollmentId: "e1" })) },
     returnToHumanQueue: vi.fn(async (w) => void log.push(`human:${w}`)),
     ctx: { orgId: "o", propertyId: P1, inboundMessageId: "m1" },
     ...over,
@@ -224,7 +249,7 @@ describe("executor: flag-off no-op and send-time re-check", () => {
   it("flags off: nothing is sent, held, alerted or enrolled; the inbound goes back to a person", async () => {
     for (const road of Object.keys(V2_ROAD_ACTIONS) as V2Road[]) {
       const { deps, log } = execDeps(() => false);
-      const res = await executeV2Action(actionForV2Decision(jevDecision(road)), deps);
+      const res = await executeV2Action(actionForV2Decision(jevDecision(road), OFF), deps);
       expect(res.kind, road).toBe("cancelled_flag_off");
       expect(log).toEqual(["human:cancelled_flag_off"]);
     }
@@ -235,7 +260,7 @@ describe("executor: flag-off no-op and send-time re-check", () => {
     let n = 0;
     const read = async () => parseRoutingV2Flags({ questions_live: true, replies: true, drips: reads[n++] ?? false, canary_property_ids: [P1] });
     const { deps, log } = execDeps(() => true, { recheck: makeSendTimeRecheck(read, P1) });
-    const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip")), deps);
+    const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip"), OFF), deps);
     expect(res.kind).toBe("cancelled_flag_off");
     expect(log).toEqual(["reply:not_interested:true", "human:cancelled_flag_off"]);
   });
@@ -250,9 +275,24 @@ describe("executor: flag-off no-op and send-time re-check", () => {
     expect(await makeSendTimeRecheck(async () => { throw new Error("db"); }, P1)("replies")).toBe(false);
   });
 
-  it("sends the approved text byte-for-byte; drips go to the PR-C seam (no-op today)", async () => {
+  it("a drip that does not enroll (PR-C no-op, error, anything but enrolled/superseded) holds for a person", async () => {
+    for (const road of ["confirmed_owner_drip", "vacant_land_drip", "listed_drip", "not_interested_drip"] as V2Road[]) {
+      const { deps, log } = execDeps(() => true, { drip: NOOP_DRIP_TRANSITION });
+      const res = await executeV2Action(actionForV2Decision(jevDecision(road), OFF), deps);
+      expect(res.kind, road).toBe("drip_not_enrolled");
+      expect(res).toMatchObject({ reason: "pr_c_not_merged" });
+      expect(log.at(-1)).toBe("hold:needs_person");
+    }
+    const { deps, log } = execDeps(() => true, { drip: { transition: async () => { throw new Error("db"); } } });
+    expect(await executeV2Action(actionForV2Decision(jevDecision("confirmed_owner_drip"), OFF), deps)).toMatchObject({ kind: "drip_not_enrolled", reason: "transition_error" });
+    expect(log).toEqual(["hold:needs_person"]);
+    const sup = execDeps(() => true, { drip: { transition: async () => ({ kind: "superseded" as const }) } });
+    expect((await executeV2Action(actionForV2Decision(jevDecision("confirmed_owner_drip"), OFF), sup.deps)).kind).toBe("done");
+  });
+
+  it("sends the approved text byte-for-byte; drips go to the PR-C seam", async () => {
     const { deps, log } = execDeps(() => true);
-    const res = await executeV2Action(actionForV2Decision(jevDecision("driving_reply+book_appointment")), deps);
+    const res = await executeV2Action(actionForV2Decision(jevDecision("driving_reply+book_appointment"), OFF), deps);
     expect(res.kind).toBe("done");
     expect(log).toEqual(["reply:driving:true", "drip:Book appointment"]);
     expect(await NOOP_DRIP_TRANSITION.transition({} as never)).toEqual({ kind: "not_available", reason: "pr_c_not_merged" });
@@ -260,7 +300,7 @@ describe("executor: flag-off no-op and send-time re-check", () => {
 
   it("a reply that did not go out holds for a person and runs nothing after it", async () => {
     const { deps, log } = execDeps(() => true, { sendReply: async () => ({ sent: false, reason: "template_unapproved" }) });
-    const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip")), deps);
+    const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip"), OFF), deps);
     expect(res).toEqual({ kind: "reply_not_sent", done: [], reason: "template_unapproved" });
     expect(log).toEqual(["hold:needs_person"]);
   });

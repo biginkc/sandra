@@ -22,6 +22,8 @@ export const V2_ALERT_LABELS = {
   commercial: "Commercial property",
   land_price: "Vacant lot, named a price",
   named_price: "Named a price",
+  /** Today's hot alert for a yes (kept while alert_on_time_only is OFF). */
+  hot_yes: "Hot seller — said yes / asked for offer",
   haiku_unsure: "Couldn't tell what they meant — please check",
   haiku_error: "Haiku error — please check",
   possible_stop: "Possible stop request — please check",
@@ -48,7 +50,15 @@ function bookReply(decision: V2Decision): V2AnyReplyKey {
   return decision.provenance.by === "jev" && decision.provenance.signal === "asked_offer" ? "asked_offer" : "said_yes";
 }
 
-export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision) => readonly V2Step[]> = {
+export type V2ActionOpts = {
+  /** routing_v2_flags.alert_on_time_only (PR-F). OFF = yes-family roads keep today's hot alert. */
+  alertOnTimeOnly: boolean;
+};
+
+/** Yes-family roads: today's hot alert stays until alert_on_time_only is ON (then: alert only when a time is picked). */
+const hotUnlessTimeOnly = (o: V2ActionOpts): V2Step[] => (o.alertOnTimeOnly ? [] : [a("hot_yes")]);
+
+export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision, opts: V2ActionOpts) => readonly V2Step[]> = {
   stop: () => [{ kind: "hold", reason: "asked_stop" }],
   ALERT_call_me: () => [a("call_me")],
   wrong_number_close: () => [{ kind: "wrong_number_close" }],
@@ -62,15 +72,15 @@ export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision) => readonly 
   ALERT_reason_to_sell: () => [a("reason_to_sell")],
   // price_check flag off (PR-E not merged) = today's price alert + named-price reply.
   price_check: () => [r("named_price"), a("named_price")],
-  book_appointment: (dec) => [r(bookReply(dec)), d("Book appointment")],
+  book_appointment: (dec, o) => [r(bookReply(dec)), ...hotUnlessTimeOnly(o), d("Book appointment")],
   maybe_later_drip: () => [r("nurture"), d("Maybe later")],
   not_interested_drip: () => [r("not_interested"), d("Not interested")],
   who_reply_drip: () => [r("identity"), d("Asked who is texting", true)],
   which_property_reply: () => [r("where_property")],
   location_reply: () => [r("where_located")],
   confirmed_owner_drip: () => [d("Confirmed owner")],
-  "reaction+book_appointment": () => [d("Book appointment")],
-  "driving_reply+book_appointment": () => [r("driving"), d("Book appointment")],
+  "reaction+book_appointment": (_dec, o) => [...hotUnlessTimeOnly(o), d("Book appointment")],
+  "driving_reply+book_appointment": (_dec, o) => [r("driving"), ...hotUnlessTimeOnly(o), d("Book appointment")],
   bad_number: () => [{ kind: "hold", reason: "bad_number" }],
 };
 
@@ -98,9 +108,9 @@ export function actionForHaikuOutcome(o: "unsure_no_jev" | "error" | "haiku_deci
  * number?" signal: its approved reply replaces the road's own reply (never both), only on
  * roads that already send a reply (same rule as the live number_source mapping).
  */
-export function actionForV2Decision(decision: V2Decision, opts: { askedHowNumber?: boolean } = {}): V2Action {
+export function actionForV2Decision(decision: V2Decision, opts: V2ActionOpts & { askedHowNumber?: boolean }): V2Action {
   if (decision.road === null) return actionForHaikuOutcome("unsure_no_jev");
-  let steps = V2_ROAD_ACTIONS[decision.road](decision);
+  let steps = V2_ROAD_ACTIONS[decision.road](decision, opts);
   if (opts.askedHowNumber && steps.some((s) => s.kind === "reply")) {
     steps = steps.map((s) => (s.kind === "reply" ? r("number_source") : s));
   }
@@ -129,7 +139,9 @@ export type V2ExecDeps = {
 export type V2ExecResult =
   | { kind: "done"; done: V2Step[] }
   | { kind: "cancelled_flag_off"; done: V2Step[]; at: V2Step }
-  | { kind: "reply_not_sent"; done: V2Step[]; reason: string };
+  | { kind: "reply_not_sent"; done: V2Step[]; reason: string }
+  /** The drip did not enroll (PR-C not merged, or any failure): held for a person. */
+  | { kind: "drip_not_enrolled"; done: V2Step[]; reason: string };
 
 export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promise<V2ExecResult> {
   const done: V2Step[] = [];
@@ -148,14 +160,25 @@ export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promi
         }
         break;
       }
-      case "drip":
-        await deps.drip.transition({
-          ...deps.ctx,
-          drip: step.drip,
-          road: action.road,
-          skipFirstStep: step.skipFirstStep ?? false,
-        });
+      case "drip": {
+        let res: Awaited<ReturnType<V2DripTransition["transition"]>>;
+        try {
+          res = await deps.drip.transition({
+            ...deps.ctx,
+            drip: step.drip,
+            road: action.road,
+            skipFirstStep: step.skipFirstStep ?? false,
+          });
+        } catch {
+          res = { kind: "not_available", reason: "transition_error" };
+        }
+        if (res.kind !== "enrolled" && res.kind !== "superseded") {
+          // Never end a reply with no drip, hold or alert: a person looks.
+          await deps.hold("needs_person");
+          return { kind: "drip_not_enrolled", done, reason: res.reason };
+        }
         break;
+      }
       case "alert":
         await deps.alert(step.reason, V2_ALERT_LABELS[step.reason]);
         break;

@@ -16,7 +16,7 @@ import { NINE_HOT_REPLY_TEXTS } from "../nine-questions";
  *   named a price (`NINE_HOT_REPLY_TEXTS`, 2026-10-20), who is texting (`IDENTITY_REPLY_BODY`).
  *
  * No LLM or engineer may edit, reword, add or remove a text without Jarrad approving that
- * exact text. `reply-texts.test.ts` pins every byte. These are seeded into the Templates
+ * exact text. `routing-v2-actions.test.ts` pins every byte. These are seeded into the Templates
  * library UNAPPROVED; nothing sends until an owner approves the template AND
  * `routing_v2_flags.replies` is on.
  */

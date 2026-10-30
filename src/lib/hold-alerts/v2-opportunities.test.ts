@@ -18,7 +18,7 @@ const NOW = "2026-10-28T12:00:00.000Z";
 const SINCE = "2026-10-28T00:00:00.000Z";
 const AT = "2026-10-28T11:00:00.000Z";
 const P1 = "11111111-1111-4111-8111-111111111111";
-const FLAGS_ON = { questions_live: true, replies: true, canary_property_ids: [P1] };
+const FLAGS_ON = { shadow: true, questions_live: true, replies: true, canary_property_ids: [P1] };
 const probs = (own: unknown = 0.98, other: unknown = 0) => ({ own_other_property: own, someone_else_property: other });
 const row = (road: string | null = "not_interested_drip", p: Record<string, unknown> = probs()) => ({
   id: "r1", org_id: ORG, property_id: P1, inbound_message_id: "m1", created_at: AT, status: "decided", road, probabilities: p,
@@ -65,12 +65,12 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   });
 
   it("flag gate: off, questions_live off, not eligible, or config error = nothing, and no decision query", async () => {
-    for (const flags of [{}, { replies: true, canary_property_ids: [P1] }, { questions_live: true, canary_property_ids: [P1] }, null]) {
+    for (const flags of [{}, { shadow: true, replies: true, canary_property_ids: [P1] }, { shadow: true, questions_live: true, canary_property_ids: [P1] }, { questions_live: true, replies: true, canary_property_ids: [P1] }, null]) {
       const { db, queries } = dbFor(fixtures(row(), flags));
       expect(await loadV2Opportunities(db, ORG, SINCE, Date.parse(NOW), OWNER.userId)).toEqual({ promotions: [], complete: true });
       expect(queries).toEqual(["ai_responder_configs"]);
     }
-    expect((await load(fixtures(row(), { questions_live: true, replies: true }))).promotions).toEqual([]);
+    expect((await load(fixtures(row(), { shadow: true, questions_live: true, replies: true }))).promotions).toEqual([]);
     expect(await load(fixtures(), "ai_responder_configs")).toEqual({ promotions: [], complete: true });
   });
 
@@ -90,7 +90,7 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
   });
 
   it("does not repeat hot/alert routes; accepts the exact cutoff; ignores failed and no-answer rows", () => {
-    for (const road of ["ALERT_call_me", "ALERT_land_price", "ALERT_commercial", "ALERT_said_theyll_call", "ALERT_reason_to_sell", "price_check"]) {
+    for (const road of ["ALERT_call_me", "ALERT_land_price", "ALERT_commercial", "ALERT_said_theyll_call", "ALERT_reason_to_sell", "price_check", "possible_stop", "haiku_error", "haiku_unsure"]) {
       expect(isV2Opportunity(row(road))).toBe(false);
     }
     expect(isV2Opportunity(row("stop", probs(0.6)))).toBe(true);

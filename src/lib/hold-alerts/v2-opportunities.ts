@@ -14,7 +14,7 @@ import { MAX_ATTEMPTS } from "./types";
  * the inbound, shares the hotTextKey delivery identity, 30-min settle until routed, 7-day
  * lookback, owner-only, deleted properties excluded, price-hold routes skipped, read-only.
  *
- * Gated by `routing_v2_flags` (questions_live + replies + canary eligibility), read fresh
+ * Gated by `routing_v2_flags` (questions_live + replies + shadow + canary eligibility), read fresh
  * on every cron pass, so this is also the send-time check for the alert fan-out.
  * Flag off = returns nothing and makes no other query.
  */
@@ -30,6 +30,10 @@ const ALERTING_ROADS: ReadonlySet<string> = new Set([
   "ALERT_said_theyll_call",
   "ALERT_reason_to_sell",
   "price_check",
+  // Haiku outcomes (PR-D): both hold + alert on their own.
+  "possible_stop",
+  "haiku_error",
+  "haiku_unsure",
 ]);
 
 export type V2DecisionRow = {
@@ -72,7 +76,9 @@ export async function loadV2Opportunities(
     .maybeSingle();
   if (cfgError) return { promotions: [], complete: true }; // fail closed = off
   const flags = parseRoutingV2Flags((cfg as { routing_v2_flags?: unknown } | null)?.routing_v2_flags);
-  if (!flags.questions_live || !flags.replies) return { promotions: [], complete: true };
+  // The source table is only written while flags.shadow is on. The cutover PR must point this
+  // at the live v2 decision log.
+  if (!flags.questions_live || !flags.replies || !flags.shadow) return { promotions: [], complete: true };
 
   const since = new Date(Math.max(Date.parse(alertsSince) || 0, nowMs - LOOKBACK_MS)).toISOString();
   const candidates = new Map<string, V2DecisionRow>();
