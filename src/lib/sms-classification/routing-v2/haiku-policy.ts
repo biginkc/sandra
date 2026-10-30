@@ -10,6 +10,7 @@ import type { V2Decision } from "./route";
  * - Valid "unsure" (needs_person or confidence <0.50) → Jev's road stands;
  *   Jev had none → ALERT_haiku_unsure.
  * - A Haiku-decided stop is never auto-suppressed: hold + alert "Possible stop request — please check".
+ *   The same holds for a Jev stop in the 0.60–0.70 band when Haiku is unsure (PR-I).
  * - Invalid answer (incl. an option id not in the list) / transport / timeout / HTTP error → hold + escalate to Jarrad with the reason;
  *   zero automatic sends. Not the valid-unsure path.
  * No daily caps or spend reservations (Jarrad 2026-10-30).
@@ -64,6 +65,9 @@ export function applyHaikuPolicy(
   if (road === "vacant_land_drip" && LAND_PRICE_SIGNALS.some((q) => probabilities[q] >= DEFAULT_CUTOFF)) road = "ALERT_land_price";
   if (road === "stop") return { road, by: "haiku", hold: true, alert: HAIKU_STOP_ALERT, failureReason: null };
   if (road) return { road, by: "haiku", hold: false, alert: null, failureReason: null };
+  // PR-I (decided 2026-10-30): a Jev stop/legal/hostile in the 0.60–0.70 band that Haiku is
+  // unsure about is never auto-suppressed: hold + alert "Possible stop request — please check".
+  if (d.road === "stop") return { road: d.road, by: "jev_haiku_unsure", hold: true, alert: HAIKU_STOP_ALERT, failureReason: null };
   if (d.road) return { road: d.road, by: "jev_haiku_unsure", hold: false, alert: null, failureReason: null };
   return { road: "ALERT_haiku_unsure", by: "haiku_unsure", hold: false, alert: null, failureReason: null };
 }
