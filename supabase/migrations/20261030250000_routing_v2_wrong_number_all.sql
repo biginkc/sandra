@@ -21,7 +21,7 @@
 -- homeowner contact also has a different phone is skipped (that phone stays reachable); the
 -- landed property is closed exactly as today's single-property path does.
 --
--- Rollback: supabase/rollbacks/20261030190000_routing_v2_wrong_number_all.sql
+-- Rollback: supabase/rollbacks/20261030250000_routing_v2_wrong_number_all.sql
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';

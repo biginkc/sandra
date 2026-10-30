@@ -10,21 +10,24 @@ import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/rout
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261030190000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
+ * 20261030250000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
  * Local-only; one rolled-back transaction per test.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030190000_routing_v2_wrong_number_all.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030250000_routing_v2_wrong_number_all.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "..", "rollbacks", "20261030190000_routing_v2_wrong_number_all.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "..", "rollbacks", "20261030250000_routing_v2_wrong_number_all.sql"), "utf8"),
 );
 
 const X = "+18165550101"; // the phone that texted "wrong number"
 const Y = "+18165550202"; // a different person's phone
 const Z = "+18165550303"; // a second phone on a contact that also holds X
+
+/** Every function this migration creates (exact names; other PRs add routing_v2_phone* functions too). */
+const PRG_FUNCTIONS = ["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply", "fn_routing_v2_phone_action_release_fence", "fn_routing_v2_phone_action_reply", "fn_routing_v2_phone_action_send_allowed", "fn_routing_v2_phone_action_unsettled_replies", "fn_undo_routing_v2_phone_action", "routing_v2_clear_pause_token", "routing_v2_phone_action_eligible", "routing_v2_phone_action_hold_superseded", "routing_v2_phone_action_newer_inbound", "routing_v2_phone_action_undo_core", "routing_v2_phone_digits", "routing_v2_phone_lock"];
 
 const db = new Client({ connectionString: url });
 let orgId: string;
@@ -1253,7 +1256,7 @@ describe("B0. post-commit fence and undo/send serialization", () => {
 
 describe("self-sweep", () => {
   it("(b) lock order is the same in apply_all and undo: phone -> contacts -> suppressions -> property advisory -> properties -> enrollments", () => {
-    const sql = readFileSync(path.join(__dirname, "20261030190000_routing_v2_wrong_number_all.sql"), "utf8");
+    const sql = readFileSync(path.join(__dirname, "20261030250000_routing_v2_wrong_number_all.sql"), "utf8");
     const body = (name: string) => {
       const start = sql.indexOf(`create or replace function public.${name}(`);
       return sql.slice(start, sql.indexOf("\n$$;", start));
@@ -1386,16 +1389,18 @@ describe("self-sweep", () => {
     const definers = (await db.query(`
       select p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), '') cfg
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'public' and (p.proname like '%routing_v2_phone%' or p.proname = 'routing_v2_clear_pause_token')`)).rows;
-    expect(definers.length).toBeGreaterThanOrEqual(11);
+      where n.nspname = 'public' and p.proname = any($1::text[])`, [PRG_FUNCTIONS])).rows;
+    expect(definers.length).toBe(PRG_FUNCTIONS.length);
     for (const d of definers) expect(d.cfg, d.proname).toMatch(/search_path=public, pg_temp/);
   });
 
   it("(g) rollback removes every object, including the enrollment token column and trigger", async () => {
+    const created = [...new Set([...readFileSync(path.join(__dirname, "20261030250000_routing_v2_wrong_number_all.sql"), "utf8").matchAll(/create or replace function public\.([a-z0-9_]+)\(/g)].map((m) => m[1]))].sort();
+    expect(created).toEqual([...PRG_FUNCTIONS].sort());
     await db.query(ROLLBACK);
     const left = (await db.query(`select to_regclass('public.routing_v2_phone_actions') a, to_regclass('public.routing_v2_phone_action_properties') b`)).rows[0];
     expect(left).toEqual({ a: null, b: null });
-    const fns = (await db.query(`select count(*) from pg_proc where proname like '%routing_v2_phone%' or proname = 'routing_v2_clear_pause_token'`)).rows[0].count;
+    const fns = (await db.query(`select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = any($1::text[])`, [PRG_FUNCTIONS])).rows[0].count;
     expect(Number(fns)).toBe(0);
     const col = (await db.query(`select count(*) from information_schema.columns where table_name = 'sequence_enrollments' and column_name = 'routing_v2_pause_token'`)).rows[0].count;
     expect(Number(col)).toBe(0);
