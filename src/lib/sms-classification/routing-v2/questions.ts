@@ -80,6 +80,22 @@ export const V2_QUESTIONS: Record<V2QuestionId, string> = {
     "Did the seller mention a different property, not the one we asked about and not one they own, that may be for sale?",
 };
 
+/**
+ * The three repairs follow-up questions (PR-E). Asked ONLY on the next inbound after our
+ * repairs reply (`price_too_high`); never part of the regular v2 call, so the pinned v7
+ * replay set above is unchanged. Source, byte for byte: vault note "2026-10-29 — Sandra SMS
+ * reply routing plan (Jev + Haiku)", line 60 ("After repairs reply"), under "Every rule and
+ * text below was approved by Jarrad word for word". Pinned by `price-check.test.ts`.
+ */
+export const REPAIRS_FOLLOW_UP_IDS = ["needs_repairs", "flexible_price", "original_portion"] as const;
+export type RepairsFollowUpId = (typeof REPAIRS_FOLLOW_UP_IDS)[number];
+
+export const REPAIRS_FOLLOW_UP_QUESTIONS: Record<RepairsFollowUpId, string> = {
+  needs_repairs: "Did the seller say the property needs repairs?",
+  flexible_price: "Did the seller say they're flexible on price, willing to negotiate, or not firm?",
+  original_portion: "Did the seller indicate any portion of the house was original?",
+};
+
 /** The pick-one property type question and its five approved choices. */
 export const PROPERTY_TYPE_QUESTION_ID = "property_type" as const;
 export const PROPERTY_TYPE_OPTIONS = ["residential", "lot", "commercial", "rental", "didnt_say"] as const;
@@ -99,13 +115,23 @@ export type V2State = {
   homeowner_reply: string;
 };
 
-/** One Jev call: every v2 yes/no question plus the property type choice (same shape as the v7 replay). */
-export function buildV2JevRequest(state: V2State): {
+/**
+ * One Jev call: every v2 yes/no question plus the property type choice (same shape as the v7
+ * replay). `repairsFollowUps: true` (only for the next inbound after the repairs reply) also
+ * asks the three follow-ups; the default leaves the request byte-identical to before.
+ */
+export function buildV2JevRequest(
+  state: V2State,
+  opts: { repairsFollowUps?: boolean } = {},
+): {
   state: V2State;
   questions: Record<string, JevNoulQuestion | JevChoiceQuestion>;
 } {
   const questions: Record<string, JevNoulQuestion | JevChoiceQuestion> = {};
   for (const id of V2_QUESTION_IDS) questions[id] = { type: "noul", instructions: V2_QUESTIONS[id] };
+  if (opts.repairsFollowUps) {
+    for (const id of REPAIRS_FOLLOW_UP_IDS) questions[id] = { type: "noul", instructions: REPAIRS_FOLLOW_UP_QUESTIONS[id] };
+  }
   questions[PROPERTY_TYPE_QUESTION_ID] = {
     type: "choice",
     instructions: PROPERTY_TYPE_INSTRUCTIONS,

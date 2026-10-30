@@ -1,3 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,13 +18,20 @@ import { lookupDealMachineValue, type ClaimOutcome, type DealMachineCacheStore, 
 import { ALL_OFF, type RoutingV2Flags } from "./flags";
 import { askAboveEightyPercent, extractDollarAmount } from "./price-amount";
 import {
-  REPAIRS_FOLLOW_UP_IDS,
+  REPAIRS_FOLLOW_UP_CUTOFF,
   decideRepairsFollowUp,
+  readRepairsFollowUps,
   isAfterRepairsReply,
   runV2PriceCheck,
   v2PriceCheckFlagOffAction,
 } from "./price-check";
-import type { PropertyTypeOption } from "./questions";
+import {
+  REPAIRS_FOLLOW_UP_IDS,
+  REPAIRS_FOLLOW_UP_QUESTIONS,
+  V2_QUESTION_IDS,
+  buildV2JevRequest,
+  type PropertyTypeOption,
+} from "./questions";
 import { v2ReplyText } from "./reply-texts";
 import type { V2Decision } from "./route";
 
@@ -201,6 +212,56 @@ describe("runV2PriceCheck", () => {
   });
 });
 
+describe("repairs follow-up questions (byte pins)", () => {
+  // Approved by Jarrad word for word (vault plan line 60). A diff here needs his approval of that exact text.
+  const PINNED = {
+    needs_repairs: "Did the seller say the property needs repairs?",
+    flexible_price: "Did the seller say they're flexible on price, willing to negotiate, or not firm?",
+    original_portion: "Did the seller indicate any portion of the house was original?",
+  };
+  const VAULT_LINE_60 =
+    '- After repairs reply: "Did the seller say the property needs repairs?" · "Did the seller say they\'re flexible on price, willing to negotiate, or not firm?" · "Did the seller indicate any portion of the house was original?"';
+
+  it("pins every byte, straight apostrophe, ids in order", () => {
+    expect(REPAIRS_FOLLOW_UP_IDS).toEqual(["needs_repairs", "flexible_price", "original_portion"]);
+    expect(REPAIRS_FOLLOW_UP_QUESTIONS).toEqual(PINNED);
+    expect(Buffer.from(REPAIRS_FOLLOW_UP_QUESTIONS.flexible_price, "utf8").includes(Buffer.from("they'r"))).toBe(true);
+    expect(Object.values(REPAIRS_FOLLOW_UP_QUESTIONS).join("")).not.toMatch(/[\u2018\u2019\u201c\u201d]/);
+  });
+
+  it("each text is quoted verbatim in the approved vault line", () => {
+    for (const t of Object.values(REPAIRS_FOLLOW_UP_QUESTIONS)) expect(VAULT_LINE_60).toContain(`"${t}"`);
+  });
+
+  const vault = join(homedir(), "BMH-OS/_inbox/2026-10-29 — Sandra SMS reply routing plan (Jev + Haiku).md");
+  it.runIf(existsSync(vault))("matches line 60 of the vault note byte for byte (local only)", () => {
+    expect(readFileSync(vault, "utf8").split("\n")[59]).toBe(VAULT_LINE_60);
+  });
+
+  it("are not in the regular v2 call; asked only when opted in", () => {
+    for (const id of REPAIRS_FOLLOW_UP_IDS) expect(V2_QUESTION_IDS as readonly string[]).not.toContain(id);
+    const state = { our_last_text_to_homeowner: v2ReplyText("price_too_high"), homeowner_reply: "it needs a roof" };
+    const plain = buildV2JevRequest(state);
+    expect(Object.keys(plain.questions)).toEqual([...V2_QUESTION_IDS, "property_type"]);
+    expect(JSON.stringify(buildV2JevRequest(state, {}))).toBe(JSON.stringify(plain));
+    const withFu = buildV2JevRequest(state, { repairsFollowUps: true });
+    for (const id of REPAIRS_FOLLOW_UP_IDS) {
+      expect(withFu.questions[id]).toEqual({ type: "noul", instructions: PINNED[id] });
+    }
+    expect(Object.keys(withFu.questions)).toHaveLength(V2_QUESTION_IDS.length + 4);
+  });
+
+  it("cutoff is the 0.60 default", () => {
+    expect(REPAIRS_FOLLOW_UP_CUTOFF).toBe(0.6);
+  });
+
+  it("readRepairsFollowUps keeps only valid probabilities", () => {
+    expect(
+      readRepairsFollowUps({ needs_repairs: { noul: 0.7 }, flexible_price: { noul: "x" }, original_portion: undefined, listed: { noul: 1 } }),
+    ).toEqual({ needs_repairs: 0.7 });
+  });
+});
+
 describe("repairs follow-ups", () => {
   const probs = (o: Partial<Record<(typeof REPAIRS_FOLLOW_UP_IDS)[number], number>> = {}) => ({
     needs_repairs: 0.1,
@@ -209,7 +270,7 @@ describe("repairs follow-ups", () => {
     ...o,
   });
   const decide = (o: Partial<Parameters<typeof decideRepairsFollowUp>[0]> = {}) =>
-    decideRepairsFollowUp({ flags: ON, propertyId: PROP, followUps: probs(), listedProbability: 0.1, noRepairs: false, ...o });
+    decideRepairsFollowUp({ flags: ON, propertyId: PROP, followUps: probs(), listedProbability: 0.1, ...o });
 
   it("runs only after the exact approved repairs reply", () => {
     expect(isAfterRepairsReply(v2ReplyText("price_too_high"))).toBe(true);
@@ -225,6 +286,15 @@ describe("repairs follow-ups", () => {
   it.each(REPAIRS_FOLLOW_UP_IDS)("any yes (%s) → alert, beats no-repairs and listed", (id) => {
     const r = decide({ followUps: probs({ [id]: 0.6 }), noRepairs: true, listedProbability: 0.9 });
     expect(r).toEqual({ outcome: "follow_up_yes", action: { road: "price_check", steps: [{ kind: "alert", reason: "named_price" }] } });
+  });
+
+  it("yes cutoff: 0.59 is not a yes, 0.60 is", () => {
+    expect(decide({ followUps: probs({ needs_repairs: 0.59 }) })?.outcome).toBe("other");
+    expect(decide({ followUps: probs({ needs_repairs: 0.6 }) })?.outcome).toBe("follow_up_yes");
+  });
+
+  it("noRepairs defaults to false: the realtor reply never fires on a guess", () => {
+    expect(decide()?.outcome).toBe("other");
   });
 
   it("no repairs → realtor reply", () => {
