@@ -28,9 +28,9 @@ const CLOCK_AUDIT = [
     sourceKey: 'enrollment',
     sourcePath: 'src/lib/sequences/enrollment.ts',
     function: 'enrollLead',
-    predicate: 'step 0 delay to sequence_enrollments.next_run_at',
+    predicate: 'start step delay to sequence_enrollments.next_run_at',
     clock: 'application Date / new Date()',
-    contract: /delayToDate\(step0\.delay_after_previous_minutes,\s*new Date\(\)\)/,
+    contract: /delayToDate\(startStep\.delayMinutes,\s*new Date\(\)\)/,
   },
   {
     id: 'tick_due_and_budget',
@@ -160,6 +160,17 @@ const DISPOSABLE_SUPABASE_EXCLUDES = [
 const MIN_FREE_BYTES = 3 * 1024 ** 3;
 const browserAcceptanceEnabled = process.env.SANDRA_CANARY_BROWSER === '1';
 const browserOnlyEnabled = process.env.SANDRA_CANARY_BROWSER_ONLY === '1';
+// Optional narrowing for focused PR gates (e.g. sms-opt-out.yml). Each entry
+// must already be listed in the disposable canary config, so this can only
+// select a subset of the reviewed suite, never add an arbitrary file.
+const vitestFileFilters = (process.env.SANDRA_CANARY_VITEST_FILES ?? '').split(/\s+/).filter(Boolean);
+if (vitestFileFilters.length) {
+  const { readFileSync } = await import('node:fs');
+  const configText = readFileSync(path.join(root, 'vitest.disposable-canary.config.ts'), 'utf8');
+  for (const file of vitestFileFilters) {
+    if (!configText.includes(`"${file}"`)) throw new Error(`SANDRA_CANARY_VITEST_FILES entry is not in the disposable canary config: ${file}`);
+  }
+}
 if (browserOnlyEnabled && !browserAcceptanceEnabled) {
   throw new Error('SANDRA_CANARY_BROWSER_ONLY=1 requires SANDRA_CANARY_BROWSER=1');
 }
@@ -556,7 +567,7 @@ try {
   }
   await run('npx', ['tsx', 'scripts/provision-disposable-canary-owner.ts'], testEnv);
   if (!browserOnlyEnabled) {
-    await run('npx', ['vitest', 'run', '--config', 'vitest.disposable-canary.config.ts'], testEnv);
+    await run('npx', ['vitest', 'run', '--config', 'vitest.disposable-canary.config.ts', ...vitestFileFilters], testEnv);
   }
   if (browserAcceptanceEnabled) {
     await run('npx', ['playwright', 'test', '--config', 'playwright.sequence-readiness.config.ts'], testEnv);
