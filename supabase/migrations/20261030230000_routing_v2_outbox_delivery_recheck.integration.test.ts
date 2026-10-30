@@ -410,6 +410,54 @@ async function cleanupOrg(o: string) {
   await db.query("commit");
 }
 
+describe("routing v2 PR-F fence overhead (committed data)", () => {
+  it("bulk-updating 10,000 properties without touching the takeover marker: negligible trigger overhead", async () => {
+    const org = randomUUID();
+    const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[Math.floor(xs.length / 2)]!;
+    const timed = async (dropTrigger: boolean) => {
+      await db.query("begin");
+      if (dropTrigger) await db.query("drop trigger trg_routing_v2_takeover_fence on public.properties");
+      const t0 = performance.now();
+      await db.query(`update public.properties set address = address where org_id = $1`, [org]);
+      const ms = performance.now() - t0;
+      await db.query("rollback");
+      return ms;
+    };
+    try {
+      await db.query(MIGRATION_RAW);
+      await db.query("begin");
+      await db.query("set local session_replication_role = replica");
+      await db.query("insert into public.organizations (id, name) values ($1, $2)", [org, `rv2f-bench-${org}`]);
+      await db.query(
+        `insert into public.properties (org_id, address, state, status)
+         select $1, 'B ' || g, 'MO', 'new_lead' from generate_series(1, 10000) g`,
+        [org],
+      );
+      await db.query("commit");
+      await db.query("vacuum analyze public.properties");
+      await timed(false); // warm-up
+      const without: number[] = [];
+      const withFence: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        without.push(await timed(true));
+        withFence.push(await timed(false));
+      }
+      const a = median(without);
+      const b = median(withFence);
+      console.log(`[PR-F fence benchmark] 10,000-row properties update: without trigger ${a.toFixed(0)} ms, with trigger ${b.toFixed(0)} ms (${(((b - a) / a) * 100).toFixed(1)}%)`);
+      // Loose bound for noisy runners; the measured overhead is ~0%.
+      expect(b).toBeLessThan(a * 1.25 + 250);
+    } finally {
+      await db.query("rollback").catch(() => undefined);
+      await db.query("begin");
+      await db.query("set local session_replication_role = replica");
+      await db.query(`delete from public.properties where org_id = $1`, [org]);
+      await db.query(`delete from public.organizations where id = $1`, [org]);
+      await db.query("commit");
+    }
+  }, 120_000);
+});
+
 describe("routing v2 PR-F races (committed data, two connections)", () => {
   it("two consumers re-checking the same claimed row at once: exactly one is authorized", async () => {
     const a = new Client({ connectionString: url });
