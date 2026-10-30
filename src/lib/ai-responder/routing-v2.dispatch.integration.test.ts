@@ -6,7 +6,6 @@ import { BMH_ORG_ID, getCanonicalTestOrgId } from "@tests/integration/fixtures/m
 import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/delivery";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
-import { V2_QUESTION_IDS } from "@/lib/sms-classification/routing-v2/questions";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
 
 import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
@@ -153,6 +152,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     jevProbabilities = { text_only: 0.95 };
     const outcome = await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
     expect(outcome).toEqual({ outcome: "auto_closed", reason: "routing_v2:text_only_reply" });
+    expect(jevCalls).toBe(1);
     // The detached kick and an explicit consumer pass race for the same row: one wins the claim.
     await Promise.all([runRoutingV2OutboxReplies(supabase, { limit: 5 }), runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId })]);
     await settle();
