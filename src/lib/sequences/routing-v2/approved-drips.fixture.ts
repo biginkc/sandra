@@ -18,10 +18,12 @@ export const APPROVED_DRIPS = {
     "Hey, Mel at BMH Group. Last check-in for now on {{property_address}}. Any wiggle room on price, or should I check back later?",
   ],
   book_appointment_first6: [
-    "Hey, Mel again. Our calendar is pretty full, but I can get you in at 2:00 today to talk about {{property_address}}. Want it?",
-    "Hi {{first_name | there}}, a 3:15 just opened up this afternoon. Want me to hold it for a quick call about {{property_address}}?",
+    // Steps 1, 2 and 4: approved replacement texts (SELF-APPROVED-TEXT-LOG row 8, Master A-005,
+    // Jarrad-delegated). They carry {{slot_time}} directly.
+    "Hey, Mel here. Can we talk about {{property_address}} at {{slot_time}}?",
+    "Hi {{first_name | there}}, can I hold {{slot_time}} for a call about {{property_address}}?",
     "Hey, Mel here. We're booked solid today, but I can squeeze you in at 11:30 this morning. Should I put you down?",
-    "Hi {{first_name | there}}, I've got one afternoon spot left today at 4:00 for {{property_address}}. Want me to save it for you?",
+    "Hi {{first_name | there}}, want to talk about {{property_address}} at {{slot_time}}?",
     "Hey, just had a 1:30 cancel today. Want me to grab it for a quick call about {{property_address}}?",
     "Hi {{first_name | there}}, last open spot I have today is 3:00. Want it for a quick call about {{property_address}}?",
   ],

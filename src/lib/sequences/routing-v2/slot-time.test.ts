@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { floorZonesForState, formatSlotLabel, hasSlotToken, planSlot } from "./slot-time";
+import { formatSlotLabel, hasSlotToken, planSlot } from "./slot-time";
 
 const CHI = "America/Chicago";
 const NY = "America/New_York";
@@ -127,31 +127,30 @@ describe("formatSlotLabel / hasSlotToken", () => {
     expect(planSlot(new Date("2026-10-14T13:00:00Z"), CHI, "any")).toMatchObject({ kind: "send_now", label: "10:00" });
   });
 
-  it("split-zone state (TX): 07:30 in El Paso (Mountain) waits even though Central is 08:30", () => {
-    const now = new Date("2026-10-14T13:30:00Z"); // 08:30 CDT, 07:30 MDT
-    expect(planSlot(now, CHI, "any")).toMatchObject({ kind: "send_now", label: "10:30" }); // dominant zone alone
-    const p = planSlot(now, CHI, "any", floorZonesForState("TX"));
-    expect(p.kind).toBe("wait");
-    if (p.kind === "wait") {
-      expect(p.sendAt.toISOString()).toBe("2026-10-14T14:00:00.000Z"); // 08:00 Mountain = 09:00 Central
-      expect(p.label).toBe("11:00"); // displayed in Central (dominant zone)
-    }
-    // Once 08:00 has passed everywhere in the state it sends.
-    expect(planSlot(new Date("2026-10-14T14:00:00Z"), CHI, "any", floorZonesForState("TX"))).toMatchObject({ kind: "send_now", label: "11:00" });
+  it("DST fall-back day (2026-11-01, Central): rounding, the 08:00 floor and the label follow local wall time", () => {
+    // 07:50 CST (after the 02:00 fall-back) = 13:50Z -> waits until 08:00 CST = 14:00Z.
+    const early = planSlot(new Date("2026-11-01T13:50:00Z"), CHI, "any");
+    expect(early.kind).toBe("wait");
+    if (early.kind === "wait") expect(early.sendAt.toISOString()).toBe("2026-11-01T14:00:00.000Z");
+    // 13:07 CST = 19:07Z -> 15:07 -> 3:15 label, slot at 21:15Z.
+    const p = planSlot(new Date("2026-11-01T19:07:00Z"), CHI, "any");
+    expect(p).toMatchObject({ kind: "send_now", label: "3:15" });
+    expect(p.slotAt.toISOString()).toBe("2026-11-01T21:15:00.000Z");
+    // Too late on fall-back day -> next morning 08:00 CST (14:00Z).
+    const late = planSlot(new Date("2026-11-01T22:30:00Z"), CHI, "any");
+    if (late.kind === "wait") expect(late.sendAt.toISOString()).toBe("2026-11-02T14:00:00.000Z");
+    expect(late.kind).toBe("wait");
   });
 
-  it("split-zone next-morning waits also clear the floor in every zone (FL panhandle)", () => {
-    // 16:30 EDT -> too late; next morning 08:00 EDT is 07:00 CDT in the panhandle -> 08:00 CDT.
-    const p = planSlot(new Date("2026-10-14T20:30:00Z"), NY, "any", floorZonesForState("FL"));
-    expect(p.kind).toBe("wait");
-    if (p.kind === "wait") expect(p.sendAt.toISOString()).toBe("2026-10-15T13:00:00.000Z");
-  });
-
-  it("single-zone states are unchanged", () => {
-    expect(floorZonesForState("MO")).toEqual([]);
-    expect(floorZonesForState(null)).toEqual([]);
-    const now = new Date("2026-10-14T13:30:00Z");
-    expect(planSlot(now, CHI, "any", floorZonesForState("MO"))).toEqual(planSlot(now, CHI, "any"));
+  it("DST spring-forward day (2027-03-14, Mountain): floor at 08:00 MDT and labels in local time", () => {
+    // 07:30 MDT = 13:30Z -> wait until 08:00 MDT = 14:00Z.
+    const early = planSlot(new Date("2027-03-14T13:30:00Z"), "America/Denver", "any");
+    expect(early.kind).toBe("wait");
+    if (early.kind === "wait") expect(early.sendAt.toISOString()).toBe("2027-03-14T14:00:00.000Z");
+    // 12:01 MDT = 18:01Z -> 14:01 -> 2:15.
+    expect(planSlot(new Date("2027-03-14T18:01:00Z"), "America/Denver", "any")).toMatchObject({ kind: "send_now", label: "2:15" });
+    // Phoenix has no DST: 12:01 MST = 19:01Z the same day.
+    expect(planSlot(new Date("2027-03-14T19:01:00Z"), "America/Phoenix", "any")).toMatchObject({ kind: "send_now", label: "2:15" });
   });
 
   it("writes times the way the approved texts do", () => {

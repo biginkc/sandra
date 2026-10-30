@@ -7,7 +7,7 @@ import { renderTemplate } from "@/lib/templates/render";
 
 import { APPROVED_DRIPS } from "./approved-drips.fixture";
 import { ROUTING_V2_DRIPS } from "./drip-spec";
-import { OPT_OUT_PHRASES, applyOptOut } from "../opt-out";
+import { OPT_OUT_PHRASES } from "../opt-out";
 import { smsSegments } from "./sms-segments";
 
 const MIGRATION = readFileSync(
@@ -57,6 +57,11 @@ describe("routing v2 drip seed pins", () => {
       ...ROUTING_V2_DRIPS.said_theyd_call.steps.map((s, i) => [s.body, APPROVED_DRIPS.said_theyd_call[i]!]),
     ];
     for (const [seeded, approved] of pairs) {
+      if (approved!.includes("{{slot_time}}")) {
+        // A-005 replacement texts: seeded byte-for-byte as approved.
+        expect(seeded).toBe(approved);
+        continue;
+      }
       const time = approved!.match(/\b\d{1,2}:\d{2}\b/)![0];
       const [before, after] = approved!.split(time);
       expect(seeded).toBe(`${before}{{slot_time}}${after}`);
@@ -75,14 +80,22 @@ describe("routing v2 drip seed pins", () => {
     expect(MIGRATION).toMatch(/v_then := null;/);
   });
 
-  it("slot windows keep the words true", () => {
+  it("slot windows keep the words true (and A-005 kept each step's window and day)", () => {
     for (const d of [ROUTING_V2_DRIPS.book_appointment, ROUTING_V2_DRIPS.said_theyd_call]) {
       for (const s of d.steps) {
         if (/this morning/.test(s.body)) expect(s.slotWindow).toBe("morning");
         else if (/afternoon/.test(s.body)) expect(s.slotWindow).toBe("afternoon");
-        else expect(s.slotWindow).toBe("any");
       }
     }
+    expect(ROUTING_V2_DRIPS.book_appointment.steps.map((s) => s.slotWindow)).toEqual(["any", "afternoon", "morning", "afternoon", "any", "any"]);
+    expect(ROUTING_V2_DRIPS.said_theyd_call.steps.map((s) => s.slotWindow)).toEqual(["any", "any", "afternoon", "afternoon", "any", "afternoon"]);
+  });
+
+  it("A-005: Book appointment v2 steps 1, 2, 4 are exactly the approved texts", () => {
+    const b = ROUTING_V2_DRIPS.book_appointment.steps.map((s) => s.body);
+    expect(b[0]).toBe("Hey, Mel here. Can we talk about {{property_address}} at {{slot_time}}?");
+    expect(b[1]).toBe("Hi {{first_name | there}}, can I hold {{slot_time}} for a call about {{property_address}}?");
+    expect(b[3]).toBe("Hi {{first_name | there}}, want to talk about {{property_address}} at {{slot_time}}?");
   });
 
   it("seeds are inactive, keep the source drip's opt-out footer setting (K1), and never touch legacy rows", () => {
@@ -196,21 +209,40 @@ describe("routing v2 drips: segment counts with realistic long substitutions", (
   });
 });
 
-describe("K1: Book appointment v2 texts with today's opt-out footer (segment report)", () => {
-  const render = (body: string, name: string, address: string) =>
+describe("K1 + A-005: Book appointment v2 with today's opt-out footer, every phrase (segment report)", () => {
+  const render = (body: string, name: string | null, address: string) =>
     renderTemplate(body, { first_name: name, property_address: address, slot_time: "12:45" });
-  const longest = [...OPT_OUT_PHRASES].sort((a, b) => b.length - a.length)[0]!;
+  const NAME_20 = "Maximiliano-Fernando";
+  const ADDR_28 = "12345 W Longview Ridge Pkwy.";
+  const ADDR_105 = "12345 North Kansas City Boulevard Apartment Building C Unit 1402, Overland Park Township, KS 66213-4455xx";
+  const cases = [
+    { label: "20-char name + 28-char address", name: NAME_20, address: ADDR_28 },
+    { label: "20-char name + 105-char address", name: NAME_20, address: ADDR_105 },
+    { label: "non-ASCII name (UCS-2) + 28-char address", name: "Łukasz", address: ADDR_28 },
+  ];
 
-  it("reports segments with the longest footer; the footer is appended, never dropped", () => {
-    const report = ROUTING_V2_DRIPS.book_appointment.steps.map((st, i) => {
-      const base = render(st.body, "Christopher", "12345 W Longview Ridge Pkwy.");
-      const withFooter = `${base} ${longest}`;
-      expect(applyOptOut(base, { append_opt_out: true, seed: "x" })).toMatch(/STOP/);
-      return { step: i + 1, chars: smsSegments(withFooter).units, segments: smsSegments(withFooter).segments };
-    });
-    console.table(report);
-    for (const r of report) expect(r.segments).toBeLessThanOrEqual(2);
-    // With the footer some booking texts exceed one segment (reported, not hidden).
-    expect(report.some((r) => r.segments === 2)).toBe(true);
+  it("fixtures are the sizes they claim", () => {
+    expect(NAME_20).toHaveLength(20);
+    expect(ADDR_28).toHaveLength(28);
+    expect(ADDR_105).toHaveLength(105);
+  });
+
+  it("renders every step x every footer phrase; the footer is never dropped and nothing is truncated", () => {
+    const over: Array<{ case: string; step: number; phrase: number; encoding: string; chars: number; segments: number }> = [];
+    for (const c of cases) {
+      ROUTING_V2_DRIPS.book_appointment.steps.forEach((st, i) => {
+        OPT_OUT_PHRASES.forEach((phrase, k) => {
+          const base = render(st.body, c.name, c.address);
+          const full = `${base} ${phrase}`;
+          if (st.body.includes("{{property_address}}")) expect(full).toContain(c.address);
+          expect(full.endsWith(phrase)).toBe(true);
+          const seg = smsSegments(full);
+          if (seg.segments > 1) over.push({ case: c.label, step: i + 1, phrase: k + 1, encoding: seg.encoding, chars: seg.units, segments: seg.segments });
+        });
+      });
+    }
+    console.table(over);
+    // Pinned so any change in text, footer or encoding shows up in review.
+    expect(over).toMatchSnapshot();
   });
 });

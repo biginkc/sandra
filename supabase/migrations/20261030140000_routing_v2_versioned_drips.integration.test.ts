@@ -6,6 +6,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { ROUTING_V2_DRIPS } from "@/lib/sequences/routing-v2/drip-spec";
+import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
@@ -80,11 +81,15 @@ async function seedOrg(c: Client): Promise<Ctx> {
 
 const setFlags = (c: Client, org: string, flags: Record<string, unknown>) =>
   c.query(`update public.ai_responder_configs set routing_v2_flags = $2::jsonb where org_id = $1`, [org, JSON.stringify(flags)]);
+// Test inbound times are shifted 400 days into the past (order preserved) so they are always
+// older than the claims / updates a test makes with now() (the final advance treats a seller
+// message newer than the claim as a reply that wins).
+const PAST_SHIFT_MS = 400 * 86_400_000;
 const inbound = async (c: Client, ctx: Ctx, at: string) =>
   (await c.query(
     `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, created_at)
      values ($1,$2,$3,'inbound','sms','hi',$4) returning id`,
-    [ctx.org, ctx.property, ctx.contact, at],
+    [ctx.org, ctx.property, ctx.contact, new Date(Date.parse(at) - PAST_SHIFT_MS).toISOString()],
   )).rows[0].id as string;
 const transition = async (c: Client, inboundId: string, property: string, decision: Record<string, unknown>) =>
   (await c.query(`select public.route_reply_transition($1,$2,$3::jsonb) as r`, [inboundId, property, JSON.stringify(decision)])).rows[0].r;
@@ -235,7 +240,7 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
   it("human takeover after the inbound: drips retired, nothing enrolled, no auto reply, alert kept", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
-    await db.query(`update public.properties set last_person_takeover_at = '2026-10-30T15:02:00Z' where id = $1`, [ctx.property]);
+    await db.query(`update public.properties set last_person_takeover_at = (timestamptz '2026-10-30T15:02:00Z' - interval '400 days') where id = $1`, [ctx.property]);
     const r = await transition(db, id, ctx.property, {
       sequence_key: "book_appointment",
       outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }],
@@ -751,6 +756,62 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select count(*)::int as n from public.sequences where org_id = $1`, [ctx.org])).rows[0].n).toBe(0);
   });
 
+  it("R2: an inbound newer than the claim (not classified, no transition yet) makes the final advance a no-op", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "vacant_land" });
+    await db.query(`update public.sequence_enrollments set current_step_index = 4 where id = $1`, [r.new_enrollment_id]);
+    const run = await stepRun(db, r.new_enrollment_id);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    // Backdate the claim, then a seller message arrives (no transition, no classification).
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '1 minute' where step_run_id = $1`, [run.id]);
+    await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, created_at)
+       values ($1,$2,$3,'inbound','sms','wait, call me', now())`, [ctx.org, ctx.property, ctx.contact]);
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("changed");
+    expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [r.new_enrollment_id])).rows[0].status).toBe("active");
+    // The text did go out: the claim still records it.
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].status).toBe("sent");
+  });
+
+  it("R1/R3: crash after the provider accepted (claim close + advance never ran): the reconcile closes the claim, a retry completes once, never a second send", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "vacant_land" });
+    const e = r.new_enrollment_id;
+    await db.query(`update public.sequence_enrollments set current_step_index = 4 where id = $1`, [e]);
+    const run = await stepRun(db, e);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [e, run.id])).rows[0].r).toBe("ok");
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','last','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(true);
+    // Provider accepted and the tick recorded the run... then crashed.
+    await db.query(`update public.sequence_step_runs set attempt_outcome = 'accepted', run_at = now() where id = $1`, [run.id]);
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    // A fresh claim (too young) is not touched.
+    const counts = (await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c;
+    expect(counts).toEqual({ sent: 1, unknown: 0, not_sent: 0 });
+    const claim = (await db.query(`select status, reconciled_at from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0];
+    expect(claim.status).toBe("sent");
+    expect(claim.reconciled_at).not.toBeNull();
+    // A retry of the same step cannot claim (and so cannot send) again.
+    await db.query("savepoint dup");
+    await expect(stepRun(db, e)).rejects.toThrow(/duplicate key|unique/i);
+    await db.query("rollback to savepoint dup");
+    // Re-running the advance completes the drip exactly once.
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [e, run.id])).rows[0].r).toBe("completed");
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [e, run.id])).rows[0].r).toBe("changed");
+  });
+
+  it("R3: reconcile maps step-run truth: unknown -> unknown, not attempted -> not_sent; young claims untouched", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [r.new_enrollment_id, run.id]);
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 0 });
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 1 });
+  });
+
   it("generic alerts are gated on replies: drips=true, replies=false -> the alert does not send", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
@@ -1018,6 +1079,84 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("rollback to savepoint s");
     await db.query(`update public.sequence_steps set template_body = 'edited' where sequence_id = $1 and step_index = 0`, [ctx.bookSrc]);
     await db.query(`update public.sequences set append_opt_out = false where id = $1`, [ctx.bookSrc]);
+  });
+});
+
+describe("R4: SQL canary eligibility == flags.ts isV2Eligible (400 ids x 24 configs)", () => {
+  it("matches exactly, including malformed configs (fail closed)", async () => {
+    const propertyIds = Array.from({ length: 400 }, () => randomUUID());
+    const listed = propertyIds.slice(0, 5);
+    const configs: unknown[] = [
+      {},
+      { canary_percent: 0 },
+      { canary_percent: 1 },
+      { canary_percent: 10 },
+      { canary_percent: 37 },
+      { canary_percent: 50 },
+      { canary_percent: 99 },
+      { canary_percent: 100 },
+      { canary_percent: 12.0 },
+      { canary_property_ids: listed },
+      { canary_property_ids: listed.map((id) => id.toUpperCase()), canary_percent: 10 },
+      { canary_property_ids: [], canary_percent: 50 },
+      // Malformed: every one must read as nothing eligible.
+      { canary_property_ids: [...listed, "not-a-uuid"], canary_percent: 100 },
+      { canary_property_ids: [listed[0], 7], canary_percent: 100 },
+      { canary_property_ids: listed[0], canary_percent: 100 },
+      { canary_property_ids: null, canary_percent: 100 },
+      { canary_property_ids: { a: listed[0] }, canary_percent: 100 },
+      { canary_percent: "50" },
+      { canary_percent: 50.5 },
+      { canary_percent: -1 },
+      { canary_percent: 101 },
+      { canary_percent: null },
+      { canary_percent: true },
+      { canary_property_ids: listed, canary_percent: 200 },
+    ];
+    expect(configs).toHaveLength(24);
+    let mismatches = 0;
+    let malformedEligible = 0;
+    for (const [i, cfg] of configs.entries()) {
+      const flags = parseRoutingV2Flags(cfg);
+      const sql = (await db.query(
+        `select t.id::text as id, public.routing_v2_canary_eligible($1::jsonb, t.id) as ok from unnest($2::uuid[]) t(id)`,
+        [JSON.stringify(cfg), propertyIds],
+      )).rows as Array<{ id: string; ok: boolean }>;
+      for (const row of sql) {
+        if (isV2Eligible(flags, row.id) !== row.ok) mismatches += 1;
+        if (i >= 12 && row.ok) malformedEligible += 1;
+      }
+    }
+    expect(mismatches).toBe(0);
+    expect(malformedEligible).toBe(0);
+    const half = (await db.query(
+      `select count(*) filter (where public.routing_v2_canary_eligible('{"canary_percent":50}'::jsonb, t.id)) c from unnest($1::uuid[]) t(id)`,
+      [propertyIds],
+    )).rows[0].c;
+    expect(Number(half)).toBeGreaterThan(120);
+    expect(Number(half)).toBeLessThan(280);
+  });
+
+  it("routing_v2_slice_enabled uses it: a malformed canary config disables every slice", async () => {
+    await db.query("begin");
+    try {
+      await db.query("set local session_replication_role = replica");
+      const ctx = await seedOrg(db);
+      await db.query("set local session_replication_role = origin");
+      const enabled = async () => (await db.query(`select public.routing_v2_slice_enabled($1, 'drips') as ok`, [ctx.property])).rows[0].ok;
+      await setFlags(db, ctx.org, { questions_live: true, drips: true, canary_percent: 100 });
+      expect(await enabled()).toBe(true);
+      await setFlags(db, ctx.org, { questions_live: true, drips: true, canary_percent: "100" });
+      expect(await enabled()).toBe(false);
+      await setFlags(db, ctx.org, { questions_live: true, drips: true, canary_property_ids: [ctx.property.toUpperCase()], canary_percent: 0 });
+      expect(await enabled()).toBe(true);
+      await setFlags(db, ctx.org, { questions_live: true, drips: true, canary_property_ids: [ctx.property, "nope"], canary_percent: 100 });
+      expect(await enabled()).toBe(false);
+      await setFlags(db, ctx.org, { questions_live: "true", drips: true, canary_percent: 100 });
+      expect(await enabled()).toBe(false);
+    } finally {
+      await db.query("rollback");
+    }
   });
 });
 

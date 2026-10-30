@@ -70,71 +70,8 @@ export function formatSlotLabel(minutes: number): string {
   return `${h12}:${pad(minutes % 60)}`;
 }
 
-/**
- * Split-zone states: zones OTHER than the state's dominant zone (STATE_TO_TZ). There is no
- * property-level timezone or ZIP->zone source in the schema, so a v2 slot send in these states
- * must clear the 08:00 floor in EVERY zone of the state (i.e. the zone latest in the day), so
- * nothing goes out early anywhere in the state. The displayed slot hour stays in the dominant
- * zone (e.g. Texas shows Central time; an El Paso seller reads it an hour ahead of their clock).
- */
-export const SPLIT_ZONE_OTHER_ZONES: Record<string, readonly string[]> = {
-  AK: ["America/Adak"],
-  AZ: ["America/Denver"],
-  FL: ["America/Chicago"],
-  ID: ["America/Los_Angeles"],
-  IN: ["America/Chicago"],
-  KS: ["America/Denver"],
-  KY: ["America/Chicago"],
-  MI: ["America/Menominee"],
-  NE: ["America/Denver"],
-  ND: ["America/Denver"],
-  OR: ["America/Boise"],
-  SD: ["America/Denver"],
-  TN: ["America/New_York"],
-  TX: ["America/Denver"],
-};
-
-export function floorZonesForState(state: string | null | undefined): readonly string[] {
-  return state ? SPLIT_ZONE_OTHER_ZONES[state.trim().toUpperCase()] ?? [] : [];
-}
-
-/** Earliest instant >= `at` that is at or past `minMinutes` local in every one of `zones`. */
-function clearFloor(at: Date, zones: readonly string[], minMinutes: number): Date {
-  let t = at;
-  for (let pass = 0; pass < 3; pass++) {
-    let moved = false;
-    for (const z of zones) {
-      const w = wallOf(t, z);
-      if (w.minutes < minMinutes) {
-        t = atWall({ y: w.y, m: w.m, d: w.d }, minMinutes, z);
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  return t;
-}
-
-export function planSlot(
-  now: Date,
-  timeZone: string,
-  window: SlotWindow = "any",
-  floorZones: readonly string[] = [],
-): SlotPlan {
-  const plan = planSlotInZone(now, timeZone, window);
-  if (!floorZones.length) return plan;
-  const floor = WINDOWS[window].start - SLOT_LEAD_MINUTES;
-  const sendAt = plan.kind === "wait" ? plan.sendAt : now;
-  const cleared = clearFloor(sendAt, floorZones, floor);
-  if (cleared.getTime() === sendAt.getTime()) return plan;
-  // Too early somewhere in the state: wait; the slot is re-planned when the step runs.
-  const replanned = planSlotInZone(cleared, timeZone, window);
-  return {
-    kind: "wait",
-    sendAt: cleared,
-    slotAt: replanned.slotAt,
-    label: replanned.label,
-  };
+export function planSlot(now: Date, timeZone: string, window: SlotWindow = "any"): SlotPlan {
+  return planSlotInZone(now, timeZone, window);
 }
 
 function planSlotInZone(now: Date, timeZone: string, window: SlotWindow): SlotPlan {

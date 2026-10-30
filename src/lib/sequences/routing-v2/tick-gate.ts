@@ -1,10 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
-import { sellerTimezoneForState } from "@/lib/norma/callback-time";
 import type { Database } from "@/lib/supabase/types";
 
-import { floorZonesForState, hasSlotToken, isSlotWindow, planSlot } from "./slot-time";
+import { resolveSellerZone } from "./seller-timezone";
+import { hasSlotToken, isSlotWindow, planSlot } from "./slot-time";
 
 /**
  * sequence-tick hook for routing v2 drips (PR-C). Legacy sequences (routing_v2_key is null)
@@ -55,6 +54,7 @@ export async function routingV2TickGate(
     stepId: string;
     actionType: string;
     templateBody: string | null;
+    propertyId?: string;
     propertyState: string | null;
     now?: Date;
   },
@@ -79,22 +79,44 @@ export async function routingV2TickGate(
     .eq("id", input.stepId)
     .maybeSingle();
   if (stepErr) return { kind: "error", message: `routing_v2_slot_window_read_failed: ${stepErr.message}` };
-  // Unknown seller time zone (blank / unmapped state): no guessing a zone for a slot time.
-  if (!input.propertyState || !STATE_TO_TZ[input.propertyState.trim().toUpperCase()]) {
-    return { kind: "hold", reason: "unknown_timezone" };
-  }
+  // Seller time zone from the property's own data; never a guessed zone (Master A-005).
+  const zoneResult = await loadSellerZone(client, input.propertyId, input.propertyState);
+  if (zoneResult.kind === "error") return { kind: "error", message: zoneResult.message };
+  if (zoneResult.kind === "hold") return { kind: "hold", reason: "timezone_unconfirmed" };
   const raw = (stepRow as { slot_window?: unknown } | null)?.slot_window;
   const window = isSlotWindow(raw) ? raw : "any";
-  // No property-level timezone exists: the state's dominant zone sets the displayed hour, and
-  // in split-zone states the 08:00 floor must hold in every zone of the state.
-  const plan = planSlot(
-    input.now ?? new Date(),
-    sellerTimezoneForState(input.propertyState),
-    window,
-    floorZonesForState(input.propertyState),
-  );
+  const plan = planSlot(input.now ?? new Date(), zoneResult.zone, window);
   if (plan.kind === "wait") return { kind: "wait", nextRunAt: plan.sendAt };
   return { kind: "send", slotLabel: plan.label };
+}
+
+/** property.fips_code, else counties.fips_code via county_id; then resolveSellerZone. */
+async function loadSellerZone(
+  client: SupabaseClient<Database>,
+  propertyId: string | undefined,
+  state: string | null,
+): Promise<{ kind: "zone"; zone: string } | { kind: "hold" } | { kind: "error"; message: string }> {
+  let fips: string | null = null;
+  if (propertyId) {
+    const { data: prop, error } = await loose(client)
+      .from("properties")
+      .select("fips_code, county_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (error) return { kind: "error", message: `routing_v2_property_zone_read_failed: ${error.message}` };
+    const row = prop as { fips_code?: string | null; county_id?: string | null } | null;
+    fips = row?.fips_code ?? null;
+    if (!fips && row?.county_id) {
+      const { data: county, error: countyErr } = await loose(client)
+        .from("counties")
+        .select("fips_code")
+        .eq("id", row.county_id)
+        .maybeSingle();
+      if (countyErr) return { kind: "error", message: `routing_v2_county_zone_read_failed: ${countyErr.message}` };
+      fips = (county as { fips_code?: string | null } | null)?.fips_code ?? null;
+    }
+  }
+  return resolveSellerZone({ state, fips });
 }
 
 /**

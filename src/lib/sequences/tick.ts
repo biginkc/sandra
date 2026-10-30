@@ -222,6 +222,7 @@ export async function processEnrollmentTick(
       stepId: step.id,
       actionType: step.action_type,
       templateBody: step.template_body,
+      propertyId: enrollment.property_id,
       propertyState: property.state,
     });
   } catch (err) {
@@ -234,9 +235,9 @@ export async function processEnrollmentTick(
     return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
   }
   if (routingV2Gate.kind === "hold") {
-    // Needs a person (e.g. unknown seller time zone): never guess, never send. Existing
-    // "Couldn't send" hold reason, so it lands in Needs person with today's wording.
-    const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+    // Needs a person (seller time zone not confirmed): never guess, never send. Own hold
+    // reason "timezone_unconfirmed" (Couldn't send in Needs person).
+    const pauseError = await pauseEnrollment(client, enrollment.id, routingV2Gate.reason, false);
     if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
     return { status: "paused", enrollmentId: enrollment.id, reason: `routing_v2_${routingV2Gate.reason}` };
   }
@@ -524,7 +525,12 @@ export async function processEnrollmentTick(
     // may have reached the seller (accepted, or accepted-but-receipt-failed, or unknown), so a
     // failed write or a reply landing before the bookkeeping can never report it as cancelled.
     // Provider definitely not reached -> "not_sent" (terminal), so no claim is left open.
-    const v2ClaimOutcome = isRoutingV2 ? (routingV2ProviderClaimOutcome(outcome) ?? "not_sent") : null;
+    // sent/queued are closed together with the advance (one RPC, below); every other outcome
+    // is closed here.
+    const v2ClaimOutcome =
+      isRoutingV2 && outcome.status !== "sent" && outcome.status !== "queued"
+        ? (routingV2ProviderClaimOutcome(outcome) ?? "not_sent")
+        : null;
     const v2ClaimCloseError = v2ClaimOutcome
       ? await routingV2MarkDripClaimSent(client, claim.id, v2ClaimOutcome)
       : null;
@@ -557,15 +563,6 @@ export async function processEnrollmentTick(
             status: "failed",
             enrollmentId: enrollment.id,
             message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
-          };
-        }
-        if (v2ClaimCloseError) {
-          // The text went out but the claim could not be closed: hold for reconciliation.
-          const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
-          return {
-            status: "failed",
-            enrollmentId: enrollment.id,
-            message: `Message ${messageId} accepted; ${v2ClaimCloseError}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
         // Routing v2: advance, or complete (+ chain, only if a migration ever configures a next

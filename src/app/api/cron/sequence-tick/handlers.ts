@@ -452,13 +452,17 @@ async function stopDisabledRoutingV2(supabase: { rpc: unknown }): Promise<void> 
   if (typeof supabase.rpc !== "function") return;
   try {
     const rpc = supabase.rpc as (fn: string, args?: Record<string, unknown>) => Promise<{ error: { code?: string; message: string } | null } | undefined>;
-    const res = await rpc.call(supabase, "routing_v2_stop_disabled", {});
-    const error = res?.error;
-    // Deployed ahead of the migration: nothing to stop.
-    if (error && error.code !== "PGRST202" && error.code !== "42883") {
-      reportError(new Error(`routing v2 stop_disabled failed: ${error.message}`), {
-        tags: { surface: "cron_sequence_tick_routing_v2_stop" },
-      });
+    // 1. Durable claim reconcile (a crash between the provider call and the claim close).
+    // 2. Flag-off rollback.
+    for (const fn of ["routing_v2_reconcile_claims", "routing_v2_stop_disabled"]) {
+      const res = await rpc.call(supabase, fn, {});
+      const error = res?.error;
+      // Deployed ahead of the migration: nothing to do.
+      if (error && error.code !== "PGRST202" && error.code !== "42883") {
+        reportError(new Error(`routing v2 ${fn} failed: ${error.message}`), {
+          tags: { surface: "cron_sequence_tick_routing_v2_stop" },
+        });
+      }
     }
   } catch (err) {
     reportError(err, { tags: { surface: "cron_sequence_tick_routing_v2_stop" } });

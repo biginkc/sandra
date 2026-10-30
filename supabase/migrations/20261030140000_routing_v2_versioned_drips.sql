@@ -141,6 +141,60 @@ grant select, insert, update on public.routing_v2_reply_transitions, public.rout
 -- ---------------------------------------------------------------------------
 -- 3. Flag + eligibility (BUILD-PLAN §13.1). Every slice also needs questions_live.
 -- ---------------------------------------------------------------------------
+-- Canary eligibility, the SQL twin of isV2Eligible(parseRoutingV2Flags(flags), id) in
+-- src/lib/sms-classification/routing-v2/flags.ts (pinned to it by the integration test):
+--   * canary_property_ids: absent, or an array whose every entry is a UUID string; anything
+--     else (null, non-array, one bad entry) = nothing eligible (fail closed);
+--   * canary_percent: absent, or an integer JSON number 0..100; anything else = nothing eligible;
+--   * eligible = id listed (case-insensitive) OR sha256(lower(id)) first 4 bytes (uint32 BE) % 100 < percent.
+create or replace function public.routing_v2_canary_eligible(p_flags jsonb, p_property_id uuid)
+returns boolean
+language plpgsql
+immutable
+set search_path = public, pg_temp
+as $$
+declare
+  v_ids jsonb := p_flags->'canary_property_ids';
+  v_pct jsonb := p_flags->'canary_percent';
+  v_percent numeric := 0;
+  v_bucket bigint;
+begin
+  if p_flags is null or jsonb_typeof(p_flags) <> 'object' or p_property_id is null then
+    return false;
+  end if;
+  if v_ids is not null then
+    if jsonb_typeof(v_ids) <> 'array' then
+      return false;
+    end if;
+    if exists (
+      select 1 from jsonb_array_elements(v_ids) e(v)
+      where jsonb_typeof(e.v) <> 'string'
+         or (e.v #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ) then
+      return false;
+    end if;
+  end if;
+  if v_pct is not null then
+    if jsonb_typeof(v_pct) <> 'number' then
+      return false;
+    end if;
+    v_percent := (v_pct #>> '{}')::numeric;
+    if v_percent <> trunc(v_percent) or v_percent < 0 or v_percent > 100 then
+      return false;
+    end if;
+  end if;
+  if v_ids is not null and exists (
+    select 1 from jsonb_array_elements_text(v_ids) e(v) where lower(e.v) = lower(p_property_id::text)
+  ) then
+    return true;
+  end if;
+  v_bucket := ('x' || substr(encode(sha256(convert_to(lower(p_property_id::text), 'UTF8')), 'hex'), 1, 8))::bit(32)::bigint % 100;
+  return v_bucket < v_percent;
+end;
+$$;
+revoke all on function public.routing_v2_canary_eligible(jsonb, uuid) from public, anon, authenticated;
+grant execute on function public.routing_v2_canary_eligible(jsonb, uuid) to service_role;
+
 create or replace function public.routing_v2_slice_enabled(p_property_id uuid, p_slice text)
 returns boolean
 language sql
@@ -153,13 +207,10 @@ as $$
     from public.properties p
     join public.ai_responder_configs c on c.org_id = p.org_id and c.active
     where p.id = p_property_id
-      and coalesce(c.routing_v2_flags->>'questions_live','false') = 'true'
-      and coalesce(c.routing_v2_flags->>p_slice,'false') = 'true'
-      and (
-        coalesce(c.routing_v2_flags->'canary_property_ids','[]'::jsonb) ? p_property_id::text
-        or ((hashtext(p_property_id::text)::bigint % 100) + 100) % 100
-           < coalesce((c.routing_v2_flags->>'canary_percent')::int, 0)
-      )
+      and jsonb_typeof(c.routing_v2_flags) = 'object'
+      and (c.routing_v2_flags->'questions_live') = 'true'::jsonb
+      and (c.routing_v2_flags->p_slice) = 'true'::jsonb
+      and public.routing_v2_canary_eligible(c.routing_v2_flags, p_property_id)
   );
 $$;
 
@@ -622,16 +673,26 @@ as $$
 declare
   e public.sequence_enrollments;
   v_delay integer;
+  v_claimed_at timestamptz;
 begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found then return 'changed'; end if;
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
-  -- The final claim close is part of the same transaction as the advance / completion.
+  -- The claim close (the provider accepted: 'sent') commits in the SAME transaction as the
+  -- advance / completion; the live tick does not close a sent claim anywhere else.
   if p_step_run_id is not null then
+    select created_at into v_claimed_at from public.routing_v2_drip_send_claims where step_run_id = p_step_run_id;
     perform public.routing_v2_mark_drip_claim_sent(p_step_run_id, 'sent');
   end if;
   select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
   if e.status <> 'active' or e.current_step_index <> p_step_index then return 'changed'; end if;
+  -- A seller message newer than the claim (classified or not, transitioned or not) decides
+  -- what happens next: no advance / completion side effect.
+  if exists (select 1 from public.messages m
+             where m.property_id = e.property_id and m.direction = 'inbound'
+               and m.created_at > coalesce(v_claimed_at, e.updated_at)) then
+    return 'changed';
+  end if;
   select delay_after_previous_minutes into v_delay from public.sequence_steps
   where sequence_id = e.sequence_id and step_index = p_step_index + 1;
   if found then
@@ -747,10 +808,10 @@ insert into routing_v2_seed (key, idx, day, slot_window, body) values
     ('said_theyd_call', 3, 5, 'afternoon', $t$Hi {{first_name | there}}, schedule's tight today, but I can hold {{slot_time}} this afternoon for a quick call about {{property_address}}. Should I hold it?$t$),
     ('said_theyd_call', 4, 7, 'any', $t$Hey, Mel here. Just had a {{slot_time}} cancel today. Want me to put you in that spot for a quick call?$t$),
     ('said_theyd_call', 5, 10, 'afternoon', $t$Hi {{first_name | there}}, we're booked most of today, but I saved one afternoon slot at {{slot_time}} for {{property_address}}. Want it?$t$),
-    ('book_appointment', 0, 1, 'any', $t$Hey, Mel again. Our calendar is pretty full, but I can get you in at {{slot_time}} today to talk about {{property_address}}. Want it?$t$),
-    ('book_appointment', 1, 2, 'afternoon', $t$Hi {{first_name | there}}, a {{slot_time}} just opened up this afternoon. Want me to hold it for a quick call about {{property_address}}?$t$),
+    ('book_appointment', 0, 1, 'any', $t$Hey, Mel here. Can we talk about {{property_address}} at {{slot_time}}?$t$),
+    ('book_appointment', 1, 2, 'afternoon', $t$Hi {{first_name | there}}, can I hold {{slot_time}} for a call about {{property_address}}?$t$),
     ('book_appointment', 2, 4, 'morning', $t$Hey, Mel here. We're booked solid today, but I can squeeze you in at {{slot_time}} this morning. Should I put you down?$t$),
-    ('book_appointment', 3, 5, 'afternoon', $t$Hi {{first_name | there}}, I've got one afternoon spot left today at {{slot_time}} for {{property_address}}. Want me to save it for you?$t$),
+    ('book_appointment', 3, 5, 'afternoon', $t$Hi {{first_name | there}}, want to talk about {{property_address}} at {{slot_time}}?$t$),
     ('book_appointment', 4, 7, 'any', $t$Hey, just had a {{slot_time}} cancel today. Want me to grab it for a quick call about {{property_address}}?$t$),
     ('book_appointment', 5, 8, 'any', $t$Hi {{first_name | there}}, last open spot I have today is {{slot_time}}. Want it for a quick call about {{property_address}}?$t$),
     ('listed_not_selling', 0, 2, null, $t$Hey, I just heard back from underwriting. It came in lower than you and I were hoping. I'm going to keep poking them to see if I can get them up on the offer.$t$);
@@ -1076,6 +1137,51 @@ $$;
 revoke all on function public.routing_v2_stop_disabled() from public, anon, authenticated;
 grant execute on function public.routing_v2_stop_disabled() to service_role;
 
+-- Durable claim reconcile (runs at the start of every tick): an open claim older than
+-- p_older_than whose step run reached the provider is closed with the truth from the step run
+-- (accepted -> sent, unknown -> unknown; anything else -> not_sent) and stamped reconciled_at.
+-- Covers a crash / RPC error between the provider call and the claim close.
+alter table public.routing_v2_drip_send_claims add column if not exists reconciled_at timestamptz;
+create or replace function public.routing_v2_reconcile_claims(p_older_than interval default interval '10 minutes')
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  r record;
+  v_status text;
+  v_sent integer := 0;
+  v_unknown integer := 0;
+  v_not_sent integer := 0;
+begin
+  for r in
+    select c.id, c.property_id, c.step_run_id, sr.attempt_outcome, sr.message_id
+    from public.routing_v2_drip_send_claims c
+    left join public.sequence_step_runs sr on sr.id = c.step_run_id
+    where c.status = 'open' and c.created_at < now() - p_older_than
+    order by c.property_id, c.created_at
+  loop
+    perform pg_advisory_xact_lock(hashtext('routing_v2:' || r.property_id::text));
+    v_status := case
+      when r.attempt_outcome = 'accepted' then 'sent'
+      when r.attempt_outcome = 'unknown' or r.message_id is not null then 'unknown'
+      else 'not_sent' end;
+    update public.routing_v2_drip_send_claims
+    set status = v_status, reconciled_at = now()
+    where id = r.id and status = 'open';
+    if found then
+      if v_status = 'sent' then v_sent := v_sent + 1;
+      elsif v_status = 'unknown' then v_unknown := v_unknown + 1;
+      else v_not_sent := v_not_sent + 1; end if;
+    end if;
+  end loop;
+  return jsonb_build_object('sent', v_sent, 'unknown', v_unknown, 'not_sent', v_not_sent);
+end;
+$$;
+revoke all on function public.routing_v2_reconcile_claims(interval) from public, anon, authenticated;
+grant execute on function public.routing_v2_reconcile_claims(interval) to service_role;
+
 -- ---------------------------------------------------------------------------
 -- 9. v2 drips are never a copy source (their {{slot_time}} has no value outside v2). Same body
 --    as 20261021200400 plus the source check.
@@ -1120,6 +1226,63 @@ end;
 $$;
 revoke all on function public.sequence_copy_steps(uuid, uuid) from public, anon, service_role;
 grant execute on function public.sequence_copy_steps(uuid, uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 10. Needs person: the routing v2 'timezone_unconfirmed' hold (seller time zone could not be
+--     confirmed for a booking text) lands in "Couldn't send". Same body as 20260929239000 with
+--     that one reason added.
+-- ---------------------------------------------------------------------------
+create or replace function public.sequence_needs_person(p_org uuid)
+returns table (property_id uuid, sequence_id uuid, bucket text, reason text, sequence_created_by uuid)
+language plpgsql security definer set search_path = '' set statement_timeout = '5s'
+as $$
+begin
+  if p_org is null or auth.uid() is null or not exists (
+    select 1 from public.memberships m where m.org_id = p_org and m.user_id = auth.uid()
+      and m.access_status = 'active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  return query
+  with latest_enrollments as (
+    select distinct on (e.property_id) e.*
+    from public.sequence_enrollments e
+    where e.org_id = p_org
+    order by e.property_id, e.enrolled_at desc, e.id desc
+  ), candidates as (
+    select e.property_id, e.sequence_id, 'finished_no_reply'::text as bucket,
+      'Finished, no reply'::text as reason, 1 as priority
+    from latest_enrollments e
+    where e.status = 'completed'
+      and not exists (select 1 from public.lead_events le where le.org_id = p_org
+        and le.property_id = e.property_id and le.event_type = 'sequence_canceled'
+        and le.source_id = e.id)
+      and not exists (select 1 from public.messages msg where msg.org_id = p_org
+        and msg.property_id = e.property_id and msg.direction = 'inbound'
+        and msg.created_at > coalesce((select max(coalesce(sent.sent_at, sr.run_at)) from public.sequence_step_runs sr
+          left join public.messages sent on sent.id = sr.message_id and sent.org_id = p_org
+          where sr.enrollment_id = e.id and sr.message_id is not null), e.enrolled_at))
+    union all
+    select e.property_id, e.sequence_id, 'couldnt_send'::text, 'Couldn''t send'::text, 2
+    from latest_enrollments e where e.status = 'paused'
+      and e.pause_reason in ('provider_failed','reconciliation_required','template_missing','step_misconfigured','no_phone','no_approved_sender','no approved sender for first-touch sequence send','timezone_unconfirmed')
+    union all
+    select p.id, null::uuid, 'needs_sequence'::text, 'Needs a sequence'::text, 3
+    from public.properties p where p.org_id = p_org and p.outreach_dispo = 'needs_sequence'
+      and p.deleted_at is null and p.is_dnc_locked is not true
+      and exists (select 1 from public.messages inbound where inbound.org_id = p_org
+        and inbound.property_id = p.id and inbound.direction = 'inbound')
+      and not exists (select 1 from latest_enrollments e
+        where e.property_id = p.id and e.status in ('active','paused'))
+  )
+  select distinct on (c.property_id) c.property_id, c.sequence_id, c.bucket, c.reason, s.created_by
+  from candidates c join public.properties p on p.id = c.property_id and p.org_id = p_org
+  left join public.sequences s on s.id = c.sequence_id and s.org_id = p_org
+  where p.deleted_at is null and p.status <> 'dead'
+  order by c.property_id, c.priority;
+end;
+$$;
+revoke all on function public.sequence_needs_person(uuid) from public, anon, service_role;
+grant execute on function public.sequence_needs_person(uuid) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 7. Inbound calls do not pause routing v2 drips (Jarrad: "Incoming calls should not pause

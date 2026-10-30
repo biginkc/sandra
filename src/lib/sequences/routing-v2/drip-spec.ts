@@ -18,6 +18,11 @@ export type RoutingV2SeedStep = { day: number; body: string; slotWindow: SlotWin
 
 /** Replaces the single clock time in an approved booking text with the slot token. */
 export function tokenizeSlotTime(approved: string): string {
+  // Approved texts written with the token already (A-005) are used verbatim.
+  if (approved.includes(SLOT_TIME_TOKEN)) {
+    if (approved.split(SLOT_TIME_TOKEN).length !== 2) throw new Error(`expected one slot token in: ${approved}`);
+    return approved;
+  }
   const matches = approved.match(/\b\d{1,2}:\d{2}\b/g) ?? [];
   if (matches.length !== 1) throw new Error(`expected exactly one clock time in: ${approved}`);
   return approved.replace(/\b\d{1,2}:\d{2}\b/, SLOT_TIME_TOKEN);

@@ -42,6 +42,7 @@ function fixture(opts: {
   advanceResult?: string;
   body?: string;
   state?: string | null;
+  fips?: string | null;
   advanceError?: string;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
@@ -80,7 +81,8 @@ function fixture(opts: {
       }
       if (table === "properties") {
         return ok({
-          id: "property-1", status: "new_lead", state: opts.state === undefined ? "MO" : opts.state, address: "4821 Oak Ridge Dr",
+          id: "property-1", status: "new_lead", state: opts.state === undefined ? "MO" : opts.state,
+          fips_code: opts.fips ?? null, county_id: null, address: "4821 Oak Ridge Dr",
           city: "Kansas City", zip: "64111", market: "KC", org_id: null, outreach_dispo: null, is_dnc_locked: false,
         });
       }
@@ -146,20 +148,24 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     const sendAt = vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!;
     expect(order("routing_v2_claim_drip_send")).toBeLessThan(sendAt);
     // After the accepted send the claim is consumed.
-    expect(order("routing_v2_mark_drip_claim_sent")).toBeGreaterThan(sendAt);
-    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: "sent" });
+    // R1: an accepted send closes its claim ONLY inside the advance RPC (same transaction).
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
+    expect(order("routing_v2_advance_after_send")).toBeGreaterThan(sendAt);
+    expect(rpc).toHaveBeenCalledWith("routing_v2_advance_after_send", { p_enrollment_id: "enrollment-1", p_step_index: 0, p_step_run_id: "run-1" });
   });
 
-  it("accepted send: the claim is consumed BEFORE the run write, even when the run write fails", async () => {
+  it("R1/R3: accepted send whose run write fails: no advance, held; the open claim is left for the durable reconcile", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     const { client, rpc, writes } = fixture({ runWriteFails: true });
     const outcome = await processEnrollmentTick(client, ENROLLMENT);
     expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("run write failed") });
-    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: "sent" });
-    const markAt = rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === "routing_v2_mark_drip_claim_sent")]!;
-    expect(markAt).toBeGreaterThan(vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!);
-    expect(writes.find((w) => w.table === "sequence_step_runs" && w.payload.attempt_outcome === "accepted")).toBeTruthy();
-    expect(markAt).toBeLessThan(writeOrder.accepted!);
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_advance_after_send", expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
+    expect(writeOrder.accepted).toBeTruthy();
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ pause_reason: "reconciliation_required" }),
+    }));
+    expect(sendSmsToContact).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -201,14 +207,24 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
       vi.mocked(sendSmsToContact).mockClear();
       const { client, rpc, writes } = fixture({ state });
       expect(await processEnrollmentTick(client, ENROLLMENT)).toEqual({
-        status: "paused", enrollmentId: "enrollment-1", reason: "routing_v2_unknown_timezone",
+        status: "paused", enrollmentId: "enrollment-1", reason: "routing_v2_timezone_unconfirmed",
       });
       expect(sendSmsToContact).not.toHaveBeenCalled();
       expect(rpc).not.toHaveBeenCalledWith("routing_v2_claim_drip_send", expect.anything());
       expect(writes).toContainEqual(expect.objectContaining({
-        table: "sequence_enrollments", payload: expect.objectContaining({ status: "paused", pause_reason: "step_misconfigured" }),
+        table: "sequence_enrollments", payload: expect.objectContaining({ status: "paused", pause_reason: "timezone_unconfirmed" }),
       }));
     }
+  });
+
+  it("Z: TX (split zone, counties not curated) holds; KS uses the county FIPS", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const tx = fixture({ state: "TX" });
+    expect(await processEnrollmentTick(tx.client, ENROLLMENT)).toMatchObject({ status: "paused", reason: "routing_v2_timezone_unconfirmed" });
+    vi.mocked(sendSmsToContact).mockClear();
+    const ks = fixture({ state: "KS", fips: "20199" }); // Wallace, Mountain: 12:07 MDT -> 2:15
+    expect((await processEnrollmentTick(ks.client, ENROLLMENT)).status).toBe("sent");
+    expect(vi.mocked(sendSmsToContact).mock.calls[0]![1].body).toContain(" at 2:15");
   });
 
   it("legacy drip whose body still has {{slot_time}} (e.g. copied before the guard): held, never sent blank", async () => {
@@ -221,8 +237,9 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     }));
   });
 
-  it("a claim-close failure after an accepted send is surfaced and held for reconciliation, not swallowed", async () => {
+  it("a claim-close failure (accepted, receipt not saved) is surfaced and held for reconciliation, not swallowed", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "db_error", messageId: "m1", externalId: "p1", deliveryOutcome: "accepted", error: "receipt write failed" } as never);
     const { client, writes } = fixture({ markError: "db down" });
     const outcome = await processEnrollmentTick(client, ENROLLMENT);
     expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("routing v2 claim close failed: db down") });
@@ -244,7 +261,7 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     // No separate TS completion write (that is what used to lose the chain).
     expect(writes.some((w) => w.table === "sequence_enrollments" && w.payload.status === "completed")).toBe(false);
     const order = (fn: string) => rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === fn)]!;
-    expect(order("routing_v2_advance_after_send")).toBeGreaterThan(order("routing_v2_mark_drip_claim_sent"));
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
     // Nothing in the tick enrolls a follow-on drip.
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_chain_after_completion", expect.anything());
     expect(writes.some((w) => w.table === "sequence_enrollments" && w.op === "insert")).toBe(false);
