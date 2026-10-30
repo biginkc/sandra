@@ -325,8 +325,12 @@ describe("sequence recovery security", () => {
     ["END", "END"],
     ["CANCEL", "CANCEL"],
     ["QUIT", "QUIT"],
-    ["REMOVE", "REMOVE"],
+    // REMOVE is not a carrier keyword: since Jarrad's 2026-10-08 ruling it is
+    // held for a person (see stop-signals.test.ts / inbound-retry.test.ts).
     ["mixed-case whitespace", "  sToP  "],
+    // Real 2026-10-28 bodies that were held instead of suppressed.
+    ["trailing exclamation marks", "Stop!!!!!!!"],
+    ["trailing zero-width space", "STOP\u200B"],
   ] as const)(
     "applies supported STOP keyword %s once across same-phone contacts and ignores its replay",
     async (_label, keyword) => {

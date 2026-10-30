@@ -1,0 +1,57 @@
+name: SMS opt-out integration
+
+# The STOP / opt-out integration suite (webhook STOP keywords, same-phone
+# suppression, drip blocking) lives in the disposable canary suite, which
+# otherwise runs only by hand. Run it on every PR to main that
+# touches the inbound or outbound SMS paths, so a matcher regression like the
+# 2026-10-28 "STOP!!!!" miss cannot merge unseen. Browser acceptance is left
+# to disposable-canary-validation.yml.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/lib/messaging/**"
+      - "src/lib/sequences/**"
+      - "src/lib/ai-responder/send-gate.ts"
+      - "src/lib/ai-responder/hostile.ts"
+      - "src/app/api/webhooks/*/sms/**"
+      - "src/app/api/cron/sequence-tick/**"
+      - "supabase/migrations/**"
+      - "scripts/run-disposable-canaries.mjs"
+      - "vitest.disposable-canary.config.ts"
+      - "tests/disposable-canary/**"
+      - ".github/workflows/sms-opt-out.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: sms-opt-out-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  opt-out-integration:
+    name: STOP and opt-out suites on a disposable database
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: npm ci
+      - name: Run the STOP keyword / same-phone suppression integration suite
+        env:
+          # Only the opt-out suite: other canary files carry stale pre-2026-10-08
+          # expectations (auto-DNC on phrases) and fail on main; they need their own fix.
+          SANDRA_CANARY_VITEST_FILES: src/lib/sequences/recovery-security.integration.test.ts
+        run: node scripts/run-disposable-canaries.mjs

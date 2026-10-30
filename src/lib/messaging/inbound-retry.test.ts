@@ -721,13 +721,17 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
       }
     };
 
-    it.each(["STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit"])("bare %j suppresses the number", async (body) => {
+    it.each([
+      "STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit",
+      // Real 2026-10-28 bodies that were wrongly held instead of suppressed.
+      "STOP!!!!", "Stop!!!!!!!", "STOP.", "STOP\n", "\u200BSTOP", "STOP\u00A0",
+    ])("bare %j suppresses the number", async (body) => {
       await withBody(body);
       expect(mocks.optOut).toHaveBeenCalledTimes(1);
       expect(mocks.optOut).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ surface: "stop" }));
     });
 
-    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot"])(
+    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot", "REMOVE", "OPTOUT "])(
       "phrase %j does NOT suppress: it is held for a person, nothing dispatched",
       async (body) => {
         await withBody(body);

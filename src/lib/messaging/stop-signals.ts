@@ -28,5 +28,22 @@ export function matchesDncKeyword(body: string) {
  * automatically; every phrase match goes to a person.
  */
 export function isCarrierStopKeyword(body: string) {
-  return /^(stop|stopall|unsubscribe|cancel|end|quit)$/i.test(body.trim());
+  return /^(stop|stopall|unsubscribe|cancel|end|quit)$/i.test(
+    normalizeCarrierKeywordBody(body),
+  );
+}
+
+/**
+ * The keyword list above is unchanged; this only decides what counts as "the
+ * whole message". Real STOPs arrive as "STOP!!!!", "Stop.", "STOP\n" or with a
+ * zero-width / non-breaking character glued on, and an exact-match test sent
+ * them to the phrase hold instead of suppressing the number (2026-10-28
+ * incident). Invisible format characters are dropped and punctuation or
+ * whitespace at either END is trimmed; punctuation inside the message is kept,
+ * so "stop by" or "STOP texting me" are still not bare keywords.
+ */
+function normalizeCarrierKeywordBody(body: string) {
+  return body
+    .replace(/\p{Cf}/gu, "")
+    .replace(/^[\s\p{P}]+|[\s\p{P}]+$/gu, "");
 }
