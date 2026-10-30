@@ -114,6 +114,8 @@ export type RoutingV2PhoneActionResult =
   | { outcome: "flag_off" }
   | { outcome: "not_applicable"; reason: string }
   | { outcome: "superseded"; reason: string }
+  /** The phone is on the global DNC registry: nothing written, nothing sent. */
+  | { outcome: "suppressed"; reason: string }
   /** The inbound is under 30 s old (settle window): nothing written; retry after the delay. */
   | { outcome: "not_settled"; retryable: true; retryAfterSeconds: number }
   /** The atomic apply failed and rolled back: nothing was written; safe to retry. */
@@ -136,6 +138,17 @@ type Loose = {
 async function stillAllowed(supabase: SupabaseClient<Database>, orgId: string, propertyIds: readonly string[]): Promise<boolean> {
   try {
     return v2SliceAllowedForAll(await readRoutingV2Flags(supabase, orgId), "wrong_number_all", propertyIds);
+  } catch {
+    return false;
+  }
+}
+
+/** Provider-boundary gate: flags + canary, AND the DB says the phone is not suppressed / not on the global DNC registry. */
+async function sendStillAllowed(supabase: SupabaseClient<Database>, orgId: string, propertyIds: readonly string[], actionId: string): Promise<boolean> {
+  if (!(await stillAllowed(supabase, orgId, propertyIds))) return false;
+  try {
+    const { data, error } = await (supabase as unknown as Loose).rpc("fn_routing_v2_phone_action_send_allowed", { p_action_id: actionId });
+    return !error && data === true;
   } catch {
     return false;
   }
@@ -197,7 +210,7 @@ export async function settleRoutingV2PhoneActionReply(
       templateKey: WRONG_NUMBER_REPLY_KEY,
       requiredBody: WRONG_NUMBER_REPLY_BODY,
       sendId: args.sendId,
-      stillAllowed: () => stillAllowed(supabase, args.orgId, args.propertyIds),
+      stillAllowed: () => sendStillAllowed(supabase, args.orgId, args.propertyIds, args.actionId),
     });
   } catch (e) {
     reportError(e, { tags: { surface: "routing_v2_phone_action_reply" }, extra: { actionId: args.actionId } });
@@ -255,6 +268,7 @@ export async function runRoutingV2PhoneAction(
     retryAfterSeconds?: number;
   };
   if (a.status === "superseded") return { outcome: "superseded", reason: a.reason ?? "superseded" };
+  if (a.status === "suppressed") return { outcome: "suppressed", reason: a.reason ?? "suppressed" };
   if (a.status === "not_settled") return { outcome: "not_settled", retryable: true, retryAfterSeconds: a.retryAfterSeconds ?? 30 };
   if (a.status === "not_applicable") return { outcome: "not_applicable", reason: a.reason ?? "not_applicable" };
   if ((a.status !== "applied" && a.status !== "replayed") || !a.actionId || !a.sendId || !a.replyState) {

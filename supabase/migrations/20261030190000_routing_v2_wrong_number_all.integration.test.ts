@@ -186,6 +186,19 @@ const toPending = async (actionId: string) => {
 /** Age a `sending` row past the 120 s provider-timeout lease (test clock shortcut). */
 const expireSendLease = (actionId: string) =>
   db.query(`update public.routing_v2_phone_actions set sending_at = clock_timestamp() - interval '121 seconds' where id = $1`, [actionId]);
+const registerGlobalDnc = async (phone = X) => {
+  await db.query("savepoint reg");
+  await db.query("set local session_replication_role = replica");
+  await db.query(
+    `insert into public.global_phone_dnc_registry (org_id, phone_e164, first_consumer_id, first_source_event_id, first_evidence_sha256)
+     values ($1, $2, gen_random_uuid(), 'prg-test', repeat('a', 64))`,
+    [orgId, phone],
+  );
+  await db.query("set local session_replication_role = origin");
+  await db.query("release savepoint reg");
+};
+const sendAllowed = (actionId: string) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_send_allowed($1) as ok`, [actionId])).rows[0].ok);
 const recover = (actionId: string) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_recover_reply($1) as r`, [actionId])).rows[0].r);
 const undo = (userId: string, actionId: string) =>
@@ -555,6 +568,58 @@ describe("B. reply after commit, keyed by the send id", () => {
     expect(await feed(0)).toContain(r.actionId); // pending
     await reply(r.actionId, r.sendId, "skipped");
     expect(await feed(0)).not.toContain(r.actionId);
+  });
+});
+
+describe("global DNC registry (registry-only phone)", () => {
+  it("A: a phone on the global DNC registry → suppressed, nothing written", async () => {
+    await setFlags(ON);
+    await registerGlobalDnc();
+    const before = await everything();
+    expect(await applyAll()).toEqual({ status: "suppressed", reason: "global_dnc_registry" });
+    expect(await everything()).toEqual(before);
+  });
+
+  it("undo: listed now → restores nothing and resumes nothing (audited)", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await registerGlobalDnc();
+    const snap = await snapshot();
+    const u = await undo(ownerId, r.actionId);
+    expect(u).toMatchObject({ status: "partial", restored: [], resumed: 0 });
+    expect(u.skipped.length).toBeGreaterThan(0);
+    expect(u.skipped.every((x: { reason: string }) => x.reason === "global_dnc_registry")).toBe(true);
+    expect(await snapshot()).toEqual(snap);
+    expect((await enrollment(ids.e2)).status).toBe("paused");
+  });
+
+  it("send gate: listed after A → the fence release refuses, pending -> sending refuses, and the provider-boundary check is false", async () => {
+    await setFlags(ON);
+    // Fence release refuses.
+    const r = await applyAll();
+    await passFence(r.actionId);
+    await registerGlobalDnc();
+    expect(await releaseFence(r.actionId)).toMatchObject({ replyState: "skipped", reason: "suppressed_at_send" });
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false, replyState: "skipped" });
+    expect(await sendAllowed(r.actionId)).toBe(false);
+  });
+
+  it("send gate: listed after the release → pending -> sending refuses (skipped)", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await registerGlobalDnc();
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false, replyState: "skipped", reason: "suppressed_at_send" });
+  });
+
+  it("provider-boundary check: true while sending and clean; false once listed", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    expect(await sendAllowed(r.actionId)).toBe(true);
+    await registerGlobalDnc();
+    expect(await sendAllowed(r.actionId)).toBe(false);
   });
 });
 
@@ -989,8 +1054,7 @@ describe("B0. post-commit fence and undo/send serialization", () => {
         expect(await settledWithin(a, 400)).toBe("pending");
         await c2.query("commit");
         const r = (await a).rows[0].r; // no deadlock, no error
-        expect(["not_applicable", "applied"]).toContain(r.status);
-        expect(r.status === "applied").toBe(false); // the DNC'd contact is never closed over
+        expect(r).toEqual({ status: "suppressed", reason: "global_dnc_registry" }); // sees the committed DNC, writes nothing
         expect(await dncLanded(sd)).toBe(true);
       } finally {
         await c1.end();
@@ -1175,6 +1239,7 @@ describe("self-sweep", () => {
       "public.fn_routing_v2_phone_action_recover_reply(uuid)",
       "public.fn_routing_v2_phone_action_unsettled_replies(integer, integer)",
       "public.fn_routing_v2_phone_action_release_fence(uuid)",
+      "public.fn_routing_v2_phone_action_send_allowed(uuid)",
     ];
     for (const fn of serviceOnly) {
       expect(await can("service_role", fn), fn).toBe(true);

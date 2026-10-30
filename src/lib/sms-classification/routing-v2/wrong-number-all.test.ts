@@ -86,6 +86,7 @@ function fakeDb(opts: { flags?: unknown; flagSeq?: unknown[]; configError?: bool
       if (ok) state = to;
       return { data: { ok, replyState: state } };
     },
+    fn_routing_v2_phone_action_send_allowed: () => ({ data: true }),
     ...opts.rpc,
   };
   const db = {
@@ -115,7 +116,8 @@ function fakeDb(opts: { flags?: unknown; flagSeq?: unknown[]; configError?: bool
       return { data: r.data ?? null, error: r.error ?? null };
     },
   };
-  const rpcs = () => calls.filter((c) => c.kind === "rpc").map((c) => (c.fn === "fn_routing_v2_phone_action_reply" ? `reply:${c.args?.p_to}` : c.fn));
+  // The provider-boundary gate (send_allowed) is asserted on its own where it matters.
+  const rpcs = () => calls.filter((c) => c.kind === "rpc" && c.fn !== "fn_routing_v2_phone_action_send_allowed").map((c) => (c.fn === "fn_routing_v2_phone_action_reply" ? `reply:${c.args?.p_to}` : c.fn));
   return { db: db as never, calls, rpcs, setState: (s: string) => (state = s) };
 }
 
@@ -177,6 +179,7 @@ describe("runRoutingV2PhoneAction", () => {
     });
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0][0]).toMatchObject({ templateKey: "wrong_number", requiredBody: APPROVED_REPLY_TEXTS.wrong_number, sendId: SEND });
+    expect(calls.filter((c) => c.fn === "fn_routing_v2_phone_action_send_allowed")).toHaveLength(1); // provider-boundary gate consulted
     expect(calls.find((c) => c.args?.p_to === "sent")?.args).toMatchObject({ p_action_id: "a1", p_send_id: SEND, p_message_id: "out-1" });
   });
 
@@ -237,6 +240,25 @@ describe("runRoutingV2PhoneAction", () => {
       expect(send).not.toHaveBeenCalled();
       expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all"]);
     }
+  });
+
+  it("global DNC registry: A says suppressed → nothing sent", async () => {
+    const { db, rpcs } = fakeDb({ flags: ON, rpc: { fn_routing_v2_phone_action_apply_all: () => ({ data: { status: "suppressed", reason: "global_dnc_registry" } }) } });
+    const { d, send } = deps();
+    expect(await runRoutingV2PhoneAction(db, input(), d)).toEqual({ outcome: "suppressed", reason: "global_dnc_registry" });
+    expect(send).not.toHaveBeenCalled();
+    expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all"]);
+  });
+
+  it("provider-boundary gate refuses when the DB says the phone is suppressed / on the global DNC registry", async () => {
+    const { db, calls, rpcs } = fakeDb({
+      flags: ON,
+      rpc: { fn_routing_v2_phone_action_apply_all: applied(), fn_routing_v2_phone_action_send_allowed: () => ({ data: false }) },
+    });
+    const { d } = deps();
+    expect(await runRoutingV2PhoneAction(db, input(), d)).toMatchObject({ outcome: "applied", replyState: "failed" });
+    expect(calls.find((c) => c.fn === "fn_routing_v2_phone_action_send_allowed")?.args).toEqual({ p_action_id: "a1" });
+    expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all", "reply:sending", "reply:failed"]);
   });
 
   it("settle window: A says not_settled → retryable, nothing sent", async () => {

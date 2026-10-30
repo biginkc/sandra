@@ -404,6 +404,13 @@ begin
   if found then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'phone_suppressed');
   end if;
+  -- Global phone DNC registry (append-only; inserted only under the EXCLUSIVE global-DNC
+  -- barrier, so it cannot change while A holds the shared one). Read directly, as the other
+  -- registry consumers do (norma eligibility, voicemail drop): contact/property DNC flags and
+  -- sms_phone_suppressions do not cover a registry-only phone.
+  if exists (select 1 from public.global_phone_dnc_registry g where g.org_id = v_message.org_id and g.phone_e164 = p_phone) then
+    return jsonb_build_object('status', 'suppressed', 'reason', 'global_dnc_registry');
+  end if;
   foreach v_id in array v_ids loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_id::text));
   end loop;
@@ -588,6 +595,16 @@ begin
   -- interleave with an undo of the same action.
   perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
   select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  -- Final DB send gate: a suppressed or globally-DNC'd phone never starts its reply.
+  if p_to = 'sending' and v.send_id = p_send_id and v.reply_state = 'pending' and (
+       exists (select 1 from public.global_phone_dnc_registry g where g.org_id = v.org_id and g.phone_e164 = v.phone_e164)
+    or exists (select 1 from public.sms_phone_suppressions sp where sp.org_id = v.org_id and sp.channel = 'sms' and sp.phone_e164 = v.phone_e164)
+  ) then
+    update public.routing_v2_phone_actions
+    set reply_state = 'skipped', reply_reason = 'suppressed_at_send', reply_updated_at = now()
+    where id = v.id;
+    return jsonb_build_object('ok', false, 'replyState', 'skipped', 'sendId', v.send_id, 'reason', 'suppressed_at_send');
+  end if;
   if v.send_id = p_send_id and (
        -- An undone action never starts its reply.
        (v.reply_state = 'pending' and p_to = 'sending' and v.status = 'applied')
@@ -608,6 +625,25 @@ end;
 $$;
 revoke all on function public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text) from public, anon, authenticated;
 grant execute on function public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text) to service_role;
+
+-- Provider-boundary send check (read-only): the action is still applied with its reply in
+-- flight, and the phone is neither in sms_phone_suppressions nor in the global DNC registry.
+create or replace function public.fn_routing_v2_phone_action_send_allowed(p_action_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select coalesce((
+    select a.status = 'applied' and a.reply_state = 'sending'
+       and not exists (select 1 from public.global_phone_dnc_registry g where g.org_id = a.org_id and g.phone_e164 = a.phone_e164)
+       and not exists (select 1 from public.sms_phone_suppressions sp where sp.org_id = a.org_id and sp.channel = 'sms' and sp.phone_e164 = a.phone_e164)
+    from public.routing_v2_phone_actions a where a.id = p_action_id
+  ), false);
+$$;
+revoke all on function public.fn_routing_v2_phone_action_send_allowed(uuid) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_send_allowed(uuid) to service_role;
 
 -- B recovery: only after the 120 s provider-timeout lease; a reply left in `sending` is settled ONLY by its send id (the outbound
 -- message's idempotency_key, on the action's own source property). Never re-sent.
@@ -709,6 +745,7 @@ declare
   v_found boolean;
   v_reason text;
   v_phone_suppressed boolean;
+  v_registry boolean;
   v_restored jsonb := '[]'::jsonb;
   v_changed jsonb := '[]'::jsonb;
   v_skipped jsonb := '[]'::jsonb;
@@ -745,6 +782,7 @@ begin
     return jsonb_build_object('status', 'busy', 'reason', 'suppression_lock', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
       'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
   end;
+  v_registry := exists (select 1 from public.global_phone_dnc_registry g where g.org_id = v_action.org_id and g.phone_e164 = v_action.phone_e164);
   v_phone_suppressed := exists (
     select 1 from public.sms_phone_suppressions sp
     where sp.org_id = v_action.org_id and sp.channel = 'sms' and sp.phone_e164 = v_action.phone_e164
@@ -768,6 +806,7 @@ begin
 
     v_reason := case
       when not v_found then 'property_missing'
+      when v_registry then 'global_dnc_registry'
       when v_phone_suppressed then 'phone_suppressed'
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo
         or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
@@ -945,6 +984,14 @@ begin
     and (m.created_at > v_trigger_at or m.id > v.source_inbound_message_id)
   order by m.created_at
   limit 1;
+
+  if exists (select 1 from public.global_phone_dnc_registry g where g.org_id = v.org_id and g.phone_e164 = v.phone_e164)
+     or exists (select 1 from public.sms_phone_suppressions sp where sp.org_id = v.org_id and sp.channel = 'sms' and sp.phone_e164 = v.phone_e164) then
+    update public.routing_v2_phone_actions
+    set reply_state = 'skipped', reply_reason = 'suppressed_at_send', reply_updated_at = now()
+    where id = v.id;
+    return jsonb_build_object('replyState', 'skipped', 'sendId', v.send_id, 'reason', 'suppressed_at_send');
+  end if;
 
   if v_newer is null then
     update public.routing_v2_phone_actions
