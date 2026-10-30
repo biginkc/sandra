@@ -614,8 +614,9 @@ describe("B. reply after commit, keyed by the send id", () => {
     expect(await feed(0)).not.toContain(r.actionId); // awaiting_fence, fence not passed yet
     await passFence(r.actionId);
     expect(await feed(0)).toContain(r.actionId);
-    expect(await feed(3600)).not.toContain(r.actionId);
+    expect(await feed(3600)).toContain(r.actionId); // a fenced reply is due at fence_at, whatever the age filter
     await releaseFence(r.actionId);
+    expect(await feed(3600)).not.toContain(r.actionId); // pending: the age filter applies again
     expect(await feed(0)).toContain(r.actionId); // pending
     await reply(r.actionId, r.sendId, "skipped");
     expect(await feed(0)).not.toContain(r.actionId);
@@ -1312,6 +1313,26 @@ describe("B0. post-commit fence and undo/send serialization", () => {
     const audit = (await db.query(`select payload from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_superseded_before_send'`, [orgId])).rows;
     expect(audit).toHaveLength(1);
     expect(audit[0].payload).toMatchObject({ phone_action_id: r.actionId, newer_inbound_message_id: late, hold_reason: "nine_needs_person" });
+  });
+
+  it("superseded on a DNC-locked source: settles (reply skipped, audited) without writing the hold", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    // A manual contact do_not_contact locks the property after A.
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.properties set is_dnc_locked = true where id = $1`, [ids.p1]);
+    await db.query("set local session_replication_role = origin");
+    const late = await insertInbound(ids.p2, "clock_timestamp()", "who is this");
+    const t = await reply(r.actionId, r.sendId, "sending"); // must not raise
+    expect(t).toMatchObject({ ok: false, replyState: "skipped", reason: "superseded_before_send", newerInboundMessageId: late, holdSet: false });
+    const p1 = (await db.query(`select needs_human_attention from public.properties where id = $1`, [ids.p1])).rows[0];
+    expect(p1.needs_human_attention).toBe(false);
+    const audit = (await db.query(`select payload from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_superseded_before_send'`, [orgId])).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].payload.hold_set).toBe(false);
+    const feed = (await asService(async () => (await db.query(`select action_id from public.fn_routing_v2_phone_action_unsettled_replies(0, 50)`)).rows)).map((x) => x.action_id);
+    expect(feed).not.toContain(r.actionId); // settled, never retried
   });
 
   it("provider-boundary check is false once a newer inbound from the phone exists", async () => {

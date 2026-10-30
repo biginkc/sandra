@@ -311,7 +311,10 @@ begin
   update public.properties
   set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person',
       last_ai_escalation_at = now(), updated_at = now()
-  where id = v.source_property_id and org_id = v.org_id and needs_human_attention = false;
+  -- A DNC-locked property (e.g. a manual contact do_not_contact) is never written (the DNC
+  -- lock guard would reject it and the settler would retry forever): the reply is still
+  -- skipped and audited, just without the hold.
+  where id = v.source_property_id and org_id = v.org_id and needs_human_attention = false and is_dnc_locked = false;
   v_held := found;
   insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
   values (v.org_id, v.source_property_id, 'system', 'routing_v2_phone_action_' || p_event,
@@ -909,7 +912,9 @@ as $$
     and (a.status = 'applied' or a.reply_state = 'sending')
     and (a.reply_state <> 'awaiting_fence' or a.fence_at <= now())
     and (a.reply_state <> 'sending' or a.sending_at <= now() - interval '120 seconds')
-    and coalesce(a.reply_updated_at, a.created_at) <= now() - make_interval(secs => greatest(coalesce(p_older_than_seconds, 120), 0))
+    -- A fenced reply's own timer is fence_at (applied + 10 s); the age filter applies to the rest.
+    and (a.reply_state = 'awaiting_fence'
+         or coalesce(a.reply_updated_at, a.created_at) <= now() - make_interval(secs => greatest(coalesce(p_older_than_seconds, 120), 0)))
   order by a.created_at
   limit greatest(coalesce(p_limit, 25), 1);
 $$;
@@ -1000,6 +1005,7 @@ begin
       when v_registry then 'global_dnc_registry'
       when v_phone_suppressed then 'phone_suppressed'
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo
+        -- A never changes follow_up_at; this catches a person setting one since (never overwrite it).
         or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
         or v_cur.decision_context_revision is distinct from v_row.recorded_revision then 'state_changed'
       -- Held now (a person must look): leave it alone. Undo never reads or writes the hold
