@@ -63,6 +63,17 @@ begin
   end if;
 end $$;
 
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'sequence_enrollments_ended_reason_check') then
+    alter table public.sequence_enrollments add constraint sequence_enrollments_ended_reason_check
+      check (ended_reason is null or ended_reason in ('rerouted','flag_off','chained'));
+  end if;
+end $$;
+-- retired_by_inbound_id / routing_v2_inbound_id are audit pointers with deliberately NO FK:
+-- an ON DELETE SET NULL from messages would UPDATE a DNC-locked enrollment, which the lock
+-- trigger forbids (only the compliance opt-out may change such a row).
+
 -- At most one ACTIVE v2 enrollment per property (legacy rows are out of scope so the index
 -- can never fail to build on existing data).
 create unique index if not exists idx_enrollments_routing_v2_one_active
@@ -74,14 +85,14 @@ create unique index if not exists idx_enrollments_routing_v2_one_active
 -- ---------------------------------------------------------------------------
 create table if not exists public.routing_v2_reply_transitions (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null,
-  property_id uuid not null,
-  inbound_message_id uuid not null unique,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  property_id uuid not null references public.properties(id) on delete cascade,
+  inbound_message_id uuid not null unique references public.messages(id) on delete cascade,
   inbound_at timestamptz not null,
   transition_seq bigint not null,
   outcome text not null check (outcome in ('applied','replies_only','superseded','takeover_blocked','flag_off','suppressed','no_sequence')),
   decision jsonb not null,
-  new_enrollment_id uuid,
+  new_enrollment_id uuid references public.sequence_enrollments(id) on delete set null,
   retired_enrollment_ids uuid[] not null default '{}',
   cancelled_outbox_ids uuid[] not null default '{}',
   cancelled_drip_claim_ids uuid[] not null default '{}',
@@ -92,9 +103,9 @@ create index if not exists routing_v2_reply_transitions_property_idx
 
 create table if not exists public.routing_v2_outbox (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null,
-  property_id uuid not null,
-  inbound_message_id uuid not null,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  property_id uuid not null references public.properties(id) on delete cascade,
+  inbound_message_id uuid not null references public.messages(id) on delete cascade,
   transition_seq bigint not null,
   kind text not null check (kind in ('reply','alert')),
   -- Which engine queued it and which routing_v2_flags slice gates it; both are re-checked at
@@ -118,10 +129,10 @@ create index if not exists routing_v2_outbox_pending_idx
 -- re-locks the enrollment and requires status = 'active') refuses the send.
 create table if not exists public.routing_v2_drip_send_claims (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null,
-  property_id uuid not null,
-  enrollment_id uuid not null,
-  step_run_id uuid not null unique,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  property_id uuid not null references public.properties(id) on delete cascade,
+  enrollment_id uuid not null references public.sequence_enrollments(id) on delete cascade,
+  step_run_id uuid not null unique references public.sequence_step_runs(id) on delete cascade,
   status text not null default 'open' check (status in ('open','cancelled','sent','unknown','not_sent')),
   cancel_reason text,
   cancelled_at timestamptz,
@@ -129,6 +140,21 @@ create table if not exists public.routing_v2_drip_send_claims (
 );
 create index if not exists routing_v2_drip_send_claims_open_idx
   on public.routing_v2_drip_send_claims (property_id) where status = 'open';
+-- Self-sweep: indexes for the reconcile scan (open claims by age) and every FK column.
+create index if not exists routing_v2_drip_send_claims_reconcile_idx
+  on public.routing_v2_drip_send_claims (created_at) where status = 'open';
+create index if not exists routing_v2_drip_send_claims_enrollment_idx
+  on public.routing_v2_drip_send_claims (enrollment_id);
+create index if not exists routing_v2_drip_send_claims_org_idx on public.routing_v2_drip_send_claims (org_id);
+create index if not exists routing_v2_outbox_org_idx on public.routing_v2_outbox (org_id);
+create index if not exists routing_v2_outbox_inbound_idx on public.routing_v2_outbox (inbound_message_id);
+create index if not exists routing_v2_reply_transitions_org_idx on public.routing_v2_reply_transitions (org_id);
+create index if not exists routing_v2_reply_transitions_new_enrollment_idx
+  on public.routing_v2_reply_transitions (new_enrollment_id) where new_enrollment_id is not null;
+-- stop_disabled / send checks scan live v2 enrollments.
+create index if not exists idx_enrollments_routing_v2_live
+  on public.sequence_enrollments (property_id)
+  where routing_v2_engine = 'v2' and status in ('active','paused');
 
 alter table public.routing_v2_reply_transitions enable row level security;
 alter table public.routing_v2_outbox enable row level security;
@@ -1041,6 +1067,7 @@ begin
 end;
 $$;
 
+revoke all on function public.routing_v2_reject_drip_edit() from public, anon, authenticated;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 create trigger routing_v2_reject_drip_edit before insert or update or delete on public.sequences
   for each row execute function public.routing_v2_reject_drip_edit();
@@ -1090,6 +1117,7 @@ begin
     raise exception 'routing_v2_enroll must not be owned by an API role';
   end if;
 end $$;
+revoke all on function public.routing_v2_reject_foreign_enrollment() from public, anon, authenticated;
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
 create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id, routing_v2_engine, routing_v2_inbound_id on public.sequence_enrollments
   for each row execute function public.routing_v2_reject_foreign_enrollment();

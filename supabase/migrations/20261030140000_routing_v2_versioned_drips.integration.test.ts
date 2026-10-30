@@ -753,23 +753,75 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select count(*)::int as n from public.sequence_steps where sequence_id = $1`, [target])).rows[0].n).toBe(0);
   });
 
-  it("S6: deleting an organization cascades through its v2 drips", async () => {
+  it("S6/R8: deleting an organization removes every routing v2 row (no manual v2 cleanup)", async () => {
     await db.query("set local routing_v2.allow_drip_edit = ''");
-    expect((await db.query(`select count(*)::int as n from public.sequences where org_id = $1 and routing_v2_key is not null`, [ctx.org])).rows[0].n).toBe(5);
-    await db.query("set local session_replication_role = replica");
-    for (const t of ["sequence_enrollments", "messages", "message_threads", "consent_events", "sms_phone_suppressions",
-      "ai_responder_configs", "routing_v2_outbox", "routing_v2_reply_transitions", "properties", "contacts"]) {
-      await db.query(`delete from public.${t} where org_id = $1`, [ctx.org]);
-    }
-    await db.query("set local session_replication_role = origin");
+    // Seed a row in EVERY v2 table: transitions, outbox, claims, v2 enrollment (+ step run),
+    // v2 sequences and steps.
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, {
+      sequence_key: "price_too_high", outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }],
+    });
+    await acceptedClaim(db, r.new_enrollment_id);
+    const counts = async () => (await db.query(
+      `select
+         (select count(*)::int from public.routing_v2_reply_transitions where org_id = $1) as transitions,
+         (select count(*)::int from public.routing_v2_outbox where org_id = $1) as outbox,
+         (select count(*)::int from public.routing_v2_drip_send_claims where org_id = $1) as claims,
+         (select count(*)::int from public.sequence_enrollments where org_id = $1 and routing_v2_engine = 'v2') as enrollments,
+         (select count(*)::int from public.sequence_step_runs sr join public.sequence_enrollments e on e.id = sr.enrollment_id where e.org_id = $1) as step_runs,
+         (select count(*)::int from public.sequences where org_id = $1 and routing_v2_key is not null) as sequences,
+         (select count(*)::int from public.sequence_steps st join public.sequences s2 on s2.id = st.sequence_id where s2.org_id = $1 and s2.routing_v2_key is not null) as steps`,
+      [ctx.org])).rows[0];
+    const before = await counts();
+    for (const [k, v] of Object.entries(before)) expect(v, k).toBeGreaterThan(0);
+    // Direct delete of a v2 drip is still refused while the org exists.
     await db.query("savepoint o");
-    // Direct delete of a v2 drip is still refused while the org exists...
     const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key is not null limit 1`, [ctx.org])).rows[0].id;
     await expect(db.query(`delete from public.sequences where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
     await db.query("rollback to savepoint o");
-    // ...but the org delete cascade goes through (the parent org row is already gone).
+    // Only the pre-existing NON-v2 parents that block an org delete (no-action FKs) are removed,
+    // with cascades off so nothing v2 is touched by them.
+    await db.query("set local session_replication_role = replica");
+    for (const t of ["messages", "message_threads", "consent_events", "sms_phone_suppressions", "ai_responder_configs", "properties", "contacts"]) {
+      await db.query(`delete from public.${t} where org_id = $1`, [ctx.org]);
+    }
+    await db.query("set local session_replication_role = origin");
+    expect(await counts()).toEqual(before); // every v2 row still there
     await db.query(`delete from public.organizations where id = $1`, [ctx.org]);
-    expect((await db.query(`select count(*)::int as n from public.sequences where org_id = $1`, [ctx.org])).rows[0].n).toBe(0);
+    expect(await counts()).toEqual({ transitions: 0, outbox: 0, claims: 0, enrollments: 0, step_runs: 0, sequences: 0, steps: 0 });
+  });
+
+  it("R8 self-sweep: every routing v2 table has its FKs with the parent's cascade convention", async () => {
+    const fks = (await db.query(
+      `select conrelid::regclass::text as tbl, a.attname as col, confrelid::regclass::text as parent, confdeltype as del
+       from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+       where c.contype = 'f' and conrelid::regclass::text in ('routing_v2_reply_transitions','routing_v2_outbox','routing_v2_drip_send_claims')
+       order by 1, 2`)).rows;
+    expect(fks).toEqual([
+      { tbl: "routing_v2_drip_send_claims", col: "enrollment_id", parent: "sequence_enrollments", del: "c" },
+      { tbl: "routing_v2_drip_send_claims", col: "org_id", parent: "organizations", del: "c" },
+      { tbl: "routing_v2_drip_send_claims", col: "property_id", parent: "properties", del: "c" },
+      { tbl: "routing_v2_drip_send_claims", col: "step_run_id", parent: "sequence_step_runs", del: "c" },
+      { tbl: "routing_v2_outbox", col: "inbound_message_id", parent: "messages", del: "c" },
+      { tbl: "routing_v2_outbox", col: "org_id", parent: "organizations", del: "c" },
+      { tbl: "routing_v2_outbox", col: "property_id", parent: "properties", del: "c" },
+      { tbl: "routing_v2_reply_transitions", col: "inbound_message_id", parent: "messages", del: "c" },
+      { tbl: "routing_v2_reply_transitions", col: "new_enrollment_id", parent: "sequence_enrollments", del: "n" },
+      { tbl: "routing_v2_reply_transitions", col: "org_id", parent: "organizations", del: "c" },
+      { tbl: "routing_v2_reply_transitions", col: "property_id", parent: "properties", del: "c" },
+    ]);
+    // RLS on, and no API role can read or write these tables directly.
+    const rls = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_reply_transitions','routing_v2_outbox','routing_v2_drip_send_claims') order by 1`)).rows;
+    expect(rls.every((x) => x.relrowsecurity)).toBe(true);
+    const grants = (await db.query(
+      `select table_name, grantee from information_schema.role_table_grants
+       where table_name in ('routing_v2_reply_transitions','routing_v2_outbox','routing_v2_drip_send_claims')
+         and grantee in ('anon','authenticated','public') order by 1`)).rows;
+    expect(grants).toEqual([]);
+    // ended_reason only takes the known values.
+    await db.query("savepoint er");
+    await expect(db.query(`update public.sequence_enrollments set ended_reason = 'bogus' where id = $1`, [ctx.legacyEnrollment])).rejects.toThrow(/ended_reason_check/);
+    await db.query("rollback to savepoint er");
   });
 
   it("R2: an inbound newer than the claim (not classified, no transition yet) makes the final advance a no-op", async () => {

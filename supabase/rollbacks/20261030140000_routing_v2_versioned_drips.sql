@@ -452,6 +452,8 @@ drop table if exists public.routing_v2_reply_transitions;
 delete from public.sequences where routing_v2_key is not null;
 
 drop index if exists public.idx_enrollments_routing_v2_one_active;
+drop index if exists public.idx_enrollments_routing_v2_live;
+alter table public.sequence_enrollments drop constraint if exists sequence_enrollments_ended_reason_check;
 alter table public.sequence_enrollments drop constraint if exists sequence_enrollments_routing_v2_engine_check;
 alter table public.sequence_enrollments
   drop column if exists routing_v2_inbound_id,
