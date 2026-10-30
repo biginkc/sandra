@@ -3,7 +3,7 @@ import type { PropertyTypeOption, V2QuestionId } from "./questions";
 /**
  * Routing order v2 — copied from ORDER-TABLE.md (results-chosen order, v7 replay:
  * order V4 + Okay/reaction = yes + land-price alert + Jarrad's 2026-10-30 Haiku ruling).
- * First match wins. Pinned by `order.test.ts`; never reorder without approval.
+ * First match wins. Pinned by `routing-v2.test.ts`; never reorder without approval.
  */
 export const DEFAULT_CUTOFF = 0.6;
 /** Reason to sell uses a 40% cutoff (Jarrad, vault plan). */

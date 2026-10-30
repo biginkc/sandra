@@ -74,6 +74,7 @@ import {
   startRun,
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
+import { scheduleRoutingV2Shadow } from "@/lib/ai-responder/routing-v2-shadow";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
@@ -1847,6 +1848,20 @@ async function dispatchAndStampAiResponder(
     outcome,
     runContext,
   });
+  // Routing v2 PR-A: record-only shadow, scheduled only after the live stamp and run
+  // after the webhook response (after()); it never delays or alters the live path.
+  scheduleRoutingV2Shadow(
+    supabase,
+    {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+      liveOutcome: outcome.outcome,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+  );
   return outcome;
 }
 
