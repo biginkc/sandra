@@ -15,9 +15,9 @@ import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
 import { processVoicemailDropStep } from "./voicemail-drop-step";
+import { hasSlotToken } from "./routing-v2/slot-time";
 import {
   loadRoutingV2Key,
-  routingV2ChainAfterCompletion,
   routingV2AdvanceAfterSend,
   routingV2ClaimDripSend,
   routingV2MarkDripClaimSent,
@@ -123,16 +123,7 @@ export async function processEnrollmentTick(
         message: completionError?.message ?? "enrollment changed before completion",
       };
     }
-    // Routing v2 only: a finished drip that names a next drip would chain here (SQL re-checks
-    // flags/takeover/suppression). None does today: auto handoff at drip end is disabled
-    // pending Jarrad's decision, so this is an inert no-op.
-    try {
-      if (await loadRoutingV2Key(client, enrollment.sequence_id)) {
-        await routingV2ChainAfterCompletion(client, enrollment.id);
-      }
-    } catch (err) {
-      reportError(err, { tags: { context: "routing_v2_chain_after_completion" }, extra: { enrollmentId: enrollment.id } });
-    }
+    // No automatic handoff at drip end (Master A-004): a finished v2 drip is plain completed.
     return { status: "completed", enrollmentId: enrollment.id };
   }
 
@@ -241,6 +232,13 @@ export async function processEnrollmentTick(
   }
   if (routingV2Gate.kind === "blocked") {
     return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
+  }
+  if (routingV2Gate.kind === "hold") {
+    // Needs a person (e.g. unknown seller time zone): never guess, never send. Existing
+    // "Couldn't send" hold reason, so it lands in Needs person with today's wording.
+    const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+    if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+    return { status: "paused", enrollmentId: enrollment.id, reason: `routing_v2_${routingV2Gate.reason}` };
   }
   if (routingV2Gate.kind === "wait") {
     const nextRunAt = routingV2Gate.nextRunAt.toISOString();
@@ -462,6 +460,17 @@ export async function processEnrollmentTick(
       };
     }
 
+    // A {{slot_time}} only has a value on a routing v2 send: never send it blank.
+    if (!isRoutingV2 && hasSlotToken(bodySource)) {
+      const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted", "slot_time outside routing v2");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Slot-time bookkeeping failed");
+      }
+      const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      return { status: "paused", enrollmentId: enrollment.id, reason: "step_misconfigured" };
+    }
+
     const rendered = renderTemplate(bodySource, vars);
     const finalBody = applyOptOut(rendered, {
       append_opt_out: appendOptOut,
@@ -514,7 +523,8 @@ export async function processEnrollmentTick(
     // Routing v2: close the claim with the provider outcome IMMEDIATELY, for every outcome that
     // may have reached the seller (accepted, or accepted-but-receipt-failed, or unknown), so a
     // failed write or a reply landing before the bookkeeping can never report it as cancelled.
-    const v2ClaimOutcome = isRoutingV2 ? routingV2ProviderClaimOutcome(outcome) : null;
+    // Provider definitely not reached -> "not_sent" (terminal), so no claim is left open.
+    const v2ClaimOutcome = isRoutingV2 ? (routingV2ProviderClaimOutcome(outcome) ?? "not_sent") : null;
     const v2ClaimCloseError = v2ClaimOutcome
       ? await routingV2MarkDripClaimSent(client, claim.id, v2ClaimOutcome)
       : null;
@@ -562,7 +572,7 @@ export async function processEnrollmentTick(
         // drip; none does today) in one transaction, so nothing is lost after completion.
         // Legacy drips keep advanceEnrollment exactly as before.
         const advanceError = isRoutingV2
-          ? await routingV2AdvanceAfterSend(client, enrollment.id, step.step_index)
+          ? await routingV2AdvanceAfterSend(client, enrollment.id, step.step_index, claim.id)
           : await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
           const pauseError = await pauseEnrollment(

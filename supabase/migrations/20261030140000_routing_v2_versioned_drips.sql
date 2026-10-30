@@ -122,7 +122,7 @@ create table if not exists public.routing_v2_drip_send_claims (
   property_id uuid not null,
   enrollment_id uuid not null,
   step_run_id uuid not null unique,
-  status text not null default 'open' check (status in ('open','cancelled','sent','unknown')),
+  status text not null default 'open' check (status in ('open','cancelled','sent','unknown','not_sent')),
   cancel_reason text,
   cancelled_at timestamptz,
   created_at timestamptz not null default now()
@@ -380,7 +380,9 @@ begin
 
     -- 5. Outbound intents. Takeover / suppression: alerts only, never an auto reply.
     for v_item in select * from jsonb_array_elements(coalesce(p_decision->'outbox', '[]'::jsonb)) loop
-      if (v_item->>'kind') = 'alert' or v_outcome in ('applied','replies_only','no_sequence') then
+      if ((v_item->>'kind') = 'alert' or v_outcome in ('applied','replies_only','no_sequence'))
+         and public.routing_v2_slice_enabled(p_property_id, coalesce(nullif(v_item->>'slice',''), 'replies')) then
+        -- Each intent only when its own slice is on (drips on / replies off: enrollment only).
         insert into public.routing_v2_outbox (org_id, property_id, inbound_message_id, transition_seq, kind, engine, slice, payload)
         values (v_org, p_property_id, p_inbound_message_id, v_seq, v_item->>'kind', 'v2',
                 coalesce(nullif(v_item->>'slice',''), 'replies'),
@@ -581,8 +583,16 @@ as $$
 declare
   v_id uuid;
 begin
-  if p_outcome not in ('sent','unknown') then
+  if p_outcome not in ('sent','unknown','not_sent') then
     raise exception 'ROUTING_V2_BAD_CLAIM_OUTCOME: %', p_outcome;
+  end if;
+  if p_outcome = 'not_sent' then
+    -- Provider definitely not reached (quiet hours, consent, suppression, no sender,
+    -- authorization refused, not attempted / definitive reject): terminal, only from open.
+    update public.routing_v2_drip_send_claims set status = 'not_sent'
+    where step_run_id = p_step_run_id and status = 'open'
+    returning id into v_id;
+    return v_id;
   end if;
   update public.routing_v2_drip_send_claims
   set status = p_outcome,
@@ -601,7 +611,9 @@ $$;
 -- After an accepted v2 send: advance to the next step, or complete AND chain in the same
 -- transaction (so a chain can never be lost after the completion committed). Returns
 -- 'advanced' | 'completed' | 'chained' | 'changed' (enrollment no longer at that step).
-create or replace function public.routing_v2_advance_after_send(p_enrollment_id uuid, p_step_index integer)
+create or replace function public.routing_v2_advance_after_send(
+  p_enrollment_id uuid, p_step_index integer, p_step_run_id uuid default null
+)
 returns text
 language plpgsql
 security definer
@@ -610,11 +622,14 @@ as $$
 declare
   e public.sequence_enrollments;
   v_delay integer;
-  v_next uuid;
 begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found then return 'changed'; end if;
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
+  -- The final claim close is part of the same transaction as the advance / completion.
+  if p_step_run_id is not null then
+    perform public.routing_v2_mark_drip_claim_sent(p_step_run_id, 'sent');
+  end if;
   select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
   if e.status <> 'active' or e.current_step_index <> p_step_index then return 'changed'; end if;
   select delay_after_previous_minutes into v_delay from public.sequence_steps
@@ -625,11 +640,11 @@ begin
     where id = e.id;
     return 'advanced';
   end if;
+  -- Plain completion: no automatic handoff at drip end (Master A-004), so nothing chains.
   update public.sequence_enrollments
   set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now()
   where id = e.id;
-  v_next := public.routing_v2_chain_after_completion(e.id);
-  return case when v_next is null then 'completed' else 'chained' end;
+  return 'completed';
 end;
 $$;
 
@@ -694,8 +709,8 @@ revoke all on function public.routing_v2_enrollment_send_check(uuid) from public
 revoke all on function public.routing_v2_chain_after_completion(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_claim_drip_send(uuid, uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_mark_drip_claim_sent(uuid, text) from public, anon, authenticated;
-revoke all on function public.routing_v2_advance_after_send(uuid, integer) from public, anon, authenticated;
-grant execute on function public.routing_v2_advance_after_send(uuid, integer) to service_role;
+revoke all on function public.routing_v2_advance_after_send(uuid, integer, uuid) from public, anon, authenticated;
+grant execute on function public.routing_v2_advance_after_send(uuid, integer, uuid) to service_role;
 grant execute on function public.routing_v2_mark_drip_claim_sent(uuid, text) to service_role;
 grant execute on function public.routing_v2_claim_drip_send(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_slice_enabled(uuid, text) to service_role;
@@ -749,6 +764,7 @@ declare
   v_seq uuid;
   v_src uuid;
   v_src_cum6 bigint;
+  v_opt_out boolean;
   v_names constant jsonb := jsonb_build_object(
     'price_too_high', 'Price too high (routing v2)',
     'vacant_land', 'Vacant land (routing v2)',
@@ -799,17 +815,32 @@ begin
           raise notice 'routing v2 seed: org % existing % drip has non-SMS steps, version 2 skipped', r.org_id, v_key;
           continue;
         end if;
+        -- v2 steps carry their text inline (the Templates UI must never edit or block a v2 drip):
+        -- a template reference is inlined below; a template POOL (template_category) cannot be,
+        -- nor a reference to a missing template, so that version is skipped instead.
+        if exists (select 1 from public.sequence_steps st
+                   left join public.sms_templates t on t.id = st.template_id and t.deleted_at is null
+                   where st.sequence_id = v_src
+                     and (v_key = 'listed_not_selling' or st.step_index >= 6)
+                     and (st.template_category is not null
+                          or (st.template_id is not null and t.id is null))) then
+          raise notice 'routing v2 seed: org % existing % drip uses a template pool or missing template, version 2 skipped', r.org_id, v_key;
+          continue;
+        end if;
       end if;
 
       -- No automatic next drip when a v2 drip runs out (Master A-004 / Jarrad: "I'll decide what
       -- to do when the drip runs out"). The chain path stays inert: nothing to chain to.
       v_then := null;
+      -- Opt-out footer: a new version of an existing drip keeps that drip's setting (never strip
+      -- the footer where today's drip has it); the brand-new drips keep the approved no-footer.
+      v_opt_out := coalesce((select append_opt_out from public.sequences where id = v_src), false);
       insert into public.sequences
         (org_id, name, description, active, append_opt_out, routing_v2_key, routing_v2_version, routing_v2_then_key)
       values
         (r.org_id, v_name,
          'Routing v2 drip (seeded inactive). Enrolled only by routing v2 when its drips flag is on.',
-         false, false, v_key, 1, v_then)
+         false, v_opt_out, v_key, 1, v_then)
       returning id into v_seq;
 
       if v_key in ('price_too_high','vacant_land','said_theyd_call') then
@@ -842,9 +873,10 @@ begin
                          and v_src_cum6 > 8 * 1440
                     then (v_src_cum6 - 8 * 1440)::int  -- keep the step on its original day
                     else st.delay_after_previous_minutes end,
-               st.action_type, st.template_body, st.template_id, st.template_category, st.target_status,
+               st.action_type, coalesce(st.template_body, t.content), null::uuid, null::text, st.target_status,
                st.vm_media_id, st.vm_tts_body, st.vm_voice_id, st.vm_phone_line_id, st.vm_template_category
         from public.sequence_steps st
+        left join public.sms_templates t on t.id = st.template_id and t.deleted_at is null
         where st.sequence_id = v_src and st.step_index >= 6;
 
       else
@@ -860,9 +892,12 @@ begin
         from (
           select sum(st.delay_after_previous_minutes) over (order by st.step_index)::bigint as cum,
                  0 as ord, st.step_index as src_index,
-                 st.action_type, st.template_body, st.template_id, st.template_category, st.target_status,
+                 st.action_type, coalesce(st.template_body, t.content) as template_body, null::uuid as template_id,
+                 null::text as template_category, st.target_status,
                  st.vm_media_id, st.vm_tts_body, st.vm_voice_id, st.vm_phone_line_id, st.vm_template_category
-          from public.sequence_steps st where st.sequence_id = v_src
+          from public.sequence_steps st
+          left join public.sms_templates t on t.id = st.template_id and t.deleted_at is null
+          where st.sequence_id = v_src
           union all
           select (s.day * 1440)::bigint, 1, 0, 'send_sms', s.body, null::uuid, null, null,
                  null, null, null, null, null
@@ -899,6 +934,10 @@ begin
     return case when tg_op = 'DELETE' then old else new end;
   end if;
   if tg_table_name = 'sequences' then
+    -- An organization delete cascades here after the org row is gone: allowed (S6).
+    if tg_op = 'DELETE' and not exists (select 1 from public.organizations o where o.id = old.org_id) then
+      return old;
+    end if;
     -- Every non-migration write to a v2 drip row is refused: metadata, active, archive /
     -- restore, delete, and turning a legacy drip into a v2 one (or creating one).
     if (tg_op in ('UPDATE','DELETE') and old.routing_v2_key is not null)
@@ -976,6 +1015,111 @@ create trigger routing_v2_reject_foreign_enrollment before insert or update of s
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 create trigger routing_v2_reject_drip_step_edit before insert or update or delete on public.sequence_steps
   for each row execute function public.routing_v2_reject_drip_edit();
+
+-- ---------------------------------------------------------------------------
+-- 8. Flag-off rollback (BUILD-PLAN 13.3). Runs at the start of every sequence-tick: stops every
+--    active/paused v2 enrollment whose property no longer has the drips slice (DNC-locked rows
+--    take the compliance opt-out), and cancels pending outbox rows whose slice is off. After
+--    it runs nothing v2 blocks the legacy engine (one live drip per property).
+-- ---------------------------------------------------------------------------
+create or replace function public.routing_v2_stop_disabled()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  r record;
+  v_stopped integer := 0;
+  v_opted_out integer := 0;
+  v_outbox integer := 0;
+  v_n integer;
+begin
+  for r in
+    select distinct e.property_id from public.sequence_enrollments e
+    where e.routing_v2_engine = 'v2' and e.status in ('active','paused')
+      and not public.routing_v2_slice_enabled(e.property_id, 'drips')
+    order by 1
+  loop
+    perform pg_advisory_xact_lock(hashtext('routing_v2:' || r.property_id::text));
+    if public.routing_v2_slice_enabled(r.property_id, 'drips') then continue; end if;
+    if coalesce((select is_dnc_locked from public.properties where id = r.property_id), false) then
+      update public.sequence_enrollments
+      set status = 'opted_out', pause_reason = 'dnc', next_run_at = null, updated_at = now()
+      where property_id = r.property_id and routing_v2_engine = 'v2' and status in ('active','paused');
+      get diagnostics v_n = row_count; v_opted_out := v_opted_out + v_n;
+    else
+      update public.sequence_enrollments
+      set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now(), ended_reason = 'flag_off'
+      where property_id = r.property_id and routing_v2_engine = 'v2' and status in ('active','paused');
+      get diagnostics v_n = row_count; v_stopped := v_stopped + v_n;
+    end if;
+    update public.routing_v2_drip_send_claims set status = 'cancelled', cancel_reason = 'flag_off', cancelled_at = now()
+    where property_id = r.property_id and status = 'open';
+  end loop;
+
+  for r in
+    select o.id, o.property_id from public.routing_v2_outbox o
+    where o.status = 'pending' and not public.routing_v2_slice_enabled(o.property_id, o.slice)
+    order by o.property_id
+  loop
+    perform pg_advisory_xact_lock(hashtext('routing_v2:' || r.property_id::text));
+    update public.routing_v2_outbox set status = 'cancelled', cancel_reason = 'flag_off'
+    where id = r.id and status = 'pending' and not public.routing_v2_slice_enabled(property_id, slice);
+    get diagnostics v_n = row_count; v_outbox := v_outbox + v_n;
+  end loop;
+
+  return jsonb_build_object('enrollments_stopped', v_stopped, 'enrollments_opted_out', v_opted_out,
+                            'outbox_cancelled', v_outbox);
+end;
+$$;
+revoke all on function public.routing_v2_stop_disabled() from public, anon, authenticated;
+grant execute on function public.routing_v2_stop_disabled() to service_role;
+
+-- ---------------------------------------------------------------------------
+-- 9. v2 drips are never a copy source (their {{slot_time}} has no value outside v2). Same body
+--    as 20261021200400 plus the source check.
+-- ---------------------------------------------------------------------------
+create or replace function public.sequence_copy_steps(p_target uuid, p_source uuid)
+returns integer
+language plpgsql security definer set search_path = '' set statement_timeout = '5s'
+as $$
+declare
+  target_org uuid;
+  copied integer;
+begin
+  if p_target is null or p_source is null or p_target = p_source or auth.uid() is null
+  then raise exception 'INVALID_SEQUENCE' using errcode = '22023'; end if;
+  if exists (select 1 from public.sequences s where s.id = p_source and s.routing_v2_key is not null)
+  then raise exception 'ROUTING_V2_DRIP_LOCKED: routing v2 drips cannot be copied' using errcode = 'P0001'; end if;
+  -- The target row lock serializes concurrent copy attempts.
+  select s.org_id into target_org from public.sequences s where s.id = p_target for update;
+  if target_org is null or not exists (
+    select 1 from public.memberships m where m.org_id = target_org and m.user_id = auth.uid()
+      and m.access_status = 'active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  if not exists (select 1 from public.sequences s where s.id = p_source and s.org_id = target_org)
+  then raise exception 'SOURCE_NOT_FOUND' using errcode = 'P0002'; end if;
+  if exists (
+    select 1 from public.sequence_steps where sequence_id = p_target
+  ) then raise exception 'TARGET_NOT_EMPTY' using errcode = '23514'; end if;
+  if not exists (select 1 from public.sequence_steps where sequence_id = p_source)
+  then raise exception 'SOURCE_EMPTY' using errcode = '23514'; end if;
+
+  insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
+    action_type, template_body, template_id, template_category, target_status,
+    vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category)
+  select p_target, st.step_index, st.delay_after_previous_minutes,
+    st.action_type, st.template_body, st.template_id, st.template_category, st.target_status,
+    st.vm_media_id, st.vm_tts_body, st.vm_voice_id, st.vm_phone_line_id, st.vm_template_category
+  from public.sequence_steps st where st.sequence_id = p_source order by st.step_index;
+  get diagnostics copied = row_count;
+  return copied;
+end;
+$$;
+revoke all on function public.sequence_copy_steps(uuid, uuid) from public, anon, service_role;
+grant execute on function public.sequence_copy_steps(uuid, uuid) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 7. Inbound calls do not pause routing v2 drips (Jarrad: "Incoming calls should not pause

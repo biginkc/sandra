@@ -215,3 +215,27 @@ describe("runSequenceTick enrollment isolation", () => {
     );
   });
 });
+
+describe("runSequenceTick routing v2 flag-off rollback", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("calls routing_v2_stop_disabled before reading due enrollments, every tick", async () => {
+    const order: string[] = [];
+    const client = {
+      rpc: vi.fn(async (fn: string) => { order.push(`rpc:${fn}`); return { data: {}, error: null }; }),
+      from: vi.fn((table: string) => { order.push(`from:${table}`); return resultBuilder([]); }),
+    } as never;
+    await runSequenceTick(client);
+    expect(order[0]).toBe("rpc:routing_v2_stop_disabled");
+    expect(order).toContain("from:sequence_enrollments");
+  });
+
+  it("a stop_disabled failure is reported and never blocks the legacy tick", async () => {
+    const client = {
+      rpc: vi.fn(async () => ({ data: null, error: { code: "XX000", message: "boom" } })),
+      from: vi.fn(() => resultBuilder([])),
+    } as never;
+    await expect(runSequenceTick(client)).resolves.toBeTruthy();
+    expect(reportError).toHaveBeenCalled();
+  });
+});

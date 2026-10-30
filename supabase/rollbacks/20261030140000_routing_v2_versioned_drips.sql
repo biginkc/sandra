@@ -19,6 +19,46 @@ end $$;
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 drop function if exists public.routing_v2_reject_drip_edit();
+-- Restore sequence_copy_steps exactly as 20261021200400 defined it.
+create or replace function public.sequence_copy_steps(p_target uuid, p_source uuid)
+returns integer
+language plpgsql security definer set search_path = '' set statement_timeout = '5s'
+as $$
+declare
+  target_org uuid;
+  copied integer;
+begin
+  if p_target is null or p_source is null or p_target = p_source or auth.uid() is null
+  then raise exception 'INVALID_SEQUENCE' using errcode = '22023'; end if;
+  -- The target row lock serializes concurrent copy attempts.
+  select s.org_id into target_org from public.sequences s where s.id = p_target for update;
+  if target_org is null or not exists (
+    select 1 from public.memberships m where m.org_id = target_org and m.user_id = auth.uid()
+      and m.access_status = 'active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  if not exists (select 1 from public.sequences s where s.id = p_source and s.org_id = target_org)
+  then raise exception 'SOURCE_NOT_FOUND' using errcode = 'P0002'; end if;
+  if exists (
+    select 1 from public.sequence_steps where sequence_id = p_target
+  ) then raise exception 'TARGET_NOT_EMPTY' using errcode = '23514'; end if;
+  if not exists (select 1 from public.sequence_steps where sequence_id = p_source)
+  then raise exception 'SOURCE_EMPTY' using errcode = '23514'; end if;
+
+  insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
+    action_type, template_body, template_id, template_category, target_status,
+    vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category)
+  select p_target, st.step_index, st.delay_after_previous_minutes,
+    st.action_type, st.template_body, st.template_id, st.template_category, st.target_status,
+    st.vm_media_id, st.vm_tts_body, st.vm_voice_id, st.vm_phone_line_id, st.vm_template_category
+  from public.sequence_steps st where st.sequence_id = p_source order by st.step_index;
+  get diagnostics copied = row_count;
+  return copied;
+end;
+$$;
+revoke all on function public.sequence_copy_steps(uuid, uuid) from public, anon, service_role;
+grant execute on function public.sequence_copy_steps(uuid, uuid) to authenticated;
+
 -- Restore pause_enrollments_for_inbound_call exactly as 20261021200300 defined it.
 create or replace function public.pause_enrollments_for_inbound_call(p_contact_ids uuid[])
 returns table (id uuid, property_id uuid, sequence_id uuid)
@@ -44,7 +84,8 @@ grant execute on function public.pause_enrollments_for_inbound_call(uuid[]) to s
 drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
 drop function if exists public.routing_v2_reject_foreign_enrollment();
 drop function if exists public.routing_v2_mark_drip_claim_sent(uuid, text);
-drop function if exists public.routing_v2_advance_after_send(uuid, integer);
+drop function if exists public.routing_v2_advance_after_send(uuid, integer, uuid);
+drop function if exists public.routing_v2_stop_disabled();
 drop function if exists public.routing_v2_chain_after_completion(uuid);
 drop function if exists public.routing_v2_claim_drip_send(uuid, uuid);
 drop function if exists public.routing_v2_enrollment_send_check(uuid);

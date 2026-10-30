@@ -7,6 +7,7 @@ import { renderTemplate } from "@/lib/templates/render";
 
 import { APPROVED_DRIPS } from "./approved-drips.fixture";
 import { ROUTING_V2_DRIPS } from "./drip-spec";
+import { OPT_OUT_PHRASES, applyOptOut } from "../opt-out";
 import { smsSegments } from "./sms-segments";
 
 const MIGRATION = readFileSync(
@@ -84,8 +85,9 @@ describe("routing v2 drip seed pins", () => {
     }
   });
 
-  it("seeds are inactive, no auto opt-out append (keeps one segment), and never touch legacy rows", () => {
-    expect(MIGRATION).toMatch(/false, false, v_key, 1, v_then/);
+  it("seeds are inactive, keep the source drip's opt-out footer setting (K1), and never touch legacy rows", () => {
+    expect(MIGRATION).toMatch(/false, v_opt_out, v_key, 1, v_then/);
+    expect(MIGRATION).toMatch(/v_opt_out := coalesce\(\(select append_opt_out from public\.sequences where id = v_src\), false\);/);
     // The only UPDATE statements in the migration live inside the v2 FUNCTION bodies. Only
     // `as $$ ... $$;` function bodies are stripped, so the seed DO block stays visible.
     const outsideFunctions = MIGRATION.replace(/\bas \$\$[\s\S]*?\$\$;/g, "");
@@ -191,5 +193,24 @@ describe("routing v2 drips: segment counts with realistic long substitutions", (
     expect(smsSegments("€".repeat(80)).segments).toBe(1); // extension chars cost 2
     expect(smsSegments("ł".repeat(70)).segments).toBe(1);
     expect(smsSegments("ł".repeat(71)).segments).toBe(2);
+  });
+});
+
+describe("K1: Book appointment v2 texts with today's opt-out footer (segment report)", () => {
+  const render = (body: string, name: string, address: string) =>
+    renderTemplate(body, { first_name: name, property_address: address, slot_time: "12:45" });
+  const longest = [...OPT_OUT_PHRASES].sort((a, b) => b.length - a.length)[0]!;
+
+  it("reports segments with the longest footer; the footer is appended, never dropped", () => {
+    const report = ROUTING_V2_DRIPS.book_appointment.steps.map((st, i) => {
+      const base = render(st.body, "Christopher", "12345 W Longview Ridge Pkwy.");
+      const withFooter = `${base} ${longest}`;
+      expect(applyOptOut(base, { append_opt_out: true, seed: "x" })).toMatch(/STOP/);
+      return { step: i + 1, chars: smsSegments(withFooter).units, segments: smsSegments(withFooter).segments };
+    });
+    console.table(report);
+    for (const r of report) expect(r.segments).toBeLessThanOrEqual(2);
+    // With the footer some booking texts exceed one segment (reported, not hidden).
+    expect(report.some((r) => r.segments === 2)).toBe(true);
   });
 });

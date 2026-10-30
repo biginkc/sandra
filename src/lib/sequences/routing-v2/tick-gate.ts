@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
 import { sellerTimezoneForState } from "@/lib/norma/callback-time";
 import type { Database } from "@/lib/supabase/types";
 
@@ -15,6 +16,8 @@ export type RoutingV2TickGate =
   | { kind: "legacy" }
   /** The SQL check refused (and wrote its own enrollment change, if any). */
   | { kind: "blocked"; reason: string }
+  /** Hold for a person (e.g. unknown seller time zone): pause, never send. */
+  | { kind: "hold"; reason: string }
   /** The check could not run (RPC/read error): nothing was written. */
   | { kind: "error"; message: string }
   | { kind: "wait"; nextRunAt: Date }
@@ -76,6 +79,10 @@ export async function routingV2TickGate(
     .eq("id", input.stepId)
     .maybeSingle();
   if (stepErr) return { kind: "error", message: `routing_v2_slot_window_read_failed: ${stepErr.message}` };
+  // Unknown seller time zone (blank / unmapped state): no guessing a zone for a slot time.
+  if (!input.propertyState || !STATE_TO_TZ[input.propertyState.trim().toUpperCase()]) {
+    return { kind: "hold", reason: "unknown_timezone" };
+  }
   const raw = (stepRow as { slot_window?: unknown } | null)?.slot_window;
   const window = isSlotWindow(raw) ? raw : "any";
   // No property-level timezone exists: the state's dominant zone sets the displayed hour, and
@@ -118,7 +125,7 @@ export async function routingV2ClaimDripSend(
 export async function routingV2MarkDripClaimSent(
   client: SupabaseClient<Database>,
   stepRunId: string,
-  outcome: "sent" | "unknown" = "sent",
+  outcome: "sent" | "unknown" | "not_sent" = "sent",
 ): Promise<string | null> {
   try {
     const { error } = await loose(client).rpc("routing_v2_mark_drip_claim_sent", {
@@ -139,11 +146,13 @@ export async function routingV2AdvanceAfterSend(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   stepIndex: number,
+  stepRunId: string,
 ): Promise<string | null> {
   try {
     const { data, error } = await loose(client).rpc("routing_v2_advance_after_send", {
       p_enrollment_id: enrollmentId,
       p_step_index: stepIndex,
+      p_step_run_id: stepRunId,
     });
     if (error) return `routing v2 advance failed: ${error.message}`;
     if (data === "changed") return "enrollment changed before advancement";

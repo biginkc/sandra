@@ -40,6 +40,8 @@ function fixture(opts: {
   lastStep?: boolean;
   chainError?: string;
   advanceResult?: string;
+  body?: string;
+  state?: string | null;
   advanceError?: string;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
@@ -70,7 +72,7 @@ function fixture(opts: {
         if ("id" in filters) return ok({ slot_window: opts.slotWindow ?? "any" });
         if (filters.step_index === 0) {
           return ok({
-            id: "step-1", step_index: 0, action_type: "send_sms", template_body: BOOKING_BODY,
+            id: "step-1", step_index: 0, action_type: "send_sms", template_body: opts.body ?? BOOKING_BODY,
             template_id: null, template_category: null, target_status: null, delay_after_previous_minutes: 1440,
           });
         }
@@ -78,7 +80,7 @@ function fixture(opts: {
       }
       if (table === "properties") {
         return ok({
-          id: "property-1", status: "new_lead", state: "MO", address: "4821 Oak Ridge Dr",
+          id: "property-1", status: "new_lead", state: opts.state === undefined ? "MO" : opts.state, address: "4821 Oak Ridge Dr",
           city: "Kansas City", zip: "64111", market: "KC", org_id: null, outreach_dispo: null, is_dnc_locked: false,
         });
       }
@@ -177,12 +179,46 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     }));
   });
 
-  it("provider never reached (definitive rejection / not attempted): the claim is not closed as sent", async () => {
+  it.each([
+    ["quiet hours", { status: "blocked_quiet_hours", messageId: "m1", reason: "quiet" }],
+    ["no consent", { status: "blocked_no_consent", messageId: "m1", reason: "no consent" }],
+    ["suppressed", { status: "blocked_automated_suppressed", messageId: "m1", reason: "dnc", source: "x", outreachDispo: null, consentState: null }],
+    ["no sender", { status: "blocked_no_approved_sender", messageId: "m1", reason: "no sender" }],
+    ["authorization refused", { status: "blocked_sequence_authorization", messageId: "m1", reason: "no", attemptOutcome: "definitively_rejected" }],
+    ["provider not attempted", { status: "provider_failed", messageId: "m1", error: "x", providerAttempted: false }],
+    ["provider definitive reject", { status: "provider_failed", messageId: "m1", error: "x", deliveryOutcome: "definitively_rejected" }],
+  ] as const)("provider never reached (%s): the claim is closed as not_sent (never left open)", async (_label, result) => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
-    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "provider_failed", messageId: "m1", error: "x", providerAttempted: false } as never);
+    vi.mocked(sendSmsToContact).mockResolvedValue(result as never);
     const { client, rpc } = fixture();
     await processEnrollmentTick(client, ENROLLMENT);
-    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1", p_outcome: "not_sent" });
+  });
+
+  it("unknown seller time zone (blank or unmapped state): hold for a person, no claim, no send", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    for (const state of [null, "", "California", "ZZ"]) {
+      vi.mocked(sendSmsToContact).mockClear();
+      const { client, rpc, writes } = fixture({ state });
+      expect(await processEnrollmentTick(client, ENROLLMENT)).toEqual({
+        status: "paused", enrollmentId: "enrollment-1", reason: "routing_v2_unknown_timezone",
+      });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(rpc).not.toHaveBeenCalledWith("routing_v2_claim_drip_send", expect.anything());
+      expect(writes).toContainEqual(expect.objectContaining({
+        table: "sequence_enrollments", payload: expect.objectContaining({ status: "paused", pause_reason: "step_misconfigured" }),
+      }));
+    }
+  });
+
+  it("legacy drip whose body still has {{slot_time}} (e.g. copied before the guard): held, never sent blank", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, writes } = fixture({ routingV2Key: null, appendOptOut: true });
+    expect(await processEnrollmentTick(client, ENROLLMENT)).toEqual({ status: "paused", enrollmentId: "enrollment-1", reason: "step_misconfigured" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_step_runs", payload: expect.objectContaining({ attempt_outcome: "not_attempted" }),
+    }));
   });
 
   it("a claim-close failure after an accepted send is surfaced and held for reconciliation, not swallowed", async () => {
@@ -203,7 +239,8 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     const { client, rpc, writes } = fixture({ lastStep: true, routingV2Key: "said_theyd_call" });
     expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
-    expect(rpc).toHaveBeenCalledWith("routing_v2_advance_after_send", { p_enrollment_id: "enrollment-1", p_step_index: 0 });
+    // The final claim close travels in the same RPC as the completion (atomic).
+    expect(rpc).toHaveBeenCalledWith("routing_v2_advance_after_send", { p_enrollment_id: "enrollment-1", p_step_index: 0, p_step_run_id: "run-1" });
     // No separate TS completion write (that is what used to lose the chain).
     expect(writes.some((w) => w.table === "sequence_enrollments" && w.payload.status === "completed")).toBe(false);
     const order = (fn: string) => rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === fn)]!;
@@ -231,7 +268,7 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
 
   it("legacy final step: completes exactly as before and never chains", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
-    const { client, rpc } = fixture({ lastStep: true, routingV2Key: null, appendOptOut: true });
+    const { client, rpc } = fixture({ lastStep: true, routingV2Key: null, appendOptOut: true, body: "Hey, Mel here." });
     expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_chain_after_completion", expect.anything());
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_advance_after_send", expect.anything());

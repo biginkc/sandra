@@ -199,6 +199,10 @@ export async function runSequenceTick(
     return (data ?? []) as DueEnrollment[];
   };
 
+  // Routing v2 flag-off rollback (BUILD-PLAN 13.3): stop v2 enrollments / cancel pending v2
+  // intents whose slice is off, before any send. Best effort: never blocks the legacy tick.
+  await stopDisabledRoutingV2(supabase);
+
   let due = await fetchDuePage(null);
   let cursor: DueCursor | null = null;
   let lookaheadRows = 0;
@@ -442,4 +446,21 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   return handle(request);
+}
+
+async function stopDisabledRoutingV2(supabase: { rpc: unknown }): Promise<void> {
+  if (typeof supabase.rpc !== "function") return;
+  try {
+    const rpc = supabase.rpc as (fn: string, args?: Record<string, unknown>) => Promise<{ error: { code?: string; message: string } | null } | undefined>;
+    const res = await rpc.call(supabase, "routing_v2_stop_disabled", {});
+    const error = res?.error;
+    // Deployed ahead of the migration: nothing to stop.
+    if (error && error.code !== "PGRST202" && error.code !== "42883") {
+      reportError(new Error(`routing v2 stop_disabled failed: ${error.message}`), {
+        tags: { surface: "cron_sequence_tick_routing_v2_stop" },
+      });
+    }
+  } catch (err) {
+    reportError(err, { tags: { surface: "cron_sequence_tick_routing_v2_stop" } });
+  }
 }
