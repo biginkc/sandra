@@ -1,4 +1,4 @@
--- Rollback for 20261030130000_auto_reply_templates_routing_v2_keys.
+-- Rollback for 20261030131000_auto_reply_templates_routing_v2_keys.
 -- Removes the eight routing v2 keys from the check constraint and the RPC
 -- allow-list, leaving every other key exactly as it was. Mappings on those keys
 -- cannot exist under the restored constraint, so they are deleted (templates

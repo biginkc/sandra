@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * routing v2 mapping keys (20261030130000). Local-only; each test runs in a
+ * routing v2 mapping keys (20261030131000). Local-only; each test runs in a
  * transaction that is rolled back. Requires a DB with the chain through
  * 20261008144200 applied; the Phase 4 migration (20261008310000) and this one
  * are re-applied here so the rollback can be exercised too.
@@ -20,8 +20,8 @@ const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*com
 const read = (rel: string) => strip(readFileSync(path.join(__dirname, rel), "utf8"));
 const PHASE4 = read("20261008310000_auto_reply_templates.sql");
 const NUMBER_SOURCE = read("20261012020000_auto_reply_templates_number_source.sql");
-const MIGRATION = read("20261030130000_auto_reply_templates_routing_v2_keys.sql");
-const ROLLBACK = read("../rollbacks/20261030130000_auto_reply_templates_routing_v2_keys.sql");
+const MIGRATION = read("20261030131000_auto_reply_templates_routing_v2_keys.sql");
+const ROLLBACK = read("../rollbacks/20261030131000_auto_reply_templates_routing_v2_keys.sql");
 const V2_KEYS = ["where_property", "where_located", "text_only", "how_it_works", "driving", "price_too_high", "no_repairs_realtor", "fair_price"];
 
 const db = new Client({ connectionString: url });

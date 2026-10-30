@@ -40,7 +40,7 @@ export const V2_REPLY_TEXTS = {
 
 export type V2ReplyKey = keyof typeof V2_REPLY_TEXTS;
 
-/** New `auto_reply_templates.outcome` keys added by 20261030130000 (number_source already existed). */
+/** New `auto_reply_templates.outcome` keys added by 20261030131000 (number_source already existed). */
 export const V2_TEMPLATE_KEYS = [
   "where_property",
   "where_located",
