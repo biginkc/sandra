@@ -8,6 +8,7 @@ import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
+import { loadV2Opportunities } from "./v2-opportunities";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
@@ -288,7 +289,15 @@ export function createHoldAlertDeps(
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadHotPromotions(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
-      return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      // Routing v2 opportunity alert: returns nothing unless routing_v2_flags.questions_live + replies.
+      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner);
+      if (opportunities.promotions.length === 0 && opportunities.complete) return hot;
+      const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      return {
+        promotions: [...hot.promotions, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete,
+      };
     },
     async loadLeadReplies(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
