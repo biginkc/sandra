@@ -335,6 +335,14 @@ const authorize = async (c: Client, ctx: Ctx, enrollmentId: string, run: { id: s
     `select * from public.authorize_sequence_provider_attempt($1,$2,$3,$4,$5,'+18165550100',$6)`,
     [enrollmentId, run.step_id, run.id, ctx.contact, ctx.property, messageId],
   )).rows[0] as { authorized: boolean; reason: string };
+// A claim for the enrollment's current step with recorded provider acceptance (R7).
+const acceptedClaim = async (c: Client, enrollmentId: string) => {
+  const run = await stepRun(c, enrollmentId);
+  const ok = (await c.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [enrollmentId, run.id])).rows[0].r;
+  if (ok !== "ok") throw new Error(`claim refused: ${ok}`);
+  await c.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', null)`, [run.id]);
+  return run;
+};
 const lockDnc = (c: Client, property: string) =>
   c.query(`update public.properties set is_dnc_locked = true where id = $1`, [property]);
 
@@ -545,9 +553,9 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     )).rows[0].id;
     const fence = await authorize(db, ctx, e, run, pendingMsg);
     expect(fence).toMatchObject({ authorized: true });
-    await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent')`, [run.id]);
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', $2)`, [run.id, pendingMsg]);
     // tick.ts (v2): one RPC completes (no next drip configured, so nothing chains).
-    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5) as r`, [e])).rows[0].r).toBe("completed");
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5, $2) as r`, [e, run.id])).rows[0].r).toBe("completed");
     expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r).toBeNull();
     const rows = await enrollments(db, ctx.property);
     expect(rows.filter((x) => x.status === "active" || x.status === "paused")).toHaveLength(0);
@@ -635,7 +643,11 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
   it("atomic advance: routing_v2_advance_after_send advances, then completes (no chain); a stale call changes nothing", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
-    const adv = async (i: number) => (await db.query(`select public.routing_v2_advance_after_send($1,$2) as r`, [r.new_enrollment_id, i])).rows[0].r;
+    const runs: Record<number, string> = {};
+    const adv = async (i: number) => {
+      runs[i] ??= (await acceptedClaim(db, r.new_enrollment_id)).id;
+      return (await db.query(`select public.routing_v2_advance_after_send($1,$2,$3) as r`, [r.new_enrollment_id, i, runs[i]])).rows[0].r;
+    };
     expect(await adv(0)).toBe("advanced");
     expect(await adv(0)).toBe("changed"); // retry of the same step: no double advance
     for (let i = 1; i < 5; i++) expect(await adv(i)).toBe("advanced");
@@ -654,15 +666,17 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("set local routing_v2.allow_drip_edit = 'on'");
     await db.query(`delete from public.sequence_steps where sequence_id = $1 and step_index = 0`, [book]);
     await db.query("set local routing_v2.allow_drip_edit = ''");
-    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5) as r`, [r.new_enrollment_id])).rows[0].r).toBe("completed");
+    const run5 = await acceptedClaim(db, r.new_enrollment_id);
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5, $2) as r`, [r.new_enrollment_id, run5.id])).rows[0].r).toBe("completed");
   });
 
   it("C2: a newer reply that lands before the final advance wins: the advance changes nothing", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
     await db.query(`update public.sequence_enrollments set current_step_index = 5 where id = $1`, [r.new_enrollment_id]);
+    const run5 = await acceptedClaim(db, r.new_enrollment_id);
     await transition(db, await inbound(db, ctx, "2026-10-30T15:10:00Z"), ctx.property, { sequence_key: "vacant_land" });
-    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5) as r`, [r.new_enrollment_id])).rows[0].r).toBe("changed");
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5, $2) as r`, [r.new_enrollment_id, run5.id])).rows[0].r).toBe("changed");
     expect((await db.query(`select status, ended_reason from public.sequence_enrollments where id = $1`, [r.new_enrollment_id])).rows[0])
       .toEqual({ status: "completed", ended_reason: "rerouted" });
     expect((await enrollments(db, ctx.property)).filter((x) => x.status === "active").map((x) => x.routing_v2_key)).toEqual(["vacant_land"]);
@@ -674,6 +688,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query(`update public.sequence_enrollments set current_step_index = 4 where id = $1`, [r.new_enrollment_id]);
     const run = await stepRun(db, r.new_enrollment_id);
     expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', null)`, [run.id]);
     expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("completed");
     expect((await db.query(`select status from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].status).toBe("sent");
     expect((await db.query(`select status, ended_reason from public.sequence_enrollments where id = $1`, [r.new_enrollment_id])).rows[0])
@@ -768,6 +783,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query(
       `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, created_at)
        values ($1,$2,$3,'inbound','sms','wait, call me', now())`, [ctx.org, ctx.property, ctx.contact]);
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', null)`, [run.id]);
     expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("changed");
     expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [r.new_enrollment_id])).rows[0].status).toBe("active");
     // The text did go out: the claim still records it.
@@ -866,6 +882,47 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
     expect((await db.query(`select * from public.resume_sequence_enrollment($1)`, [e])).rows[0].outcome).toBe("reconciliation_required");
     expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [e])).rows[0].status).toBe("paused");
+  });
+
+  it("R7: advance refuses with a null claim, another enrollment's or step's claim, or no recorded acceptance; nothing advances", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const e = r.new_enrollment_id;
+    const state = async () => (await db.query(`select status, current_step_index from public.sequence_enrollments where id = $1`, [e])).rows[0];
+    const adv = async (step: number, runId: string | null) =>
+      (await db.query(`select public.routing_v2_advance_after_send($1,$2,$3) as r`, [e, step, runId])).rows[0].r;
+    // null claim
+    expect(await adv(0, null)).toBe("refused");
+    // claim with no recorded acceptance (provider never reached) -> refused, and mark 'sent' refused too
+    const bare = await stepRun(db, e);
+    await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [e, bare.id]);
+    expect(await adv(0, bare.id)).toBe("refused");
+    expect((await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent') as id`, [bare.id])).rows[0].id).toBeNull();
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where step_run_id = $1`, [bare.id])).rows[0].status).toBe("open");
+    // 'unknown' is still allowed (never advances)
+    expect((await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'unknown') as id`, [bare.id])).rows[0].id).toBeTruthy();
+    expect(await adv(0, bare.id)).toBe("refused");
+    expect(await state()).toEqual({ status: "active", current_step_index: 0 });
+    // A claim from another enrollment (second property) is refused.
+    const p2 = (await db.query(
+      `insert into public.properties (org_id, address, state, status, homeowner_contact_id) values ($1,'9 Other St','MO','new_lead',$2) returning id`,
+      [ctx.org, ctx.contact])).rows[0].id;
+    const id2 = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, created_at)
+       values ($1,$2,$3,'inbound','sms','hi', now() - interval '500 days') returning id`, [ctx.org, p2, ctx.contact])).rows[0].id;
+    const other = (await db.query(`select public.route_reply_transition($1,$2,$3::jsonb) as r`, [id2, p2, JSON.stringify({ sequence_key: "price_too_high" })])).rows[0].r;
+    const foreign = await acceptedClaim(db, other.new_enrollment_id);
+    expect(await adv(0, foreign.id)).toBe("refused");
+    // A claim for a different step of this enrollment is refused.
+    await db.query(`update public.sequence_enrollments set current_step_index = 1 where id = $1`, [e]);
+    const step1 = await acceptedClaim(db, e);
+    await db.query(`update public.sequence_enrollments set current_step_index = 0 where id = $1`, [e]);
+    expect(await adv(0, step1.id)).toBe("refused");
+    expect(await state()).toEqual({ status: "active", current_step_index: 0 });
+    // The normal accepted path still works.
+    await db.query(`update public.sequence_enrollments set current_step_index = 1 where id = $1`, [e]);
+    expect(await adv(1, step1.id)).toBe("advanced");
+    expect(await state()).toEqual({ status: "active", current_step_index: 2 });
   });
 
   it("R6 order A: reconcile closes a never-authorized stale claim; the slow worker's authorize is then refused, nothing sent", async () => {
@@ -1104,6 +1161,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
     const t = await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });
     expect(t.cancelled_drip_claim_ids).toHaveLength(1);
+    await db.query(`update public.routing_v2_drip_send_claims set provider_outcome = 'accepted' where step_run_id = $1`, [run.id]);
     const claimId = (await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent') as id`, [run.id])).rows[0].id;
     expect(claimId).toBe(t.cancelled_drip_claim_ids[0]);
     expect((await db.query(`select status from public.routing_v2_drip_send_claims where id = $1`, [claimId])).rows[0].status).toBe("sent");
@@ -1159,6 +1217,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
     const run = await stepRun(db, r.new_enrollment_id);
     expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', null)`, [run.id]);
     await db.query(`select public.routing_v2_mark_drip_claim_sent($1)`, [run.id]);
     const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
     const t = await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });

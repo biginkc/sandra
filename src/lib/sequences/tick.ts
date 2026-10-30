@@ -540,6 +540,11 @@ export async function processEnrollmentTick(
       isRoutingV2 && outcome.status !== "sent" && outcome.status !== "queued"
         ? (routingV2ProviderClaimOutcome(outcome) ?? "not_sent")
         : null;
+    // Accepted-but-receipt-failed: record the acceptance first (R7: 'sent' needs it).
+    if (v2ClaimOutcome === "sent") {
+      const recordError = await routingV2RecordProviderOutcome(client, claim.id, "accepted", "messageId" in outcome ? outcome.messageId ?? null : null);
+      if (recordError) reportError(new Error(recordError), { tags: { context: "routing_v2_record_provider_outcome" }, extra: { enrollmentId: enrollment.id } });
+    }
     const v2ClaimCloseError = v2ClaimOutcome
       ? await routingV2MarkDripClaimSent(client, claim.id, v2ClaimOutcome)
       : null;

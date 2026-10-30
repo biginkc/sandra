@@ -281,6 +281,25 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     }));
   });
 
+  it("R7: an advance the DB refuses (no recorded acceptance) is reported and held, never treated as sent", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, writes } = fixture({ advanceResult: "refused" });
+    expect(await processEnrollmentTick(client, ENROLLMENT)).toMatchObject({ status: "failed", message: expect.stringContaining("routing v2 advance refused") });
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ pause_reason: "reconciliation_required" }),
+    }));
+  });
+
+  it("R7: accepted-but-receipt-failed records the acceptance before closing the claim as sent", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "db_error", messageId: "m1", externalId: "p1", deliveryOutcome: "accepted", error: "x" } as never);
+    const { client, rpc } = fixture();
+    await processEnrollmentTick(client, ENROLLMENT);
+    const idx = (fn: string) => rpc.mock.calls.findIndex((c) => c[0] === fn);
+    expect(idx("routing_v2_record_provider_outcome")).toBeGreaterThanOrEqual(0);
+    expect(idx("routing_v2_record_provider_outcome")).toBeLessThan(idx("routing_v2_mark_drip_claim_sent"));
+  });
+
   it("enrollment changed before the advance (e.g. a reply retired it): reported, held for reconciliation", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     const { client } = fixture({ advanceResult: "changed" });

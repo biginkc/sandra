@@ -646,6 +646,15 @@ begin
     return v_id;
   end if;
   -- The provider's truth wins: a not_sent claim is promoted (anomaly recorded).
+  -- R7: 'sent' only with recorded provider acceptance (claim record or accepted run).
+  if p_outcome = 'sent' and not exists (
+    select 1 from public.routing_v2_drip_send_claims dc
+    left join public.sequence_step_runs sr on sr.id = dc.step_run_id
+    where dc.step_run_id = p_step_run_id
+      and (dc.provider_outcome = 'accepted' or sr.attempt_outcome = 'accepted')
+  ) then
+    return null;
+  end if;
   update public.routing_v2_drip_send_claims
   set status = p_outcome,
       cancel_reason = case when status = 'cancelled' then 'provider_accepted_after:' || coalesce(cancel_reason, '') else cancel_reason end,
@@ -680,12 +689,22 @@ begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found then return 'changed'; end if;
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
+  -- R7: a v2 advance needs THIS enrollment's claim for THIS step, carrying recorded provider
+  -- acceptance (claim record or accepted run). Otherwise nothing advances.
+  if p_step_run_id is null or not exists (
+    select 1
+    from public.routing_v2_drip_send_claims dc
+    join public.sequence_step_runs sr on sr.id = dc.step_run_id and sr.enrollment_id = p_enrollment_id
+    join public.sequence_steps st on st.id = sr.step_id and st.sequence_id = e.sequence_id and st.step_index = p_step_index
+    where dc.step_run_id = p_step_run_id and dc.enrollment_id = p_enrollment_id
+      and (dc.provider_outcome = 'accepted' or sr.attempt_outcome = 'accepted')
+  ) then
+    return 'refused';
+  end if;
   -- The claim close (the provider accepted: 'sent') commits in the SAME transaction as the
   -- advance / completion; the live tick does not close a sent claim anywhere else.
-  if p_step_run_id is not null then
-    select created_at into v_claimed_at from public.routing_v2_drip_send_claims where step_run_id = p_step_run_id;
-    perform public.routing_v2_mark_drip_claim_sent(p_step_run_id, 'sent');
-  end if;
+  select created_at into v_claimed_at from public.routing_v2_drip_send_claims where step_run_id = p_step_run_id;
+  perform public.routing_v2_mark_drip_claim_sent(p_step_run_id, 'sent');
   select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
   if e.status <> 'active' or e.current_step_index <> p_step_index then return 'changed'; end if;
   -- A seller message newer than the claim (classified or not, transitioned or not) decides

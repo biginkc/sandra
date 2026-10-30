@@ -197,6 +197,7 @@ export async function routingV2AdvanceAfterSend(
     });
     if (error) return `routing v2 advance failed: ${error.message}`;
     if (data === "changed") return "enrollment changed before advancement";
+    if (data === "refused") return "routing v2 advance refused: no recorded provider acceptance for this step";
     return null;
   } catch (err) {
     return `routing v2 advance failed: ${err instanceof Error ? err.message : String(err)}`;
