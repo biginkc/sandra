@@ -98,21 +98,56 @@ create policy routing_v2_phone_action_properties_org_select on public.routing_v2
   for select to authenticated
   using (public.hugo_has_active_org_access(org_id) and org_id in (select public.pipeline_runs_readable_org_ids()));
 
--- §13.1: in canary_property_ids, or a stable hash bucket below canary_percent.
+-- §13.1, the SQL twin of isV2Eligible(parseRoutingV2Flags(flags), id) in
+-- src/lib/sms-classification/routing-v2/flags.ts (pinned to it by the integration test):
+--   * canary_property_ids: absent, or an array whose every entry is a UUID string; anything
+--     else (null, non-array, one bad entry) = nothing eligible (fail closed);
+--   * canary_percent: absent, or an integer JSON number 0..100; anything else = nothing eligible;
+--   * eligible = id listed (case-insensitive) OR sha256(lower(id)) first 4 bytes (uint32 BE) % 100 < percent.
 create or replace function public.routing_v2_phone_action_eligible(p_flags jsonb, p_property_id uuid)
 returns boolean
-language sql
+language plpgsql
 immutable
 set search_path = public, pg_temp
 as $$
-  select coalesce(
-    (jsonb_typeof(p_flags->'canary_property_ids') = 'array' and (p_flags->'canary_property_ids') ? p_property_id::text)
-    or (
-      jsonb_typeof(p_flags->'canary_percent') = 'number'
-      and (p_flags->>'canary_percent') ~ '^[0-9]+$'
-      and ((hashtext(p_property_id::text)::bigint % 100) + 100) % 100 < least((p_flags->>'canary_percent')::int, 100)
-    ),
-    false);
+declare
+  v_ids jsonb := p_flags->'canary_property_ids';
+  v_pct jsonb := p_flags->'canary_percent';
+  v_percent numeric := 0;
+  v_bucket bigint;
+begin
+  if p_flags is null or jsonb_typeof(p_flags) <> 'object' or p_property_id is null then
+    return false;
+  end if;
+  if v_ids is not null then
+    if jsonb_typeof(v_ids) <> 'array' then
+      return false;
+    end if;
+    if exists (
+      select 1 from jsonb_array_elements(v_ids) e(v)
+      where jsonb_typeof(e.v) <> 'string'
+         or (e.v #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ) then
+      return false;
+    end if;
+  end if;
+  if v_pct is not null then
+    if jsonb_typeof(v_pct) <> 'number' then
+      return false;
+    end if;
+    v_percent := (v_pct #>> '{}')::numeric;
+    if v_percent <> trunc(v_percent) or v_percent < 0 or v_percent > 100 then
+      return false;
+    end if;
+  end if;
+  if v_ids is not null and exists (
+    select 1 from jsonb_array_elements_text(v_ids) e(v) where lower(e.v) = lower(p_property_id::text)
+  ) then
+    return true;
+  end if;
+  v_bucket := ('x' || substr(encode(sha256(convert_to(lower(p_property_id::text), 'UTF8')), 'hex'), 1, 8))::bit(32)::bigint % 100;
+  return v_bucket < v_percent;
+end;
 $$;
 revoke all on function public.routing_v2_phone_action_eligible(jsonb, uuid) from public, anon, authenticated;
 

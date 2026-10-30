@@ -5,6 +5,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
@@ -313,6 +314,70 @@ describe("routing v2 PR-G phone actions", () => {
     await expect(
       asUser(ownerId, async () => db.query(`select public.fn_routing_v2_phone_action_claim($1, 'wrong_number_all', $2)`, [inbound, X])),
     ).rejects.toThrow(/permission denied|service role required/);
+  });
+
+  it("SQL canary eligibility matches flags.ts isV2Eligible exactly, including malformed configs (fail closed)", async () => {
+    const propertyIds = Array.from({ length: 400 }, () => randomUUID());
+    const listed = propertyIds.slice(0, 5);
+    const configs: unknown[] = [
+      {},
+      { canary_percent: 0 },
+      { canary_percent: 1 },
+      { canary_percent: 10 },
+      { canary_percent: 37 },
+      { canary_percent: 50 },
+      { canary_percent: 99 },
+      { canary_percent: 100 },
+      { canary_percent: 12.0 },
+      { canary_property_ids: listed },
+      { canary_property_ids: listed.map((id) => id.toUpperCase()), canary_percent: 10 },
+      { canary_property_ids: [] , canary_percent: 50 },
+      // Malformed: every one must read as nothing eligible.
+      { canary_property_ids: [...listed, "not-a-uuid"], canary_percent: 100 },
+      { canary_property_ids: [listed[0], 7], canary_percent: 100 },
+      { canary_property_ids: listed[0], canary_percent: 100 },
+      { canary_property_ids: null, canary_percent: 100 },
+      { canary_property_ids: { a: listed[0] }, canary_percent: 100 },
+      { canary_percent: "50" },
+      { canary_percent: 50.5 },
+      { canary_percent: -1 },
+      { canary_percent: 101 },
+      { canary_percent: null },
+      { canary_percent: true },
+      { canary_property_ids: listed, canary_percent: 200 },
+    ];
+    let mismatches = 0;
+    let malformedEligible = 0;
+    for (const [i, cfg] of configs.entries()) {
+      const flags = parseRoutingV2Flags(cfg);
+      const sql = (
+        await db.query(
+          `select t.id::text as id, public.routing_v2_phone_action_eligible($1::jsonb, t.id) as ok from unnest($2::uuid[]) t(id)`,
+          [JSON.stringify(cfg), propertyIds],
+        )
+      ).rows as Array<{ id: string; ok: boolean }>;
+      for (const row of sql) {
+        const ts = isV2Eligible(flags, row.id);
+        if (ts !== row.ok) mismatches += 1;
+        if (i >= 12 && row.ok) malformedEligible += 1;
+      }
+    }
+    expect(mismatches).toBe(0);
+    expect(malformedEligible).toBe(0);
+    // Sanity: the percent configs really do select a stable, non-trivial subset.
+    const half = (
+      await db.query(`select count(*) filter (where public.routing_v2_phone_action_eligible('{"canary_percent":50}'::jsonb, t.id)) c from unnest($1::uuid[]) t(id)`, [propertyIds])
+    ).rows[0].c;
+    expect(Number(half)).toBeGreaterThan(120);
+    expect(Number(half)).toBeLessThan(280);
+  });
+
+  it("a malformed canary config makes the whole phone action not applicable", async () => {
+    await setFlags({ questions_live: true, wrong_number_all: true, canary_percent: 100, canary_property_ids: [ids.p1, "bad"] });
+    expect(await claim()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
+    await setFlags({ canary_property_ids: [], canary_percent: "100" });
+    expect(await claim()).toEqual({ status: "not_applicable", reason: "canary_excluded" });
+    expect(await count("routing_v2_phone_actions")).toBe(0);
   });
 
   it("rollback removes every object", async () => {

@@ -8,6 +8,7 @@ import type { Database } from "@/lib/supabase/types";
 
 import type { FinalDecision } from "./haiku-policy";
 import { shouldAskHaiku } from "./haiku-policy";
+import { readRoutingV2Flags, v2SliceAllowedForAll } from "./flags";
 import { DEFAULT_CUTOFF } from "./order";
 import type { V2Decision } from "./route";
 
@@ -107,32 +108,15 @@ type Loose = {
   rpc: (fn: string, args?: Record<string, unknown>) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
 };
 
-/** True only when both `questions_live` and `wrong_number_all` are exactly true. Errors = off. */
-export async function readWrongNumberAllFlag(supabase: SupabaseClient<Database>, orgId: string): Promise<boolean> {
-  try {
-    const { data, error } = await (supabase as unknown as Loose)
-      .from("ai_responder_configs")
-      .select("routing_v2_flags")
-      .eq("org_id", orgId)
-      .eq("active", true)
-      .maybeSingle();
-    if (error || !data) return false;
-    const f = (data as { routing_v2_flags?: unknown }).routing_v2_flags;
-    if (typeof f !== "object" || f === null) return false;
-    const flags = f as Record<string, unknown>;
-    return flags.questions_live === true && flags.wrong_number_all === true;
-  } catch {
-    return false;
-  }
-}
-
 export async function runRoutingV2PhoneAction(
   supabase: SupabaseClient<Database>,
   input: RoutingV2PhoneActionInput,
   deps: RoutingV2PhoneActionDeps,
 ): Promise<RoutingV2PhoneActionResult> {
-  // Flag off: one config read, nothing else (today's path runs unchanged).
-  if (!(await readWrongNumberAllFlag(supabase, input.orgId))) return { outcome: "flag_off" };
+  // Flag off: one config read, nothing else (today's path runs unchanged). flags.ts is the
+  // single parser; any error or malformed value reads as off.
+  const flags = await readRoutingV2Flags(supabase, input.orgId);
+  if (!(flags.questions_live && flags.wrong_number_all)) return { outcome: "flag_off" };
 
   const candidate = phoneActionCandidate(input.decision, input.wrongScope, input.final);
   if (candidate.kind === null) return { outcome: "not_applicable", reason: candidate.reason };
@@ -153,7 +137,7 @@ export async function runRoutingV2PhoneAction(
     });
     return { outcome: "not_applicable", reason: "claim_failed" };
   }
-  const c = claim as { status?: string; actionId?: string; actionStatus?: string; reason?: string } | null;
+  const c = claim as { status?: string; actionId?: string; actionStatus?: string; reason?: string; propertyIds?: string[] } | null;
   if (c?.status === "replayed" && c.actionId) {
     return { outcome: "replayed", actionId: c.actionId, actionStatus: c.actionStatus ?? "unknown" };
   }
@@ -161,6 +145,17 @@ export async function runRoutingV2PhoneAction(
     return { outcome: "not_applicable", reason: c?.reason ?? "claim_unexpected" };
   }
   const actionId = c.actionId;
+
+  // Belt and braces: the DB already checked canary eligibility (its SQL twin is pinned to
+  // flags.ts); re-check every claimed property with the canonical TS helper before any send.
+  if (!v2SliceAllowedForAll(flags, "wrong_number_all", c.propertyIds ?? [])) {
+    await db
+      .from("routing_v2_phone_actions")
+      .update({ status: "not_applied", not_applied_reason: "canary_excluded" })
+      .eq("id", actionId)
+      .eq("status", "claimed");
+    return { outcome: "not_applicable", reason: "canary_excluded" };
+  }
 
   let replyMessageId: string | null = null;
   if (candidate.kind === "wrong_number_all") {

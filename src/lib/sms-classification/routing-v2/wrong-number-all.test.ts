@@ -108,6 +108,9 @@ function fakeDb(opts: {
   return { db: db as never, calls };
 }
 
+const P1 = "00000000-0000-4000-8000-000000000001";
+const P2 = "00000000-0000-4000-8000-000000000002";
+const P5 = "00000000-0000-4000-8000-000000000005";
 const ON = { questions_live: true, wrong_number_all: true, canary_percent: 100 };
 const input = (over: Partial<Parameters<typeof runRoutingV2PhoneAction>[1]> = {}) => ({
   orgId: "org",
@@ -119,12 +122,12 @@ const input = (over: Partial<Parameters<typeof runRoutingV2PhoneAction>[1]> = {}
 });
 const deps = (over: Partial<RoutingV2PhoneActionDeps> = {}): RoutingV2PhoneActionDeps & { send: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> } => {
   const send = vi.fn(async () => ({ sent: true as const, outboundMessageId: "out-1" }));
-  const pause = vi.fn(async (id: string) => (id === "p1" ? ["e1", "e2"] : []));
+  const pause = vi.fn(async (id: string) => (id === P1 ? ["e1", "e2"] : []));
   return { sendWrongNumberReply: send, pauseEnrollments: pause, send, pause, ...over } as never;
 };
 
-const claimed = () => ({ data: { status: "claimed", actionId: "a1", propertyIds: ["p1", "p2", "p5"] } });
-const appliedRpc = () => ({ data: { status: "applied", actionId: "a1", applied: ["p1", "p2"], skipped: [{ propertyId: "p5", reason: "other_phones_on_contact" }] } });
+const claimed = () => ({ data: { status: "claimed", actionId: "a1", propertyIds: [P1, P2, P5] } });
+const appliedRpc = () => ({ data: { status: "applied", actionId: "a1", applied: [P1, P2], skipped: [{ propertyId: P5, reason: "other_phones_on_contact" }] } });
 
 describe("runRoutingV2PhoneAction", () => {
   it("flag-off parity: any flag shape other than questions_live + wrong_number_all = one config read, no RPC, no send, no pause", async () => {
@@ -146,7 +149,7 @@ describe("runRoutingV2PhoneAction", () => {
     const { db, calls } = fakeDb({ flags: ON, rpc: { fn_routing_v2_phone_action_claim: claimed, fn_routing_v2_phone_action_apply: appliedRpc } });
     const d = deps();
     const r = await runRoutingV2PhoneAction(db, input(), d);
-    expect(r).toEqual({ outcome: "applied", kind: "wrong_number_all", actionId: "a1", applied: ["p1", "p2"], skipped: [{ propertyId: "p5", reason: "other_phones_on_contact" }] });
+    expect(r).toEqual({ outcome: "applied", kind: "wrong_number_all", actionId: "a1", applied: [P1, P2], skipped: [{ propertyId: P5, reason: "other_phones_on_contact" }] });
     expect(d.send).toHaveBeenCalledTimes(1);
     expect(d.send).toHaveBeenCalledWith({ templateKey: "wrong_number", requiredBody: APPROVED_REPLY_TEXTS.wrong_number });
     const claimCall = calls.find((c) => c.fn === "fn_routing_v2_phone_action_claim");
@@ -155,11 +158,27 @@ describe("runRoutingV2PhoneAction", () => {
     // Order: claim, send, apply.
     const order = calls.filter((c) => c.kind === "rpc").map((c) => c.fn);
     expect(order).toEqual(["fn_routing_v2_phone_action_claim", "fn_routing_v2_phone_action_apply"]);
-    expect(d.pause.mock.calls.map((c) => c[0])).toEqual(["p1", "p2"]); // never p5 (skipped)
+    expect(d.pause.mock.calls.map((c) => c[0])).toEqual([P1, P2]); // never p5 (skipped)
     const pauseWrites = calls.filter((c) => c.table === "routing_v2_phone_action_properties");
     expect(pauseWrites).toHaveLength(1);
     expect(pauseWrites[0]).toMatchObject({ op: "update", payload: { paused_enrollment_ids: ["e1", "e2"] } });
-    expect(pauseWrites[0].filters).toEqual([["action_id", "a1"], ["property_id", "p1"], ["undone_at", null]]);
+    expect(pauseWrites[0].filters).toEqual([["action_id", "a1"], ["property_id", P1], ["undone_at", null]]);
+  });
+
+  it("canary re-check with flags.ts after the claim: an ineligible or malformed canary sends nothing", async () => {
+    for (const flags of [
+      { questions_live: true, wrong_number_all: true, canary_percent: 0, canary_property_ids: [P1, P2] }, // P5 not listed
+      { questions_live: true, wrong_number_all: true, canary_percent: 100, canary_property_ids: [P1, "not-a-uuid"] },
+      { questions_live: true, wrong_number_all: true, canary_percent: "100" },
+      { questions_live: true, wrong_number_all: true, canary_percent: 50.5 },
+    ]) {
+      const { db, calls } = fakeDb({ flags, rpc: { fn_routing_v2_phone_action_claim: claimed } });
+      const d = deps();
+      expect(await runRoutingV2PhoneAction(db, input(), d)).toEqual({ outcome: "not_applicable", reason: "canary_excluded" });
+      expect(d.send).not.toHaveBeenCalled();
+      expect(calls.some((c) => c.fn === "fn_routing_v2_phone_action_apply")).toBe(false);
+      expect(calls.find((c) => c.table === "routing_v2_phone_actions")).toMatchObject({ op: "update", payload: { status: "not_applied", not_applied_reason: "canary_excluded" } });
+    }
   });
 
   it("reuses the existing reply text byte-for-byte (no new seller-facing text)", () => {
@@ -223,11 +242,11 @@ describe("runRoutingV2PhoneAction", () => {
   it("bounce: bad_number with no reply and no drip pause", async () => {
     const { db, calls } = fakeDb({
       flags: ON,
-      rpc: { fn_routing_v2_phone_action_claim: claimed, fn_routing_v2_phone_action_apply: () => ({ data: { status: "applied", applied: ["p1"], skipped: [] } }) },
+      rpc: { fn_routing_v2_phone_action_claim: claimed, fn_routing_v2_phone_action_apply: () => ({ data: { status: "applied", applied: [P1], skipped: [] } }) },
     });
     const d = deps();
     const r = await runRoutingV2PhoneAction(db, input({ decision: bounce, wrongScope: null }), d);
-    expect(r).toMatchObject({ outcome: "applied", kind: "bad_number", applied: ["p1"] });
+    expect(r).toMatchObject({ outcome: "applied", kind: "bad_number", applied: [P1] });
     expect(d.send).not.toHaveBeenCalled();
     expect(d.pause).not.toHaveBeenCalled();
     expect(calls.find((c) => c.fn === "fn_routing_v2_phone_action_claim")?.args).toMatchObject({ p_action: "bad_number" });
@@ -248,11 +267,11 @@ describe("undoRoutingV2PhoneAction", () => {
   it("restores via the RPC, then resumes only the drips this action paused (pause reason re-checked)", async () => {
     const { db, calls } = fakeDb({
       rpc: {
-        fn_undo_routing_v2_phone_action: () => ({ data: { status: "undone", restored: ["p1", "p2"], stateChanged: [], enrollmentIds: ["e1", "e2"] } }),
+        fn_undo_routing_v2_phone_action: () => ({ data: { status: "undone", restored: [P1, P2], stateChanged: [], enrollmentIds: ["e1", "e2"] } }),
         resume_sequence_enrollment: (a) => ({ data: [{ outcome: a.p_enrollment_id === "e1" ? "resumed" : "skipped" }] }),
       },
     });
-    expect(await undoRoutingV2PhoneAction(db, "a1")).toEqual({ ok: true, status: "undone", restored: ["p1", "p2"], stateChanged: [], resumed: 1, resumeFailed: 0 });
+    expect(await undoRoutingV2PhoneAction(db, "a1")).toEqual({ ok: true, status: "undone", restored: [P1, P2], stateChanged: [], resumed: 1, resumeFailed: 0 });
     const resumes = calls.filter((c) => c.fn === "resume_sequence_enrollment").map((c) => c.args);
     expect(resumes).toEqual([
       { p_enrollment_id: "e1", p_expected_pause_reason: "inbound_reply" },
@@ -260,8 +279,8 @@ describe("undoRoutingV2PhoneAction", () => {
     ]);
   });
   it("partial undo reports the properties a person changed", async () => {
-    const { db } = fakeDb({ rpc: { fn_undo_routing_v2_phone_action: () => ({ data: { status: "partial", restored: ["p1"], stateChanged: ["p2"], enrollmentIds: [] } }) } });
-    expect(await undoRoutingV2PhoneAction(db, "a1")).toMatchObject({ ok: true, status: "partial", stateChanged: ["p2"] });
+    const { db } = fakeDb({ rpc: { fn_undo_routing_v2_phone_action: () => ({ data: { status: "partial", restored: [P1], stateChanged: [P2], enrollmentIds: [] } }) } });
+    expect(await undoRoutingV2PhoneAction(db, "a1")).toMatchObject({ ok: true, status: "partial", stateChanged: [P2] });
   });
   it("maps errors", async () => {
     for (const [m, code] of [["NOT_FOUND", "NOT_FOUND"], ["FORBIDDEN", "FORBIDDEN"], ["AUTHENTICATION_REQUIRED", "FORBIDDEN"], ["other", "FAILED"]] as const) {
