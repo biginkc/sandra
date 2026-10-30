@@ -20,9 +20,14 @@ describe("atomic v2 transition intent", () => {
   it("dedupes hot and call alerts on their shared delivery identity", () => {
     expect(compileV2Transition({ road: "ALERT_call_me", steps: [{ kind: "alert", reason: "call_me" }, { kind: "alert", reason: "hot_yes" }] }, input).outbox).toHaveLength(1);
   });
-  it("replies-off produces no reply, alert, hold or phone-close effect", () => {
-    const plan = compileV2Transition({ road: "possible_stop", steps: [{ kind: "hold", reason: "asked_stop" }, { kind: "alert", reason: "possible_stop" }, { kind: "wrong_number_close" }] }, { ...input, flags: { ...input.flags, replies: false } });
+  it("replies-off produces no reply or phone-close effect", () => {
+    const plan = compileV2Transition({ road: "wrong_number_close", steps: [{ kind: "reply", key: "wrong_number" }, { kind: "wrong_number_close" }] }, { ...input, flags: { ...input.flags, replies: false } });
     expect(plan).toMatchObject({ outbox: [], hold_reason: null, wrong_number_close: false });
+  });
+  it("replies-off never silently drops an owner alert or hold (N1): the caller must hold for a person", () => {
+    const off = { ...input, flags: { ...input.flags, replies: false } };
+    expect(() => compileV2Transition({ road: "possible_stop", steps: [{ kind: "hold", reason: "asked_stop" }, { kind: "alert", reason: "possible_stop" }] }, off)).toThrow("alert_needs_replies_slice");
+    expect(() => compileV2Transition({ road: "ALERT_call_me", steps: [{ kind: "alert", reason: "call_me" }, { kind: "stop_drip", whenTimeOnlyOn: true }] }, { ...off, flags: { ...off.flags, alert_on_time_only: true } })).toThrow("alert_needs_replies_slice");
   });
   it("rejects hold+send and multiple drips instead of silently losing an effect", () => {
     expect(() => compileV2Transition({ road: "stop", steps: [{ kind: "hold", reason: "asked_stop" }, { kind: "reply", key: "said_yes" }] }, input)).toThrow("hold_has_automatic_send");

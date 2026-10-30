@@ -35,13 +35,22 @@ begin
           and s.routing_v2_key is null
           and (select count(*) from public.sequences x where x.org_id=r.org_id
             and x.name=d.name and x.archived_at is null and x.routing_v2_key is null)=1;
-      continue when source_id is null;
-      continue when exists (select 1 from public.sequences where org_id=r.org_id
-        and lower(name)=lower(d.name || ' (routing v2)') and archived_at is null);
+      if source_id is null then
+        raise notice 'routing v2 snapshot: org % has no single unarchived drip named %, % skipped', r.org_id, d.name, d.key;
+        continue;
+      end if;
+      if exists (select 1 from public.sequences where org_id=r.org_id
+        and lower(name)=lower(d.name || ' (routing v2)') and archived_at is null) then
+        raise notice 'routing v2 snapshot: org % already has a drip named % (routing v2), % skipped', r.org_id, d.name, d.key;
+        continue;
+      end if;
       -- Refuse missing/gapped steps, template pools, empty text, foreign templates,
       -- or non-SMS actions; never silently discard part of an approved drip.
-      continue when not exists (select 1 from public.sequence_steps where sequence_id=source_id);
-      continue when exists (
+      if not exists (select 1 from public.sequence_steps where sequence_id=source_id) then
+        raise notice 'routing v2 snapshot: org % drip % has no steps, % skipped', r.org_id, d.name, d.key;
+        continue;
+      end if;
+      if exists (
         select 1 from (
           select st.*, row_number() over(order by step_index)-1 as expected_index
           from public.sequence_steps st where sequence_id=source_id
@@ -51,7 +60,10 @@ begin
           or st.template_category is not null
           or (st.template_id is not null and t.id is null)
           or nullif(btrim(coalesce(st.template_body,t.content)), '') is null
-      );
+      ) then
+        raise notice 'routing v2 snapshot: org % drip % has a step gap, non-SMS step, template pool, missing template or empty text, % skipped', r.org_id, d.name, d.key;
+        continue;
+      end if;
       insert into public.sequences
         (org_id,name,description,active,append_opt_out,routing_v2_key,routing_v2_version,routing_v2_then_key)
       select org_id,d.name || ' (routing v2)',

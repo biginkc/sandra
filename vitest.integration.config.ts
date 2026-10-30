@@ -171,6 +171,7 @@ export default defineConfig({
       "supabase/migrations/20261030280000_routing_v2_skip_first_step.integration.test.ts",
       "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
       "supabase/migrations/20261030300000_routing_v2_outbox_provider_fence.integration.test.ts",
+      "supabase/migrations/20261030310000_routing_v2_live_transition_alerts_survive.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",

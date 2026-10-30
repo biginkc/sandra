@@ -29,6 +29,14 @@ describe("durable live action adapter",()=>{
   it.each(["context_changed","superseded","flag_off"])("retains RPC refusal %s",async(outcome)=>{
     const {db}=fixture(evidence,{outcome});expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:outcome});
   });
+  it("treats no_sequence as a refusal so the caller holds for a person (B2)",async()=>{
+    const {db}=fixture(evidence,{outcome:"no_sequence",alerts_queued:0});
+    expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:"no_sequence",alertsQueued:0});
+  });
+  it("reports owner alerts still queued for a stale decision (B1)",async()=>{
+    const {db}=fixture(evidence,{outcome:"superseded",alerts_queued:1});
+    expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:"superseded",alertsQueued:1});
+  });
   it("never calls a malformed result applied",async()=>{
     const {db}=fixture(evidence,{});expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:"transition_failed"});
   });

@@ -67,6 +67,11 @@ export function compileV2Transition(
     } else if (step.kind === "hold" && replies) plan.hold_reason = step.reason;
     else if (step.kind === "wrong_number_close" && replies) plan.wrong_number_close = true;
   }
+  // N1: an owner alert (or a hold) is never dropped silently. Replies off while drips stays on
+  // is only reachable by rolling replies back; the caller must hold for a person instead.
+  if (!replies && action.steps.some((step) => step.kind === "alert" || step.kind === "hold")) {
+    throw new Error("routing_v2_alert_needs_replies_slice");
+  }
   if (plan.hold_reason && (plan.sequence_key || plan.outbox.some((item) => item.kind === "reply"))) {
     throw new Error("routing_v2_hold_has_automatic_send");
   }

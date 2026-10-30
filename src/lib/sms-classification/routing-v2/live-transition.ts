@@ -11,7 +11,8 @@ type Loose = {
 };
 export type V2LiveTransitionResult =
   | { kind:"applied"; transition:Record<string,unknown> }
-  | { kind:"refused"; reason:string };
+  /** alertsQueued: owner-alert intents still queued for a stale / no-drip decision (B1/B2). */
+  | { kind:"refused"; reason:string; alertsQueued?: number };
 
 /** Both first attempt and recovery compile the ORIGINAL immutable action. A duplicate
  * classifier run never supplies replacement effects. The RPC rechecks identity/revision
@@ -33,12 +34,24 @@ export async function applyStoredV2Transition(
       return {kind:"refused",reason:"specialized_action_required"};
     }
     const flags=await readRoutingV2Flags(db,input.orgId);
-    const plan=compileV2Transition(evidence.action,{...input,flags});
+    let plan:ReturnType<typeof compileV2Transition>;
+    try { plan=compileV2Transition(evidence.action,{...input,flags}); }
+    catch(error) {
+      // N1: an effect the current flags cannot carry (e.g. an alert with replies off) is never
+      // dropped silently; the caller holds for a person.
+      return {kind:"refused",reason:error instanceof Error && error.message.startsWith("routing_v2_") ? error.message : "plan_failed"};
+    }
     const {data,error:rpcError}=await client.rpc("routing_v2_apply_live_transition",{
       p_inbound_message_id:input.inboundMessageId,p_property_id:input.propertyId,p_decision:plan,
     });
     if(rpcError || !data || typeof data.outcome!=="string") return {kind:"refused",reason:"transition_failed"};
-    if(!["applied","replies_only","no_sequence"].includes(data.outcome)) return {kind:"refused",reason:data.outcome};
+    // no_sequence is never success: the caller must hold for a person (B2). Stale decisions
+    // (superseded / context_changed / no_sequence) still queue the owner alerts in SQL (B1).
+    if(!["applied","replies_only"].includes(data.outcome)) {
+      return typeof data.alerts_queued==="number"
+        ? {kind:"refused",reason:data.outcome,alertsQueued:data.alerts_queued}
+        : {kind:"refused",reason:data.outcome};
+    }
     return {kind:"applied",transition:data};
   } catch { return {kind:"refused",reason:"transition_failed"}; }
 }
