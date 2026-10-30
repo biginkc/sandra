@@ -208,32 +208,11 @@ describe("routing v2 live dispatch hook", () => {
     });
   });
 
-  describe("number source (existing legacy detector)", () => {
-    const decided = (steps: unknown[]) => ({ kind: "decided", action: { road: "who_reply_drip", steps } });
-    it("a reply road + 'how did you get my number' (legacy askedHowNumberObtained): the approved number_source reply replaces the road's reply", async () => {
-      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }, { kind: "drip", drip: "Asked who is texting", skipFirstStep: true }]));
-      h.legacy.mockResolvedValue({ kind: "jev_nurture", askedHowNumberObtained: true });
-      await runRoutingV2LiveStep(fakeSupabase().client, args("Who is this and how did you get my number?"));
-      expect(h.legacy).toHaveBeenCalledOnce();
-      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
-        action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "number_source" }, { kind: "drip", drip: "Asked who is texting", skipFirstStep: true }] },
-      }));
-    });
-    it("not asked: the road's own reply stays", async () => {
-      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }]));
-      await runRoutingV2LiveStep(fakeSupabase().client, args("Who is this?"));
-      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }] } }));
-    });
-    it("a road with no reply never asks the legacy detector (no extra Jev call)", async () => {
-      h.classify.mockResolvedValue(decided([{ kind: "alert", reason: "call_me" }]));
-      await runRoutingV2LiveStep(fakeSupabase().client, args("Call me"));
-      expect(h.legacy).not.toHaveBeenCalled();
-    });
-    it("the legacy detector failing keeps the road's own reply", async () => {
-      h.classify.mockResolvedValue(decided([{ kind: "reply", key: "identity" }]));
-      h.legacy.mockRejectedValue(new Error("jev down"));
+  describe("number source (existing approved question, same Jev call)", () => {
+    it("asks the existing number-source question inside the single v2 classification; never the eight-answer classifier", async () => {
       await runRoutingV2LiveStep(fakeSupabase().client, args("how did you get my number"));
-      expect(h.record).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ action: { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }] } }));
+      expect(h.classify).toHaveBeenCalledWith(expect.objectContaining({ numberSourceQuestion: true }), expect.anything());
+      expect(h.legacy).not.toHaveBeenCalled();
     });
   });
 });

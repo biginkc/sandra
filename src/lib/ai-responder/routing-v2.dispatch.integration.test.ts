@@ -44,22 +44,14 @@ function installFakeJev() {
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     jevCalls++;
     const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
-    if ("outcome" in body.questions) {
-      // The eight-answer request (the existing number-source detector): a calm "unclear" read.
-      return new Response(JSON.stringify({
-        model: "jev-test",
-        answers: {
-          outcome: { choice: "unclear", confidence: 0.5, probabilities: { unclear: 0.5 } },
-          escalation_reason: { choice: "not_applicable", probabilities: { not_applicable: 0.9 } },
-          asked_how_number_obtained: { choice: numberAsked ? "yes" : "no", probabilities: numberAsked ? { yes: 0.95, no: 0.05 } : { yes: 0.05, no: 0.95 } },
-        },
-      }), { status: 200, headers: { "content-type": "application/json" } });
-    }
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
       answers[id] = id === "property_type"
         ? { choice: "residential", probabilities: { residential: 0.9, lot: 0.02, commercial: 0.02, rental: 0.02, didnt_say: 0.04 } }
-        : { choice: "noul", noul: jevProbabilities[id] ?? 0.02 };
+        : id === "asked_how_number_obtained"
+          // The existing approved number-source question, asked in the same v2 call.
+          ? { choice: numberAsked ? "yes" : "no", probabilities: numberAsked ? { yes: 0.95, no: 0.05 } : { yes: 0.05, no: 0.95 } }
+          : { choice: "noul", noul: jevProbabilities[id] ?? 0.02 };
     }
     return new Response(JSON.stringify({ answers, model: "jev-test", usage: { input_tokens: 1, output_tokens: 1 } }), {
       status: 200, headers: { "content-type": "application/json" },
@@ -171,8 +163,9 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     jevProbabilities = { text_only: 0.95 };
     const outcome = await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
     expect(outcome).toEqual({ outcome: "auto_closed", reason: "routing_v2:text_only_reply" });
-    // The v2 question set, plus the existing number-source detector (reply roads only).
-    expect(jevCalls).toBe(2);
+    // ONE Jev call: the v2 set with the existing number-source question; no eight-answer run.
+    expect(jevCalls).toBe(1);
+    expect(await count("select count(*)::int n from sms_classification_runs where source_inbound_message_id = $1", [input.inboundMessageId])).toBe(0);
     // The detached kick and an explicit consumer pass race for the same row: one wins the claim.
     await Promise.all([runRoutingV2OutboxReplies(supabase, { limit: 5 }), runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId })]);
     await settle();
@@ -194,7 +187,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [input.inboundMessageId])).toBe(1);
   });
 
-  it("\"how did you get my number\" (existing detector): the approved number_source reply replaces the road's reply", async () => {
+  it("\"how did you get my number\" (existing approved question, same Jev call): the approved number_source reply replaces the road's reply", async () => {
     const lead = await seedLead();
     await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
     const input = await inbound(lead, "Text only. How did you get my number?");

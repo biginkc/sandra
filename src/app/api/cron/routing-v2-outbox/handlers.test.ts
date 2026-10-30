@@ -17,12 +17,12 @@ describe("routing v2 outbox cron", () => {
     expect(replies).not.toHaveBeenCalled();
   });
   it("runs recovery + due replies, then the PR-G settler; a settler failure never hides the replies", async () => {
-    const replies = vi.fn(async () => ({ released: 1, reconciled: { sent: 0, not_sent: 0, unknown: 0 }, results: [{ id: "o1", result: { kind: "sent" as const, receiptId: "m1" } }] }));
+    const replies = vi.fn(async () => ({ released: 1, reconciled: { sent: 0, not_sent: 0, unknown: 0 }, held: 0, results: [{ id: "o1", result: { kind: "sent" as const, receiptId: "m1" } }] }));
     const settle = vi.fn(async () => { throw new Error("boom"); });
     const res = await handle(req("Bearer s"), { client: () => ({}) as never, replies, settle });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, released: 1, delivered: [{ id: "o1", kind: "sent" }], settled: 0 });
-    expect(replies).toHaveBeenCalledWith({}, { limit: 20 });
+    expect(replies).toHaveBeenCalledWith({}, { limit: 20, budgetMs: 45_000 });
     expect(settle).toHaveBeenCalledOnce();
   });
 });

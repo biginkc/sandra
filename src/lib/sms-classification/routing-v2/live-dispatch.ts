@@ -100,16 +100,6 @@ export function storedFinalDecision(e: StoredLiveEvidence): FinalDecision | null
   return { road: h.final_road, by: h.final_by, hold: h.hold, alert: h.alert, failureReason: h.failure_reason };
 }
 
-/**
- * "How did you get my number?" (the existing legacy detector, see dispatch.ts): the approved
- * number_source reply REPLACES the road's own reply, never adds a second one, and only on
- * roads that already send a reply (same rule as actionForV2Decision / classify.ts).
- */
-export function withNumberSourceReply(action: V2Action): V2Action {
-  if (!action.steps.some((s) => s.kind === "reply")) return action;
-  return { ...action, steps: action.steps.map((s) => (s.kind === "reply" ? { kind: "reply", key: "number_source" } : s)) };
-}
-
 export type V2LiveStep =
   /** Jev failed or was incomplete: today's classifier-failure hold. */
   | { kind: "failed"; reason: string }

@@ -5,6 +5,7 @@ import { isV2Eligible, v2SliceAllowed, type RoutingV2Flags } from "./flags";
 import { askHaiku, formatHaikuThread, type HaikuAnswer, type HaikuFailure, type HaikuCallResult, type HaikuThreadMessage } from "./haiku";
 import { applyHaikuPolicy, type FinalDecision } from "./haiku-policy";
 import { decideRepairsFollowUp, isAfterRepairsReply, readRepairsFollowUps, runV2PriceCheck } from "./price-check";
+import { NUMBER_SOURCE_QUESTION_ID } from "../questions";
 import { buildV2JevRequest, type PropertyTypeOption, type V2QuestionId } from "./questions";
 import { assertCompleteV2, routeV2, type V2Decision } from "./route";
 
@@ -36,6 +37,11 @@ export type V2ClassificationInput = {
   /** Previous messages, chronological, excluding the current inbound. */
   thread: readonly HaikuThreadMessage[];
   askedHowNumber?: boolean;
+  /**
+   * Live cutover: ask the existing number-source question in the same Jev call and use its
+   * answer ("yes" = asked) when askedHowNumber is not given.
+   */
+  numberSourceQuestion?: boolean;
 };
 export type V2ClassificationDeps = {
   jev: (request: JevAskRequest) => Promise<JevAskResult>;
@@ -65,7 +71,7 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
     raw = await deps.jev(buildV2JevRequest({
       our_last_text_to_homeowner: lastOutbound?.body ?? null,
       homeowner_reply: input.reply,
-    }, { repairsFollowUps: repairs }));
+    }, { repairsFollowUps: repairs, numberSource: input.numberSourceQuestion === true }));
   } catch {
     return { kind: "failed", reason: "jev_failed" };
   }
@@ -121,7 +127,9 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
     }
   }
   // The approved number-source reply replaces an existing reply, never adds a second one.
-  if (input.askedHowNumber) action = {
+  const askedHowNumber = input.askedHowNumber
+    ?? (input.numberSourceQuestion === true && raw.answers?.[NUMBER_SOURCE_QUESTION_ID]?.choice === "yes");
+  if (askedHowNumber) action = {
     ...action,
     steps: action.steps.map((step) => step.kind === "reply" ? { kind: "reply", key: "number_source" } : step),
   };

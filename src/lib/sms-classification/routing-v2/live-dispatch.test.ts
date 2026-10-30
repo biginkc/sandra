@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { liveHoldReason, liveStepFor, storedFinalDecision, storedV2Decision, withNumberSourceReply, type StoredLiveEvidence } from "./live-dispatch";
+import { liveHoldReason, liveStepFor, storedFinalDecision, storedV2Decision, type StoredLiveEvidence } from "./live-dispatch";
 
 const base: StoredLiveEvidence = {
   status: "decided", org_id: "o", property_id: "p", road: "who_reply_drip", jev_road: "who_reply_drip",
@@ -32,11 +32,5 @@ describe("live v2 step selection from stored evidence", () => {
     expect(storedV2Decision(e)).toMatchObject({ road: "stop", haiku: "decider_band" });
     expect(storedFinalDecision(e)).toEqual({ road: "stop", by: "jev_haiku_unsure", hold: true, alert: "x", failureReason: null });
     expect(storedV2Decision({ ...base, status: "failed" })).toBeNull();
-  });
-  it("number source replaces the reply only on reply roads", () => {
-    expect(withNumberSourceReply({ road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }, { kind: "drip", drip: "Asked who is texting" }] }).steps)
-      .toEqual([{ kind: "reply", key: "number_source" }, { kind: "drip", drip: "Asked who is texting" }]);
-    const alertOnly = { road: "ALERT_call_me" as const, steps: [{ kind: "alert" as const, reason: "call_me" as const }] };
-    expect(withNumberSourceReply(alertOnly)).toBe(alertOnly);
   });
 });

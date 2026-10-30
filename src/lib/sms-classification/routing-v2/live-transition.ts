@@ -45,6 +45,12 @@ export async function applyStoredV2Transition(
       p_inbound_message_id:input.inboundMessageId,p_property_id:input.propertyId,p_decision:plan,
     });
     if(rpcError || !data || typeof data.outcome!=="string") return {kind:"refused",reason:"transition_failed"};
+    // A replayed alerts-only record (a crash after it committed): report its original reason
+    // (no_sequence / context_changed / superseded / hold) so the caller still holds or skips.
+    const decision=(data as {decision?:{alerts_only_reason?:unknown}}).decision;
+    if(data.replayed===true && typeof decision?.alerts_only_reason==="string") {
+      return {kind:"refused",reason:decision.alerts_only_reason};
+    }
     // no_sequence is never success: the caller must hold for a person (B2). Stale decisions
     // (superseded / context_changed / no_sequence) still queue the owner alerts in SQL (B1).
     if(!["applied","replies_only"].includes(data.outcome)) {

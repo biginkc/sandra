@@ -176,6 +176,7 @@ export default defineConfig({
       "supabase/migrations/20261030330000_routing_v2_outbox_delivery.integration.test.ts",
       "supabase/migrations/20261030340000_routing_v2_phone_action_live_evidence.integration.test.ts",
       "supabase/migrations/20261030350000_routing_v2_one_canary_check.integration.test.ts",
+      "supabase/migrations/20261030360000_routing_v2_outbox_never_silent.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",

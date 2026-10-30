@@ -6,6 +6,7 @@ import { ALL_OFF, type RoutingV2Flags } from "./flags";
 import { isAfterRepairsReply } from "./price-check";
 import { PROPERTY_TYPE_OPTIONS, REPAIRS_FOLLOW_UP_IDS, V2_QUESTION_IDS } from "./questions";
 import { v2ReplyText } from "./reply-texts";
+import { NUMBER_SOURCE_QUESTION, NUMBER_SOURCE_QUESTION_ID } from "../questions";
 
 const propertyId = "11111111-1111-4111-8111-111111111111";
 const flags: RoutingV2Flags = { ...ALL_OFF, questions_live: true, haiku: true, price_check: true, canaryPercent: 100 };
@@ -21,6 +22,36 @@ function fixture(overrides: Record<string, number> = {}) {
   };
   return { deps, input: { flags, propertyId, reply: "Okay", thread: [] } };
 }
+
+describe("number source in the same Jev call (existing approved question)", () => {
+  it("asks the existing question verbatim (by reference) only when requested; shadow/replay requests unchanged", async () => {
+    const { input, deps } = fixture({ text_only: 0.95 });
+    await classifyV2(input, deps);
+    const plain = (deps.jev as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { questions: Record<string, unknown> };
+    expect(NUMBER_SOURCE_QUESTION_ID in plain.questions).toBe(false);
+    await classifyV2({ ...input, numberSourceQuestion: true }, deps);
+    const live = (deps.jev as ReturnType<typeof vi.fn>).mock.calls[1]![0] as { questions: Record<string, unknown> };
+    expect(live.questions[NUMBER_SOURCE_QUESTION_ID]).toBe(NUMBER_SOURCE_QUESTION);
+  });
+  it("\"yes\" replaces the road's reply with the approved number_source reply; one Jev call", async () => {
+    const { input, deps } = fixture({ text_only: 0.95 });
+    const answers = (await (deps.jev as unknown as () => Promise<JevAskResult>)()).answers!;
+    answers[NUMBER_SOURCE_QUESTION_ID] = { choice: "yes", probabilities: { yes: 0.93, no: 0.07 } };
+    (deps.jev as ReturnType<typeof vi.fn>).mockClear();
+    const result = await classifyV2({ ...input, reply: "Text only. How did you get my number?", numberSourceQuestion: true }, deps);
+    expect(result).toMatchObject({ kind: "decided", action: { road: "text_only_reply", steps: [{ kind: "reply", key: "number_source" }] } });
+    expect(deps.jev).toHaveBeenCalledTimes(1);
+  });
+  it("\"no\" (or a road with no reply) leaves the action alone", async () => {
+    const { input, deps } = fixture({ text_only: 0.95 });
+    expect(await classifyV2({ ...input, numberSourceQuestion: true }, deps)).toMatchObject({ action: { steps: [{ kind: "reply", key: "text_only" }] } });
+    const callMe = fixture({ asked_call: 0.95 });
+    const answers = (await (callMe.deps.jev as unknown as () => Promise<JevAskResult>)()).answers!;
+    answers[NUMBER_SOURCE_QUESTION_ID] = { choice: "yes" };
+    const r = await classifyV2({ ...callMe.input, numberSourceQuestion: true }, callMe.deps);
+    expect(r.kind === "decided" && r.action.steps.some((step) => step.kind === "reply")).toBe(false);
+  });
+});
 
 describe("v2 decision preparation", () => {
   it("does no provider work when disabled or outside the canary", async () => {

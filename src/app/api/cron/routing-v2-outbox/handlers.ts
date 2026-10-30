@@ -34,7 +34,7 @@ export async function handle(request: Request, deps: {
   }
   try {
     const supabase = (deps.client ?? createServiceRoleClient)();
-    const replies = await (deps.replies ?? runRoutingV2OutboxReplies)(supabase, { limit: 20 });
+    const replies = await (deps.replies ?? runRoutingV2OutboxReplies)(supabase, { limit: 20, budgetMs: 45_000 });
     let settled: unknown[] = [];
     try {
       settled = await (deps.settle ?? settleRoutingV2PhoneRepliesForCron)(supabase);
@@ -44,6 +44,7 @@ export async function handle(request: Request, deps: {
     return NextResponse.json({
       ok: true,
       released: replies.released,
+      held: replies.held,
       reconciled: replies.reconciled,
       delivered: replies.results.map((r) => ({ id: r.id, kind: r.result.kind })),
       settled: settled.length,

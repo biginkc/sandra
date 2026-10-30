@@ -37,6 +37,14 @@ describe("durable live action adapter",()=>{
     const {db}=fixture(evidence,{outcome:"superseded",alerts_queued:1});
     expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:"superseded",alertsQueued:1});
   });
+  it("a replayed alerts-only record keeps its original reason so the caller still holds (review N1)", async () => {
+    for (const reason of ["no_sequence", "context_changed", "superseded"]) {
+      const {db}=fixture(evidence,{outcome:"superseded",replayed:true,decision:{alerts_only_reason:reason}});
+      expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason});
+    }
+    const {db}=fixture(evidence,{outcome:"applied",replayed:true,decision:{}});
+    expect(await applyStoredV2Transition(db,input)).toMatchObject({kind:"applied"});
+  });
   it("never calls a malformed result applied",async()=>{
     const {db}=fixture(evidence,{});expect(await applyStoredV2Transition(db,input)).toEqual({kind:"refused",reason:"transition_failed"});
   });

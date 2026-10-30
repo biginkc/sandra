@@ -14,7 +14,7 @@ vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   checkRecipientQuietHours: () => (h.closed ? { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" } : { ok: true, state: "MO", localTime: "12:00", florida: false }),
 }));
 
-import { deliverRoutingV2OutboxReply, ROUTING_V2_REPLY_MAX_AGE_MS } from "./dispatch";
+import { deliverRoutingV2OutboxReply, ROUTING_V2_REPLY_MAX_AGE_MS, routingV2OutboxHoldReason, runRoutingV2OutboxReplies } from "./dispatch";
 
 const ROW = {
   id: "0b8f3c1e-6a2b-4c3d-8e4f-5a6b7c8d9e0f", org_id: "org1", property_id: "p1", inbound_message_id: "in1",
@@ -26,7 +26,8 @@ function fakeSupabase(rpc: Record<string, unknown>) {
   const updates: Array<{ table: string; values: unknown }> = [];
   const chain = (table: string) => {
     const rows = table === "messages" ? [{ contact_id: "c1", conversation_id: "conv1", from_address: "+18165550100", to_address: "+18165550199", body: "Where are you?" }]
-      : table === "ai_responder_configs" ? [{ model: "m", outbound_mode: "automatic" }] : [];
+      : table === "ai_responder_configs" ? [{ model: "m", outbound_mode: "automatic" }]
+      : table === "properties" ? [{ id: "p1" }] : [];
     const c: Record<string, unknown> = {};
     for (const m of ["select", "eq", "neq", "in", "is", "not", "or", "ilike", "gte", "gt", "lt", "lte", "order", "limit", "insert", "upsert", "delete", "contains", "filter", "match", "range"]) c[m] = () => c;
     c.update = (values: unknown) => { updates.push({ table, values }); return c; };
@@ -103,5 +104,43 @@ describe("routing v2 outbox reply consumer", () => {
 
   it("alerts are not delivered here", async () => {
     expect(await deliverRoutingV2OutboxReply(fakeSupabase({}).client, { ...ROW, kind: "alert" })).toEqual({ kind: "skipped", reason: "not_a_reply" });
+  });
+
+  it("a not-sent refusal holds ONLY when this call cancelled the row (review N2)", async () => {
+    h.reply.mockResolvedValue({ kind: "none", reason: "reply_text_not_approved" });
+    const { client, updates } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "already_sent" });
+    expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "reply_text_not_approved" });
+    expect(updates).toEqual([]);
+  });
+});
+
+describe("routing v2 outbox recovery (review B1)", () => {
+  it("maps every cancelled-before-the-seller reason to today's hold family", () => {
+    expect(routingV2OutboxHoldReason("not_sent:no_message_row")).toBe("nine_reply_not_sent:no_message_row");
+    expect(routingV2OutboxHoldReason("not_sent:provider_failed")).toBe("nine_reply_not_sent:provider_failed");
+    expect(routingV2OutboxHoldReason("unknown:held_for_person")).toBe("nine_reply_not_sent:send_outcome_unknown");
+  });
+  it("writes the hold for each reply the seller did not get, then clears its marker", async () => {
+    const { client, calls, updates } = fakeSupabase({
+      routing_v2_release_stale_outbox_claims: 0,
+      routing_v2_reconcile_outbox: { never_submitted: 1 },
+      routing_v2_outbox_holds_due: [{ outbox_id: "o9", property_id: "p9", reason: "not_sent:no_message_row" }],
+      routing_v2_mark_outbox_hold_written: "ok",
+      routing_v2_due_outbox_replies: [],
+    });
+    const r = await runRoutingV2OutboxReplies(client);
+    expect(r.held).toBe(1);
+    expect(JSON.stringify(updates)).toContain("nine_reply_not_sent:no_message_row");
+    const names = calls.map((c) => c.name);
+    expect(names.indexOf("routing_v2_mark_outbox_hold_written")).toBeGreaterThan(names.indexOf("routing_v2_outbox_holds_due"));
+    expect(calls.find((c) => c.name === "routing_v2_reconcile_outbox")?.args).toEqual({ p_older_than_seconds: 180, p_unknown_hold_minutes: 30 });
+  });
+  it("time budget: no new claim once over it", async () => {
+    let t = 0;
+    const rows = [ROW, { ...ROW, id: "1b8f3c1e-6a2b-4c3d-8e4f-5a6b7c8d9e0f" }];
+    const { client, calls } = fakeSupabase({ routing_v2_due_outbox_replies: rows, routing_v2_claim_outbox: "superseded" });
+    const r = await runRoutingV2OutboxReplies(client, { propertyId: "p1", budgetMs: 45_000, now: () => (t += 30_000) });
+    expect(r.results).toHaveLength(1);
+    expect(calls.filter((c) => c.name === "routing_v2_claim_outbox")).toHaveLength(1);
   });
 });

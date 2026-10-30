@@ -144,7 +144,6 @@ import {
   readLiveV2Evidence,
   storedFinalDecision,
   storedV2Decision,
-  withNumberSourceReply,
   type StoredLiveEvidence,
 } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
@@ -8490,7 +8489,7 @@ export async function runRoutingV2LiveStep(
       sourceCreatedAt: source?.created_at ?? null,
     });
     const result = await classifyV2(
-      { flags, propertyId: input.propertyId, reply: input.inboundBody, thread },
+      { flags, propertyId: input.propertyId, reply: input.inboundBody, thread, numberSourceQuestion: true },
       v2ProviderDeps({
         jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", maxRetries: 0, timeoutMs: 8000 },
         haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
@@ -8499,13 +8498,6 @@ export async function runRoutingV2LiveStep(
     );
     // classifyV2 only returns off when the flags say so; they were just read as on.
     classification = result.kind === "off" ? V2_JEV_FAILED : result;
-    // "How did you get my number?": the v2 question set has no such question, so the EXISTING
-    // live detector (the eight-answer classification's askedHowNumberObtained, the same signal
-    // the identity interceptor uses) is asked, only when the v2 road would send a reply.
-    if (classification.kind === "decided" && classification.action.steps.some((step) => step.kind === "reply")
-        && (await routingV2AskedHowNumber(supabase, input, property.org_id, runCtx))) {
-      classification = { ...classification, action: withNumberSourceReply(classification.action) };
-    }
   } catch {
     classification = V2_JEV_FAILED;
   }
@@ -8598,21 +8590,6 @@ async function applyRoutingV2LiveEvidence(
   }
   // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
   return nineHoldAndComplete(supabase, a, "nine_needs_person");
-}
-
-/** The existing number-source detector (eight-answer Jev classification). Any failure = false. */
-async function routingV2AskedHowNumber(
-  supabase: SupabaseClient<Database>,
-  input: AiDispatchInput,
-  orgId: string,
-  runCtx?: MaybeRunContext,
-): Promise<boolean> {
-  try {
-    const c = await classifyInboundOnce(supabase, { input, orgId, runCtx });
-    return "askedHowNumberObtained" in c && c.askedHowNumberObtained === true;
-  } catch {
-    return false;
-  }
 }
 
 /** The seller's number for a phone-level action: the inbound's own from address. */
@@ -8958,29 +8935,51 @@ async function deliverRoutingV2OutboxIntent(
       await rpcText("routing_v2_mark_outbox_unknown", { p_outbox_id: i.id, p_reason: reason });
     },
     async notSent(i, reason) {
-      await rpcText("routing_v2_mark_outbox_not_sent", { p_outbox_id: i.id, p_reason: reason });
+      const marked = await rpcText("routing_v2_mark_outbox_not_sent", { p_outbox_id: i.id, p_reason: reason });
       // The seller did not get the reply: a person looks (today's nine-question hold family).
-      // The send path already flagged its own refusals (escalated); this is idempotent.
-      await holdFor(reason.replace(/\s+/g, "_"));
+      // Only when THIS call cancelled the row: a row another consumer already sent, or the
+      // provider fence already cancelled (superseded / takeover), never gets a false hold.
+      if (marked === "ok") await holdFor(reason.replace(/\s+/g, "_"));
     },
   });
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
+/** A queued reply the seller did not get: today's hold reason family, no whitespace. */
+export function routingV2OutboxHoldReason(cancelReason: string): string {
+  if (cancelReason.startsWith("unknown:")) return "nine_reply_not_sent:send_outcome_unknown";
+  const tail = cancelReason.replace(/^not_sent:/, "").replace(/\s+/g, "_");
+  return `nine_reply_not_sent:${tail || "not_sent"}`;
+}
+
 export async function runRoutingV2OutboxReplies(
   supabase: SupabaseClient<Database>,
-  opts: { propertyId?: string; limit?: number } = {},
-): Promise<{ released: number; reconciled: unknown; results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> }> {
+  opts: { propertyId?: string; limit?: number; budgetMs?: number; now?: () => number } = {},
+): Promise<{ released: number; reconciled: unknown; held: number; results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> }> {
   const db = supabase as unknown as LooseRpc;
+  const now = opts.now ?? Date.now;
+  const started = now();
   let released = 0;
   let reconciled: unknown = null;
+  let held = 0;
   if (!opts.propertyId) {
     const rel = await db.rpc("routing_v2_release_stale_outbox_claims", { p_older_than_seconds: 300 });
     if (rel.error) reportError(new Error(rel.error.message), { tags: { surface: "routing_v2_outbox_release" } });
     else released = typeof rel.data === "number" ? rel.data : 0;
-    const rec = await db.rpc("routing_v2_reconcile_outbox", { p_older_than_seconds: 180 });
+    const rec = await db.rpc("routing_v2_reconcile_outbox", { p_older_than_seconds: 180, p_unknown_hold_minutes: 30 });
     if (rec.error) reportError(new Error(rec.error.message), { tags: { surface: "routing_v2_outbox_reconcile" } });
     else reconciled = rec.data;
+    // Replies the seller did not get (never submitted, provider failed, outcome unknown too
+    // long): write today's hold, then clear the marker. A crash between the two re-holds.
+    const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
+    if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
+    for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string }>)) {
+      const ok = await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
+      if (!ok) continue;
+      const mark = await db.rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.outbox_id });
+      if (mark.error) reportError(new Error(mark.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
+      else held++;
+    }
   }
   const { data, error } = await db.rpc("routing_v2_due_outbox_replies", {
     p_limit: opts.limit ?? 20,
@@ -8991,10 +8990,12 @@ export async function runRoutingV2OutboxReplies(
     if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
       reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_due" } });
     }
-    return { released, reconciled, results: [] };
+    return { released, reconciled, held, results: [] };
   }
   const results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> = [];
   for (const row of (data ?? []) as RoutingV2OutboxRow[]) {
+    // Time budget: never start a new claim once over it (the cron's own limit is 60 s).
+    if (opts.budgetMs !== undefined && now() - started > opts.budgetMs) break;
     try {
       results.push({ id: row.id, result: await deliverRoutingV2OutboxReply(supabase, row) });
     } catch (e) {
@@ -9002,7 +9003,7 @@ export async function runRoutingV2OutboxReplies(
       results.push({ id: row.id, result: { kind: "error" } });
     }
   }
-  return { released, reconciled, results };
+  return { released, reconciled, held, results };
 }
 
 /**

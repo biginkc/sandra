@@ -49,29 +49,50 @@ export async function loadV2OutboxAlerts(
   if (!flags.questions_live || !flags.replies) return { promotions: [], complete: true };
 
   const since = new Date(Math.max(Date.parse(alertsSince) || 0, nowMs - LOOKBACK_MS)).toISOString();
-  const { data, error } = await db
-    .from("routing_v2_outbox")
-    .select("id, property_id, inbound_message_id, created_at, status, payload")
-    .eq("org_id", orgId)
-    .eq("kind", "alert")
-    .in("status", ["pending", "claimed", "sent"])
-    .gte("created_at", since)
-    .order("created_at", { ascending: true })
-    .limit(PAGE);
-  if (error) return { promotions: [], complete: false };
-  const rows = ((data ?? []) as OutboxAlertRow[]).filter(
+  // Keyset-paged over the whole window (newest first), like loadV2Opportunities: a busy week
+  // (> PAGE alerts) never hides a new alert behind older, already-sent ones.
+  const all: OutboxAlertRow[] = [];
+  let before: OutboxAlertRow | null = null;
+  for (;;) {
+    let q = db
+      .from("routing_v2_outbox")
+      .select("id, property_id, inbound_message_id, created_at, status, payload")
+      .eq("org_id", orgId)
+      .eq("kind", "alert")
+      .in("status", ["pending", "claimed", "sent"])
+      .gte("created_at", since);
+    if (before) q = q.or(`created_at.lt.${before.created_at},and(created_at.eq.${before.created_at},id.lt.${before.id})`);
+    const { data, error } = await q.order("created_at", { ascending: false }).order("id", { ascending: false }).limit(PAGE);
+    if (error) return { promotions: [], complete: false };
+    const page = (data ?? []) as OutboxAlertRow[];
+    all.push(...page);
+    if (page.length < PAGE) break;
+    before = page[page.length - 1]!;
+  }
+  const rows = all.filter(
     (r) => typeof r.payload?.reason === "string" && r.payload.reason in V2_ALERT_LABELS && typeof r.payload?.dedupe_key === "string",
   );
-  if (rows.length === 0) return { promotions: [], complete: (data ?? []).length < PAGE };
+  if (rows.length === 0) return { promotions: [], complete: true };
   const propertyIds = [...new Set(rows.map((r) => r.property_id))];
-  const { data: properties, error: propertyError } = await db.from("properties")
-    .select("id, address, contacts:homeowner_contact_id(first_name)").eq("org_id", orgId)
-    .in("id", propertyIds).is("deleted_at", null);
-  const { data: messages, error: messageError } = await db.from("messages")
-    .select("id, created_at").eq("org_id", orgId).in("id", rows.map((r) => r.inbound_message_id));
-  if (propertyError || messageError) return { promotions: [], complete: false };
-  const props = new Map(((properties ?? []) as Array<{ id: string; address: string | null; contacts: { first_name: string | null } | null }>).map((p) => [p.id, p]));
-  const inboundAt = new Map(((messages ?? []) as Array<{ id: string; created_at: string }>).map((m) => [m.id, m.created_at]));
+  const props = new Map<string, { id: string; address: string | null; contacts: { first_name: string | null } | null }>();
+  const inboundAt = new Map<string, string>();
+  const inboundIds = [...new Set(rows.map((r) => r.inbound_message_id))];
+  for (let i = 0; i < Math.max(propertyIds.length, inboundIds.length); i += PAGE) {
+    const pIds = propertyIds.slice(i, i + PAGE);
+    const mIds = inboundIds.slice(i, i + PAGE);
+    if (pIds.length) {
+      const { data, error } = await db.from("properties")
+        .select("id, address, contacts:homeowner_contact_id(first_name)").eq("org_id", orgId)
+        .in("id", pIds).is("deleted_at", null);
+      if (error) return { promotions: [], complete: false };
+      for (const p of (data ?? []) as Array<{ id: string; address: string | null; contacts: { first_name: string | null } | null }>) props.set(p.id, p);
+    }
+    if (mIds.length) {
+      const { data, error } = await db.from("messages").select("id, created_at").eq("org_id", orgId).in("id", mIds);
+      if (error) return { promotions: [], complete: false };
+      for (const m of (data ?? []) as Array<{ id: string; created_at: string }>) inboundAt.set(m.id, m.created_at);
+    }
+  }
   const promotions: HotPromotion[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
@@ -86,7 +107,7 @@ export async function loadV2OutboxAlerts(
       ? { propertyId: r.property_id, assigneeUserId: currentOwner, name, assignedAt: at, kind: "hot_text", inboundId: r.inbound_message_id, address: property.address ?? null, key, outboxId: r.id }
       : { propertyId: r.property_id, assigneeUserId: currentOwner, name, assignedAt: at, kind: "routing_v2_alert", inboundId: r.inbound_message_id, label: V2_ALERT_LABELS[reason], key, outboxId: r.id });
   }
-  return { promotions, complete: (data ?? []).length < PAGE };
+  return { promotions, complete: true };
 }
 
 /** Send-time gate for one channel of an outbox alert. Anything but "ok" = not sent. */
