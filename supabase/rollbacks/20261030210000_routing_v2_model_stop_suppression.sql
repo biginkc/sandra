@@ -1,4 +1,4 @@
--- Rollback for 20261030171500_routing_v2_model_stop_suppression.
+-- Rollback for 20261030210000_routing_v2_model_stop_suppression.
 --
 -- Leaves every sms_phone_suppressions row in place (including source
 -- 'model_stop'): rolling back the code never silently un-suppresses a phone

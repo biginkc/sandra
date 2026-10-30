@@ -146,7 +146,7 @@ export default defineConfig({
       "supabase/migrations/20261008210000_hold_alerts_new_only.integration.test.ts",
       "supabase/migrations/20261008230000_messages_v2_holds_new_backlog.integration.test.ts",
       "supabase/migrations/20261008300100_jev_action_undo.integration.test.ts",
-      "supabase/migrations/20261030171500_routing_v2_model_stop_suppression.integration.test.ts",
+      "supabase/migrations/20261030210000_routing_v2_model_stop_suppression.integration.test.ts",
       "supabase/migrations/20261008300200_wrong_number_all_confirm_suppresses.integration.test.ts",
       "supabase/migrations/20261008300200_wrong_number_all_rollback_race.integration.test.ts",
       "supabase/migrations/20261008300000_jev_opted_out_human_only.integration.test.ts",

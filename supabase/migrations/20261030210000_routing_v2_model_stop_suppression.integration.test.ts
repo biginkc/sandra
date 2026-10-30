@@ -10,16 +10,16 @@ import { canaryBucket, isV2Eligible, parseRoutingV2Flags, v2SliceAllowedForAll }
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261030171500: routing v2 PR-I automatic model_stop suppression + audited lift.
+ * 20261030210000: routing v2 PR-I automatic model_stop suppression + audited lift.
  * Local-only (isolated loopback stack); one rolled-back transaction per test.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030171500_routing_v2_model_stop_suppression.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030210000_routing_v2_model_stop_suppression.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261030171500_routing_v2_model_stop_suppression.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261030210000_routing_v2_model_stop_suppression.sql"), "utf8"),
 );
 
 const db = new Client({ connectionString: url });
@@ -600,13 +600,17 @@ describe("TS ↔ SQL eligibility parity (flags.ts vs fn_routing_v2_property_elig
     for (const cfg of configs) {
       const ts = parseRoutingV2Flags(cfg);
       const rows = (
-        await db.query(`select x::text as id, public.fn_routing_v2_property_eligible($2::jsonb, x) as e from unnest($1::uuid[]) x`, [
+        await db.query(
+          `select x::text as id, public.fn_routing_v2_property_eligible($2::jsonb, x) as e,
+                  public.routing_v2_canary_eligible($2::jsonb, x) as pr_c
+           from unnest($1::uuid[]) x`, [
           ids,
           JSON.stringify(cfg),
         ])
       ).rows;
       for (const r of rows) {
-        expect({ cfg, id: r.id, e: r.e }).toEqual({ cfg, id: r.id, e: isV2Eligible(ts, r.id) });
+        // flags.ts, this PR's SQL twin, and PR-C's routing_v2_canary_eligible all agree.
+        expect({ cfg, id: r.id, e: r.e, pr_c: r.pr_c }).toEqual({ cfg, id: r.id, e: isV2Eligible(ts, r.id), pr_c: isV2Eligible(ts, r.id) });
         compared++;
       }
     }

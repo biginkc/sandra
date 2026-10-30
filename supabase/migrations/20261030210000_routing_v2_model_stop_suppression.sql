@@ -1,4 +1,4 @@
--- 20261030171500_routing_v2_model_stop_suppression.sql
+-- 20261030210000_routing_v2_model_stop_suppression.sql
 -- Routing v2 PR-I: automatic stop suppression (flag-off).
 --
 -- Jarrad (2026-10-30): a Jev-decided stop (>=0.70, final, no Haiku) or a Jev
@@ -21,7 +21,7 @@
 --
 -- Additive only. No data step. With the flag false (the default) nothing calls
 -- or writes any of this, and today's human-review path is unchanged.
--- Rollback: supabase/rollbacks/20261030171500_routing_v2_model_stop_suppression.sql
+-- Rollback: supabase/rollbacks/20261030210000_routing_v2_model_stop_suppression.sql
 
 begin;
 
