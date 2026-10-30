@@ -158,7 +158,12 @@ export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promi
     }
     switch (step.kind) {
       case "reply": {
-        const res = await deps.sendReply(step.key, v2ReplyText(step.key));
+        let res: { sent: boolean; reason?: string };
+        try {
+          res = await deps.sendReply(step.key, v2ReplyText(step.key));
+        } catch {
+          res = { sent: false, reason: "send_error" };
+        }
         if (!res.sent) {
           // Fail closed: no later drip/alert after a reply that did not go out; a person looks.
           await deps.hold("needs_person");

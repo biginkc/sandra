@@ -193,6 +193,12 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** Every inbound text on a My Leads lead (kind lead_reply). Optional: absent → none. */
   loadLeadReplies?(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /**
+   * Routing v2 send-time check for `selling_opportunity` alerts only: re-reads the v2
+   * flags + canary eligibility right before the Slack/SMS send. Absent or false = not sent.
+   * Never consulted for any other alert kind.
+   */
+  v2OpportunityStillAllowed?(orgId: string, propertyId: string): Promise<boolean>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */

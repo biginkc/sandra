@@ -22,18 +22,25 @@ const PAGE = 200;
 const SETTLE_MS = 30 * 60 * 1000;
 const LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** v2 roads that already alert Jarrad (or hold for a person): the opportunity alert never doubles them. */
-const ALERTING_ROADS: ReadonlySet<string> = new Set([
-  "ALERT_call_me",
-  "ALERT_land_price",
-  "ALERT_commercial",
-  "ALERT_said_theyll_call",
-  "ALERT_reason_to_sell",
-  "price_check",
-  // Haiku outcomes (PR-D): both hold + alert on their own.
-  "possible_stop",
-  "haiku_error",
-  "haiku_unsure",
+/**
+ * ALLOW-list of validated v2 roads that do not alert Jarrad on their own. Anything else
+ * (ALERT_* roads, price_check, Haiku outcomes, null, an unknown or future road) gets no
+ * opportunity alert: fail closed, one alert per reply.
+ */
+const NON_ALERTING_ROADS: ReadonlySet<string> = new Set([
+  "stop",
+  "wrong_number_close",
+  "vacant_land_drip",
+  "listed_drip",
+  "text_only_reply",
+  "how_it_works_reply",
+  "maybe_later_drip",
+  "not_interested_drip",
+  "who_reply_drip",
+  "which_property_reply",
+  "location_reply",
+  "confirmed_owner_drip",
+  "bad_number",
 ]);
 
 export type V2DecisionRow = {
@@ -58,15 +65,32 @@ export function isV2Opportunity(
   opts: { alertOnTimeOnly: boolean },
 ): boolean {
   if (!row || row.status !== "decided" || row.opportunity_alert !== true) return false;
-  if (row.road !== null && HOT_YES_ROADS.has(row.road) && !opts.alertOnTimeOnly) return false;
-  // null road = no Jev answer: the Haiku-unsure path alerts on its own.
-  if (row.road === null || ALERTING_ROADS.has(row.road)) return false;
+  if (row.road === null) return false; // no Jev answer: the Haiku-unsure path alerts on its own
+  const allowed = NON_ALERTING_ROADS.has(row.road) || (HOT_YES_ROADS.has(row.road) && opts.alertOnTimeOnly);
+  if (!allowed) return false;
   const probs = row.probabilities;
   if (!probs || typeof probs !== "object") return false;
   return OPPORTUNITY_SIGNALS.some((q) => {
     const p = probs[q];
     return validP(p) && p >= DEFAULT_CUTOFF;
   });
+}
+
+/** Send-time re-check for one opportunity alert: fresh flags + eligibility. Any error = false. */
+export async function v2OpportunityStillAllowed(db: LooseSupabase, orgId: string, propertyId: string): Promise<boolean> {
+  try {
+    const { data, error } = await db
+      .from("ai_responder_configs")
+      .select("routing_v2_flags")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error) return false;
+    const flags = parseRoutingV2Flags((data as { routing_v2_flags?: unknown } | null)?.routing_v2_flags);
+    return flags.shadow && v2SliceAllowed(flags, "replies", propertyId);
+  } catch {
+    return false;
+  }
 }
 
 export async function loadV2Opportunities(

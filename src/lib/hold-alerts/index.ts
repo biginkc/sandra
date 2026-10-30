@@ -8,7 +8,7 @@ import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
-import { loadV2Opportunities } from "./v2-opportunities";
+import { loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
@@ -307,6 +307,7 @@ export function createHoldAlertDeps(
       return loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
+    v2OpportunityStillAllowed: (orgId, propertyId) => v2OpportunityStillAllowed(db, orgId, propertyId),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")

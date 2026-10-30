@@ -325,6 +325,13 @@ describe("executor: flag-off no-op and send-time re-check", () => {
     expect(await NOOP_DRIP_TRANSITION.transition({} as never)).toEqual({ kind: "not_available", reason: "pr_c_not_merged" });
   });
 
+  it("a sendReply that throws holds for a person and returns reply_not_sent", async () => {
+    const { deps, log } = execDeps(() => true, { sendReply: async () => { throw new Error("provider down"); } });
+    const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip"), TIME_ONLY_ON), deps);
+    expect(res).toEqual({ kind: "reply_not_sent", done: [], reason: "send_error" });
+    expect(log).toEqual(["hold:needs_person"]);
+  });
+
   it("a reply that did not go out holds for a person and runs nothing after it", async () => {
     const { deps, log } = execDeps(() => true, { sendReply: async () => ({ sent: false, reason: "template_unapproved" }) });
     const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip"), TIME_ONLY_ON), deps);

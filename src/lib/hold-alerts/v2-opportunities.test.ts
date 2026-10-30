@@ -6,7 +6,7 @@ import { V2_QUESTIONS } from "@/lib/sms-classification/routing-v2/questions";
 
 import { runHoldAlertsForOrg } from "./core";
 import { makeDeps, ORG, OWNER } from "./test-support";
-import { isV2Opportunity, loadV2Opportunities } from "./v2-opportunities";
+import { isV2Opportunity, loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
 
 /**
  * #937 equivalence suite: every case of PR #937's selling-opportunities.test.ts, re-run
@@ -98,6 +98,48 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
     }
   });
 
+  it("unknown or future roads never alert (allow-list)", () => {
+    for (const road of ["ALERT_future_thing", "brand_new_road", "", "STOP", "haiku_unsure", "possible_stop", "haiku_error"]) {
+      expect(isV2Opportunity(row(road), TOO), road).toBe(false);
+    }
+  });
+
+  it("re-checks flags + eligibility right before send: a flip between load and send sends nothing", async () => {
+    const { promotions } = await load();
+    expect(promotions).toHaveLength(1);
+    let allowed = false;
+    const t = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: async () => allowed });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toEqual([]);
+    // Missing dep or a throwing check also fails closed.
+    const t2 = makeDeps({ nowIso: NOW, holds: [], promotions });
+    await runHoldAlertsForOrg(t2.deps, ORG);
+    expect(t2.sent).toEqual([]);
+    const t3 = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: async () => { throw new Error("db"); } });
+    await runHoldAlertsForOrg(t3.deps, ORG);
+    expect(t3.sent).toEqual([]);
+    allowed = true;
+    const t4 = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: async () => allowed });
+    await runHoldAlertsForOrg(t4.deps, ORG);
+    expect(t4.sent).toHaveLength(2);
+  });
+
+  it("the send-time check never touches today's hot alerts", async () => {
+    const hot = { propertyId: P1, assigneeUserId: OWNER.userId, name: "Jonathan", assignedAt: AT, kind: "hot_text" as const, inboundId: "m9", key: "hot_text:m9" };
+    const check = vi.fn(async () => false);
+    const t = makeDeps({ nowIso: NOW, holds: [], promotions: [hot], v2OpportunityStillAllowed: check });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("v2OpportunityStillAllowed reads fresh flags and fails closed", async () => {
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures()).db, ORG, P1)).toBe(true);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, replies: false })).db, ORG, P1)).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(row(), { ...FLAGS_ON, canary_property_ids: [] })).db, ORG, P1)).toBe(false);
+    expect(await v2OpportunityStillAllowed(dbFor(fixtures(), "ai_responder_configs").db, ORG, P1)).toBe(false);
+  });
+
   it("either question alone qualifies", () => {
     expect(isV2Opportunity(row("stop", probs(0, 0.7)), TOO)).toBe(true);
     expect(isV2Opportunity(row("stop", probs(0.7, 0)), TOO)).toBe(true);
@@ -126,7 +168,7 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
     const { promotions, complete } = await load();
     expect(complete).toBe(true);
     expect(promotions).toEqual([expect.objectContaining({ kind: "selling_opportunity", propertyId: P1, key: "hot_text:m1", name: "Jonathan" })]);
-    const t = makeDeps({ nowIso: NOW, holds: [], promotions });
+    const t = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: async () => true });
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(2);
@@ -142,7 +184,7 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
 
   it("a generic lead reply in the same pass does not send a second alert", async () => {
     const { promotions } = await load();
-    const t = makeDeps({ nowIso: NOW, holds: [], promotions,
+    const t = makeDeps({ nowIso: NOW, holds: [], promotions, v2OpportunityStillAllowed: async () => true,
       loadLeadReplies: async () => ({ complete: true, promotions: [{ ...promotions[0]!, kind: "lead_reply", key: "lead_reply:m1" }] }),
     });
     t.store.leadWatermarks.set(ORG, SINCE);
