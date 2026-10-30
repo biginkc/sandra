@@ -105,12 +105,17 @@ create unique index if not exists routing_v2_phone_action_properties_uidx
 create index if not exists routing_v2_phone_action_properties_property_idx
   on public.routing_v2_phone_action_properties (property_id, created_at desc);
 
--- Pause token on enrollments: set only by A, cleared by ANY other change of status or
--- pause_reason (a person resuming, a later re-pause, completion), so undo can tell its own pause
--- from a later one with the same reason. Inert (NULL) for every row A never paused.
+-- Pause token on enrollments: set only by A, cleared when a later change moves the row back
+-- to active or to a different pause (a person resuming, a later re-pause), so undo can tell its
+-- own pause from a later one with the same reason. Inert (NULL) for every row A never paused.
+-- It NEVER touches a row whose new status is anything else (opted_out / completed): a global-
+-- DNC or other compliance transition must see no extra column change (the DNC lock guard in
+-- 20260830092331 rejects any change beyond status/pause_reason/next_run_at/updated_at). A stale
+-- token on such a row is harmless: undo only resumes rows still paused for inbound_reply with
+-- this action's token AND exactly A's paused_at.
 alter table public.sequence_enrollments add column if not exists routing_v2_pause_token uuid;
 comment on column public.sequence_enrollments.routing_v2_pause_token is
-  'Routing v2 PR-G: id of the phone action that paused this enrollment; cleared by any later status/pause_reason change.';
+  'Routing v2 PR-G: id of the phone action that paused this enrollment; cleared when the row later goes back to active or to another pause. Never changed by a transition to opted_out/completed.';
 create or replace function public.routing_v2_clear_pause_token()
 returns trigger
 language plpgsql
@@ -119,6 +124,7 @@ as $$
 begin
   if old.routing_v2_pause_token is not null
      and new.routing_v2_pause_token is not distinct from old.routing_v2_pause_token
+     and new.status in ('active', 'paused')
      and (new.status is distinct from old.status or new.pause_reason is distinct from old.pause_reason) then
     new.routing_v2_pause_token := null;
   end if;
@@ -129,7 +135,7 @@ revoke all on function public.routing_v2_clear_pause_token() from public, anon, 
 drop trigger if exists trg_sequence_enrollments_routing_v2_pause_token on public.sequence_enrollments;
 create trigger trg_sequence_enrollments_routing_v2_pause_token
   before update of status, pause_reason on public.sequence_enrollments
-  for each row when (old.routing_v2_pause_token is not null)
+  for each row when (old.routing_v2_pause_token is not null and new.status in ('active', 'paused'))
   execute function public.routing_v2_clear_pause_token();
 
 alter table public.routing_v2_phone_actions enable row level security;
@@ -886,7 +892,7 @@ begin
   loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_row.property_id::text));
     select p.outreach_dispo, p.follow_up_at, p.decision_context_revision,
-           p.needs_human_attention,
+           p.needs_human_attention, p.is_dnc_locked,
            coalesce(c.sms_opted_out, false) or coalesce(c.do_not_contact, false) as contact_suppressed
     into v_cur
     from public.properties p
@@ -897,6 +903,7 @@ begin
 
     v_reason := case
       when not v_found then 'property_missing'
+      when v_cur.is_dnc_locked then 'dnc_locked'
       when v_registry then 'global_dnc_registry'
       when v_phone_suppressed then 'phone_suppressed'
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo

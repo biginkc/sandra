@@ -781,6 +781,25 @@ describe("C. undo", () => {
     }
   });
 
+  it("a compliance transition after A (DNC-locked property, enrollment -> opted_out/dnc) passes the DNC lock guard; undo then leaves it opted out", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    expect((await enrollment(ids.e2)).status).toBe("paused");
+    // The global-DNC path: lock the property, then opt the enrollment out (20260830092331:691-709).
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.properties set is_dnc_locked = true where id = $1`, [ids.p2]);
+    await db.query("set local session_replication_role = origin");
+    await db.query(
+      `update public.sequence_enrollments set status = 'opted_out', pause_reason = 'dnc', next_run_at = null, updated_at = statement_timestamp() where id = $1`,
+      [ids.e2],
+    ); // would raise DNC_LOCKED if PR-G changed any other column
+    const e = (await db.query(`select status, pause_reason, routing_v2_pause_token from public.sequence_enrollments where id = $1`, [ids.e2])).rows[0];
+    expect(e).toEqual({ status: "opted_out", pause_reason: "dnc", routing_v2_pause_token: r.actionId }); // stale, harmless
+    const u = await undo(ownerId, r.actionId);
+    expect(u.restored).not.toContain(ids.p2); // DNC-locked: skipped
+    expect(await enrollment(ids.e2)).toEqual({ status: "opted_out", pause_reason: "dnc" });
+  });
+
   it("undo never resumes a later pause with the same reason (person resumed, a later inbound re-paused)", async () => {
     await setFlags(ON);
     const r = await applyAll();
@@ -964,14 +983,14 @@ describe("B0. post-commit fence and undo/send serialization", () => {
 
   describe("global DNC concurrency (committed fixtures, two connections)", () => {
     const BARRIER_NOTE = "both orders: A first, DNC first";
-    type Seed = { org: string; consumer: string; contact: string; property: string; inbound: string; phone: string };
+    type Seed = { org: string; consumer: string; contact: string; property: string; inbound: string; phone: string; enrollment: string };
     const seedCommitted = async (): Promise<Seed> => {
       // Release this file's per-test transaction (its in-transaction migration DDL holds table
       // locks the two real connections need); afterEach's rollback then ends the fresh one.
       await db.query("rollback");
       await db.query("begin");
       const sd = {
-        org: randomUUID(), consumer: randomUUID(), contact: randomUUID(), property: randomUUID(), inbound: randomUUID(),
+        org: randomUUID(), consumer: randomUUID(), contact: randomUUID(), property: randomUUID(), inbound: randomUUID(), enrollment: randomUUID(),
         phone: `+1913${String(Math.floor(Math.random() * 10_000_000)).padStart(7, "0")}`,
       };
       await admin.query("begin");
@@ -995,6 +1014,12 @@ describe("B0. post-commit fence and undo/send serialization", () => {
         `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, from_address, created_at)
          values ($1, $2, $3, $4, 'sms', 'inbound', 'wrong number', $5, now() - interval '1 minute')`,
         [sd.inbound, sd.org, sd.property, randomUUID(), sd.phone],
+      );
+      const seq = randomUUID();
+      await admin.query(`insert into public.sequences (id, org_id, name) values ($1, $2, $3)`, [seq, sd.org, `prg race ${seq}`]);
+      await admin.query(
+        `insert into public.sequence_enrollments (id, org_id, sequence_id, property_id, contact_id, status, next_run_at) values ($1, $2, $3, $4, $5, 'active', now())`,
+        [sd.enrollment, sd.org, seq, sd.property, sd.contact],
       );
       await admin.query(
         `insert into public.routing_v2_shadow_decisions (org_id, property_id, inbound_message_id, status, road, provenance)
@@ -1046,9 +1071,13 @@ describe("B0. post-commit fence and undo/send serialization", () => {
         const dnc = dncOn(c2, sd);
         expect(await settledWithin(dnc, 400)).toBe("pending"); // queued behind A's shared barrier, no deadlock
         await c1.query("commit");
-        const res = (await dnc).rows[0].r; // must not throw (no deadlock / abort)
+        const res = (await dnc).rows[0].r; // must not throw (no deadlock / abort / DNC_LOCKED)
         expect(res).toBeTruthy();
         expect(await dncLanded(sd)).toBe(true);
+        // A paused the drip with its token; the real global-DNC request then opted it out without
+        // tripping the DNC lock guard: PR-G's token trigger leaves compliance transitions alone.
+        const e = (await admin.query(`select status, pause_reason, routing_v2_pause_token from public.sequence_enrollments where id = $1`, [sd.enrollment])).rows[0];
+        expect(e).toEqual({ status: "opted_out", pause_reason: "dnc", routing_v2_pause_token: a.actionId });
       } finally {
         await c1.end();
         await c2.end();
