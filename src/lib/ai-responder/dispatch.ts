@@ -4514,6 +4514,8 @@ function providerTimeoutMs(): number {
 }
 
 type ResponderSendArgs = {
+  /** Routing-v2 intent authorized by its single-attempt consumer; rechecked at the provider boundary. */
+  routingV2OutboxId?: string;
   input: AiDispatchInput;
   body: string;
   model: string;
@@ -5317,6 +5319,21 @@ async function fenceProviderSubmit(
     }
     const expected = deferral.revision + (ctx.messageId ? 1 : 0);
     if (liveError || !live || live.decision_context_revision !== expected) return refuse(FENCE_NINE_CONTEXT_CHANGED);
+  }
+  if (args.routingV2OutboxId) {
+    const { data, error } = await (supabase as unknown as {
+      rpc: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: unknown }>;
+    }).rpc("routing_v2_check_authorized_outbox_send", {
+      p_outbox_id: args.routingV2OutboxId,
+      p_property_id: args.input.propertyId,
+      p_inbound_message_id: args.input.inboundMessageId ?? null,
+    });
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (error || data !== "ok") return refuse("fence:routing_v2_outbox");
   }
   attempt.providerStarted = true;
   return true;
