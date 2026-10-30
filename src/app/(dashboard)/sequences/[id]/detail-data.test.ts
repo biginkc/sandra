@@ -60,3 +60,34 @@ it("opens each property's own latest SMS conversation even when a shared owner's
     }),
   ]);
 });
+
+it("routing v2: a completed enrollment retired by a reply (rerouted) or the flag shows as Stopped, not finished", async () => {
+  getSequenceWithSteps.mockResolvedValue({ ok: true, data: { id: "sequence", steps: [{ id: "s1" }] } });
+  const enrollment = (id: string) => ({ id, property_id: `p-${id}`, status: "completed", pause_reason: null, current_step_index: 0, next_run_at: null, enrolled_at: "2026-09-28T00:00:00Z" });
+  const resolve = (table: string, select: string) => {
+    if (table === "sequences") return { data: { org_id: "org" }, error: null };
+    if (table === "sequence_enrollments" && select === "id, ended_reason") {
+      return { data: [{ id: "rerouted", ended_reason: "rerouted" }, { id: "flagoff", ended_reason: "flag_off" }, { id: "done", ended_reason: null }], error: null };
+    }
+    if (table === "sequence_enrollments") return { data: [enrollment("rerouted"), enrollment("flagoff"), enrollment("done")], count: 3, error: null };
+    return { data: [], error: null };
+  };
+  const from = vi.fn((table: string) => ({
+    select(select: string) {
+      const query: Record<string, unknown> = {};
+      for (const m of ["eq", "in", "not", "order", "limit", "range"]) query[m] = () => query;
+      query.single = async () => resolve(table, select);
+      query.then = (r: (v: unknown) => unknown) => Promise.resolve(r(resolve(table, select)));
+      return query;
+    },
+  }));
+  createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id: "user" } } }) },
+    rpc: async () => ({ data: [], error: null }), from });
+
+  const result = await getDripDetail("sequence");
+  expect(result.ok).toBe(true);
+  if (!result.ok || !result.data) return;
+  expect(Object.fromEntries(result.data.people.map((p) => [p.enrollmentId, p.status]))).toEqual({
+    rerouted: "Stopped", flagoff: "Stopped", done: "Finished, no reply",
+  });
+});

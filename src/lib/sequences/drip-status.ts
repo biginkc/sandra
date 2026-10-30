@@ -28,6 +28,7 @@ const REASONS: Record<string, string> = {
   terminal_dispo: "Lead reached a final disposition.",
   template_missing: "The text template is missing.",
   step_misconfigured: "This drip step is not set up to send a text.",
+  timezone_unconfirmed: "Confirm the seller’s time zone before sending this booking text.",
   no_phone: "Lead has no phone number for texts.",
   no_approved_sender: "No approved sender is available for the first text.",
   not_interested: "Lead is not interested.",
@@ -55,7 +56,7 @@ export function dripBucket(input: {
   if (input.status === "active") return "waiting";
   if (input.status === "paused") {
     if (["inbound_reply", "rep_sms_human_takeover"].includes(input.pause_reason ?? "")) return "replied";
-    if (["provider_failed", "reconciliation_required", "template_missing", "step_misconfigured", "no_phone", "no_approved_sender", "no approved sender for first-touch sequence send"].includes(input.pause_reason ?? "")) return "couldnt_send";
+    if (["provider_failed", "reconciliation_required", "template_missing", "step_misconfigured", "timezone_unconfirmed", "no_phone", "no_approved_sender", "no approved sender for first-touch sequence send"].includes(input.pause_reason ?? "")) return "couldnt_send";
   }
   if (input.status === "opted_out" || (input.status === "completed" && input.canceled)) return "stopped";
   if (input.status === "completed" && !input.inboundAfterLastRun) return "finished_no_reply";
