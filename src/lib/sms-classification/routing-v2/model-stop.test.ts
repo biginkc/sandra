@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 import { applyHaikuPolicy, HAIKU_ERROR_ALERT, HAIKU_STOP_ALERT, type FinalDecision } from "./haiku-policy";
+import { ALL_OFF, parseRoutingV2Flags } from "./flags";
 import { decideV2StopAction, MODEL_STOP_MIN_PROBABILITY, MODEL_STOP_SOURCE } from "./model-stop";
 import { executeV2Stop, liftModelStopSuppression } from "./model-stop-suppression";
 import { PROPERTY_TYPE_OPTIONS, V2_QUESTION_IDS, type PropertyTypeOption, type V2QuestionId } from "./questions";
@@ -138,8 +139,10 @@ describe("PR-I flag off = today's human-review path", () => {
   });
 });
 
-function fakeAdmin(response: { data?: unknown; error?: { message: string } | null } | (() => never)) {
-  const rpc = vi.fn(async () => (typeof response === "function" ? response() : { data: response.data ?? null, error: response.error ?? null }));
+type RpcResp = { data?: unknown; error?: { message: string } | null } | (() => never);
+function fakeAdmin(apply: RpcResp, phoneIds: RpcResp = { data: [] }) {
+  const resolve = (r: RpcResp) => (typeof r === "function" ? r() : { data: r.data ?? null, error: r.error ?? null });
+  const rpc = vi.fn(async (fn: string) => resolve(fn === "fn_model_stop_phone_property_ids" ? phoneIds : apply));
   return { client: { rpc } as never, rpc };
 }
 const base = {
@@ -149,35 +152,64 @@ const base = {
   inboundMessageId: "00000000-0000-4000-8000-000000000004",
   phone: "(816) 555-0101",
 };
+const OTHER = "00000000-0000-4000-8000-000000000009";
+const on = (extra: Record<string, unknown> = {}) =>
+  parseRoutingV2Flags({ questions_live: true, model_stop_suppression: true, canary_property_ids: [base.propertyId, OTHER], ...extra });
+const deps = (flags: ReturnType<typeof parseRoutingV2Flags>) => ({ readFlags: async () => flags });
+const applyCalls = (rpc: ReturnType<typeof vi.fn>) => rpc.mock.calls.filter((c) => c[0] === "fn_apply_model_stop_suppression");
 
 describe("PR-I executor", () => {
-  it("flag off: no database call, today's path", async () => {
+  it.each([
+    ["all off", ALL_OFF],
+    ["slice off", parseRoutingV2Flags({ questions_live: true, canary_percent: 100 })],
+    ["questions_live off", parseRoutingV2Flags({ model_stop_suppression: true, canary_percent: 100 })],
+  ])("flag off (%s): no write, today's path", async (_n, flags) => {
     const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } });
     const d = decide({ asked_stop: 0.95 });
-    expect(await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: false })).toEqual({
-      kind: "human_review",
-      reason: "flag_off",
-    });
+    expect(await executeV2Stop(client, { ...base, decision: d, final: null }, deps(flags))).toEqual({ kind: "human_review", reason: "flag_off" });
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("hold + alert: no database call", async () => {
+  it("a flags read that throws = off", async () => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } });
+    const out = await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, {
+      readFlags: async () => {
+        throw new Error("db down");
+      },
+    });
+    expect(out).toEqual({ kind: "human_review", reason: "flag_off" });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("not a stop: nothing read, nothing written", async () => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } });
+    const readFlags = vi.fn(async () => on());
+    expect(await executeV2Stop(client, { ...base, decision: decide({ not_interested: 0.9 }), final: null }, { readFlags })).toEqual({ kind: "not_stop" });
+    expect(readFlags).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("hold + alert: no write", async () => {
     const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } });
     const d = decide({ asked_stop: 0.65 });
     const final = applyHaikuPolicy(d, ok("asked_stop", 0.9), probs({ asked_stop: 0.65 }));
-    expect(await executeV2Stop(client, { ...base, decision: d, final, modelStopSuppression: true })).toEqual({
+    expect(await executeV2Stop(client, { ...base, decision: d, final }, deps(on()))).toEqual({
       kind: "hold_alert",
       alert: HAIKU_STOP_ALERT,
       reason: "model_stop_hold:haiku",
     });
-    expect(rpc).not.toHaveBeenCalled();
+    expect(applyCalls(rpc)).toHaveLength(0);
   });
 
-  it("suppress: calls fn_apply_model_stop_suppression with the normalized phone and Jev detail", async () => {
-    const { client, rpc } = fakeAdmin({ data: { status: "suppressed", suppressionId: "s1" } });
-    const d = decide({ asked_stop: 0.95 });
-    const out = await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: true });
+  it("suppress: eligible phone → calls fn_apply_model_stop_suppression with the normalized phone and Jev detail", async () => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed", suppressionId: "s1" } }, { data: [base.propertyId, OTHER] });
+    const out = await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()));
     expect(out).toEqual({ kind: "suppressed", suppressionId: "s1", status: "suppressed" });
+    expect(rpc).toHaveBeenCalledWith("fn_model_stop_phone_property_ids", {
+      p_org_id: base.orgId,
+      p_phone_e164: "+18165550101",
+      p_property_id: base.propertyId,
+    });
     expect(rpc).toHaveBeenCalledWith("fn_apply_model_stop_suppression", {
       p_org_id: base.orgId,
       p_phone_e164: "+18165550101",
@@ -188,10 +220,64 @@ describe("PR-I executor", () => {
     });
   });
 
+  it("multi-property phone with one ineligible property → today's path, no write", async () => {
+    const ineligible = "00000000-0000-4000-8000-0000000000aa";
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, { data: [base.propertyId, OTHER, ineligible] });
+    const out = await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()));
+    expect(out).toEqual({ kind: "human_review", reason: "not_eligible" });
+    expect(applyCalls(rpc)).toHaveLength(0);
+  });
+
+  it("the inbound's own property is always included, even if the lookup misses it", async () => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, { data: [OTHER] });
+    const flags = parseRoutingV2Flags({ questions_live: true, model_stop_suppression: true, canary_property_ids: [OTHER] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(flags))).toEqual({
+      kind: "human_review",
+      reason: "not_eligible",
+    });
+    expect(applyCalls(rpc)).toHaveLength(0);
+  });
+
+  it.each([
+    ["non-UUID canary id", { canary_property_ids: ["00000000-0000-4000-8000-000000000002", "nope"], canary_percent: 100 }],
+    ["canary ids not an array", { canary_property_ids: "00000000-0000-4000-8000-000000000002", canary_percent: 100 }],
+    ["percent out of range", { canary_property_ids: ["00000000-0000-4000-8000-000000000002"], canary_percent: 101 }],
+    ["percent not an integer", { canary_property_ids: ["00000000-0000-4000-8000-000000000002"], canary_percent: 50.5 }],
+    ["percent a string", { canary_property_ids: ["00000000-0000-4000-8000-000000000002"], canary_percent: "100" }],
+    ["percent null", { canary_property_ids: ["00000000-0000-4000-8000-000000000002"], canary_percent: null }],
+  ])("malformed canary config (%s) fails closed: no write", async (_n, extra) => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, { data: [base.propertyId] });
+    const flags = parseRoutingV2Flags({ questions_live: true, model_stop_suppression: true, ...extra });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(flags))).toEqual({
+      kind: "human_review",
+      reason: "not_eligible",
+    });
+    expect(applyCalls(rpc)).toHaveLength(0);
+  });
+
+  it("eligibility flips between decision and write: the database refuses → today's path", async () => {
+    const { client } = fakeAdmin({ data: { status: "not_eligible" } }, { data: [base.propertyId] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
+      kind: "human_review",
+      reason: "not_eligible",
+    });
+  });
+
+  it.each([[{ error: { message: "boom" } }], [{ data: { nope: 1 } }], [() => { throw new Error("network"); }]] as const)(
+    "phone lookup failure (%j) → today's path, no write",
+    async (resp) => {
+      const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, resp as never);
+      expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
+        kind: "human_review",
+        reason: "model_stop_failed:eligibility",
+      });
+      expect(applyCalls(rpc)).toHaveLength(0);
+    },
+  );
+
   it("duplicate webhook: the database's duplicate answer is a no-op success", async () => {
-    const { client } = fakeAdmin({ data: { status: "duplicate", prior: "suppressed", suppressionId: "s1" } });
-    const d = decide({ legal: 0.9 });
-    expect(await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: true })).toEqual({
+    const { client } = fakeAdmin({ data: { status: "duplicate", prior: "suppressed", suppressionId: "s1" } }, { data: [base.propertyId] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ legal: 0.9 }), final: null }, deps(on()))).toEqual({
       kind: "suppressed",
       suppressionId: "s1",
       status: "duplicate",
@@ -199,40 +285,35 @@ describe("PR-I executor", () => {
   });
 
   it("already suppressed (carrier STOP row): reported, row left alone", async () => {
-    const { client } = fakeAdmin({ data: { status: "already_suppressed", suppressionId: "c1", existingSource: "sendillo" } });
-    const d = decide({ asked_stop: 0.95 });
-    expect(await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: true })).toMatchObject({
+    const { client } = fakeAdmin({ data: { status: "already_suppressed", suppressionId: "c1", existingSource: "sendillo" } }, { data: [base.propertyId] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toMatchObject({
       kind: "suppressed",
       status: "already_suppressed",
     });
   });
 
   it("write-time flag off → today's path", async () => {
-    const { client } = fakeAdmin({ data: { status: "flag_off" } });
-    const d = decide({ asked_stop: 0.95 });
-    expect(await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: true })).toEqual({
+    const { client } = fakeAdmin({ data: { status: "flag_off" } }, { data: [base.propertyId] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
       kind: "human_review",
       reason: "flag_off",
     });
   });
 
-  it.each([
-    [{ error: { message: "boom" } }],
-    [{ data: { status: "weird" } }],
-    [() => { throw new Error("network"); }],
-  ] as const)("write failure (%j) → today's human-review path, never a send", async (resp) => {
-    const { client } = fakeAdmin(resp as never);
-    const d = decide({ asked_stop: 0.95 });
-    expect(await executeV2Stop(client, { ...base, decision: d, final: null, modelStopSuppression: true })).toEqual({
-      kind: "human_review",
-      reason: "model_stop_failed:write",
-    });
-  });
+  it.each([[{ error: { message: "boom" } }], [{ data: { status: "weird" } }], [() => { throw new Error("network"); }]] as const)(
+    "write failure (%j) → today's human-review path, never a send",
+    async (resp) => {
+      const { client } = fakeAdmin(resp as never, { data: [base.propertyId] });
+      expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
+        kind: "human_review",
+        reason: "model_stop_failed:write",
+      });
+    },
+  );
 
   it("unusable phone → today's path, no database call", async () => {
     const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } });
-    const d = decide({ asked_stop: 0.95 });
-    expect(await executeV2Stop(client, { ...base, phone: "nope", decision: d, final: null, modelStopSuppression: true })).toEqual({
+    expect(await executeV2Stop(client, { ...base, phone: "nope", decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
       kind: "human_review",
       reason: "model_stop_failed:no_phone",
     });

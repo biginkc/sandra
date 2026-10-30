@@ -5,7 +5,8 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import type { FinalDecision } from "./haiku-policy";
-import { decideV2StopAction, type V2StopAction } from "./model-stop";
+import { ALL_OFF, readRoutingV2Flags, v2SliceAllowedForAll, type RoutingV2Flags } from "./flags";
+import { decideV2StopAction, isStopDecision, type V2StopAction } from "./model-stop";
 import type { V2Decision } from "./route";
 
 /**
@@ -13,9 +14,13 @@ import type { V2Decision } from "./route";
  * dispatch: the routing v2 executor calls this for the `stop` road once the cutover PR
  * makes v2 live. Until then nothing calls it, and with the flag off nothing is written.
  *
- * Flags are checked twice (BUILD-PLAN §13.2): the caller's fresh decision-time read, and
- * again inside fn_apply_model_stop_suppression at write time (questions_live AND
- * model_stop_suppression). Any failure falls back to today's human-review path (a hold), never to a send.
+ * Flags AND canary eligibility are checked twice (BUILD-PLAN §13.1/§13.2):
+ * - here, from a fresh flags read (flags.ts) and the properties sharing the phone
+ *   (fn_model_stop_phone_property_ids): every one of them must be eligible;
+ * - again inside fn_apply_model_stop_suppression at write time, with the SQL twin of
+ *   flags.ts (fn_routing_v2_property_eligible), so a flip between decision and write
+ *   writes nothing.
+ * Flag off, not eligible, or any failure → today's human-review path (a hold), never a send.
  */
 type Loose = { rpc: (fn: string, args: Record<string, unknown>) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -28,29 +33,68 @@ export type ModelStopInput = {
   phone: string;
   decision: V2Decision;
   final: FinalDecision | null;
-  /** A fresh read of routing_v2_flags.model_stop_suppression (with questions_live and eligibility). */
-  modelStopSuppression: boolean;
+};
+
+export type ModelStopDeps = {
+  /** Fresh flags read; defaults to flags.ts readRoutingV2Flags. */
+  readFlags?: () => Promise<RoutingV2Flags>;
 };
 
 export type ModelStopOutcome =
   | { kind: "not_stop" }
-  /** Today's human-review path: flag off, the write found the flag off, or the write failed. */
-  | { kind: "human_review"; reason: "flag_off" | "model_stop_failed:no_phone" | "model_stop_failed:write" }
+  /** Today's human-review path: flag off, not canary-eligible, or a failure. */
+  | {
+      kind: "human_review";
+      reason: "flag_off" | "not_eligible" | "model_stop_failed:no_phone" | "model_stop_failed:eligibility" | "model_stop_failed:write";
+    }
   | { kind: "suppressed"; suppressionId: string | null; status: "suppressed" | "already_suppressed" | "duplicate" }
   | { kind: "hold_alert"; alert: string; reason: string };
 
-export async function executeV2Stop(admin: SupabaseClient<Database>, input: ModelStopInput): Promise<ModelStopOutcome> {
-  const action: V2StopAction = decideV2StopAction({
-    decision: input.decision,
-    final: input.final,
-    modelStopSuppression: input.modelStopSuppression,
-  });
+export async function executeV2Stop(
+  admin: SupabaseClient<Database>,
+  input: ModelStopInput,
+  deps: ModelStopDeps = {},
+): Promise<ModelStopOutcome> {
+  if (!isStopDecision(input.decision, input.final)) return { kind: "not_stop" };
+  let flags: RoutingV2Flags;
+  try {
+    flags = deps.readFlags ? await deps.readFlags() : await readRoutingV2Flags(admin, input.orgId);
+  } catch {
+    flags = ALL_OFF;
+  }
+  if (!(flags.questions_live && flags.model_stop_suppression)) return { kind: "human_review", reason: "flag_off" };
+
+  const phone = normalizePhone(input.phone);
+  if (!phone) return { kind: "human_review", reason: "model_stop_failed:no_phone" };
+
+  // Phone-level action (§13.1): every property on this phone must be eligible right now.
+  let phonePropertyIds: string[];
+  try {
+    const { data, error } = await (admin as unknown as Loose).rpc("fn_model_stop_phone_property_ids", {
+      p_org_id: input.orgId,
+      p_phone_e164: phone,
+      p_property_id: input.propertyId,
+    });
+    if (error) throw new Error(String(error.message));
+    if (!Array.isArray(data)) throw new Error("phone property ids: not an array");
+    phonePropertyIds = (data as unknown[]).map((row) =>
+      typeof row === "string" ? row : String((row as Record<string, unknown>)?.fn_model_stop_phone_property_ids ?? ""),
+    );
+  } catch (e) {
+    reportError(e instanceof Error ? e : new Error(String(e)), {
+      tags: { surface: "routing_v2_model_stop_eligibility" },
+      extra: { propertyId: input.propertyId },
+    });
+    return { kind: "human_review", reason: "model_stop_failed:eligibility" };
+  }
+  const ids = Array.from(new Set([input.propertyId, ...phonePropertyIds]));
+  if (!v2SliceAllowedForAll(flags, "model_stop_suppression", ids)) return { kind: "human_review", reason: "not_eligible" };
+
+  const action: V2StopAction = decideV2StopAction({ decision: input.decision, final: input.final, modelStopSuppression: true });
   if (action.kind === "not_stop") return { kind: "not_stop" };
   if (action.kind === "human_review") return { kind: "human_review", reason: "flag_off" };
   if (action.kind === "hold_alert") return { kind: "hold_alert", alert: action.alert, reason: `model_stop_hold:${action.by}` };
 
-  const phone = normalizePhone(input.phone);
-  if (!phone) return { kind: "human_review", reason: "model_stop_failed:no_phone" };
   try {
     const { data, error } = await (admin as unknown as Loose).rpc("fn_apply_model_stop_suppression", {
       p_org_id: input.orgId,
@@ -63,6 +107,7 @@ export async function executeV2Stop(admin: SupabaseClient<Database>, input: Mode
     if (error) throw new Error(String(error.message));
     const r = (data ?? {}) as { status?: string; suppressionId?: string | null };
     if (r.status === "flag_off") return { kind: "human_review", reason: "flag_off" };
+    if (r.status === "not_eligible") return { kind: "human_review", reason: "not_eligible" };
     if (r.status === "suppressed" || r.status === "already_suppressed" || r.status === "duplicate") {
       return { kind: "suppressed", suppressionId: r.suppressionId ?? null, status: r.status };
     }

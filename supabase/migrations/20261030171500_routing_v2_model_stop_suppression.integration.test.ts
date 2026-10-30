@@ -5,6 +5,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { canaryBucket, isV2Eligible, parseRoutingV2Flags, v2SliceAllowedForAll } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
@@ -42,6 +43,10 @@ async function setFlags(flags: Record<string, unknown>) {
     JSON.stringify(flags),
   ]);
 }
+
+/** Flags on and the inbound's property in the canary list. */
+const enable = (extra: Record<string, unknown> = {}) =>
+  setFlags({ questions_live: true, model_stop_suppression: true, canary_property_ids: [propertyId], ...extra });
 
 async function newInbound(): Promise<string> {
   const id = randomUUID();
@@ -152,7 +157,7 @@ describe("fn_apply_model_stop_suppression", () => {
   });
 
   it("flag on: one model_stop row + one audit row", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const r = await apply();
     expect(r.status).toBe("suppressed");
     const rows = await suppressions();
@@ -163,7 +168,7 @@ describe("fn_apply_model_stop_suppression", () => {
   });
 
   it("is idempotent on a duplicate webhook (same inbound): one row, one audit row", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const first = await apply();
     const second = await apply();
     const third = await apply();
@@ -180,7 +185,7 @@ describe("fn_apply_model_stop_suppression", () => {
       [orgId, PHONE],
     );
     const before = await suppressions();
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const r = await apply();
     expect(r).toMatchObject({ status: "already_suppressed", existingSource: "sendillo", suppressionId: before[0].id });
     expect(await suppressions()).toEqual(before);
@@ -188,7 +193,7 @@ describe("fn_apply_model_stop_suppression", () => {
   });
 
   it("refuses non-service callers", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     await expect(
       asUser(ownerId, () =>
         db.query(`select public.fn_apply_model_stop_suppression($1, $2, $3, $4, $5, '{}'::jsonb)`, [orgId, PHONE, inboundId, propertyId, contactId]),
@@ -198,7 +203,7 @@ describe("fn_apply_model_stop_suppression", () => {
   });
 
   it("rejects a bad phone and an inbound from another org", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     await expect(apply(inboundId, "816-555-0101")).rejects.toThrow(/INVALID_REQUEST/);
     await expect(apply(randomUUID())).rejects.toThrow(/NOT_FOUND/);
     expect(await suppressions()).toEqual([]);
@@ -207,7 +212,7 @@ describe("fn_apply_model_stop_suppression", () => {
 
 describe("fn_lift_model_stop_suppression", () => {
   it("lifts a model_stop row and audits who did it", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const { suppressionId } = await apply();
     expect(await lift(ownerId, suppressionId)).toEqual({ status: "lifted", phone: PHONE });
     expect(await suppressions()).toEqual([]);
@@ -218,7 +223,7 @@ describe("fn_lift_model_stop_suppression", () => {
   });
 
   it("a duplicate webhook after a lift does not re-suppress", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const { suppressionId } = await apply();
     await lift(ownerId, suppressionId);
     expect((await apply()).status).toBe("duplicate");
@@ -242,7 +247,7 @@ describe("fn_lift_model_stop_suppression", () => {
   );
 
   it("a carrier STOP that lands on a model_stop row makes it unliftable", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const { suppressionId } = await apply();
     // Same upsert the carrier STOP path uses (recordSmsPhoneSuppression).
     await db.query(
@@ -255,7 +260,7 @@ describe("fn_lift_model_stop_suppression", () => {
   });
 
   it("refuses an outsider and an anonymous caller", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     const { suppressionId } = await apply();
     await expect(lift(outsiderId, suppressionId)).rejects.toThrow(/FORBIDDEN/);
     await expect(
@@ -278,9 +283,199 @@ describe("fn_lift_model_stop_suppression", () => {
   });
 });
 
+/** contacts.phone_1 is unique, so a phone maps to one contact; PHONE belongs to `contactId`. */
+async function contactFor(phone: string): Promise<string> {
+  if (phone === PHONE) return contactId;
+  const id = randomUUID();
+  await db.query("set local session_replication_role = replica");
+  await db.query(`insert into public.contacts (id, org_id, first_name, phone_1) values ($1, $2, 'Other', $3)`, [id, orgId, phone]);
+  await db.query("set local session_replication_role = origin");
+  return id;
+}
+
+async function addProperty(opts: { homeownerPhone?: string; linkPhone?: string; deleted?: boolean } = {}): Promise<string> {
+  const id = randomUUID();
+  const homeowner = opts.homeownerPhone ? await contactFor(opts.homeownerPhone) : null;
+  const linked = opts.linkPhone ? await contactFor(opts.linkPhone) : null;
+  await db.query("set local session_replication_role = replica");
+  await db.query(
+    `insert into public.properties (id, org_id, address, state, status, homeowner_contact_id, deleted_at)
+     values ($1, $2, 'Other St', 'MO', 'prospect', $3, $4)`,
+    [id, orgId, homeowner, opts.deleted ? new Date().toISOString() : null],
+  );
+  if (linked) {
+    await db.query(
+      `insert into public.property_contacts (property_id, contact_id, org_id, source_identity, source_position) values ($1, $2, $3, 'x', 1)`,
+      [id, linked, orgId],
+    );
+  }
+  await db.query("set local session_replication_role = origin");
+  return id;
+}
+
+describe("write-time canary eligibility (§13.1/§13.2)", () => {
+  it("not in the canary (no ids, percent 0) → not_eligible, nothing written", async () => {
+    await setFlags({ questions_live: true, model_stop_suppression: true });
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    expect(await suppressions()).toEqual([]);
+    expect(await events()).toEqual([]);
+  });
+
+  it("canary_percent 100 makes every property eligible", async () => {
+    await setFlags({ questions_live: true, model_stop_suppression: true, canary_percent: 100 });
+    expect((await apply()).status).toBe("suppressed");
+  });
+
+  it("eligibility flips off between the decision and the write → nothing written; flips back → written once", async () => {
+    await enable();
+    // The decision was taken while eligible; the property is removed from the canary before the write.
+    await setFlags({ canary_property_ids: [] });
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    expect(await suppressions()).toEqual([]);
+    // not_eligible records nothing, so a later eligible redelivery can still act once.
+    await enable();
+    expect((await apply()).status).toBe("suppressed");
+    expect((await apply()).status).toBe("duplicate");
+    expect(await suppressions()).toHaveLength(1);
+  });
+
+  it("multi-property phone: one ineligible property (homeowner) → nothing written", async () => {
+    const other = await addProperty({ homeownerPhone: PHONE });
+    await enable();
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    expect(await suppressions()).toEqual([]);
+    await enable({ canary_property_ids: [propertyId, other] });
+    expect((await apply()).status).toBe("suppressed");
+  });
+
+  it("multi-property phone: one ineligible property linked through property_contacts → nothing written", async () => {
+    await addProperty({ linkPhone: PHONE });
+    await enable();
+    expect(await apply()).toEqual({ status: "not_eligible" });
+  });
+
+  it("the phone set: own property, homeowner and linked properties; not deleted ones or other phones", async () => {
+    const home = await addProperty({ homeownerPhone: PHONE });
+    const linked = await addProperty({ linkPhone: PHONE });
+    await addProperty({ homeownerPhone: PHONE, deleted: true });
+    await addProperty({ homeownerPhone: "+18165550199" });
+    // The base property's homeowner contact is not set, but it is the inbound's own property.
+    const ids = (await db.query(`select x from public.fn_model_stop_phone_property_ids($1, $2, $3) x`, [orgId, PHONE, propertyId])).rows.map((r) => r.x);
+    expect(new Set(ids)).toEqual(new Set([propertyId, home, linked]));
+    // A deleted property never blocks; an ineligible live one does.
+    await enable({ canary_property_ids: [propertyId, home, linked] });
+    expect((await apply()).status).toBe("suppressed");
+  });
+
+  it.each([
+    ["non-UUID entry", { canary_property_ids: ["PROP", "nope"], canary_percent: 100 }],
+    ["ids not an array", { canary_property_ids: "PROP", canary_percent: 100 }],
+    ["ids null", { canary_property_ids: null, canary_percent: 100 }],
+    ["number entry", { canary_property_ids: [1], canary_percent: 100 }],
+    ["percent 101", { canary_property_ids: ["PROP"], canary_percent: 101 }],
+    ["percent -1", { canary_property_ids: ["PROP"], canary_percent: -1 }],
+    ["percent 50.5", { canary_property_ids: ["PROP"], canary_percent: 50.5 }],
+    ["percent string", { canary_property_ids: ["PROP"], canary_percent: "100" }],
+    ["percent null", { canary_property_ids: ["PROP"], canary_percent: null }],
+  ])("malformed canary config (%s) fails closed", async (_n, extra) => {
+    const fix = (v: unknown): unknown => (v === "PROP" ? propertyId : Array.isArray(v) ? v.map(fix) : v);
+    const cfg = Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, fix(v)]));
+    await setFlags({ questions_live: true, model_stop_suppression: true, ...cfg });
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    expect(await suppressions()).toEqual([]);
+  });
+
+  it("two active configs read as off (flags.ts maybeSingle parity)", async () => {
+    await enable();
+    await db.query("savepoint cfg");
+    try {
+      await db.query(`insert into public.ai_responder_configs (org_id, system_prompt, active, routing_v2_flags) select org_id, 'y', true, routing_v2_flags from public.ai_responder_configs where org_id = $1`, [orgId]);
+    } catch {
+      // A unique index on one active config per org is an equally safe outcome.
+      await db.query("rollback to savepoint cfg");
+      return;
+    }
+    expect(await apply()).toEqual({ status: "flag_off" });
+  });
+});
+
+describe("TS ↔ SQL eligibility parity (flags.ts vs fn_routing_v2_property_eligible)", () => {
+  const ids = Array.from({ length: 300 }, () => randomUUID());
+  ids.push("00000000-0000-0000-0000-000000000000", "ffffffff-ffff-ffff-ffff-ffffffffffff");
+
+  it("canary buckets are identical", async () => {
+    const rows = (await db.query(`select x::text as id, public.fn_routing_v2_canary_bucket(x) as b from unnest($1::uuid[]) x`, [ids])).rows;
+    for (const r of rows) expect([r.id, r.b]).toEqual([r.id, canaryBucket(r.id)]);
+  });
+
+  it("property eligibility is identical across valid and malformed configs", async () => {
+    const listed = ids.slice(0, 5);
+    const configs: unknown[] = [
+      {},
+      { canary_percent: 0 },
+      { canary_percent: 1 },
+      { canary_percent: 10 },
+      { canary_percent: 50 },
+      { canary_percent: 99 },
+      { canary_percent: 100 },
+      { canary_percent: 50.0 },
+      { canary_percent: 50.5 },
+      { canary_percent: -1 },
+      { canary_percent: 101 },
+      { canary_percent: "50" },
+      { canary_percent: null },
+      { canary_percent: true },
+      { canary_property_ids: listed },
+      { canary_property_ids: listed.map((s) => s.toUpperCase()), canary_percent: 10 },
+      { canary_property_ids: [...listed, "bad"], canary_percent: 100 },
+      { canary_property_ids: "x", canary_percent: 100 },
+      { canary_property_ids: null },
+      { canary_property_ids: [], canary_percent: 30 },
+      { canary_property_ids: [{ id: listed[0] }] },
+      "not-an-object",
+      [],
+    ];
+    let compared = 0;
+    for (const cfg of configs) {
+      const ts = parseRoutingV2Flags(cfg);
+      const rows = (
+        await db.query(`select x::text as id, public.fn_routing_v2_property_eligible($2::jsonb, x) as e from unnest($1::uuid[]) x`, [
+          ids,
+          JSON.stringify(cfg),
+        ])
+      ).rows;
+      for (const r of rows) {
+        expect({ cfg, id: r.id, e: r.e }).toEqual({ cfg, id: r.id, e: isV2Eligible(ts, r.id) });
+        compared++;
+      }
+    }
+    expect(compared).toBe(configs.length * ids.length);
+  });
+
+  it("phone-wide answer matches v2SliceAllowedForAll", async () => {
+    const other = await addProperty({ homeownerPhone: PHONE });
+    for (const cfg of [
+      { canary_property_ids: [propertyId] },
+      { canary_property_ids: [propertyId, other] },
+      { canary_percent: 100 },
+      { canary_percent: 0 },
+      { canary_property_ids: [propertyId, other, "bad"] },
+    ]) {
+      const flags = { questions_live: true, model_stop_suppression: true, ...cfg };
+      await setFlags({ canary_property_ids: [], canary_percent: 0 });
+      await db.query(`update public.ai_responder_configs set routing_v2_flags = $2::jsonb where org_id = $1`, [orgId, JSON.stringify(flags)]);
+      const expected = v2SliceAllowedForAll(parseRoutingV2Flags(flags), "model_stop_suppression", [propertyId, other]);
+      await db.query("savepoint parity");
+      const r = await apply();
+      await db.query("rollback to savepoint parity");
+      expect({ cfg, status: r.status }).toEqual({ cfg, status: expected ? "suppressed" : "not_eligible" });
+    }
+  });
+});
+
 describe("audit visibility + rollback", () => {
   it("org members can read the audit, outsiders cannot", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     await apply();
     const read = (u: string) => asUser(u, async () => (await db.query(`select action from public.routing_v2_model_stop_events where org_id = $1`, [orgId])).rows);
     expect(await read(ownerId)).toEqual([{ action: "suppressed" }]);
@@ -288,7 +483,7 @@ describe("audit visibility + rollback", () => {
   });
 
   it("rollback drops the audit + functions and leaves suppression rows in force", async () => {
-    await setFlags({ questions_live: true, model_stop_suppression: true });
+    await enable();
     await apply();
     await db.query(ROLLBACK);
     expect(await suppressions()).toHaveLength(1);

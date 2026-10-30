@@ -11,6 +11,9 @@ set local statement_timeout = '60s';
 
 drop function if exists public.fn_lift_model_stop_suppression(uuid, text);
 drop function if exists public.fn_apply_model_stop_suppression(uuid, text, uuid, uuid, uuid, jsonb);
+drop function if exists public.fn_model_stop_phone_property_ids(uuid, text, uuid);
+drop function if exists public.fn_routing_v2_property_eligible(jsonb, uuid);
+drop function if exists public.fn_routing_v2_canary_bucket(uuid);
 drop table if exists public.routing_v2_model_stop_events;
 
 commit;

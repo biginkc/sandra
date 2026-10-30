@@ -10,7 +10,9 @@
 -- 1. routing_v2_model_stop_events: audit of every model_stop write, lift and
 --    refused lift. One apply row per inbound message (duplicate webhooks).
 -- 2. fn_apply_model_stop_suppression (service_role): re-checks the flags at
---    write time (questions_live AND model_stop_suppression), is idempotent per
+--    write time (questions_live AND model_stop_suppression) and canary
+--    eligibility of EVERY property sharing the phone (same formula as
+--    routing-v2/flags.ts; fn_routing_v2_property_eligible), is idempotent per
 --    inbound message, and never touches an existing suppression row of any
 --    source (insert ... on conflict do nothing).
 -- 3. fn_lift_model_stop_suppression (authenticated, Messages v2 gate): deletes
@@ -78,6 +80,110 @@ create policy routing_v2_model_stop_events_org_select on public.routing_v2_model
   );
 
 -- ---------------------------------------------------------------------------
+-- Canary eligibility, the SQL twin of routing-v2/flags.ts (BUILD-PLAN §13.1).
+-- Pinned to the TS helpers by the integration test (same answers, same ids).
+-- Fail closed: any malformed canary_property_ids / canary_percent = nothing eligible.
+-- ---------------------------------------------------------------------------
+create or replace function public.fn_routing_v2_canary_bucket(p_property_id uuid)
+returns integer
+language sql
+immutable
+strict
+set search_path = public, pg_temp
+as $$
+  -- flags.ts canaryBucket: sha256(lower(id)), first 4 bytes as an unsigned int, mod 100.
+  select ((('x' || substr(encode(sha256(convert_to(lower(p_property_id::text), 'UTF8')), 'hex'), 1, 8))::bit(32)::bigint) % 100)::integer;
+$$;
+
+create or replace function public.fn_routing_v2_property_eligible(p_flags jsonb, p_property_id uuid)
+returns boolean
+language plpgsql
+immutable
+set search_path = public, pg_temp
+as $$
+declare
+  v_ids jsonb;
+  v_pct jsonb;
+  v_pct_num numeric;
+begin
+  if p_property_id is null or p_flags is null or jsonb_typeof(p_flags) <> 'object' then
+    return false;
+  end if;
+  v_ids := p_flags -> 'canary_property_ids';
+  v_pct := p_flags -> 'canary_percent';
+  -- canary_property_ids: absent, or an array whose every entry is a UUID string.
+  if v_ids is not null then
+    if jsonb_typeof(v_ids) <> 'array' then
+      return false;
+    end if;
+    if exists (
+      select 1 from jsonb_array_elements(v_ids) e
+      where jsonb_typeof(e) <> 'string'
+         or (e #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ) then
+      return false;
+    end if;
+  end if;
+  -- canary_percent: absent, or an integer 0..100.
+  if v_pct is not null then
+    if jsonb_typeof(v_pct) <> 'number' then
+      return false;
+    end if;
+    v_pct_num := (v_pct #>> '{}')::numeric;
+    if v_pct_num <> trunc(v_pct_num) or v_pct_num < 0 or v_pct_num > 100 then
+      return false;
+    end if;
+  else
+    v_pct_num := 0;
+  end if;
+  if v_ids is not null and exists (
+    select 1 from jsonb_array_elements_text(v_ids) t where lower(t) = lower(p_property_id::text)
+  ) then
+    return true;
+  end if;
+  return public.fn_routing_v2_canary_bucket(p_property_id) < v_pct_num;
+end;
+$$;
+
+-- Every live property that shares this phone in the org: the inbound's own property,
+-- properties whose homeowner contact has the phone, and properties linked to such a
+-- contact through property_contacts. Phone-level actions need ALL of them eligible.
+create or replace function public.fn_model_stop_phone_property_ids(p_org_id uuid, p_phone_e164 text, p_property_id uuid)
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  with c as (
+    select ct.id from public.contacts ct
+    where ct.org_id = p_org_id
+      and p_phone_e164 in (ct.phone_1, ct.phone_2, ct.phone_3)
+    union
+    select n.contact_id from public.contact_phone_numbers n
+    where n.org_id = p_org_id and n.e164 = p_phone_e164
+  )
+  select p.id from public.properties p
+  where p.org_id = p_org_id
+    and p.deleted_at is null
+    and (
+      p.id = p_property_id
+      or p.homeowner_contact_id in (select id from c)
+      or exists (
+        select 1 from public.property_contacts pc
+        where pc.org_id = p_org_id and pc.property_id = p.id and pc.contact_id in (select id from c)
+      )
+    );
+$$;
+
+revoke all on function public.fn_routing_v2_canary_bucket(uuid) from public, anon, authenticated;
+revoke all on function public.fn_routing_v2_property_eligible(jsonb, uuid) from public, anon, authenticated;
+revoke all on function public.fn_model_stop_phone_property_ids(uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_canary_bucket(uuid) to service_role;
+grant execute on function public.fn_routing_v2_property_eligible(jsonb, uuid) to service_role;
+grant execute on function public.fn_model_stop_phone_property_ids(uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
 -- Apply (service_role only)
 -- ---------------------------------------------------------------------------
 create or replace function public.fn_apply_model_stop_suppression(
@@ -97,6 +203,9 @@ declare
   v_prior public.routing_v2_model_stop_events%rowtype;
   v_existing public.sms_phone_suppressions%rowtype;
   v_suppression_id uuid;
+  v_config_count integer;
+  v_flags jsonb;
+  v_phone_properties uuid[];
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'FORBIDDEN' using errcode = '42501';
@@ -118,15 +227,28 @@ begin
     return jsonb_build_object('status', 'duplicate', 'prior', v_prior.action, 'suppressionId', v_prior.suppression_id);
   end if;
 
-  -- Write-time flag re-check: flag off = nothing written.
-  if not exists (
-    select 1 from public.ai_responder_configs c
-    where c.org_id = p_org_id
-      and c.active = true
-      and c.routing_v2_flags -> 'questions_live' = 'true'::jsonb
-      and c.routing_v2_flags -> 'model_stop_suppression' = 'true'::jsonb
-  ) then
+  -- Write-time flag re-check: flag off = nothing written. Exactly one active config
+  -- (flags.ts reads it with maybeSingle; two active rows read as all off).
+  select count(*), (array_agg(c.routing_v2_flags))[1]
+  into v_config_count, v_flags
+  from public.ai_responder_configs c
+  where c.org_id = p_org_id and c.active = true;
+  if v_config_count <> 1
+     or jsonb_typeof(v_flags) is distinct from 'object'
+     or v_flags -> 'questions_live' is distinct from 'true'::jsonb
+     or v_flags -> 'model_stop_suppression' is distinct from 'true'::jsonb then
     return jsonb_build_object('status', 'flag_off');
+  end if;
+
+  -- Write-time canary re-check (§13.1/§13.2): every property on this phone must be
+  -- eligible right now, under the same formula as routing-v2/flags.ts.
+  select coalesce(array_agg(x), '{}') into v_phone_properties
+  from public.fn_model_stop_phone_property_ids(p_org_id, p_phone_e164, p_property_id) x;
+  if cardinality(v_phone_properties) = 0 or exists (
+    select 1 from unnest(v_phone_properties) x
+    where not public.fn_routing_v2_property_eligible(v_flags, x)
+  ) then
+    return jsonb_build_object('status', 'not_eligible');
   end if;
 
   if not exists (
