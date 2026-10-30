@@ -8,6 +8,7 @@ import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
+import { loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
@@ -288,13 +289,25 @@ export function createHoldAlertDeps(
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadHotPromotions(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
-      return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      // Routing v2 opportunity alert: returns nothing unless routing_v2_flags.questions_live + replies.
+      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner).catch(
+        // Never let the v2 opportunity alert break today's hot alerts.
+        () => ({ promotions: [], complete: true }),
+      );
+      if (opportunities.promotions.length === 0 && opportunities.complete) return hot;
+      const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      return {
+        promotions: [...hot.promotions, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete,
+      };
     },
     async loadLeadReplies(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
       return loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
+    v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")

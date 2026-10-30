@@ -6,6 +6,8 @@ import type { Database } from "@/lib/supabase/types";
 
 import { buildTwoWayThreadState } from "../context";
 import { askJev, JevProviderError, type FetchLike } from "../providers/jev-gateway";
+import { askHaiku, formatHaikuThread } from "./haiku";
+import { applyHaikuPolicy } from "./haiku-policy";
 import { buildV2JevRequest } from "./questions";
 import { assertCompleteV2, routeV2 } from "./route";
 
@@ -27,7 +29,9 @@ export function shadowFailureReason(e: unknown, phase: "db" | "jev" = "db"): str
 /**
  * Routing v2 shadow hook (PR-A). When `ai_responder_configs.routing_v2_flags.shadow` is true,
  * asks Jev the v2 question set once and writes the v2 decision to `routing_v2_shadow_decisions`.
- * Record only: no sends, holds, enrollments, suppressions or Haiku calls. Never throws.
+ * Record only: no sends, holds, enrollments or suppressions. Never throws.
+ * PR-D: when `routing_v2_flags.haiku` is also true and the decision is Haiku-eligible, asks Haiku
+ * and records its answer plus the policy's final road in the `haiku` column (still record only).
  *
  * Runs only AFTER a live caller has stamped its terminal outcome (the inbound webhook via
  * `after()`, the delay workflow as its own step), never inside the live dispatch, so it can
@@ -45,14 +49,25 @@ export type RoutingV2ShadowInput = {
   liveOutcome?: string | null;
 };
 
-export type RoutingV2ShadowDeps = { fetch: FetchLike; typesafeApiKey: string; timeoutMs?: number };
+export type RoutingV2ShadowDeps = {
+  fetch: FetchLike;
+  typesafeApiKey: string;
+  timeoutMs?: number;
+  /** PR-D: Sandra's Anthropic key (defaults to env ANTHROPIC_API_KEY_SANDRA, then ANTHROPIC_API_KEY); only used when flags.haiku is true. Never logged. */
+  anthropicApiKey?: string;
+  haikuTimeoutMs?: number;
+  haikuSleep?: (ms: number) => Promise<void>;
+};
 
 export type RoutingV2ShadowResult = "off" | "skipped" | "decided" | "failed";
 
 // The new column/table are not in the generated types yet; keep the untyped access in one place.
 type Loose = { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-export async function readRoutingV2ShadowFlag(supabase: SupabaseClient<Database>, orgId: string): Promise<boolean> {
+export type RoutingV2ShadowFlags = { shadow: boolean; haiku: boolean };
+
+export async function readRoutingV2Flags(supabase: SupabaseClient<Database>, orgId: string): Promise<RoutingV2ShadowFlags> {
+  const off = { shadow: false, haiku: false };
   try {
     const { data, error } = await (supabase as unknown as Loose)
       .from("ai_responder_configs")
@@ -60,7 +75,7 @@ export async function readRoutingV2ShadowFlag(supabase: SupabaseClient<Database>
       .eq("org_id", orgId)
       .eq("active", true)
       .maybeSingle();
-    if (error || !data) return false; // a missing column (before the migration) = off
+    if (error || !data) return off; // a missing column (before the migration) = off
     const row = data as {
       routing_v2_flags?: unknown;
       classifier_provider?: unknown;
@@ -69,13 +84,19 @@ export async function readRoutingV2ShadowFlag(supabase: SupabaseClient<Database>
     };
     // Shadow only orgs whose live engine is the automatic nine-questions path.
     if (row.classifier_provider !== "jev" || row.classifier_engine !== "nine_questions" || row.classifier_mode !== "automatic") {
-      return false;
+      return off;
     }
     const flags = row.routing_v2_flags;
-    return typeof flags === "object" && flags !== null && (flags as Record<string, unknown>).shadow === true;
+    if (typeof flags !== "object" || flags === null) return off;
+    const f = flags as Record<string, unknown>;
+    return { shadow: f.shadow === true, haiku: f.shadow === true && f.haiku === true };
   } catch {
-    return false;
+    return off;
   }
+}
+
+export async function readRoutingV2ShadowFlag(supabase: SupabaseClient<Database>, orgId: string): Promise<boolean> {
+  return (await readRoutingV2Flags(supabase, orgId)).shadow;
 }
 
 /** True when a shadow row already exists for this inbound (retry/deferral/redelivery): skip Jev. */
@@ -122,7 +143,9 @@ export async function runRoutingV2Shadow(
       const { data } = await supabase.from("properties").select("org_id").eq("id", input.propertyId).maybeSingle();
       orgId = (data as { org_id?: string } | null)?.org_id ?? null;
     }
-    if (!orgId || !(await readRoutingV2ShadowFlag(supabase, orgId))) return "off";
+    if (!orgId) return "off";
+    const flags = await readRoutingV2Flags(supabase, orgId);
+    if (!flags.shadow) return "off";
     if (input.inboundMessageId && (await shadowAlreadyRecorded(supabase, input.inboundMessageId))) return "skipped";
     const base = {
       org_id: orgId,
@@ -163,7 +186,35 @@ export async function runRoutingV2Shadow(
         return "failed";
       }
       const d = routeV2({ reply: input.inboundBody, probabilities: complete.probabilities, propertyType: complete.propertyType });
+      let haiku: Record<string, unknown> | undefined;
+      if (flags.haiku) {
+        const h = d.haiku
+          ? await askHaiku(formatHaikuThread([...thread, { direction: "inbound", body: input.inboundBody }]), {
+              fetch: deps.fetch,
+              apiKey: deps.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "",
+              timeoutMs: deps.haikuTimeoutMs,
+              sleep: deps.haikuSleep,
+            })
+          : null;
+        const final = applyHaikuPolicy(d, h, complete.probabilities);
+        haiku = {
+          asked: h !== null,
+          option: h?.ok ? h.option : null,
+          confidence: h?.ok ? h.confidence : null,
+          failure_reason: final.failureReason,
+          latency_ms: h?.latencyMs ?? null,
+          attempts: h?.attempts ?? 0,
+          input_tokens: h?.inputTokens ?? null,
+          output_tokens: h?.outputTokens ?? null,
+          cost_usd: h?.costUsd ?? null,
+          final_road: final.road,
+          final_by: final.by,
+          hold: final.hold,
+          alert: final.alert,
+        };
+      }
       await write({
+        ...(haiku ? { haiku } : {}),
         status: "decided",
         road: d.road,
         provenance: d.provenance,

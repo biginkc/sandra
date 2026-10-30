@@ -133,6 +133,7 @@ export default defineConfig({
       "supabase/migrations/20261008310000_auto_reply_templates.integration.test.ts",
       "supabase/migrations/20261009040000_auto_reply_templates_wrong_number_hostile.integration.test.ts",
       "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
+      "supabase/migrations/20261030131000_auto_reply_templates_routing_v2_keys.integration.test.ts",
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
