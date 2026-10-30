@@ -387,10 +387,53 @@ describe("phone set comes from the contact_phone_numbers index (sync-trigger con
     expect(await phoneSet()).toEqual([propertyId]);
   });
 
-  it("un-normalizable values are not indexed by the trigger, so they are not in the set (documented)", async () => {
-    await addProperty({ homeownerPhone: "816-555-0101 x2" });
-    await addProperty({ homeownerPhone: "+44 816 555 0101" });
+  it.each(["816-555-0101 x2", "ext 12 816 555 0101", "0018165550101", "+44 816 555 0101", "8165550101 / 8165550102"])(
+    "an un-normalizable slot carrying this phone's digits (%s) fails closed (anomaly index)",
+    async (raw) => {
+      await addProperty({ homeownerPhone: raw, slot: 2 });
+      expect(await phoneSet()).toBeNull();
+      await setFlags({ questions_live: true, model_stop_suppression: true, canary_percent: 100 });
+      expect(await apply()).toEqual({ status: "not_eligible" });
+      expect(await suppressions()).toEqual([]);
+    },
+  );
+
+  it("un-normalizable slots with unrelated digits, or under 10 digits, do not block", async () => {
+    await addProperty({ homeownerPhone: "call me maybe 12" });
+    await addProperty({ homeownerPhone: "555-0101" });
+    await addProperty({ homeownerPhone: "816-555-0199 x2" });
     expect(await phoneSet()).toEqual([propertyId]);
+  });
+
+  it("the anomaly trigger follows updates: fixing the slot clears the block, breaking it again restores it", async () => {
+    const other = await addProperty({ homeownerPhone: "816-555-0101 x2", slot: 3 });
+    expect(await phoneSet()).toBeNull();
+    const cid = (await db.query(`select homeowner_contact_id as c from public.properties where id = $1`, [other])).rows[0].c;
+    await db.query(`update public.contacts set phone_3 = '(816) 555-0101', phone_3_type = 'mobile' where id = $1`, [cid]);
+    expect(new Set(await phoneSet())).toEqual(new Set([propertyId, other]));
+    await db.query(`update public.contacts set phone_3 = '816 555 0101 ext 9' where id = $1`, [cid]);
+    expect(await phoneSet()).toBeNull();
+    await db.query(`update public.contacts set phone_3 = null where id = $1`, [cid]);
+    expect(await phoneSet()).toEqual([propertyId]);
+  });
+
+  it("the anomaly trigger follows an org_id move", async () => {
+    // Any un-normalizable slot with these digits in the org blocks, linked to a property or not.
+    const cid = await contactFor("816-555-0101 x2");
+    expect(await phoneSet()).toBeNull();
+    const otherOrg = randomUUID();
+    await db.query("insert into public.organizations (id, name) values ($1, 'moved')", [otherOrg]);
+    await db.query(`update public.contacts set org_id = $2 where id = $1`, [cid, otherOrg]);
+    expect(await phoneSet()).toEqual([propertyId]);
+    const moved = (await db.query(`select count(*)::int n from public.routing_v2_contact_phone_anomalies where org_id = $1`, [otherOrg])).rows[0].n;
+    expect(moved).toBeGreaterThan(0);
+  });
+
+  it("the migration backfill finds legacy un-normalizable slots the trigger never saw", async () => {
+    await addProperty({ homeownerPhone: "816-555-0101 x2", legacy: true });
+    expect(await phoneSet()).toEqual([propertyId]);
+    await db.query(MIGRATION);
+    expect(await phoneSet()).toBeNull();
   });
 
   it("a contact the triggers never saw is not found (the cutover depends on the sync triggers)", async () => {
@@ -591,6 +634,123 @@ describe("TS ↔ SQL eligibility parity (flags.ts vs fn_routing_v2_property_elig
   });
 });
 
+describe("lock order: lift vs a concurrent carrier STOP (committed data, two sessions)", () => {
+  // Needs committed rows visible to two sessions, so this suite commits its own fixture
+  // and deletes it afterwards.
+  const ORG = randomUUID();
+  const OWNER = randomUUID();
+  const CPHONE = "+18165550177";
+  let a: Client;
+  let b: Client;
+  const carrierUpsert = (c: Client) =>
+    c.query(
+      `insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source, provider)
+       values ($1, 'sms', $2, 'sendillo', 'sendillo')
+       on conflict (org_id, channel, phone_e164) do update set source = excluded.source, updated_at = now()`,
+      [ORG, CPHONE],
+    );
+  const liftAs = async (c: Client, id: string) => {
+    await c.query("set local role authenticated");
+    await c.query("select set_config('request.jwt.claim.sub', $1, true)", [OWNER]);
+    await c.query("select set_config('request.jwt.claim.role', 'authenticated', true)");
+    const r = (await c.query(`select public.fn_lift_model_stop_suppression($1) as r`, [id])).rows[0].r;
+    await c.query("reset role");
+    return r;
+  };
+  const seedModelStop = async (): Promise<string> =>
+    (
+      await a.query(
+        `insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source, provider)
+         values ($1, 'sms', $2, 'model_stop', 'routing_v2')
+         on conflict (org_id, channel, phone_e164) do update set source = 'model_stop' returning id`,
+        [ORG, CPHONE],
+      )
+    ).rows[0].id;
+  const finalRows = async () =>
+    (await a.query(`select source from public.sms_phone_suppressions where org_id = $1 and phone_e164 = $2`, [ORG, CPHONE])).rows;
+
+  // The shared `db` client re-applies the migration in an open transaction before every
+  // test (holding DDL locks); release it for these committed two-session tests.
+  beforeEach(async () => {
+    await db.query("rollback");
+  });
+  afterEach(async () => {
+    await db.query("begin");
+  });
+
+  beforeAll(async () => {
+    a = new Client({ connectionString: url });
+    b = new Client({ connectionString: url });
+    await a.connect();
+    await b.connect();
+    await a.query("insert into public.organizations (id, name) values ($1, $2)", [ORG, `lock-order-${ORG}`]);
+    await a.query(`insert into auth.users (id, email) values ($1, $2)`, [OWNER, `u-${OWNER}@test.local`]);
+    await a.query(`insert into public.memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active')`, [ORG, OWNER]);
+  });
+  afterAll(async () => {
+    await a.query("set session_replication_role = replica");
+    await a.query(`delete from public.routing_v2_model_stop_events where org_id = $1`, [ORG]);
+    await a.query(`delete from public.sms_phone_suppressions where org_id = $1`, [ORG]);
+    await a.query(`delete from public.memberships where org_id = $1`, [ORG]);
+    await a.query(`delete from auth.users where id = $1`, [OWNER]);
+    await a.query(`delete from public.organizations where id = $1`, [ORG]);
+    await a.query("set session_replication_role = origin");
+    await a.end();
+    await b.end();
+  });
+
+  it("carrier STOP first, lift waits, then refuses: no deadlock, carrier row stays", async () => {
+    const id = await seedModelStop();
+    await b.query("begin");
+    await carrierUpsert(b);
+    await a.query("begin");
+    const lift = liftAs(a, id);
+    await new Promise((r) => setTimeout(r, 300));
+    await b.query("commit");
+    expect(await lift).toEqual({ status: "not_model_stop" });
+    await a.query("commit");
+    expect(await finalRows()).toEqual([{ source: "sendillo" }]);
+  });
+
+  it("lift first, carrier STOP waits and never aborts: no deadlock, carrier row present", async () => {
+    const id = await seedModelStop();
+    await a.query("begin");
+    expect(await liftAs(a, id)).toMatchObject({ status: "lifted" });
+    await b.query("begin");
+    const carrier = carrierUpsert(b);
+    await new Promise((r) => setTimeout(r, 300));
+    await a.query("commit");
+    await carrier;
+    await b.query("commit");
+    expect(await finalRows()).toEqual([{ source: "sendillo" }]);
+  });
+
+  it("truly concurrent lift + carrier STOP, 20 rounds: never a deadlock, the carrier row always present", async () => {
+    for (let i = 0; i < 20; i++) {
+      const id = await seedModelStop();
+      const runLift = (async () => {
+        await a.query("begin");
+        try {
+          const r = await liftAs(a, id);
+          await a.query("commit");
+          return r;
+        } catch (e) {
+          await a.query("rollback");
+          throw e;
+        }
+      })();
+      const runCarrier = (async () => {
+        await b.query("begin");
+        await carrierUpsert(b);
+        await b.query("commit");
+      })();
+      const [lr] = await Promise.all([runLift, runCarrier]);
+      expect(["lifted", "not_model_stop"]).toContain((lr as { status: string }).status);
+      expect(await finalRows()).toEqual([{ source: "sendillo" }]);
+    }
+  });
+});
+
 describe("audit visibility + rollback", () => {
   it("org members can read the audit, outsiders cannot", async () => {
     await enable();
@@ -607,7 +767,7 @@ describe("audit visibility + rollback", () => {
     expect(await suppressions()).toHaveLength(1);
     const left = (
       await db.query(
-        `select (to_regclass('public.routing_v2_model_stop_events') is null) as t,
+        `select (to_regclass('public.routing_v2_model_stop_events') is null and to_regclass('public.routing_v2_contact_phone_anomalies') is null) as t,
                 not exists (select 1 from pg_proc where proname in ('fn_apply_model_stop_suppression', 'fn_lift_model_stop_suppression')) as f`,
       )
     ).rows[0];

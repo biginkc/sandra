@@ -341,6 +341,7 @@ describe("PR-I undo (lift)", () => {
     [{ data: { status: "lifted" } }, { ok: true, status: "lifted" }],
     [{ data: { status: "already_lifted" } }, { ok: true, status: "already_lifted" }],
     [{ data: { status: "not_model_stop" } }, { ok: false, code: "NOT_MODEL_STOP" }],
+    [{ data: { status: "busy" } }, { ok: false, code: "FAILED" }],
     [{ error: { message: "NOT_FOUND" } }, { ok: false, code: "NOT_FOUND" }],
     [{ error: { message: "FORBIDDEN" } }, { ok: false, code: "FORBIDDEN" }],
     [{ error: { message: "AUTHENTICATION_REQUIRED" } }, { ok: false, code: "FORBIDDEN" }],

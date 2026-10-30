@@ -145,6 +145,86 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Phone anomalies: contact phone slots the sync index cannot hold.
+-- contact_phone_numbers (contact_phone_numbers_sync, unchanged) keeps only slots that
+-- dialpad_cti_normalize_us_phone can normalize. A slot like "816-555-0101 x2" or
+-- "+44 816 555 0101" is silently absent there, so it could hide a property that
+-- shares the phone. This additive side table records every non-empty slot that does NOT
+-- normalize, once per 10-digit window of its digit string (so an extension or a country
+-- prefix still matches; strings under 10 digits are skipped, over 20 digits capped).
+-- The phone-set lookup probes it by index and fails closed on any hit.
+-- Covers org_id updates too, in case contacts ever move tenant.
+-- ---------------------------------------------------------------------------
+create table if not exists public.routing_v2_contact_phone_anomalies (
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  contact_id uuid not null references public.contacts(id) on delete cascade,
+  slot smallint not null check (slot between 1 and 3),
+  digits10 text not null check (digits10 ~ '^[0-9]{10}$'),
+  primary key (contact_id, slot, digits10)
+);
+create index if not exists idx_routing_v2_contact_phone_anomalies_org_digits
+  on public.routing_v2_contact_phone_anomalies (org_id, digits10);
+alter table public.routing_v2_contact_phone_anomalies enable row level security;
+revoke all on public.routing_v2_contact_phone_anomalies from public, anon, authenticated, service_role;
+grant select on public.routing_v2_contact_phone_anomalies to service_role;
+comment on table public.routing_v2_contact_phone_anomalies is
+  'Routing v2 PR-I: contact phone slots that do not normalize (one row per 10-digit window). A hit makes model_stop fail closed.';
+
+create or replace function public.routing_v2_phone_anomaly_windows(p_raw text)
+returns setof text
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  with d as (select left(regexp_replace(coalesce(p_raw, ''), '[^0-9]', '', 'g'), 20) as digits)
+  select distinct substr(d.digits, i, 10)
+  from d, generate_series(1, greatest(length(d.digits) - 9, 0)) i
+  where nullif(btrim(coalesce(p_raw, '')), '') is not null
+    and public.dialpad_cti_normalize_us_phone(p_raw) is null
+    and length(d.digits) >= 10;
+$$;
+revoke all on function public.routing_v2_phone_anomaly_windows(text) from public, anon, authenticated;
+
+create or replace function public.routing_v2_contact_phone_anomalies_sync()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  delete from public.routing_v2_contact_phone_anomalies where contact_id = new.id;
+  insert into public.routing_v2_contact_phone_anomalies (org_id, contact_id, slot, digits10)
+  select new.org_id, new.id, s.slot, w
+  from (values (1::smallint, new.phone_1), (2::smallint, new.phone_2), (3::smallint, new.phone_3)) s(slot, raw)
+  cross join lateral public.routing_v2_phone_anomaly_windows(s.raw) w
+  on conflict do nothing;
+  return new;
+end;
+$$;
+revoke all on function public.routing_v2_contact_phone_anomalies_sync() from public, anon, authenticated, service_role;
+
+drop trigger if exists routing_v2_contact_phone_anomalies_sync_insert on public.contacts;
+create trigger routing_v2_contact_phone_anomalies_sync_insert
+  after insert on public.contacts
+  for each row execute function public.routing_v2_contact_phone_anomalies_sync();
+drop trigger if exists routing_v2_contact_phone_anomalies_sync_update on public.contacts;
+create trigger routing_v2_contact_phone_anomalies_sync_update
+  after update of phone_1, phone_2, phone_3, org_id on public.contacts
+  for each row
+  when (old.phone_1 is distinct from new.phone_1 or old.phone_2 is distinct from new.phone_2
+        or old.phone_3 is distinct from new.phone_3 or old.org_id is distinct from new.org_id)
+  execute function public.routing_v2_contact_phone_anomalies_sync();
+
+-- One-time backfill (prod: ~379k contacts, 0 un-normalizable phone_1/phone_2 today).
+insert into public.routing_v2_contact_phone_anomalies (org_id, contact_id, slot, digits10)
+select c.org_id, c.id, s.slot, w
+from public.contacts c
+cross join lateral (values (1::smallint, c.phone_1), (2::smallint, c.phone_2), (3::smallint, c.phone_3)) s(slot, raw)
+cross join lateral public.routing_v2_phone_anomaly_windows(s.raw) w
+where s.raw is not null
+on conflict do nothing;
+
 -- Every live property that shares this phone in the org: the inbound's own property,
 -- properties whose homeowner contact has the phone, and properties linked to such a
 -- contact through property_contacts. Phone-level actions need ALL of them eligible.
@@ -155,7 +235,8 @@ $$;
 -- so formatted legacy values ("(816) 555-0101", "816.555.0101", "1 816 555 0101") are
 -- already normalized there. Every step is an index lookup; no org-wide scan.
 -- DEPENDENCY: the routing v2 cutover relies on those sync triggers staying in place.
--- Returns NULL (fail closed → not eligible) when the phone is not a normalized US number.
+-- Returns NULL (fail closed → not eligible) when the phone is not a normalized US number,
+-- or when routing_v2_contact_phone_anomalies holds an un-normalizable slot with its digits.
 create or replace function public.fn_model_stop_phone_property_ids(p_org_id uuid, p_phone_e164 text, p_property_id uuid)
 returns uuid[]
 language plpgsql
@@ -168,6 +249,15 @@ declare
 begin
   if p_org_id is null or p_phone_e164 is null
      or public.dialpad_cti_normalize_us_phone(p_phone_e164) is distinct from p_phone_e164 then
+    return null;
+  end if;
+
+  -- A contact slot that does not normalize but carries these digits: membership cannot be
+  -- decided from the index, so fail closed.
+  if exists (
+    select 1 from public.routing_v2_contact_phone_anomalies a
+    where a.org_id = p_org_id and a.digits10 = right(p_phone_e164, 10)
+  ) then
     return null;
   end if;
 
@@ -246,6 +336,9 @@ begin
   begin
     perform pg_advisory_xact_lock(hashtext('model_stop_inbound:' || p_inbound_message_id::text));
     perform pg_advisory_xact_lock(hashtext('model_stop_phone:' || p_org_id::text || ':' || p_phone_e164));
+    -- Lock order for every path in this PR (and the carrier STOP path, whose suppression
+    -- trigger takes the org lock before touching the row): phone advisory → org → row.
+    perform public.lock_csv_import_consent_org(p_org_id);
   exception when lock_not_available then
     return jsonb_build_object('status', 'not_eligible', 'reason', 'lock_timeout');
   end;
@@ -335,6 +428,32 @@ grant execute on function public.fn_apply_model_stop_suppression(uuid, text, uui
 -- ---------------------------------------------------------------------------
 -- Lift (authenticated; owner or acquisitions, the Messages v2 gate)
 -- ---------------------------------------------------------------------------
+create or replace function public.fn_model_stop_lift_missing(p_suppression_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_lifted public.routing_v2_model_stop_events%rowtype;
+begin
+  -- Already lifted? Only visible to someone who may see that org's audit.
+  select * into v_lifted
+  from public.routing_v2_model_stop_events e
+  where e.suppression_id = p_suppression_id and e.action = 'lifted'
+  order by e.created_at desc
+  limit 1;
+  if found
+     and public.hugo_has_active_org_access(v_lifted.org_id)
+     and v_lifted.org_id in (select public.pipeline_runs_readable_org_ids()) then
+    return jsonb_build_object('status', 'already_lifted');
+  end if;
+  raise exception 'NOT_FOUND' using errcode = 'P0002';
+end;
+$$;
+revoke all on function public.fn_model_stop_lift_missing(uuid) from public, anon, authenticated;
+
 create or replace function public.fn_lift_model_stop_suppression(p_suppression_id uuid, p_note text default null)
 returns jsonb
 language plpgsql
@@ -344,7 +463,6 @@ as $$
 declare
   v_actor uuid := auth.uid();
   v_row public.sms_phone_suppressions%rowtype;
-  v_lifted public.routing_v2_model_stop_events%rowtype;
   v_note text := nullif(left(coalesce(p_note, ''), 500), '');
 begin
   if v_actor is null then
@@ -354,20 +472,11 @@ begin
     raise exception 'INVALID_REQUEST' using errcode = '22023';
   end if;
 
-  select * into v_row from public.sms_phone_suppressions where id = p_suppression_id for update;
+  -- Unlocked read to learn the org and phone; the row lock comes last (phone → org → row,
+  -- the same order as apply and the carrier STOP path, so they cannot deadlock).
+  select * into v_row from public.sms_phone_suppressions where id = p_suppression_id;
   if not found then
-    -- Already lifted? Only visible to someone who may see that org's audit.
-    select * into v_lifted
-    from public.routing_v2_model_stop_events e
-    where e.suppression_id = p_suppression_id and e.action = 'lifted'
-    order by e.created_at desc
-    limit 1;
-    if found
-       and public.hugo_has_active_org_access(v_lifted.org_id)
-       and v_lifted.org_id in (select public.pipeline_runs_readable_org_ids()) then
-      return jsonb_build_object('status', 'already_lifted');
-    end if;
-    raise exception 'NOT_FOUND' using errcode = 'P0002';
+    return public.fn_model_stop_lift_missing(p_suppression_id);
   end if;
 
   if not public.hugo_has_active_org_access(v_row.org_id)
@@ -375,8 +484,19 @@ begin
     raise exception 'FORBIDDEN' using errcode = '42501';
   end if;
 
-  perform pg_advisory_xact_lock(hashtext('model_stop_phone:' || v_row.org_id::text || ':' || v_row.phone_e164));
+  set local lock_timeout = '2s';
+  begin
+    perform pg_advisory_xact_lock(hashtext('model_stop_phone:' || v_row.org_id::text || ':' || v_row.phone_e164));
+    perform public.lock_csv_import_consent_org(v_row.org_id);
+    select * into v_row from public.sms_phone_suppressions where id = p_suppression_id for update;
+  exception when lock_not_available then
+    return jsonb_build_object('status', 'busy');
+  end;
+  if not found then
+    return public.fn_model_stop_lift_missing(p_suppression_id);
+  end if;
 
+  -- Re-checked under the locks: a carrier STOP may have replaced the source meanwhile.
   if v_row.source is distinct from 'model_stop' then
     -- Carrier STOP, DNC, human-confirmed or any other source: never lifted here.
     insert into public.routing_v2_model_stop_events (

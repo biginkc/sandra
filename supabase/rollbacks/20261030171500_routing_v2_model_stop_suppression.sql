@@ -10,6 +10,12 @@ set local lock_timeout = '5s';
 set local statement_timeout = '60s';
 
 drop function if exists public.fn_lift_model_stop_suppression(uuid, text);
+drop function if exists public.fn_model_stop_lift_missing(uuid);
+drop trigger if exists routing_v2_contact_phone_anomalies_sync_insert on public.contacts;
+drop trigger if exists routing_v2_contact_phone_anomalies_sync_update on public.contacts;
+drop function if exists public.routing_v2_contact_phone_anomalies_sync();
+drop table if exists public.routing_v2_contact_phone_anomalies;
+drop function if exists public.routing_v2_phone_anomaly_windows(text);
 drop function if exists public.fn_apply_model_stop_suppression(uuid, text, uuid, uuid, uuid, jsonb);
 drop function if exists public.fn_model_stop_phone_property_ids(uuid, text, uuid);
 drop function if exists public.fn_routing_v2_property_eligible(jsonb, uuid);

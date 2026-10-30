@@ -154,6 +154,7 @@ export async function liftModelStopSuppression(
   }
   const status = (data as { status?: string } | null)?.status;
   if (status === "lifted" || status === "already_lifted") return { ok: true, status };
+  if (status === "busy") return { ok: false, code: "FAILED", message: "Could not undo. Try again." };
   if (status === "not_model_stop") {
     return { ok: false, code: "NOT_MODEL_STOP", message: "This number was opted out another way, so it stays blocked." };
   }
