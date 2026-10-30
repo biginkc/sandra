@@ -24,6 +24,15 @@ describe("isCarrierStopKeyword", () => {
     "STOP ",
     "⁠unsubscribe.",
     "'STOP'",
+    // Default-ignorable characters anywhere in the body.
+    "ST\u034FOP",
+    "STOP\uFE0F",
+    "STOP\uFE0E",
+    "S\u200BTOP",
+    "\u180ESTOP",
+    "STOP\u3164",
+    "\uFFA0Stop",
+    "\u115F\u1160STOP",
   ])("treats %j as a bare carrier keyword", (body) => {
     expect(isCarrierStopKeyword(body)).toBe(true);
   });

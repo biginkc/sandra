@@ -21,6 +21,9 @@ on:
       - "scripts/run-disposable-canaries.mjs"
       - "vitest.disposable-canary.config.ts"
       - "tests/disposable-canary/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
       - ".github/workflows/sms-opt-out.yml"
   workflow_dispatch: {}
 
@@ -37,8 +40,6 @@ jobs:
     name: STOP and opt-out suites on a disposable database
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -48,7 +49,15 @@ jobs:
       - uses: supabase/setup-cli@v1
         with:
           version: 2.116.0
-      - run: npm ci
+      # The GitHub Packages token is scoped to the install step only, with
+      # lifecycle scripts disabled; scripts run afterwards without it, and no
+      # PR-controlled test step ever sees the token.
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run dependency lifecycle scripts without credentials
+        run: npm rebuild
       - name: Run the STOP keyword / same-phone suppression integration suite
         env:
           # Only the opt-out suite: other canary files carry stale pre-2026-10-08

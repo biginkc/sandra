@@ -331,6 +331,7 @@ describe("sequence recovery security", () => {
     // Real 2026-10-28 bodies that were held instead of suppressed.
     ["trailing exclamation marks", "Stop!!!!!!!"],
     ["trailing zero-width space", "STOP\u200B"],
+    ["variation selector", "STOP\uFE0F"],
   ] as const)(
     "applies supported STOP keyword %s once across same-phone contacts and ignores its replay",
     async (_label, keyword) => {
