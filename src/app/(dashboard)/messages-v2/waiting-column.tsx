@@ -14,6 +14,7 @@ import {
   applyResults,
   cardFlags,
   commitIfCurrent,
+  isCurrent,
   loadedCard,
   type CardRecord,
   type CardTable,
@@ -31,6 +32,8 @@ import { holdReasonSentence, withEffectiveReason } from "./tape";
 import type { HoldSource, HoldsMeta, OpenHold, RunLabel, RunWithSteps } from "./types";
 
 const PAGE = 20;
+/** The pins that decide whether a loaded card's body still matches a snapshot entry. */
+const PIN_KEYS = ["pinnedDraft", "pinnedDraftSendable", "pinnedReason", "pinnedFa", "pinnedRun", "pinnedAt", "seenVersion"] as const;
 const OLDER_PAGE = 50;
 
 const SOURCE_NAME: Record<HoldSource, string> = {
@@ -189,8 +192,6 @@ type OlderState = {
   labels: Map<string, RunLabel>;
   /** Snapshot ids that are no longer waiting (resolved, locked, unverifiable since the snapshot). */
   missing: Set<string>;
-  /** Next snapshot position to request. */
-  nextPos: number;
   unverified: number | null;
   error: string | null;
 };
@@ -269,7 +270,6 @@ export function WaitingColumn({
     cards: new Map(),
     labels: new Map(),
     missing: new Set(initialMissing ?? []),
-    nextPos: holds.length + (initialMissing?.length ?? 0),
     unverified: null,
     error: null,
   });
@@ -278,10 +278,8 @@ export function WaitingColumn({
   // Busy belongs to the snapshot it was started in (a refresh mid-load leaves the new snapshot not busy).
   const [busyFor, setBusyFor] = useState<{ key: unknown } | null>(null);
   const busy = busyFor !== null && busyFor.key === refreshKey;
-  const older: OlderState = stored.forKey === refreshKey ? stored : fresh();
-
-  const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
-
+  /** The last committed card table (its snapshot's pins), read when a new snapshot decides which cards to keep. */
+  const tableRef = useRef<CardTable>({ snapshotKey: refreshKey, cards: new Map() });
   // ---- Per-card records (client-state.ts): one record per card, every writer commits through commitIfCurrent.
   const refreshKeyRef = useRef<unknown>(refreshKey);
   const nowState = (): Now => ({ snapshotKey: refreshKeyRef.current });
@@ -314,6 +312,10 @@ export function WaitingColumn({
     }
     if (!h) return undefined;
     // No snapshot entry (tests without a snapshot, or a pinned card outside it): pinned to the card as it loaded.
+    return cardPins(h);
+  };
+  /** A card's pins as its own body shows them. */
+  const cardPins = (h: OpenHold<RunWithSteps>): Pinned => {
     return {
       pinnedDraft: h.draft?.id ?? null,
       pinnedDraftSendable: h.draft?.sendable === true,
@@ -324,11 +326,48 @@ export function WaitingColumn({
       seenVersion: h.seen?.through ?? null,
     };
   };
+  /**
+   * A new snapshot (the 60-second page refresh) keeps the older cards already loaded through "Show older" that
+   * are still in the new snapshot; only cards that left the list are dropped. Kept cards start paused (actions off)
+   * and become actionable only when a re-check in the NEW snapshot succeeds for them (see the live re-check).
+   * Without a snapshot nothing can be verified, so nothing is kept.
+   */
+  const carry = (prev: OlderState): OlderState => {
+    const base = fresh();
+    if (!snapshot) return base;
+    const pos = new Map(entries.map((e, i) => [e.id, i] as const));
+    const firstPage = new Set(holds.map((h) => h.id));
+    // A card is kept only if its pins in the NEW snapshot equal the pins it was shown against (its body is the
+    // one it loaded with). Anything changed, marked updated/missing, or unknown goes back to "not loaded" and is
+    // fetched fresh by Show older, so nobody acts on a stale body.
+    const prevTable = tableRef.current.snapshotKey === prev.forKey ? tableRef.current : null;
+    const unchanged = (id: string, h: OpenHold<RunWithSteps>) => {
+      const was = prevTable?.cards.get(id);
+      const now = pinsOf(id, h);
+      if (!was || !now || was.status === "updated" || was.status === "missing") return false;
+      return PIN_KEYS.every((k) => was[k] === now[k]);
+    };
+    const cards = new Map(
+      [...prev.cards].filter(([id, h]) => pos.has(id) && !firstPage.has(id) && !base.missing.has(id) && unchanged(id, h)),
+    );
+    return { ...base, cards, labels: new Map([...prev.labels].filter(([id]) => cards.has(id))) };
+  };
+  const older: OlderState = stored.forKey === refreshKey ? stored : carry(stored);
+  // Persist the carried state for the new snapshot (adjusting state while rendering, React's documented pattern).
+  if (stored.forKey !== refreshKey) setOlder(older);
+
+  const live = new Map<string, OpenHold<RunWithSteps>>([...older.cards, ...holds.map((h) => [h.id, h] as const)]);
+
   const initialTable = (): CardTable => {
     const cards = new Map<string, CardRecord>();
     const firstOk = !meta?.contextErrors.includes(SEEN_CHECK_FAILED);
     for (const h of holds) cards.set(h.id, loadedCard(refreshKey, pinsOf(h.id, h)!, firstOk));
     if (focusHold) cards.set(focusHold.id, loadedCard(refreshKey, pinsOf(focusHold.id, focusHold)!, !focusHoldErrors?.includes(SEEN_CHECK_FAILED)));
+    // Older cards kept across a refresh: pinned to the NEW snapshot's entry, paused until re-checked.
+    for (const [id, h] of older.cards) {
+      const pins = pinsOf(id, h);
+      if (pins && !cards.has(id)) cards.set(id, loadedCard(refreshKey, pins, false));
+    }
     return { snapshotKey: refreshKey, cards };
   };
   const [storedTable, setTable] = useState<CardTable>(initialTable);
@@ -341,7 +380,10 @@ export function WaitingColumn({
   const loadedEntries = present.filter((e) => live.has(e.id));
   const shown = loadedEntries.slice(0, visible);
   const hiddenLoaded = loadedEntries.length - shown.length;
-  const unrequested = entries.slice(older.nextPos).filter((e) => !live.has(e.id) && !missingIds.has(e.id));
+  // Gap-aware: every snapshot entry below the first page that is neither loaded nor gone, in snapshot order. After a
+  // refresh this includes cards pushed below the first page by new arrivals, wherever they now sit.
+  const firstPageEnd = holds.length + (initialMissing?.length ?? 0);
+  const unrequested = entries.slice(firstPageEnd).filter((e) => !live.has(e.id) && !missingIds.has(e.id));
   const notLoadedYet = unrequested.length;
   const focusInShown = !!focus?.propertyId && shown.some((e) => live.get(e.id)?.property_id === focus.propertyId);
   // Beyond the first page: the server loaded it by id; pinned on top until it appears in place.
@@ -350,6 +392,38 @@ export function WaitingColumn({
   const serverTotal = present.length;
   const hiddenUnverified = older.unverified ?? unverified ?? 0;
   const canLoadMore = !!loadOlder && notLoadedYet > 0;
+
+  /**
+   * A slice that finished after a refresh: keep each card only if the CURRENT snapshot still lists it below the
+   * first page and its own body matches that entry's pins (else it stays "not shown yet" and is fetched again).
+   * Kept cards start "checking" (actions off) and are re-checked now, exactly like revealed cards.
+   */
+  const landLateSlice = (data: { holds: OpenHold<RunWithSteps>[]; labels: Array<[string, RunLabel]> }) => {
+    const L = latestRef.current;
+    if (!L) return;
+    const accepted = data.holds.filter((h) => {
+      const now = L.inSnapshot(h.id) && !L.firstPage.has(h.id) ? L.pinsOf(h.id, h) : undefined;
+      return !!now && PIN_KEYS.every((k) => L.cardPins(h)[k] === now[k]);
+    });
+    if (!accepted.length) return;
+    const key = refreshKeyRef.current;
+    const stamp: Stamp = { snapshotKey: key, seq: ++cardCheckSeq.current };
+    const byId = new Map(accepted.map((h) => [h.id, h] as const));
+    commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) =>
+      prev.forKey !== key
+        ? prev
+        : {
+            ...prev,
+            cards: new Map([...prev.cards, ...accepted.filter((h) => !prev.missing.has(h.id)).map((h) => [h.id, h] as const)]),
+            labels: new Map([...prev.labels, ...data.labels.filter(([id]) => byId.has(id))]),
+          },
+    );
+    commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) =>
+      applyResults(t, stamp, accepted.map((h) => [h.id, "checking"] as const), (id) => L.pinsOf(id, byId.get(id))),
+    );
+    commitIfCurrent<number>(stamp, nowState, setVisible, (v) => v + PAGE);
+    checkNowRef.current?.([...byId.keys()]);
+  };
 
   const showOlder = async () => {
     if (hiddenLoaded > 0) {
@@ -363,16 +437,20 @@ export function WaitingColumn({
       return;
     }
     if (!loadOlder || busy || !canLoadMore) return;
-    const ids = entries.slice(older.nextPos, older.nextPos + OLDER_PAGE).map((e) => e.id);
+    const ids = unrequested.slice(0, OLDER_PAGE).map((e) => e.id);
     const startedKey = refreshKey;
     setBusyFor({ key: startedKey });
     try {
-      const requestedFrom = older.nextPos;
       const requestKey = refreshKey;
       const sliceSeq = ++cardCheckSeq.current;
       const stamp: Stamp = { snapshotKey: requestKey, seq: sliceSeq };
       const res = await loadOlder({ ids });
-      if (res.ok) {
+      if (res.ok && !isCurrent(stamp, nowState())) {
+        // A refresh landed while this slice was in flight (server calls queue one at a time, so a slow slice can
+        // outlive its snapshot). Discarding it lost the click and left Show older doing nothing until clicked
+        // again. Land it in the CURRENT snapshot instead, under the same rule a refresh uses to keep a card.
+        landLateSlice(res.data);
+      } else if (res.ok) {
         // Functional and monotonic: merge into the LATEST state (a re-check may have removed cards meanwhile);
         // `missing` only grows within a snapshot, so a removed card is never brought back by a later slice.
         commitIfCurrent<OlderState>(stamp, nowState, setOlder, (prev) => {
@@ -383,7 +461,6 @@ export function WaitingColumn({
             cards: new Map([...cur.cards, ...res.data.holds.filter((h) => !missing.has(h.id)).map((h) => [h.id, h] as const)]),
             labels: new Map([...cur.labels, ...res.data.labels]),
             missing,
-            nextPos: Math.max(cur.nextPos, requestedFrom + ids.length),
             // null = the slice could not count the whole org: keep what we had.
             unverified: res.data.unverified ?? cur.unverified,
             error: res.data.contextErrors.length ? "Some details on the older texts could not be loaded." : null,
@@ -422,14 +499,21 @@ export function WaitingColumn({
   const shownIdsRef = useRef<string[]>([]);
   /** Runs an immediate re-check of exactly these ids (set by the re-check effect). */
   const checkNowRef = useRef<((ids: readonly string[]) => void) | null>(null);
-  const tableRef = useRef<CardTable>({ snapshotKey: refreshKey, cards: new Map() });
   const olderRef = useRef(older);
+  /** This render's snapshot view, for a slice that lands after a refresh (its closure holds the old snapshot). */
+  const latestRef = useRef<{
+    pinsOf: typeof pinsOf;
+    cardPins: typeof cardPins;
+    inSnapshot: (id: string) => boolean;
+    firstPage: Set<string>;
+  } | null>(null);
   const liveRef = useRef(new Map<string, OpenHold<RunWithSteps>>());
   useEffect(() => {
     liveRef.current = live;
     // The pinned My Leads card is always re-checked too, whether or not it is in the snapshot.
     shownIdsRef.current = [...shown.map((e) => e.id), ...(focusPinned ? [focusPinned.id] : [])];
     tableRef.current = table;
+    latestRef.current = { pinsOf, cardPins, inSnapshot: (id) => entryById.has(id), firstPage: new Set(holds.map((h) => h.id)) };
     olderRef.current = older;
     refreshKeyRef.current = refreshKey;
   });
@@ -487,6 +571,11 @@ export function WaitingColumn({
       commitIfCurrent<CardTable>(stamp, nowState, updateTable, (t) => applyResults(t, stamp, results));
     };
     const id = window.setInterval(check, 60_000);
+    // Older cards kept across a refresh are paused: re-check the shown ones now rather than in 60 seconds.
+    // At most ONE server call (100 ids): server calls queue one at a time, and re-checking thousands of kept cards
+    // at once would hold a Show older click behind them. The rest are covered by the 60-second re-check.
+    const kept = shownIdsRef.current.filter((cardId) => olderRef.current.cards.has(cardId)).slice(0, 100);
+    if (kept.length) void check(kept);
     const onFocus = () => void check();
     window.addEventListener("focus", onFocus);
     checkNowRef.current = (ids) => void check(ids);
