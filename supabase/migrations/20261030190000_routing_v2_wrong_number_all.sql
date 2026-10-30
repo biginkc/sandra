@@ -220,6 +220,65 @@ set search_path = public, pg_temp
 as $$ select pg_advisory_xact_lock(hashtext('routing_v2_phone:' || p_org_id::text || ':' || public.routing_v2_phone_digits(p_phone))); $$;
 revoke all on function public.routing_v2_phone_lock(uuid, text) from public, anon, authenticated, service_role;
 
+-- Any inbound from the action's phone (any property) newer than its trigger inbound.
+create or replace function public.routing_v2_phone_action_newer_inbound(p_action_id uuid)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select m.id
+  from public.routing_v2_phone_actions a
+  join public.messages t on t.id = a.source_inbound_message_id
+  join public.messages m
+    on m.created_at >= t.created_at
+   and m.org_id = a.org_id and m.channel = 'sms' and m.direction = 'inbound'
+   and m.id <> t.id
+   and public.routing_v2_phone_digits(m.from_address) = public.routing_v2_phone_digits(a.phone_e164)
+   and (m.created_at > t.created_at or m.id > t.id)
+  where a.id = p_action_id
+  order by m.created_at
+  limit 1;
+$$;
+revoke all on function public.routing_v2_phone_action_newer_inbound(uuid) from public, anon, authenticated, service_role;
+
+-- A newer inbound raced the reply: skip it, put the source property on the EXISTING
+-- needs-person hold (nine_needs_person, the fields markPropertyNeedsAttention writes; an
+-- existing hold is left alone) and audit p_event. Properties are otherwise left exactly as A
+-- left them. Caller holds the global-DNC barrier, the phone lock and the action row lock.
+create or replace function public.routing_v2_phone_action_hold_superseded(p_action_id uuid, p_newer uuid, p_event text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v public.routing_v2_phone_actions%rowtype;
+  v_held boolean;
+begin
+  if p_event not in ('superseded_after_commit', 'superseded_before_send') then
+    raise exception 'unsupported event: %', p_event using errcode = '22023';
+  end if;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
+  update public.routing_v2_phone_actions
+  set reply_state = 'skipped', reply_reason = p_event, reply_updated_at = now()
+  where id = v.id;
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || v.source_property_id::text));
+  update public.properties
+  set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person',
+      last_ai_escalation_at = now(), updated_at = now()
+  where id = v.source_property_id and org_id = v.org_id and needs_human_attention = false;
+  v_held := found;
+  insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
+  values (v.org_id, v.source_property_id, 'system', 'routing_v2_phone_action_' || p_event,
+    jsonb_build_object('phone_action_id', v.id, 'newer_inbound_message_id', p_newer, 'hold_set', v_held,
+      'hold_reason', 'nine_needs_person'));
+  return v_held;
+end;
+$$;
+revoke all on function public.routing_v2_phone_action_hold_superseded(uuid, uuid, text) from public, anon, authenticated, service_role;
+
 -- A. The whole action except the SMS, in one transaction.
 create or replace function public.fn_routing_v2_phone_action_apply_all(
   p_source_inbound_message_id uuid,
@@ -262,6 +321,10 @@ begin
   end if;
   if p_action not in ('wrong_number_all', 'bad_number') then
     raise exception 'unsupported routing v2 phone action: %', p_action using errcode = '22023';
+  end if;
+  -- The decision's revision is required: without it A cannot prove the decision is current.
+  if p_expected_revision is null then
+    return jsonb_build_object('status', 'not_applicable', 'reason', 'expected_revision_required');
   end if;
 
   select m.id, m.org_id, m.property_id, m.from_address, m.created_at, m.body
@@ -429,12 +492,25 @@ begin
     return jsonb_build_object('status', 'not_applicable', 'reason', 'property_set_changed');
   end if;
 
+  -- Final write gate: re-read the active config NOW, after every lock, with FOR SHARE (an
+  -- owner's flag flip waits for this transaction, or this read sees the flip). The earlier
+  -- read was only an early exit; this one decides.
+  select c.routing_v2_flags into v_flags
+  from public.ai_responder_configs c
+  where c.org_id = v_message.org_id and c.active = true
+  limit 1
+  for share;
+  if v_flags is null or jsonb_typeof(v_flags) <> 'object'
+     or (v_flags->'questions_live') is distinct from 'true'::jsonb
+     or (v_flags->'wrong_number_all') is distinct from 'true'::jsonb then
+    return jsonb_build_object('status', 'not_applicable', 'reason', 'flag_off');
+  end if;
   -- Phone-level actions are eligible only if every property on the phone is (§13.1).
   if exists (select 1 from unnest(v_ids) t(id) where not public.routing_v2_phone_action_eligible(v_flags, t.id)) then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'canary_excluded');
   end if;
 
-  if p_expected_revision is not null and exists (
+  if exists (
     select 1 from public.properties p where p.id = v_message.property_id and p.decision_context_revision is distinct from p_expected_revision
   ) then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'stale_decision_context');
@@ -580,6 +656,8 @@ as $$
 declare
   v public.routing_v2_phone_actions%rowtype;
   v_ok boolean := false;
+  v_newer uuid;
+  v_held boolean;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -591,8 +669,10 @@ begin
   if not found then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
-  -- Same order as undo (phone lock, then the action row), so pending -> sending can never
-  -- interleave with an undo of the same action.
+  -- Same order as undo (global-DNC barrier, phone lock, then the action row), so pending ->
+  -- sending can never interleave with an undo of the same action; the barrier is needed
+  -- because a superseded send writes the needs-person hold on the source property.
+  perform pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
   perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
   select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
   -- Final DB send gate: a suppressed or globally-DNC'd phone never starts its reply.
@@ -604,6 +684,16 @@ begin
     set reply_state = 'skipped', reply_reason = 'suppressed_at_send', reply_updated_at = now()
     where id = v.id;
     return jsonb_build_object('ok', false, 'replyState', 'skipped', 'sendId', v.send_id, 'reason', 'suppressed_at_send');
+  end if;
+  -- A newer inbound from the phone (any property) committed after the fence release: the
+  -- reply never starts; the source property goes on the existing needs-person hold.
+  if p_to = 'sending' and v.send_id = p_send_id and v.reply_state = 'pending' and v.status = 'applied' then
+    v_newer := public.routing_v2_phone_action_newer_inbound(v.id);
+    if v_newer is not null then
+      v_held := public.routing_v2_phone_action_hold_superseded(v.id, v_newer, 'superseded_before_send');
+      return jsonb_build_object('ok', false, 'replyState', 'skipped', 'sendId', v.send_id, 'reason', 'superseded_before_send',
+        'newerInboundMessageId', v_newer, 'holdSet', v_held);
+    end if;
   end if;
   if v.send_id = p_send_id and (
        -- An undone action never starts its reply.
@@ -639,6 +729,7 @@ as $$
     select a.status = 'applied' and a.reply_state = 'sending'
        and not exists (select 1 from public.global_phone_dnc_registry g where g.org_id = a.org_id and g.phone_e164 = a.phone_e164)
        and not exists (select 1 from public.sms_phone_suppressions sp where sp.org_id = a.org_id and sp.channel = 'sms' and sp.phone_e164 = a.phone_e164)
+       and public.routing_v2_phone_action_newer_inbound(a.id) is null
     from public.routing_v2_phone_actions a where a.id = p_action_id
   ), false);
 $$;
@@ -951,7 +1042,6 @@ set search_path = public, pg_temp
 as $$
 declare
   v public.routing_v2_phone_actions%rowtype;
-  v_trigger_at timestamptz;
   v_newer uuid;
   v_held boolean;
 begin
@@ -974,16 +1064,7 @@ begin
       'retryAfterSeconds', greatest(1, ceil(extract(epoch from (v.fence_at - clock_timestamp()))))::int);
   end if;
 
-  select m.created_at into v_trigger_at from public.messages m where m.id = v.source_inbound_message_id;
-  select m.id into v_newer
-  from public.messages m
-  where m.created_at >= v_trigger_at
-    and m.org_id = v.org_id and m.channel = 'sms' and m.direction = 'inbound'
-    and m.id <> v.source_inbound_message_id
-    and public.routing_v2_phone_digits(m.from_address) = public.routing_v2_phone_digits(v.phone_e164)
-    and (m.created_at > v_trigger_at or m.id > v.source_inbound_message_id)
-  order by m.created_at
-  limit 1;
+  v_newer := public.routing_v2_phone_action_newer_inbound(v.id);
 
   if exists (select 1 from public.global_phone_dnc_registry g where g.org_id = v.org_id and g.phone_e164 = v.phone_e164)
      or exists (select 1 from public.sms_phone_suppressions sp where sp.org_id = v.org_id and sp.channel = 'sms' and sp.phone_e164 = v.phone_e164) then
@@ -1000,21 +1081,7 @@ begin
     return jsonb_build_object('replyState', 'pending', 'sendId', v.send_id);
   end if;
 
-  update public.routing_v2_phone_actions
-  set reply_state = 'skipped', reply_reason = 'superseded_after_commit', reply_updated_at = now()
-  where id = v.id;
-  -- The existing needs-person hold (same fields markPropertyNeedsAttention writes); an
-  -- existing hold is left exactly as it is.
-  perform pg_advisory_xact_lock(hashtext('routing_v2:' || v.source_property_id::text));
-  update public.properties
-  set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person',
-      last_ai_escalation_at = now(), updated_at = now()
-  where id = v.source_property_id and org_id = v.org_id and needs_human_attention = false;
-  v_held := found;
-  insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
-  values (v.org_id, v.source_property_id, 'system', 'routing_v2_phone_action_superseded_after_commit',
-    jsonb_build_object('phone_action_id', v.id, 'newer_inbound_message_id', v_newer, 'hold_set', v_held,
-      'hold_reason', 'nine_needs_person'));
+  v_held := public.routing_v2_phone_action_hold_superseded(v.id, v_newer, 'superseded_after_commit');
   return jsonb_build_object('replyState', 'skipped', 'sendId', v.send_id, 'reason', 'superseded_after_commit',
     'newerInboundMessageId', v_newer, 'holdSet', v_held);
 end;

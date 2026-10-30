@@ -99,8 +99,8 @@ export type RoutingV2PhoneActionInput = {
   wrongScope: AiWrongScope | null;
   /** applyHaikuPolicy result when the decision was Haiku-eligible. */
   final?: FinalDecision | null;
-  /** properties.decision_context_revision the decision was made against (optional). */
-  expectedRevision?: number | null;
+  /** properties.decision_context_revision the decision was made against. Required: without it nothing runs. */
+  expectedRevision: number;
 };
 
 export type RoutingV2PhoneActionDeps = {
@@ -238,6 +238,9 @@ export async function runRoutingV2PhoneAction(
   if (candidate.kind === null) return { outcome: "not_applicable", reason: candidate.reason };
   const phone = normalizePhone(input.fromPhone);
   if (!phone) return { outcome: "not_applicable", reason: "phone_unusable" };
+  if (typeof input.expectedRevision !== "number" || !Number.isSafeInteger(input.expectedRevision)) {
+    return { outcome: "not_applicable", reason: "expected_revision_required" };
+  }
 
   const db = supabase as unknown as Loose;
   // A. Everything except the SMS, atomically (the RPC re-reads flags + canary itself).
@@ -246,7 +249,7 @@ export async function runRoutingV2PhoneAction(
     p_action: candidate.kind,
     p_phone: phone,
     p_decision: { signal: candidate.signal, probability: candidate.probability, wrong_scope: input.wrongScope },
-    p_expected_revision: input.expectedRevision ?? null,
+    p_expected_revision: input.expectedRevision,
   });
   if (error) {
     reportError(new Error(String(error.message)), {

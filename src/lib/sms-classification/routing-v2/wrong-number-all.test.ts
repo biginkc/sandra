@@ -133,6 +133,7 @@ const input = (over: Partial<Parameters<typeof runRoutingV2PhoneAction>[1]> = {}
   fromPhone: "(816) 555-0101",
   decision: jev("wrong_person", 0.9),
   wrongScope: "all" as const,
+  expectedRevision: 7,
   ...over,
 });
 type SendFn = RoutingV2PhoneActionDeps["sendWrongNumberReply"];
@@ -421,6 +422,14 @@ describe("runRoutingV2PhoneAction", () => {
     expect(send).not.toHaveBeenCalled();
     expect(calls.find((c) => c.fn === "fn_routing_v2_phone_action_apply_all")?.args).toMatchObject({ p_action: "bad_number" });
     expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all"]);
+  });
+
+  it("expectedRevision is required: missing / null / non-integer → not applicable, no RPC", async () => {
+    for (const rev of [undefined, null, Number.NaN, 1.5, "7"]) {
+      const { db, calls } = fakeDb({ flags: ON });
+      expect(await runRoutingV2PhoneAction(db, input({ expectedRevision: rev as never }), deps().d)).toEqual({ outcome: "not_applicable", reason: "expected_revision_required" });
+      expect(calls.filter((c) => c.kind === "rpc")).toHaveLength(0);
+    }
   });
 
   it("unusable phone → not applicable, no RPC", async () => {

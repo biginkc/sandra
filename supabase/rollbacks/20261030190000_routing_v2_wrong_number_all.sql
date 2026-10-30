@@ -11,6 +11,8 @@ drop function if exists public.fn_routing_v2_phone_action_recover_reply(uuid);
 drop function if exists public.fn_routing_v2_phone_action_send_allowed(uuid);
 drop function if exists public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text);
 drop function if exists public.fn_routing_v2_phone_action_apply_all(uuid, text, text, jsonb, bigint);
+drop function if exists public.routing_v2_phone_action_hold_superseded(uuid, uuid, text);
+drop function if exists public.routing_v2_phone_action_newer_inbound(uuid);
 drop function if exists public.routing_v2_phone_lock(uuid, text);
 drop function if exists public.routing_v2_phone_digits(text);
 drop function if exists public.routing_v2_phone_action_eligible(jsonb, uuid);
