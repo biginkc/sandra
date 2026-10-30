@@ -23,6 +23,14 @@ import { pausePropertyEnrollments, type SequenceEventActor } from "./enrollment"
  * `trg_hot_enrollment_takeover_fence` trigger (born paused when a takeover or a
  * newer seller reply happened since the triggering inbound).
  *
+ * Routing v2 (PR-F, `alert_on_time_only`): a v2 "yes" is not a hot seller, so it never gets a
+ * `hot_book_appointment` enrolment and is never proposed as a new_lead (`isHotSellerUnderV2`);
+ * its v2 Book appointment drip is not matched here. The takeover marker written below is what
+ * fences v2: the `trg_routing_v2_takeover_fence` trigger (migration 20261030230000) cancels the
+ * property's pending v2 auto replies under the routing v2 lock in the same transaction, the
+ * delivery re-check refuses an already-claimed one, and the v2 send check pauses the drip.
+ * With routing v2 off nothing here changes.
+ *
  * Best-effort and never throws: the person's own action must not fail because
  * of this. A failure is reported.
  */

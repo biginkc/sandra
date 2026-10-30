@@ -49,6 +49,43 @@ export function isHotSeller(input: {
   return (input.reasons ?? []).some(isHotReason);
 }
 
+/**
+ * Routing v2 roads that are a plain "yes" (Yes / Maybe / asked for an offer / future action /
+ * "Okay" alone / iPhone reaction / driving auto-reply). Today each is a hot seller. Under
+ * routing v2's `alert_on_time_only` (PR-F) they are NOT hot: the seller gets the approved
+ * reply and the Book appointment drip, and Jarrad is alerted only when they pick a time or ask
+ * for a call (road ALERT_call_me, which stays hot). Pinned against the v2 action table.
+ */
+export const V2_YES_FAMILY_ROADS: readonly string[] = [
+  "book_appointment",
+  "reaction+book_appointment",
+  "driving_reply+book_appointment",
+];
+
+/**
+ * isHotSeller with routing v2's alert_on_time_only applied. `alertOnTimeOnly` must be the
+ * send-time value for the property (`alertOnTimeOnlyInForce`). Off, or not a yes-family road:
+ * exactly `isHotSeller`. On + yes-family road: the yes triggers are dropped; the
+ * price-keyword HOT tier (`keyword:price_offer`, untouched by PR-F) and every hand-off
+ * failure reason (`HOT_HANDOFF_FAILED_REASONS`) still make it hot.
+ */
+export function isHotSellerUnderV2(input: {
+  jevOutcome?: string | null;
+  reasons?: readonly (string | null | undefined)[];
+  v2Road?: string | null;
+  alertOnTimeOnly: boolean;
+}): boolean {
+  if (!input.alertOnTimeOnly || !input.v2Road || !V2_YES_FAMILY_ROADS.includes(input.v2Road)) {
+    return isHotSeller(input);
+  }
+  // A failed hot hand-off always alerts, whatever alert_on_time_only says.
+  return (input.reasons ?? []).some((r) => {
+    if (typeof r !== "string") return false;
+    const v = r.trim();
+    return v === `keyword:${HOT_KEYWORD_TIER}` || HOT_HANDOFF_FAILED_REASONS.includes(v);
+  });
+}
+
 /*
  * Alert keys: one per hot EVENT (Messages v2 PR 2 "Alert and hand-off model").
  * hot_handoff:<inbound>  Sandra put the lead on My Leads because of this text.
