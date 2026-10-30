@@ -35,6 +35,8 @@ const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const realFetch = globalThis.fetch;
 let jevProbabilities: Record<string, number> = {};
 let jevCalls = 0;
+/** The existing eight-answer classification (the number-source detector) says the seller asked. */
+let numberAsked = false;
 
 function installFakeJev() {
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -42,6 +44,17 @@ function installFakeJev() {
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     jevCalls++;
     const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+    if ("outcome" in body.questions) {
+      // The eight-answer request (the existing number-source detector): a calm "unclear" read.
+      return new Response(JSON.stringify({
+        model: "jev-test",
+        answers: {
+          outcome: { choice: "unclear", confidence: 0.5, probabilities: { unclear: 0.5 } },
+          escalation_reason: { choice: "not_applicable", probabilities: { not_applicable: 0.9 } },
+          asked_how_number_obtained: { choice: numberAsked ? "yes" : "no", probabilities: numberAsked ? { yes: 0.95, no: 0.05 } : { yes: 0.05, no: 0.95 } },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
       answers[id] = id === "property_type"
@@ -77,6 +90,11 @@ async function seedOrg(flags: Record<string, unknown>) {
     [orgId, V2_REPLY_TEXTS.text_only],
   );
   await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'text_only', $2)", [orgId, rows[0].id]);
+  const { rows: ns } = await pg.query(
+    "insert into public.sms_templates (org_id, name, content, approved_for_auto_send, approved_content, approved_at) values ($1, 'Auto reply v2: How did you get my number', $2, true, $2, now()) returning id",
+    [orgId, V2_REPLY_TEXTS.number_source],
+  );
+  await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'number_source', $2)", [orgId, ns[0].id]);
   await pg.query("commit");
 }
 
@@ -128,6 +146,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     resetMockState();
     jevProbabilities = {};
     jevCalls = 0;
+    numberAsked = false;
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (routing v2 test)" });
     expect(orgError).toBeNull();
     orgId = await getCanonicalTestOrgId(supabase);
@@ -152,7 +171,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     jevProbabilities = { text_only: 0.95 };
     const outcome = await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
     expect(outcome).toEqual({ outcome: "auto_closed", reason: "routing_v2:text_only_reply" });
-    expect(jevCalls).toBe(1);
+    // The v2 question set, plus the existing number-source detector (reply roads only).
+    expect(jevCalls).toBe(2);
     // The detached kick and an explicit consumer pass race for the same row: one wins the claim.
     await Promise.all([runRoutingV2OutboxReplies(supabase, { limit: 5 }), runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId })]);
     await settle();
@@ -172,6 +192,18 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     await runRoutingV2OutboxReplies(supabase, { limit: 5 });
     expect(sentTo(lead.phone)).toHaveLength(1);
     expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [input.inboundMessageId])).toBe(1);
+  });
+
+  it("\"how did you get my number\" (existing detector): the approved number_source reply replaces the road's reply", async () => {
+    const lead = await seedLead();
+    await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+    const input = await inbound(lead, "Text only. How did you get my number?");
+    jevProbabilities = { text_only: 0.95 };
+    numberAsked = true;
+    await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+    await settle();
+    await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+    expect(sentTo(lead.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.number_source]);
   });
 
   it("a slice switched off before delivery: nothing sent, the inbound goes back to a person", async () => {
