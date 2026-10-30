@@ -5,9 +5,24 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import { buildTwoWayThreadState } from "../context";
-import { askJev, type FetchLike } from "../providers/jev-gateway";
+import { askJev, JevProviderError, type FetchLike } from "../providers/jev-gateway";
 import { buildV2JevRequest } from "./questions";
 import { assertCompleteV2, routeV2 } from "./route";
+
+/**
+ * Sanitized failure category. Never raw error text: Jev error messages can embed upstream
+ * bodies that echo homeowner message content.
+ */
+export function shadowFailureReason(e: unknown, phase: "db" | "jev" = "db"): string {
+  if (e instanceof JevProviderError) {
+    if (e.kind === "timeout") return "jev_timeout";
+    if (typeof e.status === "number") return `jev_http_${e.status}`;
+    if (e.kind === "invalid_response") return "jev_invalid_response";
+    return `jev_${e.kind}`;
+  }
+  if (phase === "jev") return e instanceof SyntaxError ? "jev_invalid_response" : "jev_network_error";
+  return "db_error";
+}
 
 /**
  * Routing v2 shadow hook (PR-A). When `ai_responder_configs.routing_v2_flags.shadow` is true,
@@ -121,6 +136,7 @@ export async function runRoutingV2Shadow(
         reportError(new Error(String(error.message)), { tags: { surface: "routing_v2_shadow_write" }, extra: { propertyId: input.propertyId } });
       }
     };
+    let phase: "db" | "jev" = "db";
     try {
       let sourceCreatedAt: string | null = null;
       if (input.inboundMessageId) {
@@ -135,10 +151,12 @@ export async function runRoutingV2Shadow(
         sourceCreatedAt,
       });
       const lastOutbound = [...thread].reverse().find((m) => m.direction === "outbound");
+      phase = "jev";
       const result = await askJev(
         buildV2JevRequest({ our_last_text_to_homeowner: lastOutbound ? lastOutbound.body : null, homeowner_reply: input.inboundBody }),
         { fetch: deps.fetch, apiKey: deps.typesafeApiKey, maxRetries: 0, timeoutMs: deps.timeoutMs ?? 8000 },
       );
+      phase = "db";
       const complete = assertCompleteV2(result.answers ?? {});
       if (!complete.ok) {
         await write({ status: "failed", failure_reason: `incomplete:${complete.missing.join(",")}`, model: result.model ?? null, latency_ms: result.latencyMs });
@@ -158,7 +176,7 @@ export async function runRoutingV2Shadow(
       });
       return "decided";
     } catch (e) {
-      await write({ status: "failed", failure_reason: e instanceof Error ? e.message.slice(0, 200) : "unknown" }).catch(() => {});
+      await write({ status: "failed", failure_reason: shadowFailureReason(e, phase) }).catch(() => {});
       return "failed";
     }
   } catch (e) {

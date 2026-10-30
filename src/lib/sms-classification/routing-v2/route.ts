@@ -22,6 +22,9 @@ const CODE_ROADS: Record<CodeCheck, V2Road> = {
   driving: "driving_reply+book_appointment",
 };
 
+/** ORDER-TABLE rows 1–2: these beat the code pre-checks. */
+const STOP_FIRST_STEPS: ReadonlySet<string> = new Set(["legal_hostile", "asked_stop"]);
+
 export type V2RouteInput = {
   reply: string;
   probabilities: Record<V2QuestionId, number>;
@@ -50,11 +53,16 @@ function signalProbability(input: V2RouteInput, signal: V2Signal): number {
 
 /** Pure router. Callers must pass a complete, validated probability set (see assertCompleteV2). */
 export function routeV2(input: V2RouteInput): V2Decision {
-  const check = codePreCheck(input.reply);
-  if (check) return { road: CODE_ROADS[check], provenance: { by: "code", check }, haiku: null, opportunityAlert: false };
-
   const opportunityAlert = OPPORTUNITY_SIGNALS.some((q) => input.probabilities[q] >= DEFAULT_CUTOFF);
+  // Stop/legal/hostile (ORDER-TABLE rows 1–2) are evaluated before the code pre-checks, so
+  // "STOP, I'm driving" or a hostile reaction still routes to stop.
+  let checked = false;
   for (const step of V2_ORDER) {
+    if (!checked && !STOP_FIRST_STEPS.has(step.step)) {
+      checked = true;
+      const check = codePreCheck(input.reply);
+      if (check) return { road: CODE_ROADS[check], provenance: { by: "code", check }, haiku: null, opportunityAlert: false };
+    }
     for (const { signal, cutoff } of step.signals) {
       const p = signalProbability(input, signal);
       if (p >= cutoff) {
