@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -804,7 +804,7 @@ describe("B0. post-commit fence and undo/send serialization", () => {
     expect(await dispo(ids.p1)).toBe("wrong_number");
   });
 
-  it("a newer inbound committed by another connection while A holds its locks: after the fence A is auto-undone, no reply", async () => {
+  it("a newer inbound committed by another connection while A holds its locks: after the fence no reply, properties unchanged, needs-person hold, audited; the person undo keeps its full check", async () => {
     await setFlags(ON);
     const before = await snapshot();
     const r = await applyAll(); // our transaction still holds A's advisory + row locks
@@ -822,22 +822,181 @@ describe("B0. post-commit fence and undo/send serialization", () => {
         [late, orgId, ids.p2, randomUUID(), X],
       );
       await passFence(r.actionId);
+      const afterA = await snapshot();
       const f = await releaseFence(r.actionId);
-      expect(f).toMatchObject({ replyState: "skipped", reason: "superseded_after_commit", newerInboundMessageId: late });
-      expect(f.undo.status).toBe("undone");
-      expect(await snapshot()).toEqual(before); // nothing stays wrongly closed
-      expect((await enrollment(ids.e2)).status).toBe("active");
+      expect(f).toMatchObject({ replyState: "skipped", reason: "superseded_after_commit", newerInboundMessageId: late, holdSet: true });
+      // Nothing is undone automatically: every property exactly as A left it, except the hold.
+      const now = await snapshot();
+      for (const row of afterA) {
+        const cur = now.find((n) => n.id === row.id)!;
+        if (row.id === ids.p1) {
+          expect(cur).toEqual({ ...row, needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        } else {
+          expect(cur).toEqual(row);
+        }
+      }
+      expect((await enrollment(ids.e2)).status).toBe("paused");
       const action = (await db.query(`select status, reply_state, reply_reason from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0];
-      expect(action).toEqual({ status: "undone", reply_state: "skipped", reply_reason: "superseded_after_commit" });
+      expect(action).toEqual({ status: "applied", reply_state: "skipped", reply_reason: "superseded_after_commit" });
       expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false });
-      const audit = (await db.query(`select count(*) from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_superseded_after_commit'`, [orgId])).rows[0].count;
-      expect(Number(audit)).toBe(1);
-      const undoneEvents = (await db.query(`select payload->>'mode' m from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_undone'`, [orgId])).rows;
-      expect(undoneEvents.every((e) => e.m === "superseded_after_commit")).toBe(true);
+      const audit = (await db.query(`select payload from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_superseded_after_commit'`, [orgId])).rows;
+      expect(audit).toHaveLength(1);
+      expect(audit[0].payload).toMatchObject({ phone_action_id: r.actionId, newer_inbound_message_id: late, hold_set: true, hold_reason: "nine_needs_person" });
+      // A second release is a no-op.
+      expect((await releaseFence(r.actionId)).replyState).toBe("skipped");
+      // The person: the held source property is skipped by the normal undo (full checks)…
+      const u1 = await undo(ownerId, r.actionId);
+      expect(u1.skipped).toEqual(expect.arrayContaining([{ propertyId: ids.p1, reason: "held" }]));
+      // …and once they dismiss the hold, the normal undo restores it (revision check still on).
+      await db.query(`update public.properties set needs_human_attention = false, last_ai_escalation_reason = null where id = $1`, [ids.p1]);
+      const u2 = await undo(ownerId, r.actionId);
+      expect(u2.status).toBe("undone");
+      const restored = await snapshot();
+      expect(restored.map((x) => [x.id, x.outreach_dispo])).toEqual(before.map((x) => [x.id, x.outreach_dispo]));
     } finally {
       await other.query("delete from public.messages where id = $1", [late]);
       await other.end();
     }
+  });
+
+  describe("global DNC concurrency (committed fixtures, two connections)", () => {
+    const BARRIER_NOTE = "both orders: A first, DNC first";
+    type Seed = { org: string; consumer: string; contact: string; property: string; inbound: string; phone: string };
+    const seedCommitted = async (): Promise<Seed> => {
+      // Release this file's per-test transaction (its in-transaction migration DDL holds table
+      // locks the two real connections need); afterEach's rollback then ends the fresh one.
+      await db.query("rollback");
+      await db.query("begin");
+      const sd = {
+        org: randomUUID(), consumer: randomUUID(), contact: randomUUID(), property: randomUUID(), inbound: randomUUID(),
+        phone: `+1913${String(Math.floor(Math.random() * 10_000_000)).padStart(7, "0")}`,
+      };
+      await admin.query("begin");
+      await admin.query("insert into public.organizations (id, name) values ($1, $2)", [sd.org, `prg dnc race ${sd.org}`]);
+      await admin.query(
+        `insert into public.ai_responder_configs (org_id, system_prompt, active, routing_v2_flags)
+         values ($1, 'x', true, $2::jsonb)`,
+        [sd.org, JSON.stringify({ questions_live: true, wrong_number_all: true, canary_percent: 100 })],
+      );
+      await admin.query(
+        `insert into public.webhook_consumers (id, org_id, name, secret_hash, consumer_type, default_source)
+         values ($1, $2, $3, $4, 'switchboard_contact_preference', null)`,
+        [sd.consumer, sd.org, `prg ${sd.consumer}`, sd.consumer.replaceAll("-", "").padEnd(64, "0")],
+      );
+      await admin.query(`insert into public.contacts (id, org_id, phone_1, phone_1_type) values ($1, $2, $3, 'mobile')`, [sd.contact, sd.org, sd.phone]);
+      await admin.query(
+        `insert into public.properties (id, org_id, address, state, status, homeowner_contact_id) values ($1, $2, 'Race St', 'MO', 'prospect', $3)`,
+        [sd.property, sd.org, sd.contact],
+      );
+      await admin.query(
+        `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, from_address, created_at)
+         values ($1, $2, $3, $4, 'sms', 'inbound', 'wrong number', $5, now() - interval '1 minute')`,
+        [sd.inbound, sd.org, sd.property, randomUUID(), sd.phone],
+      );
+      await admin.query(
+        `insert into public.routing_v2_shadow_decisions (org_id, property_id, inbound_message_id, status, road, provenance)
+         values ($1, $2, $3, 'decided', 'wrong_number_close', $4::jsonb)`,
+        [sd.org, sd.property, sd.inbound, JSON.stringify({ by: "jev", signal: "wrong_person", probability: 0.9 })],
+      );
+      await admin.query("commit");
+      return sd;
+    };
+    const service = async () => {
+      const c = new Client({ connectionString: url });
+      await c.connect();
+      await c.query("select set_config('request.jwt.claim.role', 'service_role', false)");
+      return c;
+    };
+    const applyOn = (c: Client, sd: Seed) =>
+      c.query(`select public.fn_routing_v2_phone_action_apply_all($1, 'wrong_number_all', $2, '{"wrong_scope":"all"}'::jsonb, null) as r`, [sd.inbound, sd.phone]);
+    const dncOn = (c: Client, sd: Seed) => {
+      const key = randomUUID();
+      const evidence = createHash("sha256")
+        .update(`switchboard_contact_preference_v1\0${key}\0explicit_do_not_contact\0analysis:global_dnc_requested`, "utf8")
+        .digest("hex");
+      return c.query(
+        `select public.apply_switchboard_contact_preferences(
+           $1, $2, $3, $4, 'provider_call', 'contact_preference.explicit',
+           $5, $6, 'analysis:global_dnc_requested', null, now(), $7, $8, null, true, false,
+           'explicit_do_not_contact', $9, null, null, null, null) as r`,
+        [sd.org, sd.consumer, key, "a".repeat(64), `source-${key}`, `call-${key}`, `correlation-${key}`, sd.phone, evidence],
+      );
+    };
+    const settledWithin = async <T,>(p: Promise<T>, ms: number) =>
+      Promise.race([p.then(() => "settled", () => "settled"), new Promise<string>((res) => setTimeout(() => res("pending"), ms))]);
+    const dncLanded = async (sd: Seed) => {
+      const reg = (await admin.query(`select count(*) from public.global_phone_dnc_registry where org_id = $1 and phone_e164 = $2`, [sd.org, sd.phone])).rows[0].count;
+      const c = (await admin.query(`select do_not_contact from public.contacts where id = $1`, [sd.contact])).rows[0];
+      return Number(reg) === 1 && c.do_not_contact === true;
+    };
+
+    it(`A holds its transaction open; a global DNC for the same phone waits, then lands (${BARRIER_NOTE})`, async () => {
+      const sd = await seedCommitted();
+      const c1 = await service();
+      const c2 = await service();
+      try {
+        await c1.query("begin");
+        const a = (await applyOn(c1, sd)).rows[0].r;
+        expect(a.status).toBe("applied");
+        const dnc = dncOn(c2, sd);
+        expect(await settledWithin(dnc, 400)).toBe("pending"); // queued behind A's shared barrier, no deadlock
+        await c1.query("commit");
+        const res = (await dnc).rows[0].r; // must not throw (no deadlock / abort)
+        expect(res).toBeTruthy();
+        expect(await dncLanded(sd)).toBe(true);
+      } finally {
+        await c1.end();
+        await c2.end();
+      }
+    });
+
+    it("interleaved: A is mid-flight (contacts locked, waiting on a property row) when a global DNC starts — no deadlock, both finish, the DNC lands", async () => {
+      // Without the barrier-first rule this is the deadlock: A holds the contact row, the DNC
+      // takes the exclusive barrier and waits for the contact, then A's property update asks for
+      // the shared barrier. With it, the DNC queues behind A's shared barrier instead.
+      const sd = await seedCommitted();
+      const c1 = await service();
+      const c2 = await service();
+      const c3 = new Client({ connectionString: url });
+      await c3.connect();
+      try {
+        await c3.query("begin");
+        await c3.query("select 1 from public.properties where id = $1 for update", [sd.property]);
+        const a = applyOn(c1, sd);
+        expect(await settledWithin(a, 400)).toBe("pending"); // A is past its contact locks, blocked on the property row
+        const dnc = dncOn(c2, sd);
+        expect(await settledWithin(dnc, 400)).toBe("pending");
+        await c3.query("commit");
+        const [ra, rd] = await Promise.allSettled([a, dnc]);
+        expect(ra.status, ra.status === "rejected" ? String(ra.reason) : "").toBe("fulfilled");
+        expect(rd.status, rd.status === "rejected" ? String(rd.reason) : "").toBe("fulfilled");
+        expect(await dncLanded(sd)).toBe(true);
+      } finally {
+        await c1.end();
+        await c2.end();
+        await c3.end();
+      }
+    });
+
+    it("a global DNC holds its transaction open; A waits at the barrier (before any contact/property lock), then completes; the DNC lands", async () => {
+      const sd = await seedCommitted();
+      const c1 = await service();
+      const c2 = await service();
+      try {
+        await c2.query("begin");
+        await dncOn(c2, sd); // exclusive barrier + contact locks held until commit
+        const a = applyOn(c1, sd);
+        expect(await settledWithin(a, 400)).toBe("pending");
+        await c2.query("commit");
+        const r = (await a).rows[0].r; // no deadlock, no error
+        expect(["not_applicable", "applied"]).toContain(r.status);
+        expect(r.status === "applied").toBe(false); // the DNC'd contact is never closed over
+        expect(await dncLanded(sd)).toBe(true);
+      } finally {
+        await c1.end();
+        await c2.end();
+      }
+    });
   });
 
   it("undo while the reply is in flight (sending) = busy, nothing changed; after it settles, undo works", async () => {
@@ -912,13 +1071,24 @@ describe("self-sweep", () => {
       return sql.slice(start, sql.indexOf("\n$$;", start));
     };
     const order = (b: string, markers: string[]) => markers.map((m) => b.indexOf(m));
+    const BAR = "pg_advisory_xact_lock_shared(pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1'";
     const apply = order(body("fn_routing_v2_phone_action_apply_all"), [
-      "routing_v2_phone_lock(", "from public.contacts c\n  where c.id = any(v_contacts)", "from public.sms_phone_suppressions sp",
+      BAR, "routing_v2_phone_lock(", "from public.contacts c\n  where c.id = any(v_contacts)", "from public.sms_phone_suppressions sp",
       "hashtext('routing_v2:'", "from public.properties p where p.id = any(v_ids) order by p.id for update", "update public.sequence_enrollments e",
     ]);
     // Undo: the wrapper takes the phone lock then calls the core (contacts -> suppressions -> ...).
-    const undoWrap = order(body("fn_undo_routing_v2_phone_action"), ["routing_v2_phone_lock(", "routing_v2_phone_action_undo_core("]);
-    const fenceWrap = order(body("fn_routing_v2_phone_action_release_fence"), ["routing_v2_phone_lock(", "routing_v2_phone_action_undo_core("]);
+    const undoWrap = order(body("fn_undo_routing_v2_phone_action"), [BAR, "routing_v2_phone_lock(", "routing_v2_phone_action_undo_core("]);
+    const fenceWrap = order(body("fn_routing_v2_phone_action_release_fence"), [BAR, "routing_v2_phone_lock(", "update public.properties"]);
+    expect(body("fn_routing_v2_phone_action_release_fence")).not.toContain("routing_v2_phone_action_undo_core(");
+    // Nothing writes properties/contacts/enrollments before the barrier.
+    for (const fn of ["fn_routing_v2_phone_action_apply_all", "fn_undo_routing_v2_phone_action", "fn_routing_v2_phone_action_release_fence"]) {
+      const b = body(fn);
+      const barAt = b.indexOf(BAR);
+      for (const w of ["update public.properties", "update public.sequence_enrollments", "from public.contacts", "for update"]) {
+        const at = b.indexOf(w);
+        if (at >= 0) expect(at, `${fn}: ${w}`).toBeGreaterThan(barAt);
+      }
+    }
     const replyWrap = order(body("fn_routing_v2_phone_action_reply"), ["routing_v2_phone_lock(", "for update"]);
     const undoOrder = order(body("routing_v2_phone_action_undo_core"), [
       "order by c.id for share", "lock table public.sms_phone_suppressions",
@@ -1013,7 +1183,7 @@ describe("self-sweep", () => {
     }
     expect(await can("authenticated", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(true);
     expect(await can("anon", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(false);
-    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid, text)"]) {
+    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid)"]) {
       for (const role of ["anon", "authenticated", "service_role"]) expect(await can(role, fn), `${role} ${fn}`).toBe(false);
     }
     const tables = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties')`)).rows;

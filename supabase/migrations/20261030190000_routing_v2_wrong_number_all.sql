@@ -319,6 +319,10 @@ begin
     end if;
   end if;
 
+  -- Global-DNC write barrier (20260830092331), SHARED, before any phone/contact/property lock:
+  -- the global-DNC path takes it EXCLUSIVE before locking contacts, so taking it first here
+  -- means the two can only queue behind each other, never deadlock.
+  perform pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
   -- Serialize every v2 phone action and undo for this phone.
   perform public.routing_v2_phone_lock(v_message.org_id, p_phone);
 
@@ -686,13 +690,11 @@ $$;
 revoke all on function public.fn_routing_v2_phone_action_unsettled_replies(integer, integer) from public, anon, authenticated;
 grant execute on function public.fn_routing_v2_phone_action_unsettled_replies(integer, integer) to service_role;
 
--- C. Undo core: caller holds the phone lock and the action row lock. p_mode 'user' (a person)
--- or 'superseded_after_commit' (the post-commit fence found a newer inbound). In the fence mode
--- the decision-revision check is skipped, because the newer inbound itself moves it; dispo,
--- follow-up, currently-held and suppression checks still apply. Restores ONLY what A changed
--- (dispo, follow-up, A's own paused enrollments); hold fields are never read for restore or
--- written. Internal only.
-create or replace function public.routing_v2_phone_action_undo_core(p_action_id uuid, p_actor uuid, p_mode text)
+-- C. Undo core (a person's undo): caller holds the DNC barrier, the phone lock and the action
+-- row lock. Restores ONLY what A changed (dispo, follow-up, A's own token-stamped paused
+-- enrollments), only where dispo, follow-up AND the decision revision still equal what A left;
+-- hold fields are never read for restore or written. Internal only.
+create or replace function public.routing_v2_phone_action_undo_core(p_action_id uuid, p_actor uuid)
 returns jsonb
 language plpgsql
 security definer
@@ -715,11 +717,10 @@ declare
   v_resumed integer := 0;
   v_not_resumed jsonb := '[]'::jsonb;
   v_remaining integer;
-  v_actor_type text := case when p_mode = 'user' then 'user' else 'system' end;
-  v_actor uuid := case when p_mode = 'user' then p_actor else null end;
+  v_actor uuid := p_actor;
 begin
-  if p_mode not in ('user', 'superseded_after_commit') then
-    raise exception 'unsupported undo mode: %', p_mode using errcode = '22023';
+  if v_actor is null then
+    raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
   end if;
   select * into v_action from public.routing_v2_phone_actions where id = p_action_id;
 
@@ -770,7 +771,7 @@ begin
       when v_phone_suppressed then 'phone_suppressed'
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo
         or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
-        or (p_mode = 'user' and v_cur.decision_context_revision is distinct from v_row.recorded_revision) then 'state_changed'
+        or v_cur.decision_context_revision is distinct from v_row.recorded_revision then 'state_changed'
       -- Held now (a person must look): leave it alone. Undo never reads or writes the hold
       -- fields beyond this current-state guard.
       when v_cur.needs_human_attention then 'held'
@@ -783,8 +784,8 @@ begin
       v_skipped := v_skipped || jsonb_build_object('propertyId', v_row.property_id, 'reason', v_reason);
       if v_found then
         insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload)
-        values (v_action.org_id, v_row.property_id, v_actor_type, v_actor, 'routing_v2_phone_action_undo_skipped',
-          jsonb_build_object('reason', v_reason, 'mode', p_mode, 'phone_action_id', v_action.id, 'action', v_action.action));
+        values (v_action.org_id, v_row.property_id, 'user', v_actor, 'routing_v2_phone_action_undo_skipped',
+          jsonb_build_object('reason', v_reason, 'phone_action_id', v_action.id, 'action', v_action.action));
       end if;
       continue;
     end if;
@@ -819,8 +820,8 @@ begin
 
     insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id)
     values (
-      v_action.org_id, v_row.property_id, v_actor_type, v_actor, 'routing_v2_phone_action_undone',
-      jsonb_build_object('action', v_action.action, 'mode', p_mode, 'applied_dispo', v_row.applied_dispo, 'restored_dispo', v_row.prior_outreach_dispo,
+      v_action.org_id, v_row.property_id, 'user', v_actor, 'routing_v2_phone_action_undone',
+      jsonb_build_object('action', v_action.action, 'applied_dispo', v_row.applied_dispo, 'restored_dispo', v_row.prior_outreach_dispo,
         'phone_action_id', v_action.id, 'source_inbound_message_id', v_action.source_inbound_message_id),
       'routing_v2_phone_action_properties.undone', v_row.id
     )
@@ -838,7 +839,7 @@ begin
       undone_at = case when v_remaining = 0 then now() else undone_at end,
       undone_by = case when v_remaining = 0 then v_actor else undone_by end,
       reply_reason = case when reply_state in ('pending', 'awaiting_fence')
-                          then case when p_mode = 'user' then 'undone_before_send' else 'superseded_after_commit' end
+                          then 'undone_before_send'
                           else reply_reason end,
       reply_updated_at = case when reply_state in ('pending', 'awaiting_fence') then now() else reply_updated_at end,
       reply_state = case when reply_state in ('pending', 'awaiting_fence') then 'skipped' else reply_state end
@@ -851,7 +852,7 @@ begin
   );
 end;
 $$;
-revoke all on function public.routing_v2_phone_action_undo_core(uuid, uuid, text) from public, anon, authenticated, service_role;
+revoke all on function public.routing_v2_phone_action_undo_core(uuid, uuid) from public, anon, authenticated, service_role;
 
 -- C. Undo (a person). One transaction under the phone lock. A reply in flight (`sending`)
 -- makes undo busy: only a not-yet-started or finished reply can be undone.
@@ -880,6 +881,7 @@ begin
     raise exception 'FORBIDDEN' using errcode = '42501';
   end if;
 
+  perform pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
   perform public.routing_v2_phone_lock(v_action.org_id, v_action.phone_e164);
   select * into v_action from public.routing_v2_phone_actions where id = p_action_id for update;
   if v_action.status = 'undone' then
@@ -890,7 +892,7 @@ begin
     return jsonb_build_object('status', 'busy', 'reason', 'reply_in_flight', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
       'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
   end if;
-  return public.routing_v2_phone_action_undo_core(p_action_id, v_actor, 'user');
+  return public.routing_v2_phone_action_undo_core(p_action_id, v_actor);
 end;
 $$;
 revoke all on function public.fn_undo_routing_v2_phone_action(uuid) from public, anon;
@@ -898,9 +900,10 @@ grant execute on function public.fn_undo_routing_v2_phone_action(uuid) to authen
 
 -- B0. Post-commit fence. A leaves a wrong-number reply `awaiting_fence` until fence_at
 -- (applied + 10 s). After that, under the phone lock, any inbound from the phone (any
--- property) newer than the trigger means A raced a late-committing text: A is undone
--- automatically (superseded_after_commit), the reply is skipped and audited. Otherwise the
--- reply is released to `pending`.
+-- property) newer than the trigger means A raced a late-committing text. Then the reply is
+-- skipped, every property stays exactly as A left it, the source property is put on the
+-- EXISTING needs-person hold (reason nine_needs_person) and it is audited; a person decides and
+-- can use the normal undo (full checks). Otherwise the reply is released to `pending`.
 create or replace function public.fn_routing_v2_phone_action_release_fence(p_action_id uuid)
 returns jsonb
 language plpgsql
@@ -911,7 +914,7 @@ declare
   v public.routing_v2_phone_actions%rowtype;
   v_trigger_at timestamptz;
   v_newer uuid;
-  v_undo jsonb;
+  v_held boolean;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -920,6 +923,8 @@ begin
   if not found then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+  -- Writes properties (the hold): global-DNC barrier first, then the phone lock.
+  perform pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
   perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
   select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
   if v.reply_state <> 'awaiting_fence' then
@@ -948,15 +953,23 @@ begin
     return jsonb_build_object('replyState', 'pending', 'sendId', v.send_id);
   end if;
 
-  v_undo := public.routing_v2_phone_action_undo_core(v.id, null, 'superseded_after_commit');
-  if v_undo->>'status' = 'busy' then
-    return jsonb_build_object('replyState', 'awaiting_fence', 'sendId', v.send_id, 'retryAfterSeconds', 5, 'reason', 'undo_busy');
-  end if;
+  update public.routing_v2_phone_actions
+  set reply_state = 'skipped', reply_reason = 'superseded_after_commit', reply_updated_at = now()
+  where id = v.id;
+  -- The existing needs-person hold (same fields markPropertyNeedsAttention writes); an
+  -- existing hold is left exactly as it is.
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || v.source_property_id::text));
+  update public.properties
+  set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person',
+      last_ai_escalation_at = now(), updated_at = now()
+  where id = v.source_property_id and org_id = v.org_id and needs_human_attention = false;
+  v_held := found;
   insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
   values (v.org_id, v.source_property_id, 'system', 'routing_v2_phone_action_superseded_after_commit',
-    jsonb_build_object('phone_action_id', v.id, 'newer_inbound_message_id', v_newer, 'undo', v_undo));
+    jsonb_build_object('phone_action_id', v.id, 'newer_inbound_message_id', v_newer, 'hold_set', v_held,
+      'hold_reason', 'nine_needs_person'));
   return jsonb_build_object('replyState', 'skipped', 'sendId', v.send_id, 'reason', 'superseded_after_commit',
-    'newerInboundMessageId', v_newer, 'undo', v_undo);
+    'newerInboundMessageId', v_newer, 'holdSet', v_held);
 end;
 $$;
 revoke all on function public.fn_routing_v2_phone_action_release_fence(uuid) from public, anon, authenticated;
