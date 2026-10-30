@@ -15,6 +15,7 @@ import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
 import { processVoicemailDropStep } from "./voicemail-drop-step";
+import { loadRoutingV2Key, routingV2ChainAfterCompletion, routingV2TickGate } from "./routing-v2/tick-gate";
 
 const FIRST_TOUCH_SENDER_PAUSE_REASON =
   "no approved sender for first-touch sequence send";
@@ -61,6 +62,7 @@ export type TickOutcome =
   | { status: "voicemail_queued"; enrollmentId: string; stepIndex: number; dropId: string }
   | { status: "skipped_not_eligible"; enrollmentId: string; stepIndex: number; reason: string }
   | { status: "rescheduled_daily_cap"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_slot_window"; enrollmentId: string; nextRunAt: string }
   | { status: "rescheduled_provider_not_queued"; enrollmentId: string; nextRunAt: string }
   | { status: "failed"; enrollmentId: string; message: string };
 
@@ -113,6 +115,15 @@ export async function processEnrollmentTick(
         enrollmentId: enrollment.id,
         message: completionError?.message ?? "enrollment changed before completion",
       };
+    }
+    // Routing v2 only: a finished drip that names a next drip (Said they'd call -> Book
+    // appointment v2) chains into it, re-checking flags/takeover/suppression in SQL.
+    try {
+      if (await loadRoutingV2Key(client, enrollment.sequence_id)) {
+        await routingV2ChainAfterCompletion(client, enrollment.id);
+      }
+    } catch (err) {
+      reportError(err, { tags: { context: "routing_v2_chain_after_completion" }, extra: { enrollmentId: enrollment.id } });
     }
     return { status: "completed", enrollmentId: enrollment.id };
   }
@@ -201,6 +212,46 @@ export async function processEnrollmentTick(
     };
   }
 
+  // 2b. Routing v2 drips only (legacy sequences pass straight through): send-time re-check of
+  // flags + eligibility + takeover + suppression, and the booking texts' dynamic slot time.
+  let routingV2SlotLabel: string | null = null;
+  let routingV2Gate;
+  try {
+    routingV2Gate = await routingV2TickGate(client, {
+      enrollmentId: enrollment.id,
+      sequenceId: enrollment.sequence_id,
+      stepId: step.id,
+      actionType: step.action_type,
+      templateBody: step.template_body,
+      propertyState: property.state,
+    });
+  } catch (err) {
+    return { status: "failed", enrollmentId: enrollment.id, message: err instanceof Error ? err.message : String(err) };
+  }
+  if (routingV2Gate.kind === "blocked") {
+    return { status: "paused", enrollmentId: enrollment.id, reason: `routing_v2_${routingV2Gate.reason}` };
+  }
+  if (routingV2Gate.kind === "wait") {
+    const nextRunAt = routingV2Gate.nextRunAt.toISOString();
+    const { data: waited, error: waitError } = await client
+      .from("sequence_enrollments")
+      .update({ next_run_at: nextRunAt, updated_at: new Date().toISOString() })
+      .eq("id", enrollment.id)
+      .eq("status", "active")
+      .eq("current_step_index", enrollment.current_step_index)
+      .select("id")
+      .maybeSingle();
+    if (waitError || !waited) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: waitError?.message ?? "Enrollment changed before slot-window reschedule",
+      };
+    }
+    return { status: "rescheduled_slot_window", enrollmentId: enrollment.id, nextRunAt };
+  }
+  if (routingV2Gate.kind === "send") routingV2SlotLabel = routingV2Gate.slotLabel;
+
   // 3. Claim the fire. Double-fire safety via unique (enrollment_id, step_id).
   const { data: claim, error: claimErr } = await client
     .from("sequence_step_runs")
@@ -283,6 +334,7 @@ export async function processEnrollmentTick(
       propertyId: enrollment.property_id,
       contactId: enrollment.contact_id,
     });
+    if (routingV2SlotLabel) vars.slot_time = routingV2SlotLabel;
 
     // Load the sequence to honor its `append_opt_out` setting.
     const { data: seq } = await client
