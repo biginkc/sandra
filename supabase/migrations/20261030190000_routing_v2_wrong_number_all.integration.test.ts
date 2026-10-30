@@ -10,16 +10,16 @@ import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/rout
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * 20261030150000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
+ * 20261030190000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
  * Local-only; one rolled-back transaction per test.
  */
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030150000_routing_v2_wrong_number_all.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261030190000_routing_v2_wrong_number_all.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "..", "rollbacks", "20261030150000_routing_v2_wrong_number_all.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "..", "rollbacks", "20261030190000_routing_v2_wrong_number_all.sql"), "utf8"),
 );
 
 const X = "+18165550101"; // the phone that texted "wrong number"
@@ -722,7 +722,7 @@ describe("canary twin + rollback", () => {
 
 describe("self-sweep", () => {
   it("(b) lock order is the same in apply_all and undo: phone -> contacts -> suppressions -> property advisory -> properties -> enrollments", () => {
-    const sql = readFileSync(path.join(__dirname, "20261030150000_routing_v2_wrong_number_all.sql"), "utf8");
+    const sql = readFileSync(path.join(__dirname, "20261030190000_routing_v2_wrong_number_all.sql"), "utf8");
     const body = (name: string) => {
       const start = sql.indexOf(`create or replace function public.${name}(`);
       return sql.slice(start, sql.indexOf("\n$$;", start));

@@ -122,7 +122,7 @@ export default defineConfig({
       "supabase/migrations/20261008300100_jev_action_undo.integration.test.ts",
       "supabase/migrations/20261008300200_wrong_number_all_confirm_suppresses.integration.test.ts",
       "supabase/migrations/20261008300200_wrong_number_all_rollback_race.integration.test.ts",
-      "supabase/migrations/20261030150000_routing_v2_wrong_number_all.integration.test.ts",
+      "supabase/migrations/20261030190000_routing_v2_wrong_number_all.integration.test.ts",
       "supabase/migrations/20261008300000_jev_opted_out_human_only.integration.test.ts",
       "src/app/(dashboard)/messages-v2/hold-actions.rpc.integration.test.ts",
       "src/lib/hold-alerts/store.integration.test.ts",
