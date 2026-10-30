@@ -23,6 +23,7 @@ export default defineConfig({
       "supabase/migrations/20261030260000_routing_v2_live_decision_log.integration.test.ts",
       "supabase/migrations/20261030270000_routing_v2_legacy_drip_snapshots.integration.test.ts",
       "supabase/migrations/20261030280000_routing_v2_skip_first_step.integration.test.ts",
+      "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
       "src/**/*.integration.test.ts",
       // Migration integration tests live alongside the migration SQL files.
       // Added in phase 02-05 to include 046_backfill*.integration.test.ts.

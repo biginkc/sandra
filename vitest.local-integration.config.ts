@@ -13,6 +13,7 @@ export default defineConfig({
       "supabase/migrations/20261030260000_routing_v2_live_decision_log.integration.test.ts",
       "supabase/migrations/20261030270000_routing_v2_legacy_drip_snapshots.integration.test.ts",
       "supabase/migrations/20261030280000_routing_v2_skip_first_step.integration.test.ts",
+      "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",

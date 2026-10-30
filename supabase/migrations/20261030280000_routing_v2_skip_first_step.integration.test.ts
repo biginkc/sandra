@@ -38,6 +38,17 @@ describe("atomic skip-first enrollment",()=>{
     expect(await transition(true)).toMatchObject({outcome:"no_sequence",new_enrollment_id:null});
     expect((await db.query("select count(*)::int as n from routing_v2_outbox where inbound_message_id=$1",[inbound])).rows[0].n).toBe(1);
   });
+  it("conditional call-me stop reads the current flag and leaves legacy drips alone while off",async()=>{
+    const legacy=(await db.query("insert into sequence_enrollments(org_id,sequence_id,property_id,contact_id,status,current_step_index,next_run_at) values($1,$2,$3,$4,'active',0,now()) returning id",[org,sequence,property,contact])).rows[0].id;
+    const plan={sequence_key:null,stop_drip_when_time_only_on:true,outbox:[{kind:"alert",payload:{reason:"call_me"}}]};
+    const run=async()=> (await db.query("select route_reply_transition($1,$2,$3) as r",[inbound,property,JSON.stringify(plan)])).rows[0].r;
+    expect((await run()).outcome).toBe("replies_only");
+    expect((await db.query("select status from sequence_enrollments where id=$1",[legacy])).rows[0].status).toBe("active");
+    await db.query("update ai_responder_configs set routing_v2_flags=routing_v2_flags || '{\"alert_on_time_only\":true}'::jsonb where org_id=$1",[org]);
+    inbound=(await db.query("insert into messages(org_id,property_id,contact_id,direction,channel,body,created_at) values($1,$2,$3,'inbound','sms','Call now',now()+interval '1 second') returning id",[org,property,contact])).rows[0].id;
+    expect((await run()).outcome).toBe("applied");
+    expect((await db.query("select status from sequence_enrollments where id=$1",[legacy])).rows[0].status).toBe("completed");
+  });
   it("does not enroll or create intents with both slices off",async()=>{
     await db.query("update ai_responder_configs set routing_v2_flags='{}' where org_id=$1",[org]);
     expect(await transition(true)).toMatchObject({outcome:"flag_off",new_enrollment_id:null});

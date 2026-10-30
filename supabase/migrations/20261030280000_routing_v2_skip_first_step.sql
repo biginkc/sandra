@@ -69,7 +69,9 @@ begin
 
   if v_outcome is null then
     select coalesce(is_dnc_locked, false) into v_locked from public.properties where id = p_property_id;
-    v_drips := public.routing_v2_slice_enabled(p_property_id, 'drips');
+    v_drips := public.routing_v2_slice_enabled(p_property_id, 'drips')
+      and (not coalesce((p_decision->>'stop_drip_when_time_only_on')::boolean,false)
+        or public.routing_v2_slice_enabled(p_property_id, 'alert_on_time_only'));
 
     -- 4. Retire every active OR paused enrollment for the property (any engine). Drips slice
     --    only: with drips off, existing drips are left exactly as they are.

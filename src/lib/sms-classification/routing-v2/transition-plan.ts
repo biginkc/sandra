@@ -1,7 +1,7 @@
 import { hotTextKey } from "@/lib/hot-sellers/hot";
 import { V2_ALERT_LABELS, type V2Action, type V2Step } from "./actions";
 import type { V2DripName } from "./drip-transition";
-import { alertOnTimeOnlyInForce, v2SliceAllowed, type RoutingV2Flags } from "./flags";
+import { v2SliceAllowed, type RoutingV2Flags } from "./flags";
 
 /** Every road must name a supported transactional sequence, including the four unchanged
  * legacy drips. The cutover migration snapshots those without changing their copy/timing.
@@ -25,6 +25,7 @@ export type V2TransitionPlan = {
   outbox: Array<{ kind: "reply" | "alert"; slice: "replies"; payload: Record<string, unknown> }>;
   hold_reason: Extract<V2Step, { kind: "hold" }>["reason"] | null;
   wrong_number_close: boolean;
+  stop_drip_when_time_only_on: boolean;
 };
 
 /** Compile one atomic transition, never one transition per step: all calls for the same
@@ -37,11 +38,10 @@ export function compileV2Transition(
 ): V2TransitionPlan {
   const { flags, propertyId, contactId, inboundMessageId } = input;
   const plan: V2TransitionPlan = { sequence_key: null, contact_id: contactId, skip_first_step: false,
-    road: action.road, outbox: [], hold_reason: null, wrong_number_close: false };
+    road: action.road, outbox: [], hold_reason: null, wrong_number_close: false, stop_drip_when_time_only_on: false };
   const drips = v2SliceAllowed(flags, "drips", propertyId);
   const replies = v2SliceAllowed(flags, "replies", propertyId);
   // Conditional alert intents survive until the database delivery gate reads fresh flags.
-  const timeOnly = alertOnTimeOnlyInForce(flags, propertyId);
   let dripChosen = false;
   for (const step of action.steps) {
     if (step.kind === "drip" && drips) {
@@ -49,9 +49,10 @@ export function compileV2Transition(
       dripChosen = true;
       plan.sequence_key = V2_SEQUENCE_KEYS[step.drip];
       plan.skip_first_step = step.skipFirstStep ?? false;
-    } else if (step.kind === "stop_drip" && timeOnly) {
+    } else if (step.kind === "stop_drip" && drips) {
       if (dripChosen) throw new Error("routing_v2_conflicting_drip_intent");
       dripChosen = true;
+      plan.stop_drip_when_time_only_on = true;
     } else if (step.kind === "reply" && replies) {
       if (plan.outbox.some((item) => item.kind === "reply")) throw new Error("routing_v2_multiple_replies");
       plan.outbox.push({ kind: "reply", slice: "replies", payload: { key: step.key } });
