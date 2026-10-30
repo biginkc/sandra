@@ -13,7 +13,10 @@ import { hasSlotToken, isSlotWindow, planSlot } from "./slot-time";
  */
 export type RoutingV2TickGate =
   | { kind: "legacy" }
+  /** The SQL check refused (and wrote its own enrollment change, if any). */
   | { kind: "blocked"; reason: string }
+  /** The check could not run (RPC/read error): nothing was written. */
+  | { kind: "error"; message: string }
   | { kind: "wait"; nextRunAt: Date }
   | { kind: "send"; slotLabel: string | null };
 
@@ -59,7 +62,7 @@ export async function routingV2TickGate(
   const { data: check, error } = await loose(client).rpc("routing_v2_enrollment_send_check", {
     p_enrollment_id: input.enrollmentId,
   });
-  if (error) return { kind: "blocked", reason: `send_check_failed: ${error.message}` };
+  if (error) return { kind: "error", message: `routing_v2_send_check_failed: ${error.message}` };
   if (check !== "ok") return { kind: "blocked", reason: String(check) };
 
   if (input.actionType !== "send_sms" || !input.templateBody || !hasSlotToken(input.templateBody)) {
@@ -70,12 +73,32 @@ export async function routingV2TickGate(
     .select("slot_window")
     .eq("id", input.stepId)
     .maybeSingle();
-  if (stepErr) return { kind: "blocked", reason: `slot_window_read_failed: ${stepErr.message}` };
+  if (stepErr) return { kind: "error", message: `routing_v2_slot_window_read_failed: ${stepErr.message}` };
   const raw = (stepRow as { slot_window?: unknown } | null)?.slot_window;
   const window = isSlotWindow(raw) ? raw : "any";
   const plan = planSlot(input.now ?? new Date(), sellerTimezoneForState(input.propertyState), window);
   if (plan.kind === "wait") return { kind: "wait", nextRunAt: plan.sendAt };
   return { kind: "send", slotLabel: plan.label };
+}
+
+/**
+ * Atomic check-and-claim right before the provider call (v2 only). Under the property lock it
+ * re-runs the send check and records an open claim for this step run; a reply transition that
+ * lands afterwards cancels the claim and retires the enrollment, so the provider fence
+ * (authorize_sequence_provider_attempt) refuses. Returns "ok" or the refusal reason.
+ */
+export async function routingV2ClaimDripSend(
+  client: SupabaseClient<Database>,
+  enrollmentId: string,
+  stepRunId: string,
+): Promise<{ ok: true } | { ok: false; reason: string; error: boolean }> {
+  const { data, error } = await loose(client).rpc("routing_v2_claim_drip_send", {
+    p_enrollment_id: enrollmentId,
+    p_step_run_id: stepRunId,
+  });
+  if (error) return { ok: false, reason: `routing_v2_claim_failed: ${error.message}`, error: true };
+  if (data === "ok") return { ok: true };
+  return { ok: false, reason: String(data), error: false };
 }
 
 /** End of a v2 drip: chain into the next drip when the sequence names one (Said they'd call). */

@@ -87,7 +87,10 @@ export function planSlot(now: Date, timeZone: string, window: SlotWindow = "any"
     };
   };
 
-  if (slotMinutes < w.start) return scheduled(today);
+  // Never send before the earliest send (window start - lead, always >= 08:00): rounding up to
+  // the quarter hour would otherwise offer the window start from a 7:46-7:59 send, which lands
+  // in quiet hours and stalls the step a whole day.
+  if (nowWall.minutes < w.start - SLOT_LEAD_MINUTES || slotMinutes < w.start) return scheduled(today);
   if (slotMinutes > w.end) return scheduled(nextDay(today));
   return { kind: "send_now", slotAt: atWall(today, slotMinutes, timeZone), label: formatSlotLabel(slotMinutes) };
 }

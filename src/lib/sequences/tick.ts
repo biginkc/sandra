@@ -15,7 +15,12 @@ import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
 import { processVoicemailDropStep } from "./voicemail-drop-step";
-import { loadRoutingV2Key, routingV2ChainAfterCompletion, routingV2TickGate } from "./routing-v2/tick-gate";
+import {
+  loadRoutingV2Key,
+  routingV2ChainAfterCompletion,
+  routingV2ClaimDripSend,
+  routingV2TickGate,
+} from "./routing-v2/tick-gate";
 
 const FIRST_TOUCH_SENDER_PAUSE_REASON =
   "no approved sender for first-touch sequence send";
@@ -228,8 +233,11 @@ export async function processEnrollmentTick(
   } catch (err) {
     return { status: "failed", enrollmentId: enrollment.id, message: err instanceof Error ? err.message : String(err) };
   }
+  if (routingV2Gate.kind === "error") {
+    return { status: "failed", enrollmentId: enrollment.id, message: routingV2Gate.message };
+  }
   if (routingV2Gate.kind === "blocked") {
-    return { status: "paused", enrollmentId: enrollment.id, reason: `routing_v2_${routingV2Gate.reason}` };
+    return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
   }
   if (routingV2Gate.kind === "wait") {
     const nextRunAt = routingV2Gate.nextRunAt.toISOString();
@@ -250,6 +258,7 @@ export async function processEnrollmentTick(
     }
     return { status: "rescheduled_slot_window", enrollmentId: enrollment.id, nextRunAt };
   }
+  const isRoutingV2 = routingV2Gate.kind === "send";
   if (routingV2Gate.kind === "send") routingV2SlotLabel = routingV2Gate.slotLabel;
 
   // 3. Claim the fire. Double-fire safety via unique (enrollment_id, step_id).
@@ -456,6 +465,29 @@ export async function processEnrollmentTick(
       // Seed the rotation with the claim id so a retry picks the same variant.
       seed: claim.id,
     });
+
+    // Routing v2: atomic check-and-claim under the property lock, immediately before the send.
+    // A reply transition after this point cancels the claim and retires the enrollment, which
+    // the provider fence inside sendSmsToContact (authorize_sequence_provider_attempt) refuses.
+    if (isRoutingV2) {
+      const v2Claim = await routingV2ClaimDripSend(client, enrollment.id, claim.id);
+      if (!v2Claim.ok) {
+        const skipReason =
+          v2Claim.reason === "suppressed"
+            ? "consent_revoked"
+            : v2Claim.reason === "person_took_over"
+              ? "paused"
+              : "not_eligible";
+        const runError = await markRunSkipped(client, claim.id, skipReason, "not_attempted", v2Claim.reason);
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Routing v2 claim bookkeeping failed");
+        }
+        if (v2Claim.error) {
+          return { status: "failed", enrollmentId: enrollment.id, message: v2Claim.reason };
+        }
+        return routingV2BlockedOutcome(enrollment.id, step.step_index, v2Claim.reason);
+      }
+    }
 
     const outcome = await sendSmsToContact(client, {
       origin: "automated",
@@ -1009,6 +1041,18 @@ export async function advanceEnrollment(
     : advanced
       ? null
       : "enrollment changed before advancement";
+}
+
+/**
+ * Outcome for a routing v2 refusal. Only takeover / suppression actually paused (or opted out)
+ * the enrollment in SQL; flag_off completed it; not_active / missing / cancelled claims changed
+ * nothing, so they are reported as skips, never as "paused".
+ */
+function routingV2BlockedOutcome(enrollmentId: string, stepIndex: number, reason: string): TickOutcome {
+  if (reason === "person_took_over" || reason === "suppressed") {
+    return { status: "paused", enrollmentId, reason: `routing_v2_${reason}` };
+  }
+  return { status: "skipped_not_eligible", enrollmentId, stepIndex, reason: `routing_v2_${reason}` };
 }
 
 export async function markRunSkipped(

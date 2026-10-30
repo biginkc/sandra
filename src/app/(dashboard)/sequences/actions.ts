@@ -74,6 +74,16 @@ export type SequenceWithSteps = {
 
 export type SequenceStepInput = Omit<SequenceWithSteps["steps"][number], "id"> & { id?: string };
 
+const ROUTING_V2_DRIP_LOCKED_MESSAGE =
+  "This is an automatic reply drip. Its texts and timing can't be edited here.";
+
+/** Routing v2 drips (PR-C) are migration-managed; a DB trigger rejects editor writes. */
+function routingV2DripLocked(message: string | undefined) {
+  return /ROUTING_V2_DRIP_LOCKED/.test(message ?? "")
+    ? { ok: false as const, error: { code: "ROUTING_V2_DRIP_LOCKED", message: ROUTING_V2_DRIP_LOCKED_MESSAGE } }
+    : null;
+}
+
 export async function replaceSequenceSteps(input: {
   sequenceId: string;
   name: string;
@@ -120,7 +130,7 @@ export async function replaceSequenceSteps(input: {
       p_description: input.description,
       p_steps: input.steps,
     });
-    if (error) return { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
+    if (error) return routingV2DripLocked(error.message) ?? { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
     revalidatePath("/sequences");
     revalidatePath(`/sequences/${input.sequenceId}`);
     revalidatePath(`/sequences/${input.sequenceId}/edit`);
@@ -457,7 +467,7 @@ export async function updateSequence(
       .update(update)
       .eq("id", sequenceId);
     if (error) {
-      return {
+      return routingV2DripLocked(error.message) ?? {
         ok: false,
         error: { code: "SEQ_UPDATE_FAILED", message: error.message },
       };

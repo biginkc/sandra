@@ -186,15 +186,17 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
 
   it("flags on: retires active AND paused enrollments, enrolls the new version; repeat is idempotent", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
-    const paused = (await db.query(
-      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, pause_reason)
-       values ($1,$2,$3,$4,'paused','inbound_reply') returning id`,
-      [ctx.org, ctx.listedSrc, ctx.property, ctx.contact],
-    )).rows[0].id;
+    // One live (active/paused) drip per property is enforced (idx_enrollments_one_live_per_property):
+    // first reply retires the ACTIVE legacy row; the v2 row is then paused and the next reply retires it.
+    const id0 = await inbound(db, ctx, "2026-10-30T14:00:00Z");
+    const r0 = await transition(db, id0, ctx.property, { sequence_key: "price_too_high" });
+    expect(r0.retired_enrollment_ids).toEqual([ctx.legacyEnrollment]);
+    await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where id = $1`, [r0.new_enrollment_id]);
+    const paused = r0.new_enrollment_id;
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
     const r = await transition(db, id, ctx.property, { sequence_key: "book_appointment" });
     expect(r.outcome).toBe("applied");
-    expect(new Set(r.retired_enrollment_ids)).toEqual(new Set([ctx.legacyEnrollment, paused]));
+    expect(r.retired_enrollment_ids).toEqual([paused]);
     const rows = await enrollments(db, ctx.property);
     expect(rows.filter((e) => e.status === "active")).toEqual([
       expect.objectContaining({ routing_v2_engine: "v2", routing_v2_key: "book_appointment" }),
@@ -311,6 +313,224 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
   });
 });
 
+const stepRun = async (c: Client, enrollmentId: string) =>
+  (await c.query(
+    `insert into public.sequence_step_runs (enrollment_id, step_id, scheduled_for, attempt_outcome)
+     select e.id, st.id, now(), 'not_attempted'
+     from public.sequence_enrollments e
+     join public.sequence_steps st on st.sequence_id = e.sequence_id and st.step_index = e.current_step_index
+     where e.id = $1 returning id, step_id`,
+    [enrollmentId],
+  )).rows[0] as { id: string; step_id: string };
+const authorize = async (c: Client, ctx: Ctx, enrollmentId: string, run: { id: string; step_id: string }) =>
+  (await c.query(
+    `select * from public.authorize_sequence_provider_attempt($1,$2,$3,$4,$5,'+18165550100',$6)`,
+    [enrollmentId, run.step_id, run.id, ctx.contact, ctx.property, randomUUID()],
+  )).rows[0] as { authorized: boolean; reason: string };
+const lockDnc = (c: Client, property: string) =>
+  c.query(`update public.properties set is_dnc_locked = true where id = $1`, [property]);
+
+describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    await db.query("begin");
+    await db.query("set local session_replication_role = replica");
+    ctx = await seedOrg(db);
+    await db.query("set local session_replication_role = origin");
+    await db.query(ROLLBACK.replace(/raise exception 'routing v2 enrollments exist[^']*';/, "null;"));
+    await db.query(MIGRATION);
+    // The rollback opted this transaction into drip edits; tests run with the guard armed.
+    await db.query("set local routing_v2.allow_drip_edit = ''");
+  });
+  afterEach(async () => {
+    await db.query("rollback");
+  });
+
+  it("the real DNC enrollment guard is installed on sequence_enrollments", async () => {
+    const r = await db.query(
+      `select 1 from pg_trigger t join pg_proc p on p.oid = t.tgfoid
+       where t.tgrelid = 'public.sequence_enrollments'::regclass and p.proname = 'guard_locked_property_sequence_enrollment' and not t.tgisinternal`,
+    );
+    expect(r.rowCount).toBe(1);
+  });
+
+  it("DNC-locked property: the transition opts enrollments out (the one allowed change) and records suppressed", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    // Lock after the enrollments exist, with the lock cascade off, so active/paused rows remain.
+    await db.query("set local session_replication_role = replica");
+    await lockDnc(db, ctx.property);
+    await db.query("set local session_replication_role = origin");
+    const r = await transition(db, id, ctx.property, {
+      sequence_key: "book_appointment",
+      outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }],
+    });
+    expect(r.outcome).toBe("suppressed");
+    expect(r.new_enrollment_id).toBeNull();
+    expect(r.retired_enrollment_ids).toEqual([ctx.legacyEnrollment]);
+    const rows = (await db.query(
+      `select status, pause_reason, ended_reason, next_run_at from public.sequence_enrollments where property_id = $1 order by id`,
+      [ctx.property],
+    )).rows;
+    expect(rows).toHaveLength(1);
+    for (const row of rows) expect(row).toEqual({ status: "opted_out", pause_reason: "dnc", ended_reason: null, next_run_at: null });
+    const kinds = (await db.query(`select kind from public.routing_v2_outbox where inbound_message_id = $1`, [id])).rows.map((x) => x.kind);
+    expect(kinds).toEqual(["alert"]);
+  });
+
+  it("DNC-locked property: the old completed/rerouted write really is rejected by the trigger (guards the fix)", async () => {
+    await db.query("set local session_replication_role = replica");
+    await lockDnc(db, ctx.property);
+    await db.query("set local session_replication_role = origin");
+    await expect(
+      db.query(
+        `update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null, ended_reason = 'rerouted' where id = $1`,
+        [ctx.legacyEnrollment],
+      ),
+    ).rejects.toThrow(/DNC_LOCKED/);
+  });
+
+  it("DNC-locked property: send check and check-and-claim stop a v2 enrollment with the compliance opt-out", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    await db.query("set local session_replication_role = replica");
+    await lockDnc(db, ctx.property);
+    await db.query("set local session_replication_role = origin");
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("suppressed");
+    expect((await db.query(`select status, pause_reason from public.sequence_enrollments where id = $1`, [r.new_enrollment_id])).rows[0])
+      .toEqual({ status: "opted_out", pause_reason: "dnc" });
+    // And with the flag flipped off (the old flag_off write would also hit the lock).
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: false });
+    expect((await db.query(`select public.routing_v2_enrollment_send_check($1) as r`, [r.new_enrollment_id])).rows[0].r).toBe("not_active");
+  });
+
+  it("DNC-locked + flag off: send check opts out instead of raising", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "vacant_land" });
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: false });
+    await db.query("set local session_replication_role = replica");
+    await lockDnc(db, ctx.property);
+    await db.query("set local session_replication_role = origin");
+    expect((await db.query(`select public.routing_v2_enrollment_send_check($1) as r`, [r.new_enrollment_id])).rows[0].r).toBe("suppressed");
+  });
+
+  it("check-and-claim: ok records an open claim; a later reply cancels it and the provider fence refuses", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    const claim = (await db.query(`select id, status from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0];
+    expect(claim.status).toBe("open");
+
+    const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
+    const t = await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });
+    expect(t.cancelled_drip_claim_ids).toEqual([claim.id]);
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where id = $1`, [claim.id])).rows[0].status).toBe("cancelled");
+    const fence = await authorize(db, ctx, r.new_enrollment_id, run);
+    expect(fence.authorized).toBe(false);
+    expect(fence.reason).toMatch(/no longer active/);
+    // Re-claiming the retired enrollment refuses.
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("not_active");
+  });
+
+  it("check-and-claim after the reply already retired the enrollment: refused, no claim row", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
+    await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("not_active");
+    expect((await db.query(`select count(*)::int as n from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].n).toBe(0);
+  });
+
+  it("v2 drips are not editable outside migrations; active can still be toggled; legacy drips unaffected", async () => {
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'book_appointment'`, [ctx.org])).rows[0].id;
+    await db.query("savepoint s");
+    await expect(db.query(`update public.sequence_steps set template_body = 'x' where sequence_id = $1 and step_index = 0`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query(`delete from public.sequence_steps where sequence_id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query(
+      `insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes, action_type, template_body) values ($1, 99, 0, 'send_sms', 'x')`,
+      [v2],
+    )).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query(`update public.sequences set append_opt_out = true where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await db.query(`update public.sequences set active = true where id = $1`, [v2]);
+    await db.query(`update public.sequence_steps set template_body = 'edited' where sequence_id = $1 and step_index = 0`, [ctx.bookSrc]);
+    await db.query(`update public.sequences set append_opt_out = false where id = $1`, [ctx.bookSrc]);
+  });
+});
+
+describe("routing v2 reply vs drip tick race (committed data, two connections)", () => {
+  it("a reply landing between check-and-claim and the provider fence wins: nothing is authorized", async () => {
+    const tick = new Client({ connectionString: url });
+    const reply = new Client({ connectionString: url });
+    await tick.connect();
+    await reply.connect();
+    let ctx: Ctx | null = null;
+    try {
+      await db.query("begin");
+      await db.query("set local session_replication_role = replica");
+      ctx = await seedOrg(db);
+      await db.query("set local session_replication_role = origin");
+      await db.query("commit");
+      await db.query(MIGRATION_RAW);
+      await setFlags(db, ctx.org, FLAGS_ON);
+      for (let round = 0; round < 5; round++) {
+        const first = await inbound(db, ctx, `2026-10-30T15:0${round}:00Z`);
+        const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
+        const run = await stepRun(db, r.new_enrollment_id);
+        // Tick holds the property lock inside its claim transaction while the reply arrives.
+        await tick.query("begin");
+        expect((await tick.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+        const replyId = await inbound(db, ctx, `2026-10-30T15:0${round}:30Z`);
+        const pending = transition(reply, replyId, ctx.property, { sequence_key: "vacant_land" });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await tick.query("commit");
+        const t = await pending;
+        expect(t.outcome).toBe("applied");
+        expect(t.cancelled_drip_claim_ids).toHaveLength(1);
+        // The tick now reaches the provider fence: refused, never sent.
+        const fence = await authorize(tick, ctx, r.new_enrollment_id, run);
+        expect(fence.authorized).toBe(false);
+        const active = (await enrollments(db, ctx.property)).filter((e) => e.status === "active");
+        expect(active.map((e) => e.routing_v2_key)).toEqual(["vacant_land"]);
+      }
+    } finally {
+      if (ctx) await cleanupOrg(ctx.org);
+      await tick.end();
+      await reply.end();
+    }
+  });
+});
+
+async function cleanupOrg(o: string) {
+  await db.query("rollback").catch(() => undefined); // in case a failed step left a transaction open
+  await db.query("begin");
+  await db.query("set local routing_v2.allow_drip_edit = 'on'");
+  await db.query("set local session_replication_role = replica");
+  await db.query(`delete from public.routing_v2_drip_send_claims where org_id = $1`, [o]);
+  await db.query(`delete from public.routing_v2_outbox where org_id = $1`, [o]);
+  await db.query(`delete from public.routing_v2_reply_transitions where org_id = $1`, [o]);
+  await db.query(`delete from public.sequence_step_runs where enrollment_id in (select id from public.sequence_enrollments where org_id = $1)`, [o]);
+  await db.query(`delete from public.sequence_enrollments where org_id = $1`, [o]);
+  await db.query(`delete from public.messages where org_id = $1`, [o]);
+  await db.query(`delete from public.sequence_steps where sequence_id in (select id from public.sequences where org_id = $1)`, [o]);
+  await db.query(`delete from public.sequences where org_id = $1`, [o]);
+  await db.query(`delete from public.ai_responder_configs where org_id = $1`, [o]);
+  await db.query(`delete from public.properties where org_id = $1`, [o]);
+  await db.query(`delete from public.contacts where org_id = $1`, [o]);
+  await db.query(`delete from public.organizations where id = $1`, [o]);
+  await db.query("commit");
+}
+
 describe("routing v2 transition concurrency (committed data)", () => {
   it("two replies racing for one property leave exactly one active enrollment: the latest reply's", async () => {
     const a = new Client({ connectionString: url });
@@ -344,18 +564,7 @@ describe("routing v2 transition concurrency (committed data)", () => {
       expect([x.replayed, y.replayed].sort()).toEqual([false, true]);
       expect((await enrollments(db, ctx.property)).filter((e) => e.status === "active")).toHaveLength(1);
     } finally {
-      if (ctx) {
-        const o = ctx.org;
-        await db.query(`delete from public.routing_v2_outbox where org_id = $1`, [o]);
-        await db.query(`delete from public.routing_v2_reply_transitions where org_id = $1`, [o]);
-        await db.query(`delete from public.sequence_enrollments where org_id = $1`, [o]);
-        await db.query(`delete from public.messages where org_id = $1`, [o]);
-        await db.query(`delete from public.sequences where org_id = $1`, [o]);
-        await db.query(`delete from public.ai_responder_configs where org_id = $1`, [o]);
-        await db.query(`delete from public.properties where org_id = $1`, [o]);
-        await db.query(`delete from public.contacts where org_id = $1`, [o]);
-        await db.query(`delete from public.organizations where id = $1`, [o]);
-      }
+      if (ctx) await cleanupOrg(ctx.org);
       await a.end();
       await b.end();
     }

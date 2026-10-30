@@ -2,6 +2,8 @@
 -- Refuses while any v2 enrollment exists (stop them first: flags.drips = false, then let
 -- sequence-tick stop them, or set them completed). Legacy rows are never touched.
 begin;
+set local routing_v2.allow_drip_edit = 'on';
+
 
 do $$
 begin
@@ -10,7 +12,11 @@ begin
   end if;
 end $$;
 
+drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
+drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
+drop function if exists public.routing_v2_reject_drip_edit();
 drop function if exists public.routing_v2_chain_after_completion(uuid);
+drop function if exists public.routing_v2_claim_drip_send(uuid, uuid);
 drop function if exists public.routing_v2_enrollment_send_check(uuid);
 drop function if exists public.routing_v2_claim_outbox(uuid);
 drop function if exists public.routing_v2_cancel_for_takeover(uuid);
@@ -19,6 +25,7 @@ drop function if exists public.routing_v2_enroll(uuid, uuid, uuid, uuid, uuid);
 drop function if exists public.routing_v2_sequence_for(uuid, text);
 drop function if exists public.routing_v2_contact_suppressed(uuid, uuid);
 drop function if exists public.routing_v2_slice_enabled(uuid, text);
+drop table if exists public.routing_v2_drip_send_claims;
 drop table if exists public.routing_v2_outbox;
 drop table if exists public.routing_v2_reply_transitions;
 

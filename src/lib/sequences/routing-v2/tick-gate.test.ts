@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { routingV2TickGate } from "./tick-gate";
+import { routingV2ClaimDripSend, routingV2TickGate } from "./tick-gate";
 
 function client(opts: { key: string | null; check?: string; slotWindow?: string | null }) {
   const rpc = vi.fn(async () => ({ data: opts.check ?? "ok", error: null }));
@@ -52,5 +52,25 @@ describe("routingV2TickGate", () => {
   it("v2 non-booking step: sends with no slot", async () => {
     const { c } = client({ key: "price_too_high" });
     expect(await routingV2TickGate(c, { ...base, templateBody: "Hey, Mel here." })).toEqual({ kind: "send", slotLabel: null });
+  });
+
+  it("v2: an RPC error is an error (nothing written), not a block", async () => {
+    const { c } = client({ key: "book_appointment" });
+    (c as unknown as { rpc: ReturnType<typeof vi.fn> }).rpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+    expect(await routingV2TickGate(c, base)).toEqual({ kind: "error", message: "routing_v2_send_check_failed: boom" });
+  });
+});
+
+describe("routingV2ClaimDripSend", () => {
+  it("ok / refusal / error", async () => {
+    const rpc = vi.fn();
+    const c = { rpc } as never;
+    rpc.mockResolvedValueOnce({ data: "ok", error: null });
+    expect(await routingV2ClaimDripSend(c, "e1", "r1")).toEqual({ ok: true });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_claim_drip_send", { p_enrollment_id: "e1", p_step_run_id: "r1" });
+    rpc.mockResolvedValueOnce({ data: "not_active", error: null });
+    expect(await routingV2ClaimDripSend(c, "e1", "r1")).toEqual({ ok: false, reason: "not_active", error: false });
+    rpc.mockResolvedValueOnce({ data: null, error: { message: "x" } });
+    expect(await routingV2ClaimDripSend(c, "e1", "r1")).toEqual({ ok: false, reason: "routing_v2_claim_failed: x", error: true });
   });
 });

@@ -3,11 +3,14 @@
  * "2026-10-29 — Sandra SMS reply routing plan (Jev + Haiku).md", section "Approved drips".
  * This file is the pin source for the routing v2 drip seed (PR-C). Never edit a string here
  * without Jarrad's verbatim approval of the exact new text.
+ *
+ * Approved change (SELF-APPROVED-TEXT-LOG row 6, Master A-003 under Jarrad's delegation,
+ * 2026-10-30): Price too high #2 (day 75) shortened to its approved new text below.
  */
 export const APPROVED_DRIPS = {
   price_too_high: [
     "Hey, it's Mel. We discussed {{property_address}} in today's meeting. Bummer the numbers didn't work. Okay to stay in touch in case anything changes?",
-    "Hi {{first_name | there}}, Mel with BMH again. We just freed up some extra capital to buy a few more homes. Any flexibility on your price for {{property_address}}?",
+    "Hi {{first_name | there}}, Mel with BMH. Any flexibility on your price for {{property_address}}?",
     "Hey, Mel again. We're still buying in your area. Would you be open to revisiting an offer on {{property_address}}?",
     "Hi {{first_name | there}}, we've set aside funds for a couple more purchases. Is your number on {{property_address}} still firm?",
     "Hey, Mel here. Checking back on {{property_address}}. Has anything changed on your price?",

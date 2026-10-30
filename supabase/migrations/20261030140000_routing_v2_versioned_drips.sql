@@ -10,6 +10,8 @@
 -- Rollback: supabase/rollbacks/20261030140000_routing_v2_versioned_drips.sql
 begin;
 set local lock_timeout = '5s';
+-- The seed below writes v2 drip steps; the edit guard (section 6) honours this opt-in.
+set local routing_v2.allow_drip_edit = 'on';
 
 -- ---------------------------------------------------------------------------
 -- 1. Columns (all nullable, no defaults: existing rows unchanged)
@@ -82,6 +84,7 @@ create table if not exists public.routing_v2_reply_transitions (
   new_enrollment_id uuid,
   retired_enrollment_ids uuid[] not null default '{}',
   cancelled_outbox_ids uuid[] not null default '{}',
+  cancelled_drip_claim_ids uuid[] not null default '{}',
   created_at timestamptz not null default now()
 );
 create index if not exists routing_v2_reply_transitions_property_idx
@@ -104,10 +107,31 @@ create table if not exists public.routing_v2_outbox (
 create index if not exists routing_v2_outbox_pending_idx
   on public.routing_v2_outbox (property_id) where status in ('pending','claimed');
 
+-- Drip send claims: sequence-tick takes one (under the property lock, after re-checking the
+-- enrollment) immediately before the provider call. A reply transition cancels every open claim
+-- and retires the enrollment in the same lock, so authorize_sequence_provider_attempt (which
+-- re-locks the enrollment and requires status = 'active') refuses the send.
+create table if not exists public.routing_v2_drip_send_claims (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null,
+  property_id uuid not null,
+  enrollment_id uuid not null,
+  step_run_id uuid not null unique,
+  status text not null default 'open' check (status in ('open','cancelled')),
+  cancel_reason text,
+  cancelled_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists routing_v2_drip_send_claims_open_idx
+  on public.routing_v2_drip_send_claims (property_id) where status = 'open';
+
 alter table public.routing_v2_reply_transitions enable row level security;
 alter table public.routing_v2_outbox enable row level security;
-revoke all on public.routing_v2_reply_transitions, public.routing_v2_outbox from public, anon, authenticated;
-grant select, insert, update on public.routing_v2_reply_transitions, public.routing_v2_outbox to service_role;
+alter table public.routing_v2_drip_send_claims enable row level security;
+revoke all on public.routing_v2_reply_transitions, public.routing_v2_outbox, public.routing_v2_drip_send_claims
+  from public, anon, authenticated;
+grant select, insert, update on public.routing_v2_reply_transitions, public.routing_v2_outbox,
+  public.routing_v2_drip_send_claims to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 3. Flag + eligibility (BUILD-PLAN §13.1). Every slice also needs questions_live.
@@ -234,7 +258,9 @@ declare
   v_new_enrollment uuid;
   v_retired uuid[] := '{}';
   v_cancelled uuid[] := '{}';
+  v_cancelled_claims uuid[] := '{}';
   v_takeover timestamptz;
+  v_locked boolean;
   v_item jsonb;
 begin
   -- 1. Serialize every reply / takeover / scheduler step for this property.
@@ -272,14 +298,36 @@ begin
   end if;
 
   if v_outcome is null then
+    select coalesce(is_dnc_locked, false) into v_locked from public.properties where id = p_property_id;
+
     -- 4. Retire every active OR paused enrollment for the property (any engine).
-    with retired as (
-      update public.sequence_enrollments e
-      set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now(),
-          ended_reason = 'rerouted', retired_by_inbound_id = p_inbound_message_id
-      where e.property_id = p_property_id and e.status in ('active','paused')
-      returning e.id
-    ) select coalesce(array_agg(id), '{}') into v_retired from retired;
+    if v_locked then
+      -- DNC-locked property: guard_locked_property_sequence_enrollment only allows the exact
+      -- compliance stop (active/paused -> opted_out, pause_reason dnc, next_run_at null, no
+      -- other column). Anything else raises DNC_LOCKED and would roll back the transition.
+      with retired as (
+        update public.sequence_enrollments e
+        set status = 'opted_out', pause_reason = 'dnc', next_run_at = null, updated_at = now()
+        where e.property_id = p_property_id and e.status in ('active','paused')
+        returning e.id
+      ) select coalesce(array_agg(id), '{}') into v_retired from retired;
+    else
+      with retired as (
+        update public.sequence_enrollments e
+        set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now(),
+            ended_reason = 'rerouted', retired_by_inbound_id = p_inbound_message_id
+        where e.property_id = p_property_id and e.status in ('active','paused')
+        returning e.id
+      ) select coalesce(array_agg(id), '{}') into v_retired from retired;
+    end if;
+
+    -- 4b. Open drip send claims for the property are cancelled (reply-vs-tick race).
+    with cc as (
+      update public.routing_v2_drip_send_claims dc
+      set status = 'cancelled', cancel_reason = 'retired_by=' || p_inbound_message_id::text, cancelled_at = now()
+      where dc.property_id = p_property_id and dc.status = 'open'
+      returning dc.id
+    ) select coalesce(array_agg(id), '{}') into v_cancelled_claims from cc;
 
     -- 6. Obsolete intents from older inbounds are cancelled.
     with c as (
@@ -291,7 +339,9 @@ begin
 
     select last_person_takeover_at into v_takeover from public.properties where id = p_property_id;
 
-    if v_takeover is not null and v_takeover >= v_inbound_at then
+    if v_locked then
+      v_outcome := 'suppressed';
+    elsif v_takeover is not null and v_takeover >= v_inbound_at then
       v_outcome := 'takeover_blocked';
     elsif public.routing_v2_contact_suppressed(p_property_id, v_contact) then
       v_outcome := 'suppressed';
@@ -318,10 +368,10 @@ begin
 
   insert into public.routing_v2_reply_transitions
     (org_id, property_id, inbound_message_id, inbound_at, transition_seq, outcome, decision,
-     new_enrollment_id, retired_enrollment_ids, cancelled_outbox_ids)
+     new_enrollment_id, retired_enrollment_ids, cancelled_outbox_ids, cancelled_drip_claim_ids)
   values
     (v_org, p_property_id, p_inbound_message_id, v_inbound_at, v_seq, v_outcome, p_decision,
-     v_new_enrollment, v_retired, v_cancelled)
+     v_new_enrollment, v_retired, v_cancelled, v_cancelled_claims)
   returning * into v_row;
   return to_jsonb(v_row) || jsonb_build_object('replayed', false);
 end;
@@ -407,6 +457,14 @@ begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if e.status <> 'active' then return 'not_active'; end if;
 
+  -- DNC lock first: the only write the lock trigger allows is the compliance opt-out.
+  if coalesce((select is_dnc_locked from public.properties where id = e.property_id), false) then
+    update public.sequence_enrollments
+    set status = 'opted_out', pause_reason = 'dnc', next_run_at = null, updated_at = now()
+    where id = e.id and status = 'active';
+    return 'suppressed';
+  end if;
+
   if not public.routing_v2_slice_enabled(e.property_id, 'drips') then
     update public.sequence_enrollments
     set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now(), ended_reason = 'flag_off'
@@ -426,6 +484,42 @@ begin
     where id = e.id and status = 'active';
     return 'suppressed';
   end if;
+  return 'ok';
+end;
+$$;
+
+-- Check-and-claim for one v2 drip send, called by sequence-tick immediately before the
+-- provider call (after its own step-run claim). Under the property lock it re-runs the full
+-- send check and records an open claim; returns 'ok' or the refusal reason. A reply transition
+-- that lands afterwards cancels the claim and retires the enrollment, which makes
+-- authorize_sequence_provider_attempt refuse the provider call.
+create or replace function public.routing_v2_claim_drip_send(p_enrollment_id uuid, p_step_run_id uuid)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e public.sequence_enrollments;
+  v_check text;
+  v_existing public.routing_v2_drip_send_claims;
+begin
+  select * into e from public.sequence_enrollments where id = p_enrollment_id;
+  if not found then return 'missing'; end if;
+  if e.routing_v2_engine is distinct from 'v2' then return 'ok'; end if;
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
+  v_check := public.routing_v2_enrollment_send_check(p_enrollment_id);
+  if v_check <> 'ok' then return v_check; end if;
+  if not exists (select 1 from public.sequence_step_runs r
+                 where r.id = p_step_run_id and r.enrollment_id = p_enrollment_id and r.claim_active) then
+    return 'step_run_not_active';
+  end if;
+  select * into v_existing from public.routing_v2_drip_send_claims where step_run_id = p_step_run_id;
+  if found then
+    return case when v_existing.status = 'open' then 'ok' else 'claim_cancelled' end;
+  end if;
+  insert into public.routing_v2_drip_send_claims (org_id, property_id, enrollment_id, step_run_id)
+  values (e.org_id, e.property_id, e.id, p_step_run_id);
   return 'ok';
 end;
 $$;
@@ -475,6 +569,8 @@ revoke all on function public.routing_v2_cancel_for_takeover(uuid) from public, 
 revoke all on function public.routing_v2_claim_outbox(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_enrollment_send_check(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_chain_after_completion(uuid) from public, anon, authenticated;
+revoke all on function public.routing_v2_claim_drip_send(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.routing_v2_claim_drip_send(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_slice_enabled(uuid, text) to service_role;
 grant execute on function public.routing_v2_contact_suppressed(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_sequence_for(uuid, text) to service_role;
@@ -492,7 +588,7 @@ drop table if exists routing_v2_seed;
 create temporary table routing_v2_seed (key text, idx int, day int, slot_window text, body text) on commit drop;
 insert into routing_v2_seed (key, idx, day, slot_window, body) values
     ('price_too_high', 0, 30, null, $t$Hey, it's Mel. We discussed {{property_address}} in today's meeting. Bummer the numbers didn't work. Okay to stay in touch in case anything changes?$t$),
-    ('price_too_high', 1, 75, null, $t$Hi {{first_name | there}}, Mel with BMH again. We just freed up some extra capital to buy a few more homes. Any flexibility on your price for {{property_address}}?$t$),
+    ('price_too_high', 1, 75, null, $t$Hi {{first_name | there}}, Mel with BMH. Any flexibility on your price for {{property_address}}?$t$),
     ('price_too_high', 2, 135, null, $t$Hey, Mel again. We're still buying in your area. Would you be open to revisiting an offer on {{property_address}}?$t$),
     ('price_too_high', 3, 225, null, $t$Hi {{first_name | there}}, we've set aside funds for a couple more purchases. Is your number on {{property_address}} still firm?$t$),
     ('price_too_high', 4, 315, null, $t$Hey, Mel here. Checking back on {{property_address}}. Has anything changed on your price?$t$),
@@ -639,6 +735,53 @@ begin
     end loop;
   end loop;
 end $$;
+
+-- ---------------------------------------------------------------------------
+-- 6. v2 drips are not editable from the drip editor. sequence_replace_steps rewrites every
+--    step without slot_window and the editor forces append_opt_out = true, which would break
+--    the approved texts (slot times, one segment). New versions ship as new migrations; a
+--    migration/rollback opts in with: set local routing_v2.allow_drip_edit = 'on'.
+-- ---------------------------------------------------------------------------
+create or replace function public.routing_v2_reject_drip_edit()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+  v_seq uuid;
+begin
+  if coalesce(current_setting('routing_v2.allow_drip_edit', true), '') = 'on' then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_table_name = 'sequences' then
+    if old.routing_v2_key is not null and (
+         new.append_opt_out is distinct from old.append_opt_out
+      or new.routing_v2_key is distinct from old.routing_v2_key
+      or new.routing_v2_version is distinct from old.routing_v2_version
+      or new.routing_v2_then_key is distinct from old.routing_v2_then_key) then
+      raise exception using errcode = 'P0001',
+        message = 'ROUTING_V2_DRIP_LOCKED: routing v2 drips are edited by migration only';
+    end if;
+    return new;
+  end if;
+  foreach v_seq in array array[
+    case when tg_op <> 'INSERT' then old.sequence_id end,
+    case when tg_op <> 'DELETE' then new.sequence_id end] loop
+    if v_seq is not null and exists (select 1 from public.sequences where id = v_seq and routing_v2_key is not null) then
+      raise exception using errcode = 'P0001',
+        message = 'ROUTING_V2_DRIP_LOCKED: routing v2 drip steps are edited by migration only';
+    end if;
+  end loop;
+  return case when tg_op = 'DELETE' then old else new end;
+end;
+$$;
+
+drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
+create trigger routing_v2_reject_drip_edit before update on public.sequences
+  for each row execute function public.routing_v2_reject_drip_edit();
+drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
+create trigger routing_v2_reject_drip_step_edit before insert or update or delete on public.sequence_steps
+  for each row execute function public.routing_v2_reject_drip_edit();
 
 comment on column public.sequences.routing_v2_key is
   'Routing v2 drip identity (PR-C). Null for every pre-existing / human-made drip.';

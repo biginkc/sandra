@@ -113,6 +113,20 @@ describe("planSlot", () => {
 });
 
 describe("formatSlotLabel / hasSlotToken", () => {
+  it("never sends before 08:00 local: 7:46-7:59 rounds to a 10:00 slot but waits until 08:00", () => {
+    for (const minute of [46, 50, 59]) {
+      // 07:mm CDT = 12:mm UTC
+      const p = planSlot(new Date(`2026-10-14T12:${minute}:00Z`), CHI, "any");
+      expect(p.kind).toBe("wait");
+      if (p.kind === "wait") {
+        expect(p.sendAt.toISOString()).toBe("2026-10-14T13:00:00.000Z"); // 08:00 CDT same day
+        expect(p.label).toBe("10:00");
+      }
+    }
+    // 08:00 sharp sends now with a 10:00 slot.
+    expect(planSlot(new Date("2026-10-14T13:00:00Z"), CHI, "any")).toMatchObject({ kind: "send_now", label: "10:00" });
+  });
+
   it("writes times the way the approved texts do", () => {
     expect(formatSlotLabel(14 * 60)).toBe("2:00");
     expect(formatSlotLabel(11 * 60 + 30)).toBe("11:30");
