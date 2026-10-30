@@ -64,6 +64,7 @@ export async function executeV2Stop(
   }
   if (!(flags.questions_live && flags.model_stop_suppression)) return { kind: "human_review", reason: "flag_off" };
 
+  // Same normalizer as the database side (dialpad_cti_normalize_us_phone).
   const phone = normalizePhone(input.phone);
   if (!phone) return { kind: "human_review", reason: "model_stop_failed:no_phone" };
 
@@ -76,10 +77,12 @@ export async function executeV2Stop(
       p_property_id: input.propertyId,
     });
     if (error) throw new Error(String(error.message));
-    if (!Array.isArray(data)) throw new Error("phone property ids: not an array");
-    phonePropertyIds = (data as unknown[]).map((row) =>
-      typeof row === "string" ? row : String((row as Record<string, unknown>)?.fn_model_stop_phone_property_ids ?? ""),
-    );
+    // null = the database could not decide the phone set (un-normalizable phone data): fail closed.
+    if (data === null) return { kind: "human_review", reason: "not_eligible" };
+    if (!Array.isArray(data) || !(data as unknown[]).every((v) => typeof v === "string")) {
+      throw new Error("phone property ids: not a uuid array");
+    }
+    phonePropertyIds = data as string[];
   } catch (e) {
     reportError(e instanceof Error ? e : new Error(String(e)), {
       tags: { surface: "routing_v2_model_stop_eligibility" },

@@ -284,19 +284,22 @@ describe("fn_lift_model_stop_suppression", () => {
 });
 
 /** contacts.phone_1 is unique, so a phone maps to one contact; PHONE belongs to `contactId`. */
-async function contactFor(phone: string): Promise<string> {
+async function contactFor(phone: string, slot: 1 | 2 | 3 = 1): Promise<string> {
   if (phone === PHONE) return contactId;
   const id = randomUUID();
+  // replica = no triggers, so contact_phone_numbers is NOT filled (legacy, never backfilled).
   await db.query("set local session_replication_role = replica");
-  await db.query(`insert into public.contacts (id, org_id, first_name, phone_1) values ($1, $2, 'Other', $3)`, [id, orgId, phone]);
+  await db.query(`insert into public.contacts (id, org_id, first_name, phone_${slot}) values ($1, $2, 'Other', $3)`, [id, orgId, phone]);
   await db.query("set local session_replication_role = origin");
   return id;
 }
 
-async function addProperty(opts: { homeownerPhone?: string; linkPhone?: string; deleted?: boolean } = {}): Promise<string> {
+async function addProperty(
+  opts: { homeownerPhone?: string; linkPhone?: string; deleted?: boolean; slot?: 1 | 2 | 3 } = {},
+): Promise<string> {
   const id = randomUUID();
-  const homeowner = opts.homeownerPhone ? await contactFor(opts.homeownerPhone) : null;
-  const linked = opts.linkPhone ? await contactFor(opts.linkPhone) : null;
+  const homeowner = opts.homeownerPhone ? await contactFor(opts.homeownerPhone, opts.slot) : null;
+  const linked = opts.linkPhone ? await contactFor(opts.linkPhone, opts.slot) : null;
   await db.query("set local session_replication_role = replica");
   await db.query(
     `insert into public.properties (id, org_id, address, state, status, homeowner_contact_id, deleted_at)
@@ -312,6 +315,71 @@ async function addProperty(opts: { homeownerPhone?: string; linkPhone?: string; 
   await db.query("set local session_replication_role = origin");
   return id;
 }
+
+const phoneSet = async (phone = PHONE): Promise<string[] | null> =>
+  (await db.query(`select public.fn_model_stop_phone_property_ids($1, $2, $3) as ids`, [orgId, phone, propertyId])).rows[0].ids;
+
+describe("phone set uses normalized phones (legacy formatted rows, empty contact_phone_numbers)", () => {
+  it("contact_phone_numbers is empty for these contacts (never backfilled)", async () => {
+    await addProperty({ homeownerPhone: "(816) 555-0101" });
+    const n = (await db.query(`select count(*)::int as n from public.contact_phone_numbers where org_id = $1`, [orgId])).rows[0].n;
+    expect(n).toBe(0);
+  });
+
+  it.each([
+    ["(816) 555-0101", 1],
+    ["816.555.0101", 2],
+    ["816-555-0101", 3],
+    ["8165550101", 1],
+    ["18165550101", 2],
+    ["+1 816 555 0101", 3],
+    ["1 (816) 555-0101", 1],
+  ] as const)("formatted homeowner phone %s (slot %i) joins the set, and an ineligible one blocks the write", async (raw, slot) => {
+    const other = await addProperty({ homeownerPhone: raw, slot });
+    expect(new Set(await phoneSet())).toEqual(new Set([propertyId, other]));
+    await enable();
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    expect(await suppressions()).toEqual([]);
+  });
+
+  it.each([
+    ["(816) 555-0101", 1],
+    ["816.555.0101", 2],
+    ["+18165550101 ", 3],
+  ] as const)("formatted property_contacts phone %s (slot %i) joins the set, and an ineligible one blocks the write", async (raw, slot) => {
+    const linked = await addProperty({ linkPhone: raw, slot });
+    expect(new Set(await phoneSet())).toEqual(new Set([propertyId, linked]));
+    await enable();
+    expect(await apply()).toEqual({ status: "not_eligible" });
+    await enable({ canary_property_ids: [propertyId, linked] });
+    expect((await apply()).status).toBe("suppressed");
+  });
+
+  it("a different number that only shares digits is not in the set", async () => {
+    await addProperty({ homeownerPhone: "(816) 555-0102" });
+    expect(await phoneSet()).toEqual([propertyId]);
+  });
+
+  it.each(["816-555-0101 x2", "ext 12 816 555 0101", "0018165550101", "+44 816 555 0101"])(
+    "an un-normalizable slot carrying this phone's digits (%s) fails closed",
+    async (raw) => {
+      await addProperty({ homeownerPhone: raw });
+      expect(await phoneSet()).toBeNull();
+      await setFlags({ questions_live: true, model_stop_suppression: true, canary_percent: 100 });
+      expect(await apply()).toEqual({ status: "not_eligible" });
+      expect(await suppressions()).toEqual([]);
+    },
+  );
+
+  it("an un-normalizable slot with unrelated digits does not block", async () => {
+    await addProperty({ homeownerPhone: "call me maybe 12" });
+    expect(await phoneSet()).toEqual([propertyId]);
+  });
+
+  it.each(["+448165550101", "+1816555010"])("a phone that is not a normalized US number (%s) fails closed", async (phone) => {
+    expect(await phoneSet(phone)).toBeNull();
+  });
+});
 
 describe("write-time canary eligibility (§13.1/§13.2)", () => {
   it("not in the canary (no ids, percent 0) → not_eligible, nothing written", async () => {
@@ -360,7 +428,7 @@ describe("write-time canary eligibility (§13.1/§13.2)", () => {
     await addProperty({ homeownerPhone: PHONE, deleted: true });
     await addProperty({ homeownerPhone: "+18165550199" });
     // The base property's homeowner contact is not set, but it is the inbound's own property.
-    const ids = (await db.query(`select x from public.fn_model_stop_phone_property_ids($1, $2, $3) x`, [orgId, PHONE, propertyId])).rows.map((r) => r.x);
+    const ids = await phoneSet();
     expect(new Set(ids)).toEqual(new Set([propertyId, home, linked]));
     // A deleted property never blocks; an ineligible live one does.
     await enable({ canary_property_ids: [propertyId, home, linked] });

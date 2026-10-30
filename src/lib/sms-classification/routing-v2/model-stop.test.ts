@@ -263,7 +263,22 @@ describe("PR-I executor", () => {
     });
   });
 
-  it.each([[{ error: { message: "boom" } }], [{ data: { nope: 1 } }], [() => { throw new Error("network"); }]] as const)(
+  it("database cannot decide the phone set (null: un-normalizable phone data) → today's path, no write", async () => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, { data: null });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
+      kind: "human_review",
+      reason: "not_eligible",
+    });
+    expect(applyCalls(rpc)).toHaveLength(0);
+  });
+
+  it.each(["816-555-0101", "8165550101", "+1 (816) 555-0101", "1.816.555.0101"])("phone variant %s is sent normalized", async (raw) => {
+    const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, { data: [base.propertyId] });
+    await executeV2Stop(client, { ...base, phone: raw, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()));
+    expect((rpc.mock.calls as unknown as Array<[string, { p_phone_e164?: string }]>).every((c) => c[1].p_phone_e164 === "+18165550101")).toBe(true);
+  });
+
+  it.each([[{ error: { message: "boom" } }], [{ data: { nope: 1 } }], [{ data: [1, 2] }], [() => { throw new Error("network"); }]] as const)(
     "phone lookup failure (%j) → today's path, no write",
     async (resp) => {
       const { client, rpc } = fakeAdmin({ data: { status: "suppressed" } }, resp as never);

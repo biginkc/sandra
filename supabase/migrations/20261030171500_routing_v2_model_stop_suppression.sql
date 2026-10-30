@@ -148,22 +148,57 @@ $$;
 -- Every live property that shares this phone in the org: the inbound's own property,
 -- properties whose homeowner contact has the phone, and properties linked to such a
 -- contact through property_contacts. Phone-level actions need ALL of them eligible.
+--
+-- Raw contacts.phone_1..3 are compared AFTER normalizing with the repo's US normalizer
+-- (dialpad_cti_normalize_us_phone, the SQL twin of csv/normalize.ts normalizePhone):
+-- legacy rows can hold "(816) 555-0101" or "816.555.0101", and contact_phone_numbers
+-- was never backfilled for every contact, so it is only an extra source, never the only one.
+-- Returns NULL (fail closed → not eligible) when:
+--   - the phone itself is not a normalized US number, or
+--   - some contact slot in the org cannot be normalized but its digits contain this
+--     phone's 10 digits (e.g. "816-555-0101 x2"), so membership cannot be decided.
 create or replace function public.fn_model_stop_phone_property_ids(p_org_id uuid, p_phone_e164 text, p_property_id uuid)
-returns setof uuid
-language sql
+returns uuid[]
+language plpgsql
 stable
 security definer
 set search_path = public, pg_temp
 as $$
-  with c as (
-    select ct.id from public.contacts ct
+declare
+  v_digits10 text;
+  v_ids uuid[];
+begin
+  if p_org_id is null or p_phone_e164 is null
+     or public.dialpad_cti_normalize_us_phone(p_phone_e164) is distinct from p_phone_e164 then
+    return null;
+  end if;
+  v_digits10 := right(p_phone_e164, 10);
+
+  if exists (
+    select 1
+    from public.contacts ct
+    cross join lateral (values (ct.phone_1), (ct.phone_2), (ct.phone_3)) slot(raw)
     where ct.org_id = p_org_id
-      and p_phone_e164 in (ct.phone_1, ct.phone_2, ct.phone_3)
+      and nullif(btrim(slot.raw), '') is not null
+      and public.dialpad_cti_normalize_us_phone(slot.raw) is null
+      and position(v_digits10 in regexp_replace(slot.raw, '[^0-9]', '', 'g')) > 0
+  ) then
+    return null;
+  end if;
+
+  with c as (
+    select ct.id
+    from public.contacts ct
+    cross join lateral (values (ct.phone_1), (ct.phone_2), (ct.phone_3)) slot(raw)
+    where ct.org_id = p_org_id
+      and slot.raw is not null
+      and public.dialpad_cti_normalize_us_phone(slot.raw) = p_phone_e164
     union
     select n.contact_id from public.contact_phone_numbers n
     where n.org_id = p_org_id and n.e164 = p_phone_e164
   )
-  select p.id from public.properties p
+  select coalesce(array_agg(p.id order by p.id), '{}') into v_ids
+  from public.properties p
   where p.org_id = p_org_id
     and p.deleted_at is null
     and (
@@ -174,6 +209,8 @@ as $$
         where pc.org_id = p_org_id and pc.property_id = p.id and pc.contact_id in (select id from c)
       )
     );
+  return v_ids;
+end;
 $$;
 
 revoke all on function public.fn_routing_v2_canary_bucket(uuid) from public, anon, authenticated;
@@ -242,9 +279,9 @@ begin
 
   -- Write-time canary re-check (§13.1/§13.2): every property on this phone must be
   -- eligible right now, under the same formula as routing-v2/flags.ts.
-  select coalesce(array_agg(x), '{}') into v_phone_properties
-  from public.fn_model_stop_phone_property_ids(p_org_id, p_phone_e164, p_property_id) x;
-  if cardinality(v_phone_properties) = 0 or exists (
+  -- NULL = the phone set cannot be decided (un-normalizable phone data): fail closed.
+  v_phone_properties := public.fn_model_stop_phone_property_ids(p_org_id, p_phone_e164, p_property_id);
+  if v_phone_properties is null or cardinality(v_phone_properties) = 0 or exists (
     select 1 from unnest(v_phone_properties) x
     where not public.fn_routing_v2_property_eligible(v_flags, x)
   ) then
