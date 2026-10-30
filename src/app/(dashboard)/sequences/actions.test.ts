@@ -562,3 +562,24 @@ describe("replaceSequenceSteps voicemail drop voice", () => {
     expect(client.rpc).not.toHaveBeenCalled();
   });
 });
+
+describe("routing v2 drips are not editable from the editor", () => {
+  it("maps the DB lock to a plain message", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "ROUTING_V2_DRIP_LOCKED: routing v2 drip steps are edited by migration only" },
+    });
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1", email: "admin@bmhgroupkc.com" } }, error: null }) },
+      rpc,
+      from: vi.fn(() => { throw new Error("unexpected table access"); }),
+    });
+    const step = {
+      step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms" as const,
+      template_body: "Hi", template_id: null, template_category: null, target_status: null,
+      vm_media_id: null, vm_tts_body: null, vm_voice_id: null, vm_phone_line_id: null,
+    };
+    const result = await replaceSequenceSteps({ sequenceId: "seq-v2", name: "Drip", description: null, steps: [step] });
+    expect(result).toEqual({ ok: false, error: { code: "ROUTING_V2_DRIP_LOCKED", message: expect.stringMatching(/can't be edited here/) } });
+  });
+});

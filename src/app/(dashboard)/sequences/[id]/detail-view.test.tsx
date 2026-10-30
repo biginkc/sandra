@@ -69,3 +69,25 @@ it("opens the selected property's conversation and omits the link without one", 
     "/messages?thread=conversation-a", "/messages?thread=conversation-b",
   ]);
 });
+
+it("routing v2 (automatic) drips show no edit / add step / copy controls, even to admins", () => {
+  const empty = { ...sampleDetail, sequence: { ...sampleDetail.sequence, steps: [], managed: true } };
+  const { unmount } = render(<DripDetailView detail={empty} sources={[]} isAdmin />);
+  expect(screen.queryByRole("button", { name: "Edit drip" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Add step/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Copy steps from another drip" })).not.toBeInTheDocument();
+  unmount();
+  render(<DripDetailView detail={{ ...sampleDetail, sequence: { ...sampleDetail.sequence, managed: false } }} sources={[]} isAdmin />);
+  expect(screen.getByRole("button", { name: "Edit drip" })).toBeVisible();
+});
+
+it("S1: automatic (routing v2) drips are never offered as a copy source", async () => {
+  const user = userEvent.setup();
+  const empty = { ...sampleDetail, sequence: { ...sampleDetail.sequence, steps: [] } };
+  const live = { ...sampleSequences[0], id: "live-source", name: "Live source", step_count: 2 };
+  const v2 = { ...live, id: "v2-source", name: "Book appointment (routing v2)", managed: true };
+  render(<DripDetailView detail={empty} sources={[live, v2]} isAdmin />);
+  await user.click(screen.getByRole("button", { name: "Copy steps from another drip" }));
+  expect(screen.getByRole("button", { name: /Live source/ })).toBeVisible();
+  expect(screen.queryByRole("button", { name: /routing v2/ })).not.toBeInTheDocument();
+});

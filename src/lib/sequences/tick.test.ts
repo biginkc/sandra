@@ -616,6 +616,8 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         if (propertyCall === 2) return makeQueryResult(null);
         return makeQueryResult({ is_dnc_locked: true });
       }
+      // Legacy drip (routing_v2_key null): the routing v2 gate passes straight through.
+      if (table === "sequences") return makeQueryResult({ routing_v2_key: null });
       if (table === "sequence_step_runs") {
         return makeQueryResult({ id: "run-1" });
       }
@@ -669,6 +671,8 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         if (propertyCall === 2) return makeQueryResult(null);
         return makeQueryResult({ is_dnc_locked: true });
       }
+      // Legacy drip (routing_v2_key null): the routing v2 gate passes straight through.
+      if (table === "sequences") return makeQueryResult({ routing_v2_key: null });
       if (table === "sequence_step_runs") {
         return makeQueryResult({ id: "run-1" });
       }
