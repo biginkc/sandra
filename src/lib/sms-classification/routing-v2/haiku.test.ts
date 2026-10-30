@@ -159,6 +159,8 @@ describe("Haiku client (mocked, no network)", () => {
   });
 });
 
+// v8 replay — THE gate for PR-D: real applyHaikuPolicy + v8-prompt Haiku answers (replay-v8-haiku.json).
+// routing-v2.test.ts "replay gate (v7)" stays pinned to PR-A's v7 answers/oracle and is not the Haiku gate.
 // Replay: the pinned v7 Jev probabilities + the v8 recorded Haiku answers (v8 prompt) through the real policy.
 type Row = [string | null, Array<number | null> | null, number[] | null, [string, number] | null | 0, string, string, 0 | 1];
 const FIX = JSON.parse(readFileSync(join(__dirname, "__fixtures__/replay-v7.json"), "utf8")) as {

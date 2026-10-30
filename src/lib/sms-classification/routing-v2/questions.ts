@@ -15,7 +15,7 @@ import type { JevChoiceQuestion, JevNoulQuestion } from "../providers/jev-gatewa
  * newq2.py, newq.py, newq6.py, newq8.py).
  *
  * No LLM or engineer may edit, reword, add or remove a text without Jarrad approving that
- * exact text. `questions.test.ts` pins every byte. The live engine does NOT read this file.
+ * exact text. `routing-v2.test.ts` pins every byte. The live engine does NOT read this file.
  */
 export const V2_QUESTION_IDS = [
   "asked_stop",

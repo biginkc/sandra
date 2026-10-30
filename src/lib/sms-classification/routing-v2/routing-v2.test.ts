@@ -237,6 +237,8 @@ const HAIKU_ROADS: Record<string, string> = {
 };
 const CODE_REPLY: Record<string, string> = { reaction: "Liked “x”", bad_number: "no SMS capabilities", driving: "I'm driving" };
 
+// Pins PR-A's v7 table with the v7 Haiku answers and the test-only oracle above (v7 option list).
+// The live Haiku policy + v8 prompt answers are pinned separately in haiku.test.ts ("v8 replay").
 describe("routing v2 — replay gate (v7)", () => {
   const roads: Record<string, number> = {};
   let haikuCalls = 0;
