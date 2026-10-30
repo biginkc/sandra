@@ -117,7 +117,7 @@ create table if not exists public.routing_v2_drip_send_claims (
   property_id uuid not null,
   enrollment_id uuid not null,
   step_run_id uuid not null unique,
-  status text not null default 'open' check (status in ('open','cancelled')),
+  status text not null default 'open' check (status in ('open','cancelled','sent')),
   cancel_reason text,
   cancelled_at timestamptz,
   created_at timestamptz not null default now()
@@ -452,7 +452,26 @@ declare
 begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found then return 'missing'; end if;
-  if e.routing_v2_engine is distinct from 'v2' then return 'ok'; end if;
+  if e.routing_v2_engine is distinct from 'v2' then
+    -- Legacy enrollment: untouched, unless it points at a v2 drip (only routing v2 may enroll
+    -- there; anything else would send approved texts with no flag/canary/takeover check).
+    if not exists (select 1 from public.sequences s where s.id = e.sequence_id and s.routing_v2_key is not null) then
+      return 'ok';
+    end if;
+    perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
+    select * into e from public.sequence_enrollments where id = p_enrollment_id;
+    if e.status <> 'active' then return 'not_active'; end if;
+    if coalesce((select is_dnc_locked from public.properties where id = e.property_id), false) then
+      update public.sequence_enrollments
+      set status = 'opted_out', pause_reason = 'dnc', next_run_at = null, updated_at = now()
+      where id = e.id and status = 'active';
+      return 'suppressed';
+    end if;
+    update public.sequence_enrollments
+    set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now(), ended_reason = 'flag_off'
+    where id = e.id and status = 'active';
+    return 'flag_off';
+  end if;
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if e.status <> 'active' then return 'not_active'; end if;
@@ -506,9 +525,9 @@ declare
 begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found then return 'missing'; end if;
-  if e.routing_v2_engine is distinct from 'v2' then return 'ok'; end if;
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
   v_check := public.routing_v2_enrollment_send_check(p_enrollment_id);
+  if e.routing_v2_engine is distinct from 'v2' then return v_check; end if;
   if v_check <> 'ok' then return v_check; end if;
   if not exists (select 1 from public.sequence_step_runs r
                  where r.id = p_step_run_id and r.enrollment_id = p_enrollment_id and r.claim_active) then
@@ -522,6 +541,17 @@ begin
   values (e.org_id, e.property_id, e.id, p_step_run_id);
   return 'ok';
 end;
+$$;
+
+-- After an accepted send: the claim is consumed, so later replies only cancel unsent claims.
+create or replace function public.routing_v2_mark_drip_claim_sent(p_step_run_id uuid)
+returns void
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  update public.routing_v2_drip_send_claims set status = 'sent'
+  where step_run_id = p_step_run_id and status = 'open';
 $$;
 
 -- Chain at the end of a v2 drip (Said they'd call -> Book appointment v2). Only when the
@@ -570,6 +600,8 @@ revoke all on function public.routing_v2_claim_outbox(uuid) from public, anon, a
 revoke all on function public.routing_v2_enrollment_send_check(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_chain_after_completion(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_claim_drip_send(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.routing_v2_mark_drip_claim_sent(uuid) from public, anon, authenticated;
+grant execute on function public.routing_v2_mark_drip_claim_sent(uuid) to service_role;
 grant execute on function public.routing_v2_claim_drip_send(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_slice_enabled(uuid, text) to service_role;
 grant execute on function public.routing_v2_contact_suppressed(uuid, uuid) to service_role;
@@ -756,6 +788,7 @@ begin
   if tg_table_name = 'sequences' then
     if old.routing_v2_key is not null and (
          new.append_opt_out is distinct from old.append_opt_out
+      or new.active is distinct from old.active
       or new.routing_v2_key is distinct from old.routing_v2_key
       or new.routing_v2_version is distinct from old.routing_v2_version
       or new.routing_v2_then_key is distinct from old.routing_v2_then_key) then
@@ -779,6 +812,26 @@ $$;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 create trigger routing_v2_reject_drip_edit before update on public.sequences
   for each row execute function public.routing_v2_reject_drip_edit();
+-- Only routing v2 enrolls into a v2 drip (manual / bulk / change-drip are refused).
+create or replace function public.routing_v2_reject_foreign_enrollment()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if new.routing_v2_engine is distinct from 'v2'
+     and (tg_op = 'INSERT' or new.sequence_id is distinct from old.sequence_id)
+     and exists (select 1 from public.sequences s where s.id = new.sequence_id and s.routing_v2_key is not null) then
+    raise exception using errcode = 'P0001',
+      message = 'ROUTING_V2_DRIP_LOCKED: only routing v2 enrolls leads into routing v2 drips';
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
+create trigger routing_v2_reject_foreign_enrollment before insert or update of sequence_id on public.sequence_enrollments
+  for each row execute function public.routing_v2_reject_foreign_enrollment();
+
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 create trigger routing_v2_reject_drip_step_edit before insert or update or delete on public.sequence_steps
   for each row execute function public.routing_v2_reject_drip_edit();

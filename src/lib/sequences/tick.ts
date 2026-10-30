@@ -19,6 +19,7 @@ import {
   loadRoutingV2Key,
   routingV2ChainAfterCompletion,
   routingV2ClaimDripSend,
+  routingV2MarkDripClaimSent,
   routingV2TickGate,
 } from "./routing-v2/tick-gate";
 
@@ -538,6 +539,7 @@ export async function processEnrollmentTick(
             message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
+        if (isRoutingV2) await routingV2MarkDripClaimSent(client, claim.id);
         const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
           const pauseError = await pauseEnrollment(

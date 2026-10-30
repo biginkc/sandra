@@ -112,7 +112,12 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     expect(names.indexOf("routing_v2_enrollment_send_check")).toBeLessThan(names.indexOf("routing_v2_claim_drip_send"));
     expect(rpc).toHaveBeenCalledWith("routing_v2_claim_drip_send", { p_enrollment_id: "enrollment-1", p_step_run_id: "run-1" });
     // The claim is the last thing before the provider call.
-    expect(rpc.mock.invocationCallOrder.at(-1)!).toBeLessThan(vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!);
+    const order = (fn: string) => rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === fn)]!;
+    const sendAt = vi.mocked(sendSmsToContact).mock.invocationCallOrder[0]!;
+    expect(order("routing_v2_claim_drip_send")).toBeLessThan(sendAt);
+    // After the accepted send the claim is consumed.
+    expect(order("routing_v2_mark_drip_claim_sent")).toBeGreaterThan(sendAt);
+    expect(rpc).toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", { p_step_run_id: "run-1" });
   });
 
   it("wait: a slot outside the window reschedules (no claim, no send)", async () => {
@@ -168,5 +173,6 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     await processEnrollmentTick(client, ENROLLMENT);
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_enrollment_send_check", expect.anything());
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_claim_drip_send", expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_mark_drip_claim_sent", expect.anything());
   });
 });

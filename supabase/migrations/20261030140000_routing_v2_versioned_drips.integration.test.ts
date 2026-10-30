@@ -437,6 +437,54 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("not_active");
   });
 
+  it("only routing v2 can enroll into a v2 drip: manual insert and change-drip are refused", async () => {
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'price_too_high'`, [ctx.org])).rows[0].id;
+    await db.query("savepoint s");
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
+    await expect(db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at)
+       values ($1,$2,$3,$4,'active',0, now())`,
+      [ctx.org, v2, ctx.property, ctx.contact],
+    )).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query(`update public.sequence_enrollments set sequence_id = $2 where id = $1`, [ctx.legacyEnrollment, v2]))
+      .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+  });
+
+  it("a non-v2 enrollment that reached a v2 drip anyway (pre-existing / guard bypassed) is stopped as flag_off, never sent", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON); // even with every flag on
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'price_too_high'`, [ctx.org])).rows[0].id;
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
+    await db.query("set local session_replication_role = replica"); // bypass the insert guard
+    const foreign = (await db.query(
+      `insert into public.sequence_enrollments (org_id, sequence_id, property_id, contact_id, status, current_step_index, next_run_at)
+       values ($1,$2,$3,$4,'active',0, now()) returning id`,
+      [ctx.org, v2, ctx.property, ctx.contact],
+    )).rows[0].id;
+    await db.query("set local session_replication_role = origin");
+    const run = await stepRun(db, foreign);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [foreign, run.id])).rows[0].r).toBe("flag_off");
+    expect((await db.query(`select status, ended_reason from public.sequence_enrollments where id = $1`, [foreign])).rows[0])
+      .toEqual({ status: "completed", ended_reason: "flag_off" });
+    expect((await db.query(`select public.routing_v2_enrollment_send_check($1) as r`, [foreign])).rows[0].r).toBe("not_active");
+    const fence = await authorize(db, ctx, foreign, run);
+    expect(fence.authorized).toBe(false);
+  });
+
+  it("a sent claim is consumed: a later reply does not report it as cancelled", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, first, ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("ok");
+    await db.query(`select public.routing_v2_mark_drip_claim_sent($1)`, [run.id]);
+    const reply = await inbound(db, ctx, "2026-10-30T15:10:00Z");
+    const t = await transition(db, reply, ctx.property, { sequence_key: "vacant_land" });
+    expect(t.cancelled_drip_claim_ids).toEqual([]);
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].status).toBe("sent");
+  });
+
   it("check-and-claim after the reply already retired the enrollment: refused, no claim row", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
@@ -448,7 +496,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select count(*)::int as n from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].n).toBe(0);
   });
 
-  it("v2 drips are not editable outside migrations; active can still be toggled; legacy drips unaffected", async () => {
+  it("v2 drips are not editable outside migrations (incl. active); archive allowed; legacy drips unaffected", async () => {
     const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'book_appointment'`, [ctx.org])).rows[0].id;
     await db.query("savepoint s");
     await expect(db.query(`update public.sequence_steps set template_body = 'x' where sequence_id = $1 and step_index = 0`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
@@ -462,7 +510,9 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("rollback to savepoint s");
     await expect(db.query(`update public.sequences set append_opt_out = true where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
     await db.query("rollback to savepoint s");
-    await db.query(`update public.sequences set active = true where id = $1`, [v2]);
+    await expect(db.query(`update public.sequences set active = true where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await db.query(`update public.sequences set archived_at = now() where id = $1`, [v2]); // archiving is still allowed
     await db.query(`update public.sequence_steps set template_body = 'edited' where sequence_id = $1 and step_index = 0`, [ctx.bookSrc]);
     await db.query(`update public.sequences set append_opt_out = false where id = $1`, [ctx.bookSrc]);
   });

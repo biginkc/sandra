@@ -10,11 +10,18 @@ begin
   if exists (select 1 from public.sequence_enrollments where routing_v2_engine = 'v2') then
     raise exception 'routing v2 enrollments exist; stop and remove them before rolling back';
   end if;
+  if exists (select 1 from public.sequence_enrollments e join public.sequences s on s.id = e.sequence_id
+             where s.routing_v2_key is not null) then
+    raise exception 'enrollments point at routing v2 drips; remove them before rolling back';
+  end if;
 end $$;
 
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 drop function if exists public.routing_v2_reject_drip_edit();
+drop trigger if exists routing_v2_reject_foreign_enrollment on public.sequence_enrollments;
+drop function if exists public.routing_v2_reject_foreign_enrollment();
+drop function if exists public.routing_v2_mark_drip_claim_sent(uuid);
 drop function if exists public.routing_v2_chain_after_completion(uuid);
 drop function if exists public.routing_v2_claim_drip_send(uuid, uuid);
 drop function if exists public.routing_v2_enrollment_send_check(uuid);

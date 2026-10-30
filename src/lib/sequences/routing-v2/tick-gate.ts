@@ -101,6 +101,19 @@ export async function routingV2ClaimDripSend(
   return { ok: false, reason: String(data), error: false };
 }
 
+/** Accepted send: consume the claim so later replies only cancel unsent claims. Best effort. */
+export async function routingV2MarkDripClaimSent(
+  client: SupabaseClient<Database>,
+  stepRunId: string,
+): Promise<void> {
+  try {
+    const { error } = await loose(client).rpc("routing_v2_mark_drip_claim_sent", { p_step_run_id: stepRunId });
+    if (error) console.warn(`routing v2 claim close failed: ${error.message}`);
+  } catch (err) {
+    console.warn(`routing v2 claim close failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** End of a v2 drip: chain into the next drip when the sequence names one (Said they'd call). */
 export async function routingV2ChainAfterCompletion(
   client: SupabaseClient<Database>,
