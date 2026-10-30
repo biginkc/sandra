@@ -43,13 +43,22 @@ export type V2DecisionRow = {
   created_at: string;
   status: string;
   road: string | null;
+  /** Persisted by PR-A's routeV2 (false for code pre-checks). Required true. */
+  opportunity_alert: boolean | null;
   probabilities: Record<string, unknown> | null;
 };
 
 const validP = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
 
-export function isV2Opportunity(row: Pick<V2DecisionRow, "status" | "road" | "probabilities"> | null): boolean {
-  if (!row || row.status !== "decided") return false;
+/** Yes-family roads raise today's hot alert while alert_on_time_only is OFF (#937 non-hot guard). */
+const HOT_YES_ROADS: ReadonlySet<string> = new Set(["book_appointment", "reaction+book_appointment", "driving_reply+book_appointment"]);
+
+export function isV2Opportunity(
+  row: Pick<V2DecisionRow, "status" | "road" | "probabilities" | "opportunity_alert"> | null,
+  opts: { alertOnTimeOnly: boolean },
+): boolean {
+  if (!row || row.status !== "decided" || row.opportunity_alert !== true) return false;
+  if (row.road !== null && HOT_YES_ROADS.has(row.road) && !opts.alertOnTimeOnly) return false;
   // null road = no Jev answer: the Haiku-unsure path alerts on its own.
   if (row.road === null || ALERTING_ROADS.has(row.road)) return false;
   const probs = row.probabilities;
@@ -86,7 +95,7 @@ export async function loadV2Opportunities(
   for (;;) {
     let q = db
       .from("routing_v2_shadow_decisions")
-      .select("id, property_id, inbound_message_id, created_at, status, road, probabilities")
+      .select("id, property_id, inbound_message_id, created_at, status, road, opportunity_alert, probabilities")
       .eq("org_id", orgId)
       .gte("created_at", since);
     if (before) q = q.or(`created_at.lt.${before.created_at},and(created_at.eq.${before.created_at},id.lt.${before.id})`);
@@ -100,7 +109,7 @@ export async function loadV2Opportunities(
     if (page.length < PAGE) break;
     before = page[page.length - 1]!;
   }
-  const rows = [...candidates.values()].filter((r) => isV2Opportunity(r) && v2SliceAllowed(flags, "replies", r.property_id));
+  const rows = [...candidates.values()].filter((r) => isV2Opportunity(r, { alertOnTimeOnly: flags.alert_on_time_only }) && v2SliceAllowed(flags, "replies", r.property_id));
   const promotions: HotPromotion[] = [];
   let complete = true;
   for (let offset = 0; offset < rows.length; offset += PAGE) {

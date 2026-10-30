@@ -19,9 +19,11 @@ const SINCE = "2026-10-28T00:00:00.000Z";
 const AT = "2026-10-28T11:00:00.000Z";
 const P1 = "11111111-1111-4111-8111-111111111111";
 const FLAGS_ON = { shadow: true, questions_live: true, replies: true, canary_property_ids: [P1] };
+/** alert_on_time_only ON: yes-family roads are non-hot. */
+const TOO = { alertOnTimeOnly: true };
 const probs = (own: unknown = 0.98, other: unknown = 0) => ({ own_other_property: own, someone_else_property: other });
 const row = (road: string | null = "not_interested_drip", p: Record<string, unknown> = probs()) => ({
-  id: "r1", org_id: ORG, property_id: P1, inbound_message_id: "m1", created_at: AT, status: "decided", road, probabilities: p,
+  id: "r1", org_id: ORG, property_id: P1, inbound_message_id: "m1", created_at: AT, status: "decided", road, opportunity_alert: true, probabilities: p,
 });
 type Row = Record<string, unknown>;
 function dbFor(tables: Record<string, Row[]>, fail?: string) {
@@ -74,29 +76,46 @@ describe("v2 opportunity alert (#937 equivalence)", () => {
     expect(await load(fixtures(), "ai_responder_configs")).toEqual({ promotions: [], complete: true });
   });
 
-  it.each(["stop", "wrong_number_close", "not_interested_drip", "maybe_later_drip", "who_reply_drip", "book_appointment", "listed_drip", "vacant_land_drip", "text_only_reply"])(
+  it.each(["stop", "wrong_number_close", "not_interested_drip", "maybe_later_drip", "who_reply_drip", "listed_drip", "vacant_land_drip", "text_only_reply"])(
     "keeps the %s route and adds the opportunity alert", (road) => {
-      expect(isV2Opportunity(row(road))).toBe(true);
+      expect(isV2Opportunity(row(road), TOO)).toBe(true);
     });
 
+  it("requires the persisted opportunity_alert === true (code pre-checks store false)", async () => {
+    for (const v of [false, null, undefined, "true", 1]) {
+      expect(isV2Opportunity({ ...row("stop"), opportunity_alert: v as never }, TOO)).toBe(false);
+      const f = fixtures({ ...row("stop"), opportunity_alert: v });
+      expect((await load(f)).promotions).toEqual([]);
+    }
+  });
+
+  it("yes-family roads are hot (today's alert owns them) unless alert_on_time_only is on", async () => {
+    for (const road of ["book_appointment", "reaction+book_appointment", "driving_reply+book_appointment"]) {
+      expect(isV2Opportunity(row(road), { alertOnTimeOnly: false }), road).toBe(false);
+      expect(isV2Opportunity(row(road), { alertOnTimeOnly: true }), road).toBe(true);
+      expect((await load(fixtures(row(road)))).promotions, road).toEqual([]);
+      expect((await load(fixtures(row(road), { ...FLAGS_ON, alert_on_time_only: true }))).promotions, road).toHaveLength(1);
+    }
+  });
+
   it("either question alone qualifies", () => {
-    expect(isV2Opportunity(row("stop", probs(0, 0.7)))).toBe(true);
-    expect(isV2Opportunity(row("stop", probs(0.7, 0)))).toBe(true);
-    expect(isV2Opportunity(row("stop", probs(0, 0)))).toBe(false);
+    expect(isV2Opportunity(row("stop", probs(0, 0.7)), TOO)).toBe(true);
+    expect(isV2Opportunity(row("stop", probs(0.7, 0)), TOO)).toBe(true);
+    expect(isV2Opportunity(row("stop", probs(0, 0)), TOO)).toBe(false);
   });
 
   it.each([null, undefined, "0.99", -0.1, 0.5999, 1.1, NaN, Infinity])("fails closed for probability %s", (p) => {
-    expect(isV2Opportunity(row("stop", { own_other_property: p, someone_else_property: p }))).toBe(false);
+    expect(isV2Opportunity(row("stop", { own_other_property: p, someone_else_property: p }), TOO)).toBe(false);
   });
 
   it("does not repeat hot/alert routes; accepts the exact cutoff; ignores failed and no-answer rows", () => {
     for (const road of ["ALERT_call_me", "ALERT_land_price", "ALERT_commercial", "ALERT_said_theyll_call", "ALERT_reason_to_sell", "price_check", "possible_stop", "haiku_error", "haiku_unsure"]) {
-      expect(isV2Opportunity(row(road))).toBe(false);
+      expect(isV2Opportunity(row(road), TOO)).toBe(false);
     }
-    expect(isV2Opportunity(row("stop", probs(0.6)))).toBe(true);
-    expect(isV2Opportunity({ ...row(), status: "failed" })).toBe(false);
-    expect(isV2Opportunity(row(null))).toBe(false);
-    expect(isV2Opportunity({ ...row(), probabilities: null })).toBe(false);
+    expect(isV2Opportunity(row("stop", probs(0.6)), TOO)).toBe(true);
+    expect(isV2Opportunity({ ...row(), status: "failed" }, TOO)).toBe(false);
+    expect(isV2Opportunity(row(null), TOO)).toBe(false);
+    expect(isV2Opportunity({ ...row(), probabilities: null }, TOO)).toBe(false);
   });
 
   it("owner-only: no owner = no alert", async () => {

@@ -200,9 +200,27 @@ describe("flags and canary", () => {
     expect([f.replies, f.questions_live, f.drips]).toEqual([false, false, true]);
   });
 
-  it("validates canary_property_ids as UUIDs and canary_percent as an int 0..100", () => {
-    const f = parseRoutingV2Flags({ canary_property_ids: [P1, "not-a-uuid", 7, "' or 1=1"], canary_percent: 101 });
-    expect([...f.canaryPropertyIds]).toEqual([P1]);
+  it("any invalid canary id, wrong type or bad percent disables canary eligibility (fail closed)", () => {
+    const on = { questions_live: true, replies: true };
+    for (const bad of [
+      { canary_property_ids: [P1, "not-a-uuid"] },
+      { canary_property_ids: [P1, 7] },
+      { canary_property_ids: [P1, "' or 1=1"] },
+      { canary_property_ids: P1 },
+      { canary_property_ids: { P1 } },
+      { canary_property_ids: [P1], canary_percent: 101 },
+      { canary_property_ids: [P1], canary_percent: "50" },
+    ]) {
+      const f = parseRoutingV2Flags({ ...on, ...bad });
+      expect(f.canaryValid, JSON.stringify(bad)).toBe(false);
+      expect(isV2Eligible(f, P1), JSON.stringify(bad)).toBe(false);
+      expect(v2SliceAllowed(f, "replies", P1)).toBe(false);
+    }
+    expect(isV2Eligible(parseRoutingV2Flags({ canary_property_ids: [P1, "not-a-uuid"], canary_percent: 100 }), P1)).toBe(false);
+    const ok = parseRoutingV2Flags({ ...on, canary_property_ids: [P1.toUpperCase()] });
+    expect(ok.canaryValid).toBe(true);
+    expect(isV2Eligible(ok, P1)).toBe(true);
+    const f = parseRoutingV2Flags({ canary_percent: 101 });
     expect(f.canaryPercent).toBe(0);
     expect(parseRoutingV2Flags({ canary_percent: 12.5 }).canaryPercent).toBe(0);
     expect(parseRoutingV2Flags({ canary_percent: 50 }).canaryPercent).toBe(50);

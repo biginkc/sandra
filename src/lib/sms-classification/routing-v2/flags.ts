@@ -25,6 +25,8 @@ export type RoutingV2Flags = {
   shadow: boolean;
   questions_live: boolean;
   canaryPropertyIds: ReadonlySet<string>;
+  /** False when canary_property_ids is malformed (any non-UUID entry or not an array): nothing is eligible. */
+  canaryValid: boolean;
   canaryPercent: number;
 } & Record<V2Slice, boolean>;
 
@@ -39,6 +41,7 @@ export const ALL_OFF: RoutingV2Flags = Object.freeze({
   wrong_number_all: false,
   model_stop_suppression: false,
   canaryPropertyIds: new Set<string>(),
+  canaryValid: true,
   canaryPercent: 0,
 });
 
@@ -53,11 +56,14 @@ export function parseRoutingV2Flags(raw: unknown): RoutingV2Flags {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return ALL_OFF;
   const r = raw as Record<string, unknown>;
   const on = (k: string) => r[k] === true;
-  const ids = Array.isArray(r.canary_property_ids)
-    ? new Set(r.canary_property_ids.filter(isUuid).map((s) => s.toLowerCase()))
-    : new Set<string>();
+  // Fail closed: one bad entry (or a non-array) disables canary eligibility entirely,
+  // never a silent filter that still enables the valid ids.
+  const rawIds = r.canary_property_ids;
+  const canaryValid = rawIds === undefined || (Array.isArray(rawIds) && rawIds.every(isUuid));
+  const ids = canaryValid && Array.isArray(rawIds) ? new Set((rawIds as string[]).map((s) => s.toLowerCase())) : new Set<string>();
   const pct = r.canary_percent;
-  const canaryPercent = typeof pct === "number" && Number.isInteger(pct) && pct >= 0 && pct <= 100 ? pct : 0;
+  const pctValid = pct === undefined || (typeof pct === "number" && Number.isInteger(pct) && pct >= 0 && pct <= 100);
+  const canaryPercent = pctValid && typeof pct === "number" ? pct : 0;
   return {
     shadow: on("shadow"),
     questions_live: on("questions_live"),
@@ -69,6 +75,7 @@ export function parseRoutingV2Flags(raw: unknown): RoutingV2Flags {
     wrong_number_all: on("wrong_number_all"),
     model_stop_suppression: on("model_stop_suppression"),
     canaryPropertyIds: ids,
+    canaryValid: canaryValid && pctValid,
     canaryPercent,
   };
 }
@@ -80,7 +87,7 @@ export function canaryBucket(propertyId: string): number {
 }
 
 export function isV2Eligible(flags: RoutingV2Flags, propertyId: string): boolean {
-  if (!isUuid(propertyId)) return false;
+  if (!flags.canaryValid || !isUuid(propertyId)) return false;
   if (flags.canaryPropertyIds.has(propertyId.toLowerCase())) return true;
   return canaryBucket(propertyId) < flags.canaryPercent;
 }
