@@ -19,6 +19,198 @@ end $$;
 drop trigger if exists routing_v2_reject_drip_step_edit on public.sequence_steps;
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
 drop function if exists public.routing_v2_reject_drip_edit();
+-- Restore authorize_sequence_provider_attempt exactly as 20260919090000 defined it.
+create or replace function public.authorize_sequence_provider_attempt(
+  p_enrollment_id uuid,
+  p_step_id uuid,
+  p_claim_id uuid,
+  p_contact_id uuid,
+  p_property_id uuid,
+  p_phone text,
+  p_message_id uuid
+)
+returns table (authorized boolean, reason text, attempt_outcome text)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e public.sequence_enrollments%rowtype;
+  s public.sequence_steps%rowtype;
+  r public.sequence_step_runs%rowtype;
+  c public.contacts%rowtype;
+  p public.properties%rowtype;
+  latest_consent text;
+  normalized_phone text;
+begin
+  -- Lock the enrollment before checking the expected step.  A committed
+  -- cancel/pause before this point therefore wins and no provider call is
+  -- authorized; a concurrent cancel waits until this transaction commits.
+  select * into e
+    from public.sequence_enrollments
+   where id = p_enrollment_id
+   for update;
+
+  -- Lock and validate the claim before any rejection write. A replay with a
+  -- mismatched step, or a second authorization after intent, must never
+  -- downgrade an accepted/unknown claim or mutate an unrelated row.
+  select * into r
+    from public.sequence_step_runs
+   where id = p_claim_id
+     and enrollment_id = e.id
+     and claim_active
+   for update;
+  if r.id is null then
+    return query select false, 'sequence claim is not active', 'definitively_rejected';
+    return;
+  end if;
+  if r.attempt_outcome <> 'not_attempted' then
+    return query select false, 'sequence claim already has a provider outcome', r.attempt_outcome;
+    return;
+  end if;
+
+  select * into s
+    from public.sequence_steps
+   where id = p_step_id
+     and sequence_id = e.sequence_id;
+
+  if e.id is null or s.id is null or e.status <> 'active'
+     or e.current_step_index <> s.step_index
+     or r.step_id <> s.id
+     or not exists (
+       select 1 from public.sequences seq
+        where seq.id = e.sequence_id and seq.org_id = e.org_id
+     ) then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'enrollment is no longer active at this step'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'enrollment is no longer active at this step', 'definitively_rejected';
+    return;
+  end if;
+
+  select * into p
+    from public.properties
+   where id = p_property_id
+     and org_id = e.org_id;
+  select * into c
+    from public.contacts
+   where id = p_contact_id
+     and org_id = e.org_id;
+
+  if p.id is null or c.id is null or e.property_id <> p.id
+     or e.contact_id <> c.id then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'sequence contact/property boundary no longer matches'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'sequence contact/property boundary no longer matches', 'definitively_rejected';
+    return;
+  end if;
+
+  if p.is_dnc_locked
+     or p.status in ('dead', 'closed', 'offer_sent', 'under_contract')
+     or p.outreach_dispo in ('wrong_number', 'bad_number', 'dnc', 'opted_out',
+                             'nurture', 'callback_requested', 'booked_appointment')
+     or c.do_not_contact
+     or c.sms_opted_out then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'current sequence suppression state blocks SMS'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'current sequence suppression state blocks SMS', 'definitively_rejected';
+    return;
+  end if;
+
+  select ce.event_type into latest_consent
+    from public.consent_events ce
+   where ce.contact_id = c.id
+     and ce.org_id = e.org_id
+     and ce.channel = 'sms'
+     and ce.event_type in (
+       'opt_in_marketing_written', 'opt_in_confirmed',
+       'opt_in_informational', 'opt_out', 'provider_auto_opt_out'
+     )
+   order by ce.occurred_at desc,
+            (ce.event_type in ('opt_out', 'provider_auto_opt_out')) desc,
+            ce.id desc
+   limit 1;
+  if latest_consent in ('opt_out', 'provider_auto_opt_out') then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'contact has opted out of SMS'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'contact has opted out of SMS', 'definitively_rejected';
+    return;
+  end if;
+
+  normalized_phone := regexp_replace(coalesce(p_phone, ''), '[^0-9]', '', 'g');
+  -- Match the application's normalizePhone contract: US ten-digit values
+  -- and their +1 eleven-digit form are equivalent; other country formats are
+  -- rejected before the provider boundary.
+  if length(normalized_phone) = 10 then
+    normalized_phone := '1' || normalized_phone;
+  elsif length(normalized_phone) <> 11 or left(normalized_phone, 1) <> '1' then
+    normalized_phone := '';
+  end if;
+  if normalized_phone = '' or not exists (
+    select 1 from (values (c.phone_1, c.phone_1_type), (c.phone_2, c.phone_2_type), (c.phone_3, c.phone_3_type)) phones(phone, phone_type)
+     where case
+       when length(regexp_replace(coalesce(phones.phone, ''), '[^0-9]', '', 'g')) = 10
+         then '1' || regexp_replace(coalesce(phones.phone, ''), '[^0-9]', '', 'g')
+       else regexp_replace(coalesce(phones.phone, ''), '[^0-9]', '', 'g')
+     end = normalized_phone
+       and coalesce(phones.phone_type, '') <> 'landline'
+  ) then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'selected phone is no longer saved on contact'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'selected phone is no longer saved on contact', 'definitively_rejected';
+    return;
+  end if;
+
+  if exists (
+    select 1 from public.sms_phone_suppressions ps
+     where ps.org_id = e.org_id
+       and ps.channel = 'sms'
+       and case
+         when length(regexp_replace(coalesce(ps.phone_e164, ''), '[^0-9]', '', 'g')) = 10
+           then '1' || regexp_replace(coalesce(ps.phone_e164, ''), '[^0-9]', '', 'g')
+         else regexp_replace(coalesce(ps.phone_e164, ''), '[^0-9]', '', 'g')
+       end = normalized_phone
+  ) then
+    update public.sequence_step_runs as sr
+       set attempt_outcome = 'definitively_rejected',
+           failure_reason = 'phone number is suppressed from SMS'
+     where sr.id = r.id and sr.claim_active and sr.attempt_outcome = 'not_attempted';
+    return query select false, 'phone number is suppressed from SMS', 'definitively_rejected';
+    return;
+  end if;
+
+  update public.sequence_step_runs as sr
+     set message_id = p_message_id,
+         attempt_outcome = 'unknown',
+         attempt_started_at = now(),
+         attempt_count = sr.attempt_count + 1,
+         failure_reason = null
+   where sr.id = r.id
+     and sr.enrollment_id = e.id
+     and sr.step_id = s.id
+     and sr.claim_active
+     and sr.attempt_outcome = 'not_attempted';
+  if not found then
+    return query select false, 'sequence claim changed before provider intent', 'definitively_rejected';
+    return;
+  end if;
+
+  return query select true, null::text, 'unknown';
+end;
+$$;
+
+revoke all on function public.authorize_sequence_provider_attempt(uuid, uuid, uuid, uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.authorize_sequence_provider_attempt(uuid, uuid, uuid, uuid, uuid, text, uuid) to service_role;
+
 -- Restore resume_sequence_enrollment exactly as 20261008143600 defined it.
 create or replace function public.resume_sequence_enrollment(
   p_enrollment_id uuid,

@@ -440,7 +440,8 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select status from public.routing_v2_drip_send_claims where id = $1`, [claim.id])).rows[0].status).toBe("cancelled");
     const fence = await authorize(db, ctx, r.new_enrollment_id, run);
     expect(fence.authorized).toBe(false);
-    expect(fence.reason).toMatch(/no longer active/);
+    // Refused by the v2 claim gate (claim cancelled) before the enrollment check (R6).
+    expect(fence.reason).toMatch(/routing v2 drip claim is not open|no longer active/);
     // Re-claiming the retired enrollment refuses.
     expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [r.new_enrollment_id, run.id])).rows[0].r).toBe("not_active");
   });
@@ -787,6 +788,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     // Provider accepted and the tick recorded the run... then crashed.
     await db.query(`update public.sequence_step_runs set attempt_outcome = 'accepted', run_at = now() where id = $1`, [run.id]);
     await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    await db.query(`update public.sequence_step_runs set attempt_started_at = now() - interval '20 minutes' where id = $1 and attempt_started_at is not null`, [run.id]);
     // A fresh claim (too young) is not touched.
     const counts = (await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c;
     expect(counts).toEqual({ sent: 1, unknown: 0, not_sent: 0 });
@@ -817,6 +819,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     // ...then the sequence_step_runs write FAILS (run left as authorize wrote it) and the tick holds.
     await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'reconciliation_required' where id = $1`, [e]);
     await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    await db.query(`update public.sequence_step_runs set attempt_started_at = now() - interval '20 minutes' where id = $1 and attempt_started_at is not null`, [run.id]);
     expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toMatchObject({ sent: 1, not_sent: 0 });
     // Even a late not_sent can't overwrite the recorded acceptance.
     expect((await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'not_sent') as id`, [run.id])).rows[0].id).toBeNull();
@@ -858,10 +861,78 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(true);
     await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'reconciliation_required' where id = $1`, [e]);
     await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    await db.query(`update public.sequence_step_runs set attempt_started_at = now() - interval '20 minutes' where id = $1 and attempt_started_at is not null`, [run.id]);
     expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 1, not_sent: 0 });
     await db.query(`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
     expect((await db.query(`select * from public.resume_sequence_enrollment($1)`, [e])).rows[0].outcome).toBe("reconciliation_required");
     expect((await db.query(`select status from public.sequence_enrollments where id = $1`, [e])).rows[0].status).toBe("paused");
+  });
+
+  it("R6 order A: reconcile closes a never-authorized stale claim; the slow worker's authorize is then refused, nothing sent", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const e = r.new_enrollment_id;
+    const run = await stepRun(db, e);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [e, run.id])).rows[0].r).toBe("ok");
+    // The worker stalls between claim and authorize; the claim ages past the window.
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 1 });
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','late','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    const fence = await authorize(db, ctx, e, run, msg);
+    expect(fence).toMatchObject({ authorized: false, reason: "routing v2 drip claim is not open" });
+    expect((await db.query(`select attempt_outcome, message_id from public.sequence_step_runs where id = $1`, [run.id])).rows[0])
+      .toEqual({ attempt_outcome: "definitively_rejected", message_id: null });
+  });
+
+  it("R6 order B: the worker authorizes first: reconcile leaves the in-flight claim alone and the send is recorded as sent", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "vacant_land" });
+    const e = r.new_enrollment_id;
+    await db.query(`update public.sequence_enrollments set current_step_index = 4 where id = $1`, [e]);
+    const run = await stepRun(db, e);
+    await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [e, run.id]);
+    await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','slow','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, e, run, msg)).authorized).toBe(true);
+    // Provider call in flight: reconcile must not touch it.
+    expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 0 });
+    expect((await db.query(`select status from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].status).toBe("open");
+    // Provider accepts -> claim acceptance + run write + advance.
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', $2)`, [run.id, msg]);
+    await db.query(`update public.sequence_step_runs set attempt_outcome = 'accepted', run_at = now() where id = $1`, [run.id]);
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 4, $2) as r`, [e, run.id])).rows[0].r).toBe("completed");
+    expect((await db.query(`select status, anomaly from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0])
+      .toEqual({ status: "sent", anomaly: null });
+  });
+
+  it("R6: the provider's truth wins over an earlier not_sent close (promoted atomically, anomaly recorded)", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    const run = await stepRun(db, r.new_enrollment_id);
+    await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [r.new_enrollment_id, run.id]);
+    await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'not_sent')`, [run.id]);
+    await db.query(`select public.routing_v2_record_provider_outcome($1, 'accepted', null)`, [run.id]);
+    expect((await db.query(`select status, anomaly, provider_outcome from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0])
+      .toEqual({ status: "sent", anomaly: "provider_accepted_after_not_sent", provider_outcome: "accepted" });
+    // Same via the claim-close path.
+    const run2Claim = await db.query(`update public.routing_v2_drip_send_claims set status = 'not_sent', anomaly = null where step_run_id = $1`, [run.id]);
+    expect(run2Claim.rowCount).toBe(1);
+    await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent')`, [run.id]);
+    expect((await db.query(`select status, anomaly from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0])
+      .toEqual({ status: "sent", anomaly: "provider_sent_after_not_sent" });
+  });
+
+  it("R6: legacy authorization is unchanged (no v2 claim needed)", async () => {
+    await db.query(`update public.sequence_enrollments set current_step_index = 0 where id = $1`, [ctx.legacyEnrollment]);
+    const run = await stepRun(db, ctx.legacyEnrollment);
+    const msg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status, created_at)
+       values ($1,$2,$3,'outbound','sms','legacy','pending', now() - interval '1 day') returning id`, [ctx.org, ctx.property, ctx.contact])).rows[0].id;
+    expect((await authorize(db, ctx, ctx.legacyEnrollment, run, msg)).authorized).toBe(true);
   });
 
   it("R3: reconcile maps step-run truth: unknown -> unknown, not attempted -> not_sent; young claims untouched", async () => {
@@ -871,6 +942,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query(`select public.routing_v2_claim_drip_send($1,$2)`, [r.new_enrollment_id, run.id]);
     expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 0 });
     await db.query(`update public.routing_v2_drip_send_claims set created_at = now() - interval '20 minutes' where step_run_id = $1`, [run.id]);
+    await db.query(`update public.sequence_step_runs set attempt_started_at = now() - interval '20 minutes' where id = $1 and attempt_started_at is not null`, [run.id]);
     expect((await db.query(`select public.routing_v2_reconcile_claims(interval '10 minutes') as c`)).rows[0].c).toEqual({ sent: 0, unknown: 0, not_sent: 1 });
   });
 
