@@ -180,6 +180,50 @@ describe("runRoutingV2PhoneAction", () => {
     expect(calls.find((c) => c.args?.p_to === "sent")?.args).toMatchObject({ p_action_id: "a1", p_send_id: SEND, p_message_id: "out-1" });
   });
 
+  describe("post-commit fence (applied + 10 s)", () => {
+    it("A leaves the reply awaiting_fence: before fence_at nothing is sent", async () => {
+      const { db, rpcs } = fakeDb({
+        flags: ON,
+        rpc: {
+          fn_routing_v2_phone_action_apply_all: applied({ replyState: "awaiting_fence" }),
+          fn_routing_v2_phone_action_release_fence: () => ({ data: { replyState: "awaiting_fence", retryAfterSeconds: 9 } }),
+        },
+      });
+      const { d, send } = deps();
+      expect(await runRoutingV2PhoneAction(db, input(), d)).toMatchObject({ outcome: "applied", replyState: "awaiting_fence" });
+      expect(send).not.toHaveBeenCalled();
+      expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_release_fence"]);
+    });
+
+    it("fence passed with no newer inbound → released to pending → sent once", async () => {
+      const { db, rpcs } = fakeDb({
+        flags: ON,
+        rpc: {
+          fn_routing_v2_phone_action_apply_all: replayed("awaiting_fence"),
+          fn_routing_v2_phone_action_release_fence: () => ({ data: { replyState: "pending" } }),
+        },
+      });
+      const { d, send } = deps();
+      expect(await runRoutingV2PhoneAction(db, input(), d)).toMatchObject({ outcome: "replayed", replyState: "sent" });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_release_fence", "reply:sending", "reply:sent"]);
+    });
+
+    it("fence found a newer inbound → A auto-undone, reply skipped, nothing sent", async () => {
+      const { db, rpcs } = fakeDb({
+        flags: ON,
+        rpc: {
+          fn_routing_v2_phone_action_apply_all: replayed("awaiting_fence"),
+          fn_routing_v2_phone_action_release_fence: () => ({ data: { replyState: "skipped", reason: "superseded_after_commit" } }),
+        },
+      });
+      const { d, send } = deps();
+      expect(await runRoutingV2PhoneAction(db, input(), d)).toMatchObject({ outcome: "replayed", replyState: "skipped" });
+      expect(send).not.toHaveBeenCalled();
+      expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_release_fence"]);
+    });
+  });
+
   it("reuses the existing reply text byte-for-byte (no new seller-facing text)", () => {
     expect(WRONG_NUMBER_REPLY_KEY).toBe("wrong_number");
     expect(WRONG_NUMBER_REPLY_BODY).toBe(APPROVED_REPLY_TEXTS.wrong_number);
@@ -298,22 +342,33 @@ describe("runRoutingV2PhoneAction", () => {
     });
   });
 
-  it("settler finishes pending replies once and settles sending ones by send id", async () => {
+  it("settler releases fenced replies, finishes pending ones once and settles sending ones by send id", async () => {
     const { db, rpcs } = fakeDb({
       flags: ON,
       action: { send_id: SEND, property_ids: [P1] },
       rpc: {
-        fn_routing_v2_phone_action_unsettled_replies: () => ({ data: [{ action_id: "a1", org_id: "org", reply_state: "pending" }, { action_id: "a2", org_id: "org", reply_state: "sending" }] }),
+        fn_routing_v2_phone_action_unsettled_replies: () => ({
+          data: [
+            { action_id: "a0", org_id: "org", reply_state: "awaiting_fence" },
+            { action_id: "a1", org_id: "org", reply_state: "pending" },
+            { action_id: "a2", org_id: "org", reply_state: "sending" },
+          ],
+        }),
+        fn_routing_v2_phone_action_release_fence: () => ({ data: { replyState: "skipped", reason: "superseded_after_commit" } }),
         fn_routing_v2_phone_action_recover_reply: () => ({ data: { replyState: "unknown" } }),
       },
     });
     const { d, send } = deps();
     expect(await settleUnsettledRoutingV2PhoneReplies(db, d)).toEqual([
+      { actionId: "a0", replyState: "skipped" },
       { actionId: "a1", replyState: "sent" },
       { actionId: "a2", replyState: "unknown" },
     ]);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(rpcs()).toEqual(["fn_routing_v2_phone_action_unsettled_replies", "reply:sending", "reply:sent", "fn_routing_v2_phone_action_recover_reply"]);
+    expect(rpcs()).toEqual([
+      "fn_routing_v2_phone_action_unsettled_replies", "fn_routing_v2_phone_action_release_fence",
+      "reply:sending", "reply:sent", "fn_routing_v2_phone_action_recover_reply",
+    ]);
   });
 
   it("scope this_property never reaches the database", async () => {

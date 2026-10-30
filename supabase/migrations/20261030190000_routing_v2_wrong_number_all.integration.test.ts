@@ -174,6 +174,15 @@ const asBounce = async () => {
 };
 const reply = (actionId: string, sendId: string, to: string, messageId: string | null = null) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_reply($1, $2, $3, $4, null) as r`, [actionId, sendId, to, messageId])).rows[0].r);
+const releaseFence = (actionId: string) =>
+  asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_release_fence($1) as r`, [actionId])).rows[0].r);
+const passFence = (actionId: string) =>
+  db.query(`update public.routing_v2_phone_actions set fence_at = clock_timestamp() - interval '1 second' where id = $1`, [actionId]);
+/** Fence passed, no newer inbound: reply released to pending. */
+const toPending = async (actionId: string) => {
+  await passFence(actionId);
+  expect((await releaseFence(actionId)).replyState).toBe("pending");
+};
 const recover = (actionId: string) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_recover_reply($1) as r`, [actionId])).rows[0].r);
 const undo = (userId: string, actionId: string) =>
@@ -227,7 +236,7 @@ describe("A. atomic apply", () => {
     const contactsBefore = await contacts();
     const r = await applyAll();
     expect(r.status).toBe("applied");
-    expect(r.replyState).toBe("pending");
+    expect(r.replyState).toBe("awaiting_fence");
     expect(r.sendId).toMatch(/^[0-9a-f-]{36}$/);
     expect([...r.applied].sort()).toEqual([ids.p1, ids.p2, ids.p3].sort());
     expect(r.skipped).toEqual([{ propertyId: ids.p5, reason: "other_phones_on_contact" }]);
@@ -255,7 +264,7 @@ describe("A. atomic apply", () => {
     const r = await applyAll();
     const after = await everything();
     const again = await applyAll();
-    expect(again).toMatchObject({ status: "replayed", actionId: r.actionId, sendId: r.sendId, actionStatus: "applied", replyState: "pending" });
+    expect(again).toMatchObject({ status: "replayed", actionId: r.actionId, sendId: r.sendId, actionStatus: "applied", replyState: "awaiting_fence" });
     expect(await everything()).toEqual(after);
   });
 
@@ -432,6 +441,8 @@ describe("B. reply after commit, keyed by the send id", () => {
   it("pending -> sending happens once; sent needs sending; a wrong send id changes nothing", async () => {
     await setFlags(ON);
     const r = await applyAll();
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false, replyState: "awaiting_fence" }); // fence first
+    await toPending(r.actionId);
     expect(await reply(r.actionId, randomUUID(), "sending")).toMatchObject({ ok: false, replyState: "pending" });
     expect(await reply(r.actionId, r.sendId, "sent", randomUUID())).toMatchObject({ ok: false, replyState: "pending" });
     expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: true, replyState: "sending" });
@@ -447,6 +458,7 @@ describe("B. reply after commit, keyed by the send id", () => {
   it("crash during the send: recovered ONLY by the send id on the source property, never by body or time", async () => {
     await setFlags(ON);
     const r = await applyAll();
+    await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
     // Same approved body, same property, after the action — but no send id: not ours.
     await db.query(
@@ -464,6 +476,7 @@ describe("B. reply after commit, keyed by the send id", () => {
   it("crash during the send, our row exists: recorded sent with that message", async () => {
     await setFlags(ON);
     const r = await applyAll();
+    await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
     const out = randomUUID();
     await db.query(
@@ -477,6 +490,7 @@ describe("B. reply after commit, keyed by the send id", () => {
   it("recovery maps the message status explicitly; nothing is assumed sent", async () => {
     await setFlags(ON);
     const r = await applyAll();
+    await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
     const out = randomUUID();
     await db.query(
@@ -505,6 +519,7 @@ describe("B. reply after commit, keyed by the send id", () => {
   it("refuse-after-insert crash: a pending row that send.ts then marks failed is never recorded sent", async () => {
     await setFlags(ON);
     const r = await applyAll();
+    await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
     const out = randomUUID();
     await db.query(
@@ -520,13 +535,17 @@ describe("B. reply after commit, keyed by the send id", () => {
     expect((await recover(r.actionId)).replyState).toBe("unknown");
   });
 
-  it("unsettled feed lists only pending/sending replies past the age", async () => {
+  it("unsettled feed lists fenced replies only once fence_at passed, then pending/sending past the age", async () => {
     await setFlags(ON);
     const r = await applyAll();
     const feed = async (age: number) =>
       (await asService(async () => (await db.query(`select action_id, reply_state from public.fn_routing_v2_phone_action_unsettled_replies($1, 50)`, [age])).rows)).map((x) => x.action_id);
+    expect(await feed(0)).not.toContain(r.actionId); // awaiting_fence, fence not passed yet
+    await passFence(r.actionId);
     expect(await feed(0)).toContain(r.actionId);
     expect(await feed(3600)).not.toContain(r.actionId);
+    await releaseFence(r.actionId);
+    expect(await feed(0)).toContain(r.actionId); // pending
     await reply(r.actionId, r.sendId, "skipped");
     expect(await feed(0)).not.toContain(r.actionId);
   });
@@ -720,6 +739,99 @@ describe("canary twin + rollback", () => {
 
 });
 
+describe("B0. post-commit fence and undo/send serialization", () => {
+  // A second connection writes messages here. Creating this migration's FKs inside the test
+  // transaction would lock `messages` against it, so this block installs the migration
+  // COMMITTED on the isolated stack first and removes it afterwards.
+  const admin = new Client({ connectionString: url });
+  beforeAll(async () => {
+    await admin.connect();
+    await admin.query(`begin; ${MIGRATION}; commit;`);
+  });
+  afterAll(async () => {
+    await admin.query(`begin; ${ROLLBACK}; commit;`);
+    await admin.end();
+  });
+
+  it("before fence_at the reply stays awaiting_fence with a retry delay", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    const f = await releaseFence(r.actionId);
+    expect(f.replyState).toBe("awaiting_fence");
+    expect(f.retryAfterSeconds).toBeGreaterThan(0);
+    expect(f.retryAfterSeconds).toBeLessThanOrEqual(10);
+    const row = (await db.query(`select fence_at - created_at as gap from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0];
+    expect(row.gap).toBeTruthy();
+  });
+
+  it("no newer inbound: after the fence the reply is released and can be sent", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await passFence(r.actionId);
+    expect(await releaseFence(r.actionId)).toMatchObject({ replyState: "pending" });
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: true });
+    expect(await reply(r.actionId, r.sendId, "sent", randomUUID())).toMatchObject({ ok: true, replyState: "sent" });
+    expect(await dispo(ids.p1)).toBe("wrong_number");
+  });
+
+  it("a newer inbound committed by another connection while A holds its locks: after the fence A is auto-undone, no reply", async () => {
+    await setFlags(ON);
+    const before = await snapshot();
+    const r = await applyAll(); // our transaction still holds A's advisory + row locks
+    expect((await enrollment(ids.e2)).status).toBe("paused");
+    const other = new Client({ connectionString: url });
+    await other.connect();
+    const late = randomUUID();
+    try {
+      // The live inbound path, committing late in its own transaction (FKs point at this test's
+      // uncommitted fixtures, so the insert skips them; it touches none of A's locked rows).
+      await other.query("set session_replication_role = replica");
+      await other.query(
+        `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, from_address, created_at)
+         values ($1, $2, $3, $4, 'sms', 'inbound', 'actually this is me', $5, now())`,
+        [late, orgId, ids.p2, randomUUID(), X],
+      );
+      await passFence(r.actionId);
+      const f = await releaseFence(r.actionId);
+      expect(f).toMatchObject({ replyState: "skipped", reason: "superseded_after_commit", newerInboundMessageId: late });
+      expect(f.undo.status).toBe("undone");
+      expect(await snapshot()).toEqual(before); // nothing stays wrongly closed
+      expect((await enrollment(ids.e2)).status).toBe("active");
+      const action = (await db.query(`select status, reply_state, reply_reason from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0];
+      expect(action).toEqual({ status: "undone", reply_state: "skipped", reply_reason: "superseded_after_commit" });
+      expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false });
+      const audit = (await db.query(`select count(*) from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_superseded_after_commit'`, [orgId])).rows[0].count;
+      expect(Number(audit)).toBe(1);
+      const undoneEvents = (await db.query(`select payload->>'mode' m from public.lead_events where org_id = $1 and event_type = 'routing_v2_phone_action_undone'`, [orgId])).rows;
+      expect(undoneEvents.every((e) => e.m === "superseded_after_commit")).toBe(true);
+    } finally {
+      await other.query("delete from public.messages where id = $1", [late]);
+      await other.end();
+    }
+  });
+
+  it("undo while the reply is in flight (sending) = busy, nothing changed; after it settles, undo works", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    const snap = await snapshot();
+    expect(await undo(ownerId, r.actionId)).toMatchObject({ status: "busy", reason: "reply_in_flight", restored: [] });
+    expect(await snapshot()).toEqual(snap);
+    await reply(r.actionId, r.sendId, "sent", randomUUID());
+    expect((await undo(ownerId, r.actionId)).status).toBe("undone");
+  });
+
+  it("undo first: the not-yet-started reply is skipped and pending -> sending is refused", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    expect((await undo(ownerId, r.actionId)).status).toBe("undone");
+    expect(await reply(r.actionId, r.sendId, "sending")).toMatchObject({ ok: false, replyState: "skipped" });
+  });
+
+});
+
 describe("self-sweep", () => {
   it("(b) lock order is the same in apply_all and undo: phone -> contacts -> suppressions -> property advisory -> properties -> enrollments", () => {
     const sql = readFileSync(path.join(__dirname, "20261030190000_routing_v2_wrong_number_all.sql"), "utf8");
@@ -732,11 +844,16 @@ describe("self-sweep", () => {
       "routing_v2_phone_lock(", "from public.contacts c\n  where c.id = any(v_contacts)", "from public.sms_phone_suppressions sp",
       "hashtext('routing_v2:'", "from public.properties p where p.id = any(v_ids) order by p.id for update", "update public.sequence_enrollments e",
     ]);
-    const undoOrder = order(body("fn_undo_routing_v2_phone_action"), [
-      "routing_v2_phone_lock(", "order by c.id for share", "lock table public.sms_phone_suppressions",
+    // Undo: the wrapper takes the phone lock then calls the core (contacts -> suppressions -> ...).
+    const undoWrap = order(body("fn_undo_routing_v2_phone_action"), ["routing_v2_phone_lock(", "routing_v2_phone_action_undo_core("]);
+    const fenceWrap = order(body("fn_routing_v2_phone_action_release_fence"), ["routing_v2_phone_lock(", "routing_v2_phone_action_undo_core("]);
+    const replyWrap = order(body("fn_routing_v2_phone_action_reply"), ["routing_v2_phone_lock(", "for update"]);
+    const undoOrder = order(body("routing_v2_phone_action_undo_core"), [
+      "order by c.id for share", "lock table public.sms_phone_suppressions",
       "hashtext('routing_v2:'", "for update of p", "from public.sequence_enrollments e",
     ]);
-    for (const seq of [apply, undoOrder]) {
+    expect(body("routing_v2_phone_action_undo_core")).not.toContain("routing_v2_phone_lock(");
+    for (const seq of [apply, undoOrder, undoWrap, fenceWrap, replyWrap]) {
       expect(seq.every((i) => i > 0)).toBe(true);
       expect([...seq].sort((a, b) => a - b)).toEqual(seq);
     }
@@ -784,6 +901,7 @@ describe("self-sweep", () => {
       [`update public.routing_v2_phone_actions set reply_state = 'bogus' where id = $1`, [r.actionId]],
       [`update public.routing_v2_phone_actions set reply_state = null where id = $1`, [r.actionId]],
       [`update public.routing_v2_phone_actions set status = 'undone' where id = $1`, [r.actionId]], // undone needs undone_at
+      [`update public.routing_v2_phone_actions set fence_at = null where id = $1`, [r.actionId]], // awaiting_fence needs fence_at
       [`update public.routing_v2_phone_action_properties set outcome = 'bogus' where action_id = $1`, [r.actionId]],
       [`update public.routing_v2_phone_action_properties set outcome = 'skipped' where action_id = $1 and outcome = 'applied'`, [r.actionId]],
       [`update public.routing_v2_phone_action_properties set paused_at = null where action_id = $1 and cardinality(paused_enrollment_ids) > 0`, [r.actionId]],
@@ -802,7 +920,7 @@ describe("self-sweep", () => {
       "routing_v2_phone_action_properties_uidx", "routing_v2_phone_action_properties_property_idx",
       "messages_outbound_sms_idempotency_idx", "idx_messages_created", "routing_v2_shadow_decisions_inbound_uidx",
     ]));
-    expect(idx.find((i) => i.indexname === "routing_v2_phone_actions_unsettled_idx")?.indexdef).toMatch(/reply_state.*pending.*sending/);
+    expect(idx.find((i) => i.indexname === "routing_v2_phone_actions_unsettled_idx")?.indexdef).toMatch(/reply_state.*awaiting_fence.*pending.*sending/);
   });
 
   it("(f) grants, RLS and search_path", async () => {
@@ -813,6 +931,7 @@ describe("self-sweep", () => {
       "public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text)",
       "public.fn_routing_v2_phone_action_recover_reply(uuid)",
       "public.fn_routing_v2_phone_action_unsettled_replies(integer, integer)",
+      "public.fn_routing_v2_phone_action_release_fence(uuid)",
     ];
     for (const fn of serviceOnly) {
       expect(await can("service_role", fn), fn).toBe(true);
@@ -821,7 +940,7 @@ describe("self-sweep", () => {
     }
     expect(await can("authenticated", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(true);
     expect(await can("anon", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(false);
-    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()"]) {
+    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()", "public.routing_v2_phone_action_undo_core(uuid, uuid, text)"]) {
       for (const role of ["anon", "authenticated", "service_role"]) expect(await can(role, fn), `${role} ${fn}`).toBe(false);
     }
     const tables = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties')`)).rows;
@@ -836,7 +955,7 @@ describe("self-sweep", () => {
       select p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), '') cfg
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public' and (p.proname like '%routing_v2_phone%' or p.proname = 'routing_v2_clear_pause_token')`)).rows;
-    expect(definers.length).toBeGreaterThanOrEqual(9);
+    expect(definers.length).toBeGreaterThanOrEqual(11);
     for (const d of definers) expect(d.cfg, d.proname).toMatch(/search_path=public, pg_temp/);
   });
 

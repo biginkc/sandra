@@ -36,9 +36,12 @@ create table if not exists public.routing_v2_phone_actions (
   -- A row exists only once A committed: applied, or undone by a person.
   status text not null check (status in ('applied', 'undone')),
   property_ids uuid[] not null default '{}',
-  -- Reply (B). pending: never attempted. sending: handed to the provider boundary, outcome
+  -- Reply (B). awaiting_fence: held until fence_at, then re-checked for a newer inbound.
+  -- pending: never attempted. sending: handed to the provider boundary, outcome
   -- not yet recorded. sent/failed/unknown/skipped/not_needed: final.
-  reply_state text not null check (reply_state in ('pending', 'sending', 'sent', 'failed', 'unknown', 'skipped', 'not_needed')),
+  reply_state text not null check (reply_state in ('awaiting_fence', 'pending', 'sending', 'sent', 'failed', 'unknown', 'skipped', 'not_needed')),
+  -- Post-commit fence: the reply is released no earlier than this (applied + 10 s).
+  fence_at timestamptz,
   send_id uuid not null default gen_random_uuid(),
   reply_message_id uuid,
   reply_reason text,
@@ -48,7 +51,8 @@ create table if not exists public.routing_v2_phone_actions (
   undone_at timestamptz,
   undone_by uuid references auth.users(id) on delete set null,
   constraint routing_v2_phone_actions_undone_pair check (undone_by is null or undone_at is not null),
-  constraint routing_v2_phone_actions_undone_shape check ((status = 'undone') = (undone_at is not null))
+  constraint routing_v2_phone_actions_undone_shape check ((status = 'undone') = (undone_at is not null)),
+  constraint routing_v2_phone_actions_fence_shape check (reply_state <> 'awaiting_fence' or fence_at is not null)
 );
 comment on table public.routing_v2_phone_actions is
   'Routing v2 PR-G: one row per source inbound whose phone-level action (wrong_number_all, bad_number) committed. Unique per inbound = duplicate webhooks replay.';
@@ -61,7 +65,7 @@ create index if not exists routing_v2_phone_actions_org_created_idx
   on public.routing_v2_phone_actions (org_id, created_at desc);
 create index if not exists routing_v2_phone_actions_unsettled_idx
   on public.routing_v2_phone_actions (created_at)
-  where reply_state in ('pending', 'sending');
+  where reply_state in ('awaiting_fence', 'pending', 'sending');
 
 create table if not exists public.routing_v2_phone_action_properties (
   id uuid primary key default gen_random_uuid(),
@@ -462,10 +466,12 @@ begin
   -- Every check passed: write it all.
   insert into public.routing_v2_phone_actions (
     org_id, source_property_id, source_inbound_message_id, action, phone_e164, status,
-    property_ids, reply_state, decision
+    property_ids, reply_state, fence_at, decision
   ) values (
     v_message.org_id, v_message.property_id, p_source_inbound_message_id, p_action, p_phone, 'applied',
-    v_ids, case p_action when 'wrong_number_all' then 'pending' else 'not_needed' end, coalesce(p_decision, '{}'::jsonb)
+    v_ids, case p_action when 'wrong_number_all' then 'awaiting_fence' else 'not_needed' end,
+    case p_action when 'wrong_number_all' then clock_timestamp() + interval '10 seconds' end,
+    coalesce(p_decision, '{}'::jsonb)
   )
   returning id, send_id into v_action_id, v_send_id;
 
@@ -534,7 +540,7 @@ begin
 
   return jsonb_build_object(
     'status', 'applied', 'actionId', v_action_id, 'sendId', v_send_id,
-    'replyState', case p_action when 'wrong_number_all' then 'pending' else 'not_needed' end,
+    'replyState', case p_action when 'wrong_number_all' then 'awaiting_fence' else 'not_needed' end,
     'applied', to_jsonb(v_applied), 'skipped', v_skipped, 'propertyIds', to_jsonb(v_ids)
   );
 end;
@@ -566,10 +572,14 @@ begin
   if p_to not in ('sending', 'skipped', 'sent', 'failed', 'unknown') then
     raise exception 'unsupported reply state: %', p_to using errcode = '22023';
   end if;
-  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
   if not found then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+  -- Same order as undo (phone lock, then the action row), so pending -> sending can never
+  -- interleave with an undo of the same action.
+  perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
+  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
   if v.send_id = p_send_id and (
        -- An undone action never starts its reply.
        (v.reply_state = 'pending' and p_to = 'sending' and v.status = 'applied')
@@ -652,8 +662,9 @@ set search_path = public, pg_temp
 as $$
   select a.id, a.org_id, a.reply_state
   from public.routing_v2_phone_actions a
-  where a.reply_state in ('pending', 'sending')
+  where a.reply_state in ('awaiting_fence', 'pending', 'sending')
     and (a.status = 'applied' or a.reply_state = 'sending')
+    and (a.reply_state <> 'awaiting_fence' or a.fence_at <= now())
     and coalesce(a.reply_updated_at, a.created_at) <= now() - make_interval(secs => greatest(coalesce(p_older_than_seconds, 120), 0))
   order by a.created_at
   limit greatest(coalesce(p_limit, 25), 1);
@@ -661,8 +672,11 @@ $$;
 revoke all on function public.fn_routing_v2_phone_action_unsettled_replies(integer, integer) from public, anon, authenticated;
 grant execute on function public.fn_routing_v2_phone_action_unsettled_replies(integer, integer) to service_role;
 
--- C. Undo (a person). One transaction under the phone lock.
-create or replace function public.fn_undo_routing_v2_phone_action(p_action_id uuid)
+-- C. Undo core: caller holds the phone lock and the action row lock. p_mode 'user' (a person)
+-- or 'superseded_after_commit' (the post-commit fence found a newer inbound). In the fence mode
+-- the decision-revision check is skipped, because the newer inbound itself moves it; dispo,
+-- follow-up, hold and suppression checks still apply. Internal only.
+create or replace function public.routing_v2_phone_action_undo_core(p_action_id uuid, p_actor uuid, p_mode text)
 returns jsonb
 language plpgsql
 security definer
@@ -671,7 +685,6 @@ set search_path = public, pg_temp
 set lock_timeout = '3s'
 as $$
 declare
-  v_actor uuid := auth.uid();
   v_action public.routing_v2_phone_actions%rowtype;
   v_row public.routing_v2_phone_action_properties%rowtype;
   v_cur record;
@@ -686,31 +699,15 @@ declare
   v_resumed integer := 0;
   v_not_resumed jsonb := '[]'::jsonb;
   v_remaining integer;
+  v_actor_type text := case when p_mode = 'user' then 'user' else 'system' end;
+  v_actor uuid := case when p_mode = 'user' then p_actor else null end;
 begin
-  if v_actor is null then
-    raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
+  if p_mode not in ('user', 'superseded_after_commit') then
+    raise exception 'unsupported undo mode: %', p_mode using errcode = '22023';
   end if;
-  if p_action_id is null then
-    raise exception 'INVALID_REQUEST' using errcode = '22023';
-  end if;
-
   select * into v_action from public.routing_v2_phone_actions where id = p_action_id;
-  if not found then
-    raise exception 'NOT_FOUND' using errcode = 'P0002';
-  end if;
-  if not public.hugo_has_active_org_access(v_action.org_id)
-     or v_action.org_id not in (select public.pipeline_runs_readable_org_ids()) then
-    raise exception 'FORBIDDEN' using errcode = '42501';
-  end if;
 
-  perform public.routing_v2_phone_lock(v_action.org_id, v_action.phone_e164);
-  select * into v_action from public.routing_v2_phone_actions where id = p_action_id for update;
-  if v_action.status = 'undone' then
-    return jsonb_build_object('status', 'already_undone', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
-      'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
-  end if;
-
-  -- Same lock order as A: phone advisory (above) -> contacts rows -> sms_phone_suppressions
+  -- Same lock order as A: phone advisory (caller) -> contacts rows -> sms_phone_suppressions
   -- -> per-property advisory -> properties rows -> enrollments.
   -- The only contact data undo reads is each homeowner contact's opt-out flags (existing
   -- rows): share-lock those rows so an opt-out cannot commit between check and restore.
@@ -723,12 +720,12 @@ begin
   order by c.id for share;
   -- Undo is rare and short: SHARE mode blocks every concurrent suppression insert/update
   -- (from any writer, lock or not) until this transaction commits, so the check below cannot
-  -- be overtaken. Held only for this undo transaction (milliseconds; at most lock_timeout
-  -- waiting to get it). Busy = nothing changed; retry later.
+  -- be overtaken. Held only for this transaction (milliseconds; at most lock_timeout waiting
+  -- to get it). Busy = nothing changed; retry later.
   begin
     lock table public.sms_phone_suppressions in share mode;
   exception when lock_not_available then
-    return jsonb_build_object('status', 'busy', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
+    return jsonb_build_object('status', 'busy', 'reason', 'suppression_lock', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
       'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
   end;
   v_phone_suppressed := exists (
@@ -757,7 +754,7 @@ begin
       when v_phone_suppressed then 'phone_suppressed'
       when v_cur.outreach_dispo is distinct from v_row.applied_dispo
         or v_cur.follow_up_at is distinct from v_row.applied_follow_up_at
-        or v_cur.decision_context_revision is distinct from v_row.recorded_revision then 'state_changed'
+        or (p_mode = 'user' and v_cur.decision_context_revision is distinct from v_row.recorded_revision) then 'state_changed'
       -- A left needs_human_attention = false and no reason; anything else is a later hold.
       when v_cur.needs_human_attention is distinct from false or v_cur.last_ai_escalation_reason is not null then 'hold_changed'
       when v_cur.contact_suppressed then 'contact_suppressed'
@@ -769,8 +766,8 @@ begin
       v_skipped := v_skipped || jsonb_build_object('propertyId', v_row.property_id, 'reason', v_reason);
       if v_found then
         insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload)
-        values (v_action.org_id, v_row.property_id, 'user', v_actor, 'routing_v2_phone_action_undo_skipped',
-          jsonb_build_object('reason', v_reason, 'phone_action_id', v_action.id, 'action', v_action.action));
+        values (v_action.org_id, v_row.property_id, v_actor_type, v_actor, 'routing_v2_phone_action_undo_skipped',
+          jsonb_build_object('reason', v_reason, 'mode', p_mode, 'phone_action_id', v_action.id, 'action', v_action.action));
       end if;
       continue;
     end if;
@@ -783,8 +780,6 @@ begin
         updated_at = now()
     where id = v_row.property_id and org_id = v_action.org_id;
 
-    -- Exactly the drips A paused; the resume function re-checks each (still paused for
-    -- inbound_reply, no Norma hold, no unresolved send).
     foreach v_enrollment in array v_row.paused_enrollment_ids loop
       -- Only A's own pause: still paused for inbound_reply, still carrying this action's token
       -- and exactly the stamp A wrote. A person's resume or a later re-pause clears the token.
@@ -809,8 +804,8 @@ begin
 
     insert into public.lead_events (org_id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id)
     values (
-      v_action.org_id, v_row.property_id, 'user', v_actor, 'routing_v2_phone_action_undone',
-      jsonb_build_object('action', v_action.action, 'applied_dispo', v_row.applied_dispo, 'restored_dispo', v_row.prior_outreach_dispo,
+      v_action.org_id, v_row.property_id, v_actor_type, v_actor, 'routing_v2_phone_action_undone',
+      jsonb_build_object('action', v_action.action, 'mode', p_mode, 'applied_dispo', v_row.applied_dispo, 'restored_dispo', v_row.prior_outreach_dispo,
         'phone_action_id', v_action.id, 'source_inbound_message_id', v_action.source_inbound_message_id),
       'routing_v2_phone_action_properties.undone', v_row.id
     )
@@ -821,15 +816,18 @@ begin
   select count(*) into v_remaining
   from public.routing_v2_phone_action_properties
   where action_id = v_action.id and outcome = 'applied' and undone_at is null;
-  if v_remaining = 0 then
-    update public.routing_v2_phone_actions
-    set status = 'undone', undone_at = now(), undone_by = v_actor,
-        -- A reply that never started is not sent for an undone action.
-        reply_state = case when reply_state = 'pending' then 'skipped' else reply_state end,
-        reply_reason = case when reply_state = 'pending' then 'undone_before_send' else reply_reason end,
-        reply_updated_at = case when reply_state = 'pending' then now() else reply_updated_at end
-    where id = v_action.id;
-  end if;
+
+  -- Any undo stops a reply that has not started (even a partial one).
+  update public.routing_v2_phone_actions
+  set status = case when v_remaining = 0 then 'undone' else status end,
+      undone_at = case when v_remaining = 0 then now() else undone_at end,
+      undone_by = case when v_remaining = 0 then v_actor else undone_by end,
+      reply_reason = case when reply_state in ('pending', 'awaiting_fence')
+                          then case when p_mode = 'user' then 'undone_before_send' else 'superseded_after_commit' end
+                          else reply_reason end,
+      reply_updated_at = case when reply_state in ('pending', 'awaiting_fence') then now() else reply_updated_at end,
+      reply_state = case when reply_state in ('pending', 'awaiting_fence') then 'skipped' else reply_state end
+  where id = v_action.id;
 
   return jsonb_build_object(
     'status', case when v_remaining = 0 then 'undone' else 'partial' end,
@@ -838,7 +836,115 @@ begin
   );
 end;
 $$;
+revoke all on function public.routing_v2_phone_action_undo_core(uuid, uuid, text) from public, anon, authenticated, service_role;
+
+-- C. Undo (a person). One transaction under the phone lock. A reply in flight (`sending`)
+-- makes undo busy: only a not-yet-started or finished reply can be undone.
+create or replace function public.fn_undo_routing_v2_phone_action(p_action_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_actor uuid := auth.uid();
+  v_action public.routing_v2_phone_actions%rowtype;
+begin
+  if v_actor is null then
+    raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
+  end if;
+  if p_action_id is null then
+    raise exception 'INVALID_REQUEST' using errcode = '22023';
+  end if;
+  select * into v_action from public.routing_v2_phone_actions where id = p_action_id;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if not public.hugo_has_active_org_access(v_action.org_id)
+     or v_action.org_id not in (select public.pipeline_runs_readable_org_ids()) then
+    raise exception 'FORBIDDEN' using errcode = '42501';
+  end if;
+
+  perform public.routing_v2_phone_lock(v_action.org_id, v_action.phone_e164);
+  select * into v_action from public.routing_v2_phone_actions where id = p_action_id for update;
+  if v_action.status = 'undone' then
+    return jsonb_build_object('status', 'already_undone', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
+      'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
+  end if;
+  if v_action.reply_state = 'sending' then
+    return jsonb_build_object('status', 'busy', 'reason', 'reply_in_flight', 'restored', '[]'::jsonb, 'stateChanged', '[]'::jsonb,
+      'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
+  end if;
+  return public.routing_v2_phone_action_undo_core(p_action_id, v_actor, 'user');
+end;
+$$;
 revoke all on function public.fn_undo_routing_v2_phone_action(uuid) from public, anon;
 grant execute on function public.fn_undo_routing_v2_phone_action(uuid) to authenticated;
+
+-- B0. Post-commit fence. A leaves a wrong-number reply `awaiting_fence` until fence_at
+-- (applied + 10 s). After that, under the phone lock, any inbound from the phone (any
+-- property) newer than the trigger means A raced a late-committing text: A is undone
+-- automatically (superseded_after_commit), the reply is skipped and audited. Otherwise the
+-- reply is released to `pending`.
+create or replace function public.fn_routing_v2_phone_action_release_fence(p_action_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v public.routing_v2_phone_actions%rowtype;
+  v_trigger_at timestamptz;
+  v_newer uuid;
+  v_undo jsonb;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
+  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  if v.reply_state <> 'awaiting_fence' then
+    return jsonb_build_object('replyState', v.reply_state, 'sendId', v.send_id);
+  end if;
+  if v.fence_at > clock_timestamp() then
+    return jsonb_build_object('replyState', 'awaiting_fence', 'sendId', v.send_id,
+      'retryAfterSeconds', greatest(1, ceil(extract(epoch from (v.fence_at - clock_timestamp()))))::int);
+  end if;
+
+  select m.created_at into v_trigger_at from public.messages m where m.id = v.source_inbound_message_id;
+  select m.id into v_newer
+  from public.messages m
+  where m.created_at >= v_trigger_at
+    and m.org_id = v.org_id and m.channel = 'sms' and m.direction = 'inbound'
+    and m.id <> v.source_inbound_message_id
+    and public.routing_v2_phone_digits(m.from_address) = public.routing_v2_phone_digits(v.phone_e164)
+    and (m.created_at > v_trigger_at or m.id > v.source_inbound_message_id)
+  order by m.created_at
+  limit 1;
+
+  if v_newer is null then
+    update public.routing_v2_phone_actions
+    set reply_state = 'pending', reply_reason = 'fence_passed', reply_updated_at = now()
+    where id = v.id;
+    return jsonb_build_object('replyState', 'pending', 'sendId', v.send_id);
+  end if;
+
+  v_undo := public.routing_v2_phone_action_undo_core(v.id, null, 'superseded_after_commit');
+  if v_undo->>'status' = 'busy' then
+    return jsonb_build_object('replyState', 'awaiting_fence', 'sendId', v.send_id, 'retryAfterSeconds', 5, 'reason', 'undo_busy');
+  end if;
+  insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
+  values (v.org_id, v.source_property_id, 'system', 'routing_v2_phone_action_superseded_after_commit',
+    jsonb_build_object('phone_action_id', v.id, 'newer_inbound_message_id', v_newer, 'undo', v_undo));
+  return jsonb_build_object('replyState', 'skipped', 'sendId', v.send_id, 'reason', 'superseded_after_commit',
+    'newerInboundMessageId', v_newer, 'undo', v_undo);
+end;
+$$;
+revoke all on function public.fn_routing_v2_phone_action_release_fence(uuid) from public, anon, authenticated;
+grant execute on function public.fn_routing_v2_phone_action_release_fence(uuid) to service_role;
 
 commit;

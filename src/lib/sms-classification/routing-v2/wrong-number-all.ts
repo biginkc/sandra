@@ -108,7 +108,7 @@ export type RoutingV2PhoneActionDeps = {
   sendWrongNumberReply: SendWrongNumberReply;
 };
 
-export type ReplyState = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped" | "not_needed";
+export type ReplyState = "awaiting_fence" | "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped" | "not_needed";
 
 export type RoutingV2PhoneActionResult =
   | { outcome: "flag_off" }
@@ -154,7 +154,8 @@ async function setReply(db: Loose, actionId: string, sendId: string, to: ReplySt
 }
 
 /**
- * B. Send the approved reply AFTER the apply committed. At most once: `pending → sending` is an
+ * B. Send the approved reply AFTER the apply committed and its 10 s post-commit fence passed
+ * (until then `awaiting_fence`; the settler releases it). At most once: `pending → sending` is an
  * atomic transition taken before the provider call, and a `sending` row is only ever settled by
  * its send id (recover_reply), never re-sent. Properties stay closed whatever happens here, as
  * today's wrong-number path does.
@@ -165,12 +166,21 @@ export async function settleRoutingV2PhoneActionReply(
   deps: RoutingV2PhoneActionDeps,
 ): Promise<ReplyState> {
   const db = supabase as unknown as Loose;
-  if (args.replyState === "sending") {
+  let replyState = args.replyState;
+  if (replyState === "awaiting_fence") {
+    // Post-commit fence (applied + 10 s): released to pending only if no newer inbound from the
+    // phone committed meanwhile; otherwise A is auto-undone (superseded_after_commit) and skipped.
+    const { data, error } = await db.rpc("fn_routing_v2_phone_action_release_fence", { p_action_id: args.actionId });
+    if (error) throw new Error(String(error.message));
+    replyState = ((data ?? {}) as { replyState?: ReplyState }).replyState ?? "awaiting_fence";
+    if (replyState !== "pending") return replyState;
+  }
+  if (replyState === "sending") {
     const { data, error } = await db.rpc("fn_routing_v2_phone_action_recover_reply", { p_action_id: args.actionId });
     if (error) throw new Error(String(error.message));
     return ((data ?? {}) as { replyState?: ReplyState }).replyState ?? "sending";
   }
-  if (args.replyState !== "pending") return args.replyState;
+  if (replyState !== "pending") return replyState;
 
   // E. Flags/canary off after the apply committed: record skipped, send nothing.
   if (!(await stillAllowed(supabase, args.orgId, args.propertyIds))) {
@@ -255,7 +265,7 @@ export async function runRoutingV2PhoneAction(
   if (a.status === "replayed" && a.actionStatus !== "applied") {
     return { outcome: "replayed", actionId: a.actionId, actionStatus: a.actionStatus ?? "unknown", replyState };
   }
-  if (replyState === "pending" || replyState === "sending") {
+  if (replyState === "awaiting_fence" || replyState === "pending" || replyState === "sending") {
     try {
       replyState = await settleRoutingV2PhoneActionReply(
         supabase,
