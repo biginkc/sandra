@@ -16,6 +16,9 @@ export const V2_JEV_FAILED: Extract<V2Classification, { kind: "failed" }> = Obje
 /** No DealMachine key configured: the approved no-value path (fair-price reply + alert). */
 export const DEALMACHINE_NO_KEY: ValueLookupResult = Object.freeze({ kind: "no_value", reason: "no_api_key" });
 
+/** The stop adapter could not run (no inbound phone): today's human-review path. */
+export const MODEL_STOP_NO_PHONE = Object.freeze({ kind: "human_review" as const, reason: "model_stop_failed:no_phone" as const });
+
 /**
  * Outbox delivery refusal reasons (not hold reasons: a refused reply holds as
  * `nine_reply_not_sent:<reason>`, an existing registered family).

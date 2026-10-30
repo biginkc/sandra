@@ -14,7 +14,11 @@ const h = vi.hoisted(() => ({
   record: vi.fn(),
   evidence: vi.fn(),
   transition: vi.fn(),
+  stop: vi.fn(),
+  phone: vi.fn(),
 }));
+vi.mock("@/lib/sms-classification/routing-v2/model-stop-suppression", () => ({ executeV2Stop: h.stop }));
+vi.mock("@/lib/sms-classification/routing-v2/wrong-number-all", () => ({ runRoutingV2PhoneAction: h.phone }));
 vi.mock("@/lib/sms-classification/routing-v2/flags", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/sms-classification/routing-v2/flags")>()),
   readRoutingV2Flags: vi.fn(async () => h.flags),
@@ -61,7 +65,7 @@ function fakeSupabase() {
 
 function args(body = "Who is this?", property = PROPERTY) {
   return {
-    input: { propertyId: property, contactId: "c1", conversationId: "conv1", inboundMessageId: "in1", inboundBody: body },
+    input: { propertyId: property, contactId: "c1", conversationId: "conv1", inboundMessageId: "in1", inboundBody: body, inboundFromPhone: "+18165550100" },
     property: { id: property, org_id: "org1", state: "MO", ai_responder_disabled: false, homeowner_contact_id: "c1", last_ai_escalation_reason: null, needs_human_attention: false, outreach_dispo: null },
     claim: { claimId: null },
   } as never;
@@ -76,7 +80,9 @@ const WHO = { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }
 
 beforeEach(() => {
   h.flags = ON;
-  for (const f of [h.classify, h.record, h.evidence, h.transition]) f.mockReset();
+  for (const f of [h.classify, h.record, h.evidence, h.transition, h.stop, h.phone]) f.mockReset();
+  h.stop.mockResolvedValue({ kind: "human_review", reason: "flag_off" });
+  h.phone.mockResolvedValue({ outcome: "flag_off" });
   h.classify.mockResolvedValue({ kind: "decided" });
   h.record.mockResolvedValue("recorded");
   h.evidence.mockResolvedValue(evidence(WHO));
@@ -157,5 +163,42 @@ describe("routing v2 live dispatch hook", () => {
   ])("transition refusal %s", async (reason, expected) => {
     h.transition.mockResolvedValue({ kind: "refused", reason, alertsQueued: 0 });
     expect(await runRoutingV2LiveStep(fakeSupabase().client, args())).toEqual(expected);
+  });
+
+  describe("step (c): stop and phone-level adapters", () => {
+    const STOP = { road: "stop", steps: [{ kind: "hold", reason: "asked_stop" }] };
+    const WRONG = { road: "wrong_number_close", steps: [{ kind: "wrong_number_close" }] };
+    const BOUNCE = { road: "bad_number", steps: [{ kind: "hold", reason: "bad_number" }] };
+    it("a confident Jev stop with model_stop_suppression on: model_stop suppression, nothing sent", async () => {
+      h.evidence.mockResolvedValue(evidence(STOP, { provenance: { by: "jev", row: "2", step: "asked_stop", signal: "asked_stop", probability: 0.92 } }));
+      h.stop.mockResolvedValue({ kind: "suppressed", suppressionId: "s1", status: "suppressed" });
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("stop texting me"))).toEqual({ outcome: "opted_out", reason: "routing_v2:model_stop" });
+      expect(h.stop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ phone: "+18165550100", inboundMessageId: "in1", decision: expect.objectContaining({ road: "stop" }) }), expect.anything());
+      expect(h.transition).not.toHaveBeenCalled();
+    });
+    it("stop with the slice off (or not eligible): today's human-review hold", async () => {
+      h.evidence.mockResolvedValue(evidence(STOP));
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("Not interested in selling, please no more"))).toEqual({ outcome: "escalated", reason: "nine_asked_stop" });
+    });
+    it("wrong person, scope all (existing text match) with wrong_number_all on: phone-wide close", async () => {
+      h.evidence.mockResolvedValue(evidence(WRONG, { provenance: { by: "jev", row: "3", step: "wrong", signal: "wrong_person", probability: 0.9 } }));
+      h.phone.mockResolvedValue({ outcome: "applied", kind: "wrong_number_all", actionId: "a1", applied: ["p"], skipped: [], replyState: "sent" });
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("Nobody by that name here"))).toEqual({ outcome: "auto_closed", reason: "routing_v2:wrong_number_close" });
+      expect(h.phone).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ wrongScope: "all", expectedRevision: 7, fromPhone: "+18165550100" }), expect.anything());
+    });
+    it("scope this property only: the phone action is not taken (PR-G refuses), today's route runs", async () => {
+      h.evidence.mockResolvedValue(evidence(WRONG));
+      h.phone.mockResolvedValue({ outcome: "not_applicable", reason: "scope_not_all" });
+      // Replies slice off here -> a person closes it (today's automation switch path needs the slice).
+      h.flags = { ...ON, replies: false };
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("I sold that house"))).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      expect(h.phone).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ wrongScope: "this_property" }), expect.anything());
+    });
+    it("a bounce with the flag off holds; an unsettled inbound is re-dispatched (bounded)", async () => {
+      h.evidence.mockResolvedValue(evidence(BOUNCE, { provenance: { by: "code", check: "bad_number" } }));
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("This number has no SMS capabilities"))).toEqual({ outcome: "escalated", reason: "nine_needs_person" });
+      h.phone.mockResolvedValue({ outcome: "not_settled", retryable: true, retryAfterSeconds: 30 });
+      expect(await runRoutingV2LiveStep(fakeSupabase().client, args("This number has no SMS capabilities"))).toMatchObject({ outcome: "retry", reason: "reply_pending", attempt: 1 });
+    });
   });
 });

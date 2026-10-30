@@ -459,18 +459,21 @@ describe("undoRoutingV2PhoneAction", () => {
   });
 });
 
-describe("live parity: not wired", () => {
-  it("no live module imports the PR-G hook (cutover PR wires it)", () => {
+describe("live wiring: only the routing v2 live hook", () => {
+  it("only ai-responder/dispatch.ts (the flag-gated v2 live step) imports the PR-G hook", () => {
     const root = path.resolve(__dirname, "../../..");
     const hits: string[] = [];
     const walk = (dir: string) => {
       for (const name of readdirSync(dir)) {
         const p = path.join(dir, name);
         if (statSync(p).isDirectory()) walk(p);
-        else if (/\.(ts|tsx)$/.test(name) && !/wrong-number-all(\.test)?\.ts$/.test(name) && readFileSync(p, "utf8").includes("wrong-number-all")) hits.push(p);
+        else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name) && !/wrong-number-all\.ts$/.test(name) && readFileSync(p, "utf8").includes("wrong-number-all")) hits.push(p);
       }
     };
     walk(root);
-    expect(hits).toEqual([]);
+    expect(hits.map((h) => path.relative(root, h))).toEqual([path.join("lib", "ai-responder", "dispatch.ts")]);
+    const dispatch = readFileSync(path.join(root, "lib/ai-responder/dispatch.ts"), "utf8");
+    // Called from exactly one place: the routing v2 phone-action branch.
+    expect(dispatch.match(/runRoutingV2PhoneAction\(/g)).toHaveLength(1);
   });
 });

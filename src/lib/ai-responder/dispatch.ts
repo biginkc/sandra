@@ -124,16 +124,22 @@ import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
-import { isV2Eligible, readRoutingV2Flags, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { isV2Eligible, readRoutingV2Flags, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
+import { runRoutingV2PhoneAction } from "@/lib/sms-classification/routing-v2/wrong-number-all";
+import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-decisions";
 import {
   DEALMACHINE_NO_KEY,
+  MODEL_STOP_NO_PHONE,
   V2_OUTBOX_REASON,
   liveHoldReason,
   liveStepFor,
   V2_JEV_FAILED,
   queueLiveHoldAlerts,
   readLiveV2Evidence,
+  storedFinalDecision,
+  storedV2Decision,
   type StoredLiveEvidence,
 } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
@@ -4552,6 +4558,10 @@ function providerTimeoutMs(): number {
 type ResponderSendArgs = {
   /** Routing-v2 intent authorized by its single-attempt consumer; rechecked at the provider boundary. */
   routingV2OutboxId?: string;
+  /** Routing v2 phone action (PR-G): its durable send id, used as the provider idempotency key. */
+  providerIdempotencyKey?: string;
+  /** Routing v2 phone action (PR-G): final flags/canary/suppression check right before the provider. */
+  routingV2SendAllowed?: () => Promise<boolean>;
   input: AiDispatchInput;
   body: string;
   model: string;
@@ -5370,6 +5380,20 @@ async function fenceProviderSubmit(
       return false;
     }
     if (error || data !== "ok") return refuse("fence:routing_v2_outbox");
+  }
+  if (args.routingV2SendAllowed) {
+    let allowed = false;
+    try {
+      allowed = await args.routingV2SendAllowed();
+    } catch {
+      allowed = false;
+    }
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!allowed) return refuse("fence:routing_v2_phone_action");
   }
   attempt.providerStarted = true;
   return true;
@@ -6478,7 +6502,9 @@ async function deliverResponderMessage(
     requireStickyFrom: true,
     // Routing v2: the provider submission is keyed by the outbox id, so a replay of the same
     // intent returns the durable original and never reaches the provider twice.
-    ...(args.routingV2OutboxId ? { idempotencyKey: args.routingV2OutboxId } : {}),
+    ...(args.routingV2OutboxId || args.providerIdempotencyKey
+      ? { idempotencyKey: args.providerIdempotencyKey ?? args.routingV2OutboxId }
+      : {}),
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     // Fired inside the send, right after the provider accepts and before its
     // receipt persistence / reconciliation.
@@ -8521,14 +8547,9 @@ async function applyRoutingV2LiveEvidence(
     if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
     return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${step.reason}`);
   }
-  if (step.kind === "stop") {
-    // Today's human-review path (model_stop_suppression wiring lands in step c).
-    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
-    return holdWithAlerts("nine_asked_stop");
-  }
+  if (step.kind === "stop") return routeRoutingV2Stop(supabase, a, flags, evidence, holdWithAlerts);
   if (step.kind === "wrong_number" || step.kind === "bad_number") {
-    // Phone-wide / bounce adapters land in step c; until then a person closes it.
-    return holdWithAlerts("nine_needs_person");
+    return routeRoutingV2PhoneAction(supabase, a, flags, evidence, step.kind);
   }
   if (step.kind === "hold") return holdWithAlerts(liveHoldReason(step.reason));
 
@@ -8565,6 +8586,166 @@ async function applyRoutingV2LiveEvidence(
   }
   // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
   return nineHoldAndComplete(supabase, a, "nine_needs_person");
+}
+
+/** The seller's number for a phone-level action: the inbound's own from address. */
+async function routingV2InboundPhone(supabase: SupabaseClient<Database>, input: AiDispatchInput): Promise<string | null> {
+  if (input.inboundFromPhone) return input.inboundFromPhone;
+  if (!input.inboundMessageId) return null;
+  const { data } = await supabase.from("messages").select("from_address").eq("id", input.inboundMessageId).maybeSingle();
+  return data?.from_address ?? null;
+}
+
+/**
+ * Cutover (c), PR-I: a stop / legal / hostile road. With model_stop_suppression on (and every
+ * property on the phone eligible) a confident Jev stop writes the distinct `model_stop`
+ * suppression and nothing is sent. Every other answer is today's human-review path: hostile
+ * wording waits for a person's confirmation, anything else holds as a stop request.
+ */
+async function routeRoutingV2Stop(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  holdWithAlerts: (reason: "nine_asked_stop" | "nine_needs_person") => Promise<AiDispatchOutcome>,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const decision = storedV2Decision(evidence);
+  const phone = await routingV2InboundPhone(supabase, input);
+  const outcome = decision && phone
+    ? await executeV2Stop(supabase, {
+        orgId: evidence.org_id,
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundMessageId: input.inboundMessageId!,
+        phone,
+        decision,
+        final: storedFinalDecision(evidence),
+      }, { readFlags: async () => flags })
+    : MODEL_STOP_NO_PHONE;
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_stop",
+    result: outcome.kind === "suppressed" ? "applied" : "skipped",
+    detail: { engine: "routing_v2", outcome: outcome.kind, ...("reason" in outcome ? { reason: outcome.reason } : {}) },
+  }, runCtx);
+  if (outcome.kind === "suppressed") {
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "opted_out" });
+    return { outcome: "opted_out", reason: "routing_v2:model_stop" };
+  }
+  if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+  return holdWithAlerts(outcome.kind === "not_stop" ? "nine_needs_person" : "nine_asked_stop");
+}
+
+/**
+ * Cutover (c), PR-G: wrong person / sold / tenant, and the "no SMS capabilities" bounce.
+ * Scope comes ONLY from the existing live text match (classifyWrongNumberScope). With
+ * wrong_number_all on and scope "all" (or a bounce), the phone-wide action runs: one atomic
+ * close of every property on the phone, then the approved wrong-number reply keyed by its
+ * durable send id. Anything it does not take (flag off, scope this property, not applicable)
+ * is today's nine-question route: approved reply + close this property only.
+ */
+async function routeRoutingV2PhoneAction(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  kind: "wrong_number" | "bad_number",
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  const decision = storedV2Decision(evidence);
+  const phone = await routingV2InboundPhone(supabase, input);
+  const wrongScope = kind === "wrong_number" ? classifyWrongNumberScope(input.inboundBody) : null;
+  if (decision && phone) {
+    const result = await runRoutingV2PhoneAction(supabase, {
+      orgId: evidence.org_id,
+      inboundMessageId: input.inboundMessageId!,
+      fromPhone: phone,
+      decision,
+      wrongScope,
+      final: storedFinalDecision(evidence),
+      expectedRevision: evidence.expected_revision,
+    }, {
+      sendWrongNumberReply: async ({ requiredBody, sendId, stillAllowed }) => {
+        const resolved = await resolveApprovedTemplateReply(supabase, {
+          orgId: property.org_id, propertyId: input.propertyId, contactId: input.contactId,
+          outcome: "wrong_number", outcomeConfidence: null, escalationReason: "not_applicable", decidedBy: "nine_questions",
+        });
+        if (resolved.kind !== "template" || resolved.body !== requiredBody) {
+          return { sent: false, reason: resolved.kind === "none" ? resolved.reason : NINE_REPLY_TEXT_NOT_APPROVED, reachedProvider: false };
+        }
+        const window = await evaluateRecipientWindow(supabase, input);
+        if (!window.ok) return { sent: false, reason: V2_OUTBOX_REASON.quietHours(window.why), reachedProvider: false };
+        const { data: config } = await supabase.from("ai_responder_configs").select("model, outbound_mode")
+          .eq("org_id", property.org_id).eq("active", true).maybeSingle();
+        if (!config) return { sent: false, reason: V2_OUTBOX_REASON.configUnreadable, reachedProvider: false };
+        const sent = await sendResponderMessage(supabase, {
+          runContext: runCtx,
+          input,
+          body: resolved.body,
+          model: config.model,
+          confidence: 1,
+          sentiment: "neutral",
+          turn: (templateCtx?.currentTurn ?? 0) + 1,
+          source: "approved_template",
+          templateId: resolved.templateId,
+          templateSource: resolved.source ?? resolved.body,
+          replyKey: "wrong_number",
+          orgId: property.org_id,
+          claimStartedAt: null,
+          outboundMode: config.outbound_mode,
+          replyKind: "send_reply",
+          windowDeferrable: true,
+          providerIdempotencyKey: sendId,
+          routingV2SendAllowed: stillAllowed,
+        });
+        if (sent.outcome === "sent") return { sent: true, outboundMessageId: sent.messageId };
+        return { sent: false, reason: sent.reason, reachedProvider: sent.outcome !== "retry" && sent.reason.startsWith("send_timeout") };
+      },
+    });
+    await trace(supabase, {
+      kind: "action",
+      name: "routing_v2_phone_action",
+      result: result.outcome === "applied" || result.outcome === "replayed" ? "applied" : "skipped",
+      detail: { engine: "routing_v2", kind, outcome: result.outcome, ...("reason" in result ? { reason: result.reason } : {}) },
+    }, runCtx);
+    if (result.outcome === "applied" || result.outcome === "replayed") {
+      // Closed phone-wide. A reply that failed / is unknown is recorded on the action for the
+      // settler and the audit; the properties stay closed, as today's wrong-number path does.
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+      return { outcome: "auto_closed", reason: `routing_v2:${evidence.road}` };
+    }
+    if (result.outcome === "superseded") {
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:superseded" });
+      return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
+    }
+    if (result.outcome === "suppressed") {
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:phone_suppressed" });
+      return { outcome: "skipped", reason: "routing_v2:phone_suppressed" };
+    }
+    if (result.outcome === "not_settled") {
+      // Under 30 s old: re-dispatch the same inbound shortly (bounded like every reply retry);
+      // the stored decision is reused, never a new classification's effects.
+      const attempt = input.retryAttempt ?? 0;
+      if (attempt >= REPLY_RETRY_MAX) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+      const errorMessage = "routing_v2_phone_action:not_settled";
+      let released = await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage, releaseLease: true });
+      if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: claim.claimId, errorMessage });
+      if (!released) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+      return { outcome: "retry", reason: "reply_pending", attempt: attempt + 1, delaySeconds: Math.max(result.retryAfterSeconds, REPLY_RETRY_DELAY_SECONDS) };
+    }
+    if (result.outcome === "apply_failed") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    // flag_off / not_applicable: today's route below.
+  }
+  if (kind === "bad_number" || !v2SliceAllowed(flags, "replies", input.propertyId)) {
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  const chosen = evidence.provenance && evidence.provenance.by === "jev" ? evidence.provenance.probability : null;
+  return closeNineWrongPersonThisProperty(supabase, a, {
+    evaluationRevision: evidence.expected_revision,
+    classificationRunId: null,
+    chosenProbability: chosen,
+  });
 }
 
 /**
@@ -8760,6 +8941,87 @@ export async function runRoutingV2OutboxReplies(
   return { released, reconciled, results };
 }
 
+/**
+ * Today's nine-question wrong-person route, unchanged: the approved wrong-number reply, then
+ * close THIS property only (a person decides anything phone-wide). Shared by the nine engine
+ * and the routing v2 live hook (classificationRunId null = no Jev review row to link).
+ */
+async function closeNineWrongPersonThisProperty(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  d: { evaluationRevision: number; classificationRunId: string | null; chosenProbability: number | null },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  // Same gates as the eight-answer wrong-number route: the label's automation switch
+  // decides whether Sandra may act at all; otherwise a person closes it.
+  const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+  if (thresholds.wrong_number?.automationEnabled !== true) {
+    return nineHoldAndComplete(supabase, a, "nine_automation_disabled:wrong_number");
+  }
+  // Close ONLY after the approved reply was accepted by the provider.
+  if (!templateCtx) return nineHoldAndComplete(supabase, a, "nine_reply_not_sent:reply_ineligible");
+  const wrongStep = await runApprovedTemplateStep(supabase, {
+    input,
+    property,
+    ctx: templateCtx,
+    claim,
+    outcome: "wrong_number",
+    nativeConfidence: d.chosenProbability,
+    escalationReason: "not_applicable",
+    decidedBy: "nine_questions",
+    requiredBody: APPROVED_REPLY_TEXTS.wrong_number,
+    runCtx,
+  });
+  if (wrongStep.kind === "stop") return wrongStep.outcome;
+  if (!wrongStep.outboundMessageId || wrongStep.replyKey !== "wrong_number") {
+    const why = wrongStep.notSentReason ?? "not_sent";
+    return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
+  }
+  const messageId: string | null = wrongStep.outboundMessageId;
+  // Our own reply is ONE outbound SMS row, which moves decision_context_revision by
+  // exactly one (trg_messages_bump_decision_context_revision). Account for that and
+  // nothing else: any further movement (a person texting, a takeover, an assignment)
+  // means someone else changed the lead, so a person looks and nothing is closed.
+  let closeRevision = d.evaluationRevision;
+  if (messageId) {
+    const { data: current } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (!current) return nineHoldAndComplete(supabase, a, "nine_close_wrong_person_unreadable", messageId);
+    const expectedAfterOwnReply = wrongPersonCloseRevision(d.evaluationRevision, current.decision_context_revision);
+    if (expectedAfterOwnReply === null) {
+      return nineHoldAndComplete(supabase, a, NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED, messageId);
+    }
+    closeRevision = expectedAfterOwnReply;
+  }
+  const closed = await applyWrongNumber(supabase, {
+    runContext: runCtx,
+    propertyId: input.propertyId,
+    conversationId: input.conversationId ?? null,
+    inboundMessageId: input.inboundMessageId ?? null,
+    // This property only: phone-wide suppression is a person's call.
+    scope: "this_property",
+    reason: "nine_questions:wrong_person",
+    expectedRevision: closeRevision,
+  });
+  await traceDisposition(supabase, "wrong_number", closed, false, runCtx);
+  // As the eight-answer route does for an applied wrong_number (this property only):
+  // link the review to the run that decided it. A failure leaves it pending for a person.
+  if (closed.updated && input.inboundMessageId && d.classificationRunId) {
+    await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, d.classificationRunId);
+  }
+  const closedOutcome = closeOutcome(closed, "nine_questions:wrong_person");
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: claimOutcomeOf(closedOutcome),
+    errorMessage: dispositionClaimError(closed),
+    ...(messageId ? { outboundMessageId: messageId } : {}),
+  });
+  return closedOutcome;
+}
+
 export async function runNineQuestionsStep(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
@@ -8913,74 +9175,11 @@ export async function runNineQuestionsStep(
   const chosenProbability = result.chosen?.probability ?? null;
 
   if (action.kind === "reply_and_close_wrong_person") {
-    // Same gates as the eight-answer wrong-number route: the label's automation switch
-    // decides whether Sandra may act at all; otherwise a person closes it.
-    const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
-    if (thresholds.wrong_number?.automationEnabled !== true) {
-      return nineHoldAndComplete(supabase, a, "nine_automation_disabled:wrong_number");
-    }
-    // Close ONLY after the approved reply was accepted by the provider.
-    if (!templateCtx) return nineHoldAndComplete(supabase, a, "nine_reply_not_sent:reply_ineligible");
-    const wrongStep = await runApprovedTemplateStep(supabase, {
-      input,
-      property,
-      ctx: templateCtx,
-      claim,
-      outcome: "wrong_number",
-      nativeConfidence: chosenProbability,
-      escalationReason: "not_applicable",
-      decidedBy: "nine_questions",
-      requiredBody: APPROVED_REPLY_TEXTS.wrong_number,
-      runCtx,
+    return closeNineWrongPersonThisProperty(supabase, a, {
+      evaluationRevision: cls.evaluationRevision,
+      classificationRunId: cls.classificationRunId,
+      chosenProbability,
     });
-    if (wrongStep.kind === "stop") return wrongStep.outcome;
-    if (!wrongStep.outboundMessageId || wrongStep.replyKey !== "wrong_number") {
-      const why = wrongStep.notSentReason ?? "not_sent";
-      return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
-    }
-    const messageId: string | null = wrongStep.outboundMessageId;
-    // Our own reply is ONE outbound SMS row, which moves decision_context_revision by
-    // exactly one (trg_messages_bump_decision_context_revision). Account for that and
-    // nothing else: any further movement (a person texting, a takeover, an assignment)
-    // means someone else changed the lead, so a person looks and nothing is closed.
-    let closeRevision = cls.evaluationRevision;
-    if (messageId) {
-      const { data: current } = await supabase
-        .from("properties")
-        .select("decision_context_revision")
-        .eq("id", input.propertyId)
-        .maybeSingle();
-      if (!current) return nineHoldAndComplete(supabase, a, "nine_close_wrong_person_unreadable", messageId);
-      const expectedAfterOwnReply = wrongPersonCloseRevision(cls.evaluationRevision, current.decision_context_revision);
-      if (expectedAfterOwnReply === null) {
-        return nineHoldAndComplete(supabase, a, NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED, messageId);
-      }
-      closeRevision = expectedAfterOwnReply;
-    }
-    const closed = await applyWrongNumber(supabase, {
-      runContext: runCtx,
-      propertyId: input.propertyId,
-      conversationId: input.conversationId ?? null,
-      inboundMessageId: input.inboundMessageId ?? null,
-      // This property only: phone-wide suppression is a person's call.
-      scope: "this_property",
-      reason: "nine_questions:wrong_person",
-      expectedRevision: closeRevision,
-    });
-    await traceDisposition(supabase, "wrong_number", closed, false, runCtx);
-    // As the eight-answer route does for an applied wrong_number (this property only):
-    // link the review to the run that decided it. A failure leaves it pending for a person.
-    if (closed.updated && input.inboundMessageId) {
-      await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, cls.classificationRunId);
-    }
-    const closedOutcome = closeOutcome(closed, "nine_questions:wrong_person");
-    await completeClaim(supabase, input.propertyId, {
-      claimId: claim.claimId,
-      outcome: claimOutcomeOf(closedOutcome),
-      errorMessage: dispositionClaimError(closed),
-      ...(messageId ? { outboundMessageId: messageId } : {}),
-    });
-    return closedOutcome;
   }
 
   // reply_and_drip: the drip only starts after the reply was accepted by the provider.

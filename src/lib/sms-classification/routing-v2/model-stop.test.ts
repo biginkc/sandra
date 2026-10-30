@@ -355,7 +355,7 @@ describe("PR-I undo (lift)", () => {
 });
 
 describe("PR-I flag-off parity: the live opt-out path is not touched", () => {
-  it("dispatch.ts keeps the opt-out deferral and does not reach the model_stop writer", async () => {
+  it("dispatch.ts keeps the opt-out deferral; only the flag-gated v2 stop branch reaches executeV2Stop", async () => {
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const root = join(__dirname, "../../..");
@@ -363,9 +363,10 @@ describe("PR-I flag-off parity: the live opt-out path is not touched", () => {
     const thresholds = readFileSync(join(root, "lib/sms-classification/thresholds.ts"), "utf8");
     expect(dispatch).toContain("proposeDeferredJevDisposition");
     expect(dispatch).toContain("HOLD_JEV_OPTED_OUT_NEEDS_CONFIRM");
-    for (const src of [dispatch, thresholds]) {
-      expect(src).not.toContain("model-stop");
-      expect(src).not.toContain("fn_apply_model_stop_suppression");
-    }
+    expect(thresholds).not.toContain("model-stop");
+    for (const src of [dispatch, thresholds]) expect(src).not.toContain("fn_apply_model_stop_suppression");
+    // Cutover: one import (the adapter, which re-checks flags + canary itself) and one call site.
+    expect(dispatch.match(/routing-v2\/model-stop-suppression/g)).toHaveLength(1);
+    expect(dispatch.match(/executeV2Stop\(/g)).toHaveLength(1);
   });
 });

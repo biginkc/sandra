@@ -78,6 +78,7 @@ import { scheduleRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/sha
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
+import { classifyWrongNumberScope } from "./wrong-number-scope";
 import { DNC_KEYWORDS, isCarrierStopKeyword, matchesStopKeyword } from "./stop-signals";
 import type { MessagingProvider } from "./types";
 
@@ -88,19 +89,9 @@ const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
-export function classifyWrongNumberScope(
-  body: string,
-): "this_property" | "all" {
-  if (
-    /\bwrong (?:number|person)\b/i.test(body) ||
-    /\bnever (?:owned|own) (?:any )?propert(?:y|ies)\b/i.test(body) ||
-    /\bnobody by that name\b/i.test(body) ||
-    /\bno one by that name\b/i.test(body)
-  ) {
-    return "all";
-  }
-  return "this_property";
-}
+// Moved verbatim to ./wrong-number-scope (routing v2 cutover reuses it without importing
+// this module, which imports the responder). Re-exported so every caller is unchanged.
+export { classifyWrongNumberScope };
 
 async function setInboundDisposition(
   supabase: SupabaseClient<Database>,
