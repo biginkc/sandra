@@ -79,6 +79,8 @@ create table if not exists public.routing_v2_phone_action_properties (
   applied_follow_up_at timestamptz,
   recorded_revision bigint,
   paused_enrollment_ids uuid[] not null default '{}',
+  -- The exact updated_at A stamped on the enrollments it paused (with routing_v2_pause_token).
+  paused_at timestamptz,
   undone_at timestamptz,
   undone_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
@@ -86,7 +88,8 @@ create table if not exists public.routing_v2_phone_action_properties (
     (outcome = 'applied' and applied_dispo is not null and skip_reason is null)
     or (outcome = 'skipped' and applied_dispo is null and skip_reason is not null)
   ),
-  constraint routing_v2_phone_action_properties_undone_pair check (undone_by is null or undone_at is not null)
+  constraint routing_v2_phone_action_properties_undone_pair check (undone_by is null or undone_at is not null),
+  constraint routing_v2_phone_action_properties_paused_shape check ((cardinality(paused_enrollment_ids) = 0) = (paused_at is null))
 );
 comment on table public.routing_v2_phone_action_properties is
   'Routing v2 PR-G audit + undo: one row per target property (applied with its exact prior state and the drips it paused, or skipped with the reason).';
@@ -95,6 +98,33 @@ create unique index if not exists routing_v2_phone_action_properties_uidx
   on public.routing_v2_phone_action_properties (action_id, property_id);
 create index if not exists routing_v2_phone_action_properties_property_idx
   on public.routing_v2_phone_action_properties (property_id, created_at desc);
+
+-- Pause token on enrollments: set only by A, cleared by ANY other change of status or
+-- pause_reason (a person resuming, a later re-pause, completion), so undo can tell its own pause
+-- from a later one with the same reason. Inert (NULL) for every row A never paused.
+alter table public.sequence_enrollments add column if not exists routing_v2_pause_token uuid;
+comment on column public.sequence_enrollments.routing_v2_pause_token is
+  'Routing v2 PR-G: id of the phone action that paused this enrollment; cleared by any later status/pause_reason change.';
+create or replace function public.routing_v2_clear_pause_token()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if old.routing_v2_pause_token is not null
+     and new.routing_v2_pause_token is not distinct from old.routing_v2_pause_token
+     and (new.status is distinct from old.status or new.pause_reason is distinct from old.pause_reason) then
+    new.routing_v2_pause_token := null;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.routing_v2_clear_pause_token() from public, anon, authenticated, service_role;
+drop trigger if exists trg_sequence_enrollments_routing_v2_pause_token on public.sequence_enrollments;
+create trigger trg_sequence_enrollments_routing_v2_pause_token
+  before update of status, pause_reason on public.sequence_enrollments
+  for each row when (old.routing_v2_pause_token is not null)
+  execute function public.routing_v2_clear_pause_token();
 
 alter table public.routing_v2_phone_actions enable row level security;
 alter table public.routing_v2_phone_action_properties enable row level security;
@@ -218,6 +248,8 @@ declare
   v_skipped jsonb := '[]'::jsonb;
   v_skips jsonb := '{}'::jsonb;
   v_dec record;
+  v_contacts uuid[];
+  v_pause_at timestamptz;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -233,7 +265,7 @@ begin
   if not found or v_message.property_id is null then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'source_message_missing');
   end if;
-  if length(v_digits) <> 10 or v_digits <> public.routing_v2_phone_digits(v_message.from_address) then
+  if coalesce(p_phone, '') !~ '^\+1[0-9]{10}$' or v_digits <> public.routing_v2_phone_digits(v_message.from_address) then
     return jsonb_build_object('status', 'not_applicable', 'reason', 'phone_mismatch');
   end if;
 
@@ -304,41 +336,42 @@ begin
     return jsonb_build_object('status', 'not_applicable', 'reason', 'flag_off');
   end if;
 
-  -- D. Latest reply wins across every property for this phone.
+  -- Settle window: the triggering inbound must be at least 30 s old, so every inbound that
+  -- arrived around it has committed and is visible to the newest-inbound check below
+  -- (inbound inserts commit in milliseconds). Retryable; nothing is written.
+  if v_message.created_at > clock_timestamp() - interval '30 seconds' then
+    return jsonb_build_object('status', 'not_settled', 'reason', 'inbound_settle_window', 'retryAfterSeconds',
+      greatest(1, ceil(extract(epoch from (v_message.created_at + interval '30 seconds' - clock_timestamp()))))::int);
+  end if;
+
+  -- D. Latest reply wins across every property for this phone (committed rows; range on
+  -- created_at uses idx_messages_created).
   if exists (
     select 1 from public.messages m
-    where m.org_id = v_message.org_id and m.channel = 'sms' and m.direction = 'inbound'
+    where m.created_at >= v_message.created_at
+      and m.org_id = v_message.org_id and m.channel = 'sms' and m.direction = 'inbound'
       and m.id <> v_message.id
       and public.routing_v2_phone_digits(m.from_address) = v_digits
-      and (m.created_at > v_message.created_at or (m.created_at = v_message.created_at and m.id > v_message.id))
+      and (m.created_at > v_message.created_at or m.id > v_message.id)
   ) then
     return jsonb_build_object('status', 'superseded', 'reason', 'newer_inbound_from_phone');
   end if;
 
-  -- Lock what the decision reads: the phone's contacts and phone rows, and suppressions.
-  perform 1 from public.contacts c
-  where c.org_id = v_message.org_id
-    and v_digits in (public.routing_v2_phone_digits(c.phone_1), public.routing_v2_phone_digits(c.phone_2), public.routing_v2_phone_digits(c.phone_3))
-  order by c.id for update;
-  perform 1 from public.contact_phone_numbers cp
-  where cp.org_id = v_message.org_id and cp.digits10 = v_digits
-  order by cp.contact_id, cp.slot for update;
-  perform 1 from public.sms_phone_suppressions sp
-  where sp.org_id = v_message.org_id and sp.channel = 'sms'
-    and public.routing_v2_phone_digits(sp.phone_e164) = v_digits
-  for update;
-  if found then
-    return jsonb_build_object('status', 'not_applicable', 'reason', 'phone_suppressed');
-  end if;
-
+  -- Lock order (same everywhere): phone advisory -> contacts rows -> contact_phone_numbers
+  -- rows -> sms_phone_suppressions -> per-property advisory -> properties rows -> enrollments.
+  -- Contacts holding the phone (equality on the stored E.164 plus the normalized phone table).
+  v_contacts := array(
+    select c.id from public.contacts c
+    where c.org_id = v_message.org_id
+      and (c.phone_1 = p_phone or c.phone_2 = p_phone or c.phone_3 = p_phone
+           or c.id in (select cp.contact_id from public.contact_phone_numbers cp where cp.org_id = v_message.org_id and cp.digits10 = v_digits))
+    order by c.id
+  );
   if p_action = 'wrong_number_all' then
     select array_agg(p.id order by p.id) into v_ids
     from public.properties p
     where p.org_id = v_message.org_id and p.deleted_at is null
-      and (p.id = v_message.property_id or exists (
-        select 1 from public.contacts c
-        where c.id = p.homeowner_contact_id and c.org_id = v_message.org_id
-          and v_digits in (public.routing_v2_phone_digits(c.phone_1), public.routing_v2_phone_digits(c.phone_2), public.routing_v2_phone_digits(c.phone_3))));
+      and (p.id = v_message.property_id or p.homeowner_contact_id = any(v_contacts));
   else
     select array_agg(p.id) into v_ids
     from public.properties p
@@ -348,14 +381,36 @@ begin
     return jsonb_build_object('status', 'not_applicable', 'reason', 'source_property_missing');
   end if;
 
+  perform 1 from public.contacts c
+  where c.id = any(v_contacts)
+     or c.id in (select p.homeowner_contact_id from public.properties p where p.id = any(v_ids))
+  order by c.id for update;
+  perform 1 from public.contact_phone_numbers cp
+  where cp.org_id = v_message.org_id and cp.digits10 = v_digits
+  order by cp.contact_id, cp.slot for update;
+  perform 1 from public.sms_phone_suppressions sp
+  where sp.org_id = v_message.org_id and sp.channel = 'sms' and sp.phone_e164 = p_phone
+  for update;
+  if found then
+    return jsonb_build_object('status', 'not_applicable', 'reason', 'phone_suppressed');
+  end if;
   foreach v_id in array v_ids loop
     perform pg_advisory_xact_lock(hashtext('routing_v2:' || v_id::text));
   end loop;
   perform 1 from public.properties p where p.id = any(v_ids) order by p.id for update;
-  -- The homeowner contacts of the targets (a contact may hold the phone only in another org row).
-  perform 1 from public.contacts c
-  where c.id in (select p.homeowner_contact_id from public.properties p where p.id = any(v_ids))
-  order by c.id for update;
+
+  -- Re-derive the target set under the locks; a change since the first read = retry later.
+  if p_action = 'wrong_number_all' and v_ids is distinct from (
+    select array_agg(p.id order by p.id) from public.properties p
+    where p.org_id = v_message.org_id and p.deleted_at is null
+      and (p.id = v_message.property_id or exists (
+        select 1 from public.contacts c
+        where c.id = p.homeowner_contact_id and c.org_id = v_message.org_id
+          and (c.phone_1 = p_phone or c.phone_2 = p_phone or c.phone_3 = p_phone
+               or c.id in (select cp.contact_id from public.contact_phone_numbers cp where cp.org_id = v_message.org_id and cp.digits10 = v_digits))))
+  ) then
+    return jsonb_build_object('status', 'not_applicable', 'reason', 'property_set_changed');
+  end if;
 
   -- Phone-level actions are eligible only if every property on the phone is (§13.1).
   if exists (select 1 from unnest(v_ids) t(id) where not public.routing_v2_phone_action_eligible(v_flags, t.id)) then
@@ -433,14 +488,20 @@ begin
 
     -- As setResponderDispo does for a wrong_number: pause the property's active drips.
     v_paused := '{}';
+    v_pause_at := null;
     if p_action = 'wrong_number_all' then
+      -- Each pause carries this action's token and a unique stamp; undo resumes only rows that
+      -- still carry both (any later resume/re-pause clears the token, see the trigger below).
+      v_pause_at := clock_timestamp();
       with paused as (
         update public.sequence_enrollments e
-        set status = 'paused', pause_reason = 'inbound_reply', updated_at = now()
+        set status = 'paused', pause_reason = 'inbound_reply', updated_at = v_pause_at,
+            routing_v2_pause_token = v_action_id
         where e.property_id = r.id and e.status = 'active'
         returning e.id, e.sequence_id
       )
       select coalesce(array_agg(id order by id), '{}') into v_paused from paused;
+      if cardinality(v_paused) = 0 then v_pause_at := null; end if;
       if cardinality(v_paused) > 0 then
         insert into public.lead_events (org_id, property_id, actor_type, event_type, payload)
         values (v_message.org_id, r.id, 'system', 'sequence_paused', jsonb_build_object(
@@ -451,11 +512,11 @@ begin
     insert into public.routing_v2_phone_action_properties (
       action_id, org_id, property_id, is_source, outcome, applied_dispo,
       prior_outreach_dispo, prior_follow_up_at, prior_needs_human_attention, prior_last_ai_escalation_reason,
-      applied_follow_up_at, recorded_revision, paused_enrollment_ids
+      applied_follow_up_at, recorded_revision, paused_enrollment_ids, paused_at
     ) values (
       v_action_id, v_message.org_id, r.id, r.is_source, 'applied', v_dispo,
       r.outreach_dispo, r.follow_up_at, r.needs_human_attention, r.last_ai_escalation_reason,
-      v_after.follow_up_at, v_after.decision_context_revision, v_paused
+      v_after.follow_up_at, v_after.decision_context_revision, v_paused, v_pause_at
     )
     returning id into v_row_id;
 
@@ -539,7 +600,9 @@ set search_path = public, pg_temp
 as $$
 declare
   v public.routing_v2_phone_actions%rowtype;
-  v_msg uuid;
+  m record;
+  v_to text;
+  v_reason text;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -551,17 +614,29 @@ begin
   if v.reply_state <> 'sending' then
     return jsonb_build_object('replyState', v.reply_state, 'sendId', v.send_id);
   end if;
-  select m.id into v_msg
-  from public.messages m
-  where m.org_id = v.org_id and m.channel = 'sms' and m.direction = 'outbound'
-    and m.idempotency_key = v.send_id and m.property_id = v.source_property_id;
+  select msg.id, msg.status, msg.external_id, msg.metadata into m
+  from public.messages msg
+  where msg.org_id = v.org_id and msg.channel = 'sms' and msg.direction = 'outbound'
+    and msg.idempotency_key = v.send_id and msg.property_id = v.source_property_id;
+  -- Explicit status map, same rule as send.ts repSmsIdempotencyReplay. Nothing is assumed:
+  --   sent/delivered WITH a provider receipt (and not flagged provider_unknown) -> sent
+  --   failed                                                               -> failed
+  --   no row, pending/queued/paused/sending, a terminal row with no receipt,
+  --   provider_unknown, or any other status                                  -> unknown
+  if m.id is null then
+    v_to := 'unknown'; v_reason := 'no_message_for_send_id';
+  elsif m.status in ('sent', 'delivered') and nullif(btrim(coalesce(m.external_id, '')), '') is not null
+        and coalesce(m.metadata->>'providerOutcome', '') <> 'provider_unknown' then
+    v_to := 'sent'; v_reason := 'recovered_by_send_id';
+  elsif m.status = 'failed' then
+    v_to := 'failed'; v_reason := 'message_failed';
+  else
+    v_to := 'unknown'; v_reason := 'message_status_' || coalesce(m.status, 'null');
+  end if;
   update public.routing_v2_phone_actions
-  set reply_state = case when v_msg is null then 'unknown' else 'sent' end,
-      reply_message_id = v_msg,
-      reply_reason = case when v_msg is null then 'send_outcome_unknown' else 'recovered_by_send_id' end,
-      reply_updated_at = now()
+  set reply_state = v_to, reply_message_id = m.id, reply_reason = v_reason, reply_updated_at = now()
   where id = v.id;
-  return jsonb_build_object('replyState', case when v_msg is null then 'unknown' else 'sent' end, 'sendId', v.send_id, 'messageId', v_msg);
+  return jsonb_build_object('replyState', v_to, 'sendId', v.send_id, 'messageId', m.id, 'reason', v_reason);
 end;
 $$;
 revoke all on function public.fn_routing_v2_phone_action_recover_reply(uuid) from public, anon, authenticated;
@@ -635,6 +710,17 @@ begin
       'skipped', '[]'::jsonb, 'resumed', 0, 'notResumed', '[]'::jsonb);
   end if;
 
+  -- Same lock order as A: phone advisory (above) -> contacts rows -> sms_phone_suppressions
+  -- -> per-property advisory -> properties rows -> enrollments.
+  -- The only contact data undo reads is each homeowner contact's opt-out flags (existing
+  -- rows): share-lock those rows so an opt-out cannot commit between check and restore.
+  perform 1 from public.contacts c
+  where c.id in (
+    select p.homeowner_contact_id from public.properties p
+    join public.routing_v2_phone_action_properties ap on ap.property_id = p.id
+    where ap.action_id = v_action.id and ap.outcome = 'applied' and ap.undone_at is null
+  )
+  order by c.id for share;
   -- Undo is rare and short: SHARE mode blocks every concurrent suppression insert/update
   -- (from any writer, lock or not) until this transaction commits, so the check below cannot
   -- be overtaken. Held only for this undo transaction (milliseconds; at most lock_timeout
@@ -647,18 +733,8 @@ begin
   end;
   v_phone_suppressed := exists (
     select 1 from public.sms_phone_suppressions sp
-    where sp.org_id = v_action.org_id and sp.channel = 'sms'
-      and public.routing_v2_phone_digits(sp.phone_e164) = public.routing_v2_phone_digits(v_action.phone_e164)
+    where sp.org_id = v_action.org_id and sp.channel = 'sms' and sp.phone_e164 = v_action.phone_e164
   );
-  -- The only contact data undo reads is each homeowner contact's opt-out flags (existing
-  -- rows): share-lock those rows so an opt-out cannot commit between check and restore.
-  perform 1 from public.contacts c
-  where c.id in (
-    select p.homeowner_contact_id from public.properties p
-    join public.routing_v2_phone_action_properties ap on ap.property_id = p.id
-    where ap.action_id = v_action.id and ap.outcome = 'applied' and ap.undone_at is null
-  )
-  order by c.id for share;
 
   for v_row in
     select * from public.routing_v2_phone_action_properties
@@ -710,6 +786,17 @@ begin
     -- Exactly the drips A paused; the resume function re-checks each (still paused for
     -- inbound_reply, no Norma hold, no unresolved send).
     foreach v_enrollment in array v_row.paused_enrollment_ids loop
+      -- Only A's own pause: still paused for inbound_reply, still carrying this action's token
+      -- and exactly the stamp A wrote. A person's resume or a later re-pause clears the token.
+      if not exists (
+        select 1 from public.sequence_enrollments e
+        where e.id = v_enrollment and e.status = 'paused' and e.pause_reason = 'inbound_reply'
+          and e.routing_v2_pause_token = v_action.id and e.updated_at = v_row.paused_at
+        for update
+      ) then
+        v_not_resumed := v_not_resumed || jsonb_build_object('enrollmentId', v_enrollment, 'outcome', 'not_this_actions_pause');
+        continue;
+      end if;
       select o.outcome into v_outcome from public.resume_sequence_enrollment(v_enrollment, null, 'inbound_reply') o;
       if v_outcome = 'resumed' then
         v_resumed := v_resumed + 1;

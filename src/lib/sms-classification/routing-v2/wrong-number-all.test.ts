@@ -195,6 +195,14 @@ describe("runRoutingV2PhoneAction", () => {
     }
   });
 
+  it("settle window: A says not_settled → retryable, nothing sent", async () => {
+    const { db, rpcs } = fakeDb({ flags: ON, rpc: { fn_routing_v2_phone_action_apply_all: () => ({ data: { status: "not_settled", reason: "inbound_settle_window", retryAfterSeconds: 12 } }) } });
+    const { d, send } = deps();
+    expect(await runRoutingV2PhoneAction(db, input(), d)).toEqual({ outcome: "not_settled", retryable: true, retryAfterSeconds: 12 });
+    expect(send).not.toHaveBeenCalled();
+    expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all"]);
+  });
+
   it("E: flags/canary off after A committed → reply recorded skipped, nothing sent", async () => {
     for (const later of [OFF, { ...ON, canary_percent: 0 }, { ...ON, canary_property_ids: [P1, "bad"] }, { ...ON, canary_percent: "100" }]) {
       const { db, rpcs } = fakeDb({ flagSeq: [ON, later], rpc: { fn_routing_v2_phone_action_apply_all: applied() } });

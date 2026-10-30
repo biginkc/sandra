@@ -261,7 +261,7 @@ describe("A. atomic apply", () => {
 
   it("D. an older inbound from the same phone is superseded (any property); only the newest applies", async () => {
     await setFlags(ON);
-    const newer = await insertInbound(ids.p2, "now()");
+    const newer = await insertInbound(ids.p2, "now() - interval '40 seconds'");
     await decide(newer, { propertyId: ids.p2 });
     const before = await everything();
     expect(await applyAll("wrong_number_all", inbound)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
@@ -276,6 +276,24 @@ describe("A. atomic apply", () => {
     expect((await applyAll("wrong_number_all", inbound)).status).toBe("applied");
     expect(await applyAll("wrong_number_all", older)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
     expect(await count("routing_v2_phone_actions")).toBe(1);
+  });
+
+  it("settle window: an inbound under 30 s old is not_settled and nothing is written", async () => {
+    await setFlags(ON);
+    const fresh = await insertInbound(ids.p1, "clock_timestamp()");
+    await decide(fresh);
+    const before = await everything();
+    const r = await applyAll("wrong_number_all", fresh);
+    expect(r).toMatchObject({ status: "not_settled", reason: "inbound_settle_window" });
+    expect(r.retryAfterSeconds).toBeGreaterThan(25);
+    expect(r.retryAfterSeconds).toBeLessThanOrEqual(30);
+    expect(await everything()).toEqual(before);
+    // Past the window (and with this fresh text now the newest), the older trigger is superseded.
+    expect(await applyAll("wrong_number_all", inbound)).toEqual({ status: "superseded", reason: "newer_inbound_from_phone" });
+    await db.query("set local session_replication_role = replica");
+    await db.query(`update public.messages set created_at = now() - interval '31 seconds' where id = $1`, [fresh]);
+    await db.query("set local session_replication_role = origin");
+    expect((await applyAll("wrong_number_all", fresh)).status).toBe("applied");
   });
 
   it("canary: one property on the phone not eligible, or a malformed canary = nothing", async () => {
@@ -449,11 +467,57 @@ describe("B. reply after commit, keyed by the send id", () => {
     await reply(r.actionId, r.sendId, "sending");
     const out = randomUUID();
     await db.query(
-      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7)`,
+      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status, external_id) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'sent', 'SM123')`,
       [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, r.sendId],
     );
     expect(await recover(r.actionId)).toMatchObject({ replyState: "sent", messageId: out });
     expect(await recover(r.actionId)).toMatchObject({ replyState: "sent" }); // settled, idempotent
+  });
+
+  it("recovery maps the message status explicitly; nothing is assumed sent", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await reply(r.actionId, r.sendId, "sending");
+    const out = randomUUID();
+    await db.query(
+      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'pending')`,
+      [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, r.sendId],
+    );
+    const cases: Array<[string, string | null, Record<string, unknown> | null, string]> = [
+      ["pending", null, null, "unknown"],
+      ["queued", null, null, "unknown"],
+      ["paused", null, null, "unknown"],
+      ["received", "SM1", null, "unknown"], // any status outside the map
+      ["bounced", "SM1", null, "unknown"],
+      ["sent", null, null, "unknown"], // terminal without a provider receipt
+      ["sent", "SM1", { providerOutcome: "provider_unknown" }, "unknown"],
+      ["failed", null, null, "failed"],
+      ["sent", "SM1", null, "sent"],
+      ["delivered", "SM1", null, "sent"],
+    ];
+    for (const [status, ext, meta, expected] of cases) {
+      await db.query(`update public.routing_v2_phone_actions set reply_state = 'sending' where id = $1`, [r.actionId]);
+      await db.query(`update public.messages set status = $2, external_id = $3, metadata = $4::jsonb where id = $1`, [out, status, ext, meta ? JSON.stringify(meta) : null]);
+      expect((await recover(r.actionId)).replyState, `${status}/${ext}/${JSON.stringify(meta)}`).toBe(expected);
+    }
+  });
+
+  it("refuse-after-insert crash: a pending row that send.ts then marks failed is never recorded sent", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await reply(r.actionId, r.sendId, "sending");
+    const out = randomUUID();
+    await db.query(
+      `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'pending')`,
+      [out, orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, r.sendId],
+    );
+    // send.ts refuses before the provider and marks its own row failed; recovery runs after.
+    await db.query(`update public.messages set status = 'failed', error_message = 'blocked_before_provider' where id = $1`, [out]);
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "failed", reason: "message_failed" });
+    // Had recovery run while the row was still pending, it would have said unknown, not sent.
+    await db.query(`update public.routing_v2_phone_actions set reply_state = 'sending' where id = $1`, [r.actionId]);
+    await db.query(`update public.messages set status = 'pending' where id = $1`, [out]);
+    expect((await recover(r.actionId)).replyState).toBe("unknown");
   });
 
   it("unsettled feed lists only pending/sending replies past the age", async () => {
@@ -523,7 +587,7 @@ describe("C. undo", () => {
     await db.query(`update public.sequence_enrollments set pause_reason = 'manual' where id = $1`, [ids.e2]);
     const u = await undo(ownerId, r.actionId);
     expect(u.resumed).toBe(0);
-    expect(u.notResumed).toEqual([{ enrollmentId: ids.e2, outcome: "pause_reason_changed" }]);
+    expect(u.notResumed).toEqual([{ enrollmentId: ids.e2, outcome: "not_this_actions_pause" }]);
     expect(await enrollment(ids.e2)).toEqual({ status: "paused", pause_reason: "manual" });
   });
 
@@ -563,6 +627,22 @@ describe("C. undo", () => {
     } finally {
       await other.end();
     }
+  });
+
+  it("undo never resumes a later pause with the same reason (person resumed, a later inbound re-paused)", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    const tok = (await db.query(`select routing_v2_pause_token, updated_at from public.sequence_enrollments where id = $1`, [ids.e2])).rows[0];
+    expect(tok.routing_v2_pause_token).toBe(r.actionId);
+    // A person resumes it, then a later inbound pauses it again for inbound_reply.
+    await db.query(`update public.sequence_enrollments set status = 'active', pause_reason = null, updated_at = now() where id = $1`, [ids.e2]);
+    await db.query(`update public.sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply', updated_at = $2 where id = $1`, [ids.e2, tok.updated_at]);
+    const after = (await db.query(`select routing_v2_pause_token from public.sequence_enrollments where id = $1`, [ids.e2])).rows[0];
+    expect(after.routing_v2_pause_token).toBeNull(); // the trigger cleared A's token
+    const u = await undo(ownerId, r.actionId);
+    expect(u.resumed).toBe(0);
+    expect(u.notResumed).toEqual([{ enrollmentId: ids.e2, outcome: "not_this_actions_pause" }]);
+    expect(await enrollment(ids.e2)).toEqual({ status: "paused", pause_reason: "inbound_reply" });
   });
 
   it("refuses a user without org access", async () => {
@@ -638,11 +718,137 @@ describe("canary twin + rollback", () => {
     expect(Number(half)).toBeLessThan(280);
   });
 
-  it("rollback removes every object", async () => {
+});
+
+describe("self-sweep", () => {
+  it("(b) lock order is the same in apply_all and undo: phone -> contacts -> suppressions -> property advisory -> properties -> enrollments", () => {
+    const sql = readFileSync(path.join(__dirname, "20261030150000_routing_v2_wrong_number_all.sql"), "utf8");
+    const body = (name: string) => {
+      const start = sql.indexOf(`create or replace function public.${name}(`);
+      return sql.slice(start, sql.indexOf("\n$$;", start));
+    };
+    const order = (b: string, markers: string[]) => markers.map((m) => b.indexOf(m));
+    const apply = order(body("fn_routing_v2_phone_action_apply_all"), [
+      "routing_v2_phone_lock(", "from public.contacts c\n  where c.id = any(v_contacts)", "from public.sms_phone_suppressions sp",
+      "hashtext('routing_v2:'", "from public.properties p where p.id = any(v_ids) order by p.id for update", "update public.sequence_enrollments e",
+    ]);
+    const undoOrder = order(body("fn_undo_routing_v2_phone_action"), [
+      "routing_v2_phone_lock(", "order by c.id for share", "lock table public.sms_phone_suppressions",
+      "hashtext('routing_v2:'", "for update of p", "from public.sequence_enrollments e",
+    ]);
+    for (const seq of [apply, undoOrder]) {
+      expect(seq.every((i) => i > 0)).toBe(true);
+      expect([...seq].sort((a, b) => a - b)).toEqual(seq);
+    }
+  });
+
+  it("(c) FKs: org/property/message cascade (org delete is gated by core tables), users set null; deletes cascade", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    expect(r.status).toBe("applied");
+    const fks = (await db.query(`
+      select conrelid::regclass::text t, confrelid::regclass::text ref, confdeltype
+      from pg_constraint where contype = 'f' and conrelid in ('public.routing_v2_phone_actions'::regclass, 'public.routing_v2_phone_action_properties'::regclass)
+      order by 1, 2`)).rows;
+    const cascade = fks.filter((f) => f.ref !== "auth.users");
+    expect(cascade.every((f) => f.confdeltype === "c")).toBe(true);
+    expect(cascade.map((f) => `${f.t}->${f.ref}`)).toEqual(expect.arrayContaining([
+      "routing_v2_phone_actions->organizations", "routing_v2_phone_actions->properties", "routing_v2_phone_actions->messages",
+      "routing_v2_phone_action_properties->organizations", "routing_v2_phone_action_properties->properties", "routing_v2_phone_action_properties->routing_v2_phone_actions",
+    ]));
+    expect(fks.filter((f) => f.ref === "auth.users").every((f) => f.confdeltype === "n")).toBe(true);
+    // An org that still has properties/messages cannot be deleted (core no-action FKs); PR-G adds no blocker.
+    await db.query("savepoint orgdel");
+    await expect(db.query(`delete from public.organizations where id = $1`, [orgId])).rejects.toThrow(/foreign key/);
+    await db.query("rollback to savepoint orgdel");
+    const blockers = (await db.query(`
+      select conrelid::regclass::text t from pg_constraint
+      where contype = 'f' and confrelid = 'public.organizations'::regclass and confdeltype not in ('c', 'n')
+        and conrelid::regclass::text like 'routing_v2%'`)).rows;
+    expect(blockers).toEqual([]);
+    // Deleting the source inbound removes the action and every per-property row with it.
+    await db.query("set local session_replication_role = replica");
+    await db.query(`delete from public.routing_v2_shadow_decisions where inbound_message_id = $1`, [inbound]);
+    await db.query("set local session_replication_role = origin");
+    await db.query(`delete from public.messages where id = $1`, [inbound]);
+    expect(Number((await db.query(`select count(*) from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0].count)).toBe(0);
+    expect(Number((await db.query(`select count(*) from public.routing_v2_phone_action_properties where action_id = $1`, [r.actionId])).rows[0].count)).toBe(0);
+  });
+
+  it("(d) NOT NULL + CHECK on every status column", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    for (const [sql, args] of [
+      [`update public.routing_v2_phone_actions set status = 'bogus' where id = $1`, [r.actionId]],
+      [`update public.routing_v2_phone_actions set status = null where id = $1`, [r.actionId]],
+      [`update public.routing_v2_phone_actions set reply_state = 'bogus' where id = $1`, [r.actionId]],
+      [`update public.routing_v2_phone_actions set reply_state = null where id = $1`, [r.actionId]],
+      [`update public.routing_v2_phone_actions set status = 'undone' where id = $1`, [r.actionId]], // undone needs undone_at
+      [`update public.routing_v2_phone_action_properties set outcome = 'bogus' where action_id = $1`, [r.actionId]],
+      [`update public.routing_v2_phone_action_properties set outcome = 'skipped' where action_id = $1 and outcome = 'applied'`, [r.actionId]],
+      [`update public.routing_v2_phone_action_properties set paused_at = null where action_id = $1 and cardinality(paused_enrollment_ids) > 0`, [r.actionId]],
+    ] as Array<[string, unknown[]]>) {
+      await db.query("savepoint chk");
+      await expect(db.query(sql, args), sql).rejects.toThrow(/violates/);
+      await db.query("rollback to savepoint chk");
+    }
+  });
+
+  it("(e) indexes exist for every lookup and the settler", async () => {
+    const idx = (await db.query(`select indexname, indexdef from pg_indexes where schemaname = 'public' and tablename in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties', 'messages', 'routing_v2_shadow_decisions')`)).rows;
+    const names = idx.map((i) => i.indexname);
+    expect(names).toEqual(expect.arrayContaining([
+      "routing_v2_phone_actions_inbound_uidx", "routing_v2_phone_actions_send_id_uidx", "routing_v2_phone_actions_unsettled_idx",
+      "routing_v2_phone_action_properties_uidx", "routing_v2_phone_action_properties_property_idx",
+      "messages_outbound_sms_idempotency_idx", "idx_messages_created", "routing_v2_shadow_decisions_inbound_uidx",
+    ]));
+    expect(idx.find((i) => i.indexname === "routing_v2_phone_actions_unsettled_idx")?.indexdef).toMatch(/reply_state.*pending.*sending/);
+  });
+
+  it("(f) grants, RLS and search_path", async () => {
+    const can = async (role: string, fn: string) =>
+      (await db.query(`select has_function_privilege($1, $2, 'EXECUTE') ok`, [role, fn])).rows[0].ok;
+    const serviceOnly = [
+      "public.fn_routing_v2_phone_action_apply_all(uuid, text, text, jsonb, bigint)",
+      "public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text)",
+      "public.fn_routing_v2_phone_action_recover_reply(uuid)",
+      "public.fn_routing_v2_phone_action_unsettled_replies(integer, integer)",
+    ];
+    for (const fn of serviceOnly) {
+      expect(await can("service_role", fn), fn).toBe(true);
+      expect(await can("authenticated", fn), fn).toBe(false);
+      expect(await can("anon", fn), fn).toBe(false);
+    }
+    expect(await can("authenticated", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(true);
+    expect(await can("anon", "public.fn_undo_routing_v2_phone_action(uuid)")).toBe(false);
+    for (const fn of ["public.routing_v2_phone_lock(uuid, text)", "public.routing_v2_clear_pause_token()"]) {
+      for (const role of ["anon", "authenticated", "service_role"]) expect(await can(role, fn), `${role} ${fn}`).toBe(false);
+    }
+    const tables = (await db.query(`select relname, relrowsecurity from pg_class where relname in ('routing_v2_phone_actions', 'routing_v2_phone_action_properties')`)).rows;
+    expect(tables.every((t) => t.relrowsecurity)).toBe(true);
+    for (const role of ["authenticated", "service_role"]) {
+      for (const t of ["public.routing_v2_phone_actions", "public.routing_v2_phone_action_properties"]) {
+        const priv = (await db.query(`select has_table_privilege($1, $2, 'INSERT') i, has_table_privilege($1, $2, 'UPDATE') u, has_table_privilege($1, $2, 'DELETE') d, has_table_privilege($1, $2, 'SELECT') s`, [role, t])).rows[0];
+        expect(priv, `${role} ${t}`).toEqual({ i: false, u: false, d: false, s: true });
+      }
+    }
+    const definers = (await db.query(`
+      select p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), '') cfg
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and (p.proname like '%routing_v2_phone%' or p.proname = 'routing_v2_clear_pause_token')`)).rows;
+    expect(definers.length).toBeGreaterThanOrEqual(9);
+    for (const d of definers) expect(d.cfg, d.proname).toMatch(/search_path=public, pg_temp/);
+  });
+
+  it("(g) rollback removes every object, including the enrollment token column and trigger", async () => {
     await db.query(ROLLBACK);
     const left = (await db.query(`select to_regclass('public.routing_v2_phone_actions') a, to_regclass('public.routing_v2_phone_action_properties') b`)).rows[0];
     expect(left).toEqual({ a: null, b: null });
-    const fns = (await db.query(`select count(*) from pg_proc where proname like '%routing_v2_phone%'`)).rows[0].count;
+    const fns = (await db.query(`select count(*) from pg_proc where proname like '%routing_v2_phone%' or proname = 'routing_v2_clear_pause_token'`)).rows[0].count;
     expect(Number(fns)).toBe(0);
+    const col = (await db.query(`select count(*) from information_schema.columns where table_name = 'sequence_enrollments' and column_name = 'routing_v2_pause_token'`)).rows[0].count;
+    expect(Number(col)).toBe(0);
+    const trg = (await db.query(`select count(*) from pg_trigger where tgname = 'trg_sequence_enrollments_routing_v2_pause_token'`)).rows[0].count;
+    expect(Number(trg)).toBe(0);
   });
 });

@@ -25,7 +25,8 @@ import type { V2Decision } from "./route";
  *
  * NOT WIRED into live dispatch: the cutover PR (BUILD-PLAN §6.3) calls `runRoutingV2PhoneAction`.
  * `flag_off` / `not_applicable` mean "run today's path"; `superseded` means a newer text from
- * the phone owns the thread; `apply_failed` wrote nothing and may be retried; `applied` /
+ * the phone owns the thread; `not_settled` means the inbound is under 30 s old (call again after
+ * `retryAfterSeconds`; nothing was written); `apply_failed` wrote nothing and may be retried; `applied` /
  * `replayed` carry the reply state (failed / unknown / skipped = a person should look).
  *
  * The v2 question set has no wrong-number scope question: the caller must supply `wrongScope`
@@ -113,6 +114,8 @@ export type RoutingV2PhoneActionResult =
   | { outcome: "flag_off" }
   | { outcome: "not_applicable"; reason: string }
   | { outcome: "superseded"; reason: string }
+  /** The inbound is under 30 s old (settle window): nothing written; retry after the delay. */
+  | { outcome: "not_settled"; retryable: true; retryAfterSeconds: number }
   /** The atomic apply failed and rolled back: nothing was written; safe to retry. */
   | { outcome: "apply_failed"; retryable: true }
   | { outcome: "replayed"; actionId: string; actionStatus: string; replyState: ReplyState }
@@ -238,8 +241,10 @@ export async function runRoutingV2PhoneAction(
     applied?: string[];
     skipped?: Array<{ propertyId: string; reason: string }>;
     propertyIds?: string[];
+    retryAfterSeconds?: number;
   };
   if (a.status === "superseded") return { outcome: "superseded", reason: a.reason ?? "superseded" };
+  if (a.status === "not_settled") return { outcome: "not_settled", retryable: true, retryAfterSeconds: a.retryAfterSeconds ?? 30 };
   if (a.status === "not_applicable") return { outcome: "not_applicable", reason: a.reason ?? "not_applicable" };
   if ((a.status !== "applied" && a.status !== "replayed") || !a.actionId || !a.sendId || !a.replyState) {
     return { outcome: "apply_failed", retryable: true };
