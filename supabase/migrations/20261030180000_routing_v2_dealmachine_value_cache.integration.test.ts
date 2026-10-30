@@ -134,16 +134,65 @@ describe("dealmachine_value_cache claim", () => {
   });
 });
 
-describe("provider_spend_ledger", () => {
-  it("one row per call id, idempotent", async () => {
+describe("provider_spend_ledger: pre-call row + shared rate limit", () => {
+  const start = async (propertyId: string | null, client: Client | Pool = db, org = orgId) =>
+    (await client.query(`select public.fn_provider_attempt_start('dealmachine', $1, $2, 60) as id`, [org, propertyId])).rows[0].id as string | null;
+
+  it("start writes attempt_started; settle is idempotent; an unsettled row is still counted", async () => {
     const p = await newProperty();
-    const callId = randomUUID();
-    const rec = async () =>
-      (await db.query(`select public.fn_provider_spend_record($1, 'dealmachine', $2, $3, 200, 1) as ok`, [callId, orgId, p])).rows[0].ok;
-    expect(await rec()).toBe(true);
-    expect(await rec()).toBe(false);
-    const { rows } = await db.query("select provider, cost, http_status from public.provider_spend_ledger where call_id = $1", [callId]);
-    expect(rows).toEqual([{ provider: "dealmachine", cost: "1.0000", http_status: 200 }]);
+    const callId = await start(p);
+    expect(callId).toBeTruthy();
+    const row = async () => (await db.query("select status, cost, http_status from public.provider_spend_ledger where call_id = $1", [callId])).rows[0];
+    expect(await row()).toEqual({ status: "attempt_started", cost: null, http_status: null });
+    const settleIt = async () => (await db.query(`select public.fn_provider_attempt_settle($1, 200, 1) as ok`, [callId])).rows[0].ok;
+    expect(await settleIt()).toBe(true);
+    expect(await settleIt()).toBe(false);
+    expect(await row()).toEqual({ status: "settled", cost: "1.0000", http_status: 200 });
+  });
+
+  it("61 concurrent attempts for different properties in one org → at most 60 slots (shared across connections)", async () => {
+    const org = randomUUID();
+    await db.query("insert into public.organizations (id, name) values ($1, 'routing-v2-pr-e-rate')", [org]);
+    try {
+      const props: string[] = [];
+      for (let i = 0; i < 61; i++) props.push(await newProperty(org));
+      const ids = await Promise.all(props.map((p) => start(p, pool, org)));
+      expect(ids.filter(Boolean)).toHaveLength(60);
+      expect(ids.filter((x) => x === null)).toHaveLength(1);
+      const { rows } = await db.query("select count(*)::int as n from public.provider_spend_ledger where org_id = $1", [org]);
+      expect(rows[0].n).toBe(60);
+      // Unsettled rows still count; another org is not affected.
+      expect(await start(null, db, org)).toBeNull();
+      expect(await start(null)).toBeTruthy();
+      // Rows older than a minute no longer count (rolling window).
+      await db.query("update public.provider_spend_ledger set started_at = now() - interval '61 seconds' where org_id = $1", [org]);
+      expect(await start(null, db, org)).toBeTruthy();
+    } finally {
+      await db.query("delete from public.provider_spend_ledger where org_id = $1", [org]);
+      await db.query("delete from public.properties where org_id = $1", [org]);
+      await db.query("delete from public.organizations where id = $1", [org]);
+    }
+  });
+
+  it("rejects a property from another org and an out-of-range limit", async () => {
+    const foreign = await newProperty(otherOrgId);
+    await expect(start(foreign)).rejects.toThrow(/property not in org/);
+    await expect(db.query(`select public.fn_provider_attempt_start('dealmachine', $1, null, 61)`, [orgId])).rejects.toThrow(/limit out of range/);
+  });
+});
+
+describe("function security", () => {
+  it("every RPC is SECURITY DEFINER with a pinned search_path", async () => {
+    const { rows } = await db.query(
+      `select p.proname, p.prosecdef, p.proconfig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname in ('fn_dealmachine_value_claim','fn_dealmachine_value_settle','fn_provider_attempt_start','fn_provider_attempt_settle')
+        order by 1`,
+    );
+    expect(rows).toHaveLength(4);
+    for (const r of rows) {
+      expect(r.prosecdef).toBe(true);
+      expect(r.proconfig).toContain("search_path=public, pg_temp");
+    }
   });
 });
 
@@ -165,6 +214,14 @@ describe("grants", () => {
     }
   });
 
+  it("service_role can read but not write the tables directly (writes go through the RPCs)", async () => {
+    await db.query("begin");
+    await db.query("set local role service_role");
+    await db.query("select 1 from public.dealmachine_value_cache");
+    await expect(db.query("delete from public.provider_spend_ledger")).rejects.toThrow(/permission denied/);
+    await db.query("rollback");
+  });
+
   it("service_role can claim", async () => {
     const p = await newProperty();
     await db.query("begin");
@@ -179,9 +236,9 @@ describe("rollback", () => {
   it("drops everything and re-applies cleanly", async () => {
     await db.query(ROLLBACK);
     const gone = await db.query(
-      "select to_regclass('public.dealmachine_value_cache') as a, to_regclass('public.provider_spend_ledger') as b, to_regprocedure('public.fn_dealmachine_value_claim(uuid,uuid,integer)') as c",
+      "select to_regclass('public.dealmachine_value_cache') as a, to_regclass('public.provider_spend_ledger') as b, to_regprocedure('public.fn_dealmachine_value_claim(uuid,uuid,integer)') as c, to_regprocedure('public.fn_provider_attempt_start(text,uuid,uuid,integer)') as d",
     );
-    expect(gone.rows[0]).toEqual({ a: null, b: null, c: null });
+    expect(gone.rows[0]).toEqual({ a: null, b: null, c: null, d: null });
     await db.query(MIGRATION);
     const back = await db.query("select to_regclass('public.dealmachine_value_cache') is not null as ok");
     expect(back.rows[0].ok).toBe(true);

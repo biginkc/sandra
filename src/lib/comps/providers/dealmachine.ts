@@ -11,7 +11,9 @@ import { randomUUID } from "node:crypto";
  *            with `Authorization: Bearer <key>`;
  *   response `{ data: [{ matched, estimated_value, match_failure? }], totals, credits: { used } }`.
  * `contact_audience: "none"` skips people/contacts (fewer credits). Each request costs
- * credits, so every HTTP attempt is reported through `onAttempt` for the spend ledger.
+ * credits, so every HTTP attempt first goes through `beforeAttempt` (the caller writes the
+ * spend-ledger row and takes a slot in the shared per-org rate limit; no slot or a failed write
+ * = no request), then `onAttempt` settles that row.
  *
  * Retries: at most 2 on 429 / 5xx / timeout / network error, exponential with jitter, honoring
  * `Retry-After` when it is short enough to wait inline; otherwise the caller gets a retryable
@@ -42,7 +44,11 @@ export type DealMachineValueResult =
   /** 429 / 5xx / timeout / network, retries exhausted. */
   | { kind: "retryable_error"; reason: string; retryAfterSeconds: number }
   /** 400 / 401 / other non-retryable response or an unreadable body. */
-  | { kind: "error"; reason: string };
+  | { kind: "error"; reason: string }
+  /** The shared rate limit had no slot: no request was sent. */
+  | { kind: "rate_limited" }
+  /** The pre-call ledger write failed: no request was sent (fail closed). */
+  | { kind: "accounting_failed" };
 
 export type DealMachineOptions = {
   apiKey: string;
@@ -53,6 +59,11 @@ export type DealMachineOptions = {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   newCallId?: () => string;
+  /**
+   * Called before EVERY HTTP request. Returns the ledger call id, or null when the shared rate
+   * limit is full. Throwing = the ledger write failed. Either way no request is sent.
+   */
+  beforeAttempt?: () => Promise<string | null>;
   onAttempt?: (attempt: DealMachineAttempt) => Promise<void> | void;
 };
 
@@ -111,7 +122,19 @@ export async function fetchDealMachineEstimatedValue(
 
   let last: { reason: string; retryAfterSeconds: number } = { reason: "not_attempted", retryAfterSeconds: 60 };
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const callId = (opts.newCallId ?? randomUUID)();
+    let callId: string;
+    if (opts.beforeAttempt) {
+      let slot: string | null;
+      try {
+        slot = await opts.beforeAttempt();
+      } catch {
+        return { kind: "accounting_failed" };
+      }
+      if (!slot) return attempt === 0 ? { kind: "rate_limited" } : { kind: "retryable_error", reason: "rate_limited", retryAfterSeconds: 60 };
+      callId = slot;
+    } else {
+      callId = (opts.newCallId ?? randomUUID)();
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEALMACHINE_TIMEOUT_MS);
     let res: Response | null = null;
@@ -133,7 +156,7 @@ export async function fetchDealMachineEstimatedValue(
     try {
       await opts.onAttempt?.({ callId, httpStatus: res?.status ?? null, creditsUsed: res ? creditsUsed(parsed) : null });
     } catch {
-      // Accounting failure never changes the lookup outcome.
+      // The row was written before the request (attempt_started), so it is still counted.
     }
 
     if (res && res.ok) return parseDealMachineEnrichResponse(parsed);

@@ -1,6 +1,13 @@
 -- 20261030180000_routing_v2_dealmachine_value_cache.sql
 -- SMS reply routing v2, PR-E (BUILD-PLAN §15): DealMachine estimated-value cache with an
--- atomic claim, 30-day expiry, negative cache, retry backoff, and per-call spend accounting.
+-- atomic claim, 30-day expiry, negative cache, retry backoff, per-call spend accounting
+-- written BEFORE each provider call, and a shared per-org rate limit (<=60 calls per rolling
+-- minute) enforced by the same pre-call write. Over the limit = no call (caller treats it as
+-- "no value"); there is no queue.
+--
+-- RPCs follow the repo's service-role RPC convention: SECURITY DEFINER, pinned
+-- search_path (public, pg_temp), execute revoked from public/anon/authenticated and granted
+-- to service_role only.
 --
 -- Additive only. Nothing reads these until routing_v2_flags.price_check is on (and the
 -- cutover PR wires the price check into live dispatch). No caps (Jarrad 2026-10-30).
@@ -39,34 +46,39 @@ create table if not exists public.dealmachine_value_cache (
 create index if not exists dealmachine_value_cache_org_idx on public.dealmachine_value_cache (org_id);
 
 alter table public.dealmachine_value_cache enable row level security;
-revoke all on public.dealmachine_value_cache from public, anon, authenticated;
-grant select, insert, update, delete on public.dealmachine_value_cache to service_role;
+revoke all on public.dealmachine_value_cache from public, anon, authenticated, service_role;
+grant select on public.dealmachine_value_cache to service_role;
 
 comment on table public.dealmachine_value_cache is
   'Routing v2 PR-E: DealMachine estimated_value per property. ok/negative valid 30 days; failed_retryable honors retry_after; in_flight is a claim that expires (crashed worker).';
 
--- One row per provider HTTP request (BUILD-PLAN §15 spend accounting). No cap, no reservation.
+-- One row per provider HTTP request (BUILD-PLAN §15 spend accounting). The row is written
+-- as attempt_started BEFORE the request and settled after it; a row whose settle failed
+-- stays attempt_started and is still counted. No spend cap, no reservation.
 create table if not exists public.provider_spend_ledger (
-  call_id uuid primary key,
+  call_id uuid primary key default gen_random_uuid(),
   provider text not null check (provider in ('dealmachine')),
   day date not null default ((now() at time zone 'utc')::date),
-  org_id uuid references public.organizations(id) on delete set null,
+  org_id uuid not null references public.organizations(id) on delete cascade,
   property_id uuid references public.properties(id) on delete set null,
+  status text not null default 'attempt_started' check (status in ('attempt_started', 'settled')),
   http_status integer,
-  -- Provider-reported cost (DealMachine: credits.used). NULL = not reported (error/timeout).
+  -- Provider-reported cost (DealMachine: credits.used). NULL = not reported (error/timeout/unsettled).
   cost numeric(12, 4),
   cost_unit text not null default 'credits',
-  created_at timestamptz not null default now()
+  started_at timestamptz not null default now(),
+  settled_at timestamptz
 );
 
 create index if not exists provider_spend_ledger_provider_day_idx on public.provider_spend_ledger (provider, day);
+create index if not exists provider_spend_ledger_rate_idx on public.provider_spend_ledger (provider, org_id, started_at);
 
 alter table public.provider_spend_ledger enable row level security;
-revoke all on public.provider_spend_ledger from public, anon, authenticated;
-grant select, insert on public.provider_spend_ledger to service_role;
+revoke all on public.provider_spend_ledger from public, anon, authenticated, service_role;
+grant select on public.provider_spend_ledger to service_role;
 
 comment on table public.provider_spend_ledger is
-  'Routing v2: one row per paid-provider HTTP request (DealMachine). Accounting only: no cap, no kill switch (Jarrad 2026-10-30).';
+  'Routing v2: one row per paid-provider HTTP request (DealMachine), written before the call. Accounting + the shared per-org rate limit; no spend cap (Jarrad 2026-10-30).';
 
 -- Claim. Outcomes:
 --   claimed          caller won the claim and must call the provider, then settle
@@ -81,7 +93,7 @@ create or replace function public.fn_dealmachine_value_claim(
 )
 returns table (outcome text, claim_token uuid, estimated_value numeric, retry_after timestamptz)
 language plpgsql
-security invoker
+security definer
 set search_path = public, pg_temp
 as $$
 declare
@@ -142,7 +154,7 @@ create or replace function public.fn_dealmachine_value_settle(
 )
 returns boolean
 language plpgsql
-security invoker
+security definer
 set search_path = public, pg_temp
 as $$
 declare
@@ -177,26 +189,63 @@ begin
 end;
 $$;
 
--- Idempotent per call_id (a retried write of the same call never double counts).
-create or replace function public.fn_provider_spend_record(
-  p_call_id uuid,
+-- Pre-call accounting + shared rate limit. Serialized per (provider, org) with an
+-- advisory lock, so concurrent callers on any instance see each other's rows: at most
+-- p_limit attempts start per rolling minute. Returns the new call_id, or NULL when over the
+-- limit (the caller must not call the provider).
+create or replace function public.fn_provider_attempt_start(
   p_provider text,
   p_org_id uuid,
   p_property_id uuid,
+  p_limit_per_minute integer default 60
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_used integer;
+  v_call uuid;
+begin
+  if p_limit_per_minute is null or p_limit_per_minute < 1 or p_limit_per_minute > 60 then
+    raise exception 'limit out of range';
+  end if;
+  if p_property_id is not null
+     and not exists (select 1 from public.properties p where p.id = p_property_id and p.org_id = p_org_id) then
+    raise exception 'property not in org';
+  end if;
+  perform pg_advisory_xact_lock(hashtext('provider_rate:' || p_provider || ':' || p_org_id::text));
+  select count(*) into v_used
+  from public.provider_spend_ledger l
+  where l.provider = p_provider and l.org_id = p_org_id and l.started_at > now() - interval '1 minute';
+  if v_used >= p_limit_per_minute then
+    return null;
+  end if;
+  insert into public.provider_spend_ledger (provider, org_id, property_id)
+  values (p_provider, p_org_id, p_property_id)
+  returning call_id into v_call;
+  return v_call;
+end;
+$$;
+
+-- Settle one attempt (idempotent: only an attempt_started row changes).
+create or replace function public.fn_provider_attempt_settle(
+  p_call_id uuid,
   p_http_status integer,
   p_cost numeric
 )
 returns boolean
 language plpgsql
-security invoker
+security definer
 set search_path = public, pg_temp
 as $$
 declare
   v_count integer;
 begin
-  insert into public.provider_spend_ledger (call_id, provider, org_id, property_id, http_status, cost)
-  values (p_call_id, p_provider, p_org_id, p_property_id, p_http_status, p_cost)
-  on conflict (call_id) do nothing;
+  update public.provider_spend_ledger l
+     set status = 'settled', http_status = p_http_status, cost = p_cost, settled_at = now()
+   where l.call_id = p_call_id and l.status = 'attempt_started';
   get diagnostics v_count = row_count;
   return v_count = 1;
 end;
@@ -204,9 +253,11 @@ $$;
 
 revoke all on function public.fn_dealmachine_value_claim(uuid, uuid, integer) from public, anon, authenticated;
 revoke all on function public.fn_dealmachine_value_settle(uuid, uuid, text, numeric, integer, text, integer) from public, anon, authenticated;
-revoke all on function public.fn_provider_spend_record(uuid, text, uuid, uuid, integer, numeric) from public, anon, authenticated;
+revoke all on function public.fn_provider_attempt_start(text, uuid, uuid, integer) from public, anon, authenticated;
+revoke all on function public.fn_provider_attempt_settle(uuid, integer, numeric) from public, anon, authenticated;
 grant execute on function public.fn_dealmachine_value_claim(uuid, uuid, integer) to service_role;
 grant execute on function public.fn_dealmachine_value_settle(uuid, uuid, text, numeric, integer, text, integer) to service_role;
-grant execute on function public.fn_provider_spend_record(uuid, text, uuid, uuid, integer, numeric) to service_role;
+grant execute on function public.fn_provider_attempt_start(text, uuid, uuid, integer) to service_role;
+grant execute on function public.fn_provider_attempt_settle(uuid, integer, numeric) to service_role;
 
 commit;

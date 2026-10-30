@@ -14,7 +14,7 @@ import {
 } from "@/lib/comps/providers/dealmachine";
 
 import { V2_PRICE_CHECK_ACTIONS, V2_ROAD_ACTIONS, actionForV2Decision } from "./actions";
-import { lookupDealMachineValue, type ClaimOutcome, type DealMachineCacheStore, type SettleState } from "./dealmachine-value";
+import { DM_CALLS_PER_MINUTE, lookupDealMachineValue, type ClaimOutcome, type DealMachineCacheStore, type SettleState } from "./dealmachine-value";
 import { ALL_OFF, type RoutingV2Flags } from "./flags";
 import { askAboveEightyPercent, extractDollarAmount } from "./price-amount";
 import {
@@ -496,6 +496,22 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
     expect(r).toEqual({ kind: "error", reason: "http_401" });
   });
 
+  it("beforeAttempt: no slot → rate_limited, write failure → accounting_failed; no request either way", async () => {
+    const fetchImpl = vi.fn(async () => ok(1));
+    const f = fetchImpl as unknown as typeof fetch;
+    expect(await fetchDealMachineEstimatedValue(ADDR, { apiKey: "k", fetchImpl: f, beforeAttempt: async () => null })).toEqual({ kind: "rate_limited" });
+    expect(
+      await fetchDealMachineEstimatedValue(ADDR, {
+        apiKey: "k",
+        fetchImpl: f,
+        beforeAttempt: async () => {
+          throw new Error("ledger");
+        },
+      }),
+    ).toEqual({ kind: "accounting_failed" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("parses Retry-After seconds and dates", () => {
     expect(parseRetryAfterSeconds("7")).toBe(7);
     expect(parseRetryAfterSeconds(new Date(10_000).toUTCString(), 0)).toBe(10);
@@ -504,12 +520,32 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
   });
 });
 
-/** In-memory store with the same claim semantics as fn_dealmachine_value_claim. */
+const dmOk = (v: number) =>
+  new Response(JSON.stringify({ data: [{ matched: true, estimated_value: v }], credits: { used: 1 } }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+
+/** The real provider adapter over a mocked fetch (no network), wired to the store hooks. */
+const realProvider =
+  (fetchImpl: (...a: never[]) => Promise<Response>) =>
+  (address: Parameters<typeof fetchDealMachineEstimatedValue>[0], hooks: { beforeAttempt: () => Promise<string | null>; onAttempt: (a: DealMachineAttempt) => Promise<void> }) =>
+    fetchDealMachineEstimatedValue(address, {
+      apiKey: "test-key",
+      baseUrl: "https://dm.invalid",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      sleep: async () => {},
+      ...hooks,
+    });
+
+/** In-memory store with the same claim / ledger-slot semantics as the 20261030180000 RPCs. */
 function memoryStore(nowRef: { t: number }) {
   type Row = { state: "in_flight" | SettleState | "negative" | "ok"; value?: number; token?: string; claimExp?: number; validUntil?: number; retryAt?: number };
   const rows = new Map<string, Row>();
-  const spend: DealMachineAttempt[] = [];
+  type Spend = { callId: string; orgId: string; startedAt: number; status: "attempt_started" | "settled"; httpStatus?: number | null; cost?: number | null };
+  const spend: Spend[] = [];
   let n = 0;
+  let c = 0;
   const store: DealMachineCacheStore = {
     async claim(propertyId) {
       await Promise.resolve();
@@ -547,8 +583,19 @@ function memoryStore(nowRef: { t: number }) {
       });
       return true;
     },
-    async recordSpend({ attempt }) {
-      spend.push(attempt);
+    async startAttempt({ orgId }) {
+      await Promise.resolve();
+      const used = spend.filter((x) => x.orgId === orgId && x.startedAt > nowRef.t - 60_000).length;
+      if (used >= DM_CALLS_PER_MINUTE) return null;
+      const callId = `call${++c}`;
+      spend.push({ callId, orgId, startedAt: nowRef.t, status: "attempt_started" });
+      return callId;
+    },
+    async settleAttempt(a) {
+      const row = spend.find((x) => x.callId === a.callId && x.status === "attempt_started");
+      if (!row) return false;
+      Object.assign(row, { status: "settled", httpStatus: a.httpStatus, cost: a.creditsUsed });
+      return true;
     },
   };
   return { store, rows, spend };
@@ -562,11 +609,11 @@ describe("lookupDealMachineValue (claim + cache)", () => {
     const { store, spend } = memoryStore(clock);
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    const callProvider = vi.fn(async (_a: unknown, onAttempt: (a: DealMachineAttempt) => Promise<void>) => {
+    const fetchImpl = vi.fn(async () => {
       await gate;
-      await onAttempt({ callId: "c1", httpStatus: 200, creditsUsed: 1 });
-      return { kind: "ok" as const, value: 200_000 };
+      return dmOk(200_000);
     });
+    const callProvider = vi.fn(realProvider(fetchImpl));
     // Each poll advances the fake clock a little; the winner's provider call finishes after a few polls.
     const sleep = async () => {
       clock.t += 10;
@@ -579,8 +626,9 @@ describe("lookupDealMachineValue (claim + cache)", () => {
       ),
     );
     expect(callProvider).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(results.every((r) => r.kind === "value" && r.value === 200_000)).toBe(true);
-    expect(spend).toHaveLength(1);
+    expect(spend).toEqual([expect.objectContaining({ status: "settled", httpStatus: 200, cost: 1 })]);
   });
 
   it("losers give up after ≤10 s while the claim is in flight → no value", async () => {
@@ -652,28 +700,119 @@ describe("lookupDealMachineValue (claim + cache)", () => {
 
   it("no usable address / claim error → no value, no call", async () => {
     const callProvider = vi.fn();
-    const store = { claim: vi.fn(async () => { throw new Error("db"); }), settle: vi.fn(), recordSpend: vi.fn() } as unknown as DealMachineCacheStore;
+    const store = {
+      claim: vi.fn(async () => {
+        throw new Error("db");
+      }),
+      settle: vi.fn(),
+      startAttempt: vi.fn(),
+      settleAttempt: vi.fn(),
+    } as unknown as DealMachineCacheStore;
     expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: { street: "1 Test St", city: "", state: "MO" } }, { store, callProvider })).toEqual({ kind: "no_value", reason: "no_address" });
     expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider })).toEqual({ kind: "no_value", reason: "claim_error" });
     expect(callProvider).not.toHaveBeenCalled();
   });
 
-  it("spend-record failure never changes the outcome", async () => {
+  it("ledger row is written BEFORE the request; a failed pre-call write → no request, no value", async () => {
     const clock = { t: 0 };
-    const { store } = memoryStore(clock);
-    store.recordSpend = async () => {
+    const { store, rows } = memoryStore(clock);
+    store.startAttempt = async () => {
       throw new Error("ledger down");
     };
-    const r = await lookupDealMachineValue(
-      { orgId: ORG, propertyId: PROP, address: ADDR },
-      {
-        store,
-        callProvider: async (_a, onAttempt) => {
-          await onAttempt({ callId: "x", httpStatus: 200, creditsUsed: 1 });
-          return { kind: "ok", value: 9 };
-        },
-      },
-    );
+    const fetchImpl = vi.fn(async () => dmOk(9));
+    const r = await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider: realProvider(fetchImpl) });
+    expect(r).toEqual({ kind: "no_value", reason: "accounting_failed" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(rows.get(PROP)?.state).toBe("failed_retryable");
+  });
+
+  it("order: startAttempt happens before fetch, settleAttempt after", async () => {
+    const clock = { t: 0 };
+    const { store, spend } = memoryStore(clock);
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async () => {
+      seen.push(`fetch:${spend.map((x) => x.status).join(",")}`);
+      return dmOk(9);
+    });
+    await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider: realProvider(fetchImpl) });
+    expect(seen).toEqual(["fetch:attempt_started"]);
+    expect(spend.map((x) => x.status)).toEqual(["settled"]);
+  });
+
+  it("a failed ledger settle leaves the row attempt_started (still counted); outcome unchanged", async () => {
+    const clock = { t: 0 };
+    const { store, spend } = memoryStore(clock);
+    store.settleAttempt = async () => {
+      throw new Error("ledger down");
+    };
+    const r = await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider: realProvider(vi.fn(async () => dmOk(9))) });
     expect(r).toEqual({ kind: "value", value: 9, source: "provider" });
+    expect(spend).toEqual([expect.objectContaining({ status: "attempt_started" })]);
+  });
+
+  it("every retry attempt gets its own pre-call ledger row", async () => {
+    const clock = { t: 0 };
+    const { store, spend } = memoryStore(clock);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+      .mockResolvedValueOnce(dmOk(9));
+    await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider: realProvider(fetchImpl) });
+    expect(spend.map((x) => [x.status, x.httpStatus])).toEqual([
+      ["settled", 503],
+      ["settled", 200],
+    ]);
+  });
+
+  it("settle not successful (claim reclaimed/lost) → no value, never the obsolete value", async () => {
+    const clock = { t: 0 };
+    const { store } = memoryStore(clock);
+    const callProvider = async () => {
+      // While the provider was slow, the claim expired and someone else retook it.
+      clock.t += 61_000;
+      await store.claim(PROP, ORG);
+      return { kind: "ok" as const, value: 123 };
+    };
+    expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store, callProvider })).toEqual({
+      kind: "no_value",
+      reason: "settle_lost",
+    });
+    const throwing = { ...store, settle: async () => { throw new Error("db"); } } as DealMachineCacheStore;
+    const fresh = memoryStore({ t: 0 }).store;
+    const s2 = { ...fresh, settle: throwing.settle } as DealMachineCacheStore;
+    expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store: s2, callProvider: async () => ({ kind: "ok", value: 5 }) })).toEqual({
+      kind: "no_value",
+      reason: "settle_lost",
+    });
+  });
+
+  it("shared rate limit: 61 concurrent lookups for different properties → at most 60 provider calls; overflow = no value, no queue", async () => {
+    const clock = { t: 0 };
+    const { store, spend } = memoryStore(clock);
+    const fetchImpl = vi.fn(async () => dmOk(100_000));
+    const props = Array.from({ length: 61 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
+    const results = await Promise.all(
+      props.map((propertyId) => lookupDealMachineValue({ orgId: ORG, propertyId, address: ADDR }, { store, callProvider: realProvider(fetchImpl) })),
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(60);
+    expect(spend).toHaveLength(60);
+    expect(results.filter((r) => r.kind === "value")).toHaveLength(60);
+    expect(results.filter((r) => r.kind === "no_value" && r.reason === "rate_limited")).toHaveLength(1);
+    // A minute later there is room again.
+    clock.t += 61_000;
+    const later = await lookupDealMachineValue({ orgId: ORG, propertyId: props[60], address: ADDR }, { store, callProvider: realProvider(fetchImpl) });
+    expect(later.kind).toBe("value");
+  });
+
+  it("price check on a rate-limited lookup takes the safe path (fair-price reply + alert)", async () => {
+    const r = await runV2PriceCheck({
+      flags: ON,
+      propertyId: PROP,
+      decision: DECISION,
+      reply: "$150k",
+      propertyType: PT(),
+      lookupValue: async () => ({ kind: "no_value", reason: "rate_limited" }),
+    });
+    expect(r).toMatchObject({ outcome: "no_value", action: FAIR, noValueReason: "rate_limited" });
   });
 });
