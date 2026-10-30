@@ -322,10 +322,10 @@ const stepRun = async (c: Client, enrollmentId: string) =>
      where e.id = $1 returning id, step_id`,
     [enrollmentId],
   )).rows[0] as { id: string; step_id: string };
-const authorize = async (c: Client, ctx: Ctx, enrollmentId: string, run: { id: string; step_id: string }) =>
+const authorize = async (c: Client, ctx: Ctx, enrollmentId: string, run: { id: string; step_id: string }, messageId: string = randomUUID()) =>
   (await c.query(
     `select * from public.authorize_sequence_provider_attempt($1,$2,$3,$4,$5,'+18165550100',$6)`,
-    [enrollmentId, run.step_id, run.id, ctx.contact, ctx.property, randomUUID()],
+    [enrollmentId, run.step_id, run.id, ctx.contact, ctx.property, messageId],
   )).rows[0] as { authorized: boolean; reason: string };
 const lockDnc = (c: Client, property: string) =>
   c.query(`update public.properties set is_dnc_locked = true where id = $1`, [property]);
@@ -518,6 +518,67 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await expect(db.query(`update public.sequence_enrollments set routing_v2_inbound_id = $2 where id = $1`, [r.new_enrollment_id, randomUUID()]))
       .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
     await db.query("rollback to savepoint q");
+  });
+
+  it("final Said they'd call step sends -> completes -> lands in Book appointment v2, once (idempotent)", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, { sequence_key: "said_theyd_call" });
+    const e = r.new_enrollment_id;
+    // Walk to the last step (index 5) the way advanceEnrollment does.
+    await db.query(`update public.sequence_enrollments set current_step_index = 5, next_run_at = now() where id = $1`, [e]);
+    const run = await stepRun(db, e);
+    expect((await db.query(`select public.routing_v2_claim_drip_send($1,$2) as r`, [e, run.id])).rows[0].r).toBe("ok");
+    const pendingMsg = (await db.query(
+      `insert into public.messages (org_id, property_id, contact_id, direction, channel, body, status)
+       values ($1,$2,$3,'outbound','sms','last step','pending') returning id`,
+      [ctx.org, ctx.property, ctx.contact],
+    )).rows[0].id;
+    const fence = await authorize(db, ctx, e, run, pendingMsg);
+    expect(fence).toMatchObject({ authorized: true });
+    await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent')`, [run.id]);
+    // advanceEnrollment: no step 6 -> completed (same filters as tick.ts).
+    const done = await db.query(
+      `update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now()
+       where id = $1 and status = 'active' and current_step_index = 5 returning id`, [e]);
+    expect(done.rowCount).toBe(1);
+    const next = (await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r;
+    expect(next).toBeTruthy();
+    // A tick retry / the missing-step path calling it again does nothing.
+    expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r).toBeNull();
+    const rows = await enrollments(db, ctx.property);
+    expect(rows.filter((x) => x.status === "active").map((x) => x.routing_v2_key)).toEqual(["book_appointment"]);
+    expect(rows.find((x) => x.id === e)).toMatchObject({ status: "completed", ended_reason: "chained" });
+  });
+
+  it("completions that must NOT chain: legacy final step, a v2 drip with no next drip, rerouted, flag_off, DNC-locked", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const chain = async (e: string) => (await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r;
+    // Legacy final step.
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [ctx.legacyEnrollment]);
+    expect(await chain(ctx.legacyEnrollment)).toBeNull();
+    // v2 with no next drip (Price too high).
+    const a = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "price_too_high" });
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [a.new_enrollment_id]);
+    expect(await chain(a.new_enrollment_id)).toBeNull();
+    // Rerouted Said they'd call (a newer reply retired it).
+    const b = await transition(db, await inbound(db, ctx, "2026-10-30T15:01:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    await transition(db, await inbound(db, ctx, "2026-10-30T15:02:00Z"), ctx.property, { sequence_key: "vacant_land" });
+    expect(await chain(b.new_enrollment_id)).toBeNull();
+    // flag_off-stopped Said they'd call.
+    const c = await transition(db, await inbound(db, ctx, "2026-10-30T15:03:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: false });
+    expect((await db.query(`select public.routing_v2_enrollment_send_check($1) as r`, [c.new_enrollment_id])).rows[0].r).toBe("flag_off");
+    expect(await chain(c.new_enrollment_id)).toBeNull();
+    // Completed normally but the property is now DNC-locked.
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const d = await transition(db, await inbound(db, ctx, "2026-10-30T15:04:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [d.new_enrollment_id]);
+    await db.query("set local session_replication_role = replica");
+    await lockDnc(db, ctx.property);
+    await db.query("set local session_replication_role = origin");
+    expect(await chain(d.new_enrollment_id)).toBeNull();
+    expect((await enrollments(db, ctx.property)).filter((x) => x.status === "active")).toHaveLength(0);
   });
 
   it("generic alerts are gated on replies: drips=true, replies=false -> the alert does not send", async () => {

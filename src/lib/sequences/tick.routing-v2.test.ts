@@ -37,11 +37,16 @@ function fixture(opts: {
   appendOptOut?: boolean;
   runWriteFails?: boolean;
   markError?: string;
+  lastStep?: boolean;
+  chainError?: string;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "routing_v2_enrollment_send_check") return { data: opts.sendCheck ?? "ok", error: null };
     if (fn === "routing_v2_claim_drip_send") return { data: opts.claimResult ?? "ok", error: null };
+    if (fn === "routing_v2_chain_after_completion") {
+      return opts.chainError ? { data: null, error: { message: opts.chainError } } : { data: "next-enrollment", error: null };
+    }
     if (fn === "routing_v2_mark_drip_claim_sent") {
       return opts.markError ? { data: null, error: { message: opts.markError } } : { data: "claim-1", error: null };
     }
@@ -62,7 +67,7 @@ function fixture(opts: {
             template_id: null, template_category: null, target_status: null, delay_after_previous_minutes: 1440,
           });
         }
-        return ok({ delay_after_previous_minutes: 1440 });
+        return ok(opts.lastStep ? null : { delay_after_previous_minutes: 1440 });
       }
       if (table === "properties") {
         return ok({
@@ -185,6 +190,31 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     expect(writes).toContainEqual(expect.objectContaining({
       table: "sequence_step_runs", payload: expect.objectContaining({ attempt_outcome: "accepted" }),
     }));
+  });
+
+  it("final v2 step sent: the enrollment completes and chains (Said they'd call -> Book appointment v2)", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, rpc, writes } = fixture({ lastStep: true, routingV2Key: "said_theyd_call" });
+    expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ status: "completed" }),
+    }));
+    expect(rpc).toHaveBeenCalledWith("routing_v2_chain_after_completion", { p_enrollment_id: "enrollment-1" });
+    const order = (fn: string) => rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === fn)]!;
+    expect(order("routing_v2_chain_after_completion")).toBeGreaterThan(order("routing_v2_mark_drip_claim_sent"));
+  });
+
+  it("a chain failure after the final send is reported, never turns the sent text into a failure", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client } = fixture({ lastStep: true, chainError: "boom" });
+    expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
+  });
+
+  it("legacy final step: completes exactly as before and never chains", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, rpc } = fixture({ lastStep: true, routingV2Key: null, appendOptOut: true });
+    expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_chain_after_completion", expect.anything());
   });
 
   it("wait: a slot outside the window reschedules (no claim, no send)", async () => {

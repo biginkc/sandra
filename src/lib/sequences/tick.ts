@@ -570,6 +570,17 @@ export async function processEnrollmentTick(
             message: `Message ${messageId} accepted; ${advanceError}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
+        // Routing v2 only: when that was the drip's last step (advance completed it), chain into
+        // the next drip (Said they'd call -> Book appointment v2). The SQL is idempotent (sets
+        // ended_reason = 'chained'; a retry or the missing-step path returns null) and re-checks
+        // flags, takeover, suppression/DNC and the one-live-drip rule under the property lock.
+        if (isRoutingV2) {
+          try {
+            await routingV2ChainAfterCompletion(client, enrollment.id);
+          } catch (err) {
+            reportError(err, { tags: { context: "routing_v2_chain_after_completion" }, extra: { enrollmentId: enrollment.id } });
+          }
+        }
         return {
           status: "sent",
           enrollmentId: enrollment.id,
