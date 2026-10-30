@@ -1,4 +1,4 @@
-import type { HaikuAnswer, HaikuFailure } from "./haiku";
+import { HAIKU_OPTION_IDS, type HaikuAnswer, type HaikuFailure } from "./haiku";
 import { DEFAULT_CUTOFF, LAND_PRICE_SIGNALS, type V2Road } from "./order";
 import type { V2QuestionId } from "./questions";
 import type { V2Decision } from "./route";
@@ -7,10 +7,10 @@ import type { V2Decision } from "./route";
  * Routing v2 PR-D: what happens with Haiku's second opinion (pure; Jarrad 2026-10-30).
  * - Haiku is asked only when routeV2 says it is eligible (haiku-eligibility.ts).
  * - Valid answer, confidence ≥0.50, known option → Haiku's road (route_v7 `hroad`).
- * - Valid "unsure" (needs_person, confidence <0.50, or an off-list option) → Jev's road stands;
+ * - Valid "unsure" (needs_person or confidence <0.50) → Jev's road stands;
  *   Jev had none → ALERT_haiku_unsure.
  * - A Haiku-decided stop is never auto-suppressed: hold + alert "Possible stop request — please check".
- * - Invalid answer / transport / timeout / HTTP error → hold + escalate to Jarrad with the reason;
+ * - Invalid answer (incl. an option id not in the list) / transport / timeout / HTTP error → hold + escalate to Jarrad with the reason;
  *   zero automatic sends. Not the valid-unsure path.
  * No daily caps or spend reservations (Jarrad 2026-10-30).
  */
@@ -53,6 +53,9 @@ export function applyHaikuPolicy(
 ): FinalDecision {
   const base = d.provenance.by === "code" ? "code" : "jev";
   if (!shouldAskHaiku(d)) return { road: d.road, by: base, hold: false, alert: null, failureReason: null };
+  if (haiku?.ok && !(HAIKU_OPTION_IDS as readonly string[]).includes(haiku.option)) {
+    haiku = { ok: false, reason: "haiku_invalid:unknown_option" };
+  }
   if (!haiku || !haiku.ok) {
     return { road: null, by: "haiku_failed", hold: true, alert: HAIKU_ERROR_ALERT, failureReason: haiku ? haiku.reason : "haiku_invalid:missing" };
   }
