@@ -183,6 +183,9 @@ const toPending = async (actionId: string) => {
   await passFence(actionId);
   expect((await releaseFence(actionId)).replyState).toBe("pending");
 };
+/** Age a `sending` row past the 120 s provider-timeout lease (test clock shortcut). */
+const expireSendLease = (actionId: string) =>
+  db.query(`update public.routing_v2_phone_actions set sending_at = clock_timestamp() - interval '121 seconds' where id = $1`, [actionId]);
 const recover = (actionId: string) =>
   asService(async () => (await db.query(`select public.fn_routing_v2_phone_action_recover_reply($1) as r`, [actionId])).rows[0].r);
 const undo = (userId: string, actionId: string) =>
@@ -460,6 +463,7 @@ describe("B. reply after commit, keyed by the send id", () => {
     const r = await applyAll();
     await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
+    await expireSendLease(r.actionId);
     // Same approved body, same property, after the action — but no send id: not ours.
     await db.query(
       `insert into public.messages (org_id, property_id, conversation_id, channel, direction, body, to_address) values ($1, $2, $3, 'sms', 'outbound', $4, $5)`,
@@ -478,6 +482,7 @@ describe("B. reply after commit, keyed by the send id", () => {
     const r = await applyAll();
     await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
+    await expireSendLease(r.actionId);
     const out = randomUUID();
     await db.query(
       `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status, external_id) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'sent', 'SM123')`,
@@ -492,6 +497,7 @@ describe("B. reply after commit, keyed by the send id", () => {
     const r = await applyAll();
     await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
+    await expireSendLease(r.actionId);
     const out = randomUUID();
     await db.query(
       `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'pending')`,
@@ -521,6 +527,7 @@ describe("B. reply after commit, keyed by the send id", () => {
     const r = await applyAll();
     await toPending(r.actionId);
     await reply(r.actionId, r.sendId, "sending");
+    await expireSendLease(r.actionId);
     const out = randomUUID();
     await db.query(
       `insert into public.messages (id, org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status) values ($1, $2, $3, $4, 'sms', 'outbound', $5, $6, $7, 'pending')`,
@@ -845,6 +852,48 @@ describe("B0. post-commit fence and undo/send serialization", () => {
     expect((await undo(ownerId, r.actionId)).status).toBe("undone");
   });
 
+  it("duplicate webhook during an in-flight send: recovery leaves it `sending` and undo stays busy; after the lease it settles", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    const snap = await snapshot();
+    // Duplicate webhook -> recovery runs immediately: inside the lease it changes nothing.
+    const early = await recover(r.actionId);
+    expect(early).toMatchObject({ replyState: "sending", inFlight: true });
+    expect(early.retryAfterSeconds).toBeGreaterThan(100);
+    expect(early.retryAfterSeconds).toBeLessThanOrEqual(120);
+    const row = (await db.query(`select reply_state, reply_message_id from public.routing_v2_phone_actions where id = $1`, [r.actionId])).rows[0];
+    expect(row).toEqual({ reply_state: "sending", reply_message_id: null });
+    expect(await undo(ownerId, r.actionId)).toMatchObject({ status: "busy", reason: "reply_in_flight" });
+    expect(await snapshot()).toEqual(snap);
+    // The settler does not pick it up inside the lease either.
+    const feed = async () =>
+      (await asService(async () => (await db.query(`select action_id from public.fn_routing_v2_phone_action_unsettled_replies(0, 50)`)).rows)).map((x) => x.action_id);
+    expect(await feed()).not.toContain(r.actionId);
+    // After the lease: no message for the send id -> unknown; undo then works.
+    await expireSendLease(r.actionId);
+    expect(await feed()).toContain(r.actionId);
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "unknown" });
+    expect((await undo(ownerId, r.actionId)).status).toBe("undone");
+  });
+
+  it("after the lease, a reply that did go out is recorded sent; undo then still restores (properties only)", async () => {
+    await setFlags(ON);
+    const r = await applyAll();
+    await toPending(r.actionId);
+    await reply(r.actionId, r.sendId, "sending");
+    await db.query(
+      `insert into public.messages (org_id, property_id, conversation_id, channel, direction, body, to_address, idempotency_key, status, external_id) values ($1, $2, $3, 'sms', 'outbound', $4, $5, $6, 'sent', 'SM9')`,
+      [orgId, ids.p1, ids.conv, APPROVED_REPLY_TEXTS.wrong_number, X, r.sendId],
+    );
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "sending", inFlight: true }); // still in the lease
+    await expireSendLease(r.actionId);
+    expect(await recover(r.actionId)).toMatchObject({ replyState: "sent" });
+    const u = await undo(ownerId, r.actionId);
+    expect(u.status).not.toBe("busy");
+  });
+
   it("undo first: the not-yet-started reply is skipped and pending -> sending is refused", async () => {
     await setFlags(ON);
     const r = await applyAll();
@@ -925,6 +974,7 @@ describe("self-sweep", () => {
       [`update public.routing_v2_phone_actions set reply_state = null where id = $1`, [r.actionId]],
       [`update public.routing_v2_phone_actions set status = 'undone' where id = $1`, [r.actionId]], // undone needs undone_at
       [`update public.routing_v2_phone_actions set fence_at = null where id = $1`, [r.actionId]], // awaiting_fence needs fence_at
+      [`update public.routing_v2_phone_actions set reply_state = 'sending', sending_at = null where id = $1`, [r.actionId]], // sending needs sending_at
       [`update public.routing_v2_phone_action_properties set outcome = 'bogus' where action_id = $1`, [r.actionId]],
       [`update public.routing_v2_phone_action_properties set outcome = 'skipped' where action_id = $1 and outcome = 'applied'`, [r.actionId]],
       [`update public.routing_v2_phone_action_properties set paused_at = null where action_id = $1 and cardinality(paused_enrollment_ids) > 0`, [r.actionId]],

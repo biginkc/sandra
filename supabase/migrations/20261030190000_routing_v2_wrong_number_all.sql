@@ -46,13 +46,17 @@ create table if not exists public.routing_v2_phone_actions (
   reply_message_id uuid,
   reply_reason text,
   reply_updated_at timestamptz,
+  -- When the reply entered `sending` (handed to the provider boundary). Recovery may not touch
+  -- a `sending` row until this is older than the provider-timeout lease (120 s).
+  sending_at timestamptz,
   decision jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   undone_at timestamptz,
   undone_by uuid references auth.users(id) on delete set null,
   constraint routing_v2_phone_actions_undone_pair check (undone_by is null or undone_at is not null),
   constraint routing_v2_phone_actions_undone_shape check ((status = 'undone') = (undone_at is not null)),
-  constraint routing_v2_phone_actions_fence_shape check (reply_state <> 'awaiting_fence' or fence_at is not null)
+  constraint routing_v2_phone_actions_fence_shape check (reply_state <> 'awaiting_fence' or fence_at is not null),
+  constraint routing_v2_phone_actions_sending_shape check (reply_state <> 'sending' or sending_at is not null)
 );
 comment on table public.routing_v2_phone_actions is
   'Routing v2 PR-G: one row per source inbound whose phone-level action (wrong_number_all, bad_number) committed. Unique per inbound = duplicate webhooks replay.';
@@ -589,7 +593,8 @@ begin
   ) then
     update public.routing_v2_phone_actions
     set reply_state = p_to, reply_message_id = coalesce(p_message_id, reply_message_id),
-        reply_reason = p_reason, reply_updated_at = now()
+        reply_reason = p_reason, reply_updated_at = now(),
+        sending_at = case when p_to = 'sending' then clock_timestamp() else sending_at end
     where id = v.id;
     v_ok := true;
   end if;
@@ -600,7 +605,7 @@ $$;
 revoke all on function public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text) from public, anon, authenticated;
 grant execute on function public.fn_routing_v2_phone_action_reply(uuid, uuid, text, uuid, text) to service_role;
 
--- B recovery: a reply left in `sending` is settled ONLY by its send id (the outbound
+-- B recovery: only after the 120 s provider-timeout lease; a reply left in `sending` is settled ONLY by its send id (the outbound
 -- message's idempotency_key, on the action's own source property). Never re-sent.
 create or replace function public.fn_routing_v2_phone_action_recover_reply(p_action_id uuid)
 returns jsonb
@@ -617,12 +622,20 @@ begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
   end if;
-  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
+  select * into v from public.routing_v2_phone_actions where id = p_action_id;
   if not found then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+  perform public.routing_v2_phone_lock(v.org_id, v.phone_e164);
+  select * into v from public.routing_v2_phone_actions where id = p_action_id for update;
   if v.reply_state <> 'sending' then
     return jsonb_build_object('replyState', v.reply_state, 'sendId', v.send_id);
+  end if;
+  -- Provider-timeout lease: the original send may still be in flight (provider HTTP timeout
+  -- plus margin). Until the lease expires the row stays `sending` (undo stays busy).
+  if v.sending_at > clock_timestamp() - interval '120 seconds' then
+    return jsonb_build_object('replyState', 'sending', 'sendId', v.send_id, 'inFlight', true,
+      'retryAfterSeconds', greatest(1, ceil(extract(epoch from (v.sending_at + interval '120 seconds' - clock_timestamp()))))::int);
   end if;
   select msg.id, msg.status, msg.external_id, msg.metadata into m
   from public.messages msg
@@ -665,6 +678,7 @@ as $$
   where a.reply_state in ('awaiting_fence', 'pending', 'sending')
     and (a.status = 'applied' or a.reply_state = 'sending')
     and (a.reply_state <> 'awaiting_fence' or a.fence_at <= now())
+    and (a.reply_state <> 'sending' or a.sending_at <= now() - interval '120 seconds')
     and coalesce(a.reply_updated_at, a.created_at) <= now() - make_interval(secs => greatest(coalesce(p_older_than_seconds, 120), 0))
   order by a.created_at
   limit greatest(coalesce(p_limit, 25), 1);

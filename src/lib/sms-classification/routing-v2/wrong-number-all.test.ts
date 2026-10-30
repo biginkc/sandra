@@ -297,6 +297,20 @@ describe("runRoutingV2PhoneAction", () => {
       }
     });
 
+    it("duplicate webhook inside the provider-timeout lease: recovery leaves it in flight, nothing sent", async () => {
+      const { db, rpcs } = fakeDb({
+        flags: ON,
+        rpc: {
+          fn_routing_v2_phone_action_apply_all: replayed("sending"),
+          fn_routing_v2_phone_action_recover_reply: () => ({ data: { replyState: "sending", inFlight: true, retryAfterSeconds: 110 } }),
+        },
+      });
+      const { d, send } = deps();
+      expect(await runRoutingV2PhoneAction(db, input(), d)).toMatchObject({ outcome: "replayed", replyState: "sending" });
+      expect(send).not.toHaveBeenCalled();
+      expect(rpcs()).toEqual(["fn_routing_v2_phone_action_apply_all", "fn_routing_v2_phone_action_recover_reply"]);
+    });
+
     it("the provider call throws: recorded unknown (cannot prove it never reached the provider), never re-sent", async () => {
       const { db, rpcs } = fakeDb({ flags: ON, rpc: { fn_routing_v2_phone_action_apply_all: applied() } });
       const { d, send } = deps(async () => {

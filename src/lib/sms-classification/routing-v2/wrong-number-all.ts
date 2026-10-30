@@ -176,6 +176,7 @@ export async function settleRoutingV2PhoneActionReply(
     if (replyState !== "pending") return replyState;
   }
   if (replyState === "sending") {
+    // Inside the 120 s provider-timeout lease the RPC leaves the row `sending` (in flight).
     const { data, error } = await db.rpc("fn_routing_v2_phone_action_recover_reply", { p_action_id: args.actionId });
     if (error) throw new Error(String(error.message));
     return ((data ?? {}) as { replyState?: ReplyState }).replyState ?? "sending";
