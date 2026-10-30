@@ -19,7 +19,11 @@ export type V2DripTransitionRequest = {
   orgId: string;
   propertyId: string;
   inboundMessageId: string;
-  drip: V2DripName;
+  /**
+   * The drip to start, or null to only retire the current drip (PR-F: a picked time while
+   * alert_on_time_only is on stops the Book appointment drip and starts nothing).
+   */
+  drip: V2DripName | null;
   /** The v2 road that chose this drip (audit). */
   road: string;
   /** Skip step 1 when our reply already said what step 1 says (who-is-texting). */
@@ -28,6 +32,8 @@ export type V2DripTransitionRequest = {
 
 export type V2DripTransitionResult =
   | { kind: "enrolled"; enrollmentId: string }
+  /** drip: null — the current drip (if any) was retired and nothing new was started. */
+  | { kind: "stopped" }
   | { kind: "superseded" }
   | { kind: "not_available"; reason: "pr_c_not_merged" | string };
 

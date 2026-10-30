@@ -97,6 +97,16 @@ export function v2SliceAllowed(flags: RoutingV2Flags, slice: V2Slice, propertyId
   return flags.questions_live && flags[slice] && isV2Eligible(flags, propertyId);
 }
 
+/**
+ * PR-F: "alert only when a time is picked" is in force for this property only when its own
+ * slice is allowed AND the drips slice is allowed too. A yes without a hot alert must always
+ * get the Book appointment drip that asks for a time; while drips cannot run, today's hot
+ * alert on a yes is kept (fail toward telling Jarrad, never toward silence).
+ */
+export function alertOnTimeOnlyInForce(flags: RoutingV2Flags, propertyId: string): boolean {
+  return v2SliceAllowed(flags, "alert_on_time_only", propertyId) && v2SliceAllowed(flags, "drips", propertyId);
+}
+
 /** Phone-level actions: every property on the phone must be eligible (§13.1). */
 export function v2SliceAllowedForAll(flags: RoutingV2Flags, slice: V2Slice, propertyIds: readonly string[]): boolean {
   return propertyIds.length > 0 && propertyIds.every((id) => v2SliceAllowed(flags, slice, id));

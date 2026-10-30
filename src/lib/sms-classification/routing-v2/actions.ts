@@ -1,7 +1,7 @@
 import { hotTextKey } from "@/lib/hot-sellers/hot";
 
 import type { V2DripName, V2DripTransition } from "./drip-transition";
-import { ALL_OFF, v2SliceAllowed, type RoutingV2Flags, type V2Slice } from "./flags";
+import { ALL_OFF, alertOnTimeOnlyInForce, v2SliceAllowed, type RoutingV2Flags, type V2Slice } from "./flags";
 import type { V2Road } from "./order";
 import type { V2Decision } from "./route";
 import { v2ReplyText, type V2AnyReplyKey } from "./reply-texts";
@@ -40,6 +40,13 @@ export type V2Step =
    * sent only while alert_on_time_only is OFF (PR-F), skipped while it is ON.
    */
   | { kind: "alert"; reason: V2AlertReason; whenTimeOnlyOff?: true }
+  /**
+   * PR-F: retire the current drip and start nothing (a picked time / asked for a call while
+   * alert_on_time_only is in force stops the Book appointment drip). Decided at SEND time
+   * from the fresh flags: skipped (a no-op, never a cancel) while the mode is not in force,
+   * so flag-off behaviour is unchanged.
+   */
+  | { kind: "stop_drip"; whenTimeOnlyOn: true }
   /** Existing wait_for_person hold (stop: suppression is PR-I, not here). */
   | { kind: "hold"; reason: "asked_stop" | "bad_number" | "needs_person" }
   /** Existing wrong-number path: approved reply + close this property. */
@@ -63,10 +70,19 @@ function bookReply(decision: V2Decision): V2AnyReplyKey {
  * needed one.
  */
 const HOT_YES: V2Step = { kind: "alert", reason: "hot_yes", whenTimeOnlyOff: true };
+/** PR-F: the alert goes FIRST, so a drip stop that fails can never lose it. */
+const STOP_DRIP_ON_TIME: V2Step = { kind: "stop_drip", whenTimeOnlyOn: true };
+
+/**
+ * Alerts that share today's classifier hot-alert identity, hotTextKey(inbound): the yes alert
+ * and the call-me alert. Both reconcile with the classifier's own hot alert for that inbound,
+ * so every flag state ends in at most one hot alert per inbound.
+ */
+const HOT_KEYED_ALERTS: ReadonlySet<V2AlertReason> = new Set<V2AlertReason>(["hot_yes", "call_me"]);
 
 export const V2_ROAD_ACTIONS: Record<V2Road, (decision: V2Decision) => readonly V2Step[]> = {
   stop: () => [{ kind: "hold", reason: "asked_stop" }],
-  ALERT_call_me: () => [a("call_me")],
+  ALERT_call_me: () => [a("call_me"), STOP_DRIP_ON_TIME],
   wrong_number_close: () => [{ kind: "wrong_number_close" }],
   vacant_land_drip: () => [d("Vacant land")],
   ALERT_land_price: () => [a("land_price")],
@@ -126,7 +142,7 @@ export function actionForV2Decision(decision: V2Decision, opts: { askedHowNumber
 
 /** Which flag slice each step needs (§13.2). Holds are the existing safe path: replies slice. */
 export function sliceForStep(step: V2Step): V2Slice {
-  return step.kind === "drip" ? "drips" : "replies";
+  return step.kind === "drip" || step.kind === "stop_drip" ? "drips" : "replies";
 }
 
 export type V2ExecDeps = {
@@ -157,16 +173,37 @@ export type V2ExecResult =
   | { kind: "cancelled_flag_off"; done: V2Step[]; at: V2Step }
   | { kind: "reply_not_sent"; done: V2Step[]; reason: string }
   /** The drip did not enroll (PR-C not merged, or any failure): held for a person. */
-  | { kind: "drip_not_enrolled"; done: V2Step[]; reason: string };
+  | { kind: "drip_not_enrolled"; done: V2Step[]; reason: string }
+  /** PR-F: the drip could not be stopped after a picked time (alert already sent): held for a person. */
+  | { kind: "drip_not_stopped"; done: V2Step[]; reason: string };
 
 export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promise<V2ExecResult> {
   const done: V2Step[] = [];
+  const alertKeysSent = new Set<string>();
   for (const step of action.steps) {
     let flags: RoutingV2Flags;
     try {
       flags = await deps.readFlags();
     } catch {
       flags = ALL_OFF;
+    }
+    if (step.kind === "stop_drip") {
+      // Not in force (fresh read): skip. Nothing v2 started a drip that needs stopping here,
+      // and a flag-off reply must not be handed back to the human queue after its alert.
+      if (!alertOnTimeOnlyInForce(flags, deps.ctx.propertyId)) continue;
+      let res: Awaited<ReturnType<V2DripTransition["transition"]>>;
+      try {
+        res = await deps.drip.transition({ ...deps.ctx, drip: null, road: action.road, skipFirstStep: false });
+      } catch {
+        res = { kind: "not_available", reason: "transition_error" };
+      }
+      if (res.kind !== "stopped" && res.kind !== "superseded") {
+        // The seller picked a time but the drip may keep texting: a person looks.
+        await deps.hold("needs_person");
+        return { kind: "drip_not_stopped", done, reason: res.kind === "not_available" ? res.reason : res.kind };
+      }
+      done.push(step);
+      continue;
     }
     if (!v2SliceAllowed(flags, sliceForStep(step), deps.ctx.propertyId)) {
       await deps.returnToHumanQueue("cancelled_flag_off");
@@ -202,18 +239,21 @@ export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promi
         if (res.kind !== "enrolled" && res.kind !== "superseded") {
           // Never end a reply with no drip, hold or alert: a person looks.
           await deps.hold("needs_person");
-          return { kind: "drip_not_enrolled", done, reason: res.reason };
+          return { kind: "drip_not_enrolled", done, reason: res.kind === "not_available" ? res.reason : res.kind };
         }
         break;
       }
       case "alert":
-        // alert_on_time_only ON (fresh read): no hot alert on a yes; only a picked time alerts (PR-F).
-        if (step.whenTimeOnlyOff && flags.alert_on_time_only) continue;
-        await deps.alert(
-          step.reason,
-          V2_ALERT_LABELS[step.reason],
-          step.reason === "hot_yes" ? hotTextKey(deps.ctx.inboundMessageId) : null,
-        );
+        // alert_on_time_only in force (fresh read): no hot alert on a yes; only a picked time
+        // alerts (PR-F).
+        if (step.whenTimeOnlyOff && alertOnTimeOnlyInForce(flags, deps.ctx.propertyId)) continue;
+        {
+          const key = HOT_KEYED_ALERTS.has(step.reason) ? hotTextKey(deps.ctx.inboundMessageId) : null;
+          // One alert per delivery identity per inbound, even if an action ever lists two.
+          if (key !== null && alertKeysSent.has(key)) continue;
+          await deps.alert(step.reason, V2_ALERT_LABELS[step.reason], key);
+          if (key !== null) alertKeysSent.add(key);
+        }
         break;
       case "hold":
         await deps.hold(step.reason);
