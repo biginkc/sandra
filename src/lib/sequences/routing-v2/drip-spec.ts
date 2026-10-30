@@ -53,7 +53,8 @@ export const ROUTING_V2_DRIPS = {
       "any", // a 3:30 cancel today
       "afternoon", // one afternoon slot at 2:45
     ]),
-    thenKey: "book_appointment" as RoutingV2DripKey,
+    // No automatic handoff at drip end: disabled pending Jarrad's decision (Master A-004).
+    thenKey: null,
   },
   /** First 6 steps; the migration appends the existing drip's later steps (step_index >= 6). */
   book_appointment: {

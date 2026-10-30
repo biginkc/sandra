@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { sellerTimezoneForState } from "@/lib/norma/callback-time";
 import type { Database } from "@/lib/supabase/types";
 
-import { hasSlotToken, isSlotWindow, planSlot } from "./slot-time";
+import { floorZonesForState, hasSlotToken, isSlotWindow, planSlot } from "./slot-time";
 
 /**
  * sequence-tick hook for routing v2 drips (PR-C). Legacy sequences (routing_v2_key is null)
@@ -78,7 +78,14 @@ export async function routingV2TickGate(
   if (stepErr) return { kind: "error", message: `routing_v2_slot_window_read_failed: ${stepErr.message}` };
   const raw = (stepRow as { slot_window?: unknown } | null)?.slot_window;
   const window = isSlotWindow(raw) ? raw : "any";
-  const plan = planSlot(input.now ?? new Date(), sellerTimezoneForState(input.propertyState), window);
+  // No property-level timezone exists: the state's dominant zone sets the displayed hour, and
+  // in split-zone states the 08:00 floor must hold in every zone of the state.
+  const plan = planSlot(
+    input.now ?? new Date(),
+    sellerTimezoneForState(input.propertyState),
+    window,
+    floorZonesForState(input.propertyState),
+  );
   if (plan.kind === "wait") return { kind: "wait", nextRunAt: plan.sendAt };
   return { kind: "send", slotLabel: plan.label };
 }
@@ -121,6 +128,28 @@ export async function routingV2MarkDripClaimSent(
     return error ? `routing v2 claim close failed: ${error.message}` : null;
   } catch (err) {
     return `routing v2 claim close failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/**
+ * v2 only: advance after an accepted send, or complete + chain atomically in SQL. Returns null
+ * on success, or an error string (RPC error, or the enrollment changed before the write).
+ */
+export async function routingV2AdvanceAfterSend(
+  client: SupabaseClient<Database>,
+  enrollmentId: string,
+  stepIndex: number,
+): Promise<string | null> {
+  try {
+    const { data, error } = await loose(client).rpc("routing_v2_advance_after_send", {
+      p_enrollment_id: enrollmentId,
+      p_step_index: stepIndex,
+    });
+    if (error) return `routing v2 advance failed: ${error.message}`;
+    if (data === "changed") return "enrollment changed before advancement";
+    return null;
+  } catch (err) {
+    return `routing v2 advance failed: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 

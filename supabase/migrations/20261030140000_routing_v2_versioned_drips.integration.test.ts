@@ -298,18 +298,21 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
     expect((await transition(db, id2, ctx.property, { sequence_key: "vacant_land" })).outcome).toBe("applied");
   });
 
-  it("Said they'd call chains into Book appointment v2 when it completes", async () => {
+  it("no v2 drip names a next drip (auto handoff disabled); the chain function is an inert no-op", async () => {
+    const r0 = await db.query(`select count(*)::int as n from public.sequences where org_id = $1 and routing_v2_then_key is not null`, [ctx.org]);
+    expect(r0.rows[0].n).toBe(0);
     await setFlags(db, ctx.org, FLAGS_ON);
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
     const r = await transition(db, id, ctx.property, { sequence_key: "said_theyd_call" });
     await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [r.new_enrollment_id]);
-    const next = (await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [r.new_enrollment_id])).rows[0].r;
-    expect(next).toBeTruthy();
-    const active = (await enrollments(db, ctx.property)).filter((e) => e.status === "active");
-    expect(active.map((e) => e.routing_v2_key)).toEqual(["book_appointment"]);
-    // Book appointment itself has no next drip (drip-end behaviour is not decided).
-    await db.query(`update public.sequence_enrollments set status = 'completed', next_run_at = null where id = $1`, [next]);
-    expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [next])).rows[0].r).toBeNull();
+    expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [r.new_enrollment_id])).rows[0].r).toBeNull();
+    expect((await enrollments(db, ctx.property)).filter((e) => e.status === "active")).toHaveLength(0);
+    // A next drip can't be configured outside a migration.
+    await db.query("set local routing_v2.allow_drip_edit = ''");
+    const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'said_theyd_call'`, [ctx.org])).rows[0].id;
+    await db.query("savepoint t");
+    await expect(db.query(`update public.sequences set routing_v2_then_key = 'book_appointment' where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint t");
   });
 });
 
@@ -520,7 +523,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("rollback to savepoint q");
   });
 
-  it("final Said they'd call step sends -> completes -> lands in Book appointment v2, once (idempotent)", async () => {
+  it("final Said they'd call step sends -> plain completed; NO Book appointment enrollment is created", async () => {
     await setFlags(db, ctx.org, FLAGS_ON);
     const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
     const r = await transition(db, id, ctx.property, { sequence_key: "said_theyd_call" });
@@ -537,18 +540,13 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     const fence = await authorize(db, ctx, e, run, pendingMsg);
     expect(fence).toMatchObject({ authorized: true });
     await db.query(`select public.routing_v2_mark_drip_claim_sent($1, 'sent')`, [run.id]);
-    // advanceEnrollment: no step 6 -> completed (same filters as tick.ts).
-    const done = await db.query(
-      `update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now()
-       where id = $1 and status = 'active' and current_step_index = 5 returning id`, [e]);
-    expect(done.rowCount).toBe(1);
-    const next = (await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r;
-    expect(next).toBeTruthy();
-    // A tick retry / the missing-step path calling it again does nothing.
+    // tick.ts (v2): one RPC completes (no next drip configured, so nothing chains).
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5) as r`, [e])).rows[0].r).toBe("completed");
     expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r).toBeNull();
     const rows = await enrollments(db, ctx.property);
-    expect(rows.filter((x) => x.status === "active").map((x) => x.routing_v2_key)).toEqual(["book_appointment"]);
-    expect(rows.find((x) => x.id === e)).toMatchObject({ status: "completed", ended_reason: "chained" });
+    expect(rows.filter((x) => x.status === "active" || x.status === "paused")).toHaveLength(0);
+    expect(rows.filter((x) => x.routing_v2_key === "book_appointment")).toHaveLength(0);
+    expect(rows.find((x) => x.id === e)).toMatchObject({ status: "completed", ended_reason: null });
   });
 
   it("completions that must NOT chain: legacy final step, a v2 drip with no next drip, rerouted, flag_off, DNC-locked", async () => {
@@ -579,6 +577,78 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("set local session_replication_role = origin");
     expect(await chain(d.new_enrollment_id)).toBeNull();
     expect((await enrollments(db, ctx.property)).filter((x) => x.status === "active")).toHaveLength(0);
+  });
+
+  it.each([
+    { drips: false, replies: false, outcome: "flag_off", enrolled: false, retired: false, outbox: 0, replyClaim: null },
+    { drips: true, replies: false, outcome: "applied", enrolled: true, retired: true, outbox: 2, replyClaim: "flag_off" },
+    { drips: false, replies: true, outcome: "replies_only", enrolled: false, retired: false, outbox: 2, replyClaim: "ok" },
+    { drips: true, replies: true, outcome: "applied", enrolled: true, retired: true, outbox: 2, replyClaim: "ok" },
+  ])("slices work on their own: drips=$drips replies=$replies -> $outcome", async (c) => {
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: c.drips, replies: c.replies });
+    const id = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const r = await transition(db, id, ctx.property, {
+      sequence_key: "price_too_high",
+      outbox: [{ kind: "reply", payload: {} }, { kind: "alert", payload: {} }],
+    });
+    expect(r.outcome).toBe(c.outcome);
+    expect(Boolean(r.new_enrollment_id)).toBe(c.enrolled);
+    expect(r.retired_enrollment_ids.includes(ctx.legacyEnrollment)).toBe(c.retired);
+    const legacy = (await db.query(`select status from public.sequence_enrollments where id = $1`, [ctx.legacyEnrollment])).rows[0].status;
+    expect(legacy).toBe(c.retired ? "completed" : "active");
+    const rows = (await db.query(`select id, kind from public.routing_v2_outbox where inbound_message_id = $1`, [id])).rows;
+    expect(rows).toHaveLength(c.outbox);
+    const reply = rows.find((x) => x.kind === "reply");
+    if (c.replyClaim) expect((await db.query(`select public.routing_v2_claim_outbox($1) as r`, [reply!.id])).rows[0].r).toBe(c.replyClaim);
+  });
+
+  it("no chain when the seller replied after the drip started (newer inbound, or a newer transition)", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const chain = async (e: string) => (await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [e])).rows[0].r;
+    const complete = (e: string) => db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [e]);
+    // (a) newer inbound not routed yet
+    const a = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    await complete(a.new_enrollment_id);
+    await inbound(db, ctx, "2026-10-30T16:00:00Z");
+    expect(await chain(a.new_enrollment_id)).toBeNull();
+    expect((await enrollments(db, ctx.property)).filter((x) => x.status === "active")).toHaveLength(0);
+  });
+
+  it("no chain when a newer non-superseded transition exists (even if its inbound row is the only newer one)", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const first = await inbound(db, ctx, "2026-10-30T15:00:00Z");
+    const a = await transition(db, first, ctx.property, { sequence_key: "said_theyd_call" });
+    await db.query(`update public.sequence_enrollments set status = 'completed', completed_at = now(), next_run_at = null where id = $1`, [a.new_enrollment_id]);
+    // A newer reply routed with replies only (drips off) leaves the completed drip alone but must still block the chain.
+    await setFlags(db, ctx.org, { ...FLAGS_ON, drips: false });
+    expect((await transition(db, await inbound(db, ctx, "2026-10-30T15:30:00Z"), ctx.property, {})).outcome).toBe("replies_only");
+    await setFlags(db, ctx.org, FLAGS_ON);
+    expect((await db.query(`select public.routing_v2_chain_after_completion($1) as r`, [a.new_enrollment_id])).rows[0].r).toBeNull();
+  });
+
+  it("atomic advance: routing_v2_advance_after_send advances, then completes (no chain); a stale call changes nothing", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    const adv = async (i: number) => (await db.query(`select public.routing_v2_advance_after_send($1,$2) as r`, [r.new_enrollment_id, i])).rows[0].r;
+    expect(await adv(0)).toBe("advanced");
+    expect(await adv(0)).toBe("changed"); // retry of the same step: no double advance
+    for (let i = 1; i < 5; i++) expect(await adv(i)).toBe("advanced");
+    expect(await adv(5)).toBe("completed");
+    expect(await adv(5)).toBe("changed");
+    const rows = await enrollments(db, ctx.property);
+    expect(rows.filter((x) => x.status === "active")).toHaveLength(0);
+    expect(rows.find((x) => x.id === r.new_enrollment_id)).toMatchObject({ status: "completed", ended_reason: null });
+  });
+
+  it("atomic advance: an empty Book appointment drip can't affect a Said they'd call completion (nothing chains)", async () => {
+    await setFlags(db, ctx.org, FLAGS_ON);
+    const r = await transition(db, await inbound(db, ctx, "2026-10-30T15:00:00Z"), ctx.property, { sequence_key: "said_theyd_call" });
+    await db.query(`update public.sequence_enrollments set current_step_index = 5 where id = $1`, [r.new_enrollment_id]);
+    const book = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'book_appointment'`, [ctx.org])).rows[0].id;
+    await db.query("set local routing_v2.allow_drip_edit = 'on'");
+    await db.query(`delete from public.sequence_steps where sequence_id = $1 and step_index = 0`, [book]);
+    await db.query("set local routing_v2.allow_drip_edit = ''");
+    expect((await db.query(`select public.routing_v2_advance_after_send($1, 5) as r`, [r.new_enrollment_id])).rows[0].r).toBe("completed");
   });
 
   it("generic alerts are gated on replies: drips=true, replies=false -> the alert does not send", async () => {
@@ -766,7 +836,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     expect((await db.query(`select count(*)::int as n from public.routing_v2_drip_send_claims where step_run_id = $1`, [run.id])).rows[0].n).toBe(0);
   });
 
-  it("v2 drips are not editable outside migrations (incl. active); archive allowed; legacy drips unaffected", async () => {
+  it("v2 drips are not editable outside migrations (incl. active, archive, metadata, delete); legacy drips unaffected", async () => {
     const v2 = (await db.query(`select id from public.sequences where org_id = $1 and routing_v2_key = 'book_appointment'`, [ctx.org])).rows[0].id;
     await db.query("savepoint s");
     await expect(db.query(`update public.sequence_steps set template_body = 'x' where sequence_id = $1 and step_index = 0`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
@@ -782,7 +852,24 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
     await db.query("rollback to savepoint s");
     await expect(db.query(`update public.sequences set active = true where id = $1`, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
     await db.query("rollback to savepoint s");
-    await db.query(`update public.sequences set archived_at = now() where id = $1`, [v2]); // archiving is still allowed
+    // Archive / restore, metadata, delete, and creating or converting a v2 drip are all refused.
+    for (const sql of [
+      `update public.sequences set archived_at = now() where id = $1`,
+      `update public.sequences set name = 'renamed', description = 'x' where id = $1`,
+      `update public.sequences set updated_at = now() where id = $1`,
+      `delete from public.sequences where id = $1`,
+    ]) {
+      await expect(db.query(sql, [v2])).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+      await db.query("rollback to savepoint s");
+    }
+    await expect(db.query(`update public.sequences set routing_v2_key = 'vacant_land', routing_v2_version = 9 where id = $1`, [ctx.bookSrc]))
+      .rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query(
+      `insert into public.sequences (org_id, name, active, routing_v2_key, routing_v2_version) values ($1, 'fake v2', false, 'vacant_land', 7)`,
+      [ctx.org],
+    )).rejects.toThrow(/ROUTING_V2_DRIP_LOCKED/);
+    await db.query("rollback to savepoint s");
     await db.query(`update public.sequence_steps set template_body = 'edited' where sequence_id = $1 and step_index = 0`, [ctx.bookSrc]);
     await db.query(`update public.sequences set append_opt_out = false where id = $1`, [ctx.bookSrc]);
   });

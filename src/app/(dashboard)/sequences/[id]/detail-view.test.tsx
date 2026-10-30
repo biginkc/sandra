@@ -69,3 +69,14 @@ it("opens the selected property's conversation and omits the link without one", 
     "/messages?thread=conversation-a", "/messages?thread=conversation-b",
   ]);
 });
+
+it("routing v2 (automatic) drips show no edit / add step / copy controls, even to admins", () => {
+  const empty = { ...sampleDetail, sequence: { ...sampleDetail.sequence, steps: [], managed: true } };
+  const { unmount } = render(<DripDetailView detail={empty} sources={[]} isAdmin />);
+  expect(screen.queryByRole("button", { name: "Edit drip" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Add step/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Copy steps from another drip" })).not.toBeInTheDocument();
+  unmount();
+  render(<DripDetailView detail={{ ...sampleDetail, sequence: { ...sampleDetail.sequence, managed: false } }} sources={[]} isAdmin />);
+  expect(screen.getByRole("button", { name: "Edit drip" })).toBeVisible();
+});

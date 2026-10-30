@@ -48,7 +48,7 @@ export function DripsOverview({ archived, isAdmin, sequencesResult, needsResult 
         <TableCell><div className="flex items-center gap-2"><Droplet className="size-4 text-primary" /><div><Link href={`/sequences/${row.id}`} className="font-medium hover:underline">{row.name}</Link>{row.description && <p className="text-muted-foreground max-w-64 truncate text-xs">{row.description}</p>}</div></div></TableCell>
         <TableCell>{row.step_count}</TableCell><TableCell>{row.active_enrollment_count}</TableCell><TableCell>{row.replied ?? 0}</TableCell><TableCell>{row.finished_no_reply ?? 0}</TableCell><TableCell>{row.couldnt_send ?? 0}</TableCell>
         <TableCell><span title={row.archived_at ? "Archived" : row.active ? "Open to new leads" : "Closed to new leads"}>{row.archived_at ? "Archived" : row.active ? "Open" : "Closed"}</span></TableCell>
-        <TableCell className="text-right">{isAdmin && <SequenceRowActions sequenceId={row.id} isArchived={!!row.archived_at} isActive={row.active} />}</TableCell>
+        <TableCell className="text-right">{isAdmin && <SequenceRowActions sequenceId={row.id} isArchived={!!row.archived_at} isActive={row.active} managed={!!row.managed} />}</TableCell>
       </TableRow>)}
     </TableBody></Table><DataTableFooter><span className="text-sm text-muted-foreground">Showing {rows.length} {archived ? "archived" : "current"} {rows.length === 1 ? "drip" : "drips"}</span></DataTableFooter></DataTableShell>}
   </Page>;

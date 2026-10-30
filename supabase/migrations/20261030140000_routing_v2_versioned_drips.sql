@@ -79,7 +79,7 @@ create table if not exists public.routing_v2_reply_transitions (
   inbound_message_id uuid not null unique,
   inbound_at timestamptz not null,
   transition_seq bigint not null,
-  outcome text not null check (outcome in ('applied','superseded','takeover_blocked','flag_off','suppressed','no_sequence')),
+  outcome text not null check (outcome in ('applied','replies_only','superseded','takeover_blocked','flag_off','suppressed','no_sequence')),
   decision jsonb not null,
   new_enrollment_id uuid,
   retired_enrollment_ids uuid[] not null default '{}',
@@ -271,6 +271,7 @@ declare
   v_cancelled_claims uuid[] := '{}';
   v_takeover timestamptz;
   v_locked boolean;
+  v_drips boolean;
   v_item jsonb;
 begin
   -- 1. Serialize every reply / takeover / scheduler step for this property.
@@ -303,15 +304,21 @@ begin
            or (t.inbound_at = v_inbound_at and t.inbound_message_id > p_inbound_message_id))
   ) then
     v_outcome := 'superseded';
-  elsif not public.routing_v2_slice_enabled(p_property_id, 'drips') then
+  elsif not (public.routing_v2_slice_enabled(p_property_id, 'drips')
+              or public.routing_v2_slice_enabled(p_property_id, 'replies')) then
+    -- Each slice works on its own: only when NEITHER drips nor replies is on is it record-only.
     v_outcome := 'flag_off';
   end if;
 
   if v_outcome is null then
     select coalesce(is_dnc_locked, false) into v_locked from public.properties where id = p_property_id;
+    v_drips := public.routing_v2_slice_enabled(p_property_id, 'drips');
 
-    -- 4. Retire every active OR paused enrollment for the property (any engine).
-    if v_locked then
+    -- 4. Retire every active OR paused enrollment for the property (any engine). Drips slice
+    --    only: with drips off, existing drips are left exactly as they are.
+    if not v_drips then
+      null;
+    elsif v_locked then
       -- DNC-locked property: guard_locked_property_sequence_enrollment only allows the exact
       -- compliance stop (active/paused -> opted_out, pause_reason dnc, next_run_at null, no
       -- other column). Anything else raises DNC_LOCKED and would roll back the transition.
@@ -332,12 +339,14 @@ begin
     end if;
 
     -- 4b. Open drip send claims for the property are cancelled (reply-vs-tick race).
-    with cc as (
-      update public.routing_v2_drip_send_claims dc
-      set status = 'cancelled', cancel_reason = 'retired_by=' || p_inbound_message_id::text, cancelled_at = now()
-      where dc.property_id = p_property_id and dc.status = 'open'
-      returning dc.id
-    ) select coalesce(array_agg(id), '{}') into v_cancelled_claims from cc;
+    if v_drips then
+      with cc as (
+        update public.routing_v2_drip_send_claims dc
+        set status = 'cancelled', cancel_reason = 'retired_by=' || p_inbound_message_id::text, cancelled_at = now()
+        where dc.property_id = p_property_id and dc.status = 'open'
+        returning dc.id
+      ) select coalesce(array_agg(id), '{}') into v_cancelled_claims from cc;
+    end if;
 
     -- 6. Obsolete intents from older inbounds are cancelled.
     with c as (
@@ -355,6 +364,8 @@ begin
       v_outcome := 'takeover_blocked';
     elsif public.routing_v2_contact_suppressed(p_property_id, v_contact) then
       v_outcome := 'suppressed';
+    elsif not v_drips then
+      v_outcome := 'replies_only';  -- reply/alert intents only; no drip change
     else
       v_outcome := 'applied';
       if v_key is not null then
@@ -369,7 +380,7 @@ begin
 
     -- 5. Outbound intents. Takeover / suppression: alerts only, never an auto reply.
     for v_item in select * from jsonb_array_elements(coalesce(p_decision->'outbox', '[]'::jsonb)) loop
-      if (v_item->>'kind') = 'alert' or v_outcome in ('applied','no_sequence') then
+      if (v_item->>'kind') = 'alert' or v_outcome in ('applied','replies_only','no_sequence') then
         insert into public.routing_v2_outbox (org_id, property_id, inbound_message_id, transition_seq, kind, engine, slice, payload)
         values (v_org, p_property_id, p_inbound_message_id, v_seq, v_item->>'kind', 'v2',
                 coalesce(nullif(v_item->>'slice',''), 'replies'),
@@ -587,8 +598,44 @@ begin
 end;
 $$;
 
--- Chain at the end of a v2 drip (Said they'd call -> Book appointment v2). Only when the
--- finished sequence names routing_v2_then_key; no other drip has an end-of-drip action.
+-- After an accepted v2 send: advance to the next step, or complete AND chain in the same
+-- transaction (so a chain can never be lost after the completion committed). Returns
+-- 'advanced' | 'completed' | 'chained' | 'changed' (enrollment no longer at that step).
+create or replace function public.routing_v2_advance_after_send(p_enrollment_id uuid, p_step_index integer)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e public.sequence_enrollments;
+  v_delay integer;
+  v_next uuid;
+begin
+  select * into e from public.sequence_enrollments where id = p_enrollment_id;
+  if not found then return 'changed'; end if;
+  perform pg_advisory_xact_lock(hashtext('routing_v2:' || e.property_id::text));
+  select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
+  if e.status <> 'active' or e.current_step_index <> p_step_index then return 'changed'; end if;
+  select delay_after_previous_minutes into v_delay from public.sequence_steps
+  where sequence_id = e.sequence_id and step_index = p_step_index + 1;
+  if found then
+    update public.sequence_enrollments
+    set current_step_index = p_step_index + 1, next_run_at = now() + make_interval(mins => v_delay), updated_at = now()
+    where id = e.id;
+    return 'advanced';
+  end if;
+  update public.sequence_enrollments
+  set status = 'completed', completed_at = now(), next_run_at = null, updated_at = now()
+  where id = e.id;
+  v_next := public.routing_v2_chain_after_completion(e.id);
+  return case when v_next is null then 'completed' else 'chained' end;
+end;
+$$;
+
+-- Chain at the end of a v2 drip. Only when the finished sequence names routing_v2_then_key,
+-- which NO seeded drip does (auto handoff at drip end is disabled pending Jarrad's decision,
+-- Master A-004), so today this always returns null; then_key is changeable by migration only.
 create or replace function public.routing_v2_chain_after_completion(p_enrollment_id uuid)
 returns uuid
 language plpgsql
@@ -600,6 +647,7 @@ declare
   v_then text;
   v_next uuid;
   v_takeover timestamptz;
+  v_origin_at timestamptz;
 begin
   select * into e from public.sequence_enrollments where id = p_enrollment_id;
   if not found or e.routing_v2_engine is distinct from 'v2' then return null; end if;
@@ -608,6 +656,18 @@ begin
   if e.status <> 'completed' or e.ended_reason is not null then return null; end if;
   select routing_v2_then_key into v_then from public.sequences where id = e.sequence_id;
   if v_then is null then return null; end if;
+  -- The seller replied after the reply that started this drip (newer inbound or a newer,
+  -- non-superseded transition): that reply decides what happens next, never the chain.
+  select created_at into v_origin_at from public.messages where id = e.routing_v2_inbound_id;
+  if v_origin_at is null
+     or exists (select 1 from public.messages m
+                where m.property_id = e.property_id and m.direction = 'inbound'
+                  and m.id <> e.routing_v2_inbound_id and m.created_at >= v_origin_at)
+     or exists (select 1 from public.routing_v2_reply_transitions t
+                where t.property_id = e.property_id and t.outcome <> 'superseded'
+                  and t.inbound_message_id <> e.routing_v2_inbound_id and t.inbound_at >= v_origin_at) then
+    return null;
+  end if;
   if not public.routing_v2_slice_enabled(e.property_id, 'drips') then return null; end if;
   select last_person_takeover_at into v_takeover from public.properties where id = e.property_id;
   if v_takeover is not null and v_takeover >= e.enrolled_at then return null; end if;
@@ -634,6 +694,8 @@ revoke all on function public.routing_v2_enrollment_send_check(uuid) from public
 revoke all on function public.routing_v2_chain_after_completion(uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_claim_drip_send(uuid, uuid) from public, anon, authenticated;
 revoke all on function public.routing_v2_mark_drip_claim_sent(uuid, text) from public, anon, authenticated;
+revoke all on function public.routing_v2_advance_after_send(uuid, integer) from public, anon, authenticated;
+grant execute on function public.routing_v2_advance_after_send(uuid, integer) to service_role;
 grant execute on function public.routing_v2_mark_drip_claim_sent(uuid, text) to service_role;
 grant execute on function public.routing_v2_claim_drip_send(uuid, uuid) to service_role;
 grant execute on function public.routing_v2_slice_enabled(uuid, text) to service_role;
@@ -739,7 +801,9 @@ begin
         end if;
       end if;
 
-      v_then := case v_key when 'said_theyd_call' then 'book_appointment' else null end;
+      -- No automatic next drip when a v2 drip runs out (Master A-004 / Jarrad: "I'll decide what
+      -- to do when the drip runs out"). The chain path stays inert: nothing to chain to.
+      v_then := null;
       insert into public.sequences
         (org_id, name, description, active, append_opt_out, routing_v2_key, routing_v2_version, routing_v2_then_key)
       values
@@ -835,16 +899,14 @@ begin
     return case when tg_op = 'DELETE' then old else new end;
   end if;
   if tg_table_name = 'sequences' then
-    if old.routing_v2_key is not null and (
-         new.append_opt_out is distinct from old.append_opt_out
-      or new.active is distinct from old.active
-      or new.routing_v2_key is distinct from old.routing_v2_key
-      or new.routing_v2_version is distinct from old.routing_v2_version
-      or new.routing_v2_then_key is distinct from old.routing_v2_then_key) then
+    -- Every non-migration write to a v2 drip row is refused: metadata, active, archive /
+    -- restore, delete, and turning a legacy drip into a v2 one (or creating one).
+    if (tg_op in ('UPDATE','DELETE') and old.routing_v2_key is not null)
+       or (tg_op in ('INSERT','UPDATE') and new.routing_v2_key is not null) then
       raise exception using errcode = 'P0001',
         message = 'ROUTING_V2_DRIP_LOCKED: routing v2 drips are edited by migration only';
     end if;
-    return new;
+    return case when tg_op = 'DELETE' then old else new end;
   end if;
   foreach v_seq in array array[
     case when tg_op <> 'INSERT' then old.sequence_id end,
@@ -859,7 +921,7 @@ end;
 $$;
 
 drop trigger if exists routing_v2_reject_drip_edit on public.sequences;
-create trigger routing_v2_reject_drip_edit before update on public.sequences
+create trigger routing_v2_reject_drip_edit before insert or update or delete on public.sequences
   for each row execute function public.routing_v2_reject_drip_edit();
 -- Only routing v2 enrolls into a v2 drip (manual / bulk / change-drip are refused).
 create or replace function public.routing_v2_reject_foreign_enrollment()

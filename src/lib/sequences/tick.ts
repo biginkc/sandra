@@ -18,6 +18,7 @@ import { processVoicemailDropStep } from "./voicemail-drop-step";
 import {
   loadRoutingV2Key,
   routingV2ChainAfterCompletion,
+  routingV2AdvanceAfterSend,
   routingV2ClaimDripSend,
   routingV2MarkDripClaimSent,
   routingV2TickGate,
@@ -122,8 +123,9 @@ export async function processEnrollmentTick(
         message: completionError?.message ?? "enrollment changed before completion",
       };
     }
-    // Routing v2 only: a finished drip that names a next drip (Said they'd call -> Book
-    // appointment v2) chains into it, re-checking flags/takeover/suppression in SQL.
+    // Routing v2 only: a finished drip that names a next drip would chain here (SQL re-checks
+    // flags/takeover/suppression). None does today: auto handoff at drip end is disabled
+    // pending Jarrad's decision, so this is an inert no-op.
     try {
       if (await loadRoutingV2Key(client, enrollment.sequence_id)) {
         await routingV2ChainAfterCompletion(client, enrollment.id);
@@ -556,7 +558,12 @@ export async function processEnrollmentTick(
             message: `Message ${messageId} accepted; ${v2ClaimCloseError}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
-        const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+        // Routing v2: advance, or complete (+ chain, only if a migration ever configures a next
+        // drip; none does today) in one transaction, so nothing is lost after completion.
+        // Legacy drips keep advanceEnrollment exactly as before.
+        const advanceError = isRoutingV2
+          ? await routingV2AdvanceAfterSend(client, enrollment.id, step.step_index)
+          : await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
           const pauseError = await pauseEnrollment(
             client,
@@ -569,17 +576,6 @@ export async function processEnrollmentTick(
             enrollmentId: enrollment.id,
             message: `Message ${messageId} accepted; ${advanceError}${pauseError ? `; ${pauseError}` : ""}`,
           };
-        }
-        // Routing v2 only: when that was the drip's last step (advance completed it), chain into
-        // the next drip (Said they'd call -> Book appointment v2). The SQL is idempotent (sets
-        // ended_reason = 'chained'; a retry or the missing-step path returns null) and re-checks
-        // flags, takeover, suppression/DNC and the one-live-drip rule under the property lock.
-        if (isRoutingV2) {
-          try {
-            await routingV2ChainAfterCompletion(client, enrollment.id);
-          } catch (err) {
-            reportError(err, { tags: { context: "routing_v2_chain_after_completion" }, extra: { enrollmentId: enrollment.id } });
-          }
         }
         return {
           status: "sent",

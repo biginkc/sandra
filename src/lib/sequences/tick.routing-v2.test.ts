@@ -39,11 +39,18 @@ function fixture(opts: {
   markError?: string;
   lastStep?: boolean;
   chainError?: string;
+  advanceResult?: string;
+  advanceError?: string;
 } = {}) {
   const writes: Array<{ table: string; op: string; payload: Record<string, unknown>; filters: Record<string, unknown> }> = [];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "routing_v2_enrollment_send_check") return { data: opts.sendCheck ?? "ok", error: null };
     if (fn === "routing_v2_claim_drip_send") return { data: opts.claimResult ?? "ok", error: null };
+    if (fn === "routing_v2_advance_after_send") {
+      return opts.advanceError
+        ? { data: null, error: { message: opts.advanceError } }
+        : { data: opts.advanceResult ?? (opts.lastStep ? "completed" : "advanced"), error: null };
+    }
     if (fn === "routing_v2_chain_after_completion") {
       return opts.chainError ? { data: null, error: { message: opts.chainError } } : { data: "next-enrollment", error: null };
     }
@@ -192,22 +199,34 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     }));
   });
 
-  it("final v2 step sent: the enrollment completes and chains (Said they'd call -> Book appointment v2)", async () => {
+  it("final Said they'd call send: completes via ONE RPC; no next-drip enrollment (auto handoff disabled)", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     const { client, rpc, writes } = fixture({ lastStep: true, routingV2Key: "said_theyd_call" });
     expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
-    expect(writes).toContainEqual(expect.objectContaining({
-      table: "sequence_enrollments", payload: expect.objectContaining({ status: "completed" }),
-    }));
-    expect(rpc).toHaveBeenCalledWith("routing_v2_chain_after_completion", { p_enrollment_id: "enrollment-1" });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_advance_after_send", { p_enrollment_id: "enrollment-1", p_step_index: 0 });
+    // No separate TS completion write (that is what used to lose the chain).
+    expect(writes.some((w) => w.table === "sequence_enrollments" && w.payload.status === "completed")).toBe(false);
     const order = (fn: string) => rpc.mock.invocationCallOrder[rpc.mock.calls.findIndex((c) => c[0] === fn)]!;
-    expect(order("routing_v2_chain_after_completion")).toBeGreaterThan(order("routing_v2_mark_drip_claim_sent"));
+    expect(order("routing_v2_advance_after_send")).toBeGreaterThan(order("routing_v2_mark_drip_claim_sent"));
+    // Nothing in the tick enrolls a follow-on drip.
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_chain_after_completion", expect.anything());
+    expect(writes.some((w) => w.table === "sequence_enrollments" && w.op === "insert")).toBe(false);
   });
 
-  it("a chain failure after the final send is reported, never turns the sent text into a failure", async () => {
+  it("advance/complete+chain RPC failure: nothing committed, the send is held for reconciliation (not silently lost)", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
-    const { client } = fixture({ lastStep: true, chainError: "boom" });
-    expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
+    const { client, writes } = fixture({ lastStep: true, advanceError: "db down" });
+    const outcome = await processEnrollmentTick(client, ENROLLMENT);
+    expect(outcome).toMatchObject({ status: "failed", message: expect.stringContaining("routing v2 advance failed: db down") });
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_enrollments", payload: expect.objectContaining({ pause_reason: "reconciliation_required" }),
+    }));
+  });
+
+  it("enrollment changed before the advance (e.g. a reply retired it): reported, held for reconciliation", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client } = fixture({ advanceResult: "changed" });
+    expect(await processEnrollmentTick(client, ENROLLMENT)).toMatchObject({ status: "failed", message: expect.stringContaining("enrollment changed before advancement") });
   });
 
   it("legacy final step: completes exactly as before and never chains", async () => {
@@ -215,6 +234,7 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     const { client, rpc } = fixture({ lastStep: true, routingV2Key: null, appendOptOut: true });
     expect((await processEnrollmentTick(client, ENROLLMENT)).status).toBe("sent");
     expect(rpc).not.toHaveBeenCalledWith("routing_v2_chain_after_completion", expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith("routing_v2_advance_after_send", expect.anything());
   });
 
   it("wait: a slot outside the window reschedules (no claim, no send)", async () => {

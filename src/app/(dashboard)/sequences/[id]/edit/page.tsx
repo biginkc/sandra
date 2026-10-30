@@ -41,6 +41,19 @@ export default async function SequenceEditPage({
       </Page>
     );
   }
+  if (result.data.managed) {
+    return (
+      <Page>
+        <PageHeader
+          breadcrumb={[{ label: "Workspace" }, { label: "Drips", href: "/sequences" }, { label: result.data.name }]}
+          title={result.data.name}
+        />
+        <div className="text-muted-foreground text-sm">
+          This is an automatic reply drip. Its texts and timing can&apos;t be edited here.
+        </div>
+      </Page>
+    );
+  }
   const impactResult = await getImpactAction(id);
   const impact = impactResult.ok
     ? impactResult.data

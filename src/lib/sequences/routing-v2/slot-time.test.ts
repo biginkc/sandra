@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatSlotLabel, hasSlotToken, planSlot } from "./slot-time";
+import { floorZonesForState, formatSlotLabel, hasSlotToken, planSlot } from "./slot-time";
 
 const CHI = "America/Chicago";
 const NY = "America/New_York";
@@ -125,6 +125,33 @@ describe("formatSlotLabel / hasSlotToken", () => {
     }
     // 08:00 sharp sends now with a 10:00 slot.
     expect(planSlot(new Date("2026-10-14T13:00:00Z"), CHI, "any")).toMatchObject({ kind: "send_now", label: "10:00" });
+  });
+
+  it("split-zone state (TX): 07:30 in El Paso (Mountain) waits even though Central is 08:30", () => {
+    const now = new Date("2026-10-14T13:30:00Z"); // 08:30 CDT, 07:30 MDT
+    expect(planSlot(now, CHI, "any")).toMatchObject({ kind: "send_now", label: "10:30" }); // dominant zone alone
+    const p = planSlot(now, CHI, "any", floorZonesForState("TX"));
+    expect(p.kind).toBe("wait");
+    if (p.kind === "wait") {
+      expect(p.sendAt.toISOString()).toBe("2026-10-14T14:00:00.000Z"); // 08:00 Mountain = 09:00 Central
+      expect(p.label).toBe("11:00"); // displayed in Central (dominant zone)
+    }
+    // Once 08:00 has passed everywhere in the state it sends.
+    expect(planSlot(new Date("2026-10-14T14:00:00Z"), CHI, "any", floorZonesForState("TX"))).toMatchObject({ kind: "send_now", label: "11:00" });
+  });
+
+  it("split-zone next-morning waits also clear the floor in every zone (FL panhandle)", () => {
+    // 16:30 EDT -> too late; next morning 08:00 EDT is 07:00 CDT in the panhandle -> 08:00 CDT.
+    const p = planSlot(new Date("2026-10-14T20:30:00Z"), NY, "any", floorZonesForState("FL"));
+    expect(p.kind).toBe("wait");
+    if (p.kind === "wait") expect(p.sendAt.toISOString()).toBe("2026-10-15T13:00:00.000Z");
+  });
+
+  it("single-zone states are unchanged", () => {
+    expect(floorZonesForState("MO")).toEqual([]);
+    expect(floorZonesForState(null)).toEqual([]);
+    const now = new Date("2026-10-14T13:30:00Z");
+    expect(planSlot(now, CHI, "any", floorZonesForState("MO"))).toEqual(planSlot(now, CHI, "any"));
   });
 
   it("writes times the way the approved texts do", () => {

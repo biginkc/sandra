@@ -69,7 +69,9 @@ describe("routing v2 drip seed pins", () => {
     expect(ROUTING_V2_DRIPS.said_theyd_call.steps.map((s) => s.day)).toEqual([1, 2, 3, 5, 7, 10]);
     expect(ROUTING_V2_DRIPS.book_appointment.steps.map((s) => s.day)).toEqual([1, 2, 4, 5, 7, 8]);
     expect(ROUTING_V2_DRIPS.listed_not_selling.steps.map((s) => s.day)).toEqual([2]);
-    expect(ROUTING_V2_DRIPS.said_theyd_call.thenKey).toBe("book_appointment");
+    // Auto handoff at drip end is disabled pending Jarrad's decision: no drip names a next drip.
+    for (const d of Object.values(ROUTING_V2_DRIPS)) expect(d.thenKey).toBeNull();
+    expect(MIGRATION).toMatch(/v_then := null;/);
   });
 
   it("slot windows keep the words true", () => {
