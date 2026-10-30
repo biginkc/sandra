@@ -275,6 +275,15 @@ export async function runHoldAlertsForOrg(
           // Before any provider call, so a failed check is cleanly retryable.
           const ownerCheck = await hotOwnerStillIs(deps, orgId, owner);
           if (ownerCheck) return ownerCheck;
+          if (p.kind === "selling_opportunity") {
+            let allowed = false;
+            try {
+              allowed = (await deps.v2OpportunityStillAllowed?.(orgId, p.propertyId, p.inboundId)) === true;
+            } catch {
+              allowed = false;
+            }
+            if (!allowed) return { status: "skipped", reason: "routing_v2_flag_off" };
+          }
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
