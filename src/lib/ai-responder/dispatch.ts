@@ -4266,7 +4266,7 @@ async function gatherOutboundFacts(
   const rows = new Map<string, Row>();
 
   const threadQuery = (statuses: readonly string[]) => {
-    let query = supabase
+    const query = supabase
       .from("messages")
       .select(columns)
       .eq("property_id", input.propertyId)
@@ -6104,7 +6104,7 @@ async function repairOrphanedTimeouts(
       if (!Number.isFinite(stampedMs) || Date.now() - stampedMs < ORPHAN_MIN_AGE_MS) continue;
       candidates.push({ prop, inboundId, stampedAt });
     }
-    let existing = new Set<string>();
+    const existing = new Set<string>();
     if (candidates.length > 0) {
       const ids = candidates.map((c) => c.inboundId);
       for (let i = 0; i < ids.length; i += ORPHAN_IN_CHUNK) {

@@ -20,11 +20,6 @@ const env = loadTestEnv();
 export default defineConfig({
   test: {
     include: [
-      "supabase/migrations/20261030260000_routing_v2_live_decision_log.integration.test.ts",
-      "supabase/migrations/20261030270000_routing_v2_legacy_drip_snapshots.integration.test.ts",
-      "supabase/migrations/20261030280000_routing_v2_skip_first_step.integration.test.ts",
-      "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
-      "supabase/migrations/20261030300000_routing_v2_outbox_provider_fence.integration.test.ts",
       "src/**/*.integration.test.ts",
       // Migration integration tests live alongside the migration SQL files.
       // Added in phase 02-05 to include 046_backfill*.integration.test.ts.
@@ -171,6 +166,11 @@ export default defineConfig({
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",
       "supabase/migrations/20261030230000_routing_v2_outbox_delivery_recheck.integration.test.ts",
+      "supabase/migrations/20261030260000_routing_v2_live_decision_log.integration.test.ts",
+      "supabase/migrations/20261030270000_routing_v2_legacy_drip_snapshots.integration.test.ts",
+      "supabase/migrations/20261030280000_routing_v2_skip_first_step.integration.test.ts",
+      "supabase/migrations/20261030290000_routing_v2_live_transition_guard.integration.test.ts",
+      "supabase/migrations/20261030300000_routing_v2_outbox_provider_fence.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
