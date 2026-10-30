@@ -408,6 +408,21 @@ describe("runRoutingV2PhoneAction", () => {
     ]);
   });
 
+  it("settler builds each row's transport from its own action when given a factory (cutover cron)", async () => {
+    const { db } = fakeDb({
+      flags: ON,
+      action: { send_id: SEND, property_ids: [P1] },
+      rpc: {
+        fn_routing_v2_phone_action_unsettled_replies: () => ({ data: [{ action_id: "a1", org_id: "org", reply_state: "pending" }] }),
+      },
+    });
+    const { d, send } = deps();
+    const factory = vi.fn(async () => d);
+    expect(await settleUnsettledRoutingV2PhoneReplies(db, factory)).toEqual([{ actionId: "a1", replyState: "sent" }]);
+    expect(factory).toHaveBeenCalledExactlyOnceWith("a1");
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("scope this_property never reaches the database", async () => {
     const { db, calls } = fakeDb({ flags: ON });
     expect(await runRoutingV2PhoneAction(db, input({ wrongScope: "this_property" }), deps().d)).toEqual({ outcome: "not_applicable", reason: "scope_not_all" });

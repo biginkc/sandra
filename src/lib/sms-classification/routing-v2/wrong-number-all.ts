@@ -304,7 +304,8 @@ export async function runRoutingV2PhoneAction(
 /** Settler (cron): finishes replies left pending/sending by a crash. Sends at most once. */
 export async function settleUnsettledRoutingV2PhoneReplies(
   supabase: SupabaseClient<Database>,
-  deps: RoutingV2PhoneActionDeps,
+  /** Fixed deps, or built per action (the cutover cron builds each row's transport from its own source inbound). */
+  deps: RoutingV2PhoneActionDeps | ((actionId: string) => Promise<RoutingV2PhoneActionDeps>),
   options: { olderThanSeconds?: number; limit?: number } = {},
 ): Promise<Array<{ actionId: string; replyState: ReplyState | "error" }>> {
   const db = supabase as unknown as Loose & { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -331,7 +332,7 @@ export async function settleUnsettledRoutingV2PhoneReplies(
         replyState: await settleRoutingV2PhoneActionReply(
           supabase,
           { orgId: row.org_id, actionId: row.action_id, sendId: act.send_id, replyState: row.reply_state, propertyIds: act.property_ids },
-          deps,
+          typeof deps === "function" ? await deps(row.action_id) : deps,
         ),
       });
     } catch (e) {

@@ -126,7 +126,11 @@ import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import { isV2Eligible, readRoutingV2Flags, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
-import { runRoutingV2PhoneAction } from "@/lib/sms-classification/routing-v2/wrong-number-all";
+import {
+  runRoutingV2PhoneAction,
+  settleUnsettledRoutingV2PhoneReplies,
+  type SendWrongNumberReply,
+} from "@/lib/sms-classification/routing-v2/wrong-number-all";
 import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-decisions";
 import {
@@ -8666,42 +8670,9 @@ async function routeRoutingV2PhoneAction(
       final: storedFinalDecision(evidence),
       expectedRevision: evidence.expected_revision,
     }, {
-      sendWrongNumberReply: async ({ requiredBody, sendId, stillAllowed }) => {
-        const resolved = await resolveApprovedTemplateReply(supabase, {
-          orgId: property.org_id, propertyId: input.propertyId, contactId: input.contactId,
-          outcome: "wrong_number", outcomeConfidence: null, escalationReason: "not_applicable", decidedBy: "nine_questions",
-        });
-        if (resolved.kind !== "template" || resolved.body !== requiredBody) {
-          return { sent: false, reason: resolved.kind === "none" ? resolved.reason : NINE_REPLY_TEXT_NOT_APPROVED, reachedProvider: false };
-        }
-        const window = await evaluateRecipientWindow(supabase, input);
-        if (!window.ok) return { sent: false, reason: V2_OUTBOX_REASON.quietHours(window.why), reachedProvider: false };
-        const { data: config } = await supabase.from("ai_responder_configs").select("model, outbound_mode")
-          .eq("org_id", property.org_id).eq("active", true).maybeSingle();
-        if (!config) return { sent: false, reason: V2_OUTBOX_REASON.configUnreadable, reachedProvider: false };
-        const sent = await sendResponderMessage(supabase, {
-          runContext: runCtx,
-          input,
-          body: resolved.body,
-          model: config.model,
-          confidence: 1,
-          sentiment: "neutral",
-          turn: (templateCtx?.currentTurn ?? 0) + 1,
-          source: "approved_template",
-          templateId: resolved.templateId,
-          templateSource: resolved.source ?? resolved.body,
-          replyKey: "wrong_number",
-          orgId: property.org_id,
-          claimStartedAt: null,
-          outboundMode: config.outbound_mode,
-          replyKind: "send_reply",
-          windowDeferrable: true,
-          providerIdempotencyKey: sendId,
-          routingV2SendAllowed: stillAllowed,
-        });
-        if (sent.outcome === "sent") return { sent: true, outboundMessageId: sent.messageId };
-        return { sent: false, reason: sent.reason, reachedProvider: sent.outcome !== "retry" && sent.reason.startsWith("send_timeout") };
-      },
+      sendWrongNumberReply: routingV2WrongNumberReplySender(supabase, {
+        orgId: property.org_id, input, turn: (templateCtx?.currentTurn ?? 0) + 1, runCtx,
+      }),
     });
     await trace(supabase, {
       kind: "action",
@@ -8745,6 +8716,76 @@ async function routeRoutingV2PhoneAction(
     evaluationRevision: evidence.expected_revision,
     classificationRunId: null,
     chosenProbability: chosen,
+  });
+}
+
+/**
+ * The PR-G wrong-number reply transport: the approved wrong-number template only (exact
+ * body), recipient window first, then the normal responder send with the action's durable
+ * send id as the provider idempotency key and PR-G's stillAllowed inside the provider fence.
+ */
+function routingV2WrongNumberReplySender(
+  supabase: SupabaseClient<Database>,
+  ctx: { orgId: string; input: AiDispatchInput; turn: number; runCtx?: MaybeRunContext },
+): SendWrongNumberReply {
+  return async ({ requiredBody, sendId, stillAllowed }) => {
+    const resolved = await resolveApprovedTemplateReply(supabase, {
+      orgId: ctx.orgId, propertyId: ctx.input.propertyId, contactId: ctx.input.contactId,
+      outcome: "wrong_number", outcomeConfidence: null, escalationReason: "not_applicable", decidedBy: "nine_questions",
+    });
+    if (resolved.kind !== "template" || resolved.body !== requiredBody) {
+      return { sent: false, reason: resolved.kind === "none" ? resolved.reason : NINE_REPLY_TEXT_NOT_APPROVED, reachedProvider: false };
+    }
+    const window = await evaluateRecipientWindow(supabase, ctx.input);
+    if (!window.ok) return { sent: false, reason: V2_OUTBOX_REASON.quietHours(window.why), reachedProvider: false };
+    const { data: config } = await supabase.from("ai_responder_configs").select("model, outbound_mode")
+      .eq("org_id", ctx.orgId).eq("active", true).maybeSingle();
+    if (!config) return { sent: false, reason: V2_OUTBOX_REASON.configUnreadable, reachedProvider: false };
+    const sent = await sendResponderMessage(supabase, {
+      runContext: ctx.runCtx,
+      input: ctx.input,
+      body: resolved.body,
+      model: config.model,
+      confidence: 1,
+      sentiment: "neutral",
+      turn: ctx.turn,
+      source: "approved_template",
+      templateId: resolved.templateId,
+      templateSource: resolved.source ?? resolved.body,
+      replyKey: "wrong_number",
+      orgId: ctx.orgId,
+      claimStartedAt: null,
+      outboundMode: config.outbound_mode,
+      replyKind: "send_reply",
+      windowDeferrable: true,
+      providerIdempotencyKey: sendId,
+      routingV2SendAllowed: stillAllowed,
+    });
+    if (sent.outcome === "sent") return { sent: true, outboundMessageId: sent.messageId };
+    return { sent: false, reason: sent.reason, reachedProvider: sent.outcome !== "retry" && sent.reason.startsWith("send_timeout") };
+  };
+}
+
+/**
+ * Cutover (d): PR-G settler. Finishes phone-action replies a crash left pending / sending
+ * (at most once; a `sending` row is only settled by its send id, never re-sent). Each row's
+ * transport is built from the action's own source inbound.
+ */
+export async function settleRoutingV2PhoneRepliesForCron(supabase: SupabaseClient<Database>) {
+  return settleUnsettledRoutingV2PhoneReplies(supabase, async (actionId) => {
+    const { data: action } = await (supabase as unknown as { from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { maybeSingle: () => PromiseLike<{ data: { org_id: string; source_inbound_message_id: string } | null }> } } } })
+      .from("routing_v2_phone_actions").select("org_id, source_inbound_message_id").eq("id", actionId).maybeSingle();
+    if (!action) throw new Error("routing v2 phone action not found");
+    const { data: msg } = await supabase.from("messages")
+      .select("property_id, contact_id, conversation_id, from_address, to_address, body")
+      .eq("id", action.source_inbound_message_id).maybeSingle();
+    if (!msg?.property_id || !msg.contact_id) throw new Error("routing v2 phone action source unreadable");
+    const input: AiDispatchInput = {
+      propertyId: msg.property_id, contactId: msg.contact_id, conversationId: msg.conversation_id ?? null,
+      inboundFromPhone: msg.from_address ?? null, inboundToPhone: msg.to_address ?? null,
+      inboundBody: msg.body ?? "", inboundMessageId: action.source_inbound_message_id,
+    };
+    return { sendWrongNumberReply: routingV2WrongNumberReplySender(supabase, { orgId: action.org_id, input, turn: 1 }) };
   });
 }
 
