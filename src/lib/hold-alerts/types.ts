@@ -47,7 +47,7 @@ export type HotPromotion = {
   /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply";
+  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply" | "selling_opportunity";
   /** lead_reply: the inbound text this alert is about (dedupes against hot alerts on the same text). */
   inboundId?: string;
   /** hot_text on a lead that already needs a person: may be unassigned. */
@@ -193,6 +193,12 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** Every inbound text on a My Leads lead (kind lead_reply). Optional: absent → none. */
   loadLeadReplies?(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /**
+   * Routing v2 send-time check for `selling_opportunity` alerts only: re-reads the v2
+   * flags + canary eligibility right before the Slack/SMS send. Absent or false = not sent.
+   * Never consulted for any other alert kind.
+   */
+  v2OpportunityStillAllowed?(orgId: string, propertyId: string, inboundId: string | undefined): Promise<boolean>;
   /** The org's hot-seller owner (Jarrad); null when it cannot be told apart (then no hot hold alerts: fail closed). */
   loadHotOwner(orgId: string): Promise<string | null>;
   /** Active owner + acquisitions members. */
