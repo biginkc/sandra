@@ -109,6 +109,7 @@ describe("pauseHotBookAppointmentOnTakeover", () => {
     expect(mocks.tableUpdates).toContainEqual(["sequence_enrollments", expect.objectContaining({ status: "paused", pause_reason: "person_took_over" })]);
     expect(mocks.filters).toContainEqual(["routing_v2_engine", "v2"]);
     expect(mocks.tableUpdates).toContainEqual(["routing_v2_outbox", { status: "cancelled", cancel_reason: "human_takeover" }]);
+    expect(mocks.rpcCalls).toContainEqual(["routing_v2_write_hold", { p_property_id: "p1", p_inbound_message_id: null, p_reason: "nine_needs_person", p_kind: "safety" }]);
     expect(mocks.report).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ tags: { surface: "hot_lead_takeover_stamp_fallback" } }));
   });
 

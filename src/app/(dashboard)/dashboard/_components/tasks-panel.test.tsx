@@ -54,6 +54,10 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 }
 
 describe("<TasksPanel />", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
     render(
       <TasksPanel
@@ -394,11 +398,12 @@ describe("<TasksPanel />", () => {
   });
 
   it("renders the compact upcoming overflow (not the outcome row) for an appointment not yet due, with the time range in the panel's timezone", () => {
+    // Pinned to a summer date: 19:00 UTC is 2:00 PM in America/Chicago only
+    // while daylight time is in effect. On the real clock this failed every
+    // day from the end of DST (2026-11-01) until March.
+    vi.useFakeTimers({ now: new Date("2026-06-15T12:00:00Z"), toFake: ["Date"] });
     const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    // 2:00 PM America/Chicago on that day, CDT or CST (was a fixed 19:00 UTC, wrong across DST).
-    tomorrow.setUTCHours(12, 0, 0, 0);
-    const chicagoNoonHour = Number(new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", hourCycle: "h23" }).format(tomorrow));
-    tomorrow.setUTCHours(14 + (12 - chicagoNoonHour), 0, 0, 0);
+    tomorrow.setUTCHours(19, 0, 0, 0); // 2:00 PM America/Chicago (CDT, UTC-5)
     const dueAt = tomorrow.toISOString();
     const endAt = new Date(tomorrow.getTime() + 30 * 60 * 1000).toISOString();
     const upcoming = [
