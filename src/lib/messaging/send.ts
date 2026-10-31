@@ -1163,7 +1163,9 @@ async function sendSmsToContactInner(
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
-      sent_at: new Date().toISOString(),
+      // DB clock ('now' is evaluated by Postgres): the send gate compares sent_at with the
+      // inbound's created_at (DB clock), so an app clock running ahead/behind cannot misorder them.
+      sent_at: "now",
       metadata: {
         ...(inputMetadata ?? {}),
         providerStatus: result.providerStatus,
@@ -2174,7 +2176,7 @@ async function releaseQueuedMessageInner(
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
-      sent_at: new Date().toISOString(),
+      sent_at: "now", // DB clock (see the immediate send above)
       failed_at: null,
       error_message: null,
       metadata: {
