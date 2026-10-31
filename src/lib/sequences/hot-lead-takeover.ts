@@ -42,11 +42,20 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
   try {
     if (a.propertyIds.length === 0) return { paused };
     const admin = createAdminClient();
-    const { error: markError } = await admin
-      .from("properties")
-      .update({ last_person_takeover_at: new Date().toISOString() })
-      .in("id", a.propertyIds);
-    if (markError) throw new Error(markError.message);
+    // DB clock, under the routing v2 property lock (stress §14); the plain stamp stays as the
+    // fallback if the function is not there yet.
+    const { error: rpcError } = await (admin as unknown as {
+      rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: unknown }>;
+    }).rpc("routing_v2_mark_person_takeover", {
+      p_property_ids: a.propertyIds,
+    });
+    if (rpcError) {
+      const { error: markError } = await admin
+        .from("properties")
+        .update({ last_person_takeover_at: new Date().toISOString() })
+        .in("id", a.propertyIds);
+      if (markError) throw new Error(markError.message);
+    }
     // 1) Re-label a TEMPORARY pause (a call in progress, a Norma call) FIRST, with the
     //    status/reason predicates evaluated by the database at update time (no snapshot):
     //    call cleanup resumes only a row still carrying its own reason, so a cleanup that

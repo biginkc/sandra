@@ -88,17 +88,20 @@ describe("routing v2 outbox reply consumer", () => {
 
   it("a reply that is not approved / not ready is cancelled before any claim and a person looks", async () => {
     h.reply.mockResolvedValue({ kind: "none", reason: "reply_text_not_approved" });
-    const { client, calls, updates } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok" });
+    const { client, calls } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok", routing_v2_write_hold: "held" });
     expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "reply_text_not_approved" });
-    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent"]);
-    expect(JSON.stringify(updates)).toContain("nine_reply_not_sent:reply_text_not_approved");
+    // A-2 F2: the hold goes through the one fenced writer, as a hold about our own reply.
+    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent", "routing_v2_write_hold"]);
+    expect(calls.find((c) => c.name === "routing_v2_write_hold")!.args).toEqual({
+      p_property_id: "p1", p_inbound_message_id: "in1", p_reason: "nine_reply_not_sent:reply_text_not_approved", p_kind: "mechanics",
+    });
   });
 
   it("an old queued reply is never sent late", async () => {
-    const { client, calls } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok" });
+    const { client, calls } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "ok", routing_v2_write_hold: "held" });
     const old = { ...ROW, created_at: new Date(Date.now() - ROUTING_V2_REPLY_MAX_AGE_MS - 1000).toISOString() };
     expect(await deliverRoutingV2OutboxReply(client, old)).toEqual({ kind: "skipped", reason: "expired" });
-    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent"]);
+    expect(names(calls)).toEqual(["routing_v2_mark_outbox_not_sent", "routing_v2_write_hold"]);
     expect(h.reply).not.toHaveBeenCalled();
   });
 

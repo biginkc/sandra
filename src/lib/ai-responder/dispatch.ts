@@ -20,6 +20,7 @@ import {
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { WEBHOOK_PROCESSING_LEASE_MS } from "@/lib/messaging/webhook-lease";
+import { testBarrier } from "@/lib/testing/test-barriers";
 import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
@@ -568,7 +569,7 @@ export async function checkAiResponderDispatchPreGates(
       return { ok: false, outcome: flaggedSkip(NUMBER_SOURCE_ANSWER_RECEIVED_REASON) };
     }
   }
-  if (isTerminalAiResponderProperty(property)) {
+  if (isTerminalAiResponderProperty(property) && !(await mechanicsHoldYieldsTo(supabase, property, input.inboundMessageId))) {
     // PR 2: a lead that already needs a person, or carries a human-owned
     // disposition (nurture / callback / booked), still gets ONE classify-only
     // look so a new hot text reaches Jarrad (owner rule 2026-10-19: every hot
@@ -585,6 +586,7 @@ export async function checkAiResponderDispatchPreGates(
       outcome: silentSkip("already_terminal", 0),
     };
   }
+  await testBarrier("dispatch:after_early_gate", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
 
   // Stress review A-2 (latest reply wins): with routing v2 live, a newer seller text (rule 1),
   // an auto reply to another inbound (rule 3) or a drip / campaign text (rule 5) sent since this
@@ -3902,6 +3904,38 @@ async function deliverRoutedReply(
   return sent;
 }
 
+/**
+ * A-2 F2: a hold about OUR OWN earlier reply ('mechanics', from an older inbound) does not make
+ * a newer seller text terminal: that text is routed fresh and the v2 transition clears the hold
+ * (audited). Decided in SQL (created_at, id) under the DB clock. A human-owned disposition still
+ * wins; any read error keeps today's terminal behaviour.
+ */
+async function mechanicsHoldYieldsTo(
+  supabase: SupabaseClient<Database>,
+  property: { id?: string; needs_human_attention?: boolean | null; outreach_dispo?: string | null },
+  inboundMessageId: string | null | undefined,
+): Promise<boolean> {
+  if (!property.needs_human_attention || !property.id || !inboundMessageId) return false;
+  if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo ?? null })) return false;
+  let data: unknown;
+  let error: { message: string } | null;
+  try {
+    ({ data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mechanics_hold_yields", {
+      p_property_id: property.id, p_inbound_message_id: inboundMessageId,
+    }));
+  } catch (e) {
+    error = { message: e instanceof Error ? e.message : String(e) };
+  }
+  if (error) {
+    // Deployed ahead of the migration (function missing) or a read error: terminal, as today.
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_mechanics_hold_yields" }, extra: { propertyId: property.id } });
+    }
+    return false;
+  }
+  return data === true;
+}
+
 function isTerminalAiResponderProperty(
   property: Pick<
     AiDispatchPropertyGateRow,
@@ -4183,6 +4217,7 @@ async function evaluateSendGate(
 
   const outbound = await gatherOutboundFacts(supabase, input, opts, nowMs);
   if (!outbound.ok) return outbound.truncated ? { ok: false, reason: "evidence_truncated" } : { ok: false };
+  if (opts.phase === "presend") await testBarrier("outbox:presend_after_evidence", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
   return {
     ok: true,
     decision: decideSendGate({ newerInbound, outbound: outbound.facts }, { phase: opts.phase }),
@@ -4246,7 +4281,7 @@ async function loadSilentExit(
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
       };
     }
-  } else if (isTerminalAiResponderProperty(property)) {
+  } else if (isTerminalAiResponderProperty(property) && !(await mechanicsHoldYieldsTo(supabase, { ...property, id: input.propertyId }, input.inboundMessageId))) {
     return { ok: true, reason: "already_terminal" };
   }
 
@@ -4748,16 +4783,14 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: V2_OLDER_AUTO_REPLY_SENT, result: "block", detail: { rule: 3 } }, args.runContext);
     return { outcome: "skipped", reason: V2_OLDER_AUTO_REPLY_SENT };
   }
-  // Rule 1 already writes no flag when the newer text has a live handler (its delayed dispatch
-  // is scheduled or running); a newer text whose handler ended or never started keeps the flag,
-  // so a person looks (review M-1). A-2 round 3: for a queued v2 reply, a newer text still
-  // inside its webhook (saved, not yet stamped, younger than the webhook lease) will be routed
-  // by its own dispatch, so it is cancelled without the flag (the outbox applies the same test).
+  // A-2 race analysis F1: a queued v2 reply overtaken by a newer seller text (rule 1, flagged or
+  // not) is cancelled and nothing more. It never writes a hold and never reads another request's
+  // progress: the newer text is routed (or, if its own handler dies, held by the lease-death
+  // sweep) on its own lifecycle. Non-v2 callers keep today's rule-1 behaviour.
   const basePlan = skipPlanFor(decision, "presend")!;
-  const newerInFlight = !!args.routingV2OutboxId && decision.action === "skip" && decision.rule === 1 && decision.flag
-    && !!args.input.inboundMessageId
-    && (await newerSellerTextIsLive(supabase, { property_id: args.input.propertyId, inbound_message_id: args.input.inboundMessageId }));
-  const plan = newerInFlight ? { ...basePlan, flagReason: null } : basePlan;
+  const plan = args.routingV2OutboxId && decision.action === "skip" && decision.rule === 1
+    ? { ...basePlan, flagReason: null }
+    : basePlan;
   guard();
   await trace(
     supabase,
@@ -4770,13 +4803,18 @@ async function applyGateEvaluation(
   );
   if (plan.flagReason) {
     guard();
-    const flagged = await markPropertyNeedsAttention(
-      supabase,
-      args.input.propertyId,
-      plan.flagReason,
-      args.runContext,
-      guard,
-    );
+    // A-2 F2: a queued v2 reply's flag is about our own reply (mechanics): written through the
+    // one fenced hold writer, only if no newer seller text exists ('superseded' = the newer text
+    // owns the thread: no hold, counted as handled).
+    const flagged = args.routingV2OutboxId && args.input.inboundMessageId
+      ? await writeV2Hold(supabase, args.input.propertyId, args.input.inboundMessageId, plan.flagReason, "mechanics") !== "error"
+      : await markPropertyNeedsAttention(
+        supabase,
+        args.input.propertyId,
+        plan.flagReason,
+        args.runContext,
+        guard,
+      );
     if (!flagged) {
       // The flag could not be proven: the seller is unanswered and no human
       // was told. The reply exists, so it is dead-lettered (rule 7); the
@@ -8682,6 +8720,7 @@ async function applyRoutingV2LiveEvidence(
   }
   if (step.kind === "hold") return holdWithAlerts(liveHoldReason(step.reason));
 
+  await testBarrier("dispatch:before_transition", { propertyId: input.propertyId, inboundMessageId });
   const applied = await applyStoredV2Transition(supabase, {
     orgId: evidence.org_id,
     propertyId: input.propertyId,
@@ -8712,6 +8751,13 @@ async function applyRoutingV2LiveEvidence(
     // A newer seller text owns the thread; this one's owner alerts were still queued.
     await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:superseded" });
     return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
+  }
+  if (applied.reason === "held") {
+    // A-2 F4: the lead is held for the seller's words / a person (the hold landed while this
+    // text was being decided). No reply, no drip start; its owner alerts were queued. Not a new
+    // hold: the lead is already with a person.
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:already_held" });
+    return { outcome: "skipped", reason: "routing_v2:already_held" };
   }
   // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
   return nineHoldAndComplete(supabase, a, "nine_needs_person");
@@ -8990,8 +9036,10 @@ export async function deliverRoutingV2OutboxReply(
     if (error) throw new Error(`${fn}: ${error.message}`);
     return typeof data === "string" ? data : "unexpected_result";
   };
+  // A-2 F2: a reply the seller did not get is a hold about our own reply (mechanics): written
+  // only if no newer seller text exists; the newer text is routed by itself.
   const holdFor = async (why: string) => {
-    await holdWithRetry(supabase, row.property_id, `nine_reply_not_sent:${why}`);
+    await writeV2Hold(supabase, row.property_id, row.inbound_message_id, `nine_reply_not_sent:${why}`, "mechanics");
   };
   const intent: V2OutboxIntent = {
     id: row.id, orgId: row.org_id, propertyId: row.property_id, inboundMessageId: row.inbound_message_id,
@@ -9107,7 +9155,9 @@ async function deliverRoutingV2OutboxIntent(
       // a hold here would make it exit already_terminal. A newer text whose handler ended without
       // handling it, or never started (webhook died after the insert), still holds (review M-1).
       if (marked !== "ok") return;
-      if (isV2SupersededReason(reason) && (await newerSellerTextIsLive(supabase, row))) return;
+      // A-2 F1: overtaken by a newer seller text = cancelled, nothing more (never a hold).
+      if (isV2SupersededReason(reason)) return;
+      await testBarrier("outbox:before_hold", { propertyId: row.property_id, inboundMessageId: row.inbound_message_id });
       // A-2 C1: a mechanics no-op (a repeat template we never resend, a window that closed, our
       // own older auto reply already went out) on a road whose v2 drip for THIS inbound is
       // running is not a person case: the drip is the outcome. Reply-only roads have no such
@@ -9149,53 +9199,31 @@ async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: R
 }
 
 /**
- * Is there a newer seller text after this reply's inbound that will be (or was) routed by its own
- * dispatch? True when its handler is live (delayed dispatch scheduled or running) or already
- * handled it (send-gate rule 1, `classifyNewerInboundHandler`), OR when it is still inside its
- * webhook: saved, not yet stamped or claimed, and younger than the webhook processing lease
- * (A-2 round 3: the newer text's webhook has not reached its delay stamp yet). A newer text past
- * that lease with no stamp is a dead webhook / handler: false, a person looks (M-1). Fails
- * toward the hold on a lookup error.
+ * The one writer of v2 holds (routing_v2_write_hold, 20261030420000), with bounded retries.
+ * 'mechanics' = our own reply could not go out: written only if no newer seller text exists
+ * ('superseded'); 'safety' = the seller's words / a person: always written. Returns 'error' when
+ * the hold could not be written.
  */
-async function newerSellerTextIsLive(
+export async function writeV2Hold(
   supabase: SupabaseClient<Database>,
-  row: { property_id: string; inbound_message_id: string },
-): Promise<boolean> {
-  const { data: own, error: ownError } = await supabase
-    .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
-  if (ownError || !own?.created_at) return false;
-  const { data, error } = await supabase
-    .from("messages").select("id, created_at, metadata")
-    .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
-    .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
-    .order("created_at", { ascending: false })
-    .limit(5);
-  if (error) return false;
-  const nowMs = Date.now();
-  for (const newer of (data ?? []) as Array<{ id: string; created_at: string; metadata: Json | null }>) {
-    if ((await newerInboundHasLiveHandler(supabase, newer.id, nowMs)) === true) return true;
-    if (await newerInboundStillInWebhook(supabase, newer, nowMs)) return true;
+  propertyId: string,
+  inboundMessageId: string,
+  reason: string,
+  kind: "mechanics" | "safety",
+): Promise<"held" | "already_held" | "upgraded" | "superseded" | "missing" | "error"> {
+  const db = supabase as unknown as LooseRpc;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data, error } = await db.rpc("routing_v2_write_hold", {
+      p_property_id: propertyId, p_inbound_message_id: inboundMessageId, p_reason: reason, p_kind: kind,
+    });
+    if (!error && typeof data === "string") return data as "held" | "already_held" | "upgraded" | "superseded" | "missing";
+    if (attempt === 2) {
+      reportError(new Error(error?.message ?? "routing_v2_write_hold: unexpected result"), {
+        tags: { surface: "routing_v2_write_hold" }, extra: { propertyId, inboundMessageId, reason, kind },
+      });
+    }
   }
-  return false;
-}
-
-/** Saved, no responder stamp, no claim, and younger than the webhook processing lease. */
-async function newerInboundStillInWebhook(
-  supabase: SupabaseClient<Database>,
-  newer: { id: string; created_at: string; metadata: Json | null },
-  nowMs: number,
-): Promise<boolean> {
-  const createdMs = Date.parse(newer.created_at);
-  if (Number.isNaN(createdMs) || nowMs - createdMs > WEBHOOK_PROCESSING_LEASE_MS) return false;
-  const processing = readJsonObject(newer.metadata).processing;
-  const stamped = !!processing && typeof processing === "object" && !Array.isArray(processing)
-    && (processing as Record<string, Json>).aiResponder != null;
-  if (stamped) return false;
-  const { data: claim, error } = await supabase
-    .from("ai_response_claims").select("id")
-    .eq("inbound_message_id", newer.id).eq("response_kind", "sms_ai_responder_v1")
-    .maybeSingle();
-  return !error && !claim;
+  return "error";
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
@@ -9227,59 +9255,52 @@ export function routingV2OutboxHoldReason(cancelReason: string): string {
  */
 export async function sweepUnstampedV2Inbounds(
   supabase: SupabaseClient<Database>,
-  nowMs: number = Date.now(),
+  _nowMs: number = Date.now(),
   shouldStop: () => boolean = () => false,
 ): Promise<number> {
-  const before = new Date(nowMs - WEBHOOK_PROCESSING_LEASE_MS).toISOString();
-  const after = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
-  const { data, error } = await supabase
-    .from("messages")
-    .select("id, org_id, property_id, conversation_id, metadata")
-    .eq("direction", "inbound").eq("channel", "sms")
-    .lt("created_at", before).gt("created_at", after)
-    .not("property_id", "is", null)
-    .is("metadata->processing->aiResponder", null)
-    .is("metadata->processing->routingV2Sweep", null)
-    .is("metadata->>keyword", null)
-    .order("created_at", { ascending: true })
-    .limit(50);
+  // A-2 F3: candidates come from SQL, aged on the DB clock (never the app clock): an inbound SMS
+  // with no stamp past the webhook lease, a 'delayed' stamp whose workflow never ran (scheduled
+  // time past by the lease), or a claim still 'processing' long after its lease expired; none
+  // with a v2 decision / audit row, a keyword exit, or a previous sweep mark.
+  const db = supabase as unknown as LooseRpc;
+  const { data, error } = await db.rpc("routing_v2_sweep_candidates", {
+    p_lease_seconds: Math.round(WEBHOOK_PROCESSING_LEASE_MS / 1000), p_limit: 50,
+  });
   if (error) {
-    reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
+    }
     return 0;
   }
   let held = 0;
-  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; metadata: Json | null }>) {
+  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; why: string }>) {
     if (shouldStop()) break;
-    const [{ data: claim }, { data: decision }] = await Promise.all([
-      supabase.from("ai_response_claims").select("id").eq("inbound_message_id", m.id).limit(1),
-      (supabase as unknown as { from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null }> } } } })
-        .from("routing_v2_live_decisions").select("id").eq("inbound_message_id", m.id).limit(1),
-    ]);
-    let result: "handled" | "not_v2" | "held";
-    if ((claim ?? []).length > 0 || (decision ?? []).length > 0) result = "handled";
-    else {
-      // Review B2: an unreadable flag / config / engine is NOT "not v2". The text is left
-      // unmarked for the next pass (a flaky database must never let a dead v2 text escape).
-      const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);
-      if (live === "error") {
-        reportError(new Error("routing v2 sweep: v2-live state unreadable; left for the next pass"), {
-          tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id },
-        });
-        continue;
-      }
-      if (live === "no") result = "not_v2";
-      else {
-        // Not marked "held" unless the hold is really there (markPropertyNeedsAttention proves it).
-        if (!(await markPropertyNeedsAttention(supabase, m.property_id, "nine_needs_person"))) continue;
-        await recordRoutingV2Audit(supabase, {
-          orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
-          note: "webhook_lease_expired_unstamped",
-        }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
-        held++;
-        result = "held";
-      }
+    // Review B2: an unreadable v2 state is NOT "not v2". The text is left unmarked for the next
+    // pass (a flaky database must never let a dead v2 text escape).
+    const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);
+    if (live === "error") {
+      reportError(new Error("routing v2 sweep: v2-live state unreadable; left for the next pass"), {
+        tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id },
+      });
+      continue;
     }
-    await markSwept(supabase, m, result, nowMs);
+    let result: "not_v2" | "held";
+    if (live === "no") result = "not_v2";
+    else {
+      // A dead newest text is a person case about the seller's text (safety): always written.
+      // Not marked "held" unless the hold is really there.
+      const hold = await writeV2Hold(supabase, m.property_id, m.id, "nine_needs_person", "safety");
+      if (hold === "error" || hold === "missing") continue;
+      await recordRoutingV2Audit(supabase, {
+        orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
+        note: `webhook_lease_expired_${m.why}`,
+      }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
+      held++;
+      result = "held";
+    }
+    // Server-side mark (jsonb_set): only on a text with no completed responder stamp.
+    const { error: markError } = await db.rpc("routing_v2_mark_inbound_swept", { p_message_id: m.id, p_result: result });
+    if (markError) reportError(new Error(markError.message), { tags: { surface: "routing_v2_unstamped_sweep_mark" }, extra: { messageId: m.id } });
   }
   return held;
 }
@@ -9308,23 +9329,6 @@ export async function routingV2LiveForSweep(
   } catch {
     return "error";
   }
-}
-
-/** Mark a text as examined by the sweep; only while it still has no responder stamp. */
-async function markSwept(
-  supabase: SupabaseClient<Database>,
-  m: { id: string; metadata: Json | null },
-  result: string,
-  nowMs: number,
-): Promise<void> {
-  const meta = readJsonObject(m.metadata);
-  const processing = meta.processing && typeof meta.processing === "object" && !Array.isArray(meta.processing)
-    ? (meta.processing as Record<string, Json>) : {};
-  const { error } = await supabase.from("messages")
-    .update({ metadata: { ...meta, processing: { ...processing, routingV2Sweep: { at: new Date(nowMs).toISOString(), result } } } as Json })
-    .eq("id", m.id)
-    .is("metadata->processing->aiResponder", null);
-  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep_mark" }, extra: { messageId: m.id } });
 }
 
 export async function runRoutingV2OutboxReplies(
@@ -9356,7 +9360,12 @@ export async function runRoutingV2OutboxReplies(
     const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
     for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
-      const ok = await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
+      // A-2 F2: mechanics hold about this outbox row's own reply (superseded by a newer text = done).
+      const { data: boxRow } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      const inboundId = (boxRow as { inbound_message_id?: string } | null)?.inbound_message_id;
+      const ok = inboundId
+        ? (await writeV2Hold(supabase, row.property_id, inboundId, routingV2OutboxHoldReason(row.reason), "mechanics")) !== "error"
+        : await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
       if (!ok) {
         // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
         if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {

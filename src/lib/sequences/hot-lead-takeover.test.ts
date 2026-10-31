@@ -9,12 +9,18 @@ const mocks = vi.hoisted(() => ({
   filters: [] as Array<[string, unknown]>,
   fail: false,
   onUpdate: null as null | ((v: Record<string, unknown>) => void),
+  rpcCalls: [] as Array<[string, unknown]>,
+  rpcOk: false,
 }));
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("./enrollment", () => ({ pausePropertyEnrollments: mocks.pause }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
+    rpc: async (fn: string, args: unknown) => {
+      mocks.rpcCalls.push([fn, args]);
+      return mocks.rpcOk && !mocks.fail ? { data: 1, error: null } : { data: null, error: { message: "missing" } };
+    },
     from: (table: string) => {
       const b: Record<string, unknown> = {};
       b.select = () => b;
@@ -51,9 +57,18 @@ beforeEach(() => {
   mocks.live = [{ property_id: "p1" }];
   mocks.marker = { last_person_takeover_at: null };
   mocks.newerInbound = [];
+  mocks.rpcCalls = [];
+  mocks.rpcOk = false;
 });
 
 describe("pauseHotBookAppointmentOnTakeover", () => {
+  it("stamps the takeover on the DB clock through routing_v2_mark_person_takeover (no app-clock stamp)", async () => {
+    mocks.rpcOk = true;
+    expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
+    expect(mocks.rpcCalls).toEqual([["routing_v2_mark_person_takeover", { p_property_ids: ["p1"] }]]);
+    expect(mocks.updates.some((u) => "last_person_takeover_at" in u)).toBe(false);
+  });
+
   it("writes the takeover marker, then pauses enrolments created by the hot route, with the person as actor", async () => {
     expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
     expect(mocks.updates[0]).toHaveProperty("last_person_takeover_at");
