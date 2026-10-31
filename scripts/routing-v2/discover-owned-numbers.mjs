@@ -13,7 +13,7 @@
  *   TEST_DEST_ALLOWLIST=<comma-separated E.164>
  * to that file with mode 0600 (for the harness to load at run time). Never commit that file.
  */
-import { writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 
 const key = process.env.TELNYX_API_KEY ?? "";
 if (!key.trim()) {
@@ -51,6 +51,10 @@ console.log(`owned numbers: ${numbers.length} (with a messaging profile: ${numbe
 for (const n of numbers) console.log(`  ${last4(n.e164)}  status=${n.status}  messaging=${n.messaging}${n.tags.length ? `  tags=${n.tags.length}` : ""}`);
 if (envFile) {
   const allow = numbers.filter((n) => n.status === "active").map((n) => n.e164);
+  // `mode` applies only when the file is created: tighten an existing file BEFORE the numbers
+  // go in, and again after (in case it was replaced in between).
+  if (existsSync(envFile)) chmodSync(envFile, 0o600);
   writeFileSync(envFile, `TEST_DEST_ALLOWLIST=${allow.join(",")}\n`, { mode: 0o600 });
+  chmodSync(envFile, 0o600);
   console.log(`wrote ${allow.length} active numbers to ${envFile} (mode 0600; full numbers only in that file)`);
 }
