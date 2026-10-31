@@ -7801,17 +7801,25 @@ export async function markPropertyNeedsAttention(
     // Nothing matched `needs_human_attention = false`: either a human was
     // already told (the flag exists: success) or the property is gone / the
     // write silently matched nothing. Prove which before claiming success.
-    const { data: current, error: readError } = await supabase
+    const { data: current, error: readError } = (await supabase
       .from("properties")
-      .select("needs_human_attention")
+      .select("needs_human_attention, hold_kind" as "needs_human_attention")
       .eq("id", propertyId)
-      .maybeSingle();
+      .maybeSingle()) as unknown as {
+      data: { needs_human_attention: boolean | null; hold_kind?: string | null } | null;
+      error: { message: string } | null;
+    };
     const exists = !readError && current?.needs_human_attention === true;
     if (!exists) {
       reportError(new Error(readError?.message ?? "attention flag not persisted"), {
         tags: { surface: "ai_responder_mark_attention" },
         extra: { propertyId, reason },
       });
+    } else if (current?.hold_kind === "mechanics") {
+      // Review B-1 (3288da8ef6b3): this hold (the seller's words, a person, a keyword / legal
+      // hold) lands on a lead already held only for our own unsent reply. It must not keep that
+      // label, or the next text would clear it: upgrade to safety through the one hold writer.
+      await upgradeMechanicsHold(supabase, propertyId, reason);
     }
     return exists;
   }
@@ -9196,6 +9204,21 @@ async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: R
     .eq("property_id", row.property_id).eq("routing_v2_inbound_id", row.inbound_message_id).eq("status", "active")
     .limit(1);
   return !error && (data ?? []).length > 0;
+}
+
+/**
+ * Review B-1: a safety hold re-asserted on a lead held only for our own unsent reply turns the
+ * mechanics label into safety (never the reverse), through routing_v2_write_hold. Best effort:
+ * a failure is reported; the DB trigger upgrades any writer that sets the flag or reason too.
+ */
+async function upgradeMechanicsHold(supabase: SupabaseClient<Database>, propertyId: string, reason: string) {
+  const db = supabase as unknown as LooseRpc;
+  const { error } = await db.rpc("routing_v2_write_hold", {
+    p_property_id: propertyId, p_inbound_message_id: null, p_reason: reason, p_kind: "safety",
+  });
+  if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+    reportError(new Error(error.message), { tags: { surface: "ai_responder_mark_attention_upgrade" }, extra: { propertyId, reason } });
+  }
 }
 
 /**
