@@ -217,14 +217,12 @@ const V8 = new Map(
   ),
 );
 const CODE_REPLY: Record<string, string> = { reaction: "Liked “x”", bad_number: "no SMS capabilities", driving: "I'm driving" };
-// HOLD_haiku_error = invalid Haiku answer → hold + "Haiku error — please check" (no road).
-// A-1 (2026-10-31): 6 rows are final Jev stops, never asked (not_interested 774→770, stop 108→112).
-const PINNED_ROADS: Record<string, number> = { not_interested_drip: 770, book_appointment: 239, price_check: 188, wrong_number_close: 111, stop: 112, ALERT_call_me: 87, listed_drip: 37, who_reply_drip: 37, maybe_later_drip: 31, ALERT_haiku_unsure: 22, which_property_reply: 21, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 11, location_reply: 11, text_only_reply: 10, "reaction+book_appointment": 7, how_it_works_reply: 6, confirmed_owner_drip: 5, ALERT_land_price: 3, "driving_reply+book_appointment": 3, HOLD_haiku_error: 2, ALERT_said_theyll_call: 2, bad_number: 1 };
-const PINNED_BY: Record<string, number> = { jev: 1472, haiku: 237, haiku_unsure: 22, code: 11, jev_haiku_unsure: 8, haiku_failed: 2 };
-
+// The replay below runs with a placeholder reply text ("x"), so it cannot exercise anything that
+// reads the text (code checks, D-1). It asserts only the structure it can honestly check: which
+// rows are Haiku-eligible and that Jev-decided rows keep the approved v7 road. Per-road counts
+// are no longer pinned here (a snapshot of current answers); the road expectations live in
+// regression-expectations.test.ts, derived from approved policy (A-014).
 describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", () => {
-  const roads: Record<string, number> = {};
-  const by: Record<string, number> = {};
   const mismatches: string[] = [];
   let eligible = 0;
   FIX.rows.forEach(([code, p, pt, , expRoad], i) => {
@@ -240,9 +238,6 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
       // Review A-1: a confident Jev stop is final; Haiku is never asked.
       if (d.haiku !== null || f.road !== "stop" || f.by !== "jev") mismatches.push(`${i}: A-1 row is not a final Jev stop`);
     } else if (!d.haiku && f.road !== expRoad) mismatches.push(`${i}: non-Haiku row changed`);
-    const key = f.road ?? "HOLD_haiku_error";
-    roads[key] = (roads[key] ?? 0) + 1;
-    by[f.by] = (by[f.by] ?? 0) + 1;
   });
 
   it("covers exactly the 275 Haiku-eligible rows and leaves every other row unchanged", () => {
@@ -251,8 +246,4 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
     expect(V8.size).toBe(275);
   });
 
-  it("pins the v8 road counts", () => {
-    expect(roads).toEqual(PINNED_ROADS);
-    expect(by).toEqual(PINNED_BY);
-  });
 });
