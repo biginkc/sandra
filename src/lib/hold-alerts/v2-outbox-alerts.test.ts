@@ -19,20 +19,29 @@ function fakeDb(tables: Tables) {
     const c: Record<string, unknown> = {};
     for (const m of ["select", "eq", "in", "is", "gte", "order"]) c[m] = () => c;
     if (table === "routing_v2_outbox") {
-      // Newest first by (created_at, id); `or` = the keyset cursor.
-      rows = [...rows].sort((a, b) => {
-        const x = a as { created_at: string; id: string }, y = b as { created_at: string; id: string };
-        return x.created_at === y.created_at ? (x.id < y.id ? 1 : -1) : x.created_at < y.created_at ? 1 : -1;
-      });
+      // Honors the query's own .order(...) calls (column + direction) and the `or` keyset cursor,
+      // so an ascending + limit query really gets the OLDEST rows, as a database would.
+      const orders: Array<{ col: "created_at" | "id"; asc: boolean }> = [];
+      c.order = (col: "created_at" | "id", o?: { ascending?: boolean }) => { orders.push({ col, asc: o?.ascending !== false }); return c; };
       c.or = (f: string) => {
         const m = /created_at\.lt\.([^,]+),and\(created_at\.eq\.([^,]+),id\.lt\.([^)]+)\)/.exec(f)!;
         rows = rows.filter((r) => { const x = r as { created_at: string; id: string }; return x.created_at < m[1]! || (x.created_at === m[2] && x.id < m[3]!); });
         return c;
       };
+      c.then = (res: (v: unknown) => unknown) => {
+        const sorted = [...rows].sort((a, b) => {
+          for (const { col, asc } of orders) {
+            const x = (a as Record<string, string>)[col]!, y = (b as Record<string, string>)[col]!;
+            if (x !== y) return (x < y ? -1 : 1) * (asc ? 1 : -1);
+          }
+          return 0;
+        });
+        return res({ data: sorted.slice(0, limit), error: null });
+      };
     }
     c.limit = (n: number) => { limit = n; return c; };
     c.maybeSingle = async () => ({ data: rows[0] ?? null, error: null });
-    c.then = (res: (v: unknown) => unknown) => res({ data: rows.slice(0, limit), error: null });
+    if (!c.then) c.then = (res: (v: unknown) => unknown) => res({ data: rows.slice(0, limit), error: null });
     return c;
   };
   return { db: { from: chain } as never, queries };
@@ -73,7 +82,8 @@ describe("routing v2 outbox owner alerts", () => {
   it("a busy week (> one page of sent alerts) never hides a new pending alert (review B2)", async () => {
     const sent = Array.from({ length: 450 }, (_, i) => alert(`s${String(i).padStart(4, "0")}`, "haiku_unsure", `routing_v2:old${i}:haiku_unsure`,
       { status: "sent", created_at: new Date(Date.parse("2026-10-27T00:00:00Z") + i * 60_000).toISOString() }));
-    const fresh = alert("new1", "call_me", "hot_text:in1", { created_at: "2026-10-26T00:00:00Z" });
+    // The real B2 case: the new alert is NEWER than every one of the 450 already-sent alerts.
+    const fresh = alert("new1", "call_me", "hot_text:in1", { created_at: "2026-10-30T11:30:00Z" });
     const { db } = fakeDb(base([...sent, fresh]));
     const { promotions, complete } = await loadV2OutboxAlerts(db, ORG, "2026-10-01T00:00:00Z", NOW, OWNER.userId);
     expect(complete).toBe(true);

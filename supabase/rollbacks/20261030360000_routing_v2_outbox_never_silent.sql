@@ -1,4 +1,6 @@
 -- Rollback for 20261030360000: restore the 20261030330000 reconcile body; drop the hold helpers.
+-- WARNING: dropping hold_pending loses any hold not yet written (rows still hold_pending = true):
+-- write those holds (run the routing-v2-outbox cron until routing_v2_outbox_holds_due is empty) first.
 begin;
 set local lock_timeout = '5s';
 drop function if exists public.routing_v2_mark_outbox_hold_written(uuid);
@@ -46,5 +48,5 @@ $$;
 revoke all on function public.routing_v2_reconcile_outbox(integer) from public, anon, authenticated;
 grant execute on function public.routing_v2_reconcile_outbox(integer) to service_role;
 drop index if exists public.routing_v2_outbox_hold_pending_idx;
-alter table public.routing_v2_outbox drop column if exists hold_pending;
+alter table public.routing_v2_outbox drop column if exists hold_last_attempt_at, drop column if exists hold_attempts, drop column if exists hold_pending;
 commit;

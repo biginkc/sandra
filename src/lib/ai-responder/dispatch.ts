@@ -8945,6 +8945,9 @@ async function deliverRoutingV2OutboxIntent(
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
+/** A hold that has failed this many times is reported on every further failure. */
+export const ROUTING_V2_HOLD_REPORT_AFTER = 5;
+
 /** A queued reply the seller did not get: today's hold reason family, no whitespace. */
 export function routingV2OutboxHoldReason(cancelReason: string): string {
   if (cancelReason.startsWith("unknown:")) return "nine_reply_not_sent:send_outcome_unknown";
@@ -8973,9 +8976,18 @@ export async function runRoutingV2OutboxReplies(
     // long): write today's hold, then clear the marker. A crash between the two re-holds.
     const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
-    for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string }>)) {
+    for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
       const ok = await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
-      if (!ok) continue;
+      if (!ok) {
+        // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
+        if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+          reportError(new Error("routing v2 outbox hold keeps failing"), {
+            tags: { surface: "routing_v2_outbox_holds" },
+            extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+          });
+        }
+        continue;
+      }
       const mark = await db.rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.outbox_id });
       if (mark.error) reportError(new Error(mark.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
       else held++;
