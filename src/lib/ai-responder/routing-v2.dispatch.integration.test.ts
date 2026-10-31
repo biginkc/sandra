@@ -28,9 +28,14 @@ import type { AnthropicLike } from "./generate";
 // The property's own business-hours window. `openCalls` = stay open for that many more checks,
 // then close (a window that closes between the outbox's prepare and the send).
 const propertyWindow = vi.hoisted(() => ({ open: true, openCalls: null as number | null }));
-vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
-  checkQuietHours: () => {
+vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/messaging/quiet-hours")>();
+  return {
+  ...real,
+  checkQuietHours: (state: string | null | undefined) => {
+    // An unreadable state is never "open" (B-1): pass the real answer through.
+    const actual = real.checkQuietHours(state);
+    if (!actual.ok && actual.reason === "unknown_state") return actual;
     let open = propertyWindow.open;
     if (propertyWindow.openCalls !== null) {
       open = propertyWindow.openCalls > 0;
@@ -40,7 +45,8 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
       ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
       : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" };
   },
-}));
+  };
+});
 const recipientWindow = vi.hoisted(() => ({ open: true }));
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
@@ -759,6 +765,21 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
       expect(await count("select count(*)::int n from properties where id = $1 and needs_human_attention = true and is_dnc_locked = false", [lead.propertyId])).toBe(1);
       expect(await auditRows(later)).toBe(1);
+    });
+
+    it.each([["blank", ""], ["spelled out", "Missouri"]] as const)("B-1: a property whose state is %s (unreadable) ends HELD: the reply holds and the drip is paused for a person, never silent", async (_label, state) => {
+      const lead = await setup();
+      await pg.query("update properties set state = $2 where id = $1", [lead.propertyId, state]);
+      const id = await text(lead, "not interested", { not_interested: 0.95 });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await box(id)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:nine_window_unknown_state" });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_reply_not_sent:nine_window_unknown_state" });
+      // The drip never reschedules +10h forever: the tick pauses it for a person.
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(await enrollments(lead.propertyId)).toContainEqual({ k: "not_interested", status: "paused", r: "timezone_unconfirmed" });
+      expect(sentTo(lead.phone)).toHaveLength(0);
     });
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {

@@ -54,6 +54,13 @@ describe("routingV2TickGate", () => {
     expect(await routingV2TickGate(c, { ...base, templateBody: "Hey, Mel here." })).toEqual({ kind: "send", slotLabel: null });
   });
 
+  it.each([null, "", "Missouri"])("B-1: v2 step on a property whose state %j cannot be read: held (timezone_unconfirmed), never rescheduled forever", async (state) => {
+    const r = await routingV2TickGate(client({ key: "not_interested" }).c, { ...base, propertyState: state as string | null, templateBody: "Plain text" });
+    expect(r).toEqual({ kind: "hold", reason: "timezone_unconfirmed" });
+  });
+  it("B-1: legacy drips are untouched by an unreadable state", async () => {
+    expect(await routingV2TickGate(client({ key: null }).c, { ...base, propertyState: null })).toEqual({ kind: "legacy" });
+  });
   it("v2: an RPC error is an error (nothing written), not a block", async () => {
     const { c } = client({ key: "book_appointment" });
     (c as unknown as { rpc: ReturnType<typeof vi.fn> }).rpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });

@@ -6727,6 +6727,13 @@ async function deliverResponderMessage(
     return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
 
+  if (sendResult.status === "blocked_quiet_hours" && args.routingV2OutboxId && !sendResult.check.ok && sendResult.check.reason === "unknown_state") {
+    // B-1: the property's state cannot be read, so there is no window to wait for. Not a
+    // quiet-hours close and never a routine no-op: a person looks (the outbox holds).
+    guard();
+    await trace(supabase, { kind: "gate", name: "quiet_hours", result: "block", detail: { window: "unknown_state" } }, args.runContext);
+    return { outcome: "skipped", reason: NINE_WINDOW_UNKNOWN_STATE };
+  }
   if (sendResult.status === "blocked_quiet_hours" && args.windowDeferrable) {
     // The property's own window (checked inside the send, before any row is written):
     // window-only, so a deferrable nine reply is deferred instead of flagged.
@@ -7989,6 +7996,8 @@ export function isNineDeferrableNotSent(why: string, replyIneligibleReason?: str
 export const NINE_WINDOW_CLOSED = "nine_window_closed";
 /** The same, refused at the provider fence: this attempt's own pending row was written first. */
 export const NINE_WINDOW_CLOSED_AT_FENCE = "nine_window_closed_at_fence";
+/** B-1: a v2 reply refused because the property's state (its time zone) cannot be read. */
+export const NINE_WINDOW_UNKNOWN_STATE = "nine_window_unknown_state";
 
 /**
  * Seconds from `now` until both the property's business-hours window and the
@@ -8974,7 +8983,8 @@ async function deliverRoutingV2OutboxIntent(
       if (!window.ok) return { kind: "wait", reason: V2_OUTBOX_REASON.quietHours(window.why) };
       // A-2 C2: the property's own business-hours window too (the same check the send makes),
       // so a closed window waits before any claim instead of being refused and held. An unknown
-      // state is not a window: it takes the send's own fail-closed path as before.
+      // state is not a window to wait for: it goes on to the send, which refuses it; that
+      // refusal comes back as NINE_WINDOW_UNKNOWN_STATE (not a C1 no-op), so the lead is held.
       const { data: propState } = await supabase.from("properties").select("state").eq("id", row.property_id).maybeSingle();
       const propertyWindow = checkQuietHours((propState as { state?: string | null } | null)?.state ?? null);
       if (!propertyWindow.ok && propertyWindow.reason !== "unknown_state") {
