@@ -33,4 +33,24 @@ export function setTestBarrier(name: TestBarrierName, handler: Handler): void {
 
 export function clearTestBarriers(): void {
   handlers.clear();
+  faults.clear();
+}
+
+/** Named one-shot test faults: a read that should fail once, at a named point (tests only). */
+export type TestFaultName = "dispatch:v2_live_read";
+const faults = new Map<TestFaultName, (ctx: TestBarrierContext) => boolean>();
+
+/** True once when a test armed this fault and its predicate matches; always false outside tests. */
+export function testFault(name: TestFaultName, ctx: TestBarrierContext = {}): boolean {
+  if (process.env.NODE_ENV !== "test" || faults.size === 0) return false;
+  const f = faults.get(name);
+  if (!f || !f(ctx)) return false;
+  faults.delete(name);
+  return true;
+}
+
+/** Tests only. */
+export function setTestFault(name: TestFaultName, match: (ctx: TestBarrierContext) => boolean = () => true): void {
+  if (process.env.NODE_ENV !== "test") throw new Error("test faults are for tests only");
+  faults.set(name, match);
 }

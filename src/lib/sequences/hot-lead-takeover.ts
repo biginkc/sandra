@@ -113,7 +113,8 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
 
 /**
  * The takeover could not be stamped at all: no v2 automation may continue on this property.
- * Every active v2 drip is paused for the person and every pending v2 auto reply is cancelled.
+ * Every active v2 drip is paused for the person, every pending or claimed v2 auto reply is cancelled,
+ * and the lead is held for a person (safety).
  * Best effort; each failure is reported (the person's own action never fails because of this).
  */
 async function failClosedV2Takeover(admin: ReturnType<typeof createAdminClient>, propertyId: string) {
@@ -136,15 +137,25 @@ async function failClosedV2Takeover(admin: ReturnType<typeof createAdminClient>,
   const { error: cancelError } = await (admin as unknown as {
     from: (t: string) => {
       update: (v: Record<string, unknown>) => {
-        eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } };
+        eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { in: (c: string, v: unknown[]) => PromiseLike<{ error: { message: string } | null }> } };
       };
     };
   }).from("routing_v2_outbox")
     .update({ status: "cancelled", cancel_reason: "human_takeover" })
     .eq("property_id", propertyId)
     .eq("kind", "reply")
-    .eq("status", "pending");
+    .in("status", ["pending", "claimed"]);
   if (cancelError) {
     reportError(new Error(cancelError.message), { tags: { surface: "hot_lead_takeover_fail_closed_cancel" }, extra: { propertyId } });
+  }
+  // Opus review of 93a8070932bd (N1): a person hold (safety) too, so a later seller text gets no
+  // auto reply or drip either (a newer text could otherwise be routed while the stamp is missing).
+  const { error: holdError } = await (admin as unknown as {
+    rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+  }).rpc("routing_v2_write_hold", {
+    p_property_id: propertyId, p_inbound_message_id: null, p_reason: "nine_needs_person", p_kind: "safety",
+  });
+  if (holdError) {
+    reportError(new Error(holdError.message), { tags: { surface: "hot_lead_takeover_fail_closed_hold" }, extra: { propertyId } });
   }
 }

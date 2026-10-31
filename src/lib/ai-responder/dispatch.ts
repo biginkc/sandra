@@ -20,7 +20,7 @@ import {
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { WEBHOOK_PROCESSING_LEASE_MS } from "@/lib/messaging/webhook-lease";
-import { testBarrier } from "@/lib/testing/test-barriers";
+import { testBarrier, testFault } from "@/lib/testing/test-barriers";
 import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
@@ -419,24 +419,6 @@ export type AiDispatchPreGateResult =
   | { ok: true; property: AiDispatchPropertyGateRow; routingV2Live?: boolean }
   | { ok: false; outcome: AiDispatchOutcome };
 
-/**
- * Stress review A-2: is this inbound going to the routing v2 live engine? (Jev automatic +
- * nine-question engine + routing_v2_flags.questions_live + canary-eligible property.) Any
- * read problem = false (today's path).
- */
-async function routingV2LiveFor(supabase: SupabaseClient<Database>, orgId: string, propertyId: string): Promise<boolean> {
-  try {
-    const flags = await readRoutingV2Flags(supabase, orgId);
-    if (!flags.questions_live || !isV2Eligible(flags, propertyId)) return false;
-    const { data: config } = await supabase.from("ai_responder_configs")
-      .select("classifier_provider, classifier_mode").eq("org_id", orgId).eq("active", true).maybeSingle();
-    if (config?.classifier_provider !== "jev" || config.classifier_mode !== "automatic") return false;
-    return (await readClassifierEngine(supabase, orgId)) === "nine_questions";
-  } catch {
-    return false;
-  }
-}
-
 export async function applyKeywordEscalation(
   supabase: SupabaseClient<Database>,
   args: {
@@ -569,7 +551,17 @@ export async function checkAiResponderDispatchPreGates(
       return { ok: false, outcome: flaggedSkip(NUMBER_SOURCE_ANSWER_RECEIVED_REASON) };
     }
   }
-  if (isTerminalAiResponderProperty(property) && !(await mechanicsHoldYieldsTo(supabase, property, input.inboundMessageId))) {
+  // Opus review of 93a8070932bd (B1): "is routing v2 live for this property" is decided ONCE, with
+  // the strict read, before the terminal gate. That single answer picks v2 vs legacy below and
+  // decides whether an older mechanics hold yields; a read error is "not live", so the hold stays.
+  const v2LiveState = input.inboundMessageId
+    ? (testFault("dispatch:v2_live_read", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId })
+        ? "error"
+        : await routingV2LiveForSweep(supabase, property.org_id, input.propertyId))
+    : "no";
+  const routingV2Live = v2LiveState === "yes";
+  if (isTerminalAiResponderProperty(property)
+      && !(routingV2Live && (await mechanicsHoldYieldsTo(supabase, property, input.inboundMessageId, { v2Live: true })))) {
     // PR 2: a lead that already needs a person, or carries a human-owned
     // disposition (nurture / callback / booked), still gets ONE classify-only
     // look so a new hot text reaches Jarrad (owner rule 2026-10-19: every hot
@@ -593,7 +585,6 @@ export async function checkAiResponderDispatchPreGates(
   // inbound never parks or drops it here. Every reply is
   // classified and recorded; the v2 transition keeps the newest reply's route (an older one
   // queues only its owner alerts) and the outbox fence refuses a stale auto reply.
-  const routingV2Live = input.inboundMessageId ? await routingV2LiveFor(supabase, property.org_id, input.propertyId) : false;
   if (input.inboundMessageId) {
     // Q8 decision table at the early gate: rule 0 (suppression / disabled /
     // terminal) and rule 8 first, then rules 1-6, first match wins; the same
@@ -604,6 +595,7 @@ export async function checkAiResponderDispatchPreGates(
       claimStartedAt: null,
       checkNewerInbound: options.checkSuperseded === true,
       property,
+      ...(routingV2Live ? { mechanicsYield: "decided" as const } : {}),
     });
     if (evaluation.ok) {
       const decision = evaluation.decision;
@@ -1440,6 +1432,10 @@ async function classifyAndHandleNonRouteOutcomes(
         ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
       });
       if (v2) return { handled: true, outcome: v2 };
+      // Opus review of 93a8070932bd (B1): a lead still held here got past the early gate only
+      // because an older mechanics hold yields on the v2 road; if v2 did not take it after all,
+      // the legacy engine must not answer a held lead.
+      if (property.needs_human_attention) return { handled: true, outcome: silentSkip("already_terminal", 0) };
       return {
         handled: true,
         outcome: await runNineQuestionsStep(supabase, {
@@ -3914,6 +3910,8 @@ async function mechanicsHoldYieldsTo(
   supabase: SupabaseClient<Database>,
   property: { id?: string; org_id?: string | null; needs_human_attention?: boolean | null; outreach_dispo?: string | null },
   inboundMessageId: string | null | undefined,
+  /** The caller already decided v2 is live (the early gate's single strict read). */
+  decided?: { v2Live: true },
 ): Promise<boolean> {
   if (!property.needs_human_attention || !property.id || !inboundMessageId) return false;
   if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo ?? null })) return false;
@@ -3921,12 +3919,12 @@ async function mechanicsHoldYieldsTo(
   // the hold yields only while v2 routing is live for this property. With v2 off (never on, or
   // turned off after it wrote the hold) the hold is terminal exactly as today; any read error too.
   let orgId = property.org_id ?? null;
-  if (!orgId) {
+  if (!decided?.v2Live && !orgId) {
     const { data: row, error: orgError } = await supabase.from("properties").select("org_id").eq("id", property.id).maybeSingle();
     if (orgError || !row?.org_id) return false;
     orgId = row.org_id;
   }
-  if ((await routingV2LiveForSweep(supabase, orgId, property.id)) !== "yes") return false;
+  if (!decided?.v2Live && (await routingV2LiveForSweep(supabase, orgId!, property.id)) !== "yes") return false;
   let data: unknown;
   let error: { message: string } | null;
   try {
@@ -4166,13 +4164,19 @@ async function evaluateSendGate(
      * consent, terminal disposition, responder off) still applies.
      */
     humanActor?: boolean;
+    /**
+     * Opus review of 93a8070932bd (B1): an older mechanics hold may yield only on the v2 road:
+     * "decided" = the early gate's single strict read said v2 is live; "outbox" = this is a v2
+     * outbox reply send (re-checked strictly). Absent = the legacy road: the hold is terminal.
+     */
+    mechanicsYield?: "decided" | "outbox";
   },
 ): Promise<GateEvaluation> {
   const nowMs = Date.now();
 
   // Rule 0 evidence (suppression / disabled / consent / terminal): silent by
   // design and decided before anything else is read.
-  const silent = await loadSilentExit(supabase, input, opts.property ?? null, opts.humanActor === true);
+  const silent = await loadSilentExit(supabase, input, opts.property ?? null, opts.humanActor === true, opts.mechanicsYield);
   if (!silent.ok) return { ok: false };
   if (silent.reason) {
     return {
@@ -4247,6 +4251,7 @@ async function loadSilentExit(
   input: AiDispatchInput,
   known: GateProperty | null,
   humanActor = false,
+  mechanicsYield?: "decided" | "outbox",
 ): Promise<{ ok: true; reason: string | null } | { ok: false }> {
   // A human send reads the flag reason fresh: the exemption below depends on
   // it, and the early gate's row does not carry it.
@@ -4291,7 +4296,9 @@ async function loadSilentExit(
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
       };
     }
-  } else if (isTerminalAiResponderProperty(property) && !(await mechanicsHoldYieldsTo(supabase, { ...property, id: input.propertyId }, input.inboundMessageId))) {
+  } else if (isTerminalAiResponderProperty(property) && !(mechanicsYield
+      && (await mechanicsHoldYieldsTo(supabase, { ...property, id: input.propertyId }, input.inboundMessageId,
+        mechanicsYield === "decided" ? { v2Live: true } : undefined)))) {
     return { ok: true, reason: "already_terminal" };
   }
 
@@ -5386,6 +5393,7 @@ async function fenceProviderSubmit(
     return false;
   };
   const evaluation = await evaluateSendGate(supabase, args.input, {
+    ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
     phase: "presend",
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
@@ -5760,6 +5768,7 @@ async function sendResponderMessageInner(
   });
   if (initialPolicy.hold) {
     const evaluation = await evaluateSendGate(supabase, args.input, {
+      ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
       phase: "presend",
       claimStartedAt: args.claimStartedAt,
       checkNewerInbound: !!args.input.inboundMessageId,
@@ -6522,6 +6531,7 @@ async function leasedSend(
   // Re-validate UNDER the reservation (the Q8 table, final): READ everything,
   // then re-check the attempt is still live, only then apply (flag / trace).
   const evaluation = await evaluateSendGate(supabase, args.input, {
+    ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
     phase: "presend",
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
@@ -6699,6 +6709,7 @@ async function deliverResponderMessage(
         detail: { reason: attempt.fenceReason ?? "fence:gate:error" },
       }, args.runContext);
       const evaluation = await evaluateSendGate(supabase, args.input, {
+        ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
         phase: "presend",
         claimStartedAt: args.claimStartedAt,
         checkNewerInbound: !!args.input.inboundMessageId,

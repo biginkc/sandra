@@ -9,7 +9,7 @@ import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/deliv
 import { handleInboundWebhook } from "@/lib/messaging/inbound";
 import { getMockMessageLog, MockMessagingProvider, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
-import { clearTestBarriers, setTestBarrier, type TestBarrierContext, type TestBarrierName } from "@/lib/testing/test-barriers";
+import { clearTestBarriers, setTestBarrier, setTestFault, type TestBarrierContext, type TestBarrierName } from "@/lib/testing/test-barriers";
 import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2/reply-texts";
 import type { Json } from "@/lib/supabase/types";
 
@@ -1589,6 +1589,22 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await tickDue(lead);
       expect(sentTo(lead.phone).slice(before)).toEqual([]);
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+
+    // Opus review of 93a8070932bd (B1): the "is v2 live" read fails once for B. The decision is made
+    // once (strict): an error is "not live", so the older mechanics hold stays terminal and the
+    // legacy road never answers the held lead.
+    forced("M20: mechanics hold, then the v2-live read fails once for the newer text: B stays held, 0 sends, no reply or drip", async (lead) => {
+      await mechanicsHoldOnA(lead);
+      const before = sentTo(lead.phone).length;
+      setTestFault("dispatch:v2_live_read", (c) => c.propertyId === lead.propertyId);
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await tickDue(lead);
+      expect(sentTo(lead.phone).slice(before)).toEqual([]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(await count("select count(*)::int n from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply'", [b])).toBe(0);
     });
 
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
