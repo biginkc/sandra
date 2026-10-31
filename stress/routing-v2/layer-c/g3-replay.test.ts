@@ -375,6 +375,14 @@ it("G3 blast-day replay", async () => {
       if (y && held && !["stop", "possible_stop", "haiku_error"].includes(t.road ?? "")) lost++; }
     R.check("A-8 (SQL): after-repairs follow-up yes lost because the main decision held (stop/error excluded) = 0", lost === 0, { afterRepairsTurns: turns.length, followUpYes: yes, lost, breakdown: br });
   }
+  {
+    // 410000: no v2 drip step may be sent to a lead held for a person (step run accepted after the hold was written).
+    const bad = await q(`select r.id, e.property_id, r.created_at, p.last_ai_escalation_at, p.last_ai_escalation_reason from sequence_step_runs r join sequence_enrollments e on e.id = r.enrollment_id
+      join properties p on p.id = e.property_id where e.property_id = any($1) and e.routing_v2_engine = 'v2' and r.attempt_outcome in ('accepted','sent','delivered')
+      and p.needs_human_attention and p.last_ai_escalation_at is not null and r.created_at > p.last_ai_escalation_at`);
+    const allSends = await q("select count(*)::int n from sequence_step_runs r join sequence_enrollments e on e.id = r.enrollment_id where e.property_id = any($1) and e.routing_v2_engine = 'v2' and r.attempt_outcome in ('accepted','sent','delivered')");
+    R.check("410000: v2 drip steps sent to a lead held for a person = 0", bad.length === 0, { held: bad.length, v2DripStepSendsInRun: allSends[0].n, sample: bad.slice(0, 5) });
+  }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
   const fu = (p: Record<string, number>) => ["needs_repairs", "flexible_price", "original_portion", "no_repairs"].some((k) => (p?.[k] ?? 0) >= 0.6);

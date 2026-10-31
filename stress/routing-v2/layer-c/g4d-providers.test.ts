@@ -209,3 +209,28 @@ it("outbox crash recovery + >200 owner alerts paged", async () => {
   const paged = res.promotions.filter((p) => mine.has((p as { propertyId?: string }).propertyId ?? "")).length;
   R2.check(">200 owner alerts queued -> all returned by the paged loader", queued >= 200 && paged === queued && res.complete, { queued, pagedForTheseLeads: paged, promotionsTotal: res.promotions.length, complete: res.complete });
 });
+
+it("lease-death sweep: an inbound whose webhook died is held for a person once, never sent", async () => {
+  const R3 = new Receipt("G4d-lease-death-sweep.txt");
+  const { createTestClient } = await import("@tests/integration/client");
+  const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");
+  const { getMockMessageLog } = await import("@/lib/messaging/providers/mock");
+  const db = createTestClient();
+  const leads = await seedLeads(pg, org, 3, { state: () => ({ state: "MO", fips: null }), address: (i) => `${i} Lease Death Ct` });
+  // Saved by a webhook that then died: message row only (no stamp, claim, keyword exit, decision or audit row), 10 min old.
+  const ids: string[] = [];
+  for (const l of leads) {
+    const { rows } = await pg.query(`insert into public.messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body, created_at)
+      values ($1, 'sms', 'inbound', 'received', $2, $3, $4, $5, 'are you still buying?', now() - interval '10 minutes') returning id`, [BMH, l.propertyId, l.contactId, l.phone, org.sender]);
+    ids.push(rows[0].id);
+  }
+  const before = getMockMessageLog().length;
+  const r1 = await runRoutingV2OutboxReplies(db, { limit: 50 });
+  const r2 = await runRoutingV2OutboxReplies(db, { limit: 50 });
+  const props = (await pg.query("select id, needs_human_attention, last_ai_escalation_reason from properties where id = any($1)", [leads.map((l) => l.propertyId)])).rows;
+  const audit = (await pg.query("select inbound_message_id, status, failure_reason from routing_v2_live_decisions where inbound_message_id = any($1)", [ids])).rows;
+  const marks = (await pg.query("select id, metadata->'processing'->'routingV2Sweep' mark from messages where id = any($1)", [ids])).rows;
+  R3.check("dead-webhook inbounds: each lead held for a person, exactly one audit row per text, marked, zero sends, second pass holds nothing new",
+    props.every((p) => p.needs_human_attention) && audit.length === ids.length && new Set(audit.map((a) => a.inbound_message_id)).size === ids.length && getMockMessageLog().length === before && ((r2 as { held?: number }).held ?? 0) === 0,
+    { pass1Held: (r1 as { held?: number }).held, pass2Held: (r2 as { held?: number }).held, props, audit, marks, sends: getMockMessageLog().length - before });
+});

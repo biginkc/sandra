@@ -13,7 +13,7 @@ def norm(o):
     return o
 def counts(rows): return collections.Counter(norm(r["outcome"]) for r in rows)
 configs = {}
-for head in ("7e6b4c8aa64e", "dbdd5940e032", "64ba15bb65c0", "84eda34d5213"):
+for head in ("7e6b4c8aa64e", "dbdd5940e032", "64ba15bb65c0", "84eda34d5213", "72229239848d"):
     runs = []
     for i in (1, 2, 3):
         try: runs.append(counts([json.loads(l) for l in open(f"{W}/replay-{i}-{head}.jsonl").read().splitlines()[1:]]))
