@@ -193,7 +193,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
             contact_id: "contact-1",
             created_at: "2026-09-17T12:00:00.000Z",
             sent_at: "2026-09-17T12:00:00.000Z",
-            from_address: "+18163706846",
+            from_address: "+18165550143",
             status: "sent",
             metadata: mariaThroughMel,
           },
@@ -223,7 +223,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T13:01:00.000Z",
           sent_at: "2026-09-17T13:01:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -233,7 +233,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -243,7 +243,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T11:00:00.000Z",
           sent_at: "not-a-date",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -256,7 +256,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
       contactId: "contact-1",
       inboundMessageId: inboundId,
       inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-      inboundToNumber: "(816) 370-6846",
+      inboundToNumber: "(816) 555-0143",
     });
 
     expect(source).toEqual({
@@ -265,7 +265,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
       contactId: "contact-1",
       actorUserId: "rep-1",
       senderAssignmentId: "sender-1",
-      fromNumber: "+18163706846",
+      fromNumber: "+18165550143",
       messageStatus: "sent",
       sentAt: "2026-09-17T12:00:00.000Z",
     });
@@ -313,7 +313,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: inboundId,
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).rejects.toBeInstanceOf(RepSmsHumanTakeoverLookupError);
     expect(calls).toHaveLength(4);
@@ -329,7 +329,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -350,7 +350,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: "55555555-5555-4555-8555-555555555555",
         inboundReceivedAt: "2026-09-17T13:00:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).resolves.toBeNull();
   });
@@ -364,7 +364,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:15:00.000Z",
           sent_at: "2026-09-17T12:15:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: { generated_by: "ai_responder_v1" },
         },
@@ -374,7 +374,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -388,7 +388,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: "77777777-7777-4777-8777-777777777777",
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).resolves.toBeNull();
   });
@@ -402,7 +402,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:15:00.000Z",
           sent_at: "2026-09-17T12:15:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "failed_not_dispatched",
           metadata: mariaThroughMel,
         },
@@ -412,7 +412,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -426,7 +426,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: inboundId,
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).resolves.toEqual(
       expect.objectContaining({
@@ -455,7 +455,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -469,12 +469,12 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: inboundId,
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).resolves.toEqual(
       expect.objectContaining({
         outboundMessageId: outboundId,
-        fromNumber: "+18163706846",
+        fromNumber: "+18165550143",
       }),
     );
   });
@@ -488,7 +488,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "sent",
           metadata: mariaThroughMel,
         },
@@ -518,7 +518,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
             contact_id: "contact-1",
             created_at: "2026-09-17T12:00:00.000Z",
             sent_at: "2026-09-17T12:00:00.000Z",
-            from_address: "+18163706846",
+            from_address: "+18165550143",
             status,
             metadata: mariaThroughMel,
           },
@@ -532,7 +532,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contactId: "contact-1",
           inboundMessageId: inboundId,
           inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-          inboundToNumber: "+18163706846",
+          inboundToNumber: "+18165550143",
         }),
       ).resolves.toBeNull();
     },
@@ -549,7 +549,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
             contact_id: "contact-1",
             created_at: "2026-09-17T12:00:00.000Z",
             sent_at: "2026-09-17T12:00:00.000Z",
-            from_address: "+18163706846",
+            from_address: "+18165550143",
             status,
             metadata: mariaThroughMel,
           },
@@ -563,7 +563,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contactId: "contact-1",
           inboundMessageId: inboundId,
           inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-          inboundToNumber: "+18163706846",
+          inboundToNumber: "+18165550143",
         }),
       ).resolves.toEqual(
         expect.objectContaining({
@@ -583,7 +583,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:00:00.000Z",
           sent_at: "2026-09-17T12:00:00.000Z",
-          from_address: "+18163706846",
+          from_address: "+18165550143",
           status: "failed",
           metadata: { ...mariaThroughMel, providerOutcome: "provider_unknown" },
         },
@@ -597,7 +597,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: inboundId,
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18163706846",
+        inboundToNumber: "+18165550143",
       }),
     ).resolves.toEqual(
       expect.objectContaining({
@@ -619,7 +619,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         actorUserId: "rep-1",
       senderAssignmentId: "sender-1",
-      fromNumber: "+18163706846",
+      fromNumber: "+18165550143",
       messageStatus: "sent",
       sentAt: "2026-09-17T12:00:00.000Z",
       },
@@ -677,7 +677,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         actorUserId: "rep-1",
         senderAssignmentId: "sender-1",
-        fromNumber: "+18163706846",
+        fromNumber: "+18165550143",
         messageStatus: "sent",
         sentAt: "2026-09-17T12:00:00.000Z",
       } });
@@ -692,7 +692,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         actorUserId: "rep-1",
         senderAssignmentId: "sender-1",
-        fromNumber: "+18163706846",
+        fromNumber: "+18165550143",
         messageStatus: "sent",
         sentAt: "2026-09-17T12:00:00.000Z",
       } });
@@ -707,7 +707,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         actorUserId: "rep-1",
         senderAssignmentId: "sender-1",
-        fromNumber: "+18163706846",
+        fromNumber: "+18165550143",
         messageStatus: "sent",
         sentAt: "2026-09-17T12:00:00.000Z",
       } })).rejects.toBeInstanceOf(RepSmsHumanTakeoverPersistenceError);
@@ -718,7 +718,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         actorUserId: "rep-1",
         senderAssignmentId: "sender-1",
-        fromNumber: "+18163706846",
+        fromNumber: "+18165550143",
         messageStatus: "sent",
         sentAt: "2026-09-17T12:00:00.000Z",
       } })).resolves.toBeUndefined();
@@ -740,7 +740,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contactId: "contact-1",
           actorUserId: "rep-1",
           senderAssignmentId: "sender-1",
-          fromNumber: "+18163706846",
+          fromNumber: "+18165550143",
           messageStatus: "sent",
           sentAt: "2026-09-17T12:00:00.000Z",
         },
