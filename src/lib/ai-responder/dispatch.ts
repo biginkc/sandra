@@ -4736,13 +4736,10 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  const basePlan = skipPlanFor(decision, "presend")!;
-  // Stress A-2 (round 2): a queued routing v2 reply overtaken by a newer seller text (rule 1) is
-  // only cancelled. The newer text is routed by its own v2 dispatch; a person hold here would
-  // make that dispatch exit already_terminal and leave the drip paused.
-  const plan = args.routingV2OutboxId && decision.rule === 1
-    ? { ...basePlan, flagReason: null }
-    : basePlan;
+  // Rule 1 already writes no flag when the newer text has a live handler (its delayed dispatch
+  // is scheduled or running); a newer text whose handler ended or never started keeps the flag,
+  // so a person looks (review M-1).
+  const plan = skipPlanFor(decision, "presend")!;
   guard();
   await trace(
     supabase,
@@ -9005,9 +9002,11 @@ async function deliverRoutingV2OutboxIntent(
       // The seller did not get the reply: a person looks (today's nine-question hold family).
       // Only when THIS call cancelled the row: a row another consumer already sent, or the
       // provider fence already cancelled (superseded / takeover), never gets a false hold.
-      // Stress A-2 (round 2): a reply overtaken by a NEWER SELLER TEXT is not a failure; that
-      // text is routed by its own v2 dispatch, which a hold here would block (already_terminal).
-      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextExists(supabase, row)))) {
+      // Stress A-2 (round 2): a reply overtaken by a newer seller text whose own dispatch is still
+      // pending / scheduled (or already handled it) is not a failure; that dispatch routes it, and
+      // a hold here would make it exit already_terminal. A newer text whose handler ended without
+      // handling it, or never started (webhook died after the insert), still holds (review M-1).
+      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextIsLive(supabase, row)))) {
         await holdFor(reason.replace(/\s+/g, "_"));
       }
     },
@@ -9020,10 +9019,11 @@ export function isV2SupersededReason(reason: string): boolean {
 }
 
 /**
- * Did the seller text again after this reply's inbound? Then that newer text owns the thread and
- * is routed by its own dispatch. Fails toward the hold (a person looks) on a lookup error.
+ * Is there a newer seller text after this reply's inbound whose own handler is live (its delayed
+ * dispatch is scheduled or running) or already handled it? Same test as send-gate rule 1
+ * (`classifyNewerInboundHandler`). Fails toward the hold (a person looks) on a lookup error.
  */
-async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+async function newerSellerTextIsLive(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
   const { data: own, error: ownError } = await supabase
     .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
   if (ownError || !own?.created_at) return false;
@@ -9031,8 +9031,14 @@ async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: Ro
     .from("messages").select("id")
     .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
     .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
-    .limit(1);
-  return !error && (data ?? []).length > 0;
+    .order("created_at", { ascending: false })
+    .limit(5);
+  if (error) return false;
+  const nowMs = Date.now();
+  for (const newer of data ?? []) {
+    if ((await newerInboundHasLiveHandler(supabase, newer.id, nowMs)) === true) return true;
+  }
+  return false;
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */

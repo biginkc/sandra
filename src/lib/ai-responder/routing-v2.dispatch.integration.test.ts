@@ -10,6 +10,7 @@ import { handleInboundWebhook } from "@/lib/messaging/inbound";
 import { getMockMessageLog, MockMessagingProvider, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
+import type { Json } from "@/lib/supabase/types";
 
 import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
 import type { AnthropicLike } from "./generate";
@@ -530,6 +531,49 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         stamp: { o: "auto_closed", r: "routing_v2:confirmed_owner_drip" },
       });
       expect(await auditRows(second)).toBe(1);
+      // The older reply was cancelled; its owner alerts were not (review M-1).
+      const { rows: alerts } = await pg.query("select o.status from routing_v2_outbox o join messages m on m.id = o.inbound_message_id where o.property_id = $1 and o.kind = 'alert' and m.body = $2", [lead.propertyId, "sure what's the offer"]);
+      expect(alerts.length).toBeGreaterThan(0);
+      expect(alerts.filter((a) => a.status === "cancelled")).toEqual([]);
+    });
+
+    async function olderReplyQueued() {
+      const lead = await setup();
+      recipientWindow.open = false;
+      jevProbabilities = { open_to_selling: 0.95 };
+      await say(lead, "sure what's the offer");
+      await runWorkflows();
+      const { rows: [box] } = await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.status).toBe("pending");
+      return lead;
+    }
+    const newerText = async (lead: Awaited<ReturnType<typeof seedLead>>, metadata: Json = {}) => {
+      const { data, error } = await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: "Yes I own it", metadata }).select("id").single();
+      expect(error).toBeNull();
+      return data!.id as string;
+    };
+    async function deliverOlderAndExpectHold(lead: Awaited<ReturnType<typeof seedLead>>) {
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      const { rows: [box] } = await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.status).toBe("cancelled");
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      const p = await prop(lead.propertyId);
+      expect(p.needs_human_attention).toBe(true);
+      expect(p.last_ai_escalation_reason).toMatch(/^(reply_skipped:newer_inbound|nine_reply_not_sent:)/);
+    }
+
+    it("M-1: the newer text's webhook died after the insert (no handler): the cancelled older reply still holds for a person", async () => {
+      const lead = await olderReplyQueued();
+      await newerText(lead);
+      await deliverOlderAndExpectHold(lead);
+    });
+
+    it("M-1: the newer text's handler ended without handling it: the cancelled older reply still holds for a person", async () => {
+      const lead = await olderReplyQueued();
+      const newer = await newerText(lead, { processing: { aiResponder: { outcome: "delayed", workflowRunId: "ended-run", delaySeconds: 30 } } });
+      await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, completed_at, outcome, error_message) values ($1, $2, $3, $4, 'error', now(), 'skipped', 'reply_ineligible')", [orgId, newer, lead.propertyId, lead.contactId]);
+      await deliverOlderAndExpectHold(lead);
     });
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {
