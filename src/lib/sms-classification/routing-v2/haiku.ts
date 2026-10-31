@@ -6,7 +6,11 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
 /**
  * Routing v2 PR-D: Haiku second opinion (shadow only). Request shape as the v7 replay
  * (scratchpad final/haiku.py): model `claude-haiku-5-5`, thinking disabled, no
- * temperature, max_tokens 100, the system prompt below and one option line per approved question.
+ * temperature, the system prompt below and one option line per approved question.
+ * Stress review A-3 (round 2): Haiku sometimes wrote prose BEFORE the JSON and ran out of tokens
+ * first. The request now carries structured outputs (`output_config.format`, a JSON schema of
+ * the same {road, confidence} answer) so the reply is JSON only, and max_tokens is 200 as a
+ * guard. Prefill is not an option (Haiku 5.5 rejects assistant prefill). No prompt wording changed.
  *
  * BUSINESS RULES: option lines are the Jarrad-approved question texts (questions.ts) plus the
  * approved `maybe_yes` text. The option ORDER follows ORDER-TABLE.md (v8 prompt, self-approved
@@ -15,7 +19,17 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
  * The key is passed in by the caller and never logged.
  */
 export const HAIKU_MODEL = "claude-haiku-5-5";
-export const HAIKU_MAX_TOKENS = 100;
+export const HAIKU_MAX_TOKENS = 200;
+/** The answer shape the prompt already asks for, enforced by the API (structured outputs). */
+export const HAIKU_OUTPUT_FORMAT = {
+  type: "json_schema" as const,
+  schema: {
+    type: "object",
+    properties: { road: { type: "string" }, confidence: { type: "number" } },
+    required: ["road", "confidence"],
+    additionalProperties: false,
+  },
+};
 export const HAIKU_URL = "https://api.anthropic.com/v1/messages";
 export const HAIKU_TIMEOUT_MS = 10_000;
 /** USD per million tokens, as used for the v7 replay cost (route_v7.py). Accounting only; no caps. */
@@ -58,6 +72,7 @@ export function buildHaikuRequest(threadLines: ReadonlyArray<string>) {
     model: HAIKU_MODEL,
     max_tokens: HAIKU_MAX_TOKENS,
     thinking: { type: "disabled" as const },
+    output_config: { format: HAIKU_OUTPUT_FORMAT },
     system: HAIKU_SYSTEM_PROMPT,
     messages: [{ role: "user" as const, content }],
   };
