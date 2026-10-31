@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
@@ -15,6 +16,7 @@ beforeAll(() => db.connect());
 afterAll(() => db.end());
 beforeEach(async () => {
   await db.query("begin");
+  await unwindRoutingV2After(db, "20261030330000"); // A-7: pass on a fully migrated stack too
   org = randomUUID();
   await db.query("insert into organizations(id,name) values($1,'outbox delivery test')", [org]);
   await db.query("insert into ai_responder_configs(org_id,system_prompt,routing_v2_flags) values($1,'test',$2)", [org, JSON.stringify(FLAGS)]);

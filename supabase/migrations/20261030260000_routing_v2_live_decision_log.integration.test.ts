@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 const url = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres");
 const strip = (text: string) => text.replace(/^\s*(begin|commit);\s*$/gim, "");
@@ -10,7 +11,7 @@ const rollback = strip(readFileSync(path.join(__dirname, "../rollbacks/202610302
 const db = new Client({ connectionString: url });
 beforeAll(async () => { await db.connect(); });
 afterAll(async () => { await db.end(); });
-beforeEach(async () => { await db.query("begin"); await db.query(migration); });
+beforeEach(async () => { await db.query("begin"); await unwindRoutingV2After(db, "20261030260000"); await db.query(migration); });
 afterEach(async () => { await db.query("rollback"); });
 const insert = `insert into public.routing_v2_live_decisions (org_id, property_id, inbound_message_id, status, expected_revision)
  values ('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','failed',7)`;

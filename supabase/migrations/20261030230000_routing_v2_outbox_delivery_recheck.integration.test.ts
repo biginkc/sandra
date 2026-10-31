@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
@@ -125,6 +126,7 @@ describe("routing v2 PR-F delivery re-check + takeover fence (rolled back per te
   let ctx: Ctx;
   beforeEach(async () => {
     await db.query("begin");
+    await unwindRoutingV2After(db, "20261030230000"); // A-7: pass on a fully migrated stack too
     await db.query("set local session_replication_role = replica");
     ctx = await seedOrg(db);
     await db.query("set local session_replication_role = origin");
