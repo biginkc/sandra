@@ -33,7 +33,7 @@ begin
   join public.properties p on p.id = b.property_id and p.org_id = b.org_id
   where p.homeowner_contact_id = b.contact_id and p.is_dnc_locked;
   if v_skipped > 0 then
-    raise notice 'homeowner_from_property_links rollback: % backfilled lead(s) are now DNC-locked and were left as-is; ledger rows kept in public.homeowner_link_backfill: %', v_skipped, v_ids;
+    raise notice 'homeowner_from_property_links rollback: % backfilled lead(s) are now DNC-locked and were left as-is; ledger rows kept in public.homeowner_link_backfill: %. Before re-applying the forward migration, review those rows and drop the table by hand (drop table public.homeowner_link_backfill), or create table will fail.', v_skipped, v_ids;
     delete from public.homeowner_link_backfill b
     where not exists (
       select 1 from public.properties p
