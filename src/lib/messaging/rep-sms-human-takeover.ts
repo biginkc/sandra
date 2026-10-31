@@ -420,6 +420,25 @@ export async function recordRepSmsHumanTakeover(
       `recordRepSmsHumanTakeover property: ${propertyError.message}`,
     );
   }
+  if (!updated) {
+    // Review B-1' (251a3321672a): the lead is already held (or became unheld meanwhile). A hold
+    // held only for our own unsent reply ("mechanics") would be cleared by the seller's next text,
+    // and the AI would reply inside the rep's conversation: write this person hold through the
+    // one hold writer (holds an unheld lead, upgrades mechanics to safety with this reason).
+    const { error: holdError } = await (supabase as unknown as {
+      rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+    }).rpc("routing_v2_write_hold", {
+      p_property_id: input.propertyId,
+      p_inbound_message_id: input.inboundMessageId,
+      p_reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+      p_kind: "safety",
+    });
+    if (holdError && !/PGRST202|42883|does not exist|Could not find/i.test(holdError.message)) {
+      throw new RepSmsHumanTakeoverPersistenceError(
+        `recordRepSmsHumanTakeover hold: ${holdError.message}`,
+      );
+    }
+  }
 
   if (input.conversationId) {
     const { error: threadError } = await supabase

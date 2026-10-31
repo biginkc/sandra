@@ -83,11 +83,11 @@ describe("pauseHotBookAppointmentOnTakeover", () => {
     ]);
   });
 
-  it("any error other than a missing function fails closed: no app-clock stamp, reported, the takeover pauses still run (review N-1)", async () => {
+  it("any error other than a missing function is retried once, reported, then the app-clock stamp is written so the takeover fence still fires (review N-1)", async () => {
     mocks.rpcError = "canceling statement due to lock timeout";
     expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
     expect(mocks.rpcCalls).toHaveLength(2);
-    expect(mocks.updates.some((u) => "last_person_takeover_at" in u)).toBe(false);
+    expect(mocks.updates.some((u) => "last_person_takeover_at" in u)).toBe(true);
     expect(mocks.report).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ tags: { surface: "hot_lead_takeover_stamp" } }));
   });
 
