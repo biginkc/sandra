@@ -54,6 +54,10 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 }
 
 describe("<TasksPanel />", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
     render(
       <TasksPanel
