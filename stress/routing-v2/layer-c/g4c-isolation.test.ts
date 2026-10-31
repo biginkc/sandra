@@ -6,7 +6,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { BMH, createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
+import { BMH, createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg, QS, QA, QT } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
@@ -110,8 +110,8 @@ it("G4c §5.4 isolation", async () => {
     { prodSends: sends(prod!.phone), testSends: sends(tNon2!.phone), testRefusals: (await refusals(tNon2!.propertyId)).length });
 
   // 4. taint stripped from the derived row by a bug -> still refused (lead tag re-read at the boundary).
-  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }), testRunId: RUN });
-  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: QS, fips: null }), testRunId: RUN });
+  assertZoneQuiet(QT); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-strip`, from: tStrip!.phone, to: org.sender, body: "TONLY text only" });
   await settle();
   await new Promise((r) => setTimeout(r, 1500));

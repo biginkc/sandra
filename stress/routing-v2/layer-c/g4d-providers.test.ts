@@ -3,7 +3,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { BMH, createRunOrg, retirePriorRuns, seedLeads, type RunOrg } from "./lib/seed";
+import { BMH, createRunOrg, retirePriorRuns, seedLeads, type RunOrg, QS, QA, QT } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
@@ -127,9 +127,9 @@ it("outbox crash recovery + >200 owner alerts paged", async () => {
   const settleAll = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
   // Queue a reply that waits (recipient quiet hours: 05:00 in CA), then open the window.
   const queueReply = async (tag: string) => {
-    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }) });
+    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: QS, fips: null }) });
     stubs.jevOverride = () => ({ text_only: 0.95 });
-    assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+    assertZoneQuiet(QT); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
     await deliverWebhook({ externalId: `${org.runId}-crash-${tag}`, from: lead!.phone, to: org.sender, body: `text only please ${tag}` });
     await settleAll();
     await new Promise((r) => setTimeout(r, 1500)); // detached kick: waits on quiet hours, never claims

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { assertStack, Receipt, SCRATCH, finishNoLiveClassifier } from "./lib/env";
-import { BMH, createRunOrg, readdressToInHours, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
+import { BMH, createRunOrg, readdressToInHours, retirePriorRuns, seedLeads, type Lead, type RunOrg, QS, QA, QT } from "./lib/seed";
 import { loadReplay, ProviderStubs } from "./lib/stubs";
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
@@ -31,7 +31,7 @@ const FLAGS = { questions_live: true, replies: true, drips: true, haiku: true, p
 beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
   const clock = await assertClockAligned(pg, FIXTURE_ZONES);
-  R.line(`clock: NO shift; |app - DB| skew = ${Math.round(clock.skewMs)} ms; local`, clock.local, `; Guam ${new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Guam", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date())}`);
+  R.line(`clock: NO shift; |app - DB| skew = ${Math.round(clock.skewMs)} ms; local`, clock.local, `; Guam ${new Intl.DateTimeFormat("en-US", { timeZone: QT, hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date())}`);
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4e-${Date.now()}`, FLAGS);
   if (MODE !== "bonus_resume" && !process.env.G4E_KEEP) await retirePriorRuns(pg);
@@ -62,11 +62,11 @@ it(`G4e quiet resume (${MODE})`, async () => {
   let n = 0;
   const ext = () => `${org.runId}-e-${n++}`;
   const sendsTo = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const hi = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }), address: () => `${n} Resume Rd` }))[0]!;
+  const hi = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: QS, fips: null }), address: () => `${n} Resume Rd` }))[0]!;
   const box = async (p: string) => (await pg.query("select id, org_id, property_id, inbound_message_id, kind, payload, created_at::text, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at", [p])).rows;
   const keyed = async (outboxId: string) => (await pg.query("select count(*)::int n from messages where idempotency_key = $1", [outboxId])).rows[0].n;
   const defer = async (l: Lead, body: string) => {
-    assertZoneQuiet("Pacific/Guam");
+    assertZoneQuiet(QT);
     await assertClockAligned(pg, FIXTURE_ZONES);
     await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body });
     await settle(); await pause(400);
@@ -85,7 +85,7 @@ it(`G4e quiet resume (${MODE})`, async () => {
   }
   if (MODE === "bonus_resume") {
     const ids = JSON.parse(readFileSync(BONUS_FILE, "utf8")) as Array<{ id: string; phone: string; prop: string }>;
-    const hst = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Guam", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date());
+    const hst = new Intl.DateTimeFormat("en-US", { timeZone: QT, hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date());
     await runRoutingV2OutboxReplies(db, { limit: 200 });
     await runRoutingV2OutboxReplies(db, { limit: 200 });
     const rows = (await pg.query("select id, status, cancel_reason from routing_v2_outbox where id = any($1)", [ids.map((x) => x.id)])).rows;

@@ -22,7 +22,7 @@ const N = Number(process.env.F_N ?? 20);
 const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const stubs = new ProviderStubs(loadReplay());
 let org: RunOrg;
-const R = new Receipt("G4g-fence-flags-F1-F2.txt");
+const R = new Receipt("G4g-fence-flags-F1-F2-F3.txt");
 const pending: Promise<unknown>[] = [];
 const FLAGS = { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, alert_on_time_only: true, model_stop_suppression: true, wrong_number_all: true, canary_percent: 100 };
 
@@ -44,7 +44,7 @@ it(`F1 / F2 x${N}`, async () => {
   const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");
   const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
   const { getMockMessageLog } = await import("@/lib/messaging/providers/mock");
-  const { setTestBarrier, clearTestBarriers } = await import("@/lib/testing/test-barriers");
+  const { setTestBarrier, clearTestBarriers, setTestFault } = await import("@/lib/testing/test-barriers");
   const db = createTestClient();
   let n = 0;
   const ext = () => `${org.runId}-f-${n++}`;
@@ -104,6 +104,35 @@ it(`F1 / F2 x${N}`, async () => {
     }
     R.line(`${pass === N ? "PASS" : "FAIL"} F2 flags off after a mechanics hold, then the next text: ${pass}/${N}; sends after the hold ${totalSends}`);
     R.line("   modes", modes);
+  }
+  // F3: mechanics hold, then on text B the one-shot "dispatch:v2_live_read" fault (the app's own test fault).
+  {
+    await setFlags(pg, BMH, FLAGS);
+    let pass = 0; const modes: Record<string, number> = {}; let totalSends = 0;
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      await say(l, "TONLY text only please");
+      await say(l, "TONLY text only please");
+      const a = (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [l.propertyId])).rows[0];
+      const sAtA = sends(l.phone);
+      const nineBefore = stubs.count("jev_nine", (c) => c.key.startsWith("NOTINT actually never mind"));
+      setTestFault("dispatch:v2_live_read", (ctx) => ctx.propertyId === l.propertyId);
+      await say(l, "NOTINT actually never mind");
+      clearTestBarriers();
+      const b = (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [l.propertyId])).rows[0];
+      const p = (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [l.propertyId])).rows[0];
+      const alerts = (await pg.query("select payload->>'reason' reason, status from routing_v2_outbox where inbound_message_id = $1 and kind = 'alert'", [b.id])).rows;
+      const audit = (await pg.query("select m.id, (select count(*)::int from routing_v2_live_decisions d where d.inbound_message_id = m.id) n, (select status || ':' || coalesce(failure_reason, '') from routing_v2_live_decisions d where d.inbound_message_id = m.id limit 1) s from messages m where m.property_id = $1 and m.direction = 'inbound'", [l.propertyId])).rows;
+      const nineRuns = stubs.count("jev_nine", (c) => c.key.startsWith("NOTINT actually never mind")) - nineBefore;
+      const legacyStamp = /^nine_questions:/.test(b.r ?? "");
+      const extra = sends(l.phone) - sAtA; totalSends += extra;
+      const ok = p.nh === true && extra === 0 && !legacyStamp && audit.every((x) => x.n === 1);
+      if (ok) pass++;
+      const k = `${ok ? "PASS" : "FAIL"} A=${a.nh ? String(a.r).split(":").slice(0, 2).join(":") : "-"} B-stamp=${b.o}:${b.r} hold=${p.nh ? p.r : "-"} outboxAlerts=${alerts.map((x) => `${x.reason}:${x.status}`).join(",") || 0} nineQuestionJevCalls=${nineRuns} sends=${extra} audit=${audit.map((x) => x.n).join("")} Baudit=${audit[audit.length - 1]?.s}`;
+      modes[k] = (modes[k] ?? 0) + 1;
+    }
+    R.line(`${pass === N ? "PASS" : "FAIL"} F3 mechanics hold + one-shot dispatch:v2_live_read fault on text B: ${pass}/${N}; sends ${totalSends}`);
+    R.line("   modes", Object.fromEntries(Object.entries(modes).map(([k, v]) => [k.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>"), v])));
   }
   await setFlags(pg, BMH, FLAGS);
 });

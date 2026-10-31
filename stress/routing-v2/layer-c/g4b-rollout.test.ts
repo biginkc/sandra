@@ -5,7 +5,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
+import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg, QS, QA, QT } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
@@ -127,8 +127,8 @@ it("G4b stage tests + flag-off rollback", async () => {
   // Flag-off while queued: a deferred (quiet-hours) reply, a due drip step, then questions_live off.
   await setFlags(pg, BMH, ALL);
   stubs.jevOverride = (r) => r.includes("QTEXT") ? { text_only: 0.95 } : r.includes("QYES") ? { open_to_selling: 0.95 } : null;
-  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: "GU", fips: null }) });
-  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: QS, fips: null }) });
+  assertZoneQuiet(QT); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-q1`, from: qa!.phone, to: org.sender, body: "QTEXT text only" });
   await deliverWebhook({ externalId: `${org.runId}-q2`, from: qb!.phone, to: org.sender, body: "QYES yes interested" });
   await settle();
@@ -151,9 +151,9 @@ it("G4b stage tests + flag-off rollback", async () => {
     { queuedBefore: queued, sendsBefore, sendsAfter, outbox: boxAfter, enrollments: enrAfter, properties: human });
 
   // Flip between decision and send.
-  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }) });
+  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: QS, fips: null }) });
   await setFlags(pg, BMH, ALL);
-  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  assertZoneQuiet(QT); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-race`, from: ra!.phone, to: org.sender, body: "QTEXT only text" });
   await settle();
   await readdressToInHours(pg, ra!); // deliverable now without moving the clock

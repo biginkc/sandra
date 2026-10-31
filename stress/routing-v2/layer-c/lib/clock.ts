@@ -17,7 +17,8 @@ export async function assertClockAligned(pg: Client, zones: string[]): Promise<{
   if (outside.length) throw new Error(`real time is outside 08:00-21:00 in ${outside.map(([z, hm]) => `${z} ${hm}`).join(", ")}; run inside business hours (no clock shift)`);
   return { skewMs, local };
 }
-export const FIXTURE_ZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"];
+/** In-hours fixture zones (IN_HOURS_ZONES env overrides, e.g. when Eastern itself is in quiet hours). */
+export const FIXTURE_ZONES = (process.env.IN_HOURS_ZONES ?? "America/New_York,America/Chicago,America/Denver,America/Los_Angeles").split(",");
 
 /** The quiet fixture zone must really be in quiet hours (outside 08:00-21:00) right now; fail fast otherwise. */
 export function assertZoneQuiet(zone: string): string {

@@ -18,7 +18,7 @@ console.error = (...a: unknown[]) => {
   }
   realErr(...a);
 };
-import { createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
+import { createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg, QS, QA, QT } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
 void offsetToChicago;
@@ -141,18 +141,18 @@ it("G3 blast-day replay", async () => {
   const quietCount = Math.min(150, Math.floor(rows.length / 10));
   const quietLeads = [...new Set(all.slice(0, quietCount).map((e) => e.lead))];
   for (const l of quietLeads) {
-    const phone = `+1671${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
+    const phone = `+1${QA}${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
     await pg.query("update public.contacts set phone_1 = $1 where id = $2", [phone, l.contactId]);
     await pg.query("update public.messages set to_address = $1 where property_id = $2 and direction = 'outbound'", [phone, l.propertyId]);
-    await pg.query("update public.properties set state = 'GU', fips_code = null where id = $1", [l.propertyId]);
-    l.phone = phone; l.state = "GU";
+    await pg.query("update public.properties set state = $2, fips_code = null where id = $1", [l.propertyId, QS]);
+    l.phone = phone; l.state = QS;
   }
-  R.line(`quiet fixture: ${quietLeads.length} leads re-homed to GU/671; Guam local time now ${assertZoneQuiet("Pacific/Guam")}; replaces the old 07:50-Chicago JS clock shift`);
+  R.line(`quiet fixture: ${quietLeads.length} leads re-homed to ${QS}/${QA}; quiet-zone local time now ${assertZoneQuiet(QT)}; replaces the old 07:50-Chicago JS clock shift`);
   phase = "quiet_0750";
   for (const e of all.slice(0, quietCount)) await deliverWebhook({ externalId: e.ext, from: e.lead.phone, to: org.sender, body: e.body });
   await drainInflight(120_000);
   await runRoutingV2OutboxReplies(db, { limit: 200 });
-  const quietSends = getMockMessageLog().filter((m) => m.to.startsWith("+1671")).length;
+  const quietSends = getMockMessageLog().filter((m) => m.to.startsWith(`+1${QA}`)).length;
   R.line(`quiet phase (Guam leads, real clock): ${quietCount} deliveries, sends to Guam leads during phase = ${quietSends}`);
   R.line("main replay + burst run at REAL time (no clock shift)");
 
@@ -311,13 +311,16 @@ it("G3 blast-day replay", async () => {
   const pendRows = pend.map((r) => {
     const w = checkRecipientQuietHours(r.phone);
     const mockSends = getMockMessageLog().filter((m) => m.to === r.phone && m.createdAt.getTime() >= new Date(r.created_at).getTime()).length;
-    return { id: r.id, property: r.property_id, status: r.status, state: r.state, zone: r.state === "GU" ? "Pacific/Guam" : r.state, scheduledFor: new Date(r.created_at).toISOString(),
+    return { id: r.id, property: r.property_id, status: r.status, state: r.state, zone: r.state === QS ? QT : r.state, scheduledFor: new Date(r.created_at).toISOString(),
       deferral: w.ok ? "recipient window OPEN" : `quiet_hours_recipient:${(w as { reason: string }).reason}`, keyedMessages: r.keyed, mockSends, guamQuietSet: quietSet.has(r.property_id) };
   });
   R.line(`pending/claimed reply rows after drain (${pendRows.length}):`); for (const r of pendRows) R.line("   ", r);
-  const notGuam = pendRows.filter((r) => !(r.guamQuietSet && r.state === "GU" && r.deferral.startsWith("quiet_hours_recipient") && r.keyedMessages === 0 && r.mockSends === 0));
+  const otherQuiet = pendRows.filter((r) => !r.guamQuietSet && r.deferral.startsWith("quiet_hours_recipient") && r.keyedMessages === 0 && r.mockSends === 0);
+  R.line(`pending rows deferred because their own (non-fixture) recipient zone is in real quiet hours now: ${otherQuiet.length}`, otherQuiet.reduce((a: Record<string, number>, r) => { a[String(r.state)] = (a[String(r.state)] ?? 0) + 1; return a; }, {}));
+  const notGuam = pendRows.filter((r) => !((r.guamQuietSet && r.state === QS) || otherQuiet.includes(r)) || !(r.deferral.startsWith("quiet_hours_recipient") && r.keyedMessages === 0 && r.mockSends === 0));
   for (const r of notGuam) R.line(`   NOT A GUAM QUIET DEFERRAL -> code bug candidate: outbox ${r.id} property ${r.property}`);
-  const nonDeferredOpen = outbox.filter((o) => o.kind === "reply" && (o.status === "pending" || o.status === "claimed") && !quietSet.has(o.property_id)).length;
+  const otherQuietProps = new Set(otherQuiet.map((r) => r.property));
+  const nonDeferredOpen = outbox.filter((o) => o.kind === "reply" && (o.status === "pending" || o.status === "claimed") && !quietSet.has(o.property_id) && !otherQuietProps.has(o.property_id)).length;
   R.check("queue: drained = every non-deferred reply row is done; deferred = exactly the Guam quiet set (each still quiet, 0 sends, 0 keyed messages)",
     notGuam.length === 0 && nonDeferredOpen === 0, { pending: pendRows.length, guamDeferred: pendRows.length - notGuam.length, notGuam: notGuam.length, nonDeferredOpen });
 
@@ -409,6 +412,12 @@ it("G3 blast-day replay", async () => {
       and p.needs_human_attention and p.last_ai_escalation_at is not null and r.created_at > p.last_ai_escalation_at`);
     const allSends = await q("select count(*)::int n from sequence_step_runs r join sequence_enrollments e on e.id = r.enrollment_id where e.property_id = any($1) and e.routing_v2_engine = 'v2' and r.attempt_outcome in ('accepted','sent','delivered')");
     R.check("410000: v2 drip steps sent to a lead held for a person = 0", bad.length === 0, { held: bad.length, v2DripStepSendsInRun: allSends[0].n, sample: bad.slice(0, 5) });
+  }
+  {
+    // 450000 provider fence (in-run): sends to held leads after the hold vs held/fence refusals.
+    const sentToHeld = (await q("select count(*)::int n from messages m join properties p on p.id = m.property_id where m.property_id = any($1) and m.direction = 'outbound' and m.status in ('sent','delivered') and p.needs_human_attention and p.last_ai_escalation_at is not null and coalesce(m.sent_at, m.created_at) > p.last_ai_escalation_at"))[0].n;
+    const refusals = await q("select o.cancel_reason r, count(*)::int n from routing_v2_outbox o where o.property_id = any($1) and o.kind = 'reply' and o.status = 'cancelled' and (o.cancel_reason like '%held%' or o.cancel_reason like '%fence%') group by 1");
+    R.check("450000: outbound sends to a lead held for a person after the hold = 0", sentToHeld === 0, { sentToHeld, heldOrFenceRefusals: refusals });
   }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
