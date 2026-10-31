@@ -33,6 +33,11 @@ import {
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import { hasOpeningIdentity, openingIdentityError } from "./opening-identity";
 
+/** §5.4: the lead's test tag could not be read (transient); see checkSendAllowed. */
+const TEST_TAG_UNREADABLE = "test_tag_unreadable";
+/** A queued text whose test tag could not be read is retried this much later. */
+const TEST_TAG_RETRY_MS = 5 * 60_000;
+
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
  * composer today; the Phase-2 queue page will call the same helper.
@@ -370,6 +375,9 @@ export type SendSmsOutcome =
        * when `origin: 'automated'`; manual sends don't run this re-check
        * at all, so they're unaffected. The row is marked `status: 'failed'`
        * (never retried) so the queue doesn't loop on an unresolved read.
+       * Also returned, for ANY origin, when the §5.4 test-run tag could not be read
+       * (`error: "test_tag_unreadable"`); a queued row is then put back in the queue a
+       * little later instead of being failed.
        */
       status: "blocked_fresh_state_unavailable";
       /** Absent when the unreadable state was caught before a row existed. */
@@ -1087,9 +1095,11 @@ async function sendSmsToContactInner(
           providerError: allow.why,
         });
       }
+      // An unreadable test tag is a transient read failure, not a refusal: the same contract as
+      // an unreadable consent / suppression state (every caller already retries or holds it).
       return allow.why === "refused_non_owned"
         ? { status: "blocked_before_provider", messageId: pending.id, retired, refusal: TEST_SEND_REFUSED }
-        : { status: "blocked_before_provider", messageId: pending.id, retired };
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: TEST_TAG_UNREADABLE };
     }
     if (input.beforeProviderSubmit) {
       let proceed = false;
@@ -2133,6 +2143,17 @@ async function releaseQueuedMessageInner(
         messageId: msg.id,
       })
       : { allowed: true as const };
+    if (!allow.allowed && allow.why === "taint_lookup_failed") {
+      // A database blip must delay this queued text, never kill it: back to queued, a little
+      // later (nothing reached the provider). The drain retries it on a later tick.
+      const { error: requeueError } = await supabase
+        .from("messages")
+        .update({ status: "queued", scheduled_for: new Date(Date.now() + TEST_TAG_RETRY_MS).toISOString() })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (requeueError) return { status: "db_error", error: requeueError.message };
+      return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: TEST_TAG_UNREADABLE };
+    }
     if (!allow.allowed) {
       const { error: refuseError } = await supabase
         .from("messages")
@@ -2140,9 +2161,7 @@ async function releaseQueuedMessageInner(
         .eq("id", msg.id)
         .eq("status", "pending");
       if (refuseError) return { status: "db_error", error: refuseError.message };
-      return allow.why === "refused_non_owned"
-        ? { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED }
-        : { status: "blocked_before_provider", messageId: msg.id, retired: true };
+      return { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED };
     }
     const result = await provider.sendSms({
       to: msg.to_address,
