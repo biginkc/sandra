@@ -28,6 +28,11 @@ const superseded = async () => (await db.query("select public.routing_v2_phone_a
 beforeEach(async () => {
   await db.query("begin");
   await unwindRoutingV2After(db, "20261030440000");
+  // The 250000 suite commits its own rollback (dropping routing_v2_phone_actions) on a shared stack:
+  // re-create it inside this test's transaction (rolled back afterwards) so the order never matters.
+  if ((await db.query("select to_regclass('public.routing_v2_phone_actions') is null as gone")).rows[0].gone) {
+    await db.query(sql("20261030250000_routing_v2_wrong_number_all.sql"));
+  }
   await db.query(sql(M));
   const org = randomUUID();
   await db.query("set local session_replication_role = replica");
