@@ -1030,6 +1030,20 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await sweepUnstampedV2Inbounds(supabase, Date.now())).toBe(1);
     });
 
+    it("N-3: unknown time zone on a lead with no other hold: the tick puts the drip in the person queue (paused timezone_unconfirmed), 0 sends", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const sentBefore = sentTo(lead.phone).length;
+      await pg.query("update properties set state = '' where id = $1", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "timezone_unconfirmed" }]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toHaveLength(sentBefore);
+    });
+
     it("wrong-number keyword: when the close does NOT apply (a person's disposition blocks it), the v2 drip is not retired", async () => {
       const lead = await setup();
       await text(lead, "not interested", { not_interested: 0.95 });
