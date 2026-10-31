@@ -224,6 +224,24 @@ it("lease-death sweep: an inbound whose webhook died is held for a person once, 
       values ($1, 'sms', 'inbound', 'received', $2, $3, $4, $5, 'are you still buying?', now() - interval '10 minutes') returning id`, [BMH, l.propertyId, l.contactId, l.phone, org.sender]);
     ids.push(rows[0].id);
   }
+  // Read-error injection: the sweep's flag / config reads fail -> no mark, no hold, nothing claimed as held.
+  const { sweepUnstampedV2Inbounds } = await import("@/lib/ai-responder/dispatch");
+  const failing = (): unknown => {
+    const err = { data: null, error: { message: "injected read error", code: "XX000" } };
+    const chain: Record<string, unknown> = {};
+    const h: ProxyHandler<object> = { get: (_t, k) => (k === "then" ? (res: (v: unknown) => void) => res(err) : () => new Proxy(chain, h)) };
+    return new Proxy(chain, h);
+  };
+  const broken = new Proxy(db, { get(t, k) {
+    if (k === "from") return (table: string) => (table === "ai_responder_configs" ? failing() : (t as unknown as { from: (x: string) => unknown }).from(table));
+    const v = (t as unknown as Record<string | symbol, unknown>)[k];
+    return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+  } });
+  const heldOnError = await sweepUnstampedV2Inbounds(broken as typeof db, Date.now());
+  const afterErr = (await pg.query("select p.needs_human_attention nh, m.metadata->'processing'->'routingV2Sweep' mark from messages m join properties p on p.id = m.property_id where m.id = any($1)", [ids])).rows;
+  const auditErr = (await pg.query("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = any($1)", [ids])).rows[0].n;
+  R3.check("read-error injection (flags/config reads fail): sweep holds 0, marks nothing, writes no audit row", heldOnError === 0 && afterErr.every((r) => !r.nh && (r.mark === null || r.mark === undefined)) && auditErr === 0,
+    { heldOnError, afterErr, auditRows: auditErr });
   const before = getMockMessageLog().length;
   const r1 = await runRoutingV2OutboxReplies(db, { limit: 50 });
   const r2 = await runRoutingV2OutboxReplies(db, { limit: 50 });
