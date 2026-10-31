@@ -91,9 +91,22 @@ as $$
 declare
   v_contact_id uuid;
 begin
+  -- The candidate contact row is locked FOR SHARE before the property is
+  -- written (contact, then property: the order contacts_propagate_true_dnc_lock
+  -- uses). A do_not_contact flip committed after the resolver's snapshot but
+  -- before our write is then re-checked on the row's newest version and the
+  -- candidate is skipped; without the lock, properties_true_dnc_lock_guard
+  -- would read the fresh flag and permanently DNC-lock the lead.
   update public.properties p
-  set homeowner_contact_id = r.contact_id
-  from (select public.resolve_homeowner_from_links(p_property_id, p_org_id) as contact_id) r
+  set homeowner_contact_id = c.id
+  from (
+    select c.id
+    from public.contacts c
+    where c.id = public.resolve_homeowner_from_links(p_property_id, p_org_id)
+      and c.org_id = p_org_id
+      and not c.do_not_contact
+    for share
+  ) c
   where p.id = p_property_id
     and p.org_id = p_org_id
     and p.homeowner_contact_id is null
@@ -102,7 +115,6 @@ begin
     and not p.is_training
     and (p.outreach_dispo is null
          or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
-    and r.contact_id is not null
   returning p.homeowner_contact_id into v_contact_id;
   return v_contact_id;
 end;
@@ -369,20 +381,28 @@ grant select on public.homeowner_link_backfill to service_role;
 
 -- Resolve, write and record in ONE statement, so the ledger holds exactly the
 -- rows this update wrote (RETURNING), never a candidate that was skipped.
--- Every eligibility predicate is on the update itself, including the
--- do_not_contact check: writing such a person as homeowner would permanently
--- DNC-lock the lead via properties_true_dnc_lock_guard.
+-- Every eligibility predicate is on the update itself.
+--
+-- The candidate contact row is locked FOR SHARE (contact, then property, the
+-- order contacts_propagate_true_dnc_lock uses) so a do_not_contact flip that
+-- commits after this statement's snapshot is re-checked on the row's newest
+-- version and the candidate is skipped. Without the lock the BEFORE UPDATE
+-- trigger properties_true_dnc_lock_guard would read the fresh flag and
+-- permanently DNC-lock the lead. A concurrent flip that arrives later waits
+-- for this commit, then propagates the lock the normal way.
 with candidate as (
-  select p.id, p.org_id, r.contact_id
+  select p.id, p.org_id, c.id as contact_id
   from public.properties p
   cross join lateral (select public.resolve_homeowner_from_links(p.id, p.org_id) as contact_id) r
+  join public.contacts c on c.id = r.contact_id and c.org_id = p.org_id
   where p.homeowner_contact_id is null
     and p.deleted_at is null
     and not p.is_dnc_locked
     and not p.is_training
     and (p.outreach_dispo is null
          or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
-    and r.contact_id is not null
+    and not c.do_not_contact
+  for share of c
 ),
 written as (
   update public.properties p
@@ -396,10 +416,6 @@ written as (
     and not p.is_training
     and (p.outreach_dispo is null
          or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
-    and not exists (
-      select 1 from public.contacts x
-      where x.id = c.contact_id and x.org_id = c.org_id and x.do_not_contact
-    )
   returning p.id, p.org_id, p.homeowner_contact_id
 )
 insert into public.homeowner_link_backfill (property_id, org_id, contact_id)

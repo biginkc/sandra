@@ -41,7 +41,7 @@ describe("homeowner from property links migration", () => {
     expect(resolver).toContain("stable");
   });
 
-  it("fills only an empty homeowner on a contactable, unlocked, live lead", () => {
+  it("fills only an empty homeowner on a contactable, unlocked, live lead, with the contact row locked first", () => {
     const fill = forward.slice(
       forward.indexOf("create or replace function public.fill_homeowner_from_links"),
       forward.indexOf("revoke all on function public.resolve_homeowner_from_links"),
@@ -51,7 +51,10 @@ describe("homeowner from property links migration", () => {
     expect(fill).toContain("not p.is_dnc_locked");
     expect(fill).toContain("not p.is_training");
     expect(fill).toMatch(EXCLUDED_DISPOS);
-    expect(fill).toContain("r.contact_id is not null");
+    // The candidate contact is locked FOR SHARE and re-checked on its newest
+    // version, so a do_not_contact flip racing the write is skipped instead of
+    // permanently DNC-locking the lead.
+    expect(fill).toMatch(/from public\.contacts c\s+where c\.id = public\.resolve_homeowner_from_links\(p_property_id, p_org_id\)\s+and c\.org_id = p_org_id\s+and not c\.do_not_contact\s+for share\s*\)/);
   });
 
   it("locks the helpers down to the service role", () => {
@@ -98,15 +101,19 @@ describe("homeowner from property links migration", () => {
 
   it("resolves, writes and records the backfill in one statement from RETURNING, with every guard on the write", () => {
     const backfill = forward.slice(forward.indexOf("with candidate as ("));
+    const candidate = backfill.slice(0, backfill.indexOf("written as ("));
     const written = backfill.slice(backfill.indexOf("written as ("), backfill.indexOf("insert into public.homeowner_link_backfill"));
+    // The candidate contact is locked FOR SHARE (contact before property) and
+    // its do_not_contact flag re-checked on the newest row version, so a flip
+    // racing the write is skipped instead of permanently DNC-locking the lead.
+    expect(candidate).toMatch(/join public\.contacts c on c\.id = r\.contact_id and c\.org_id = p\.org_id/);
+    expect(candidate).toMatch(/and not c\.do_not_contact\s+for share of c\s*\)/);
     expect(written).toMatch(/update public\.properties p\s+set homeowner_contact_id = c\.contact_id\s+from candidate c/);
     expect(written).toContain("p.homeowner_contact_id is null");
     expect(written).toContain("p.deleted_at is null");
     expect(written).toContain("not p.is_dnc_locked");
     expect(written).toContain("not p.is_training");
     expect(written).toMatch(EXCLUDED_DISPOS);
-    // Writing a do_not_contact person would permanently DNC-lock the lead.
-    expect(written).toMatch(/not exists \(\s*select 1 from public\.contacts x\s+where x\.id = c\.contact_id and x\.org_id = c\.org_id and x\.do_not_contact\s*\)/);
     expect(written).toMatch(/returning p\.id, p\.org_id, p\.homeowner_contact_id\s*\)\s*$/);
     expect(backfill).toMatch(/insert into public\.homeowner_link_backfill \(property_id, org_id, contact_id\)\s+select id, org_id, homeowner_contact_id from written;/);
     // Nothing between the write and the record: no separate insert, no reconciliation delete.
