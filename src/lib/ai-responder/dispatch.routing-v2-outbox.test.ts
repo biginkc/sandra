@@ -14,7 +14,7 @@ vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   checkRecipientQuietHours: () => (h.closed ? { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" } : { ok: true, state: "MO", localTime: "12:00", florida: false }),
 }));
 
-import { deliverRoutingV2OutboxReply, isV2SupersededReason, ROUTING_V2_REPLY_MAX_AGE_MS, routingV2OutboxHoldReason, runRoutingV2OutboxReplies } from "./dispatch";
+import { deliverRoutingV2OutboxReply, isOwnOlderAutoReplyOnly, isV2MechanicsNoOpReason, isV2SupersededReason, ROUTING_V2_REPLY_MAX_AGE_MS, routingV2OutboxHoldReason, runRoutingV2OutboxReplies } from "./dispatch";
 
 const ROW = {
   id: "0b8f3c1e-6a2b-4c3d-8e4f-5a6b7c8d9e0f", org_id: "org1", property_id: "p1", inbound_message_id: "in1",
@@ -121,6 +121,21 @@ describe("stress A-2 round 2: an overtaken reply is not a failure", () => {
     for (const r of ["superseded_by_broadcast", "provider_failed", "test_send_refused", "flag_off", "send_lease_lost"]) {
       expect(isV2SupersededReason(r)).toBe(false);
     }
+  });
+});
+
+describe("A-2 consolidated fix: mechanics no-ops and rule 3 (C1, C3)", () => {
+  it("C1: only the mechanics reasons are no-ops (a lookup failure still holds)", () => {
+    for (const r of ["template_already_sent", "nine_window_closed", "nine_window_closed_at_fence", "v2_older_auto_reply_sent"]) expect(isV2MechanicsNoOpReason(r)).toBe(true);
+    for (const r of ["template_already_sent:lookup_failed", "reply_text_not_approved", "already_answered", "superseded_before_send", "send_check_failed", "test_send_refused"]) expect(isV2MechanicsNoOpReason(r)).toBe(false);
+  });
+  it("C3: quiet cancel only when OUR OWN older auto reply is the only rule-3 trigger; a person's text keeps the flag", () => {
+    const r3 = (triggers?: Array<"ai_other_inbound" | "human_unrelated">) => ({ action: "skip" as const, flag: true as const, rule: 3 as const, reason: "unrelated_conversational_text" as const, triggers });
+    expect(isOwnOlderAutoReplyOnly(r3(["ai_other_inbound"]))).toBe(true);
+    expect(isOwnOlderAutoReplyOnly(r3(["human_unrelated"]))).toBe(false);
+    expect(isOwnOlderAutoReplyOnly(r3(["ai_other_inbound", "human_unrelated"]))).toBe(false);
+    expect(isOwnOlderAutoReplyOnly(r3(undefined))).toBe(false);
+    expect(isOwnOlderAutoReplyOnly({ action: "skip", flag: true, rule: 1, reason: "newer_inbound_unhandled" })).toBe(false);
   });
 });
 

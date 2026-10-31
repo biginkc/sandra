@@ -3008,6 +3008,8 @@ const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
 /** Not-sent reason: this approved template (or its exact text) already went to this property. */
 export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** A-2 C3: a v2 reply cancelled because our own older auto reply went out after its inbound. */
+export const V2_OLDER_AUTO_REPLY_SENT = "v2_older_auto_reply_sent";
 /** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
 const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
 
@@ -4735,6 +4737,14 @@ async function applyGateEvaluation(
     guard();
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
+  }
+  // A-2 C3: a queued v2 reply whose rule 3 fired only because OUR OWN older auto reply (to
+  // another seller text) already went out is cancelled quietly; the outbox decides the hold
+  // (C1). A person's text (human_unrelated) and every non-v2 caller keep today's flag.
+  if (args.routingV2OutboxId && isOwnOlderAutoReplyOnly(decision)) {
+    guard();
+    await trace(supabase, { kind: "gate", name: V2_OLDER_AUTO_REPLY_SENT, result: "block", detail: { rule: 3 } }, args.runContext);
+    return { outcome: "skipped", reason: V2_OLDER_AUTO_REPLY_SENT };
   }
   // Rule 1 already writes no flag when the newer text has a live handler (its delayed dispatch
   // is scheduled or running); a newer text whose handler ended or never started keeps the flag,
@@ -8953,6 +8963,14 @@ async function deliverRoutingV2OutboxIntent(
       if (repeat !== "no") return { kind: "refused", reason: repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT };
       const window = await evaluateRecipientWindow(supabase, input);
       if (!window.ok) return { kind: "wait", reason: V2_OUTBOX_REASON.quietHours(window.why) };
+      // A-2 C2: the property's own business-hours window too (the same check the send makes),
+      // so a closed window waits before any claim instead of being refused and held. An unknown
+      // state is not a window: it takes the send's own fail-closed path as before.
+      const { data: propState } = await supabase.from("properties").select("state").eq("id", row.property_id).maybeSingle();
+      const propertyWindow = checkQuietHours((propState as { state?: string | null } | null)?.state ?? null);
+      if (!propertyWindow.ok && propertyWindow.reason !== "unknown_state") {
+        return { kind: "wait", reason: V2_OUTBOX_REASON.propertyWindow(propertyWindow.reason) };
+      }
       const { data: config } = await supabase
         .from("ai_responder_configs")
         .select("model, outbound_mode")
@@ -9006,9 +9024,14 @@ async function deliverRoutingV2OutboxIntent(
       // pending / scheduled (or already handled it) is not a failure; that dispatch routes it, and
       // a hold here would make it exit already_terminal. A newer text whose handler ended without
       // handling it, or never started (webhook died after the insert), still holds (review M-1).
-      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextIsLive(supabase, row)))) {
-        await holdFor(reason.replace(/\s+/g, "_"));
-      }
+      if (marked !== "ok") return;
+      if (isV2SupersededReason(reason) && (await newerSellerTextIsLive(supabase, row))) return;
+      // A-2 C1: a mechanics no-op (a repeat template we never resend, a window that closed, our
+      // own older auto reply already went out) on a road whose v2 drip for THIS inbound is
+      // running is not a person case: the drip is the outcome. Reply-only roads have no such
+      // drip and still hold. The row stays cancelled with its reason (the record).
+      if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return;
+      await holdFor(reason.replace(/\s+/g, "_"));
     },
   });
 }
@@ -9016,6 +9039,31 @@ async function deliverRoutingV2OutboxIntent(
 /** A queued v2 reply cancelled because something newer overtook it (the send gate's reasons). */
 export function isV2SupersededReason(reason: string): boolean {
   return /^(superseded_before_send|superseded_by_newer_inbound)$/.test(reason);
+}
+
+/** A-2 C3: rule 3 fired ONLY because of our own older auto reply (no person's text involved). */
+export function isOwnOlderAutoReplyOnly(decision: SendGateDecision): boolean {
+  if (decision.action !== "skip" || decision.rule !== 3) return false;
+  const triggers = decision.triggers ?? [];
+  return triggers.length > 0 && triggers.every((t) => t === "ai_other_inbound");
+}
+
+/** Outbox send outcomes that are mechanics, not a person case, when the road's drip is running. */
+export function isV2MechanicsNoOpReason(reason: string): boolean {
+  return reason === TEMPLATE_ALREADY_SENT
+    || reason === NINE_WINDOW_CLOSED
+    || reason === NINE_WINDOW_CLOSED_AT_FENCE
+    || reason === V2_OLDER_AUTO_REPLY_SENT;
+}
+
+/** Is the v2 drip this reply's inbound enrolled still active? A lookup error = no (hold). */
+async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+  const { data, error } = await (supabase as unknown as {
+    from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } } };
+  }).from("sequence_enrollments").select("id")
+    .eq("property_id", row.property_id).eq("routing_v2_inbound_id", row.inbound_message_id).eq("status", "active")
+    .limit(1);
+  return !error && (data ?? []).length > 0;
 }
 
 /**
