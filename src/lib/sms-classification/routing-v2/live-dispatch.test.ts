@@ -91,6 +91,11 @@ describe("A-6: Jev / Haiku spend ledger rows", () => {
       expect.objectContaining({ p_provider: "jev", p_outcome: "decided", p_input_tokens: 1200, p_output_tokens: 300 }),
     ]);
   });
+  it("an incomplete Jev answer keeps its token counts", async () => {
+    const { calls, db } = rpcDb();
+    await recordV2ModelSpend(db, ctx, { kind: "failed", reason: "jev_incomplete", jevAttempts: ["ok"], jevUsage: { input_tokens: 700, output_tokens: 40 } }, () => {});
+    expect(calls).toEqual([expect.objectContaining({ p_provider: "jev", p_outcome: "jev_incomplete", p_input_tokens: 700, p_output_tokens: 40 })]);
+  });
   it("Jev never called (no attempt made): no Jev row; every attempt of a failed call is counted", async () => {
     const none = rpcDb();
     await recordV2ModelSpend(none.db, ctx, { kind: "failed", reason: "jev_failed", jevAttempts: [] }, () => {});

@@ -21,6 +21,8 @@ export type V2Classification =
       reason: "jev_failed" | "jev_incomplete";
       /** Every Jev HTTP attempt actually made (spend ledger); undefined = not reported. */
       jevAttempts?: readonly JevAttemptOutcome[];
+      /** Jev's token usage when it answered but incompletely (spend ledger). */
+      jevUsage?: { input_tokens?: number; output_tokens?: number } | null;
     }
   | {
       kind: "decided";
@@ -102,7 +104,7 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   }
   const jevAttempts = raw.attempts ? { jevAttempts: raw.attempts } : {};
   const complete = assertCompleteV2(raw.answers ?? {});
-  if (!complete.ok) return { kind: "failed", reason: "jev_incomplete", ...jevAttempts };
+  if (!complete.ok) return { kind: "failed", reason: "jev_incomplete", ...jevAttempts, jevUsage: raw.usage ?? null };
   const decision = routeV2({ reply: input.reply, ...complete });
   let haiku: HaikuCallResult | HaikuAnswer | HaikuFailure | null = null;
   let final: FinalDecision | null = null;

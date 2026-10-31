@@ -41,6 +41,7 @@ vi.mock("@/lib/sms-classification/routing-v2/live-transition", () => ({ applySto
 vi.mock("@/lib/sms-classification/context", () => ({ buildTwoWayThreadState: vi.fn(async () => []) }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
+import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { runRoutingV2LiveStep } from "./dispatch";
 
 const PROPERTY = "11111111-1111-4111-8111-111111111111";
@@ -124,6 +125,15 @@ describe("routing v2 live dispatch hook", () => {
     expect(h.classify).toHaveBeenCalledOnce();
     expect(h.record).toHaveBeenCalledWith(client, expect.objectContaining({ expectedRevision: 7, inboundMessageId: "in1" }), expect.objectContaining({ kind: "decided" }));
     expect(h.transition).toHaveBeenCalledExactlyOnceWith(client, { orgId: "org1", propertyId: PROPERTY, contactId: "c1", inboundMessageId: "in1" });
+  });
+
+  it("A-6 nit: a thread build that throws before Jev records no Jev ledger row (still a failed decision)", async () => {
+    vi.mocked(buildTwoWayThreadState).mockRejectedValueOnce(new Error("thread boom"));
+    const { client, rpcCalls } = fakeSupabase();
+    await runRoutingV2LiveStep(client, args());
+    expect(h.classify).not.toHaveBeenCalled();
+    expect(rpcCalls.filter((c) => c.name === "fn_record_model_call")).toEqual([]);
+    expect(h.record).toHaveBeenCalledWith(client, expect.anything(), expect.objectContaining({ kind: "failed", reason: "jev_failed", jevAttempts: [] }));
   });
 
   it("a duplicate run acts only on the stored original", async () => {
