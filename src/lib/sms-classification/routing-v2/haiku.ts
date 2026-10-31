@@ -75,12 +75,48 @@ export type HaikuCallResult = (HaikuAnswer | HaikuFailure) & {
   costUsd: number | null;
 };
 
-/** Strict parse: the whole text must be one JSON object {road: string, confidence: number 0–1}. */
+/**
+ * The FIRST complete JSON object at the start of the text (after an optional ```json fence);
+ * anything after it (Haiku's trailing prose, a "correction", a second object, a cut-off
+ * max_tokens tail) is ignored. No complete leading object = null. Braces inside strings and
+ * escaped quotes are respected.
+ */
+export function firstJsonObject(text: string): string | null {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, "");
+  if (!t.startsWith("{")) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return t.slice(0, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse Haiku's answer: the first complete JSON object {road: string, confidence: number 0–1}
+ * (stress review A-3: Haiku sometimes appends prose after a valid object and is cut off at
+ * max_tokens). The option is then checked against the allowed list by applyHaikuPolicy,
+ * exactly as before; a low confidence stays a valid "unsure".
+ */
 export function parseHaikuText(text: string): HaikuAnswer | HaikuFailure {
-  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const candidate = firstJsonObject(text);
+  if (candidate === null) return { ok: false, reason: "haiku_invalid:parser" };
   let v: unknown;
   try {
-    v = JSON.parse(t);
+    v = JSON.parse(candidate);
   } catch {
     return { ok: false, reason: "haiku_invalid:parser" };
   }

@@ -5261,6 +5261,28 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       deadLettered(state, "send_blocked:abort_unconfirmed", "inbound-ab");
     });
 
+    it("§5.4: a test-send refusal is terminal: skipped test_send_refused, one send attempt, no retry, no dead letter or flag", async () => {
+      for (const retired of [true, false]) {
+        const state = setup();
+        seedInboundAt(state, `inbound-tsr-${retired}`, at("18:00:00"));
+        vi.mocked(sendSmsToContact).mockReset();
+        vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_before_provider", messageId: "m1", retired, refusal: "test_send_refused" } as never);
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp(`inbound-tsr-${retired}`), anthropic);
+        expect(result).toEqual({ outcome: "skipped", reason: "test_send_refused" });
+        expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+        expect(state.deadLetters ?? []).toEqual([]);
+        expect(state.property.last_ai_escalation_reason ?? null).toBeNull();
+      }
+    });
+
+    it("an unreadable test tag (plain blocked_before_provider) still takes today's retry road", async () => {
+      const state = setup();
+      seedInboundAt(state, "inbound-tlf", at("18:00:00"));
+      vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_before_provider", messageId: "m1", retired: true } as never);
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-tlf"), anthropic);
+      expect(result).toMatchObject({ outcome: "retry", reason: "send_lease_lost" });
+    });
+
     it("an earlier attempt's FAILED stamped row is flagged, never 'already replied'", async () => {
       const state = setup();
       seedInboundAt(state, "inbound-pf", at("18:00:00"));

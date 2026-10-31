@@ -1,4 +1,4 @@
-import { askJev, type JevAskRequest, type JevAskResult } from "../providers/jev-gateway";
+import { askJev, type JevAskRequest, type JevAskResult, type JevAttemptOutcome } from "../providers/jev-gateway";
 import { actionForHaikuOutcome, actionForV2Decision, type V2Action } from "./actions";
 import type { ValueLookupResult } from "./dealmachine-value";
 import { isV2Eligible, v2SliceAllowed, type RoutingV2Flags } from "./flags";
@@ -16,7 +16,12 @@ import { assertCompleteV2, routeV2, type V2Decision } from "./route";
  */
 export type V2Classification =
   | { kind: "off" }
-  | { kind: "failed"; reason: "jev_failed" | "jev_incomplete" }
+  | {
+      kind: "failed";
+      reason: "jev_failed" | "jev_incomplete";
+      /** Every Jev HTTP attempt actually made (spend ledger); undefined = not reported. */
+      jevAttempts?: readonly JevAttemptOutcome[];
+    }
   | {
       kind: "decided";
       decision: V2Decision;
@@ -28,6 +33,10 @@ export type V2Classification =
       model: string | null;
       latencyMs: number;
       priceOutcome: string | null;
+      /** Jev's reported token usage for the spend ledger (A-6); null when not reported. */
+      jevUsage?: { input_tokens?: number; output_tokens?: number } | null;
+      /** Every Jev HTTP attempt actually made (spend ledger); undefined = not reported. */
+      jevAttempts?: readonly JevAttemptOutcome[];
     };
 
 export type V2ClassificationInput = {
@@ -43,8 +52,16 @@ export type V2ClassificationInput = {
    */
   numberSourceQuestion?: boolean;
 };
+/** A Jev answer (or failure) that reports the HTTP attempts it took. */
+export type JevAskResultWithAttempts = JevAskResult & { attempts?: readonly JevAttemptOutcome[] };
+export class JevAttemptsError extends Error {
+  constructor(readonly cause: unknown, readonly attempts: readonly JevAttemptOutcome[]) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "JevAttemptsError";
+  }
+}
 export type V2ClassificationDeps = {
-  jev: (request: JevAskRequest) => Promise<JevAskResult>;
+  jev: (request: JevAskRequest) => Promise<JevAskResultWithAttempts>;
   haiku: (thread: string[]) => Promise<HaikuCallResult | HaikuAnswer | HaikuFailure>;
   lookupValue: () => Promise<ValueLookupResult>;
 };
@@ -55,7 +72,15 @@ export function v2ProviderDeps(deps: {
   lookupValue: V2ClassificationDeps["lookupValue"];
 }): V2ClassificationDeps {
   return {
-    jev: (request) => askJev(request, deps.jev),
+    jev: async (request) => {
+      const attempts: JevAttemptOutcome[] = [];
+      try {
+        const res = await askJev(request, { ...deps.jev, onAttempt: (o) => { attempts.push(o); deps.jev.onAttempt?.(o); } });
+        return { ...res, attempts };
+      } catch (e) {
+        throw new JevAttemptsError(e, attempts);
+      }
+    },
     haiku: (thread) => askHaiku(thread, deps.haiku),
     lookupValue: deps.lookupValue,
   };
@@ -66,17 +91,18 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   if (!flags.questions_live || !isV2Eligible(flags, propertyId)) return { kind: "off" };
   const lastOutbound = [...input.thread].reverse().find((m) => m.direction === "outbound");
   const repairs = v2SliceAllowed(flags, "price_check", propertyId) && isAfterRepairsReply(lastOutbound?.body);
-  let raw: JevAskResult;
+  let raw: JevAskResultWithAttempts;
   try {
     raw = await deps.jev(buildV2JevRequest({
       our_last_text_to_homeowner: lastOutbound?.body ?? null,
       homeowner_reply: input.reply,
     }, { repairsFollowUps: repairs, numberSource: input.numberSourceQuestion === true }));
-  } catch {
-    return { kind: "failed", reason: "jev_failed" };
+  } catch (e) {
+    return { kind: "failed", reason: "jev_failed", ...(e instanceof JevAttemptsError ? { jevAttempts: e.attempts } : {}) };
   }
+  const jevAttempts = raw.attempts ? { jevAttempts: raw.attempts } : {};
   const complete = assertCompleteV2(raw.answers ?? {});
-  if (!complete.ok) return { kind: "failed", reason: "jev_incomplete" };
+  if (!complete.ok) return { kind: "failed", reason: "jev_incomplete", ...jevAttempts };
   const decision = routeV2({ reply: input.reply, ...complete });
   let haiku: HaikuCallResult | HaikuAnswer | HaikuFailure | null = null;
   let final: FinalDecision | null = null;
@@ -136,6 +162,7 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   return {
     kind: "decided", decision, final, action,
     probabilities: complete.probabilities, propertyType: complete.propertyType,
-    haiku, model: raw.model ?? null, latencyMs: raw.latencyMs, priceOutcome,
+    haiku, model: raw.model ?? null, latencyMs: raw.latencyMs, priceOutcome, jevUsage: raw.usage ?? null,
+    ...jevAttempts,
   };
 }

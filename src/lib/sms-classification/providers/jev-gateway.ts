@@ -141,7 +141,16 @@ export type JevAskRequest = {
   questions: Record<string, JevChoiceQuestion | JevNoulQuestion>;
 };
 export type JevAskResult = JevRawResponse & { latencyMs: number };
-export type JevAskDeps = { fetch: FetchLike; apiKey: string; maxRetries?: number; timeoutMs?: number };
+/** One HTTP attempt's result: "ok" or why it failed (for per-attempt spend accounting). */
+export type JevAttemptOutcome = "ok" | JevProviderError["kind"] | "transport";
+export type JevAskDeps = {
+  fetch: FetchLike;
+  apiKey: string;
+  maxRetries?: number;
+  timeoutMs?: number;
+  /** Called once per HTTP attempt actually made (observation only; never changes the call). */
+  onAttempt?: (outcome: JevAttemptOutcome) => void;
+};
 
 /**
  * The one HTTP client for TypeSafe System One (shared by SMS classification and call facts).
@@ -159,6 +168,7 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let attemptOutcome: JevAttemptOutcome = "transport";
     try {
       const res = await deps.fetch(JEV_ENDPOINT, {
         method: "POST",
@@ -174,6 +184,7 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         const err = classifyHttpFailure(res.status, text);
+        attemptOutcome = err.kind;
         if (err.kind === "auth" || err.kind === "billing") throw err;
         lastErr = err;
         if (attempt < maxRetries) {
@@ -183,12 +194,15 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
         throw err;
       }
 
+      attemptOutcome = "invalid_response";
       const json = (await res.json()) as JevRawResponse;
+      attemptOutcome = "ok";
       return { ...json, latencyMs: Date.now() - startedAt };
     } catch (e) {
       clearTimeout(timer);
       if (e instanceof JevProviderError) throw e;
       if (e instanceof Error && e.name === "AbortError") {
+        attemptOutcome = "timeout";
         lastErr = new JevProviderError("Jev request timed out", "timeout");
         if (attempt < maxRetries) {
           await sleep(backoffMs(attempt));
@@ -197,6 +211,8 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
         throw lastErr;
       }
       throw e;
+    } finally {
+      try { deps.onAttempt?.(attemptOutcome); } catch { /* observation only */ }
     }
   }
   throw lastErr ?? new JevProviderError("Jev request failed", "server_error");

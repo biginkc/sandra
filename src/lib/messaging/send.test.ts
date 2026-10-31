@@ -13,6 +13,14 @@ vi.mock("@/lib/supabase/admin", () => ({
 // Mock every side-dependency sendSmsToContact touches *before* the fresh
 // automated-suppression re-check, so the test can drive the pipeline up to
 // that exact boundary with a minimal, deterministic fake Supabase client.
+const allowlist = vi.hoisted(() => ({ check: vi.fn() }));
+vi.mock("./send-allowlist", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./send-allowlist")>();
+  // The guard's own rules are covered in send-allowlist.test.ts (this file's fake database has
+  // no test tag data). Allowed by default; a test overrides one call to simulate a refusal.
+  allowlist.check.mockImplementation(async () => ({ allowed: true }));
+  return { ...real, checkSendAllowed: allowlist.check };
+});
 vi.mock("./registry", () => ({
   getMessagingProvider: vi.fn(),
 }));
@@ -477,6 +485,25 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
       ...aiInput,
       beforeProviderSubmit: vi.fn().mockResolvedValue(false),
     });
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
+  });
+
+  it("§5.4: a confirmed non-owned refusal is terminal (refusal flag), never reaches the hook or the provider", async () => {
+    const { provider, supabase, updates } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "refused_non_owned" });
+    const hook = vi.fn().mockResolvedValue(true);
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
+    expect(hook).not.toHaveBeenCalled();
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true, refusal: "test_send_refused" });
+    expect(updates[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("§5.4: an unreadable test tag refuses the send but is NOT terminal (no refusal flag; retryable)", async () => {
+    const { provider, supabase } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: vi.fn().mockResolvedValue(true) });
+    expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
   });
 

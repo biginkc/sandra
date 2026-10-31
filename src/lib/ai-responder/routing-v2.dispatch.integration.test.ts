@@ -243,4 +243,156 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(sentTo(lead.phone)).toHaveLength(0);
     }
   });
+
+  describe("§5.4 final send boundary (test-run taint)", () => {
+    const tagLead = (propertyId: string) => pg.query("update properties set test_run_id = 'stress-run-1' where id = $1", [propertyId]);
+    afterAll(() => { delete process.env.TEST_DEST_ALLOWLIST; });
+
+    it("a test-tagged lead to a non-owned number: refused at the boundary, zero provider calls, recorded", async () => {
+      const lead = await seedLead();
+      await tagLead(lead.propertyId);
+      process.env.TEST_DEST_ALLOWLIST = "+18165550142";
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      // Terminal: a second (and third) consumer pass never retries it.
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      const { rows: [box] } = await pg.query("select test_run_id, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.test_run_id).toBe("stress-run-1"); // taint reached the outbox row
+      expect(box).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:test_send_refused" });
+      const { rows: refusals } = await pg.query("select reason, destination_last4 from test_send_refusals where property_id = $1", [lead.propertyId]);
+      expect(refusals).toEqual([{ reason: "refused_non_owned", destination_last4: lead.phone.slice(-4) }]);
+      // One refused message row (never re-created by a retry), never sent.
+      expect(await count("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and body = $2 and status = 'failed'", [lead.propertyId, V2_REPLY_TEXTS.text_only])).toBe(1);
+      expect(await count("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and body = $2", [lead.propertyId, V2_REPLY_TEXTS.text_only])).toBe(1);
+    });
+
+    it("the outbox row's own tag lost by a bug: the lead's tag still refuses it", async () => {
+      const lead = await seedLead();
+      process.env.TEST_DEST_ALLOWLIST = "+18165550142";
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      // Hold delivery back until the tag is in place: no detached delivery before it.
+      await tagLead(lead.propertyId);
+      await pg.query("alter table routing_v2_outbox disable trigger trg_routing_v2_outbox_inherit_test_run");
+      try {
+        await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      } finally {
+        await pg.query("alter table routing_v2_outbox enable trigger trg_routing_v2_outbox_inherit_test_run");
+      }
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      const { rows: [box] } = await pg.query("select test_run_id from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.test_run_id).toBeNull();
+      expect(sentTo(lead.phone)).toHaveLength(0);
+    });
+
+    it("a test-tagged lead on an allowlisted (owned) number in any format: sent once", async () => {
+      const lead = await seedLead();
+      await tagLead(lead.propertyId);
+      const d = lead.phone.replace(/\D/g, "").slice(-10);
+      process.env.TEST_DEST_ALLOWLIST = `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      expect(sentTo(lead.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
+      expect(await count("select count(*)::int n from test_send_refusals where property_id = $1", [lead.propertyId])).toBe(0);
+    });
+  });
+
+  describe("stress A-2: every reply stops the current drip and the newest reply wins", () => {
+    /** v2 drips for this org (seeded the way a migration does; v2 drips are migration-edited only). */
+    async function seedV2Drips() {
+      await pg.query("begin");
+      await pg.query("select set_config('routing_v2.allow_drip_edit', 'on', true)");
+      for (const [key, name] of [["book_appointment", "Book appointment (routing v2)"], ["confirmed_owner", "Confirmed owner (routing v2)"]]) {
+        const { rows } = await pg.query("insert into sequences(org_id,name,active,routing_v2_key,routing_v2_version) values($1,$2,false,$3,1) returning id", [orgId, name, key]);
+        await pg.query("insert into sequence_steps(sequence_id,step_index,delay_after_previous_minutes,action_type,template_body) values($1,0,1440,'send_sms',$2),($1,1,1440,'send_sms',$3)", [rows[0].id, `${key} one`, `${key} two`]);
+      }
+      await pg.query("commit");
+    }
+    const enrollments = async (propertyId: string) => (await pg.query(
+      "select s.routing_v2_key k, e.status, e.ended_reason r from sequence_enrollments e join sequences s on s.id = e.sequence_id where e.property_id = $1 order by e.enrolled_at, e.id", [propertyId])).rows;
+    async function setup() {
+      const lead = await seedLead();
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      await seedV2Drips();
+      return lead;
+    }
+    async function routeYes(lead: Awaited<ReturnType<typeof seedLead>>) {
+      jevProbabilities = { just_ok: 0.95 };
+      const yes = await inbound(lead, "Okay");
+      await pg.query("update messages set created_at = now() - interval '30 minutes' where id = $1", [yes.inboundMessageId]);
+      await dispatchAiResponse(supabase, yes, { anthropic: NO_ANTHROPIC });
+      await settle();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "book_appointment", status: "active", r: null }]);
+    }
+
+    it("a reply onto an ACTIVE v2 drip retires it (rerouted) and starts the new road", async () => {
+      const lead = await setup();
+      await routeYes(lead);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      const out = await dispatchAiResponse(supabase, await inbound(lead, "Yes I own it"), { anthropic: NO_ANTHROPIC });
+      expect(out).toEqual({ outcome: "auto_closed", reason: "routing_v2:confirmed_owner_drip" });
+      expect(await enrollments(lead.propertyId)).toEqual([
+        { k: "book_appointment", status: "completed", r: "rerouted" }, { k: "confirmed_owner", status: "active", r: null },
+      ]);
+    });
+
+    it("a reply onto a PAUSED drip (the webhook paused it) is retired and rerouted, never left paused", async () => {
+      const lead = await setup();
+      await routeYes(lead);
+      await pg.query("update sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where property_id = $1 and status = 'active'", [lead.propertyId]);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      await dispatchAiResponse(supabase, await inbound(lead, "Yes I own it"), { anthropic: NO_ANTHROPIC });
+      const rows = await enrollments(lead.propertyId);
+      expect(rows.filter((e) => e.status === "paused")).toEqual([]);
+      expect(rows).toContainEqual({ k: "confirmed_owner", status: "active", r: null });
+    });
+
+    it("a reply racing the tick (a drip text went out after the reply landed): still routed, drip retired", async () => {
+      const lead = await setup();
+      await routeYes(lead);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      const reply = await inbound(lead, "Yes I own it");
+      await pg.query("update messages set created_at = now() - interval '2 minutes' where id = $1", [reply.inboundMessageId]);
+      // The tick sent the drip's next text a moment after the reply landed.
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "book_appointment two", metadata: { generated_by: "sequence_tick" }, created_at: new Date(Date.now() - 60_000).toISOString(), sent_at: new Date(Date.now() - 60_000).toISOString() });
+      const out = await dispatchAiResponse(supabase, reply, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+      const rows = await enrollments(lead.propertyId);
+      expect({ out, rows }).toEqual({ out: { outcome: "auto_closed", reason: "routing_v2:confirmed_owner_drip" }, rows: [{ k: "book_appointment", status: "completed", r: "rerouted" }, { k: "confirmed_owner", status: "active", r: null }] });
+    });
+
+    it("two replies (the older dispatched first, past the grace): the newest wins, the older only queues alerts, nothing parked or paused", async () => {
+      const lead = await setup();
+      await routeYes(lead);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      const older = await inbound(lead, "Yes I own it");
+      const newer = await inbound(lead, "Yes I own it, still here");
+      // As in the blast-day replay: both texts landed minutes ago (past the newer-inbound grace),
+      // and the delayed dispatch of the OLDER one runs first, then the newer one.
+      await pg.query("update messages set created_at = now() - interval '11 minutes' where id = $1", [older.inboundMessageId]);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [newer.inboundMessageId]);
+      await dispatchAiResponse(supabase, older, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+      await dispatchAiResponse(supabase, newer, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+      await settle();
+      const rows = await enrollments(lead.propertyId);
+      expect(rows.filter((e) => e.status === "paused")).toEqual([]);
+      expect(rows.filter((e) => e.status === "active")).toEqual([{ k: "confirmed_owner", status: "active", r: null }]);
+      const { rows: tr } = await pg.query("select inbound_message_id, outcome from routing_v2_reply_transitions where property_id = $1 and inbound_message_id = any($2)", [lead.propertyId, [older.inboundMessageId, newer.inboundMessageId]]);
+      expect(tr.find((t) => t.inbound_message_id === newer.inboundMessageId)?.outcome).toBe("applied");
+      expect(tr.find((t) => t.inbound_message_id === older.inboundMessageId)?.outcome).toBe("superseded");
+      const { rows: [p] } = await pg.query("select needs_human_attention, last_ai_escalation_reason from properties where id = $1", [lead.propertyId]);
+      expect(p.last_ai_escalation_reason ?? "").not.toMatch(/^reply_skipped/);
+    });
+  });
 });

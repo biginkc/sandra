@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 import { ROUTING_V2_DRIPS } from "@/lib/sequences/routing-v2/drip-spec";
 import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
@@ -122,6 +123,7 @@ describe("routing v2 versioned drips (rolled back per test)", () => {
   let before: unknown;
   beforeEach(async () => {
     await db.query("begin");
+    await unwindRoutingV2After(db, "20261030181000"); // A-7: pass on a fully migrated stack too
     await db.query("set local session_replication_role = replica");
     ctx = await seedOrg(db);
     await db.query("set local session_replication_role = origin");
@@ -353,6 +355,7 @@ describe("routing v2 PR-C review fixes (rolled back per test, real triggers)", (
   let ctx: Ctx;
   beforeEach(async () => {
     await db.query("begin");
+    await unwindRoutingV2After(db, "20261030181000"); // A-7: pass on a fully migrated stack too
     await db.query("set local session_replication_role = replica");
     ctx = await seedOrg(db);
     await db.query("set local session_replication_role = origin");

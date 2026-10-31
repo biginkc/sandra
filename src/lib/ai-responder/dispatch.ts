@@ -19,6 +19,7 @@ import {
   checkRecipientQuietHours,
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { isSuppressed, shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
@@ -136,6 +137,8 @@ import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-d
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
+  recordV2ModelSpend,
+  V2_LIVE_JEV_POLICY,
   V2_OUTBOX_REASON,
   liveHoldReason,
   liveStepFor,
@@ -409,8 +412,26 @@ type AiDispatchPropertyGateRow = Pick<
 >;
 
 export type AiDispatchPreGateResult =
-  | { ok: true; property: AiDispatchPropertyGateRow }
+  | { ok: true; property: AiDispatchPropertyGateRow; routingV2Live?: boolean }
   | { ok: false; outcome: AiDispatchOutcome };
+
+/**
+ * Stress review A-2: is this inbound going to the routing v2 live engine? (Jev automatic +
+ * nine-question engine + routing_v2_flags.questions_live + canary-eligible property.) Any
+ * read problem = false (today's path).
+ */
+async function routingV2LiveFor(supabase: SupabaseClient<Database>, orgId: string, propertyId: string): Promise<boolean> {
+  try {
+    const flags = await readRoutingV2Flags(supabase, orgId);
+    if (!flags.questions_live || !isV2Eligible(flags, propertyId)) return false;
+    const { data: config } = await supabase.from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode").eq("org_id", orgId).eq("active", true).maybeSingle();
+    if (config?.classifier_provider !== "jev" || config.classifier_mode !== "automatic") return false;
+    return (await readClassifierEngine(supabase, orgId)) === "nine_questions";
+  } catch {
+    return false;
+  }
+}
 
 export async function applyKeywordEscalation(
   supabase: SupabaseClient<Database>,
@@ -562,6 +583,12 @@ export async function checkAiResponderDispatchPreGates(
     };
   }
 
+  // Stress review A-2 (latest reply wins): with routing v2 live, a newer seller text (rule 1),
+  // an auto reply to another inbound (rule 3) or a drip / campaign text (rule 5) sent since this
+  // inbound never parks or drops it here. Every reply is
+  // classified and recorded; the v2 transition keeps the newest reply's route (an older one
+  // queues only its owner alerts) and the outbox fence refuses a stale auto reply.
+  const routingV2Live = input.inboundMessageId ? await routingV2LiveFor(supabase, property.org_id, input.propertyId) : false;
   if (input.inboundMessageId) {
     // Q8 decision table at the early gate: rule 0 (suppression / disabled /
     // terminal) and rule 8 first, then rules 1-6, first match wins; the same
@@ -579,7 +606,8 @@ export async function checkAiResponderDispatchPreGates(
       // disabled property) keep their existing downstream handling (the skip
       // classifier still lets Jev classify): silent, nothing flagged here,
       // and rules 1-6 must not run for a dead lead.
-      const passThrough = decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal";
+      const passThrough = (decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal")
+        || (routingV2Live && decision.action === "skip" && (decision.rule === 1 || decision.rule === 3 || decision.rule === 5));
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
         await blocked(plan.trace);
@@ -606,7 +634,7 @@ export async function checkAiResponderDispatchPreGates(
   }
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
-  return { ok: true, property };
+  return routingV2Live ? { ok: true, property, routingV2Live } : { ok: true, property };
 }
 
 /**
@@ -891,7 +919,8 @@ async function dispatchAiResponseCore(
     return silentSkip(decision.reason, 0);
   }
 
-  if (input.conversationId) {
+  // Stress review A-2: the 45 s reply throttle never parks a v2 reply (see the pre-gates).
+  if (input.conversationId && !preGates.routingV2Live) {
     const recentReply = await findRecentAiReplyInThread(
       supabase,
       input.conversationId,
@@ -4564,6 +4593,8 @@ type ResponderSendArgs = {
   routingV2OutboxId?: string;
   /** Routing v2 phone action (PR-G): its durable send id, used as the provider idempotency key. */
   providerIdempotencyKey?: string;
+  /** §5.4: the work item's test tag (routing v2 outbox row), checked at the provider boundary. */
+  testRunId?: string | null;
   /** Routing v2 phone action (PR-G): final flags/canary/suppression check right before the provider. */
   routingV2SendAllowed?: () => Promise<boolean>;
   input: AiDispatchInput;
@@ -6509,6 +6540,7 @@ async function deliverResponderMessage(
     ...(args.routingV2OutboxId || args.providerIdempotencyKey
       ? { idempotencyKey: args.providerIdempotencyKey ?? args.routingV2OutboxId }
       : {}),
+    ...(args.testRunId ? { testRunId: args.testRunId } : {}),
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     // Fired inside the send, right after the provider accepts and before its
     // receipt persistence / reconciliation.
@@ -6529,6 +6561,13 @@ async function deliverResponderMessage(
   });
 
   if (sendResult.status === "blocked_before_provider") {
+    if (sendResult.refusal === TEST_SEND_REFUSED) {
+      // §5.4: a test-tagged reply to a number the business does not own. Terminal on every
+      // path: never retried (one message row, one refusal row), never dead-lettered or flagged.
+      guard();
+      await trace(supabase, { kind: "gate", name: TEST_SEND_REFUSED, result: "block" }, args.runContext);
+      return { outcome: "skipped", reason: TEST_SEND_REFUSED };
+    }
     if (sendResult.retired === false) {
       // The refused row could not be retired: it still carries the stamp that
       // owns this inbound, so a retry would collide with it. Never retry over
@@ -8491,7 +8530,7 @@ export async function runRoutingV2LiveStep(
     const result = await classifyV2(
       { flags, propertyId: input.propertyId, reply: input.inboundBody, thread, numberSourceQuestion: true },
       v2ProviderDeps({
-        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", maxRetries: 0, timeoutMs: 8000 },
+        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", ...V2_LIVE_JEV_POLICY },
         haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
         lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
       }),
@@ -8502,6 +8541,8 @@ export async function runRoutingV2LiveStep(
     classification = V2_JEV_FAILED;
   }
 
+  await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
+    (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
   const recorded = await recordLiveV2Decision(
     supabase,
     { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision },
@@ -8818,6 +8859,8 @@ export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
 type RoutingV2OutboxRow = {
   id: string; org_id: string; property_id: string; inbound_message_id: string;
   kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
+  /** §5.4 taint inherited from the lead at insert (20261030370000). */
+  test_run_id?: string | null;
 };
 type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
 
@@ -8904,6 +8947,7 @@ async function deliverRoutingV2OutboxIntent(
         async send() {
           const sent = await sendResponderMessage(supabase, {
             routingV2OutboxId: row.id,
+            ...(row.test_run_id ? { testRunId: row.test_run_id } : {}),
             input,
             body: reply.body,
             model: config.model,

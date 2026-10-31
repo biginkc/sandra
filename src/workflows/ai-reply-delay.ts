@@ -17,6 +17,7 @@ import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-t
 import { markInboundMessageState } from "@/lib/messaging/inbound-state";
 import { finishRunFromOutcome, resumeRun } from "@/lib/pipeline-runs";
 import { runRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
+import { recordRoutingV2Audit } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type AiReplyDelayParams = {
@@ -110,6 +111,13 @@ export async function routingV2ShadowStep(
 ): Promise<void> {
   "use step";
 
+  // Routing v2 AUDIT: the run is finished; one audit row per inbound (no-op if v2 decided it).
+  await recordRoutingV2Audit(createAdminClient(), {
+    propertyId: params.propertyId,
+    inboundMessageId: params.inboundMessageId,
+    conversationId: params.conversationId,
+    note: `dispatch:${liveOutcome}`,
+  }).catch(() => undefined);
   await runRoutingV2Shadow(
     createAdminClient(),
     {

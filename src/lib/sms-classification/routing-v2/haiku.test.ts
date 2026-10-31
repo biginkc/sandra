@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { A1_FINAL_STOP_ROWS } from "./__fixtures__/a1-final-stop-rows";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -111,9 +112,32 @@ describe("Haiku response parsing", () => {
     ['{"road":"made_up","confidence":0.7}', ok("made_up", 0.7)],
   ])("valid %s", (t, exp) => expect(parseHaikuText(t)).toEqual(exp));
   it.each([
-    "", "I think asked_call", '{"road":"a","confidence":"0.8"}', '{"road":"a","confidence":0.8}{"road":"b","confidence":0.8}',
+    "", "I think asked_call", '{"road":"a","confidence":"0.8"}',
     '{"road":"a","confidence":1.2}', '{"road":"a","confidence":-0.1}', '{"road":"","confidence":0.5}', '["a",0.5]', '{"confidence":0.5}',
+    // No complete leading object: prose first, or cut off inside the object.
+    'Sure: {"road":"a","confidence":0.8}', '{"road": "needs_person",', '{"road":"a","confidence":0.8',
   ])("invalid %j", (t) => expect(parseHaikuText(t)).toEqual({ ok: false, reason: "haiku_invalid:parser" }));
+
+  // Stress review A-3: the FIRST complete object wins; trailing prose / a second object is ignored.
+  it.each([
+    ['{"road":"a","confidence":0.8}{"road":"b","confidence":0.8}', ok("a", 0.8)],
+    ['{"road":"asked_who","confidence":0.7}\n\nNote: braces in prose {like this} are ignored', ok("asked_who", 0.7)],
+    ['{"road":"x}y","confidence":0.6} trailing', ok("x}y", 0.6)],
+    ['{"road":"a \\"q\\" b","confidence":0.6}', ok('a "q" b', 0.6)],
+  ])("first object of %j", (t, exp) => expect(parseHaikuText(t)).toEqual(exp));
+
+  const RAW = (JSON.parse(readFileSync(join(__dirname, "__fixtures__/haiku-parser-raw.json"), "utf8")) as { outputs: Array<{ stop: string; text: string }> }).outputs;
+  it("every raw stress output (incl. max_tokens tails) parses to its first object", () => {
+    expect(RAW).toHaveLength(16);
+    for (const { text } of RAW) expect(parseHaikuText(text).ok, text).toBe(true);
+  });
+  it('"lot 0.3 … correcting … needs_person": the FIRST object, 0.3 → a valid Haiku unsure, not an error', () => {
+    const correcting = RAW.find((r) => r.stop === "max_tokens" && r.text.includes("needs_person"))!;
+    expect(parseHaikuText(correcting.text)).toEqual(ok("lot", 0.3));
+    // Existing low-confidence behavior: below 0.50 Haiku is unsure, so Jev's road stands (no hold, no error alert).
+    const d = { road: "not_interested_drip" as const, provenance: { by: "jev" as const, row: "14", step: "not_interested", signal: "not_interested" as const, probability: 0.62 }, haiku: "decider_band" as const, opportunityAlert: false };
+    expect(applyHaikuPolicy(d, parseHaikuText(correcting.text) as never, probs())).toEqual({ road: "not_interested_drip", by: "jev_haiku_unsure", hold: false, alert: null, failureReason: null });
+  });
 });
 
 describe("Haiku client (mocked, no network)", () => {
@@ -175,8 +199,9 @@ const V8 = new Map(
 );
 const CODE_REPLY: Record<string, string> = { reaction: "Liked “x”", bad_number: "no SMS capabilities", driving: "I'm driving" };
 // HOLD_haiku_error = invalid Haiku answer → hold + "Haiku error — please check" (no road).
-const PINNED_ROADS: Record<string, number> = { not_interested_drip: 774, book_appointment: 239, price_check: 188, wrong_number_close: 111, stop: 108, ALERT_call_me: 87, listed_drip: 37, who_reply_drip: 37, maybe_later_drip: 31, ALERT_haiku_unsure: 22, which_property_reply: 21, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 11, location_reply: 11, text_only_reply: 10, "reaction+book_appointment": 7, how_it_works_reply: 6, confirmed_owner_drip: 5, ALERT_land_price: 3, "driving_reply+book_appointment": 3, HOLD_haiku_error: 2, ALERT_said_theyll_call: 2, bad_number: 1 };
-const PINNED_BY: Record<string, number> = { jev: 1466, haiku: 243, haiku_unsure: 22, code: 11, jev_haiku_unsure: 8, haiku_failed: 2 };
+// A-1 (2026-10-31): 6 rows are final Jev stops, never asked (not_interested 774→770, stop 108→112).
+const PINNED_ROADS: Record<string, number> = { not_interested_drip: 770, book_appointment: 239, price_check: 188, wrong_number_close: 111, stop: 112, ALERT_call_me: 87, listed_drip: 37, who_reply_drip: 37, maybe_later_drip: 31, ALERT_haiku_unsure: 22, which_property_reply: 21, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 11, location_reply: 11, text_only_reply: 10, "reaction+book_appointment": 7, how_it_works_reply: 6, confirmed_owner_drip: 5, ALERT_land_price: 3, "driving_reply+book_appointment": 3, HOLD_haiku_error: 2, ALERT_said_theyll_call: 2, bad_number: 1 };
+const PINNED_BY: Record<string, number> = { jev: 1472, haiku: 237, haiku_unsure: 22, code: 11, jev_haiku_unsure: 8, haiku_failed: 2 };
 
 describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", () => {
   const roads: Record<string, number> = {};
@@ -190,9 +215,12 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
     if (d.haiku) {
       eligible++;
       if (!V8.has(i)) mismatches.push(`${i}: eligible but not recorded`);
-    } else if (V8.has(i)) mismatches.push(`${i}: recorded but not eligible`);
+    } else if (V8.has(i) && !A1_FINAL_STOP_ROWS.has(i)) mismatches.push(`${i}: recorded but not eligible`);
     const f = applyHaikuPolicy(d, d.haiku ? (V8.get(i) ?? null) : null, probabilities);
-    if (!d.haiku && f.road !== expRoad) mismatches.push(`${i}: non-Haiku row changed`);
+    if (A1_FINAL_STOP_ROWS.has(i)) {
+      // Review A-1: a confident Jev stop is final; Haiku is never asked.
+      if (d.haiku !== null || f.road !== "stop" || f.by !== "jev") mismatches.push(`${i}: A-1 row is not a final Jev stop`);
+    } else if (!d.haiku && f.road !== expRoad) mismatches.push(`${i}: non-Haiku row changed`);
     const key = f.road ?? "HOLD_haiku_error";
     roads[key] = (roads[key] ?? 0) + 1;
     by[f.by] = (by[f.by] ?? 0) + 1;
@@ -200,7 +228,7 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
 
   it("covers exactly the 275 Haiku-eligible rows and leaves every other row unchanged", () => {
     expect(mismatches).toEqual([]);
-    expect(eligible).toBe(275);
+    expect(eligible).toBe(275 - A1_FINAL_STOP_ROWS.size);
     expect(V8.size).toBe(275);
   });
 
