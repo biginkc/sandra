@@ -1607,6 +1607,87 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await count("select count(*)::int n from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply'", [b])).toBe(0);
     });
 
+    // Astra review of a0c905d42390 (P1 #1): a possible-stop decision is stored, then the worker dies
+    // before its hold. A newer ordinary text routes nothing; the sweep then lands the hold.
+    forced("M21: decision stored, worker dies before its hold: the newer text routes nothing (0 sends, no drip); the sweep holds the lead", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await say(lead, "I think I'm all set");
+      const dead = gate("dispatch:after_decision", (c) => c.inboundMessageId === a);
+      const wa = takeWorkflow(a); void wa.fn(wa.params).catch(() => {});   // the worker "dies" at the barrier (never released)
+      await dead.reached;
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);   // decision stored, no hold yet
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await tickDue(lead);
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      // The dead run's lease runs out; the next cron pass lands the hold.
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 hour' where inbound_message_id = $1", [a]);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [a]);
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true });
+      expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("safety");
+    });
+
+    // Astra P1 #2: the reply on a reply+drip road is cancelled, then the worker dies before the hold:
+    // the drip must not send; the cron lands the hold.
+    forced("M22: reply cancelled, worker dies before its hold: the due drip sends nothing (reply_pending); the cron writes the hold and the drip pauses", async (lead) => {
+      recipientWindow.open = false;
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      const { rows: [gone] } = await pg.query("delete from auto_reply_templates where org_id = $1 and outcome = 'not_interested' returning template_id", [orgId]); // the reply cannot be prepared
+      recipientWindow.open = true;
+      try {
+      const dead = gate("outbox:before_hold", (c) => c.inboundMessageId === b);
+      void runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 }).catch(() => {});
+      await dead.reached;                                   // cancelled; the hold never comes from this worker
+      expect((await box(b)).status).toBe("cancelled");
+      await tickDue(lead);
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });   // the cron: holds_due
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      await tickDue(lead);
+      expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        await pg.query("begin");
+        await pg.query("select set_config('sandra.template_approval', 'on', true)");
+        await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'not_interested', $2)", [orgId, gone.template_id]);
+        await pg.query("commit");
+      }
+    });
+
+    // Astra P2 #3: the 24 h reply age is decided on the DB clock, whatever the app clock says.
+    it.each([
+      ["DB age 23.5 h, app clock 1 h ahead: still sent", 23.5, 3600_000, true],
+      ["DB age 24.5 h, app clock 1 h behind: refused (expired), the lead held", 24.5, -3600_000, false],
+    ] as const)("M23 %s", (_label, ageHours, appSkew, sent) => forcedRun(async (lead) => {
+      recipientWindow.open = false;
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      recipientWindow.open = true;
+      await pg.query("update routing_v2_outbox set created_at = now() - make_interval(secs => $2) where inbound_message_id = $1", [b, ageHours * 3600]);
+      const RealDate = Date;
+      class Skewed extends RealDate {
+        constructor(...args: unknown[]) { if (args.length === 0) super(RealDate.now() + appSkew); else super(...(args as [string])); }
+        static now() { return RealDate.now() + appSkew; }
+      }
+      try {
+        globalThis.Date = Skewed as DateConstructor;
+        await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      } finally { globalThis.Date = RealDate; }
+      if (sent) {
+        expect(sentTo(lead.phone).map((m) => m.body)).toEqual([v2ReplyText("not_interested")]);
+      } else {
+        expect(sentTo(lead.phone)).toEqual([]);
+        expect((await box(b)).status).toBe("cancelled");
+        await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      }
+    }), 3_600_000);
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);
