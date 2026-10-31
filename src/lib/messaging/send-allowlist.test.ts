@@ -17,7 +17,7 @@ describe("§5.4 send allowlist (pure)", () => {
       expect(decideSendAllowed({ testRunId: "run-1", destination: v, allowlist: ALLOW })).toEqual({ allowed: true, tested: true });
     });
   it("a test-tagged send to a non-owned number is refused", () => {
-    expect(decideSendAllowed({ testRunId: "run-1", destination: "+18163321021", allowlist: ALLOW })).toEqual({ allowed: false, reason: REFUSED_NON_OWNED });
+    expect(decideSendAllowed({ testRunId: "run-1", destination: "+18165550191", allowlist: ALLOW })).toEqual({ allowed: false, reason: REFUSED_NON_OWNED });
   });
   it("a lookalike differing by one digit is refused", () => {
     expect(decideSendAllowed({ testRunId: "run-1", destination: "+18165550143", allowlist: ALLOW })).toMatchObject({ allowed: false });
@@ -30,7 +30,7 @@ describe("§5.4 send allowlist (pure)", () => {
   });
   it("no test tag: unchanged (allowed, whatever the number)", () => {
     for (const t of [null, undefined, "", "   "]) {
-      expect(decideSendAllowed({ testRunId: t, destination: "+18163321021", allowlist: new Set() })).toEqual({ allowed: true, tested: false });
+      expect(decideSendAllowed({ testRunId: t, destination: "+18165550191", allowlist: new Set() })).toEqual({ allowed: true, tested: false });
     }
   });
   it("invalid allowlist entries never widen it", () => {
@@ -56,42 +56,42 @@ const base = { orgId: "o", propertyId: "p", origin: "automated", messageId: "m",
 describe("§5.4 assertSendAllowed (boundary)", () => {
   it("a test-tagged lead to a non-owned number: refused and recorded with the last 4 digits only", async () => {
     const { db, inserts } = fakeDb({ data: { test_run_id: "run-1" } });
-    expect(await assertSendAllowed(db, { ...base, destination: "+18163321021" })).toBe(false);
-    expect(inserts).toEqual([expect.objectContaining({ table: "test_send_refusals", test_run_id: "run-1", destination_last4: "1021", reason: "refused_non_owned" })]);
-    expect(JSON.stringify(inserts)).not.toContain("8163321021");
+    expect(await assertSendAllowed(db, { ...base, destination: "+18165550191" })).toBe(false);
+    expect(inserts).toEqual([expect.objectContaining({ table: "test_send_refusals", test_run_id: "run-1", destination_last4: "0191", reason: "refused_non_owned" })]);
+    expect(JSON.stringify(inserts)).not.toContain("8165550191");
   });
   it("a derived work item whose own tag was lost: the lead's tag still refuses it (taint)", async () => {
     const { db } = fakeDb({ data: { test_run_id: "run-1" } });
-    expect(await assertSendAllowed(db, { ...base, destination: "+18163321021", testRunId: null })).toBe(false);
+    expect(await assertSendAllowed(db, { ...base, destination: "+18165550191", testRunId: null })).toBe(false);
   });
   it("a tagged work item on an untagged lead is still held to the allowlist", async () => {
     const { db } = fakeDb({ data: { test_run_id: null } });
-    expect(await assertSendAllowed(db, { ...base, destination: "+18163321021", testRunId: "run-1" })).toBe(false);
+    expect(await assertSendAllowed(db, { ...base, destination: "+18165550191", testRunId: "run-1" })).toBe(false);
     expect(await assertSendAllowed(db, { ...base, destination: "(816) 555-0142", testRunId: "run-1" })).toBe(true);
   });
   it("production (no tag anywhere): allowed, nothing recorded", async () => {
     const { db, inserts } = fakeDb({ data: { test_run_id: null } });
-    expect(await assertSendAllowed(db, { ...base, destination: "+18163321021", env: {} })).toBe(true);
+    expect(await assertSendAllowed(db, { ...base, destination: "+18165550191", env: {} })).toBe(true);
     expect(inserts).toEqual([]);
   });
   it("database without the column yet: untagged", async () => {
-    expect(await assertSendAllowed(fakeDb({ error: { code: "42703", message: "column properties.test_run_id does not exist" } }).db, { ...base, destination: "+18163321021" })).toBe(true);
+    expect(await assertSendAllowed(fakeDb({ error: { code: "42703", message: "column properties.test_run_id does not exist" } }).db, { ...base, destination: "+18165550191" })).toBe(true);
   });
   it("a taint lookup failure fails closed even with no test run active (production too); retryable, no refusal row", async () => {
     const timeout = () => fakeDb({ error: { message: "timeout" } });
     const prod = timeout();
-    expect(await checkSendAllowed(prod.db, { ...base, destination: "+18163321021", env: {} })).toEqual({ allowed: false, why: "taint_lookup_failed" });
+    expect(await checkSendAllowed(prod.db, { ...base, destination: "+18165550191", env: {} })).toEqual({ allowed: false, why: "taint_lookup_failed" });
     expect(prod.inserts).toEqual([]);
     expect(await assertSendAllowed(timeout().db, { ...base, destination: OWNED })).toBe(false);
   });
   it("a taint lookup failure on a tagged work item: the item's own tag decides (owned allowed, other refused + recorded)", async () => {
     expect(await checkSendAllowed(fakeDb({ error: { message: "timeout" } }).db, { ...base, destination: OWNED, testRunId: "run-1" })).toEqual({ allowed: true });
     const other = fakeDb({ error: { message: "timeout" } });
-    expect(await checkSendAllowed(other.db, { ...base, destination: "+18163321021", testRunId: "run-1" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
-    expect(other.inserts).toEqual([expect.objectContaining({ table: "test_send_refusals", test_run_id: "run-1", destination_last4: "1021" })]);
+    expect(await checkSendAllowed(other.db, { ...base, destination: "+18165550191", testRunId: "run-1" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
+    expect(other.inserts).toEqual([expect.objectContaining({ table: "test_send_refusals", test_run_id: "run-1", destination_last4: "0191" })]);
   });
   it("checkSendAllowed names a confirmed refusal refused_non_owned (the terminal kind)", async () => {
-    expect(await checkSendAllowed(fakeDb({ data: { test_run_id: "run-1" } }).db, { ...base, destination: "+18163321021" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
+    expect(await checkSendAllowed(fakeDb({ data: { test_run_id: "run-1" } }).db, { ...base, destination: "+18165550191" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
   });
 });
 

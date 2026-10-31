@@ -1519,6 +1519,78 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await expectCStaysHeld(lead, "rep_sms_human_takeover");
     });
 
+    // Astra review of 921b71c2a133 (P1 #1): a safety hold committed between the reply's authorization
+    // and the final SQL fence refuses the send (held_for_person).
+    const M17_REPEAT = Number(process.env.M17_REPEAT ?? 20);
+    it(`M17 x${M17_REPEAT}: a hold committed after the reply is authorized but before the provider fence: no send, cancelled held_for_person, lead held`, async () => {
+      const failures: string[] = [];
+      const first = await raceSetup();
+      for (let i = 0; i < M17_REPEAT; i++) {
+        const lead = i === 0 ? first : await addRaceLead();
+        jevByReply = RACE_JEV; recipientWindow.open = true; workflows.pending.length = 0;
+        try {
+          const a = await aRoutedReplyQueued(lead);
+          const f = gate("outbox:before_fence", (c) => c.inboundMessageId === a);
+          const delivery = runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+          await f.reached;
+          await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'needs_reply' where id = $1", [lead.propertyId]);
+          f.release(); await delivery;
+          expect(sentTo(lead.phone)).toEqual([]);
+          expect(await box(a)).toMatchObject({ status: "cancelled" });
+          expect((await pg.query("select cancel_reason from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply'", [a])).rows[0].cancel_reason).toBe("held_for_person");
+          expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+        } catch (e) {
+          failures.push(`${i}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        } finally { clearTestBarriers(); }
+      }
+      expect(failures).toEqual([]);
+    }, 900_000);
+
+    // Astra P1 #2: v2 left a mechanics hold, then every v2 flag is turned off: the hold is terminal
+    // for the legacy path (only the v2 transition clears it).
+    forced("M18: v2 leaves a mechanics hold, then all v2 flags off, then a newer text: terminal (rule 0), no send, still held", async (lead) => {
+      await mechanicsHoldOnA(lead);
+      const { rows: [cfg] } = await pg.query("select routing_v2_flags from ai_responder_configs where org_id = $1", [orgId]);
+      try {
+        await pg.query("update ai_responder_configs set routing_v2_flags = '{}'::jsonb where org_id = $1", [orgId]);
+        const before = sentTo(lead.phone).length;
+        const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+        await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+        expect(await stampOf(b)).toMatchObject({ o: "skipped:rule_0" });
+        expect(sentTo(lead.phone).slice(before)).toEqual([]);
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true });
+      } finally {
+        await pg.query("update ai_responder_configs set routing_v2_flags = $2::jsonb where org_id = $1", [orgId, JSON.stringify(cfg.routing_v2_flags)]);
+      }
+    });
+
+    // Astra P1 #3: the DB-clock takeover stamp fails and the app clock is an hour behind: the
+    // fallback must still be later than the seller's text (DB time), so the drip never texts.
+    forced("M19: takeover while the DB-clock stamp is unavailable and the app clock is 1 h behind: the drip is paused (person_took_over), 0 drip sends", async (lead) => {
+      await say(lead, A_TEXT); await runWorkflows(); await deliver();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "book_appointment", status: "active", r: null }]);
+      const before = sentTo(lead.phone).length;
+      const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+      await pg.query("revoke execute on function public.routing_v2_mark_person_takeover(uuid) from service_role");
+      const RealDate = Date;
+      class Behind extends RealDate {
+        constructor(...args: unknown[]) { if (args.length === 0) super(RealDate.now() - 3600_000); else super(...(args as [string])); }
+        static now() { return RealDate.now() - 3600_000; }
+      }
+      try {
+        globalThis.Date = Behind as DateConstructor;
+        await pauseHotBookAppointmentOnTakeover({ propertyIds: [lead.propertyId], actor: { actorType: "user", actorId: null } as never });
+      } finally {
+        globalThis.Date = RealDate;
+        await pg.query("grant execute on function public.routing_v2_mark_person_takeover(uuid) to service_role");
+      }
+      const { rows: [t] } = await pg.query("select p.last_person_takeover_at > m.created_at as after from properties p join messages m on m.property_id = p.id and m.direction = 'inbound' where p.id = $1 order by m.created_at desc limit 1", [lead.propertyId]);
+      expect(t.after).toBe(true);
+      await tickDue(lead);
+      expect(sentTo(lead.phone).slice(before)).toEqual([]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);

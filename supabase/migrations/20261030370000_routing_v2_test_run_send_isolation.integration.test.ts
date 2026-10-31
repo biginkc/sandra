@@ -32,9 +32,9 @@ describe("§5.4 test-run taint", () => {
     expect(await outbox()).toBe("run-7");
   });
   it("refusal rows keep at most the last 4 digits; service role only", async () => {
-    await db.query("insert into test_send_refusals(org_id,property_id,test_run_id,destination_last4,origin,reason) values($1,$2,'run-7','1021','automated','refused_non_owned')", [org, property]);
+    await db.query("insert into test_send_refusals(org_id,property_id,test_run_id,destination_last4,origin,reason) values($1,$2,'run-7','0191','automated','refused_non_owned')", [org, property]);
     await db.query("savepoint s");
-    await expect(db.query("insert into test_send_refusals(org_id,destination_last4,origin,reason) values($1,'8163321021','automated','refused_non_owned')", [org])).rejects.toMatchObject({ code: "23514" });
+    await expect(db.query("insert into test_send_refusals(org_id,destination_last4,origin,reason) values($1,'8165550191','automated','refused_non_owned')", [org])).rejects.toMatchObject({ code: "23514" });
     await db.query("rollback to savepoint s");
     expect((await db.query("select has_table_privilege('authenticated','public.test_send_refusals','SELECT') u, has_table_privilege('service_role','public.test_send_refusals','INSERT') s")).rows[0]).toEqual({ u: false, s: true });
   });

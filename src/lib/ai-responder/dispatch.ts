@@ -3912,11 +3912,21 @@ async function deliverRoutedReply(
  */
 async function mechanicsHoldYieldsTo(
   supabase: SupabaseClient<Database>,
-  property: { id?: string; needs_human_attention?: boolean | null; outreach_dispo?: string | null },
+  property: { id?: string; org_id?: string | null; needs_human_attention?: boolean | null; outreach_dispo?: string | null },
   inboundMessageId: string | null | undefined,
 ): Promise<boolean> {
   if (!property.needs_human_attention || !property.id || !inboundMessageId) return false;
   if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo ?? null })) return false;
+  // Astra review of 921b71c2a133 (P1): only the v2 transition clears a mechanics hold (audited), so
+  // the hold yields only while v2 routing is live for this property. With v2 off (never on, or
+  // turned off after it wrote the hold) the hold is terminal exactly as today; any read error too.
+  let orgId = property.org_id ?? null;
+  if (!orgId) {
+    const { data: row, error: orgError } = await supabase.from("properties").select("org_id").eq("id", property.id).maybeSingle();
+    if (orgError || !row?.org_id) return false;
+    orgId = row.org_id;
+  }
+  if ((await routingV2LiveForSweep(supabase, orgId, property.id)) !== "yes") return false;
   let data: unknown;
   let error: { message: string } | null;
   try {
@@ -5462,6 +5472,7 @@ async function fenceProviderSubmit(
     if (liveError || !live || live.decision_context_revision !== expected) return refuse(FENCE_NINE_CONTEXT_CHANGED);
   }
   if (args.routingV2OutboxId) {
+    await testBarrier("outbox:before_fence", { propertyId: args.input.propertyId, inboundMessageId: args.input.inboundMessageId ?? null });
     const { data, error } = await (supabase as unknown as {
       rpc: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: unknown }>;
     }).rpc("routing_v2_check_authorized_outbox_send", {
