@@ -1458,6 +1458,49 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(failures).toEqual([]);
     }, 900_000);
 
+    // Review B-1 (3288da8ef6b3): a seller-words hold stacked on our own mechanics hold must not
+    // keep the mechanics label, or the next text clears it.
+    async function mechanicsHoldOnA(lead: Awaited<ReturnType<typeof seedLead>>) {
+      jevByReply = { ...RACE_JEV, "where are you located?": { where_located: 0.95 } };
+      recipientWindow.open = false;
+      await say(lead, "where are you located?"); await runWorkflows();
+      recipientWindow.open = true;
+      propertyWindow.openCalls = 1;   // open at prepare, closed at the send: refused -> mechanics hold
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      propertyWindow.openCalls = null;
+      expect((await pg.query("select needs_human_attention h, hold_kind k from properties where id = $1", [lead.propertyId])).rows[0]).toEqual({ h: true, k: "mechanics" });
+    }
+    async function expectCStaysHeld(lead: Awaited<ReturnType<typeof seedLead>>, reason: string) {
+      const before = sentTo(lead.phone).length;
+      const c = await say(lead, B_TEXT); await runWorkflows();
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await tickDue(lead);
+      // Held at the early gate (rule 0: the hold no longer yields) or, if it raced past it, at the transition.
+      const stamp = await stampOf(c);
+      expect(stamp.o === "skipped:rule_0" || stamp.r === "routing_v2:already_held").toBe(true);
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: reason });
+      expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("safety");
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone).slice(before)).toEqual([]);
+      expect(await count("select count(*)::int n from lead_events where property_id = $1 and event_type = 'ai_escalation_cleared' and payload->>'reason' = 'mechanics_hold_superseded'", [lead.propertyId])).toBe(0);
+    }
+    forced("M14: mechanics hold (A's reply refused), then a possible stop (B), then any text (C): C stays held, no reply, no drip", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      await mechanicsHoldOnA(lead);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      await say(lead, "I think I'm all set"); await runWorkflows();
+      await expectCStaysHeld(lead, "nine_asked_stop");
+    });
+    forced("M15: mechanics hold (A's reply refused), then a keyword hold (B), then any text (C): C stays held, no reply, no drip", async (lead) => {
+      await mechanicsHoldOnA(lead);
+      await say(lead, "can I talk to someone please"); await runWorkflows();
+      const reason = (await prop(lead.propertyId)).last_ai_escalation_reason as string;
+      expect(reason).not.toMatch(/^nine_reply_not_sent/);
+      await expectCStaysHeld(lead, reason);
+    });
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);
