@@ -4,6 +4,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
 const migration = readFileSync(path.join(__dirname, "20261030270000_routing_v2_legacy_drip_snapshots.sql"), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
 const rollback = readFileSync(path.join(__dirname, "../rollbacks/20261030270000_routing_v2_legacy_drip_snapshots.sql"), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
@@ -12,6 +13,14 @@ beforeAll(() => db.connect());
 afterAll(() => db.end());
 beforeEach(async () => {
   await db.query("begin"); org = randomUUID();
+  // A-7: on a fully migrated / shared stack, other orgs' v2 drips (used or versioned) would trip
+  // the rollback's stack-wide guard. Clear them inside this rolled-back transaction only.
+  await unwindRoutingV2After(db, "20261030270000");
+  await db.query("select set_config('routing_v2.allow_drip_edit','on',true)");
+  await db.query("delete from sequence_enrollments where sequence_id in (select id from sequences where routing_v2_key is not null)");
+  await db.query("delete from sequence_steps where sequence_id in (select id from sequences where routing_v2_key is not null)");
+  await db.query("delete from sequences where routing_v2_key is not null");
+  await db.query("select set_config('routing_v2.allow_drip_edit','',true)");
   await db.query("insert into organizations(id,name) values($1,'routing snapshot test')", [org]);
   await db.query("insert into ai_responder_configs(org_id,system_prompt) values($1,'test')", [org]);
 });
