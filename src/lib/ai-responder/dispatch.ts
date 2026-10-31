@@ -19,6 +19,7 @@ import {
   checkRecipientQuietHours,
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { WEBHOOK_PROCESSING_LEASE_MS } from "@/lib/messaging/webhook-lease";
 import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
@@ -4748,8 +4749,14 @@ async function applyGateEvaluation(
   }
   // Rule 1 already writes no flag when the newer text has a live handler (its delayed dispatch
   // is scheduled or running); a newer text whose handler ended or never started keeps the flag,
-  // so a person looks (review M-1).
-  const plan = skipPlanFor(decision, "presend")!;
+  // so a person looks (review M-1). A-2 round 3: for a queued v2 reply, a newer text still
+  // inside its webhook (saved, not yet stamped, younger than the webhook lease) will be routed
+  // by its own dispatch, so it is cancelled without the flag (the outbox applies the same test).
+  const basePlan = skipPlanFor(decision, "presend")!;
+  const newerInFlight = !!args.routingV2OutboxId && decision.action === "skip" && decision.rule === 1 && decision.flag
+    && !!args.input.inboundMessageId
+    && (await newerSellerTextIsLive(supabase, { property_id: args.input.propertyId, inbound_message_id: args.input.inboundMessageId }));
+  const plan = newerInFlight ? { ...basePlan, flagReason: null } : basePlan;
   guard();
   await trace(
     supabase,
@@ -8520,6 +8527,31 @@ export async function runRoutingV2LiveStep(
   supabase: SupabaseClient<Database>,
   a: NineStepArgs,
 ): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
+  const outcome = await runRoutingV2LiveStepInner(supabase, a);
+  // H1(iii): per-property v2 decisions see each other. Texts in a burst are decided in
+  // parallel: one can write a person hold (e.g. a possible stop) while another enrolls a drip.
+  // Every v2 decision ends by re-reading the hold; a held lead keeps no active drip (paused for
+  // the person, as the webhook pauses it). Whichever decision finishes last sees the other's
+  // write, so the end state is always "held, drip paused". The outbox also refuses an auto
+  // reply to a held lead (prepare). Jarrad Q2 default: a possible-stop hold stays with the person.
+  if (outcome && outcome.outcome !== "retry") await pauseDripsIfHeld(supabase, a.input.propertyId);
+  return outcome;
+}
+
+async function pauseDripsIfHeld(supabase: SupabaseClient<Database>, propertyId: string): Promise<void> {
+  try {
+    const { data } = await supabase.from("properties").select("needs_human_attention").eq("id", propertyId).maybeSingle();
+    if (data?.needs_human_attention !== true) return;
+    await pausePropertyEnrollments(supabase, { propertyId, reason: "inbound_reply" });
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_pause_drips_if_held" }, extra: { propertyId } });
+  }
+}
+
+async function runRoutingV2LiveStepInner(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const { input, property, runCtx } = a;
   // A legacy deferral already owns this inbound's decision.
   if (input.nineDeferral || !input.inboundMessageId) return null;
@@ -8804,11 +8836,33 @@ async function routeRoutingV2PhoneAction(
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
   const chosen = evidence.provenance && evidence.provenance.by === "jev" ? evidence.provenance.probability : null;
-  return closeNineWrongPersonThisProperty(supabase, a, {
+  const closedHere = await closeNineWrongPersonThisProperty(supabase, a, {
     evaluationRevision: evidence.expected_revision,
     classificationRunId: null,
     chosenProbability: chosen,
   });
+  // H1(i): today's this-property close leaves drips paused (setResponderDispo). On the v2 path
+  // every reply ends the current drip, so the property's v2 drip (paused by the webhook) is
+  // retired too; otherwise it sits paused on a closed lead nobody owns. Legacy drips: unchanged.
+  if (closedHere.outcome === "auto_closed") {
+    await retireV2DripsForProperty(supabase, input.propertyId, input.inboundMessageId ?? null);
+  }
+  return closedHere;
+}
+
+/** End every active or paused v2 enrollment on the property (ended_reason rerouted). Best effort. */
+export async function retireV2DripsForProperty(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await (supabase as unknown as {
+    from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { in: (k: string, v: string[]) => PromiseLike<{ error: { message: string } | null }> } } } };
+  }).from("sequence_enrollments")
+    .update({ status: "completed", completed_at: now, next_run_at: null, updated_at: now, ended_reason: "rerouted", retired_by_inbound_id: inboundMessageId })
+    .eq("property_id", propertyId).eq("routing_v2_engine", "v2").in("status", ["active", "paused"]);
+  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_wrong_number_retire" }, extra: { propertyId } });
 }
 
 /**
@@ -8979,6 +9033,10 @@ async function deliverRoutingV2OutboxIntent(
         inboundBody: msg.body ?? "",
         inboundMessageId: row.inbound_message_id,
       };
+      // H1(iii): never an auto reply to a lead held for a person (a burst text may have held it
+      // after this reply was queued). Refused = cancelled; the hold already exists.
+      const { data: heldRow } = await supabase.from("properties").select("needs_human_attention").eq("id", row.property_id).maybeSingle();
+      if (heldRow?.needs_human_attention === true) return { kind: "refused", reason: V2_OUTBOX_REASON.heldForPerson };
       const reply = await resolveV2Reply(supabase, { orgId: row.org_id, propertyId: row.property_id, contactId: msg.contact_id, key: key as V2AnyReplyKey });
       if (reply.kind !== "ready") return { kind: "refused", reason: reply.reason };
       const repeat = await templateAlreadySentToProperty(supabase, row.org_id, row.property_id, reply.templateId, reply.body);
@@ -9090,26 +9148,53 @@ async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: R
 }
 
 /**
- * Is there a newer seller text after this reply's inbound whose own handler is live (its delayed
- * dispatch is scheduled or running) or already handled it? Same test as send-gate rule 1
- * (`classifyNewerInboundHandler`). Fails toward the hold (a person looks) on a lookup error.
+ * Is there a newer seller text after this reply's inbound that will be (or was) routed by its own
+ * dispatch? True when its handler is live (delayed dispatch scheduled or running) or already
+ * handled it (send-gate rule 1, `classifyNewerInboundHandler`), OR when it is still inside its
+ * webhook: saved, not yet stamped or claimed, and younger than the webhook processing lease
+ * (A-2 round 3: the newer text's webhook has not reached its delay stamp yet). A newer text past
+ * that lease with no stamp is a dead webhook / handler: false, a person looks (M-1). Fails
+ * toward the hold on a lookup error.
  */
-async function newerSellerTextIsLive(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+async function newerSellerTextIsLive(
+  supabase: SupabaseClient<Database>,
+  row: { property_id: string; inbound_message_id: string },
+): Promise<boolean> {
   const { data: own, error: ownError } = await supabase
     .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
   if (ownError || !own?.created_at) return false;
   const { data, error } = await supabase
-    .from("messages").select("id")
+    .from("messages").select("id, created_at, metadata")
     .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
     .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
     .order("created_at", { ascending: false })
     .limit(5);
   if (error) return false;
   const nowMs = Date.now();
-  for (const newer of data ?? []) {
+  for (const newer of (data ?? []) as Array<{ id: string; created_at: string; metadata: Json | null }>) {
     if ((await newerInboundHasLiveHandler(supabase, newer.id, nowMs)) === true) return true;
+    if (await newerInboundStillInWebhook(supabase, newer, nowMs)) return true;
   }
   return false;
+}
+
+/** Saved, no responder stamp, no claim, and younger than the webhook processing lease. */
+async function newerInboundStillInWebhook(
+  supabase: SupabaseClient<Database>,
+  newer: { id: string; created_at: string; metadata: Json | null },
+  nowMs: number,
+): Promise<boolean> {
+  const createdMs = Date.parse(newer.created_at);
+  if (Number.isNaN(createdMs) || nowMs - createdMs > WEBHOOK_PROCESSING_LEASE_MS) return false;
+  const processing = readJsonObject(newer.metadata).processing;
+  const stamped = !!processing && typeof processing === "object" && !Array.isArray(processing)
+    && (processing as Record<string, Json>).aiResponder != null;
+  if (stamped) return false;
+  const { data: claim, error } = await supabase
+    .from("ai_response_claims").select("id")
+    .eq("inbound_message_id", newer.id).eq("response_kind", "sms_ai_responder_v1")
+    .maybeSingle();
+  return !error && !claim;
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
