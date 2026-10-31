@@ -118,8 +118,14 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
  */
 async function failClosedV2Takeover(admin: ReturnType<typeof createAdminClient>, propertyId: string) {
   const now = new Date().toISOString();
-  const { error: pauseError } = await admin
-    .from("sequence_enrollments")
+  // routing_v2_engine is not in the generated types yet (added by the routing v2 migrations).
+  const { error: pauseError } = await (admin as unknown as {
+    from: (t: string) => {
+      update: (v: Record<string, unknown>) => {
+        eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } };
+      };
+    };
+  }).from("sequence_enrollments")
     .update({ status: "paused", pause_reason: "person_took_over", next_run_at: null, updated_at: now })
     .eq("property_id", propertyId)
     .eq("routing_v2_engine", "v2")
