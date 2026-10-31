@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { BMH_ORG_ID, getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
@@ -9,6 +9,7 @@ import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/deliv
 import { handleInboundWebhook } from "@/lib/messaging/inbound";
 import { getMockMessageLog, MockMessagingProvider, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
+import { clearTestBarriers, setTestBarrier, type TestBarrierContext, type TestBarrierName } from "@/lib/testing/test-barriers";
 import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2/reply-texts";
 import type { Json } from "@/lib/supabase/types";
 
@@ -56,6 +57,25 @@ vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
     ? { ok: true, state: "MO", localTime: "12:00", florida: false }
     : { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" },
 }));
+
+// A-2 race analysis acceptance: RACE_SKEW_MS shifts the APP clock only (the DB keeps real time),
+// as the stress harness did; every A-2 result must be the same at 0 and +/- 1 h.
+const RACE_SKEW_MS = Number(process.env.RACE_SKEW_MS ?? 0);
+if (RACE_SKEW_MS !== 0) {
+  const RealDate = Date;
+  class SkewedDate extends RealDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) super(RealDate.now() + RACE_SKEW_MS);
+      else super(...(args as [string]));
+    }
+    static now() { return RealDate.now() + RACE_SKEW_MS; }
+  }
+  globalThis.Date = SkewedDate as DateConstructor;
+}
+/** Natural (no-barrier) repeats per volume case. */
+const RACE_REPEAT = Number(process.env.RACE_REPEAT ?? 3);
+/** Repeats of every barrier-forced order (fresh lead each time). */
+const FORCED_REPEAT = Number(process.env.FORCED_REPEAT ?? 1);
 
 // The REAL webhook path: handleInboundWebhook starts the delay workflow; the workflow runtime is
 // not available in vitest, so start() queues the real aiReplyDelayWorkflow body and runWorkflows()
@@ -668,11 +688,16 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await deliverOlderAndExpectHold(lead);
     });
 
-    it("M-1: the newer text's handler ended without handling it: the cancelled older reply still holds for a person", async () => {
+    it("A-2 F1 (was M-1): the newer text's own handler ended (claim error): the older reply is cancelled with NO hold; the newer text's own outcome stands", async () => {
       const lead = await olderReplyQueued();
       const newer = await newerText(lead, { processing: { aiResponder: { outcome: "delayed", workflowRunId: "ended-run", delaySeconds: 30 } } });
       await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, completed_at, outcome, error_message) values ($1, $2, $3, $4, 'error', now(), 'skipped', 'reply_ineligible')", [orgId, newer, lead.propertyId, lead.contactId]);
-      await deliverOlderAndExpectHold(lead);
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      const { rows: [box] } = await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.status).toBe("cancelled");
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
     });
 
     // ---- A-2 consolidated fix (A2-ROOT-CAUSE-ANALYSIS.md, matrix cases 1-10) ----
@@ -844,7 +869,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       // the unknown-state gate, whichever the tick reaches first. Never active, never sent.
       const drip = (await enrollments(lead.propertyId)).find((e) => e.k === "not_interested");
       expect(drip).toMatchObject({ status: "paused" });
-      expect(["inbound_reply", "timezone_unconfirmed"]).toContain(drip!.r);
+      expect(["held_for_person", "inbound_reply", "timezone_unconfirmed"]).toContain(drip!.r);
       expect(sentTo(lead.phone)).toHaveLength(0);
     });
 
@@ -983,7 +1008,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'keyword:legal_contract' where id = $1", [lead.propertyId]);
       await tickDue(lead);
       expect(sentTo(lead.phone)).toHaveLength(sentBefore);
-      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "inbound_reply" }]);
+      // 420000: every hold pauses the v2 drips in the same transaction (held_for_person).
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "held_for_person" }]);
     });
 
     it("A-2 lease death: a newer text whose webhook died inside its lease (no stamp, no claim) is swept by the outbox cron once it is past the lease: a person looks; a young one is left in flight", async () => {
@@ -1052,6 +1078,434 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect((await dispoOf(lead.propertyId)).outreach_dispo).toBe("callback_requested");
       expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "inbound_reply" }]);
     });
+
+    // ================= A-2 race analysis acceptance matrix (M1-M12) =================
+    // Order is forced only by named barriers (F6) and the DB; no sleeps decide an interleaving.
+    const A_TEXT = "sure what's the offer";
+    const B_TEXT = "not interested";
+    const C_TEXT = "Yes I own it";
+    const RACE_JEV = { [A_TEXT]: { open_to_selling: 0.95 }, [B_TEXT]: { not_interested: 0.95 }, [C_TEXT]: { confirmed_owner: 0.95 } };
+    function gate(name: TestBarrierName, match: (c: TestBarrierContext) => boolean = () => true) {
+      let release!: () => void;
+      let reached!: () => void;
+      const released = new Promise<void>((r) => { release = r; });
+      const hit = new Promise<void>((r) => { reached = r; });
+      let fired = false;
+      setTestBarrier(name, async (c) => {
+        if (fired || !match(c)) return;
+        fired = true;
+        reached();
+        await released;
+      });
+      const timed = Promise.race([hit, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`barrier ${name} never reached`)), 20_000))]);
+      return { reached: timed, release };
+    }
+    const idOf = async (lead: Awaited<ReturnType<typeof seedLead>>, body: string) =>
+      ((await pg.query("select id from messages where property_id = $1 and direction = 'inbound' and body = $2 order by created_at desc limit 1", [lead.propertyId, body])).rows[0]?.id ?? null) as string | null;
+    const waitForId = async (lead: Awaited<ReturnType<typeof seedLead>>, body: string) => {
+      for (let i = 0; i < 400; i++) { const id = await idOf(lead, body); if (id) return id; await new Promise((r) => setTimeout(r, 25)); }
+      throw new Error(`inbound ${body} never inserted`);
+    };
+    const takeWorkflow = (inboundId: string) => {
+      const i = workflows.pending.findIndex((w) => (w.params as { inboundMessageId?: string }).inboundMessageId === inboundId);
+      if (i < 0) throw new Error(`no workflow for ${inboundId}`);
+      return workflows.pending.splice(i, 1)[0]!;
+    };
+    async function raceSetup() {
+      const lead = await setup();
+      jevByReply = RACE_JEV;
+      return lead;
+    }
+    /** Another canary lead in the same org (seedOrg runs once per test). */
+    async function addRaceLead() {
+      const l = await seedLead();
+      await pg.query("update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || to_jsonb($2::text)) where org_id = $1", [orgId, l.propertyId]);
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: l.propertyId, contact_id: l.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: l.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+      return l;
+    }
+    /** A routed (book drip) with its reply still queued (the seller's window closed for now). */
+    async function aRoutedReplyQueued(lead: Awaited<ReturnType<typeof seedLead>>) {
+      recipientWindow.open = false;
+      const a = await say(lead, A_TEXT);
+      await runWorkflows();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "book_appointment", status: "active", r: null }]);
+      recipientWindow.open = true;
+      return a;
+    }
+    /** The newest text B won: routed, only its drip active, its reply sent once, nobody held, no reply_skipped. */
+    async function expectBWon(lead: Awaited<ReturnType<typeof seedLead>>, b: string) {
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(await stampOf(b)).toMatchObject({ o: "auto_closed", r: "routing_v2:not_interested_drip" });
+      expect((await enrollments(lead.propertyId)).filter((e) => e.status === "active")).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'paused'", [lead.propertyId])).toBe(0);
+      const p = await prop(lead.propertyId);
+      expect(p.needs_human_attention).toBe(false);
+      expect(p.last_ai_escalation_reason ?? "").not.toMatch(/^reply_skipped/);
+      expect(sentTo(lead.phone).filter((m) => m.body === v2ReplyText("not_interested"))).toHaveLength(1);
+    }
+    afterEach(() => clearTestBarriers());
+    /** Runs a forced-order case FORCED_REPEAT times, each on a fresh lead; every failure is listed. */
+    async function forcedRun(body: (lead: Awaited<ReturnType<typeof seedLead>>) => Promise<void>) {
+      const failures: string[] = [];
+      for (let i = 0; i < FORCED_REPEAT; i++) {
+        const lead = i === 0 ? await raceSetup() : await addRaceLead();
+        jevByReply = RACE_JEV; recipientWindow.open = true; propertyWindow.openCalls = null; workflows.pending.length = 0;
+        try { await body(lead); } catch (e) {
+          failures.push(`${i}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        } finally { clearTestBarriers(); }
+      }
+      expect(failures).toEqual([]);
+    }
+    const forced = (name: string, body: (lead: Awaited<ReturnType<typeof seedLead>>) => Promise<void>) =>
+      it(`${name} [x${FORCED_REPEAT}]`, () => forcedRun(body), 3_600_000);
+
+    forced("M1(i): A's whole flow before B: B wins", async (lead) => {
+      await say(lead, A_TEXT); await runWorkflows(); await deliver();
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      await expectBWon(lead, b);
+    });
+
+    forced("M1(ii): B is inserted (webhook held at webhook:inserted) while A's transition runs: A is superseded, B wins", async (lead) => {
+      const a = await say(lead, A_TEXT);
+      const g = gate("webhook:inserted", (c) => c.inboundMessageId !== a);
+      const bWebhook = say(lead, B_TEXT);
+      await g.reached;
+      await runWorkflows();                       // A's transition: B already exists
+      expect(await stampOf(a)).toMatchObject({ o: "skipped", r: "superseded_by_newer_inbound" });
+      g.release(); const b = await bWebhook; await runWorkflows();
+      await expectBWon(lead, b);
+    });
+
+    forced("M1(iii): A's reply held at outbox:presend_after_evidence until B is inserted, released before B stamps: A cancelled, NO hold, B wins", async (lead) => {
+      const a = await aRoutedReplyQueued(lead);
+      const k0 = gate("outbox:presend_after_evidence", (c) => c.inboundMessageId === a);
+      const delivery = runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await k0.reached;
+      const stamp = gate("webhook:before_stamp", (c) => c.inboundMessageId !== a);
+      const bWebhook = say(lead, B_TEXT);
+      await stamp.reached;                        // B inserted, not stamped
+      k0.release(); await delivery;
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      stamp.release(); const b = await bWebhook; await runWorkflows();
+      expect(sentTo(lead.phone).filter((m) => m.body !== v2ReplyText("not_interested")).filter((m) => m.body !== "Hi, would you sell 2 Vee Ln?")).toHaveLength(0);
+      await expectBWon(lead, b);
+    });
+
+    forced("M1(iv): A's reply released while B's dispatch is past its early gate (claim processing): A cancelled, NO hold, B wins", async (lead) => {
+      const a = await aRoutedReplyQueued(lead);
+      const k0 = gate("outbox:presend_after_evidence", (c) => c.inboundMessageId === a);
+      const delivery = runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await k0.reached;
+      const b = await say(lead, B_TEXT);
+      const early = gate("dispatch:after_early_gate", (c) => c.inboundMessageId === b);
+      const w = takeWorkflow(b);
+      const bDispatch = w.fn(w.params);
+      await early.reached;
+      k0.release(); await delivery;
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      early.release(); await bDispatch;
+      await expectBWon(lead, b);
+    });
+
+    forced("M1(v): A's reply is refused at its send (window closed) and its mechanics hold is attempted between B's insert and B's early gate: superseded, NO hold, B wins", async (lead) => {
+      recipientWindow.open = false;
+      jevByReply = { ...RACE_JEV, [A_TEXT]: { text_only: 0.95 } };   // a reply-only road: its refusal would hold
+      const a = await say(lead, A_TEXT); await runWorkflows();
+      recipientWindow.open = true;
+      const ins = gate("webhook:inserted", (c) => c.inboundMessageId !== a);
+      const bWebhook = say(lead, B_TEXT);
+      await ins.reached;
+      propertyWindow.openCalls = 1;   // open at prepare, closed at the send: A's reply is refused
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });  // A refused -> mechanics hold -> superseded
+      propertyWindow.openCalls = null;
+      expect((await box(a)).status).toBe("cancelled");
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      ins.release(); const b = await bWebhook; await runWorkflows();
+      await expectBWon(lead, b);
+    });
+
+    forced("M2(i): reply vs tick, the tick passes its send check first: <=1 old step, then retired; new road active, no hold", async (lead) => {
+      await say(lead, A_TEXT); await runWorkflows(); await deliver();
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const before = sentTo(lead.phone).length;
+      const t = gate("tick:after_send_check", (c) => c.propertyId === lead.propertyId);
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      const tick = runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      await t.reached;
+      const b = await say(lead, B_TEXT);
+      t.release(); await tick;
+      await runWorkflows();
+      const oldSteps = sentTo(lead.phone).slice(before).filter((m) => /book_appointment/.test(m.body));
+      expect(oldSteps.length).toBeLessThanOrEqual(1);
+      await expectBWon(lead, b);
+      expect(await enrollments(lead.propertyId)).toContainEqual({ k: "book_appointment", status: "completed", r: "rerouted" });
+    });
+
+    forced("M2(ii): reply vs tick, the transition goes first: 0 old steps; new road active, no hold", async (lead) => {
+      await say(lead, A_TEXT); await runWorkflows(); await deliver();
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active' and routing_v2_inbound_id is distinct from '" + b + "'; commit;");
+      const before = sentTo(lead.phone).length;
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(sentTo(lead.phone).slice(before).filter((m) => /book_appointment/.test(m.body))).toHaveLength(0);
+      await expectBWon(lead, b);
+    });
+
+    forced("M3: the second text +0.4 s while the first reply is in presend, held across B's whole webhook and dispatch: no reply_skipped anywhere, B wins", async (lead) => {
+      const a = await aRoutedReplyQueued(lead);
+      const k0 = gate("outbox:presend_after_evidence", (c) => c.inboundMessageId === a);
+      const delivery = runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      await k0.reached;
+      const b = await say(lead, B_TEXT);
+      await runWorkflows();                        // B fully routed while A's reply sits in presend
+      k0.release(); await delivery;
+      await expectBWon(lead, b);
+    });
+
+    forced("M4: the new drip's step comes due before its reply is sent: the send check says reply_pending, the drip stays active, 0 drip sends; the reply goes; the next tick sends step 1", async (lead) => {
+      recipientWindow.open = false;
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(sentTo(lead.phone).map((m) => m.body)).toEqual([v2ReplyText("not_interested")]);
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(sentTo(lead.phone).map((m) => m.body).slice(1)).toEqual([expect.stringMatching(/^not_interested (one|two)\b/)]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect(await stampOf(b)).toMatchObject({ o: "auto_closed" });
+    });
+
+    forced("M5 (Jarrad Q2 default): unknown state on a reply+drip road: held nine_reply_not_sent:nine_window_unknown_state, the trigger pauses the drip held_for_person, 0 sends, in the hold list", async (lead) => {
+      await pg.query("update properties set state = '' where id = $1", [lead.propertyId]);
+      await say(lead, B_TEXT); await runWorkflows(); await deliver();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_reply_not_sent:nine_window_unknown_state" });
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "held_for_person" }]);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await count("select count(*)::int n from properties where id = $1 and needs_human_attention and not is_dnc_locked", [lead.propertyId])).toBe(1);
+    });
+
+    forced("M6: a safety hold (possible stop) lands while the newer text is held at dispatch:before_transition: transition 'held', no reply, no active drip, alerts kept, lead held", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await say(lead, "I think I'm all set");
+      const b = await say(lead, B_TEXT);
+      const t = gate("dispatch:before_transition", (c) => c.inboundMessageId === b);
+      const wb = takeWorkflow(b); const bRun = wb.fn(wb.params);
+      await t.reached;
+      const wa = takeWorkflow(a); await wa.fn(wa.params);       // the possible-stop hold commits
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      t.release(); await bRun;
+      await deliver();
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await count("select count(*)::int n from routing_v2_reply_transitions where inbound_message_id = $1 and decision->>'alerts_only_reason' = 'held'", [b])).toBe(1);
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+    });
+
+    forced("M7 (Jarrad Q1 default): an older mechanics hold, then a newer text: the newer text is routed and the hold cleared (audited mechanics_hold_superseded); its drip active", async (lead) => {
+      jevByReply = { ...RACE_JEV, "where are you located?": { where_located: 0.95 } };
+      recipientWindow.open = false;
+      await say(lead, "where are you located?"); await runWorkflows();
+      recipientWindow.open = true;
+      propertyWindow.openCalls = 1;   // open at prepare, closed at the send: a reply-only road holds
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      propertyWindow.openCalls = null;
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("mechanics");
+      const b = await say(lead, B_TEXT); await runWorkflows();
+      await expectBWon(lead, b);
+      expect(await count("select count(*)::int n from lead_events where property_id = $1 and event_type = 'ai_escalation_cleared' and payload->>'reason' = 'mechanics_hold_superseded'", [lead.propertyId])).toBe(1);
+    });
+
+    it.each([
+      ["(a) webhook killed after INSERT", {} as Record<string, unknown>, false],
+      ["(b) killed after the delayed stamp, no workflow", { processing: { aiResponder: { outcome: "delayed", workflowRunId: "dead-run", scheduledAt: "OLD" } } }, false],
+      ["(c) claim lease expired", { processing: { aiResponder: { outcome: "delayed", workflowRunId: "dead-run", scheduledAt: "NOW" } } }, true],
+    ] as const)("M8 %s: the older reply is cancelled with NO hold; the sweep then holds the dead newest text (nine_needs_person, safety), one audit row; the trigger pauses the drip; 0 sends", (_label, meta, claim) => forcedRun(async (lead) => {
+      const a = await aRoutedReplyQueued(lead);
+      const resolved = JSON.parse(JSON.stringify(meta).replace('"OLD"', JSON.stringify(new Date(Date.now() - 3600_000).toISOString())).replace('"NOW"', JSON.stringify(new Date().toISOString())));
+      const dead = await newerText(lead, resolved);
+      await pg.query("update messages set created_at = now() - interval '30 minutes' where id = $1", [a]);
+      await pg.query("update messages set created_at = now() - interval '6 minutes' where id = $1", [dead]);
+      if (claim) await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, lease_expires_at) values ($1,$2,$3,$4,'processing', now() - interval '1 hour')", [orgId, dead, lead.propertyId, lead.contactId]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });   // A's reply only (no sweep)
+      expect((await box(a)).status).toBe("cancelled");
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });                                 // the cron: sweep
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("safety");
+      expect(await auditRows(dead)).toBe(1);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+    }), 3_600_000);
+
+    it.each([["ABC", [0, 1, 2]], ["ACB", [0, 2, 1]], ["BAC", [1, 0, 2]], ["BCA", [1, 2, 0]], ["CAB", [2, 0, 1]], ["CBA", [2, 1, 0]]] as const)("M9 burst A<B<C, transitions in order %s: C applied, A and B superseded, one active = C's road, no hold", (_name, order) => forcedRun(async (lead) => {
+      const ids = [await say(lead, A_TEXT), await say(lead, B_TEXT), await say(lead, C_TEXT)];
+      const runs = ids.map((id) => takeWorkflow(id));
+      for (const i of order) await runs[i]!.fn(runs[i]!.params);
+      await settle(); await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(await stampOf(ids[2]!)).toMatchObject({ o: "auto_closed", r: "routing_v2:confirmed_owner_drip" });
+      expect((await enrollments(lead.propertyId)).filter((e) => e.status === "active")).toEqual([{ k: "confirmed_owner", status: "active", r: null }]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    }), 3_600_000);
+
+    it.each([
+      ["markPropertyNeedsAttention (app)", "app"],
+      ["routing_v2_write_hold", "write_hold"],
+      ["v2 live hold (possible stop)", "live_hold"],
+      ["webhook keyword hold", "keyword"],
+      ["the sweep", "sweep"],
+      ["a person / UI (plain SQL)", "ui"],
+    ] as const)("M10 every hold writer pauses the v2 drips in the same transaction: %s", async (_label, writer) => {
+      const lead = await raceSetup();
+      const b = await say(lead, B_TEXT); await runWorkflows(); await deliver();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      if (writer === "app") {
+        const { markPropertyNeedsAttention } = await import("./dispatch");
+        await markPropertyNeedsAttention(supabase, lead.propertyId, "nine_needs_person");
+      } else if (writer === "write_hold") {
+        await pg.query("select public.routing_v2_write_hold($1,$2,'nine_needs_person','safety')", [lead.propertyId, b]);
+      } else if (writer === "live_hold") {
+        await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+        haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+        jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+        await say(lead, "I think I'm all set"); await runWorkflows();
+      } else if (writer === "keyword") {
+        await say(lead, "can I talk to someone please"); await runWorkflows();
+      } else if (writer === "sweep") {
+        const dead = await newerText(lead);
+        await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [dead]);
+        await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      } else {
+        await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'needs_reply' where id = $1", [lead.propertyId]);
+      }
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      const drip = (await enrollments(lead.propertyId)).find((e) => e.k === "not_interested");
+      expect(drip).toMatchObject({ status: "paused" });
+      expect(["held_for_person", "inbound_reply"]).toContain(drip!.r);
+    });
+
+    // Stress §14: a person takes over between the seller's text and the routing commit.
+    // (a) the takeover's transaction starts before the transition (its DB stamp, now(), is the
+    //     transaction start, as the assignment trigger writes it) and commits after it;
+    // (b) the takeover (the real hot-lead takeover writer) commits before the transition.
+    it(`M13(a) x${RACE_REPEAT}: takeover stamped before, committed after the routing commit: no auto reply, no active drip, 0 sends`, async () => {
+      const failures: string[] = [];
+      const first = await raceSetup();
+      for (let i = 0; i < RACE_REPEAT; i++) {
+        const lead = i === 0 ? first : await addRaceLead();
+        const person = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
+        await person.connect();
+        try {
+          const b = await say(lead, A_TEXT);
+          const t = gate("dispatch:before_transition", (c) => c.inboundMessageId === b);
+          const w = takeWorkflow(b); const run = w.fn(w.params);
+          await t.reached;
+          await person.query("begin");
+          await person.query("select now()");               // the takeover's DB stamp is fixed here
+          t.release(); await run;                            // the routing commits (enrolls)
+          await person.query("update properties set last_person_takeover_at = now() where id = $1", [lead.propertyId]);
+          await person.query("commit");
+          await settle();
+          await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+          await tickDue(lead);
+          expect(sentTo(lead.phone)).toEqual([]);
+          expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+        } catch (e) {
+          failures.push(`${i}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        } finally {
+          await person.query("rollback").catch(() => {});
+          await person.end();
+          clearTestBarriers();
+        }
+      }
+      expect(failures).toEqual([]);
+    }, 900_000);
+
+    it(`M13(b) x${RACE_REPEAT}: takeover (hot-lead takeover writer) committed between the inbound and the routing: nothing enrolled, no auto reply, 0 sends`, async () => {
+      const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+      const failures: string[] = [];
+      const first = await raceSetup();
+      for (let i = 0; i < RACE_REPEAT; i++) {
+        const lead = i === 0 ? first : await addRaceLead();
+        try {
+          const b = await say(lead, A_TEXT);
+          const t = gate("dispatch:before_transition", (c) => c.inboundMessageId === b);
+          const w = takeWorkflow(b); const run = w.fn(w.params);
+          await t.reached;
+          await pauseHotBookAppointmentOnTakeover({ propertyIds: [lead.propertyId], actor: { actorType: "user", actorId: null } as never });
+          t.release(); await run;
+          await settle();
+          await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+          await tickDue(lead);
+          expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1", [lead.propertyId])).toBe(0);
+          expect(sentTo(lead.phone)).toEqual([]);
+        } catch (e) {
+          failures.push(`${i}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        } finally {
+          clearTestBarriers();
+        }
+      }
+      expect(failures).toEqual([]);
+    }, 900_000);
+
+    it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
+      const lead = await raceSetup();
+      const a = await say(lead, A_TEXT);
+      await say(lead, B_TEXT);
+      expect((await pg.query("select public.routing_v2_write_hold($1,$2,'nine_reply_not_sent:provider_failed','mechanics') as r", [lead.propertyId, a])).rows[0].r).toBe("superseded");
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    });
+
+    it(`volume (barriers off, x${RACE_REPEAT}): A's queued reply delivered while B arrives and is routed, concurrently: always B wins, never a hold`, async () => {
+      const lead0 = await raceSetup();
+      const leads = [lead0];
+      for (let i = 1; i < RACE_REPEAT; i++) leads.push(await addRaceLead());
+      const failures: string[] = [];
+      for (const lead of leads) {
+        try {
+          await aRoutedReplyQueued(lead);
+          const [, b] = await Promise.all([
+            runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 }),
+            (async () => { const id = await say(lead, B_TEXT); await runWorkflows(); return id; })(),
+          ]);
+          await expectBWon(lead, b);
+        } catch (e) {
+          failures.push(`${lead.propertyId}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    }, 600_000);
+
+    it(`volume (barriers off, x${RACE_REPEAT}): bursts of 3 dispatched in parallel: always C wins, one active, never a hold`, async () => {
+      const lead0 = await raceSetup();
+      const failures: string[] = [];
+      for (let i = 0; i < RACE_REPEAT; i++) {
+        const lead = i === 0 ? lead0 : await addRaceLead();
+        try {
+          await Promise.all([A_TEXT, B_TEXT, C_TEXT].map((t, k) => new Promise((r) => setTimeout(r, k * 30)).then(() => say(lead, t))));
+          const c = await idOf(lead, C_TEXT);
+          const batch = workflows.pending.splice(0);
+          await Promise.all(batch.map((w) => w.fn(w.params)));
+          await settle(); await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+          expect(await stampOf(c!)).toMatchObject({ r: "routing_v2:confirmed_owner_drip" });
+          expect((await enrollments(lead.propertyId)).filter((e) => e.status === "active")).toEqual([{ k: "confirmed_owner", status: "active", r: null }]);
+          expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        } catch (e) {
+          failures.push(`${lead.propertyId}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    }, 600_000);
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {
       const lead = await setup();
