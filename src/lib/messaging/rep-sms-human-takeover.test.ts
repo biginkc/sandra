@@ -445,7 +445,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
           contact_id: "contact-1",
           created_at: "2026-09-17T12:15:00.000Z",
           sent_at: "2026-09-17T12:15:00.000Z",
-          from_address: "+18164876899",
+          from_address: "+18165550144",
           status: "sent",
           metadata: { generated_by: "ai_responder_v1" },
         },
@@ -502,7 +502,7 @@ describe("Maria-through-Mel human SMS takeover", () => {
         contactId: "contact-1",
         inboundMessageId: inboundId,
         inboundReceivedAt: "2026-09-17T12:30:00.000Z",
-        inboundToNumber: "+18164876899",
+        inboundToNumber: "+18165550144",
       }),
     ).resolves.toBeNull();
   });
