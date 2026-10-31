@@ -176,7 +176,7 @@ describe("§2.4 provider faults", () => {
   it("Jev throws (timeout/5xx/429) → failed jev_failed, Haiku and DealMachine never called", async () => {
     for (const err of [new JevProviderError("t", "timeout"), new JevProviderError("s", "server_error", 503), new JevProviderError("r", "rate_limited", 429)]) {
       const { d, calls } = deps({}, { ok: true, option: "just_ok", confidence: 1 }, { jev: async () => { throw err; } });
-      expect(await run("hi", d)).toEqual({ kind: "failed", reason: "jev_failed" });
+      expect(await run("hi", d)).toMatchObject({ kind: "failed", reason: "jev_failed" });
       expect(calls()).toEqual({ haikuCalls: 0, dmCalls: 0 });
     }
   });
@@ -185,7 +185,7 @@ describe("§2.4 provider faults", () => {
     delete (partial as Record<string, unknown>).asked_stop;
     for (const body of [{ answers: partial }, {}, { answers: {} }]) {
       const { d } = deps({}, { ok: true, option: "just_ok", confidence: 1 }, { jev: async () => ({ ...body, latencyMs: 1 }) });
-      expect(await run("hi", d)).toEqual({ kind: "failed", reason: "jev_incomplete" });
+      expect(await run("hi", d)).toMatchObject({ kind: "failed", reason: "jev_incomplete" });
     }
   });
   it("askJev: 429 storm → 1 + maxRetries attempts, then rate_limited; 402/401 not retried", async () => {

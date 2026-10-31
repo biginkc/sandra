@@ -84,7 +84,7 @@ it("G4c §5.4 isolation", async () => {
   const [tNon] = await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), testRunId: RUN });
   const box1 = await reply(tNon!, "t-non");
   R.check("test-tagged reply to a non-owned number -> refused, 0 provider calls, refused_non_owned recorded, outbox row carries the tag",
-    sends(tNon!.phone) === 0 && (await refusals(tNon!.propertyId)).some((r) => r.reason === "refused_non_owned") && box1.every((b) => b.test_run_id === RUN),
+    sends(tNon!.phone) === 0 && (await refusals(tNon!.propertyId)).some((r) => r.reason === "refused_non_owned") && box1.every((b) => b.test_run_id === RUN) && box1.every((b) => b.cancel_reason === "not_sent:test_send_refused"),
     { providerCalls: sends(tNon!.phone), outbox: box1, refusals: await refusals(tNon!.propertyId) });
 
   // 2. tagged lead on an allowlisted (fake) number -> allowed.

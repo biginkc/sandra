@@ -306,6 +306,8 @@ it("G3 blast-day replay", async () => {
   const enrHist: Record<string, number> = {};
   for (const e of enr) { const k = `${e.status}:${e.ended_reason ?? ""}`; enrHist[k] = (enrHist[k] ?? 0) + 1; }
   R.line("enrollment status histogram", enrHist);
+  const pausedLeft = enr.filter((e) => e.status === "paused").length;
+  R.check("A-2: v2 drips left paused after the run = 0", pausedLeft === 0, { pausedLeft, byPauseReason: (await q("select coalesce(pause_reason,'-') r, count(*)::int n from sequence_enrollments where property_id = any($1) and status = 'paused' group by 1 order by 2 desc")) });
 
   // Stamped / decided / dead-lettered with a human flag.
   const propRows = await q("select id, needs_human_attention, last_ai_escalation_reason from properties where id = any($1)");
@@ -420,6 +422,7 @@ it("G3 blast-day replay", async () => {
   R.line("spend ledger rows by provider/outcome (A-6):", led);
   const ledN = (p: string) => led.filter((r) => r.provider === p).reduce((a, r) => a + r.n, 0);
   const haikuDecisions = decisions.filter((d) => d.haiku && (d.haiku as { asked?: boolean }).asked !== false).length;
-  R.check("A-6: one Jev ledger row per v2 classification (decided + failed)", ledN("jev") === decisions.length, { ledgerJev: ledN("jev"), v2Classifications: decisions.length, jevV2HttpAttempts: jevV2, jevNineQuestionHttpCalls_unledgered: jevNine });
+  R.check("A-6 (fdd5e8c82): one Jev ledger row per Jev v2 HTTP attempt incl. retries", ledN("jev") === jevV2, { ledgerJev: ledN("jev"), jevV2HttpAttempts: jevV2, v2Classifications: decisions.length, jevAbortedByClientTimeout: stubs.aborted, jevNineQuestionHttpCalls: jevNine });
+  R.check("A-3: every Haiku request uses structured outputs (json_schema) + max_tokens 200", stubs.haikuShapeBad === 0 && stubs.haikuShapeOk > 0, { ok: stubs.haikuShapeOk, bad: stubs.haikuShapeBad });
   R.check("A-6: one Haiku ledger row per Haiku consultation", ledN("haiku") === haikuDecisions, { ledgerHaiku: ledN("haiku"), decisionsWithHaiku: haikuDecisions, haikuHttpAttempts: stubs.count("haiku") });
 });

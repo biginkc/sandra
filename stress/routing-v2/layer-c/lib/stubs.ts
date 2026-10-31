@@ -69,6 +69,8 @@ export class ProviderStubs {
   jevOverride: ((reply: string) => Partial<Probs> | null) | null = null;
   haikuOverride: ((thread: string) => { status: number; text?: string } | null) | null = null;
   haikuDelayMs = 0;
+  haikuShapeOk = 0;
+  haikuShapeBad = 0;
   /** DealMachine: force a status for every call (e.g. 429 storm) or an unmatched body. */
   dmForce: { status?: number; unmatched?: boolean } = {};
   latencyScale = 1; // compress the 25 s latency window
@@ -170,7 +172,8 @@ export class ProviderStubs {
 
   private async anthropic(raw: string): Promise<Response> {
     const t0 = Date.now();
-    const body = JSON.parse(raw) as { model?: string; messages?: Array<{ content: string }> };
+    const body = JSON.parse(raw) as { model?: string; max_tokens?: number; output_config?: { format?: { type?: string } }; messages?: Array<{ content: string }> };
+    if (body.model === "claude-haiku-5-5") { if (body.max_tokens === 200 && body.output_config?.format?.type === "json_schema") this.haikuShapeOk++; else this.haikuShapeBad++; }
     if (body.model !== "claude-haiku-5-5") {
       this.calls.push({ provider: "llm", at: t0, status: 500, key: String(body.model), ms: 0 });
       return this.json(500, { error: "stress: LLM not stubbed" });
