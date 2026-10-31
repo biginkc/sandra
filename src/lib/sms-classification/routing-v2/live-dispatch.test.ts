@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { vi } from "vitest";
 import { askJev } from "../providers/jev-gateway";
-import { liveHoldReason, liveStepFor, recordV2ModelSpend, storedFinalDecision, storedV2Decision, V2_LIVE_JEV_POLICY, type StoredLiveEvidence } from "./live-dispatch";
+import { liveHoldReason, liveStepFor, recordRoutingV2Audit, recordV2ModelSpend, storedFinalDecision, storedV2Decision, V2_LIVE_JEV_POLICY, type StoredLiveEvidence } from "./live-dispatch";
 
 const base: StoredLiveEvidence = {
   status: "decided", org_id: "o", property_id: "p", road: "who_reply_drip", jev_road: "who_reply_drip",
@@ -67,5 +67,33 @@ describe("A-6: Jev / Haiku spend ledger rows", () => {
     const report = vi.fn();
     await recordV2ModelSpend({ rpc: async () => ({ error: { message: "down" } }) } as never, ctx, { kind: "failed", reason: "jev_failed" }, report);
     expect(report).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AUDIT: one v2 audit row per inbound", () => {
+  const P = "11111111-1111-4111-8111-111111111111";
+  function fake(flags: unknown, insertError: { code?: string; message: string } | null = null) {
+    const inserts: Array<Record<string, unknown>> = [];
+    const db = {
+      from: (t: string) => ({
+        select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { routing_v2_flags: flags }, error: null }) }), maybeSingle: async () => ({ data: t === "properties" ? { org_id: "o", decision_context_revision: 4 } : { routing_v2_flags: flags }, error: null }) }) }),
+        insert: async (r: Record<string, unknown>) => { inserts.push({ t, ...r }); return { error: insertError }; },
+      }),
+    };
+    return { db: db as never, inserts };
+  }
+  it("flags off: nothing written", async () => {
+    const { db, inserts } = fake({});
+    expect(await recordRoutingV2Audit(db, { orgId: "o", propertyId: P, inboundMessageId: "i", note: "stop_keyword:x" })).toBe("skipped");
+    expect(inserts).toEqual([]);
+  });
+  it("v2-live property the engine never decided: one not_routed row with the reason", async () => {
+    const { db, inserts } = fake({ questions_live: true, canary_property_ids: [P] });
+    expect(await recordRoutingV2Audit(db, { orgId: "o", propertyId: P, inboundMessageId: "i", note: "dispatch:skipped" })).toBe("recorded");
+    expect(inserts).toEqual([expect.objectContaining({ t: "routing_v2_live_decisions", status: "not_routed", failure_reason: "dispatch:skipped", inbound_message_id: "i", expected_revision: 4 })]);
+  });
+  it("already decided by the engine (unique inbound): exists, untouched", async () => {
+    const { db } = fake({ questions_live: true, canary_property_ids: [P] }, { code: "23505", message: "duplicate" });
+    expect(await recordRoutingV2Audit(db, { orgId: "o", propertyId: P, inboundMessageId: "i", note: "dispatch:auto_closed" })).toBe("exists");
   });
 });

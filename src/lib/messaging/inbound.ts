@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import {
   createClient as createSupabaseClient,
   type SupabaseClient,
@@ -75,6 +75,7 @@ import {
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
 import { scheduleRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
+import { recordRoutingV2Audit } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
@@ -1854,6 +1855,13 @@ function scheduleShadowAfterStamp(
   input: AiDispatchInput,
   liveOutcome: AiDispatchOutcome["outcome"],
 ): void {
+  // Routing v2 AUDIT: the live path is done with this inbound; record why if v2 did not decide it.
+  scheduleRoutingV2Audit(supabase, {
+    propertyId: input.propertyId,
+    inboundMessageId: input.inboundMessageId ?? null,
+    conversationId: input.conversationId ?? null,
+    note: `dispatch:${liveOutcome}`,
+  });
   scheduleRoutingV2Shadow(
     supabase,
     {
@@ -1965,6 +1973,26 @@ async function recordKeywordExitRun(
     });
   } catch {
     // Evidence is best-effort; never affect message handling.
+  }
+  // Routing v2 AUDIT: a keyword exit never reaches the v2 engine; one not_routed row per inbound.
+  scheduleRoutingV2Audit(supabase, {
+    orgId: args.orgId,
+    propertyId: args.insertOutcome.propertyId ?? null,
+    inboundMessageId: args.insertOutcome.messageId ?? null,
+    conversationId: args.insertOutcome.conversationId ?? null,
+    note: `${args.gate}:${args.reason}`,
+  });
+}
+
+/** Routing v2 AUDIT, after the response (never delays or alters the live path). */
+function scheduleRoutingV2Audit(supabase: SupabaseClient<Database>, input: Parameters<typeof recordRoutingV2Audit>[1]): void {
+  const task = async () => {
+    await recordRoutingV2Audit(supabase, input, (e) => reportError(e, { tags: { surface: "routing_v2_audit" } }));
+  };
+  try {
+    after(task);
+  } catch {
+    void task();
   }
 }
 
