@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
-import { assertSendAllowed, decideSendAllowed, normalizeDestination, parseTestDestAllowlist, REFUSED_NON_OWNED } from "./send-allowlist";
+import { assertSendAllowed, checkSendAllowed, decideSendAllowed, normalizeDestination, parseTestDestAllowlist, REFUSED_NON_OWNED } from "./send-allowlist";
 
 // Fictional 555 numbers only; real owned numbers are never committed.
 const OWNED = "+18165550142";
@@ -77,10 +77,21 @@ describe("§5.4 assertSendAllowed (boundary)", () => {
   it("database without the column yet: untagged", async () => {
     expect(await assertSendAllowed(fakeDb({ error: { code: "42703", message: "column properties.test_run_id does not exist" } }).db, { ...base, destination: "+18163321021" })).toBe(true);
   });
-  it("a taint lookup failure fails closed while a test run is active (or the item is tagged); never changes production", async () => {
-    expect(await assertSendAllowed(fakeDb({ error: { message: "timeout" } }).db, { ...base, destination: OWNED })).toBe(false);
-    expect(await assertSendAllowed(fakeDb({ error: { message: "timeout" } }).db, { ...base, destination: OWNED, env: {}, testRunId: "run-1" })).toBe(false);
-    expect(await assertSendAllowed(fakeDb({ error: { message: "timeout" } }).db, { ...base, destination: "+18163321021", env: {} })).toBe(true);
+  it("a taint lookup failure fails closed even with no test run active (production too); retryable, no refusal row", async () => {
+    const timeout = () => fakeDb({ error: { message: "timeout" } });
+    const prod = timeout();
+    expect(await checkSendAllowed(prod.db, { ...base, destination: "+18163321021", env: {} })).toEqual({ allowed: false, why: "taint_lookup_failed" });
+    expect(prod.inserts).toEqual([]);
+    expect(await assertSendAllowed(timeout().db, { ...base, destination: OWNED })).toBe(false);
+  });
+  it("a taint lookup failure on a tagged work item: the item's own tag decides (owned allowed, other refused + recorded)", async () => {
+    expect(await checkSendAllowed(fakeDb({ error: { message: "timeout" } }).db, { ...base, destination: OWNED, testRunId: "run-1" })).toEqual({ allowed: true });
+    const other = fakeDb({ error: { message: "timeout" } });
+    expect(await checkSendAllowed(other.db, { ...base, destination: "+18163321021", testRunId: "run-1" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
+    expect(other.inserts).toEqual([expect.objectContaining({ table: "test_send_refusals", test_run_id: "run-1", destination_last4: "1021" })]);
+  });
+  it("checkSendAllowed names a confirmed refusal refused_non_owned (the terminal kind)", async () => {
+    expect(await checkSendAllowed(fakeDb({ data: { test_run_id: "run-1" } }).db, { ...base, destination: "+18163321021" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
   });
 });
 

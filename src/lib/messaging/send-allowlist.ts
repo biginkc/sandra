@@ -16,6 +16,8 @@ import type { Database } from "@/lib/supabase/types";
  * a US E.164 number are ignored (they can never match), never widened.
  */
 export const REFUSED_NON_OWNED = "refused_non_owned" as const;
+/** The terminal dispatch outcome of a §5.4 refusal: never retried, one refusal row. */
+export const TEST_SEND_REFUSED = "test_send_refused" as const;
 
 /** Strict US E.164: strips spaces, dashes, dots and parentheses; +1 default; letters / short codes rejected. */
 export function normalizeDestination(raw: string | null | undefined): string | null {
@@ -90,11 +92,25 @@ export async function loadLeadTestRunId(
   }
 }
 
+export type SendAllowCheck =
+  | { allowed: true }
+  /** A confirmed test-tagged send to a non-owned number: terminal, never retried. */
+  | { allowed: false; why: typeof REFUSED_NON_OWNED }
+  /** The lead's test tag could not be read: refused now (fail closed), retryable later. */
+  | { allowed: false; why: "taint_lookup_failed" };
+
 /**
  * The boundary check, called immediately before the provider submission. Returns true when the
  * send may proceed. A refusal is recorded (test_send_refusals; last 4 digits only) and reported.
  */
 export async function assertSendAllowed(
+  supabase: SupabaseClient<Database>,
+  input: Parameters<typeof checkSendAllowed>[1],
+): Promise<boolean> {
+  return (await checkSendAllowed(supabase, input)).allowed;
+}
+
+export async function checkSendAllowed(
   supabase: SupabaseClient<Database>,
   input: {
     orgId: string | null;
@@ -106,18 +122,17 @@ export async function assertSendAllowed(
     messageId?: string | null;
     env?: Record<string, string | undefined>;
   },
-): Promise<boolean> {
+): Promise<SendAllowCheck> {
   const env = input.env ?? process.env;
-  // A test run is active in this environment only while TEST_DEST_ALLOWLIST is configured.
-  const testRunActive = String(env.TEST_DEST_ALLOWLIST ?? "").trim() !== "";
   const lead = await loadLeadTestRunId(supabase, input.propertyId);
-  if (!lead.ok) {
-    reportError(new Error(`send allowlist taint lookup failed: ${lead.error}`), {
-      tags: { surface: "send_allowlist" }, extra: { propertyId: input.propertyId },
+  if (!lead.ok && !input.testRunId?.trim()) {
+    // Fail closed (stress review): a lead whose test tag cannot be read might be tagged, so it
+    // is not sent now, test run active or not. Not a confirmed test send, so no refusal row and
+    // the caller may retry later. A missing column is "untagged" (handled in loadLeadTestRunId).
+    reportError(new Error(`send allowlist taint lookup failed; send refused: ${lead.error}`), {
+      tags: { surface: "send_allowlist", reason: "taint_lookup_failed" }, extra: { propertyId: input.propertyId },
     });
-    // Fail closed while a test run is active (the lead might be tagged); with no test run in
-    // this environment a lookup hiccup never changes a production send.
-    if (testRunActive || input.testRunId?.trim()) return false;
+    return { allowed: false, why: "taint_lookup_failed" };
   }
   const testRunId = input.testRunId?.trim() || (lead.ok ? lead.testRunId : null);
   const decision = decideSendAllowed({
@@ -125,21 +140,30 @@ export async function assertSendAllowed(
     destination: input.destination,
     allowlist: parseTestDestAllowlist(env.TEST_DEST_ALLOWLIST),
   });
-  if (decision.allowed) return true;
+  if (decision.allowed) return { allowed: true };
+  await recordRefusal(supabase, input, testRunId, decision.reason);
+  return { allowed: false, why: REFUSED_NON_OWNED };
+}
+
+async function recordRefusal(
+  supabase: SupabaseClient<Database>,
+  input: { orgId: string | null; propertyId: string; destination: string; origin: string; messageId?: string | null },
+  testRunId: string | null,
+  why: typeof REFUSED_NON_OWNED,
+): Promise<void> {
   const digits = (input.destination ?? "").replace(/\D/g, "");
   const last4 = digits.slice(-4) || null;
   try {
     const { error } = await (supabase as unknown as Loose).from("test_send_refusals").insert({
       org_id: input.orgId, property_id: input.propertyId, test_run_id: testRunId,
-      destination_last4: last4, origin: input.origin, reason: decision.reason, message_id: input.messageId ?? null,
+      destination_last4: last4, origin: input.origin, reason: REFUSED_NON_OWNED, message_id: input.messageId ?? null,
     });
     if (error) throw new Error(error.message);
   } catch (e) {
     reportError(e, { tags: { surface: "send_allowlist_record" }, extra: { propertyId: input.propertyId } });
   }
-  reportError(new Error(`${REFUSED_NON_OWNED}: test-tagged send to a non-allowlisted number`), {
+  reportError(new Error(`${why}: test-tagged send to a non-allowlisted number`), {
     tags: { surface: "send_allowlist", reason: REFUSED_NON_OWNED },
     extra: { propertyId: input.propertyId, testRunId, destinationLast4: last4, origin: input.origin },
   });
-  return false;
 }

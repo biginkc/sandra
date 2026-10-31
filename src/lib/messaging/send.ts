@@ -1,7 +1,7 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
-import { assertSendAllowed } from "./send-allowlist";
+import { checkSendAllowed, TEST_SEND_REFUSED } from "./send-allowlist";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -309,7 +309,13 @@ export type SendSmsOutcome =
    * uniqueness-bearing stamp released (see `retireRefusedRow`): the caller must
    * not retry over it.
    */
-  | { status: "blocked_before_provider"; messageId: string; retired: boolean }
+  | {
+      status: "blocked_before_provider";
+      messageId: string;
+      retired: boolean;
+      /** §5.4: a confirmed test-tagged send to a non-owned number. Terminal: never retry. */
+      refusal?: typeof TEST_SEND_REFUSED;
+    }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -1066,21 +1072,24 @@ async function sendSmsToContactInner(
     });
     // §5.4 final send boundary: a test-tagged lead / work item may reach only an owned
     // (TEST_DEST_ALLOWLIST) number. No test tag = unchanged. Refused = never reaches the provider.
-    if (!(await assertSendAllowed(supabase, {
+    const allow = await checkSendAllowed(supabase, {
       orgId: propertyResult.data.org_id,
       propertyId: input.propertyId,
       destination: destination.phone,
       origin: input.origin,
       testRunId: input.testRunId ?? null,
       messageId: pending.id,
-    }))) {
+    });
+    if (!allow.allowed) {
       const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
       if (input.repSmsReceipt) {
         await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
-          providerError: "refused_non_owned",
+          providerError: allow.why,
         });
       }
-      return { status: "blocked_before_provider", messageId: pending.id, retired };
+      return allow.why === "refused_non_owned"
+        ? { status: "blocked_before_provider", messageId: pending.id, retired, refusal: TEST_SEND_REFUSED }
+        : { status: "blocked_before_provider", messageId: pending.id, retired };
     }
     if (input.beforeProviderSubmit) {
       let proceed = false;
@@ -2115,20 +2124,25 @@ async function releaseQueuedMessageInner(
       propertyId: msg.property_id, body: claimed.body,
     });
     // §5.4 final send boundary (queued release path): same allowlist rule as an immediate send.
-    if (msg.property_id && !(await assertSendAllowed(supabase, {
-      orgId: msg.org_id ?? null,
-      propertyId: msg.property_id,
-      destination: msg.to_address ?? "",
-      origin: "queued_release",
-      messageId: msg.id,
-    }))) {
+    const allow = msg.property_id
+      ? await checkSendAllowed(supabase, {
+        orgId: msg.org_id ?? null,
+        propertyId: msg.property_id,
+        destination: msg.to_address ?? "",
+        origin: "queued_release",
+        messageId: msg.id,
+      })
+      : { allowed: true as const };
+    if (!allow.allowed) {
       const { error: refuseError } = await supabase
         .from("messages")
-        .update({ status: "failed", failed_at: new Date().toISOString(), error_message: "refused_non_owned" })
+        .update({ status: "failed", failed_at: new Date().toISOString(), error_message: allow.why })
         .eq("id", msg.id)
         .eq("status", "pending");
       if (refuseError) return { status: "db_error", error: refuseError.message };
-      return { status: "blocked_before_provider", messageId: msg.id, retired: true };
+      return allow.why === "refused_non_owned"
+        ? { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED }
+        : { status: "blocked_before_provider", messageId: msg.id, retired: true };
     }
     const result = await provider.sendSms({
       to: msg.to_address,

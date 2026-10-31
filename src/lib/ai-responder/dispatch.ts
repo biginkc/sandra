@@ -19,6 +19,7 @@ import {
   checkRecipientQuietHours,
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { isSuppressed, shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
@@ -6560,6 +6561,13 @@ async function deliverResponderMessage(
   });
 
   if (sendResult.status === "blocked_before_provider") {
+    if (sendResult.refusal === TEST_SEND_REFUSED) {
+      // §5.4: a test-tagged reply to a number the business does not own. Terminal on every
+      // path: never retried (one message row, one refusal row), never dead-lettered or flagged.
+      guard();
+      await trace(supabase, { kind: "gate", name: TEST_SEND_REFUSED, result: "block" }, args.runContext);
+      return { outcome: "skipped", reason: TEST_SEND_REFUSED };
+    }
     if (sendResult.retired === false) {
       // The refused row could not be retired: it still carries the stamp that
       // owns this inbound, so a retry would collide with it. Never retry over

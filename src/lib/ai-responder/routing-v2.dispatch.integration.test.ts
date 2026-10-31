@@ -258,12 +258,18 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
       await settle();
       await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      // Terminal: a second (and third) consumer pass never retries it.
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
       expect(sentTo(lead.phone)).toHaveLength(0);
-      const { rows: [box] } = await pg.query("select test_run_id, status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      const { rows: [box] } = await pg.query("select test_run_id, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
       expect(box.test_run_id).toBe("stress-run-1"); // taint reached the outbox row
-      expect(box.status).not.toBe("sent");
-      const { rows: [refusal] } = await pg.query("select reason, destination_last4 from test_send_refusals where property_id = $1", [lead.propertyId]);
-      expect(refusal).toEqual({ reason: "refused_non_owned", destination_last4: lead.phone.slice(-4) });
+      expect(box).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:test_send_refused" });
+      const { rows: refusals } = await pg.query("select reason, destination_last4 from test_send_refusals where property_id = $1", [lead.propertyId]);
+      expect(refusals).toEqual([{ reason: "refused_non_owned", destination_last4: lead.phone.slice(-4) }]);
+      // One refused message row (never re-created by a retry), never sent.
+      expect(await count("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and body = $2 and status = 'failed'", [lead.propertyId, V2_REPLY_TEXTS.text_only])).toBe(1);
+      expect(await count("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and body = $2", [lead.propertyId, V2_REPLY_TEXTS.text_only])).toBe(1);
     });
 
     it("the outbox row's own tag lost by a bug: the lead's tag still refuses it", async () => {
