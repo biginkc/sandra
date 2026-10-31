@@ -9,6 +9,16 @@ import { loadReplay, ProviderStubs } from "./lib/stubs";
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
+// F6 parking: dispatch kicks an inline outbox consumer through next/server after() (falling back to a
+// detached promise outside a request). That consumer raced the test's own consumer and was caught
+// mid-send ("claimed, never sent"). Only while PARK_AFTER.on is set, after() tasks are dropped, i.e. the
+// inline kick is lost and the cron consumer (the test's call) is the one that delivers. Otherwise the
+// mock throws exactly as after() does outside a request scope, so every other lane is unchanged.
+const PARK_AFTER = vi.hoisted(() => ({ on: false, dropped: 0 }));
+vi.mock("next/server", async (o) => ({
+  ...((await o()) as object),
+  after: (_task: unknown) => { if (PARK_AFTER.on) { PARK_AFTER.dropped++; return; } throw new Error("after() outside a request scope (stress mock)"); },
+}));
 
 /**
  * F1 fence race: a hold committed between the outbox authorize step and the provider fence (real path; the app's own
@@ -140,7 +150,7 @@ it(`F1 / F2 x${N}`, async () => {
 /**
  * F4-F7 baselines (round-14 queue). Hooks: F4/F7 = the app's own barrier "dispatch:before_transition" (throws = crash
  * after the v2 decision row is persisted, before transition/hold); F5 = "outbox:before_hold" (throws = crash after
- * routing_v2_mark_outbox_not_sent committed the cancel, before writeV2Hold); F6 = vi fake Date only (app clock), the row
+ * routing_v2_mark_outbox_not_sent committed the cancel, before writeV2Hold); F6 = vi fake Date (whole app clock) around the consumer call only, inline after() consumer parked, the row
  * aged by backdating routing_v2_outbox.created_at in SQL. Ages of the crashed claim/inbound for the sweep are backdated
  * in SQL (DB clock untouched). Existing fixture texts only.
  */
@@ -233,28 +243,35 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
     let pass = 0; const modes: Record<string, number> = {}; let total = 0;
     for (let i = 0; i < N; i++) {
       const l = await fresh();
-      const fired = 0;
       // Park the queued reply: deliver the text and let its dispatch finish, but run no outbox consumer.
-      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle();
+      PARK_AFTER.on = true; const dropped0 = PARK_AFTER.dropped;
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); await pause(300);
+      PARK_AFTER.on = false; const parked = PARK_AFTER.dropped - dropped0;
       const before = (await pg.query("select id, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at desc limit 1", [l.propertyId])).rows[0];
       const s0 = sends(l.phone);
       await pg.query("update routing_v2_outbox set created_at = now() - make_interval(secs => $2), status = case when status = 'claimed' then 'queued' else status end where id = $1", [before?.id, Math.round(sc.ageH * 3600)]);
       const ready = (await pg.query("select status from routing_v2_outbox where id = $1", [before?.id])).rows[0];
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now() + sc.skewH * 3600_000);
-      let err: string | null = null;
-      try { await runRoutingV2OutboxReplies(db, { propertyId: l.propertyId, limit: 5 }); } catch (e) { err = String(e); }
+      // App clock skew = the whole app process's clock (a server whose clock is off): vi fake Date for
+      // the consumer call only. The inline after() consumer is parked above, so only this consumer runs.
+      // (runRoutingV2OutboxReplies opts.now is not threaded into deliverRoutingV2OutboxReply's expiry
+      // read at a0c9, so the seam alone would not skew the expiry decision.)
+      const skewMs = sc.skewH * 3600_000;
+      let err: string | null = null; let res = "-";
+      vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+      vi.setSystemTime(Date.now() + skewMs);
+      try { const out = await runRoutingV2OutboxReplies(db, { propertyId: l.propertyId, limit: 5 }); res = out.results.map((x) => JSON.stringify(x.result)).join("|") || "none"; } catch (e) { err = String(e); }
       vi.useRealTimers();
       await assertClockAligned(pg, FIXTURE_ZONES);
       const after = (await pg.query("select status, cancel_reason, hold_pending from routing_v2_outbox where id = $1", [before?.id])).rows[0];
       const p = await prop(l.propertyId);
       const s = sends(l.phone) - s0; total += s;
       const expired = after?.status === "cancelled" && /expired/.test(after?.cancel_reason ?? "");
-      const ok = before?.status === "pending" && (sc.wantExpire ? expired && after.hold_pending === true && s === 0 : !expired);
+      const sentOk = after?.status === "sent" && s === 1;
+      const ok = parked >= 1 && before?.status === "pending" && (sc.wantExpire ? expired && after.hold_pending === true && s === 0 : sentOk);
       if (ok) pass++;
-      tally(modes, `${ok ? "PASS" : "FAIL"} parkBarrier=${fired} before=${before?.status}:${before?.cancel_reason ?? ""} ready=${ready?.status} err=${err ? sh(err).slice(0, 60) : "n"} after=${after?.status}:${after?.cancel_reason ?? ""}:hold_pending=${after?.hold_pending} hold=${p.nh ? p.r : "-"} sends=${s}`);
+      tally(modes, `${ok ? "PASS" : "FAIL"} parkedInlineKicks=${parked} before=${before?.status}:${before?.cancel_reason ?? ""} ready=${ready?.status} consumer=${res} err=${err ? sh(err).slice(0, 60) : "n"} after=${after?.status}:${after?.cancel_reason ?? ""}:hold_pending=${after?.hold_pending} hold=${p.nh ? p.r : "-"} sends=${s}`);
     }
-    R2.line(`${verdict(pass)} F6${sc.name} DB age ${sc.ageH} h, app clock ${sc.skewH > 0 ? "+" : ""}${sc.skewH} h -> ${sc.wantExpire ? "must expire + hold_pending" : "must NOT expire"}: ${pass}/${N}; sends ${total}`);
+    R2.line(`${verdict(pass)} F6${sc.name} DB age ${sc.ageH} h, app clock ${sc.skewH > 0 ? "+" : ""}${sc.skewH} h -> ${sc.wantExpire ? "must expire + hold_pending, 0 sends" : "must NOT expire: sent once"}: ${pass}/${N}; sends ${total}`);
     R2.line("   modes", modes);
   }
   // F7: crash after decision persist; sweep; a person dismisses through fn_resolve_hold (the app's clear path); new ordinary text routes normally.
