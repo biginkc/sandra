@@ -8700,6 +8700,7 @@ async function runRoutingV2LiveStepInner(
     { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision },
     classification,
   );
+  await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });
   // A duplicate never acts on this run's classification: only the stored original does.
   const evidence = recorded === "failed" ? null : await readLiveV2Evidence(supabase, inboundMessageId);
   await trace(supabase, {
@@ -9035,6 +9036,9 @@ async function routingV2PropertyValue(
   );
 }
 
+/** The DB-clock age check could not be read: wait (no claim), never send (a wait, not a hold). */
+const V2_OUTBOX_EXPIRY_UNREADABLE = "expiry_unreadable";
+
 /** A queued v2 reply older than this is never sent late; a person looks instead. */
 export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
 
@@ -9068,8 +9072,20 @@ export async function deliverRoutingV2OutboxReply(
   };
   // A-2 F2: a reply the seller did not get is a hold about our own reply (mechanics): written
   // only if no newer seller text exists; the newer text is routed by itself.
-  const holdFor = async (why: string) => {
-    await writeV2Hold(supabase, row.property_id, row.inbound_message_id, `nine_reply_not_sent:${why}`, "mechanics");
+  // Astra review of a0c905d42390 (P1 #2): the result is never discarded. A hold that cannot be
+  // written leaves the row's hold_pending set (the cron retries it; the drip check keeps the drip
+  // waiting meanwhile) and pauses this property's v2 drips now (fail closed).
+  const holdFor = async (why: string): Promise<boolean> => {
+    const r = await writeV2Hold(supabase, row.property_id, row.inbound_message_id, `nine_reply_not_sent:${why}`, "mechanics");
+    if (r === "error") {
+      await pauseV2DripsFailClosed(supabase, row.property_id);
+      return false;
+    }
+    const { error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.id });
+    if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_hold_written" }, extra: { outboxId: row.id } });
+    }
+    return true;
   };
   const intent: V2OutboxIntent = {
     id: row.id, orgId: row.org_id, propertyId: row.property_id, inboundMessageId: row.inbound_message_id,
@@ -9089,12 +9105,19 @@ async function deliverRoutingV2OutboxIntent(
   row: RoutingV2OutboxRow,
   supabase: SupabaseClient<Database>,
   rpcText: (fn: string, args: Record<string, unknown>) => Promise<string>,
-  holdFor: (why: string) => Promise<void>,
+  holdFor: (why: string) => Promise<boolean>,
   now: () => number,
 ): Promise<V2OutboxResult> {
   return deliverV2Outbox(intent, {
     async prepare() {
-      if (now() - Date.parse(row.created_at) > ROUTING_V2_REPLY_MAX_AGE_MS) return { kind: "refused", reason: V2_OUTBOX_REASON.expired };
+      // Astra review of a0c905d42390 (P2 #3): the age is decided on the DB clock (the final fence
+      // enforces it too). Only a database without the function falls back to the app clock.
+      const { data: expiredData, error: expiredError } = await (supabase as unknown as LooseRpc).rpc("routing_v2_outbox_expired", { p_outbox_id: row.id });
+      const expired = expiredError
+        ? (/PGRST202|42883|does not exist|Could not find/i.test(expiredError.message) ? now() - Date.parse(row.created_at) > ROUTING_V2_REPLY_MAX_AGE_MS : null)
+        : expiredData === true;
+      if (expired === null) return { kind: "wait", reason: V2_OUTBOX_EXPIRY_UNREADABLE };
+      if (expired) return { kind: "refused", reason: V2_OUTBOX_REASON.expired };
       const key = row.payload.key;
       if (typeof key !== "string") return { kind: "refused", reason: V2_OUTBOX_REASON.malformedIntent };
       const { data: msg } = await supabase
@@ -9184,18 +9207,28 @@ async function deliverRoutingV2OutboxIntent(
       // pending / scheduled (or already handled it) is not a failure; that dispatch routes it, and
       // a hold here would make it exit already_terminal. A newer text whose handler ended without
       // handling it, or never started (webhook died after the insert), still holds (review M-1).
+      // Astra review of a0c905d42390 (P1 #2): the cancel itself decided the handoff, atomically:
+      // "ok_no_hold" = overtaken by a newer text (A-2 F1) or a mechanics no-op while this inbound's
+      // drip runs (A-2 C1); "ok" = cancelled with hold_pending (the drip waits until the hold lands).
+      if (marked === "ok_no_hold") return;
       if (marked !== "ok") return;
-      // A-2 F1: overtaken by a newer seller text = cancelled, nothing more (never a hold).
+      // A database still on the 330000 body returns plain "ok" for every cancel: keep its checks.
       if (isV2SupersededReason(reason)) return;
       await testBarrier("outbox:before_hold", { propertyId: row.property_id, inboundMessageId: row.inbound_message_id });
-      // A-2 C1: a mechanics no-op (a repeat template we never resend, a window that closed, our
-      // own older auto reply already went out) on a road whose v2 drip for THIS inbound is
-      // running is not a person case: the drip is the outcome. Reply-only roads have no such
-      // drip and still hold. The row stays cancelled with its reason (the record).
       if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return;
       await holdFor(reason.replace(/\s+/g, "_"));
     },
   });
+}
+
+/** Fail closed: every active v2 drip of the property is paused for a person (best effort, reported). */
+async function pauseV2DripsFailClosed(supabase: SupabaseClient<Database>, propertyId: string): Promise<void> {
+  const { error } = await (supabase as unknown as {
+    from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } } } };
+  }).from("sequence_enrollments")
+    .update({ status: "paused", pause_reason: "held_for_person", updated_at: new Date().toISOString() })
+    .eq("property_id", propertyId).eq("routing_v2_engine", "v2").eq("status", "active");
+  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_fail_closed_pause" }, extra: { propertyId } });
 }
 
 /** A queued v2 reply cancelled because something newer overtook it (the send gate's reasons). */
@@ -9431,6 +9464,8 @@ export async function runRoutingV2OutboxReplies(
         : await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
       if (!ok) {
         // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
+        // Astra review of a0c905d42390 (P1 #2): a hold that cannot be written never lets the drip go.
+        await pauseV2DripsFailClosed(supabase, row.property_id);
         if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
           reportError(new Error("routing v2 outbox hold keeps failing"), {
             tags: { surface: "routing_v2_outbox_holds" },
