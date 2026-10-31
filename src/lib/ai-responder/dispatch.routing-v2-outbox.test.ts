@@ -14,7 +14,7 @@ vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   checkRecipientQuietHours: () => (h.closed ? { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" } : { ok: true, state: "MO", localTime: "12:00", florida: false }),
 }));
 
-import { deliverRoutingV2OutboxReply, ROUTING_V2_REPLY_MAX_AGE_MS, routingV2OutboxHoldReason, runRoutingV2OutboxReplies } from "./dispatch";
+import { deliverRoutingV2OutboxReply, isV2SupersededReason, ROUTING_V2_REPLY_MAX_AGE_MS, routingV2OutboxHoldReason, runRoutingV2OutboxReplies } from "./dispatch";
 
 const ROW = {
   id: "0b8f3c1e-6a2b-4c3d-8e4f-5a6b7c8d9e0f", org_id: "org1", property_id: "p1", inbound_message_id: "in1",
@@ -111,6 +111,16 @@ describe("routing v2 outbox reply consumer", () => {
     const { client, updates } = fakeSupabase({ routing_v2_mark_outbox_not_sent: "already_sent" });
     expect(await deliverRoutingV2OutboxReply(client, ROW)).toEqual({ kind: "skipped", reason: "reply_text_not_approved" });
     expect(updates).toEqual([]);
+  });
+});
+
+describe("stress A-2 round 2: an overtaken reply is not a failure", () => {
+  it("only the send gate's supersession reasons skip the hold (and only with a newer seller text: E2E)", () => {
+    expect(isV2SupersededReason("superseded_before_send")).toBe(true);
+    expect(isV2SupersededReason("superseded_by_newer_inbound")).toBe(true);
+    for (const r of ["superseded_by_broadcast", "provider_failed", "test_send_refused", "flag_off", "send_lease_lost"]) {
+      expect(isV2SupersededReason(r)).toBe(false);
+    }
   });
 });
 

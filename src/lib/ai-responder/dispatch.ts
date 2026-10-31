@@ -124,7 +124,8 @@ import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
-import { classifyV2, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
+import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
+import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
 import { isV2Eligible, readRoutingV2Flags, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import {
@@ -4735,7 +4736,13 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  const plan = skipPlanFor(decision, "presend")!;
+  const basePlan = skipPlanFor(decision, "presend")!;
+  // Stress A-2 (round 2): a queued routing v2 reply overtaken by a newer seller text (rule 1) is
+  // only cancelled. The newer text is routed by its own v2 dispatch; a person hold here would
+  // make that dispatch exit already_terminal and leave the drip paused.
+  const plan = args.routingV2OutboxId && decision.rule === 1
+    ? { ...basePlan, flagReason: null }
+    : basePlan;
   guard();
   await trace(
     supabase,
@@ -8518,6 +8525,8 @@ export async function runRoutingV2LiveStep(
   const expectedRevision = revisionRow.decision_context_revision;
 
   let classification: Exclude<V2Classification, { kind: "off" }>;
+  // Jev attempts actually made, for the spend ledger even if something after Jev throws.
+  let jevAttempts: readonly JevAttemptOutcome[] = [];
   try {
     const { data: source } = await supabase.from("messages").select("created_at").eq("id", inboundMessageId).maybeSingle();
     const thread = await buildTwoWayThreadState(supabase, {
@@ -8527,18 +8536,31 @@ export async function runRoutingV2LiveStep(
       excludeMessageId: inboundMessageId,
       sourceCreatedAt: source?.created_at ?? null,
     });
+    const deps = v2ProviderDeps({
+      jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", ...V2_LIVE_JEV_POLICY },
+      haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
+      lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
+    });
+    const askJevCounted = deps.jev;
+    deps.jev = async (request) => {
+      try {
+        const res = await askJevCounted(request);
+        jevAttempts = res.attempts ?? ["ok"];
+        return res;
+      } catch (e) {
+        if (e instanceof JevAttemptsError) jevAttempts = e.attempts;
+        throw e;
+      }
+    };
     const result = await classifyV2(
       { flags, propertyId: input.propertyId, reply: input.inboundBody, thread, numberSourceQuestion: true },
-      v2ProviderDeps({
-        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", ...V2_LIVE_JEV_POLICY },
-        haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
-        lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
-      }),
+      deps,
     );
     // classifyV2 only returns off when the flags say so; they were just read as on.
-    classification = result.kind === "off" ? V2_JEV_FAILED : result;
+    classification = result.kind === "off" ? { ...V2_JEV_FAILED, jevAttempts } : result;
   } catch {
-    classification = V2_JEV_FAILED;
+    // Thrown before Jev (thread build) = no attempt and no Jev ledger row; after it = its attempts.
+    classification = { ...V2_JEV_FAILED, jevAttempts };
   }
 
   await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
@@ -8983,9 +9005,34 @@ async function deliverRoutingV2OutboxIntent(
       // The seller did not get the reply: a person looks (today's nine-question hold family).
       // Only when THIS call cancelled the row: a row another consumer already sent, or the
       // provider fence already cancelled (superseded / takeover), never gets a false hold.
-      if (marked === "ok") await holdFor(reason.replace(/\s+/g, "_"));
+      // Stress A-2 (round 2): a reply overtaken by a NEWER SELLER TEXT is not a failure; that
+      // text is routed by its own v2 dispatch, which a hold here would block (already_terminal).
+      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextExists(supabase, row)))) {
+        await holdFor(reason.replace(/\s+/g, "_"));
+      }
     },
   });
+}
+
+/** A queued v2 reply cancelled because something newer overtook it (the send gate's reasons). */
+export function isV2SupersededReason(reason: string): boolean {
+  return /^(superseded_before_send|superseded_by_newer_inbound)$/.test(reason);
+}
+
+/**
+ * Did the seller text again after this reply's inbound? Then that newer text owns the thread and
+ * is routed by its own dispatch. Fails toward the hold (a person looks) on a lookup error.
+ */
+async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+  const { data: own, error: ownError } = await supabase
+    .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
+  if (ownError || !own?.created_at) return false;
+  const { data, error } = await supabase
+    .from("messages").select("id")
+    .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
+    .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
+    .limit(1);
+  return !error && (data ?? []).length > 0;
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */

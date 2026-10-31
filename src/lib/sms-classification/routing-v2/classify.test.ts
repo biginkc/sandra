@@ -96,7 +96,9 @@ describe("v2 decision preparation", () => {
   it("fails closed on incomplete or failed Jev without asking Haiku", async () => {
     const { input, deps } = fixture();
     deps.jev = vi.fn(async () => ({ answers: {}, latencyMs: 1 }));
-    expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_incomplete" });
+    expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_incomplete", jevUsage: null });
+    deps.jev = vi.fn(async () => ({ answers: {}, latencyMs: 1, usage: { input_tokens: 700, output_tokens: 40 } }));
+    expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_incomplete", jevUsage: { input_tokens: 700, output_tokens: 40 } });
     deps.jev = vi.fn(async () => { throw new Error("private data"); });
     expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_failed" });
     expect(deps.haiku).not.toHaveBeenCalled();

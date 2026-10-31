@@ -5275,12 +5275,12 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       }
     });
 
-    it("an unreadable test tag (plain blocked_before_provider) still takes today's retry road", async () => {
+    it("an unreadable test tag takes today's unreadable-state road (send_check_failed: a person looks), never a refusal", async () => {
       const state = setup();
       seedInboundAt(state, "inbound-tlf", at("18:00:00"));
-      vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_before_provider", messageId: "m1", retired: true } as never);
+      vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_fresh_state_unavailable", messageId: "m1", error: "test_tag_unreadable" } as never);
       const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-tlf"), anthropic);
-      expect(result).toMatchObject({ outcome: "retry", reason: "send_lease_lost" });
+      expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
     });
 
     it("an earlier attempt's FAILED stamped row is flagged, never 'already replied'", async () => {

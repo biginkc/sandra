@@ -25,12 +25,23 @@ describe("Haiku request shape", () => {
     expect(HAIKU_SYSTEM_PROMPT).toBe(EXPECTED_SYSTEM);
     expect(HAIKU_OPTIONS_BLOCK).toBe(EXPECTED_OPTIONS);
   });
-  it("matches haiku.py: model, no temperature, thinking disabled, max_tokens 100", () => {
+  it("matches haiku.py (model, no temperature, thinking disabled, same prompt) + JSON-only structured output, max_tokens 200 (A-3 round 2)", () => {
     const r = buildHaikuRequest(["US: hi", "SELLER: yes"]);
     expect(r).toEqual({
       model: "claude-haiku-5-5",
-      max_tokens: 100,
+      max_tokens: 200,
       thinking: { type: "disabled" },
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { road: { type: "string" }, confidence: { type: "number" } },
+            required: ["road", "confidence"],
+            additionalProperties: false,
+          },
+        },
+      },
       system: EXPECTED_SYSTEM,
       messages: [{ role: "user", content: EXPECTED_OPTIONS + "\n\nCONVERSATION (oldest to newest):\nUS: hi\nSELLER: yes\n\nReturn JSON only." }],
     });

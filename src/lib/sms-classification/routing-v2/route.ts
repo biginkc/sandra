@@ -12,8 +12,10 @@ export type CodeCheck = "reaction" | "bad_number" | "driving" | "not_interested_
 /**
  * Jarrad 2026-10-30 (BUILD-PLAN §16): "Do NOT check back" (and "Do not bother", "No need to
  * call me back") → Not interested drip, NOT a stop. Exactly these three, matched as the whole
- * message, ignoring case, punctuation and extra spaces. Legal / hostile (row 1) and the
- * carrier STOP keyword (webhook) still win. No other phrase is added here.
+ * message, ignoring case, punctuation and extra spaces. No other phrase is added here.
+ * Master A-012 (relayed by Jarrad, round 2): the whole-message phrase wins over every Jev
+ * score (legal / hostile / asked_stop, any band). Any other content = no match = normal
+ * precedence. The carrier STOP keyword and the webhook keyword gate run before this, unchanged.
  */
 const NOT_INTERESTED_PHRASES: ReadonlySet<string> = new Set(["do not check back", "do not bother", "no need to call me back"]);
 
@@ -71,6 +73,11 @@ function signalProbability(input: V2RouteInput, signal: V2Signal): number {
 /** Pure router. Callers must pass a complete, validated probability set (see assertCompleteV2). */
 export function routeV2(input: V2RouteInput): V2Decision {
   const opportunityAlert = OPPORTUNITY_SIGNALS.some((q) => input.probabilities[q] >= DEFAULT_CUTOFF);
+  // D-1 (Master A-012): one of the three whole-message phrases is the Not interested drip,
+  // whatever Jev scored (legal / hostile / asked_stop at any probability).
+  if (isNotInterestedPhrase(input.reply)) {
+    return { road: CODE_ROADS.not_interested_phrase, provenance: { by: "code", check: "not_interested_phrase" }, haiku: null, opportunityAlert };
+  }
   // Stop/legal/hostile (ORDER-TABLE rows 1–2) are evaluated before the code pre-checks, so
   // "STOP, I'm driving" or a hostile reaction still routes to stop.
   const row1 = V2_ORDER.find((step) => step.step === "legal_hostile")!;
@@ -88,10 +95,6 @@ export function routeV2(input: V2RouteInput): V2Decision {
   const askedStopP = signalProbability(input, askedStop.signal);
   const row1Band = row1.signals.some(({ signal, cutoff }) => signalProbability(input, signal) >= cutoff);
   if (row1Band && askedStopP >= STOP_FINAL_AT) return finalStop(row2, askedStop.signal, askedStopP);
-  // D-1: Jarrad's three not-interested phrases, after legal/hostile, before asked_stop.
-  if (!row1Band && isNotInterestedPhrase(input.reply)) {
-    return { road: CODE_ROADS.not_interested_phrase, provenance: { by: "code", check: "not_interested_phrase" }, haiku: null, opportunityAlert };
-  }
   if (askedStopP >= STOP_FINAL_AT) return finalStop(row2, askedStop.signal, askedStopP);
   let checked = false;
   for (const step of V2_ORDER) {

@@ -51,8 +51,9 @@ export async function recordV2ModelSpend(
     return {
       p_provider: "jev",
       p_outcome: answered ? final : `attempt_failed:${attempt}`,
-      p_input_tokens: answered && result.kind === "decided" ? tokens(result.jevUsage?.input_tokens) : null,
-      p_output_tokens: answered && result.kind === "decided" ? tokens(result.jevUsage?.output_tokens) : null,
+      // Tokens on the answering attempt, decided or incomplete (Jev still billed it).
+      p_input_tokens: answered ? tokens(result.jevUsage?.input_tokens) : null,
+      p_output_tokens: answered ? tokens(result.jevUsage?.output_tokens) : null,
       p_cost: null, p_cost_unit: "usd",
     };
   });
