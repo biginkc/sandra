@@ -327,9 +327,12 @@ it("G3 blast-day replay", async () => {
   R.check("H1(i): paused v2 enrollments on leads NOT held and with no human-owned disposition = 0", h1i.length === 0, { n: h1i.length, humanOwnedDispositionPaused_notAFailure: humanOwnedPaused.length });
   const mech = /^(nine_reply_not_sent:template_already_sent$|nine_reply_not_sent:template_already_sent[^:]|nine_reply_not_sent:nine_window_closed|reply_skipped:outbound_since_claim)/;
   const mechHeld = st.filter((r) => r.nh && mech.test(r.reason ?? ""));
-  const enrolledAny = new Set((await q("select distinct e.property_id from sequence_enrollments e where e.property_id = any($1) and e.routing_v2_engine = 'v2' and exists (select 1 from routing_v2_outbox o where o.property_id = e.property_id and o.inbound_message_id = e.routing_v2_inbound_id and o.kind = 'reply' and o.status = 'cancelled' and (o.cancel_reason like 'not_sent:template_already_sent%' or o.cancel_reason like 'not_sent:nine_window_closed%' or o.cancel_reason like 'not_sent:%'))")).map((r) => r.property_id));
+  // H1(ii) (fixed): the held inbound = an inbound whose v2 reply was cancelled not_sent:* (the refusal that wrote the
+  // mechanics hold); count the lead only if a v2 enrollment ENROLLED BY THAT inbound is still active or paused now
+  // (drips already retired by a later reply do not count).
+  const enrolledAny = new Set((await q("select distinct e.property_id from sequence_enrollments e where e.property_id = any($1) and e.routing_v2_engine = 'v2' and e.status in ('active','paused') and exists (select 1 from routing_v2_outbox o where o.property_id = e.property_id and o.inbound_message_id = e.routing_v2_inbound_id and o.kind = 'reply' and o.status = 'cancelled' and o.cancel_reason like 'not_sent:%')")).map((r) => r.property_id));
   const h1ii = mechHeld.filter((r) => enrolledAny.has(r.id));
-  R.check("H1(ii): leads held for template_already_sent / nine_window_closed* / outbound_since_claim whose inbound enrolled a v2 drip = 0", h1ii.length === 0,
+  R.check("H1(ii): leads held for template_already_sent / nine_window_closed* / outbound_since_claim with an ACTIVE or PAUSED v2 enrollment enrolled by the held inbound = 0", h1ii.length === 0,
     { n: h1ii.length, mechanicsHeldTotal: mechHeld.length, byReason: h1ii.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}) });
   const h1iii = st.filter((r) => r.nh && r.active);
   R.check("H1(iii): held leads with an ACTIVE v2 enrollment = 0", h1iii.length === 0,
@@ -359,6 +362,19 @@ it("G3 blast-day replay", async () => {
   }
   R.line("held+paused leads by hold reason (informational)", heldPaused.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}));
   R.line("A-8 exposure: after-repairs turns in this replay", { jevRequestsWithFollowUps: stubs.afterRepairsJevRequests, priceTooHighRepliesSent: (await q("select count(*)::int n from routing_v2_outbox where property_id = any($1) and kind = 'reply' and payload->>'key' = 'price_too_high' and status = 'sent'"))[0].n });
+  {
+    // A-8 via SQL: after-repairs turn = an inbound after a SENT price_too_high reply on the same lead. The stub answers
+    // needs_repairs 0.80 when hash(reply) is even; such a turn is "lost" if its decision held (stop/error holds excluded).
+    const turns = await q(`select d.road, d.action, d.price_outcome, m.body from routing_v2_live_decisions d join messages m on m.id = d.inbound_message_id
+      where d.property_id = any($1) and d.status in ('decided','failed') and exists (select 1 from routing_v2_outbox o where o.property_id = d.property_id and o.kind = 'reply'
+      and o.status = 'sent' and o.payload->>'key' = 'price_too_high' and o.created_at < m.created_at)`);
+    const fy = (r: string) => { let h = 0; for (const ch of r.trim()) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 2 === 0; };
+    const br: Record<string, number> = {}; let lost = 0, yes = 0;
+    for (const t of turns) { const y = fy(t.body); if (y) yes++; const held = (t.action?.steps ?? []).some((x: { kind: string }) => x.kind === "hold");
+      const k = `${y ? "followUpYes" : "followUpNo"}|${t.road}|${t.price_outcome}|${held ? "held" : "notheld"}`; br[k] = (br[k] ?? 0) + 1;
+      if (y && held && !["stop", "possible_stop", "haiku_error"].includes(t.road ?? "")) lost++; }
+    R.check("A-8 (SQL): after-repairs follow-up yes lost because the main decision held (stop/error excluded) = 0", lost === 0, { afterRepairsTurns: turns.length, followUpYes: yes, lost, breakdown: br });
+  }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
   const fu = (p: Record<string, number>) => ["needs_repairs", "flexible_price", "original_portion", "no_repairs"].some((k) => (p?.[k] ?? 0) >= 0.6);
