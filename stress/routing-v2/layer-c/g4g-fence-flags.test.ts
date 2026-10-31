@@ -136,3 +136,157 @@ it(`F1 / F2 x${N}`, async () => {
   }
   await setFlags(pg, BMH, FLAGS);
 });
+
+/**
+ * F4-F7 baselines (round-14 queue). Hooks: F4/F7 = the app's own barrier "dispatch:before_transition" (throws = crash
+ * after the v2 decision row is persisted, before transition/hold); F5 = "outbox:before_hold" (throws = crash after
+ * routing_v2_mark_outbox_not_sent committed the cancel, before writeV2Hold); F6 = vi fake Date only (app clock), the row
+ * aged by backdating routing_v2_outbox.created_at in SQL. Ages of the crashed claim/inbound for the sweep are backdated
+ * in SQL (DB clock untouched). Existing fixture texts only.
+ */
+const R2 = new Receipt("G4g-F4-F5-F6-F7.txt");
+it(`F4 / F5 / F6 / F7 x${N}`, async () => {
+  const { createTestClient } = await import("@tests/integration/client");
+  const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");
+  const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+  const { getMockMessageLog } = await import("@/lib/messaging/providers/mock");
+  const { setTestBarrier, clearTestBarriers } = await import("@/lib/testing/test-barriers");
+  const { loadFreshSeen } = await import("@/app/(dashboard)/messages-v2/hold-seen");
+  const db = createTestClient();
+  await setFlags(pg, BMH, FLAGS);
+  let n = 0;
+  const ext = () => `${org.runId}-f47-${n++}`;
+  const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Crash Ct` }))[0]!;
+  const sweep = async () => { try { await runRoutingV2OutboxReplies(db, { limit: 50 }); } catch (e) { return String(e); } return null; };
+  const say = async (l: Lead, body: string) => { await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body }); await settle(); await pause(300); const e = await sweep(); await pause(300); return e; };
+  const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
+  const lastIn = async (id: string) => (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [id])).rows[0];
+  const decisions = async (mid: string) => (await pg.query("select status, coalesce(failure_reason,'') fr from routing_v2_live_decisions where inbound_message_id = $1", [mid])).rows;
+  const claim = async (mid: string) => (await pg.query("select status, outcome, error_message em from ai_response_claims where inbound_message_id = $1", [mid])).rows[0];
+  const ageCrashed = async (mid: string) => {
+    await pg.query("update messages set created_at = now() - interval '1 hour' where id = $1", [mid]);
+    await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 hour' where inbound_message_id = $1 and status = 'processing'", [mid]);
+  };
+  const crashAtTransition = (pid: string) => {
+    let fired = 0;
+    setTestBarrier("dispatch:before_transition", async (ctx) => { if (ctx.propertyId !== pid || fired) return; fired++; throw new Error("stress-crash:before_transition"); });
+    return () => fired;
+  };
+  const sh = (s: unknown) => String(s ?? "-").replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>");
+  const tally = (modes: Record<string, number>, k: string) => { modes[k] = (modes[k] ?? 0) + 1; };
+  const verdict = (pass: number) => (pass === N ? "PASS" : "FAIL-expected-at-a0c9");
+  R2.line("head under test: a0c905d423909a2f4024b08ed8c197013b02890b (478 migrations; 460000 not applied)");
+
+  // F4: crash after the decision persists, before transition/hold; sweep; later text held, 0 sends.
+  {
+    let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      const fired = crashAtTransition(l.propertyId);
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle();
+      clearTestBarriers();
+      const a = await lastIn(l.propertyId); const d = await decisions(a.id); const c0 = await claim(a.id);
+      await ageCrashed(a.id); const err = await sweep();
+      const afterSweep = await prop(l.propertyId);
+      const s0 = sends(l.phone);
+      await say(l, "NOTINT actually never mind");
+      const b = await lastIn(l.propertyId); const p = await prop(l.propertyId);
+      const s = sends(l.phone); total += s;
+      const ok = fired() === 1 && afterSweep.nh === true && p.nh === true && s === 0;
+      if (ok) pass++;
+      tally(modes, `${ok ? "PASS" : "FAIL"} barrier=${fired()} decision=${d.map((x) => `${x.status}:${x.fr}`).join(",") || 0} claim=${c0?.status}:${sh(c0?.outcome)}:${sh(c0?.em)} A-stamp=${a.o}:${sh(a.r)} sweepErr=${err ? "y" : "n"} holdAfterSweep=${afterSweep.nh ? afterSweep.r : "-"} sendsBeforeB=${s0} B-stamp=${b.o}:${sh(b.r)} hold=${p.nh ? p.r : "-"} sends=${s}`);
+    }
+    R2.line(`${verdict(pass)} F4 crash at dispatch:before_transition (decision persisted, no hold) -> sweep -> later text: ${pass}/${N}; sends ${total}`);
+    R2.line("   modes", modes);
+  }
+  // F5: TONLY (sent), TONLY again -> cancel committed (template_already_sent) -> crash at outbox:before_hold; tick; sweep.
+  {
+    let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      await say(l, "TONLY text only please");
+      const s1 = sends(l.phone);
+      let fired = 0;
+      setTestBarrier("outbox:before_hold", async (ctx) => { if (ctx.propertyId !== l.propertyId || fired) return; fired++; throw new Error("stress-crash:before_hold"); });
+      const e2 = await say(l, "TONLY text only please");
+      clearTestBarriers();
+      const box = (await pg.query("select status, cancel_reason, hold_pending from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at desc limit 1", [l.propertyId])).rows[0];
+      const pCrash = await prop(l.propertyId);
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + l.propertyId + "' and status = 'active'; commit;");
+      await runSequenceTick(db as never, { budgetMs: 20_000 });
+      const sTick = sends(l.phone) - s1;
+      const err = await sweep();
+      const box2 = (await pg.query("select status, cancel_reason, hold_pending from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at desc limit 1", [l.propertyId])).rows[0];
+      const p = await prop(l.propertyId);
+      const enr = (await pg.query("select status from sequence_enrollments where property_id = $1", [l.propertyId])).rows;
+      const s = sends(l.phone) - s1; total += s;
+      const ok = fired === 1 && sTick === 0 && p.nh === true && s === 0;
+      if (ok) pass++;
+      tally(modes, `${ok ? "PASS" : "FAIL"} barrier=${fired} crashSurfaced=${e2 ? "y" : "n"} outboxAtCrash=${box?.status}:${box?.cancel_reason}:hold_pending=${box?.hold_pending} holdAtCrash=${pCrash.nh ? pCrash.r : "-"} tickSends=${sTick} sweepErr=${err ? "y" : "n"} outboxAfter=${box2?.status}:${box2?.cancel_reason}:hold_pending=${box2?.hold_pending} hold=${p.nh ? p.r : "-"} enr=${enr.map((x) => x.status).join("/") || 0} sendsAfterFirst=${s}`);
+    }
+    R2.line(`${verdict(pass)} F5 cancel committed then crash at outbox:before_hold -> tick -> sweep: ${pass}/${N}; sends after the first reply ${total}`);
+    R2.line("   modes", modes);
+  }
+  // F6: reply expiry vs DB age with only the app clock skewed.
+  for (const sc of [{ name: "a", ageH: 23.5, skewH: 1, wantExpire: false }, { name: "b", ageH: 24.5, skewH: -1, wantExpire: true }]) {
+    let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      const fired = 0;
+      // Park the queued reply: deliver the text and let its dispatch finish, but run no outbox consumer.
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle();
+      const before = (await pg.query("select id, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at desc limit 1", [l.propertyId])).rows[0];
+      const s0 = sends(l.phone);
+      await pg.query("update routing_v2_outbox set created_at = now() - make_interval(secs => $2), status = case when status = 'claimed' then 'queued' else status end where id = $1", [before?.id, Math.round(sc.ageH * 3600)]);
+      const ready = (await pg.query("select status from routing_v2_outbox where id = $1", [before?.id])).rows[0];
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + sc.skewH * 3600_000);
+      let err: string | null = null;
+      try { await runRoutingV2OutboxReplies(db, { propertyId: l.propertyId, limit: 5 }); } catch (e) { err = String(e); }
+      vi.useRealTimers();
+      await assertClockAligned(pg, FIXTURE_ZONES);
+      const after = (await pg.query("select status, cancel_reason, hold_pending from routing_v2_outbox where id = $1", [before?.id])).rows[0];
+      const p = await prop(l.propertyId);
+      const s = sends(l.phone) - s0; total += s;
+      const expired = after?.status === "cancelled" && /expired/.test(after?.cancel_reason ?? "");
+      const ok = before?.status === "pending" && (sc.wantExpire ? expired && after.hold_pending === true && s === 0 : !expired);
+      if (ok) pass++;
+      tally(modes, `${ok ? "PASS" : "FAIL"} parkBarrier=${fired} before=${before?.status}:${before?.cancel_reason ?? ""} ready=${ready?.status} err=${err ? sh(err).slice(0, 60) : "n"} after=${after?.status}:${after?.cancel_reason ?? ""}:hold_pending=${after?.hold_pending} hold=${p.nh ? p.r : "-"} sends=${s}`);
+    }
+    R2.line(`${verdict(pass)} F6${sc.name} DB age ${sc.ageH} h, app clock ${sc.skewH > 0 ? "+" : ""}${sc.skewH} h -> ${sc.wantExpire ? "must expire + hold_pending" : "must NOT expire"}: ${pass}/${N}; sends ${total}`);
+    R2.line("   modes", modes);
+  }
+  // F7: crash after decision persist; sweep; a person dismisses through fn_resolve_hold (the app's clear path); new ordinary text routes normally.
+  {
+    const user = (await pg.query("select user_id from memberships where org_id = $1 and role in ('owner','acquisitions') limit 1", [BMH])).rows[0]?.user_id;
+    let pass = 0; const modes: Record<string, number> = {};
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      const fired = crashAtTransition(l.propertyId);
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "NOTINT actually never mind" }); await settle();
+      clearTestBarriers();
+      const a = await lastIn(l.propertyId);
+      await ageCrashed(a.id); await sweep();
+      const held = await prop(l.propertyId);
+      let clearRes = "skipped:not_held";
+      if (held.nh && user) {
+        const seen = (await loadFreshSeen(db as never, BMH, [l.propertyId]))?.get(l.propertyId);
+        const r = await pg.query("select public.fn_resolve_hold($1,$2,$3,'dismiss','stress F7 cleared by person',$4,$5,$6) x", [BMH, l.propertyId, user, seen?.through ?? null, seen?.flagReason ?? null, seen?.flagAt ?? null]).catch((e) => ({ rows: [{ x: { error: String(e) } }] }));
+        clearRes = sh(JSON.stringify(r.rows[0]?.x)).slice(0, 80);
+      }
+      const cleared = await prop(l.propertyId);
+      const s0 = sends(l.phone);
+      await say(l, "TONLY text only please");
+      const b = await lastIn(l.propertyId); const d = await decisions(b.id); const p = await prop(l.propertyId);
+      const enr = (await pg.query("select status from sequence_enrollments where property_id = $1 and status = 'active'", [l.propertyId])).rows.length;
+      const s = sends(l.phone) - s0;
+      const ok = fired() === 1 && held.nh === true && cleared.nh === false && d.length === 1 && p.nh === false && (s >= 1 || enr >= 1);
+      if (ok) pass++;
+      tally(modes, `${ok ? "PASS" : "FAIL"} barrier=${fired()} holdAfterSweep=${held.nh ? held.r : "-"} clear=${clearRes} afterClear=${cleared.nh ? cleared.r : "clear"} B-stamp=${b.o}:${sh(b.r)} Baudit=${d.length}:${d.map((x) => x.status).join(",")} hold=${p.nh ? p.r : "-"} sends=${s} activeDrips=${enr}`);
+    }
+    R2.line(`${verdict(pass)} F7 crash at decision persist -> sweep -> person dismisses (fn_resolve_hold) -> ordinary TONLY routes normally: ${pass}/${N}`);
+    R2.line("   modes", modes);
+  }
+  await setFlags(pg, BMH, FLAGS);
+});
