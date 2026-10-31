@@ -13,7 +13,7 @@ import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2
 import type { Json } from "@/lib/supabase/types";
 
 import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
-import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
+import { dispatchAiResponse, runRoutingV2OutboxReplies, sweepUnstampedV2Inbounds } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 
 /**
@@ -999,6 +999,35 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       // Once per text: a second pass writes nothing new.
       await runRoutingV2OutboxReplies(supabase, { limit: 10 });
       expect(await auditRows(dead)).toBe(1);
+    });
+
+    it("sweep N-1: 51 handled unstamped texts ahead of 1 dead text never stall the sweep: the dead text's lead is held", async () => {
+      const lead = await setup();
+      const busy = await seedLead();
+      // 51 older texts on another lead that were handled (each has a claim) but carry no stamp.
+      const { rows: handled } = await pg.query(
+        "insert into messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body, created_at) select $1, 'sms', 'inbound', 'received', $2, $3, $4, $5, 'handled ' || g, now() - interval '30 minutes' - (g || ' seconds')::interval from generate_series(1, 51) g returning id",
+        [orgId, busy.propertyId, busy.contactId, busy.phone, MOCK_SENDER_PRIMARY],
+      );
+      for (const h of handled) {
+        await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, completed_at, outcome) values ($1, $2, $3, $4, 'completed', now(), 'auto_closed')", [orgId, h.id, busy.propertyId, busy.contactId]);
+      }
+      const dead = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [dead]);
+      // Passes run until the backlog is through (each pass examines at most 50 texts).
+      for (let i = 0; i < 3; i++) await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and failure_reason = 'webhook_lease_expired_unstamped'", [dead])).toBe(1);
+    });
+
+    it("sweep time budget: out of time = no text examined (nothing held, nothing marked); the next pass does it", async () => {
+      const lead = await setup();
+      const dead = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [dead]);
+      expect(await sweepUnstampedV2Inbounds(supabase, Date.now(), () => true)).toBe(0);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect((await pg.query("select metadata->'processing'->'routingV2Sweep' s from messages where id = $1", [dead])).rows[0].s).toBeNull();
+      expect(await sweepUnstampedV2Inbounds(supabase, Date.now())).toBe(1);
     });
 
     it("wrong-number keyword: when the close does NOT apply (a person's disposition blocks it), the v2 drip is not retired", async () => {
