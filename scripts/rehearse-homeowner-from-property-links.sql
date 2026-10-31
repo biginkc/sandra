@@ -17,7 +17,8 @@
 --   E  backfill: the person who texted in wins over an earlier link
 --   F  backfill: with no messages the first link wins
 --   G  backfill: an opted_out lead stays empty
---   rollback clears only backfilled rows and keeps a homeowner changed since
+--   rollback clears only backfilled rows, keeps a homeowner changed since, and
+--   skips + reports + keeps the ledger row for a lead DNC-locked since
 \set ON_ERROR_STOP on
 \set org '00000000-0000-0000-0000-000000000bbb'
 
@@ -37,7 +38,7 @@ select public.upsert_dealmachine_property_contact('a0000000-0000-0000-0000-00000
 select public.upsert_dealmachine_property_contact('a0000000-0000-0000-0000-00000000000a', :'org', 'dm-a2', 1::smallint, '{}'::jsonb,
   '{"first_name":"Linda","last_name":"Fugate","phone_1":"+14175550002","phone_1_type":"mobile"}'::jsonb) as a2 \gset
 do $$ begin
-  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000a') <> (select id from public.contacts where phone_1='+14175550001') then
+  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000a') is distinct from (select id from public.contacts where phone_1='+14175550001') then
     raise exception 'A: expected first linked person as homeowner';
   end if;
 end $$;
@@ -53,7 +54,7 @@ end $$;
 select public.upsert_assigns_property_contact('a0000000-0000-0000-0000-00000000000b', :'org', 'assigns:2:deadbeef', 2::smallint, '{}'::jsonb,
   '{"contact_type":"person","first_name":"Okay","last_name":"Person","phone_1":"+14175550012","phone_1_type":"mobile"}'::jsonb) as b2 \gset
 do $$ begin
-  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000b') <> (select id from public.contacts where phone_1='+14175550012') then
+  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000b') is distinct from (select id from public.contacts where phone_1='+14175550012') then
     raise exception 'B: expected the contactable second person as homeowner';
   end if;
   if (select is_dnc_locked from public.properties where id='a0000000-0000-0000-0000-00000000000b') then
@@ -68,7 +69,7 @@ update public.properties set homeowner_contact_id = 'c0000000-0000-0000-0000-000
 select public.upsert_dealmachine_property_contact('a0000000-0000-0000-0000-00000000000c', :'org', 'dm-c1', 1::smallint, '{}'::jsonb,
   '{"first_name":"New","last_name":"Guy","phone_1":"+14175550022","phone_1_type":"mobile"}'::jsonb) as c1 \gset
 do $$ begin
-  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000c') <> 'c0000000-0000-0000-0000-00000000000c' then
+  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000c') is distinct from 'c0000000-0000-0000-0000-00000000000c' then
     raise exception 'C: existing homeowner was rewired';
   end if;
 end $$;
@@ -133,10 +134,10 @@ end $$;
 
 \i :FWD_FORWARD
 do $$ begin
-  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000e') <> 'c0000000-0000-0000-0000-0000000000e2' then
+  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000e') is distinct from 'c0000000-0000-0000-0000-0000000000e2' then
     raise exception 'E: the person who texted in must win';
   end if;
-  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000f') <> 'c0000000-0000-0000-0000-0000000000f1' then
+  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000f') is distinct from 'c0000000-0000-0000-0000-0000000000f1' then
     raise exception 'F: first link must be chosen';
   end if;
   if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-000000000010') is not null then
@@ -145,24 +146,48 @@ do $$ begin
   if (select count(*) from public.homeowner_link_backfill) <> 2 then
     raise exception 'backfill table should hold exactly E and F, has %', (select count(*) from public.homeowner_link_backfill);
   end if;
-  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000c') <> 'c0000000-0000-0000-0000-00000000000c' then
+  if (select homeowner_contact_id from public.properties where id='a0000000-0000-0000-0000-00000000000c') is distinct from 'c0000000-0000-0000-0000-00000000000c' then
     raise exception 'C: backfill must not touch a set homeowner';
   end if;
 end $$;
 \echo FORWARD BACKFILL OK
 
--- Rollback undoes exactly E and F, keeps a homeowner changed by a person since.
+-- Rollback undoes exactly F, keeps a homeowner changed by a person since (E),
+-- and skips a backfilled lead that became DNC-locked since (F2), keeping its
+-- ledger row and the table.
+insert into public.properties (id, org_id, address, state, source) values
+  ('b0000000-0000-0000-0000-0000000000f2', :'org', '8 H St', 'MO', 'assigns');
+insert into public.contacts (id, org_id, first_name, last_name, phone_1, phone_1_type) values
+  ('c0000000-0000-0000-0000-0000000000f2', :'org', 'H', 'One', '+14175550071', 'mobile');
+insert into public.property_contacts (property_id, contact_id, org_id, relationship, source_identity, source_position, source_attributes) values
+  ('b0000000-0000-0000-0000-0000000000f2', 'c0000000-0000-0000-0000-0000000000f2', :'org', 'assigns_contact', 'assigns:1:00000005', 1, '{}');
+-- Simulate "backfilled, then locked later": record it in the ledger as the backfill would have, set the homeowner, then lock.
+update public.properties set homeowner_contact_id = 'c0000000-0000-0000-0000-0000000000f2' where id='b0000000-0000-0000-0000-0000000000f2';
+insert into public.homeowner_link_backfill (property_id, org_id, contact_id) values ('b0000000-0000-0000-0000-0000000000f2', :'org', 'c0000000-0000-0000-0000-0000000000f2');
+update public.properties set outreach_dispo = 'dnc' where id='b0000000-0000-0000-0000-0000000000f2';
 update public.properties set homeowner_contact_id = 'c0000000-0000-0000-0000-0000000000e1' where id='b0000000-0000-0000-0000-00000000000e';
 \i :FWD_ROLLBACK
 do $$ begin
   if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000f') is not null then
     raise exception 'rollback: F should be cleared';
   end if;
-  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000e') <> 'c0000000-0000-0000-0000-0000000000e1' then
+  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-00000000000e') is distinct from 'c0000000-0000-0000-0000-0000000000e1' then
     raise exception 'rollback: a homeowner changed since must be kept';
   end if;
+  if (select homeowner_contact_id from public.properties where id='b0000000-0000-0000-0000-0000000000f2') is distinct from 'c0000000-0000-0000-0000-0000000000f2' then
+    raise exception 'rollback: a lead locked since must be left alone';
+  end if;
+  if to_regclass('public.homeowner_link_backfill') is null then
+    raise exception 'rollback: ledger must be kept while a skipped row exists';
+  end if;
+  if (select count(*) from public.homeowner_link_backfill) <> 1
+     or (select property_id from public.homeowner_link_backfill) <> 'b0000000-0000-0000-0000-0000000000f2' then
+    raise exception 'rollback: ledger must hold exactly the skipped row';
+  end if;
 end $$;
-\echo ROLLBACK (post-backfill) OK
+\echo ROLLBACK (post-backfill, one lead locked since) OK
+-- Clear the kept ledger so the forward migration can recreate it.
+drop table public.homeowner_link_backfill;
 
 -- Leave the stack in the migrated state.
 \i :FWD_FORWARD

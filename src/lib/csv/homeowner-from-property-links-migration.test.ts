@@ -85,29 +85,42 @@ describe("homeowner from property links migration", () => {
     expect(forward).toMatch(/relationship = 'assigns_contact'/);
   });
 
-  it("records every backfilled row and writes only those rows, with the same guards", () => {
-    expect(forward).toMatch(/create table public\.homeowner_link_backfill \(\s*property_id uuid primary key/);
+  it("keeps the ledger free of a foreign key to properties (a table-level lock for the whole migration)", () => {
+    const table = forward.slice(
+      forward.indexOf("create table public.homeowner_link_backfill"),
+      forward.indexOf("alter table public.homeowner_link_backfill enable row level security;"),
+    );
+    expect(table).toMatch(/property_id uuid primary key,/);
+    expect(table).not.toMatch(/references/i);
     expect(forward).toContain("alter table public.homeowner_link_backfill enable row level security;");
     expect(forward).toContain("revoke all on public.homeowner_link_backfill from public, anon, authenticated;");
-    const backfill = forward.slice(forward.indexOf("insert into public.homeowner_link_backfill"));
-    expect(backfill).toMatch(EXCLUDED_DISPOS);
-    expect(backfill).toMatch(/update public\.properties p\s+set homeowner_contact_id = b\.contact_id\s+from public\.homeowner_link_backfill b/);
-    expect(backfill).toMatch(/p\.homeowner_contact_id is null[\s\S]*not p\.is_dnc_locked[\s\S]*not p\.is_training/);
   });
 
-  it("re-checks do_not_contact at write time and drops recorded rows it did not write", () => {
-    const backfill = forward.slice(forward.indexOf("insert into public.homeowner_link_backfill"));
-    const update = backfill.slice(backfill.indexOf("update public.properties p"), backfill.indexOf("delete from public.homeowner_link_backfill"));
-    // A contact can flip to do_not_contact between the candidate insert and
-    // this update; writing them would permanently DNC-lock the lead.
-    expect(update).toMatch(/not exists \(\s*select 1 from public\.contacts c\s+where c\.id = b\.contact_id and c\.org_id = b\.org_id and c\.do_not_contact\s*\)/);
-    expect(backfill).toMatch(/delete from public\.homeowner_link_backfill b\s+using public\.properties p\s+where p\.id = b\.property_id\s+and p\.homeowner_contact_id is distinct from b\.contact_id;/);
+  it("resolves, writes and records the backfill in one statement from RETURNING, with every guard on the write", () => {
+    const backfill = forward.slice(forward.indexOf("with candidate as ("));
+    const written = backfill.slice(backfill.indexOf("written as ("), backfill.indexOf("insert into public.homeowner_link_backfill"));
+    expect(written).toMatch(/update public\.properties p\s+set homeowner_contact_id = c\.contact_id\s+from candidate c/);
+    expect(written).toContain("p.homeowner_contact_id is null");
+    expect(written).toContain("p.deleted_at is null");
+    expect(written).toContain("not p.is_dnc_locked");
+    expect(written).toContain("not p.is_training");
+    expect(written).toMatch(EXCLUDED_DISPOS);
+    // Writing a do_not_contact person would permanently DNC-lock the lead.
+    expect(written).toMatch(/not exists \(\s*select 1 from public\.contacts x\s+where x\.id = c\.contact_id and x\.org_id = c\.org_id and x\.do_not_contact\s*\)/);
+    expect(written).toMatch(/returning p\.id, p\.org_id, p\.homeowner_contact_id\s*\)\s*$/);
+    expect(backfill).toMatch(/insert into public\.homeowner_link_backfill \(property_id, org_id, contact_id\)\s+select id, org_id, homeowner_contact_id from written;/);
+    // Nothing between the write and the record: no separate insert, no reconciliation delete.
+    expect(backfill).not.toContain("delete from public.homeowner_link_backfill");
   });
 
   it("rolls back only its own writes and restores the prior import functions", () => {
     expect(rollback).toMatch(/^[\s\S]*?begin;[\s\S]*commit;\s*$/i);
     expect(rollback).toMatch(/set homeowner_contact_id = null\s+from public\.homeowner_link_backfill b[\s\S]*p\.homeowner_contact_id = b\.contact_id/);
-    expect(rollback).toContain("drop table if exists public.homeowner_link_backfill;");
+    // Leads that became DNC-locked since the backfill are read-only: skipped,
+    // reported, and their ledger rows kept; the table goes only when empty.
+    expect(rollback).toMatch(/p\.homeowner_contact_id = b\.contact_id and p\.is_dnc_locked/);
+    expect(rollback).toMatch(/raise notice 'homeowner_from_property_links rollback: % backfilled lead\(s\) are now DNC-locked/);
+    expect(rollback).toMatch(/else\s+drop table public\.homeowner_link_backfill;\s+end if;/);
     expect(rollback).toContain("drop function if exists public.fill_homeowner_from_links(uuid, uuid);");
     expect(rollback).toContain("drop function if exists public.resolve_homeowner_from_links(uuid, uuid);");
     expect(rollback).not.toContain("fill_homeowner_from_links(p_property_id, p_org_id)");

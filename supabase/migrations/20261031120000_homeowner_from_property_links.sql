@@ -351,8 +351,14 @@ $$;
 
 -- One-time backfill, recorded row by row so the rollback can undo exactly
 -- these writes. Server-only; nothing reads it from the app.
+--
+-- Deliberately NO foreign key to properties: creating one takes
+-- SHARE ROW EXCLUSIVE on public.properties for the rest of this transaction,
+-- which would block every property write in every org while the ~14k-row
+-- update below runs. The ledger is a plain audit table; a property deleted
+-- later simply leaves an orphan row that the rollback's join ignores.
 create table public.homeowner_link_backfill (
-  property_id uuid primary key references public.properties(id) on delete cascade,
+  property_id uuid primary key,
   org_id uuid not null,
   contact_id uuid not null,
   backfilled_at timestamptz not null default now()
@@ -361,40 +367,42 @@ alter table public.homeowner_link_backfill enable row level security;
 revoke all on public.homeowner_link_backfill from public, anon, authenticated;
 grant select on public.homeowner_link_backfill to service_role;
 
+-- Resolve, write and record in ONE statement, so the ledger holds exactly the
+-- rows this update wrote (RETURNING), never a candidate that was skipped.
+-- Every eligibility predicate is on the update itself, including the
+-- do_not_contact check: writing such a person as homeowner would permanently
+-- DNC-lock the lead via properties_true_dnc_lock_guard.
+with candidate as (
+  select p.id, p.org_id, r.contact_id
+  from public.properties p
+  cross join lateral (select public.resolve_homeowner_from_links(p.id, p.org_id) as contact_id) r
+  where p.homeowner_contact_id is null
+    and p.deleted_at is null
+    and not p.is_dnc_locked
+    and not p.is_training
+    and (p.outreach_dispo is null
+         or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
+    and r.contact_id is not null
+),
+written as (
+  update public.properties p
+  set homeowner_contact_id = c.contact_id
+  from candidate c
+  where p.id = c.id
+    and p.org_id = c.org_id
+    and p.homeowner_contact_id is null
+    and p.deleted_at is null
+    and not p.is_dnc_locked
+    and not p.is_training
+    and (p.outreach_dispo is null
+         or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
+    and not exists (
+      select 1 from public.contacts x
+      where x.id = c.contact_id and x.org_id = c.org_id and x.do_not_contact
+    )
+  returning p.id, p.org_id, p.homeowner_contact_id
+)
 insert into public.homeowner_link_backfill (property_id, org_id, contact_id)
-select p.id, p.org_id, r.contact_id
-from public.properties p
-cross join lateral (select public.resolve_homeowner_from_links(p.id, p.org_id) as contact_id) r
-where p.homeowner_contact_id is null
-  and p.deleted_at is null
-  and not p.is_dnc_locked
-  and not p.is_training
-  and (p.outreach_dispo is null
-       or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
-  and r.contact_id is not null;
-
--- Re-checked at write time: under READ COMMITTED a contact can become
--- do_not_contact between the insert above and this update, and writing them
--- as homeowner would permanently DNC-lock the lead.
-update public.properties p
-set homeowner_contact_id = b.contact_id
-from public.homeowner_link_backfill b
-where p.id = b.property_id
-  and p.org_id = b.org_id
-  and p.homeowner_contact_id is null
-  and p.deleted_at is null
-  and not p.is_dnc_locked
-  and not p.is_training
-  and not exists (
-    select 1 from public.contacts c
-    where c.id = b.contact_id and c.org_id = b.org_id and c.do_not_contact
-  );
-
--- A row recorded but not written (the race above) must not be "undone" by
--- the rollback into a state it never had; keep the table honest.
-delete from public.homeowner_link_backfill b
-using public.properties p
-where p.id = b.property_id
-  and p.homeowner_contact_id is distinct from b.contact_id;
+select id, org_id, homeowner_contact_id from written;
 
 commit;
