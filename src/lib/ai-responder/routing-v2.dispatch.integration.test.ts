@@ -1512,8 +1512,10 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         sent_at: new Date(Date.now() - 1000).toISOString(),
         metadata: { repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: randomUUID(), senderAssignmentId: randomUUID() } },
       });
-      await say(lead, "ok call me tomorrow"); await runWorkflows();
+      const b = await say(lead, "ok call me tomorrow"); await runWorkflows();
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "rep_sms_human_takeover" });
+      await settle();
+      expect(await auditRows(b)).toBe(1);   // AUD: one audit row per inbound, the rep takeover too
       await expectCStaysHeld(lead, "rep_sms_human_takeover");
     });
 

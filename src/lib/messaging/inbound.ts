@@ -1122,6 +1122,14 @@ export async function handleInboundWebhook(
             propertyEnrollmentsPauseCompleted = true;
           }
           repSmsHumanTakeover = true;
+          // Routing v2 AUDIT (stress at c7b95a1964d1): a rep-SMS takeover never reaches v2;
+          // record why, once, like the keyword and pre-gate exits.
+          scheduleRoutingV2Audit(supabase, {
+            propertyId: effectivePropertyId,
+            inboundMessageId: insertOutcome.messageId,
+            conversationId: insertOutcome.conversationId,
+            note: `rep_sms_takeover:${REP_SMS_HUMAN_TAKEOVER_REASON}`,
+          });
         } catch (e) {
           // The source is confirmed, so an incomplete durable write must not
           // be treated like an ordinary inbound. Keep the property attention
