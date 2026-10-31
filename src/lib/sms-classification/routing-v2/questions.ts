@@ -1,4 +1,5 @@
 import type { JevChoiceQuestion, JevNoulQuestion } from "../providers/jev-gateway";
+import { NUMBER_SOURCE_QUESTION, NUMBER_SOURCE_QUESTION_ID } from "../questions";
 
 /**
  * SMS reply routing v2 — the question set (PR-A, shadow only).
@@ -127,7 +128,15 @@ export type V2State = {
  */
 export function buildV2JevRequest(
   state: V2State,
-  opts: { repairsFollowUps?: boolean } = {},
+  opts: {
+    repairsFollowUps?: boolean;
+    /**
+     * Live cutover: also ask the EXISTING approved number-source question (Jarrad 2026-10-07,
+     * referenced, never copied) in this same call, so "How did you get my number?" needs no
+     * second Jev call and no extra classification run. Off by default (shadow/replay unchanged).
+     */
+    numberSource?: boolean;
+  } = {},
 ): {
   state: V2State;
   questions: Record<string, JevNoulQuestion | JevChoiceQuestion>;
@@ -137,6 +146,7 @@ export function buildV2JevRequest(
   if (opts.repairsFollowUps) {
     for (const id of REPAIRS_FOLLOW_UP_IDS) questions[id] = { type: "noul", instructions: REPAIRS_FOLLOW_UP_QUESTIONS[id] };
   }
+  if (opts.numberSource) questions[NUMBER_SOURCE_QUESTION_ID] = NUMBER_SOURCE_QUESTION;
   questions[PROPERTY_TYPE_QUESTION_ID] = {
     type: "choice",
     instructions: PROPERTY_TYPE_INSTRUCTIONS,

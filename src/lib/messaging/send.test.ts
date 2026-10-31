@@ -13,6 +13,14 @@ vi.mock("@/lib/supabase/admin", () => ({
 // Mock every side-dependency sendSmsToContact touches *before* the fresh
 // automated-suppression re-check, so the test can drive the pipeline up to
 // that exact boundary with a minimal, deterministic fake Supabase client.
+const allowlist = vi.hoisted(() => ({ check: vi.fn() }));
+vi.mock("./send-allowlist", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./send-allowlist")>();
+  // The guard's own rules are covered in send-allowlist.test.ts (this file's fake database has
+  // no test tag data). Allowed by default; a test overrides one call to simulate a refusal.
+  allowlist.check.mockImplementation(async () => ({ allowed: true }));
+  return { ...real, checkSendAllowed: allowlist.check };
+});
 vi.mock("./registry", () => ({
   getMessagingProvider: vi.fn(),
 }));
@@ -480,6 +488,33 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
   });
 
+  it("§5.4: a confirmed non-owned refusal is terminal (refusal flag), never reaches the hook or the provider", async () => {
+    const { provider, supabase, updates } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "refused_non_owned" });
+    const hook = vi.fn().mockResolvedValue(true);
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
+    expect(hook).not.toHaveBeenCalled();
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true, refusal: "test_send_refused" });
+    expect(updates[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("§5.4: an unreadable test tag is a transient read failure (blocked_fresh_state_unavailable), never a refusal", async () => {
+    const { provider, supabase } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: vi.fn().mockResolvedValue(true) });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_fresh_state_unavailable", messageId: "msg-f", error: "test_tag_unreadable" });
+  });
+
+  it.each(["automated", "manual"] as const)("§5.4: a %s (drip / bulk / rep) send with an unreadable test tag gets the same retryable status", async (origin) => {
+    const { provider, supabase } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const outcome = await sendSmsToContact(supabase, { origin, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234" });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "test_tag_unreadable" });
+  });
+
   it("a hook that throws is a refusal", async () => {
     const { provider, supabase } = scripted();
     const outcome = await sendSmsToContact(supabase, {
@@ -786,6 +821,72 @@ describe("releaseQueuedMessage — claimed payload", () => {
     });
     // A person's queued text finally going out is a takeover: the Book appointment drip stops.
     expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
+  });
+
+  it("§5.4: a queued row whose test tag cannot be read goes back in the queue (later), never failed or sent", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-t", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-t", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-t" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+    const updates: Array<Record<string, unknown>> = [];
+    const realFrom = supabase.from;
+    supabase.from = (table: string) => {
+      const builder = realFrom(table);
+      const realUpdate = builder.update;
+      builder.update = (value: Record<string, unknown>) => {
+        if (table === "messages") updates.push(value);
+        return realUpdate(value);
+      };
+      return builder;
+    };
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const before = Date.now();
+    const outcome = await releaseQueuedMessage(supabase, "queued-t");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_fresh_state_unavailable", messageId: "queued-t", error: "test_tag_unreadable" });
+    const requeue = updates.at(-1)!;
+    expect(requeue).toMatchObject({ status: "queued" });
+    expect(Date.parse(String(requeue.scheduled_for))).toBeGreaterThan(before);
+    expect(updates.some((u) => u.status === "failed")).toBe(false);
+  });
+
+  it("§5.4: a queued row refused as non-owned is failed (terminal refusal flag)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-r", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-r", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-r" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "refused_non_owned" });
+    const outcome = await releaseQueuedMessage(supabase, "queued-r");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "queued-r", retired: true, refusal: "test_send_refused" });
   });
 
   it("a released AUTOMATED queue row is not a takeover", async () => {

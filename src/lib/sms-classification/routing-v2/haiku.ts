@@ -6,7 +6,12 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
 /**
  * Routing v2 PR-D: Haiku second opinion (shadow only). Request shape as the v7 replay
  * (scratchpad final/haiku.py): model `claude-haiku-5-5`, thinking disabled, no
- * temperature, max_tokens 100, the system prompt below and one option line per approved question.
+ * temperature, the system prompt below and one option line per approved question.
+ * A-3 / C5 (Haiku A/B 2026-10-31, arm d): the original request plus `stop_sequences: ["}"]` and
+ * max_tokens 200. The answer ends at its first closing brace (askHaiku re-appends it), so no
+ * trailing prose can follow; prose BEFORE the JSON still fails to parse and escalates (hold +
+ * Haiku-error alert, never a send). Structured outputs (`output_config`) are not used: they
+ * moved Haiku's judgement (unsure 31.5% vs 19.8%). No prompt wording changed.
  *
  * BUSINESS RULES: option lines are the Jarrad-approved question texts (questions.ts) plus the
  * approved `maybe_yes` text. The option ORDER follows ORDER-TABLE.md (v8 prompt, self-approved
@@ -15,7 +20,9 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
  * The key is passed in by the caller and never logged.
  */
 export const HAIKU_MODEL = "claude-haiku-5-5";
-export const HAIKU_MAX_TOKENS = 100;
+export const HAIKU_MAX_TOKENS = 200;
+/** The answer is one flat JSON object: stop at its closing brace (re-appended before parsing). */
+export const HAIKU_STOP_SEQUENCES = ["}"] as const;
 export const HAIKU_URL = "https://api.anthropic.com/v1/messages";
 export const HAIKU_TIMEOUT_MS = 10_000;
 /** USD per million tokens, as used for the v7 replay cost (route_v7.py). Accounting only; no caps. */
@@ -58,6 +65,7 @@ export function buildHaikuRequest(threadLines: ReadonlyArray<string>) {
     model: HAIKU_MODEL,
     max_tokens: HAIKU_MAX_TOKENS,
     thinking: { type: "disabled" as const },
+    stop_sequences: [...HAIKU_STOP_SEQUENCES],
     system: HAIKU_SYSTEM_PROMPT,
     messages: [{ role: "user" as const, content }],
   };
@@ -75,12 +83,48 @@ export type HaikuCallResult = (HaikuAnswer | HaikuFailure) & {
   costUsd: number | null;
 };
 
-/** Strict parse: the whole text must be one JSON object {road: string, confidence: number 0–1}. */
+/**
+ * The FIRST complete JSON object at the start of the text (after an optional ```json fence);
+ * anything after it (Haiku's trailing prose, a "correction", a second object, a cut-off
+ * max_tokens tail) is ignored. No complete leading object = null. Braces inside strings and
+ * escaped quotes are respected.
+ */
+export function firstJsonObject(text: string): string | null {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, "");
+  if (!t.startsWith("{")) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return t.slice(0, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse Haiku's answer: the first complete JSON object {road: string, confidence: number 0–1}
+ * (stress review A-3: Haiku sometimes appends prose after a valid object and is cut off at
+ * max_tokens). The option is then checked against the allowed list by applyHaikuPolicy,
+ * exactly as before; a low confidence stays a valid "unsure".
+ */
 export function parseHaikuText(text: string): HaikuAnswer | HaikuFailure {
-  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const candidate = firstJsonObject(text);
+  if (candidate === null) return { ok: false, reason: "haiku_invalid:parser" };
   let v: unknown;
   try {
-    v = JSON.parse(t);
+    v = JSON.parse(candidate);
   } catch {
     return { ok: false, reason: "haiku_invalid:parser" };
   }
@@ -155,13 +199,15 @@ export async function askHaiku(threadLines: ReadonlyArray<string>, deps: HaikuDe
         const aborted = ctrl.signal.aborted || (e instanceof Error && e.name === "AbortError");
         return done({ ok: false, reason: aborted ? "haiku_invalid:timeout" : "haiku_invalid:parser" }, attempt);
       }
-      const d = (json ?? {}) as { content?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+      const d = (json ?? {}) as { content?: unknown; stop_reason?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
       const blocks = Array.isArray(d.content) ? d.content : [];
       const text = blocks
         .filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
         .map((b) => b.text)
         .join("");
-      return done(parseHaikuText(text), attempt, d.usage);
+      // The stop sequence is not returned: put the closing brace back before parsing.
+      const full = d.stop_reason === "stop_sequence" ? text + "}" : text;
+      return done(parseHaikuText(full), attempt, d.usage);
     } finally {
       clearTimeout(timer);
     }

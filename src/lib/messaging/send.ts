@@ -1,6 +1,7 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
+import { checkSendAllowed, TEST_SEND_REFUSED } from "./send-allowlist";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -31,6 +32,11 @@ import {
 } from "./suppression";
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import { hasOpeningIdentity, openingIdentityError } from "./opening-identity";
+
+/** §5.4: the lead's test tag could not be read (transient); see checkSendAllowed. */
+const TEST_TAG_UNREADABLE = "test_tag_unreadable";
+/** A queued text whose test tag could not be read is retried this much later. */
+const TEST_TAG_RETRY_MS = 5 * 60_000;
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -308,7 +314,13 @@ export type SendSmsOutcome =
    * uniqueness-bearing stamp released (see `retireRefusedRow`): the caller must
    * not retry over it.
    */
-  | { status: "blocked_before_provider"; messageId: string; retired: boolean }
+  | {
+      status: "blocked_before_provider";
+      messageId: string;
+      retired: boolean;
+      /** §5.4: a confirmed test-tagged send to a non-owned number. Terminal: never retry. */
+      refusal?: typeof TEST_SEND_REFUSED;
+    }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -363,6 +375,9 @@ export type SendSmsOutcome =
        * when `origin: 'automated'`; manual sends don't run this re-check
        * at all, so they're unaffected. The row is marked `status: 'failed'`
        * (never retried) so the queue doesn't loop on an unresolved read.
+       * Also returned, for ANY origin, when the §5.4 test-run tag could not be read
+       * (`error: "test_tag_unreadable"`); a queued row is then put back in the queue a
+       * little later instead of being failed.
        */
       status: "blocked_fresh_state_unavailable";
       /** Absent when the unreadable state was caught before a row existed. */
@@ -532,6 +547,11 @@ export type SendSmsInput = {
   requiresOpeningIdentity?: boolean;
   /** Tenant-scoped replay key for a manual rep SMS submission. */
   idempotencyKey?: string | null;
+  /**
+   * §5.4: the work item's test tag (e.g. a routing v2 outbox row's test_run_id). The lead's
+   * own properties.test_run_id is always read at the provider boundary too.
+   */
+  testRunId?: string | null;
   /**
    * Service-owned rep SMS reservation. When present, this ledger is the
    * replay authority and messages.idempotency_key is intentionally ignored.
@@ -1058,6 +1078,29 @@ async function sendSmsToContactInner(
       propertyId: input.propertyId, body: input.body,
       enrollmentId: input.sequenceContext?.enrollmentId,
     });
+    // §5.4 final send boundary: a test-tagged lead / work item may reach only an owned
+    // (TEST_DEST_ALLOWLIST) number. No test tag = unchanged. Refused = never reaches the provider.
+    const allow = await checkSendAllowed(supabase, {
+      orgId: propertyResult.data.org_id,
+      propertyId: input.propertyId,
+      destination: destination.phone,
+      origin: input.origin,
+      testRunId: input.testRunId ?? null,
+      messageId: pending.id,
+    });
+    if (!allow.allowed) {
+      const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
+      if (input.repSmsReceipt) {
+        await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+          providerError: allow.why,
+        });
+      }
+      // An unreadable test tag is a transient read failure, not a refusal: the same contract as
+      // an unreadable consent / suppression state (every caller already retries or holds it).
+      return allow.why === "refused_non_owned"
+        ? { status: "blocked_before_provider", messageId: pending.id, retired, refusal: TEST_SEND_REFUSED }
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: TEST_TAG_UNREADABLE };
+    }
     if (input.beforeProviderSubmit) {
       let proceed = false;
       try {
@@ -2090,6 +2133,36 @@ async function releaseQueuedMessageInner(
     await assertCanarySendBinding(supabase, {
       propertyId: msg.property_id, body: claimed.body,
     });
+    // §5.4 final send boundary (queued release path): same allowlist rule as an immediate send.
+    const allow = msg.property_id
+      ? await checkSendAllowed(supabase, {
+        orgId: msg.org_id ?? null,
+        propertyId: msg.property_id,
+        destination: msg.to_address ?? "",
+        origin: "queued_release",
+        messageId: msg.id,
+      })
+      : { allowed: true as const };
+    if (!allow.allowed && allow.why === "taint_lookup_failed") {
+      // A database blip must delay this queued text, never kill it: back to queued, a little
+      // later (nothing reached the provider). The drain retries it on a later tick.
+      const { error: requeueError } = await supabase
+        .from("messages")
+        .update({ status: "queued", scheduled_for: new Date(Date.now() + TEST_TAG_RETRY_MS).toISOString() })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (requeueError) return { status: "db_error", error: requeueError.message };
+      return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: TEST_TAG_UNREADABLE };
+    }
+    if (!allow.allowed) {
+      const { error: refuseError } = await supabase
+        .from("messages")
+        .update({ status: "failed", failed_at: new Date().toISOString(), error_message: allow.why })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (refuseError) return { status: "db_error", error: refuseError.message };
+      return { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED };
+    }
     const result = await provider.sendSms({
       to: msg.to_address,
       body: claimed.body,

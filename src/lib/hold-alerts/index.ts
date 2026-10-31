@@ -9,6 +9,7 @@ import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
 import { loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
+import { loadV2OutboxAlerts, v2OutboxAlertGate } from "./v2-outbox-alerts";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
@@ -295,11 +296,19 @@ export function createHoldAlertDeps(
         // Never let the v2 opportunity alert break today's hot alerts.
         () => ({ promotions: [], complete: true }),
       );
-      if (opportunities.promotions.length === 0 && opportunities.complete) return hot;
+      // Routing v2 owner alerts queued by live transitions (questions_live + replies only).
+      const outboxAlerts = await loadV2OutboxAlerts(db, orgId, alertsSince, now().getTime(), owner).catch(
+        () => ({ promotions: [], complete: true }),
+      );
+      if (opportunities.promotions.length === 0 && opportunities.complete
+        && outboxAlerts.promotions.length === 0 && outboxAlerts.complete) return hot;
+      // One alert per delivery key: today's hot alert first, then v2 alerts, then opportunities.
       const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      const v2 = outboxAlerts.promotions.filter((p) => !existingKeys.has(p.key));
+      for (const p of v2) existingKeys.add(p.key);
       return {
-        promotions: [...hot.promotions, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
-        complete: hot.complete && opportunities.complete,
+        promotions: [...hot.promotions, ...v2, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete && outboxAlerts.complete,
       };
     },
     async loadLeadReplies(orgId, alertsSince) {
@@ -308,6 +317,7 @@ export function createHoldAlertDeps(
     },
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
+    v2OutboxAlertGate: (outboxId, key) => v2OutboxAlertGate(db, outboxId, key),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")
