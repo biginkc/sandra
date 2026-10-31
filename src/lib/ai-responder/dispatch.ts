@@ -139,6 +139,7 @@ import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-d
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
+  recordRoutingV2Audit,
   recordV2ModelSpend,
   V2_LIVE_JEV_POLICY,
   V2_OUTBOX_REASON,
@@ -9208,6 +9209,54 @@ export function routingV2OutboxHoldReason(cancelReason: string): string {
   return `nine_reply_not_sent:${tail || "not_sent"}`;
 }
 
+/**
+ * A-2 lease death (review of 30d35369b, N-1): a newer text that is saved but never stamped is
+ * treated as "still inside its webhook" for WEBHOOK_PROCESSING_LEASE_MS, so an older reply is
+ * cancelled without a hold. If that webhook then dies, nothing else picks the text up (a
+ * redelivery inside the lease is acknowledged as a skip). This sweep, run by the outbox cron,
+ * holds a person for a v2-live lead whose inbound SMS is older than the lease and still has no
+ * responder stamp, no claim, no keyword exit and no v2 decision / audit row. The audit row it
+ * writes makes it run once per text. A text v2 never routes (flags off) is left as today.
+ */
+export async function sweepUnstampedV2Inbounds(
+  supabase: SupabaseClient<Database>,
+  nowMs: number = Date.now(),
+): Promise<number> {
+  const before = new Date(nowMs - WEBHOOK_PROCESSING_LEASE_MS).toISOString();
+  const after = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, org_id, property_id, conversation_id")
+    .eq("direction", "inbound").eq("channel", "sms")
+    .lt("created_at", before).gt("created_at", after)
+    .not("property_id", "is", null)
+    .is("metadata->processing->aiResponder", null)
+    .is("metadata->>keyword", null)
+    .order("created_at", { ascending: true })
+    .limit(50);
+  if (error) {
+    reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
+    return 0;
+  }
+  let held = 0;
+  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null }>) {
+    const [{ data: claim }, { data: decision }] = await Promise.all([
+      supabase.from("ai_response_claims").select("id").eq("inbound_message_id", m.id).limit(1),
+      (supabase as unknown as { from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null }> } } } })
+        .from("routing_v2_live_decisions").select("id").eq("inbound_message_id", m.id).limit(1),
+    ]);
+    if ((claim ?? []).length > 0 || (decision ?? []).length > 0) continue;
+    if (!(await routingV2LiveFor(supabase, m.org_id, m.property_id))) continue;
+    await markPropertyNeedsAttention(supabase, m.property_id, "nine_needs_person");
+    await recordRoutingV2Audit(supabase, {
+      orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
+      note: "webhook_lease_expired_unstamped",
+    }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
+    held++;
+  }
+  return held;
+}
+
 export async function runRoutingV2OutboxReplies(
   supabase: SupabaseClient<Database>,
   opts: { propertyId?: string; limit?: number; budgetMs?: number; now?: () => number } = {},
@@ -9227,6 +9276,11 @@ export async function runRoutingV2OutboxReplies(
     else reconciled = rec.data;
     // Replies the seller did not get (never submitted, provider failed, outcome unknown too
     // long): write today's hold, then clear the marker. A crash between the two re-holds.
+    // A newer text whose webhook died inside its lease (A-2): a person looks.
+    held += await sweepUnstampedV2Inbounds(supabase, now()).catch((e) => {
+      reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } });
+      return 0;
+    });
     const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
     for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
