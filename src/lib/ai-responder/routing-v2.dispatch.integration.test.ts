@@ -13,7 +13,7 @@ import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2
 import type { Json } from "@/lib/supabase/types";
 
 import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
-import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
+import { dispatchAiResponse, runRoutingV2OutboxReplies, sweepUnstampedV2Inbounds } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 
 /**
@@ -614,7 +614,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(sentTo(lead.phone)).toHaveLength(0);
       const p = await prop(lead.propertyId);
       expect(p.needs_human_attention).toBe(true);
-      expect(p.last_ai_escalation_reason).toMatch(/^(reply_skipped:newer_inbound|nine_reply_not_sent:)/);
+      // A dead newer webhook may also be found first by the outbox cron's unstamped-inbound sweep.
+      expect(p.last_ai_escalation_reason).toMatch(/^(reply_skipped:newer_inbound|nine_reply_not_sent:|nine_needs_person$)/);
     }
 
     it("A-2 round 3, the EXACT stress order: yes -> Book drip, reply in flight; the newer text is saved but its webhook has not stamped it yet when the older reply cancels; the newer text is then routed (no reply_skipped hold, no already_terminal, drip rerouted)", async () => {
@@ -839,7 +840,11 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
-      expect(await enrollments(lead.propertyId)).toContainEqual({ k: "not_interested", status: "paused", r: "timezone_unconfirmed" });
+      // Paused for the person: by the held-lead send check (410000, the lead is already held) or
+      // the unknown-state gate, whichever the tick reaches first. Never active, never sent.
+      const drip = (await enrollments(lead.propertyId)).find((e) => e.k === "not_interested");
+      expect(drip).toMatchObject({ status: "paused" });
+      expect(["inbound_reply", "timezone_unconfirmed"]).toContain(drip!.r);
       expect(sentTo(lead.phone)).toHaveLength(0);
     });
 
@@ -897,7 +902,11 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     async function expectNothingSurvivesHold(lead: Awaited<ReturnType<typeof seedLead>>) {
       await settle();
       await deliver();
-      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      // Held, whichever hold commits first in the burst: the possible stop itself, or a reply the
+      // outbox could not send (never a hold written over another hold). The zero-send checks are exact.
+      const held = await prop(lead.propertyId);
+      expect(held.needs_human_attention).toBe(true);
+      expect(held.last_ai_escalation_reason).toMatch(/^(nine_asked_stop|nine_reply_not_sent:.+)$/);
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
       expect(await count("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply' and status = 'sent'", [lead.propertyId])).toBe(0);
       expect(sentTo(lead.phone)).toHaveLength(0);
@@ -945,6 +954,103 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       release();
       await niDispatch;                              // its transition enrolls on the now-held lead
       await expectNothingSurvivesHold(lead);
+    });
+
+    // ---- 410000 (review of 30d35369b, BLOCKING): the hold is checked at drip SEND time ----
+    async function tickDue(lead: Awaited<ReturnType<typeof seedLead>>) {
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+    }
+
+    it("send-time hold (a): the reply on a reply+drip road cannot be sent, the outbox holds the lead, and its new drip never texts the held lead", async () => {
+      const lead = await setup();
+      await pg.query("delete from auto_reply_templates where org_id = $1 and outcome = 'not_interested'", [orgId]); // the reply cannot be prepared
+      const id = await text(lead, "not interested", { not_interested: 0.95 });
+      expect((await box(id)).status).toBe("cancelled");
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      await tickDue(lead);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+
+    it("send-time hold (b): a keyword / legal hold that lands after the decision's re-read (webhook race) never lets the drip text the held lead", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const sentBefore = sentTo(lead.phone).length;
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(1);
+      // The webhook's keyword / legal hold commits only now, after the decision's own re-read.
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'keyword:legal_contract' where id = $1", [lead.propertyId]);
+      await tickDue(lead);
+      expect(sentTo(lead.phone)).toHaveLength(sentBefore);
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "inbound_reply" }]);
+    });
+
+    it("A-2 lease death: a newer text whose webhook died inside its lease (no stamp, no claim) is swept by the outbox cron once it is past the lease: a person looks; a young one is left in flight", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const dead = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '6 minutes' where id = $1", [dead]);
+      const young = await newerText(lead);
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status = 'not_routed' and failure_reason = 'webhook_lease_expired_unstamped'", [dead])).toBe(1);
+      expect(await auditRows(young)).toBe(0);
+      // Once per text: a second pass writes nothing new.
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect(await auditRows(dead)).toBe(1);
+    });
+
+    it("sweep N-1: 51 handled unstamped texts ahead of 1 dead text never stall the sweep: the dead text's lead is held", async () => {
+      const lead = await setup();
+      const busy = await seedLead();
+      // 51 older texts on another lead that were handled (each has a claim) but carry no stamp.
+      const { rows: handled } = await pg.query(
+        "insert into messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body, created_at) select $1, 'sms', 'inbound', 'received', $2, $3, $4, $5, 'handled ' || g, now() - interval '30 minutes' - (g || ' seconds')::interval from generate_series(1, 51) g returning id",
+        [orgId, busy.propertyId, busy.contactId, busy.phone, MOCK_SENDER_PRIMARY],
+      );
+      for (const h of handled) {
+        await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, completed_at, outcome) values ($1, $2, $3, $4, 'completed', now(), 'auto_closed')", [orgId, h.id, busy.propertyId, busy.contactId]);
+      }
+      const dead = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [dead]);
+      // Passes run until the backlog is through (each pass examines at most 50 texts).
+      for (let i = 0; i < 3; i++) await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and failure_reason = 'webhook_lease_expired_unstamped'", [dead])).toBe(1);
+    });
+
+    it("sweep time budget: out of time = no text examined (nothing held, nothing marked); the next pass does it", async () => {
+      const lead = await setup();
+      const dead = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [dead]);
+      expect(await sweepUnstampedV2Inbounds(supabase, Date.now(), () => true)).toBe(0);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect((await pg.query("select metadata->'processing'->'routingV2Sweep' s from messages where id = $1", [dead])).rows[0].s).toBeNull();
+      expect(await sweepUnstampedV2Inbounds(supabase, Date.now())).toBe(1);
+    });
+
+    it("N-3: unknown time zone on a lead with no other hold: the tick puts the drip in the person queue (paused timezone_unconfirmed), 0 sends", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const sentBefore = sentTo(lead.phone).length;
+      await pg.query("update properties set state = '' where id = $1", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "timezone_unconfirmed" }]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toHaveLength(sentBefore);
+    });
+
+    it("wrong-number keyword: when the close does NOT apply (a person's disposition blocks it), the v2 drip is not retired", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      await pg.query("update properties set outreach_dispo = 'callback_requested' where id = $1", [lead.propertyId]);
+      await text(lead, "I don't own that house", {});
+      expect((await dispoOf(lead.propertyId)).outreach_dispo).toBe("callback_requested");
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "inbound_reply" }]);
     });
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {

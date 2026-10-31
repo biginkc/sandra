@@ -139,6 +139,7 @@ import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-d
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
+  recordRoutingV2Audit,
   recordV2ModelSpend,
   V2_LIVE_JEV_POLICY,
   V2_OUTBOX_REASON,
@@ -9208,6 +9209,86 @@ export function routingV2OutboxHoldReason(cancelReason: string): string {
   return `nine_reply_not_sent:${tail || "not_sent"}`;
 }
 
+/**
+ * A-2 lease death (review of 30d35369b, N-1): a newer text that is saved but never stamped is
+ * treated as "still inside its webhook" for WEBHOOK_PROCESSING_LEASE_MS, so an older reply is
+ * cancelled without a hold. If that webhook then dies, nothing else picks the text up (a
+ * redelivery inside the lease is acknowledged as a skip). This sweep, run by the outbox cron,
+ * holds a person for a v2-live lead whose inbound SMS is older than the lease and still has no
+ * responder stamp, no claim, no keyword exit and no v2 decision / audit row.
+ * - Every text it examines is marked (processing.routingV2Sweep), so the next pass never picks it
+ *   again: handled or not-v2 texts cannot pile up in front of a new dead one (review N-1). The
+ *   mark is written only while the text still has no responder stamp, so it never overwrites a
+ *   stamp being written at the same moment.
+ * - "v2-live" is read from the flags at SWEEP time, not at the text's arrival (review N-2): a
+ *   text that arrived just before the slice was switched on is also swept. Fail-safe: the worst
+ *   case is a person looks at it.
+ * - It stops when `shouldStop` says the cron is out of time (the rest wait for the next pass).
+ */
+export async function sweepUnstampedV2Inbounds(
+  supabase: SupabaseClient<Database>,
+  nowMs: number = Date.now(),
+  shouldStop: () => boolean = () => false,
+): Promise<number> {
+  const before = new Date(nowMs - WEBHOOK_PROCESSING_LEASE_MS).toISOString();
+  const after = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, org_id, property_id, conversation_id, metadata")
+    .eq("direction", "inbound").eq("channel", "sms")
+    .lt("created_at", before).gt("created_at", after)
+    .not("property_id", "is", null)
+    .is("metadata->processing->aiResponder", null)
+    .is("metadata->processing->routingV2Sweep", null)
+    .is("metadata->>keyword", null)
+    .order("created_at", { ascending: true })
+    .limit(50);
+  if (error) {
+    reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
+    return 0;
+  }
+  let held = 0;
+  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; metadata: Json | null }>) {
+    if (shouldStop()) break;
+    const [{ data: claim }, { data: decision }] = await Promise.all([
+      supabase.from("ai_response_claims").select("id").eq("inbound_message_id", m.id).limit(1),
+      (supabase as unknown as { from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null }> } } } })
+        .from("routing_v2_live_decisions").select("id").eq("inbound_message_id", m.id).limit(1),
+    ]);
+    let result: "handled" | "not_v2" | "held";
+    if ((claim ?? []).length > 0 || (decision ?? []).length > 0) result = "handled";
+    else if (!(await routingV2LiveFor(supabase, m.org_id, m.property_id))) result = "not_v2";
+    else {
+      await markPropertyNeedsAttention(supabase, m.property_id, "nine_needs_person");
+      await recordRoutingV2Audit(supabase, {
+        orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
+        note: "webhook_lease_expired_unstamped",
+      }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
+      held++;
+      result = "held";
+    }
+    await markSwept(supabase, m, result, nowMs);
+  }
+  return held;
+}
+
+/** Mark a text as examined by the sweep; only while it still has no responder stamp. */
+async function markSwept(
+  supabase: SupabaseClient<Database>,
+  m: { id: string; metadata: Json | null },
+  result: string,
+  nowMs: number,
+): Promise<void> {
+  const meta = readJsonObject(m.metadata);
+  const processing = meta.processing && typeof meta.processing === "object" && !Array.isArray(meta.processing)
+    ? (meta.processing as Record<string, Json>) : {};
+  const { error } = await supabase.from("messages")
+    .update({ metadata: { ...meta, processing: { ...processing, routingV2Sweep: { at: new Date(nowMs).toISOString(), result } } } as Json })
+    .eq("id", m.id)
+    .is("metadata->processing->aiResponder", null);
+  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep_mark" }, extra: { messageId: m.id } });
+}
+
 export async function runRoutingV2OutboxReplies(
   supabase: SupabaseClient<Database>,
   opts: { propertyId?: string; limit?: number; budgetMs?: number; now?: () => number } = {},
@@ -9227,6 +9308,13 @@ export async function runRoutingV2OutboxReplies(
     else reconciled = rec.data;
     // Replies the seller did not get (never submitted, provider failed, outcome unknown too
     // long): write today's hold, then clear the marker. A crash between the two re-holds.
+    // A newer text whose webhook died inside its lease (A-2): a person looks.
+    // Respects the cron's time budget (review item 4): no new text is examined past it.
+    const outOfTime = () => opts.budgetMs !== undefined && now() - started > opts.budgetMs;
+    held += await sweepUnstampedV2Inbounds(supabase, now(), outOfTime).catch((e) => {
+      reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } });
+      return 0;
+    });
     const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
     for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {

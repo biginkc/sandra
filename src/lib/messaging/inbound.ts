@@ -635,8 +635,9 @@ export async function handleInboundWebhook(
         // applied; the conversation is held for a person instead.
         const hostileWrongNumber = isHostileInbound(ev.body);
         if (propertyId) {
+          let wrongNumberApplied = false;
           if (!hostileWrongNumber) {
-            await setInboundDisposition(supabase, {
+            wrongNumberApplied = await setInboundDisposition(supabase, {
               propertyId,
               disposition: "wrong_number",
               sourceId: resumeDecision.webhookEventId,
@@ -658,8 +659,9 @@ export async function handleInboundWebhook(
           }
           // H1(i): a this-property wrong number is closed with no person hold, so a v2 drip
           // (only routing v2 creates those) is ended, not left paused on a lead nobody owns.
-          // Phone-wide / hostile wording is held for a person below: its drip stays paused.
-          if (wrongScope !== "all" && !hostileWrongNumber) {
+          // Only when the close actually applied here (as the dispatch side retires only on a
+          // closed outcome). Phone-wide / hostile wording is held below: its drip stays paused.
+          if (wrongNumberApplied && wrongScope !== "all") {
             await retireV2DripsForProperty(supabase, propertyId, null);
           }
         }
