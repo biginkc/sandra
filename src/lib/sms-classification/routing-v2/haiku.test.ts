@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { A1_FINAL_STOP_ROWS } from "./__fixtures__/a1-final-stop-rows";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -175,8 +176,9 @@ const V8 = new Map(
 );
 const CODE_REPLY: Record<string, string> = { reaction: "Liked “x”", bad_number: "no SMS capabilities", driving: "I'm driving" };
 // HOLD_haiku_error = invalid Haiku answer → hold + "Haiku error — please check" (no road).
-const PINNED_ROADS: Record<string, number> = { not_interested_drip: 774, book_appointment: 239, price_check: 188, wrong_number_close: 111, stop: 108, ALERT_call_me: 87, listed_drip: 37, who_reply_drip: 37, maybe_later_drip: 31, ALERT_haiku_unsure: 22, which_property_reply: 21, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 11, location_reply: 11, text_only_reply: 10, "reaction+book_appointment": 7, how_it_works_reply: 6, confirmed_owner_drip: 5, ALERT_land_price: 3, "driving_reply+book_appointment": 3, HOLD_haiku_error: 2, ALERT_said_theyll_call: 2, bad_number: 1 };
-const PINNED_BY: Record<string, number> = { jev: 1466, haiku: 243, haiku_unsure: 22, code: 11, jev_haiku_unsure: 8, haiku_failed: 2 };
+// A-1 (2026-10-31): 6 rows are final Jev stops, never asked (not_interested 774→770, stop 108→112).
+const PINNED_ROADS: Record<string, number> = { not_interested_drip: 770, book_appointment: 239, price_check: 188, wrong_number_close: 111, stop: 112, ALERT_call_me: 87, listed_drip: 37, who_reply_drip: 37, maybe_later_drip: 31, ALERT_haiku_unsure: 22, which_property_reply: 21, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 11, location_reply: 11, text_only_reply: 10, "reaction+book_appointment": 7, how_it_works_reply: 6, confirmed_owner_drip: 5, ALERT_land_price: 3, "driving_reply+book_appointment": 3, HOLD_haiku_error: 2, ALERT_said_theyll_call: 2, bad_number: 1 };
+const PINNED_BY: Record<string, number> = { jev: 1472, haiku: 237, haiku_unsure: 22, code: 11, jev_haiku_unsure: 8, haiku_failed: 2 };
 
 describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", () => {
   const roads: Record<string, number> = {};
@@ -190,9 +192,12 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
     if (d.haiku) {
       eligible++;
       if (!V8.has(i)) mismatches.push(`${i}: eligible but not recorded`);
-    } else if (V8.has(i)) mismatches.push(`${i}: recorded but not eligible`);
+    } else if (V8.has(i) && !A1_FINAL_STOP_ROWS.has(i)) mismatches.push(`${i}: recorded but not eligible`);
     const f = applyHaikuPolicy(d, d.haiku ? (V8.get(i) ?? null) : null, probabilities);
-    if (!d.haiku && f.road !== expRoad) mismatches.push(`${i}: non-Haiku row changed`);
+    if (A1_FINAL_STOP_ROWS.has(i)) {
+      // Review A-1: a confident Jev stop is final; Haiku is never asked.
+      if (d.haiku !== null || f.road !== "stop" || f.by !== "jev") mismatches.push(`${i}: A-1 row is not a final Jev stop`);
+    } else if (!d.haiku && f.road !== expRoad) mismatches.push(`${i}: non-Haiku row changed`);
     const key = f.road ?? "HOLD_haiku_error";
     roads[key] = (roads[key] ?? 0) + 1;
     by[f.by] = (by[f.by] ?? 0) + 1;
@@ -200,7 +205,7 @@ describe("Haiku policy — v8 replay (v7 Jev probabilities, v8 Haiku answers)", 
 
   it("covers exactly the 275 Haiku-eligible rows and leaves every other row unchanged", () => {
     expect(mismatches).toEqual([]);
-    expect(eligible).toBe(275);
+    expect(eligible).toBe(275 - A1_FINAL_STOP_ROWS.size);
     expect(V8.size).toBe(275);
   });
 

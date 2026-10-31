@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { A1_FINAL_STOP_ROWS } from "./__fixtures__/a1-final-stop-rows";
 
 import { NINE_QUESTIONS } from "../nine-questions";
 import { haikuEligibility } from "./haiku-eligibility";
@@ -15,7 +16,7 @@ import {
   type PropertyTypeOption,
   type V2QuestionId,
 } from "./questions";
-import { codePreCheck, routeV2 } from "./route";
+import { codePreCheck, isNotInterestedPhrase, routeV2 } from "./route";
 
 // ---------------------------------------------------------------------------
 // (a) Byte pins. Approved by Jarrad word for word; a diff here needs his approval of that text.
@@ -253,6 +254,7 @@ const CODE_REPLY: Record<string, string> = { reaction: "Liked “x”", bad_numb
 
 // Pins PR-A's v7 table with the v7 Haiku answers and the test-only oracle above (v7 option list).
 // The live Haiku policy + v8 prompt answers are pinned separately in haiku.test.ts ("v8 replay").
+
 describe("routing v2 — replay gate (v7)", () => {
   const roads: Record<string, number> = {};
   let haikuCalls = 0;
@@ -260,7 +262,10 @@ describe("routing v2 — replay gate (v7)", () => {
   let alerts = 0;
   const mismatches: string[] = [];
 
-  FIX.rows.forEach(([code, p, pt, haiku, expRoad, expBy, sell], i) => {
+  FIX.rows.forEach(([code, p, pt, haiku, recRoad, recBy, sell], i) => {
+    // Review A-1 (2026-10-31): these recorded rows had a confident asked_stop (≥0.70) beside a
+    // legal/hostile answer in the Haiku band. "A Jev stop ≥70% is final", so they are Jev stops.
+    const [expRoad, expBy] = A1_FINAL_STOP_ROWS.has(i) ? ["stop", "Jev"] : [recRoad, recBy];
     const probabilities = Object.fromEntries(FIX.questionOrder.map((q, k) => [q, p?.[k] ?? 0])) as Record<V2QuestionId, number>;
     const propertyType = Object.fromEntries(FIX.propertyTypeOrder.map((o, k) => [o, pt?.[k] ?? 0])) as Record<PropertyTypeOption, number>;
     const d = routeV2({ reply: code ? CODE_REPLY[code] : "x", probabilities, propertyType });
@@ -288,14 +293,56 @@ describe("routing v2 — replay gate (v7)", () => {
 
   it("pins the §3 table, Haiku-call count and alert counts", () => {
     expect(roads).toEqual({
-      not_interested_drip: 783, book_appointment: 242, price_check: 186, wrong_number_close: 109, stop: 107,
+      // A-1 (2026-10-31): 4 Haiku not_interested rows are final Jev stops (783→779, 107→111).
+      not_interested_drip: 779, book_appointment: 242, price_check: 186, wrong_number_close: 109, stop: 111,
       ALERT_call_me: 93, listed_drip: 35, who_reply_drip: 35, maybe_later_drip: 27, ALERT_haiku_unsure: 26,
       which_property_reply: 22, vacant_land_drip: 19, ALERT_commercial: 17, ALERT_reason_to_sell: 10, location_reply: 10,
       text_only_reply: 9, "reaction+book_appointment": 7, confirmed_owner_drip: 4, ALERT_land_price: 3,
       "driving_reply+book_appointment": 3, ALERT_said_theyll_call: 2, how_it_works_reply: 2, bad_number: 1,
     });
-    expect(haikuCalls).toBe(275);
+    // A-1: 6 rows no longer go to Haiku (275→269); 2 of them were Haiku-decided stops (174→172).
+    expect(haikuCalls).toBe(269);
     expect(alerts).toBe(164);
-    expect(alerts + haikuStops).toBe(174);
+    expect(alerts + haikuStops).toBe(172);
+  });
+});
+
+describe("review A-1: a confident stop-family answer is final (never Haiku)", () => {
+  const zero = () => Object.fromEntries(V2_QUESTION_IDS.map((q) => [q, 0.02])) as Record<V2QuestionId, number>;
+  const PT = { residential: 0.02, lot: 0.02, commercial: 0.02, rental: 0.02, didnt_say: 0.9 } as Record<PropertyTypeOption, number>;
+  const route = (reply: string, p: Partial<Record<V2QuestionId, number>>) => routeV2({ reply, probabilities: { ...zero(), ...p }, propertyType: PT });
+  it("asked_stop 0.85 + hostile 0.68 (the stress repro): final Jev stop, no Haiku", () => {
+    expect(route("Don't", { asked_stop: 0.85, hostile: 0.68 })).toMatchObject({ road: "stop", haiku: null, provenance: { by: "jev", step: "asked_stop", probability: 0.85 } });
+  });
+  it.each([
+    ["Give it a rest for now.", { asked_stop: 0.83, hostile: 0.64, not_interested: 0.9 }],
+    ["Stop texting me about Elm Ave. What's your offer on 123 Main?", { asked_stop: 0.72, legal: 0.61, asked_offer: 0.93, talked_price: 0.8 }],
+    ["Stop texting me about Elm Ave. What's your offer on 123 Main?", { asked_stop: 0.75, asked_offer: 0.93 }],
+  ])("%s → final stop", (reply, p) => {
+    expect(route(reply, p)).toMatchObject({ road: "stop", haiku: null });
+  });
+  it("legal / hostile ≥0.70 are final too; a band-only stop family still goes to Haiku", () => {
+    expect(route("x", { hostile: 0.72, asked_stop: 0.65 })).toMatchObject({ road: "stop", haiku: null, provenance: { signal: "hostile" } });
+    expect(route("x", { hostile: 0.65 })).toMatchObject({ road: "stop", haiku: "decider_band" });
+    expect(route("x", { asked_stop: 0.65 })).toMatchObject({ road: "stop", haiku: "decider_band" });
+  });
+});
+
+describe("D-1: Jarrad's three not-interested phrases (never a stop)", () => {
+  const zero = () => Object.fromEntries(V2_QUESTION_IDS.map((q) => [q, 0.02])) as Record<V2QuestionId, number>;
+  const PT = { residential: 0.02, lot: 0.02, commercial: 0.02, rental: 0.02, didnt_say: 0.9 } as Record<PropertyTypeOption, number>;
+  const route = (reply: string, p: Partial<Record<V2QuestionId, number>>) => routeV2({ reply, probabilities: { ...zero(), ...p }, propertyType: PT });
+  it.each(["Do NOT check back", "do not check back.", "Do not bother", "DO NOT BOTHER!!", "No need to call me back", "no need to call me back, "])(
+    "%j with Jev asked_stop 0.92 → Not interested drip (code)", (reply) => {
+      expect(route(reply, { asked_stop: 0.92 })).toMatchObject({ road: "not_interested_drip", provenance: { by: "code", check: "not_interested_phrase" }, haiku: null });
+    });
+  it("legal or hostile still win over the phrase", () => {
+    expect(route("Do not bother", { legal: 0.8, asked_stop: 0.9 })).toMatchObject({ road: "stop", provenance: { signal: "legal" } });
+    expect(route("Do not bother", { hostile: 0.65 })).toMatchObject({ road: "stop" });
+  });
+  it("only the whole phrase: a longer stop request is still Jev's", () => {
+    expect(isNotInterestedPhrase("Do not bother texting me ever again")).toBe(false);
+    expect(route("Do not bother texting me ever again", { asked_stop: 0.92 })).toMatchObject({ road: "stop" });
+    expect(isNotInterestedPhrase("Don't bother")).toBe(false);
   });
 });
