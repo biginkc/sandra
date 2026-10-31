@@ -11,6 +11,7 @@ export type TestBarrierName =
   | "dispatch:before_transition"
   | "outbox:presend_after_evidence"
   | "outbox:before_hold"
+  | "outbox:before_fence"
   | "tick:after_send_check";
 
 export type TestBarrierContext = { propertyId?: string | null; inboundMessageId?: string | null; enrollmentId?: string | null };
