@@ -153,7 +153,7 @@ it("G3 blast-day replay", async () => {
   await drainInflight(120_000);
   await runRoutingV2OutboxReplies(db, { limit: 200 });
   const quietSends = getMockMessageLog().filter((m) => m.to.startsWith("+1671")).length;
-  R.line(`quiet phase (HI leads, real clock): ${quietCount} deliveries, sends to HI leads during phase = ${quietSends}`);
+  R.line(`quiet phase (Guam leads, real clock): ${quietCount} deliveries, sends to Guam leads during phase = ${quietSends}`);
   R.line("main replay + burst run at REAL time (no clock shift)");
 
   // Chaos script on the compressed timeline.
@@ -302,8 +302,24 @@ it("G3 blast-day replay", async () => {
   const replyStatus: Record<string, number> = {};
   for (const o of outbox) { const k = `${o.kind}:${o.status}${o.cancel_reason ? ":" + o.cancel_reason : ""}`; replyStatus[k] = (replyStatus[k] ?? 0) + 1; }
   R.line("outbox status histogram", replyStatus);
-  const pendingLeft = outbox.filter((o) => o.kind === "reply" && (o.status === "pending" || o.status === "claimed")).length;
-  R.check("queue drained (no reply outbox row left pending/claimed after drain)", pendingLeft === 0, { pendingLeft });
+  // Queue state (replaces "queue drained"): dump every pending/claimed reply row BEFORE anything else clears rows.
+  const pend = (await q(`select o.id, o.property_id, o.status, o.created_at, p.state, c.phone_1 phone,
+      (select count(*)::int from messages k where k.idempotency_key = o.id) keyed
+    from routing_v2_outbox o join properties p on p.id = o.property_id left join contacts c on c.id = p.homeowner_contact_id
+    where o.property_id = any($1) and o.kind = 'reply' and o.status in ('pending','claimed') order by o.created_at`));
+  const quietSet = new Set(quietLeads.map((l) => l.propertyId));
+  const pendRows = pend.map((r) => {
+    const w = checkRecipientQuietHours(r.phone);
+    const mockSends = getMockMessageLog().filter((m) => m.to === r.phone && m.createdAt.getTime() >= new Date(r.created_at).getTime()).length;
+    return { id: r.id, property: r.property_id, status: r.status, state: r.state, zone: r.state === "GU" ? "Pacific/Guam" : r.state, scheduledFor: new Date(r.created_at).toISOString(),
+      deferral: w.ok ? "recipient window OPEN" : `quiet_hours_recipient:${(w as { reason: string }).reason}`, keyedMessages: r.keyed, mockSends, guamQuietSet: quietSet.has(r.property_id) };
+  });
+  R.line(`pending/claimed reply rows after drain (${pendRows.length}):`); for (const r of pendRows) R.line("   ", r);
+  const notGuam = pendRows.filter((r) => !(r.guamQuietSet && r.state === "GU" && r.deferral.startsWith("quiet_hours_recipient") && r.keyedMessages === 0 && r.mockSends === 0));
+  for (const r of notGuam) R.line(`   NOT A GUAM QUIET DEFERRAL -> code bug candidate: outbox ${r.id} property ${r.property}`);
+  const nonDeferredOpen = outbox.filter((o) => o.kind === "reply" && (o.status === "pending" || o.status === "claimed") && !quietSet.has(o.property_id)).length;
+  R.check("queue: drained = every non-deferred reply row is done; deferred = exactly the Guam quiet set (each still quiet, 0 sends, 0 keyed messages)",
+    notGuam.length === 0 && nonDeferredOpen === 0, { pending: pendRows.length, guamDeferred: pendRows.length - notGuam.length, notGuam: notGuam.length, nonDeferredOpen });
 
   const alerts = outbox.filter((o) => o.kind === "alert");
   const alertKey = new Map<string, number>();
@@ -461,7 +477,7 @@ it("G3 blast-day replay", async () => {
   // Quiet hours: every mock send's recipient-local time inside 08:00-21:00.
   const qViol = mock.filter((m) => !checkRecipientQuietHours(m.to, m.createdAt).ok);
   R.check("zero sends outside 08-21 recipient-local (mock provider log, send-time clock)", qViol.length === 0, { sends: mock.length, violations: qViol.length, sample: qViol.slice(0, 5).map((m) => ({ to: m.to, at: m.createdAt.toISOString() })) });
-  R.line(`sends to HI (quiet) leads during the quiet phase: ${quietSends} (allowed only where the recipient is already past 08:00 local, e.g. Eastern; per-recipient check above)`);
+  R.line(`sends to Guam (quiet) leads during the quiet phase: ${quietSends} (allowed only where the recipient is already past 08:00 local, e.g. Eastern; per-recipient check above)`);
   const deferred = outbox.filter((o) => o.kind === "reply" && inbound.find((m) => m.id === o.inbound_message_id && track.get(m.id)?.phase === "quiet_0750"));
   R.line("replies decided during the quiet phase -> status", deferred.reduce((a: Record<string, number>, o) => { a[o.status] = (a[o.status] ?? 0) + 1; return a; }, {}));
 
