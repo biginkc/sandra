@@ -10,6 +10,8 @@ import { ALL_OFF, type RoutingV2Flags } from "@/lib/sms-classification/routing-v
  */
 const h = vi.hoisted(() => ({
   flags: null as unknown as RoutingV2Flags,
+  flagsUnreadable: false,
+  v2Enrollments: [] as Array<{ id: string }>,
   classify: vi.fn(),
   record: vi.fn(),
   evidence: vi.fn(),
@@ -27,6 +29,7 @@ vi.mock("@/lib/sms-classification/routing-v2/wrong-number-all", () => ({ runRout
 vi.mock("@/lib/sms-classification/routing-v2/flags", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/sms-classification/routing-v2/flags")>()),
   readRoutingV2Flags: vi.fn(async () => h.flags),
+  readRoutingV2FlagsResult: vi.fn(async () => (h.flagsUnreadable ? { ok: false } : { ok: true, flags: h.flags })),
 }));
 vi.mock("@/lib/sms-classification/routing-v2/classify", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/sms-classification/routing-v2/classify")>()),
@@ -50,7 +53,7 @@ const ON: RoutingV2Flags = { ...ALL_OFF, questions_live: true, replies: true, dr
 function fakeSupabase() {
   const rpcCalls: Array<{ name: string; args: unknown }> = [];
   const chain = (table: string) => {
-    const rows = table === "properties" ? [{ decision_context_revision: 7 }] : table === "messages" ? [{ created_at: "2026-10-30T12:00:00Z" }] : [];
+    const rows = table === "properties" ? [{ decision_context_revision: 7 }] : table === "messages" ? [{ created_at: "2026-10-30T12:00:00Z" }] : table === "sequence_enrollments" ? h.v2Enrollments : [];
     const c: Record<string, unknown> = {};
     for (const m of ["select", "eq", "neq", "in", "is", "not", "or", "ilike", "gte", "lte", "order", "limit", "update", "insert", "upsert", "delete"]) c[m] = () => c;
     c.maybeSingle = async () => ({ data: rows[0] ?? null, error: null });
@@ -86,6 +89,8 @@ const WHO = { road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }
 
 beforeEach(() => {
   h.flags = ON;
+  h.flagsUnreadable = false;
+  h.v2Enrollments = [];
   for (const f of [h.classify, h.record, h.evidence, h.transition, h.stop, h.phone, h.legacy]) f.mockReset();
   h.legacy.mockResolvedValue({ kind: "jev_no_action", askedHowNumberObtained: undefined });
   h.stop.mockResolvedValue({ kind: "human_review", reason: "flag_off" });
@@ -104,6 +109,22 @@ describe("routing v2 live dispatch hook", () => {
     expect(h.classify).not.toHaveBeenCalled();
     expect(h.record).not.toHaveBeenCalled();
     expect(rpcCalls).toEqual([]);
+  });
+
+  it("H1(i): unreadable flags on a lead v2 already routed hold for a person, never the legacy engine (no orphan paused drip)", async () => {
+    h.flagsUnreadable = true;
+    h.v2Enrollments = [{ id: "e1" }];
+    const { client, rpcCalls } = fakeSupabase();
+    const out = await runRoutingV2LiveStep(client, args());
+    expect(out).not.toBeNull();
+    expect(h.classify).not.toHaveBeenCalled();
+    expect(JSON.stringify({ out, rpcCalls })).toContain("nine_needs_person");
+  });
+
+  it("unreadable flags on a lead v2 never touched: today's engine exactly (null)", async () => {
+    h.flagsUnreadable = true;
+    const { client } = fakeSupabase();
+    expect(await runRoutingV2LiveStep(client, args())).toBeNull();
   });
 
   it("questions_live on but the property is not canary-eligible: today's engine", async () => {

@@ -126,7 +126,7 @@ import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
-import { isV2Eligible, readRoutingV2Flags, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { isV2Eligible, readRoutingV2Flags, readRoutingV2FlagsResult, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import {
   runRoutingV2PhoneAction,
@@ -8514,12 +8514,21 @@ export async function runRoutingV2LiveStep(
   const { input, property, runCtx } = a;
   // A legacy deferral already owns this inbound's decision.
   if (input.nineDeferral || !input.inboundMessageId) return null;
-  let flags: RoutingV2Flags;
-  try {
-    flags = await readRoutingV2Flags(supabase, property.org_id);
-  } catch {
+  const flagRead = await readRoutingV2FlagsResult(supabase, property.org_id);
+  if (!flagRead.ok) {
+    // Unreadable flags (a database blip), not "off": a property v2 already routed (it has a v2
+    // enrollment, which the webhook just paused) must not fall back to the legacy engine, which
+    // neither retires that drip nor holds (H1(i): a paused drip on a lead nobody owns). A person
+    // looks. A property v2 never touched keeps today's behaviour exactly.
+    const { data: v2Enrollment, error: v2EnrollmentError } = await (supabase as unknown as {
+      from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } };
+    }).from("sequence_enrollments").select("id")
+      .eq("property_id", input.propertyId).eq("routing_v2_engine", "v2")
+      .limit(1);
+    if (v2EnrollmentError || (v2Enrollment ?? []).length > 0) return nineHoldAndComplete(supabase, a, "nine_needs_person");
     return null;
   }
+  const flags: RoutingV2Flags = flagRead.flags;
   if (!flags.questions_live || !isV2Eligible(flags, input.propertyId)) return null;
   const inboundMessageId = input.inboundMessageId;
 
