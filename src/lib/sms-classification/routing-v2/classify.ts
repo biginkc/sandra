@@ -134,8 +134,13 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   else action = actionForV2Decision(effective);
 
   let priceOutcome: string | null = null;
-  // Never let a price follow-up override a failed/uncertain second opinion or a stop.
-  const held = action.steps.some((step) => step.kind === "hold");
+  // Never let a price follow-up override a failed second opinion or a stop (A-8): a Haiku error,
+  // a Haiku-decided / possible stop, or an ambiguous stop with Haiku off. "Jev had no main road
+  // and Haiku is unsure" is not one of those: the follow-up answer in the same Jev response
+  // decides (decideRepairsFollowUp keeps its own precedence set); if it returns nothing the
+  // hold action stands.
+  const held = final?.by === "haiku_failed" || final?.hold === true
+    || (!final && decision.road === "stop" && decision.haiku !== null);
   if (!held) {
     const followUp = repairs ? decideRepairsFollowUp({
       flags, propertyId, mainDecision: effective,

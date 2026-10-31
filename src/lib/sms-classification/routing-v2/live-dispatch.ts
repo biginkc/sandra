@@ -88,6 +88,7 @@ export const V2_OUTBOX_REASON = Object.freeze({
   inboundUnreadable: "inbound_unreadable",
   configUnreadable: "config_unreadable",
   quietHours: (why: string) => `quiet_hours_recipient:${why}`,
+  propertyWindow: (why: string) => `quiet_hours_property:${why}`,
 });
 
 /**

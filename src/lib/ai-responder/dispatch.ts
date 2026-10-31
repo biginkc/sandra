@@ -126,7 +126,7 @@ import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
-import { isV2Eligible, readRoutingV2Flags, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { isV2Eligible, readRoutingV2Flags, readRoutingV2FlagsResult, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import {
   runRoutingV2PhoneAction,
@@ -3008,6 +3008,8 @@ const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
 /** Not-sent reason: this approved template (or its exact text) already went to this property. */
 export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** A-2 C3: a v2 reply cancelled because our own older auto reply went out after its inbound. */
+export const V2_OLDER_AUTO_REPLY_SENT = "v2_older_auto_reply_sent";
 /** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
 const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
 
@@ -4736,13 +4738,18 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  const basePlan = skipPlanFor(decision, "presend")!;
-  // Stress A-2 (round 2): a queued routing v2 reply overtaken by a newer seller text (rule 1) is
-  // only cancelled. The newer text is routed by its own v2 dispatch; a person hold here would
-  // make that dispatch exit already_terminal and leave the drip paused.
-  const plan = args.routingV2OutboxId && decision.rule === 1
-    ? { ...basePlan, flagReason: null }
-    : basePlan;
+  // A-2 C3: a queued v2 reply whose rule 3 fired only because OUR OWN older auto reply (to
+  // another seller text) already went out is cancelled quietly; the outbox decides the hold
+  // (C1). A person's text (human_unrelated) and every non-v2 caller keep today's flag.
+  if (args.routingV2OutboxId && isOwnOlderAutoReplyOnly(decision)) {
+    guard();
+    await trace(supabase, { kind: "gate", name: V2_OLDER_AUTO_REPLY_SENT, result: "block", detail: { rule: 3 } }, args.runContext);
+    return { outcome: "skipped", reason: V2_OLDER_AUTO_REPLY_SENT };
+  }
+  // Rule 1 already writes no flag when the newer text has a live handler (its delayed dispatch
+  // is scheduled or running); a newer text whose handler ended or never started keeps the flag,
+  // so a person looks (review M-1).
+  const plan = skipPlanFor(decision, "presend")!;
   guard();
   await trace(
     supabase,
@@ -8507,12 +8514,21 @@ export async function runRoutingV2LiveStep(
   const { input, property, runCtx } = a;
   // A legacy deferral already owns this inbound's decision.
   if (input.nineDeferral || !input.inboundMessageId) return null;
-  let flags: RoutingV2Flags;
-  try {
-    flags = await readRoutingV2Flags(supabase, property.org_id);
-  } catch {
+  const flagRead = await readRoutingV2FlagsResult(supabase, property.org_id);
+  if (!flagRead.ok) {
+    // Unreadable flags (a database blip), not "off": a property v2 already routed (it has a v2
+    // enrollment, which the webhook just paused) must not fall back to the legacy engine, which
+    // neither retires that drip nor holds (H1(i): a paused drip on a lead nobody owns). A person
+    // looks. A property v2 never touched keeps today's behaviour exactly.
+    const { data: v2Enrollment, error: v2EnrollmentError } = await (supabase as unknown as {
+      from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } };
+    }).from("sequence_enrollments").select("id")
+      .eq("property_id", input.propertyId).eq("routing_v2_engine", "v2")
+      .limit(1);
+    if (v2EnrollmentError || (v2Enrollment ?? []).length > 0) return nineHoldAndComplete(supabase, a, "nine_needs_person");
     return null;
   }
+  const flags: RoutingV2Flags = flagRead.flags;
   if (!flags.questions_live || !isV2Eligible(flags, input.propertyId)) return null;
   const inboundMessageId = input.inboundMessageId;
 
@@ -8956,6 +8972,14 @@ async function deliverRoutingV2OutboxIntent(
       if (repeat !== "no") return { kind: "refused", reason: repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT };
       const window = await evaluateRecipientWindow(supabase, input);
       if (!window.ok) return { kind: "wait", reason: V2_OUTBOX_REASON.quietHours(window.why) };
+      // A-2 C2: the property's own business-hours window too (the same check the send makes),
+      // so a closed window waits before any claim instead of being refused and held. An unknown
+      // state is not a window: it takes the send's own fail-closed path as before.
+      const { data: propState } = await supabase.from("properties").select("state").eq("id", row.property_id).maybeSingle();
+      const propertyWindow = checkQuietHours((propState as { state?: string | null } | null)?.state ?? null);
+      if (!propertyWindow.ok && propertyWindow.reason !== "unknown_state") {
+        return { kind: "wait", reason: V2_OUTBOX_REASON.propertyWindow(propertyWindow.reason) };
+      }
       const { data: config } = await supabase
         .from("ai_responder_configs")
         .select("model, outbound_mode")
@@ -9005,11 +9029,18 @@ async function deliverRoutingV2OutboxIntent(
       // The seller did not get the reply: a person looks (today's nine-question hold family).
       // Only when THIS call cancelled the row: a row another consumer already sent, or the
       // provider fence already cancelled (superseded / takeover), never gets a false hold.
-      // Stress A-2 (round 2): a reply overtaken by a NEWER SELLER TEXT is not a failure; that
-      // text is routed by its own v2 dispatch, which a hold here would block (already_terminal).
-      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextExists(supabase, row)))) {
-        await holdFor(reason.replace(/\s+/g, "_"));
-      }
+      // Stress A-2 (round 2): a reply overtaken by a newer seller text whose own dispatch is still
+      // pending / scheduled (or already handled it) is not a failure; that dispatch routes it, and
+      // a hold here would make it exit already_terminal. A newer text whose handler ended without
+      // handling it, or never started (webhook died after the insert), still holds (review M-1).
+      if (marked !== "ok") return;
+      if (isV2SupersededReason(reason) && (await newerSellerTextIsLive(supabase, row))) return;
+      // A-2 C1: a mechanics no-op (a repeat template we never resend, a window that closed, our
+      // own older auto reply already went out) on a road whose v2 drip for THIS inbound is
+      // running is not a person case: the drip is the outcome. Reply-only roads have no such
+      // drip and still hold. The row stays cancelled with its reason (the record).
+      if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return;
+      await holdFor(reason.replace(/\s+/g, "_"));
     },
   });
 }
@@ -9019,11 +9050,37 @@ export function isV2SupersededReason(reason: string): boolean {
   return /^(superseded_before_send|superseded_by_newer_inbound)$/.test(reason);
 }
 
+/** A-2 C3: rule 3 fired ONLY because of our own older auto reply (no person's text involved). */
+export function isOwnOlderAutoReplyOnly(decision: SendGateDecision): boolean {
+  if (decision.action !== "skip" || decision.rule !== 3) return false;
+  const triggers = decision.triggers ?? [];
+  return triggers.length > 0 && triggers.every((t) => t === "ai_other_inbound");
+}
+
+/** Outbox send outcomes that are mechanics, not a person case, when the road's drip is running. */
+export function isV2MechanicsNoOpReason(reason: string): boolean {
+  return reason === TEMPLATE_ALREADY_SENT
+    || reason === NINE_WINDOW_CLOSED
+    || reason === NINE_WINDOW_CLOSED_AT_FENCE
+    || reason === V2_OLDER_AUTO_REPLY_SENT;
+}
+
+/** Is the v2 drip this reply's inbound enrolled still active? A lookup error = no (hold). */
+async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+  const { data, error } = await (supabase as unknown as {
+    from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } } };
+  }).from("sequence_enrollments").select("id")
+    .eq("property_id", row.property_id).eq("routing_v2_inbound_id", row.inbound_message_id).eq("status", "active")
+    .limit(1);
+  return !error && (data ?? []).length > 0;
+}
+
 /**
- * Did the seller text again after this reply's inbound? Then that newer text owns the thread and
- * is routed by its own dispatch. Fails toward the hold (a person looks) on a lookup error.
+ * Is there a newer seller text after this reply's inbound whose own handler is live (its delayed
+ * dispatch is scheduled or running) or already handled it? Same test as send-gate rule 1
+ * (`classifyNewerInboundHandler`). Fails toward the hold (a person looks) on a lookup error.
  */
-async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+async function newerSellerTextIsLive(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
   const { data: own, error: ownError } = await supabase
     .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
   if (ownError || !own?.created_at) return false;
@@ -9031,8 +9088,14 @@ async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: Ro
     .from("messages").select("id")
     .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
     .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
-    .limit(1);
-  return !error && (data ?? []).length > 0;
+    .order("created_at", { ascending: false })
+    .limit(5);
+  if (error) return false;
+  const nowMs = Date.now();
+  for (const newer of data ?? []) {
+    if ((await newerInboundHasLiveHandler(supabase, newer.id, nowMs)) === true) return true;
+  }
+  return false;
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */

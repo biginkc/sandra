@@ -9,7 +9,8 @@ import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/deliv
 import { handleInboundWebhook } from "@/lib/messaging/inbound";
 import { getMockMessageLog, MockMessagingProvider, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
-import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
+import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2/reply-texts";
+import type { Json } from "@/lib/supabase/types";
 
 import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
 import type { AnthropicLike } from "./generate";
@@ -24,9 +25,21 @@ import type { AnthropicLike } from "./generate";
  * routing v2 migration applied, then
  * `npx vitest run --config vitest.local-integration.config.ts <this file>`.
  */
+// The property's own business-hours window. `openCalls` = stay open for that many more checks,
+// then close (a window that closes between the outbox's prepare and the send).
+const propertyWindow = vi.hoisted(() => ({ open: true, openCalls: null as number | null }));
 vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
-  checkQuietHours: () => ({ ok: true, localTime: "12:00", zone: "America/Chicago" }),
+  checkQuietHours: () => {
+    let open = propertyWindow.open;
+    if (propertyWindow.openCalls !== null) {
+      open = propertyWindow.openCalls > 0;
+      propertyWindow.openCalls = Math.max(0, propertyWindow.openCalls - 1);
+    }
+    return open
+      ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
+      : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" };
+  },
 }));
 const recipientWindow = vi.hoisted(() => ({ open: true }));
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
@@ -57,6 +70,7 @@ const supabase = createTestClient();
 const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const realFetch = globalThis.fetch;
 let jevProbabilities: Record<string, number> = {};
+let haikuAnswer: { road: string; confidence: number } | null = null;
 let jevCalls = 0;
 /** The existing eight-answer classification (the number-source detector) says the seller asked. */
 let numberAsked = false;
@@ -64,6 +78,13 @@ let numberAsked = false;
 function installFakeJev() {
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("api.anthropic.com")) {
+      // Fake Haiku: a set answer, or a provider error (Haiku error road) when none is set.
+      if (haikuAnswer === null) return new Response("{}", { status: 500 });
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify(haikuAnswer) }], usage: { input_tokens: 1, output_tokens: 1 } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     jevCalls++;
     const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
@@ -110,6 +131,13 @@ async function seedOrg(flags: Record<string, unknown>) {
     [orgId, V2_REPLY_TEXTS.number_source],
   );
   await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'number_source', $2)", [orgId, ns[0].id]);
+  for (const [outcome, name] of [["not_interested", "Auto reply v2: Not interested"], ["where_located", "Auto reply v2: Where located"]] as const) {
+    const { rows: t } = await pg.query(
+      "insert into public.sms_templates (org_id, name, content, approved_for_auto_send, approved_content, approved_at) values ($1, $2, $3, true, $3, now()) returning id",
+      [orgId, name, v2ReplyText(outcome)],
+    );
+    await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, $2, $3)", [orgId, outcome, t[0].id]);
+  }
   await pg.query("commit");
 }
 
@@ -144,6 +172,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
     await pg.connect();
     process.env.TYPESAFE_API_KEY = "test-key";
+    process.env.ANTHROPIC_API_KEY_SANDRA = "test-key";
     process.env.MESSAGING_PROVIDER = "mock";
     installFakeJev();
   });
@@ -160,6 +189,9 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     expect(resetError).toBeNull();
     resetMockState();
     jevProbabilities = {};
+    haikuAnswer = null;
+    propertyWindow.open = true;
+    propertyWindow.openCalls = null;
     jevCalls = 0;
     numberAsked = false;
     const { error: orgError } = await supabase.from("organizations").upsert({ id: BMH_ORG_ID, name: "BMH (routing v2 test)" });
@@ -422,7 +454,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     async function seedV2DripsWh() {
       await pg.query("begin");
       await pg.query("select set_config('routing_v2.allow_drip_edit', 'on', true)");
-      for (const [key, name] of [["book_appointment", "Book appointment (routing v2)"], ["confirmed_owner", "Confirmed owner (routing v2)"]]) {
+      for (const [key, name] of [["book_appointment", "Book appointment (routing v2)"], ["confirmed_owner", "Confirmed owner (routing v2)"], ["not_interested", "Not interested (routing v2)"], ["asked_who", "Asked who is texting (routing v2)"]]) {
         const { rows } = await pg.query("insert into sequences(org_id,name,active,routing_v2_key,routing_v2_version) values($1,$2,false,$3,1) returning id", [orgId, name, key]);
         await pg.query("insert into sequence_steps(sequence_id,step_index,delay_after_previous_minutes,action_type,template_body) values($1,0,1440,'send_sms',$2),($1,1,1440,'send_sms',$3)", [rows[0].id, `${key} one`, `${key} two`]);
       }
@@ -530,6 +562,203 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         stamp: { o: "auto_closed", r: "routing_v2:confirmed_owner_drip" },
       });
       expect(await auditRows(second)).toBe(1);
+      // The older reply was cancelled; its owner alerts were not (review M-1).
+      const { rows: alerts } = await pg.query("select o.status from routing_v2_outbox o join messages m on m.id = o.inbound_message_id where o.property_id = $1 and o.kind = 'alert' and m.body = $2", [lead.propertyId, "sure what's the offer"]);
+      expect(alerts.length).toBeGreaterThan(0);
+      expect(alerts.filter((a) => a.status === "cancelled")).toEqual([]);
+    });
+
+    async function olderReplyQueued() {
+      const lead = await setup();
+      recipientWindow.open = false;
+      jevProbabilities = { open_to_selling: 0.95 };
+      await say(lead, "sure what's the offer");
+      await runWorkflows();
+      const { rows: [box] } = await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.status).toBe("pending");
+      return lead;
+    }
+    const newerText = async (lead: Awaited<ReturnType<typeof seedLead>>, metadata: Json = {}) => {
+      const { data, error } = await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: "Yes I own it", metadata }).select("id").single();
+      expect(error).toBeNull();
+      return data!.id as string;
+    };
+    async function deliverOlderAndExpectHold(lead: Awaited<ReturnType<typeof seedLead>>) {
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      const { rows: [box] } = await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.status).toBe("cancelled");
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      const p = await prop(lead.propertyId);
+      expect(p.needs_human_attention).toBe(true);
+      expect(p.last_ai_escalation_reason).toMatch(/^(reply_skipped:newer_inbound|nine_reply_not_sent:)/);
+    }
+
+    it("M-1: the newer text's webhook died after the insert (no handler): the cancelled older reply still holds for a person", async () => {
+      const lead = await olderReplyQueued();
+      await newerText(lead);
+      await deliverOlderAndExpectHold(lead);
+    });
+
+    it("M-1: the newer text's handler ended without handling it: the cancelled older reply still holds for a person", async () => {
+      const lead = await olderReplyQueued();
+      const newer = await newerText(lead, { processing: { aiResponder: { outcome: "delayed", workflowRunId: "ended-run", delaySeconds: 30 } } });
+      await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, completed_at, outcome, error_message) values ($1, $2, $3, $4, 'error', now(), 'skipped', 'reply_ineligible')", [orgId, newer, lead.propertyId, lead.contactId]);
+      await deliverOlderAndExpectHold(lead);
+    });
+
+    // ---- A-2 consolidated fix (A2-ROOT-CAUSE-ANALYSIS.md, matrix cases 1-10) ----
+    const box = async (inboundId: string) => (await pg.query("select status, cancel_reason from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply'", [inboundId])).rows[0] ?? null;
+    const stampOf = async (inboundId: string) => (await pg.query("select metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where id = $1", [inboundId])).rows[0];
+    const activeFor = async (inboundId: string) => count("select count(*)::int n from sequence_enrollments where routing_v2_inbound_id = $1 and status = 'active'", [inboundId]);
+    const deliver = async () => { await runRoutingV2OutboxReplies(supabase, { limit: 20 }); await settle(); await runRoutingV2OutboxReplies(supabase, { limit: 20 }); };
+    async function text(lead: Awaited<ReturnType<typeof seedLead>>, body: string, p: Record<string, number>) {
+      jevProbabilities = p;
+      const id = await say(lead, body);
+      await runWorkflows();
+      await deliver();
+      return id;
+    }
+
+    it("case 1: not interested twice: the repeat reply is a no-op, NO hold, the new Not interested drip is active, audit decided", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const second = await text(lead, "still not interested", { not_interested: 0.95 });
+      expect(await box(second)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:template_already_sent" });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect(await activeFor(second)).toBe(1);
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status = 'decided'", [second])).toBe(1);
+    });
+
+    it("case 2: case 1, then \"who is this?\": rerouted, identity reply sent, Asked-who drip active, no already_terminal", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      const second = await text(lead, "still not interested", { not_interested: 0.95 });
+      const third = await text(lead, "who is this?", { asked_who: 0.95 });
+      expect(await stampOf(third)).toMatchObject({ o: "auto_closed" });
+      const rows = await enrollments(lead.propertyId);
+      expect(rows.filter((e) => e.status === "active")).toEqual([{ k: "asked_who", status: "active", r: null }]);
+      expect(await count("select count(*)::int n from sequence_enrollments where routing_v2_inbound_id = $1 and ended_reason = 'rerouted'", [second])).toBe(1);
+      expect(sentTo(lead.phone).map((m) => m.body)).toContain(v2ReplyText("identity"));
+    });
+
+    it("case 3: a reply-only question repeated: the second reply is cancelled and the lead IS held (no drip to fall back on)", async () => {
+      const lead = await setup();
+      await text(lead, "where are you located?", { where_located: 0.95 });
+      const second = await text(lead, "where are you located again?", { where_located: 0.95 });
+      expect(await box(second)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:template_already_sent" });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_reply_not_sent:template_already_sent" });
+      expect(await activeFor(second)).toBe(0);
+    });
+
+    it("case 4: the property window is closed (recipient open): the reply waits pending, then sends when it opens; no hold", async () => {
+      const lead = await setup();
+      recipientWindow.open = false; // hold the first delivery attempt back during the dispatch
+      jevProbabilities = { not_interested: 0.95 };
+      const id = await say(lead, "not interested");
+      await runWorkflows();
+      recipientWindow.open = true;
+      propertyWindow.open = false;
+      await deliver();
+      expect(await box(id)).toMatchObject({ status: "pending" });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      propertyWindow.open = true;
+      await deliver();
+      expect(await box(id)).toMatchObject({ status: "sent" });
+      expect(sentTo(lead.phone)).toHaveLength(1);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    });
+
+    it("case 5: the window closes between prepare and send: a drip road is a quiet no-op (drip active), a reply-only road holds", async () => {
+      const drip = await setup();
+      recipientWindow.open = false;
+      jevProbabilities = { not_interested: 0.95 };
+      const a = await say(drip, "not interested");
+      await runWorkflows();
+      recipientWindow.open = true;
+      propertyWindow.openCalls = 1; // open at the outbox prepare, closed at the send
+      await runRoutingV2OutboxReplies(supabase, { limit: 20 });
+      propertyWindow.openCalls = null;
+      expect((await box(a)).status).toBe("cancelled");
+      expect((await prop(drip.propertyId)).needs_human_attention).toBe(false);
+      expect(await activeFor(a)).toBe(1);
+
+      const only = await seedLead();
+      await pg.query("update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || to_jsonb($2::text)) where org_id = $1", [orgId, only.propertyId]);
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: only.propertyId, contact_id: only.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: only.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+      recipientWindow.open = false;
+      jevProbabilities = { where_located: 0.95 };
+      const b = await say(only, "where are you located?");
+      await runWorkflows();
+      recipientWindow.open = true;
+      propertyWindow.openCalls = 1;
+      await runRoutingV2OutboxReplies(supabase, { limit: 20 });
+      propertyWindow.openCalls = null;
+      expect((await box(b)).status).toBe("cancelled");
+      expect((await prop(only.propertyId)).needs_human_attention).toBe(true);
+    });
+
+    async function doubleText(trigger: "ai" | "human") {
+      const lead = await setup();
+      // Text A gets its reply; text B landed just BEFORE that reply was submitted (the double-text race).
+      const a = await text(lead, "text only please", { text_only: 0.95 });
+      expect(sentTo(lead.phone)).toHaveLength(1);
+      if (trigger === "human") {
+        // Instead of our own reply, a rep's manual text went out after B landed.
+        await pg.query("update messages set metadata = '{}'::jsonb where property_id = $1 and direction = 'outbound' and body = $2", [lead.propertyId, V2_REPLY_TEXTS.text_only]);
+      }
+      jevProbabilities = { not_interested: 0.95 };
+      const b = await say(lead, "actually not interested");
+      const { rows: [sent] } = await pg.query("select coalesce(sent_at, created_at) t from messages where property_id = $1 and direction = 'outbound' and body = $2", [lead.propertyId, V2_REPLY_TEXTS.text_only]);
+      // B landed after A but before A's reply went out.
+      await pg.query("update messages set created_at = (select created_at from messages where id = $3) + ($2::timestamptz - (select created_at from messages where id = $3)) / 2 where id = $1", [b, sent.t, a]);
+      await runWorkflows();
+      await deliver();
+      return { lead, a, b };
+    }
+
+    it("case 6: double text, our own older auto reply went out after B landed: B's reply cancelled v2_older_auto_reply_sent, NO hold, B's drip active", async () => {
+      const { lead, b } = await doubleText("ai");
+      expect(await box(b)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:v2_older_auto_reply_sent" });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect(await activeFor(b)).toBe(1);
+    });
+
+    it("case 7: the same race with a rep's manual text: B's auto reply is never sent (the rep answered: today's rule 2, unchanged)", async () => {
+      const { lead, b } = await doubleText("human");
+      expect(sentTo(lead.phone).filter((m) => m.body === v2ReplyText("not_interested"))).toHaveLength(0);
+      expect(await box(b)).toBeNull();
+      expect(await stampOf(b)).toMatchObject({ r: "already_answered" });
+    });
+
+    it("case 8: a possible-stop hold stays with the person: \"ok\" and \"call me now\" never auto-send or reroute (Jarrad Q2 default)", async () => {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      await text(lead, "I think I'm all set", { asked_stop: 0.65 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      const before = sentTo(lead.phone).length;
+      const ok = await text(lead, "ok", { just_ok: 0.95 });
+      const call = await text(lead, "call me now", { asked_call: 0.95 });
+      expect(sentTo(lead.phone)).toHaveLength(before);
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true });
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      for (const id of [ok, call]) {
+        expect(await stampOf(id)).toMatchObject({ r: "already_terminal" });
+        expect(await auditRows(id)).toBe(1);
+      }
+    });
+
+    it("case 9: a needs-person hold (Haiku error) stays held and in the hold list after a later text", async () => {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = null; // Haiku provider error
+      await text(lead, "hmm", { just_ok: 0.65 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      const later = await text(lead, "hello?", { just_ok: 0.95 });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+      expect(await count("select count(*)::int n from properties where id = $1 and needs_human_attention = true and is_dnc_locked = false", [lead.propertyId])).toBe(1);
+      expect(await auditRows(later)).toBe(1);
     });
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {

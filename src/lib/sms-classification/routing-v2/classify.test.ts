@@ -74,6 +74,34 @@ describe("v2 decision preparation", () => {
     expect(await classifyV2(input, deps)).toMatchObject({ kind: "decided", decision: { provenance: { signal: "asked_stop", probability: 0.7 } }, action: { road: "stop" } });
     expect(deps.haiku).not.toHaveBeenCalled();
   });
+  describe("A-8: after the repairs reply, Jev has no main road and Haiku is unsure", () => {
+    const afterRepairs = [{ direction: "outbound" as const, body: v2ReplyText("price_too_high") }];
+    it("case 11: needs_repairs 0.8 → the follow-up alert decides (no haiku_unsure hold)", async () => {
+      const { input, deps } = fixture({ needs_repairs: 0.8 });
+      const r = await classifyV2({ ...input, thread: afterRepairs }, deps);
+      expect(deps.haiku).toHaveBeenCalledOnce();
+      expect(r).toMatchObject({ kind: "decided", final: { road: "ALERT_haiku_unsure" }, priceOutcome: "follow_up_yes" });
+      expect(JSON.stringify((r as { action: unknown }).action)).not.toContain("haiku_unsure");
+    });
+    it("case 12: no_repairs 0.8 → the realtor reply; every follow-up below 0.60 → the Price too high drip", async () => {
+      const a = fixture({ no_repairs: 0.8 });
+      expect(await classifyV2({ ...a.input, thread: afterRepairs }, a.deps)).toMatchObject({ priceOutcome: "no_repairs", action: { steps: [{ kind: "reply", key: "no_repairs_realtor" }] } });
+      const b = fixture({ needs_repairs: 0.4, no_repairs: 0.4 });
+      const rb = await classifyV2({ ...b.input, thread: afterRepairs }, b.deps);
+      expect(rb).toMatchObject({ kind: "decided", priceOutcome: "other" });
+      expect(JSON.stringify((rb as { action: unknown }).action)).toContain("drip");
+    });
+    it("case 13: a possible stop, a Haiku error or a main call-me still wins over a 0.9 follow-up", async () => {
+      const stop = fixture({ needs_repairs: 0.9 });
+      stop.deps.haiku = vi.fn(async () => ({ ok: true as const, option: "asked_stop", confidence: 0.9 }));
+      expect(await classifyV2({ ...stop.input, thread: afterRepairs }, stop.deps)).toMatchObject({ priceOutcome: null, action: { road: "possible_stop" } });
+      const err = fixture({ needs_repairs: 0.9 });
+      err.deps.haiku = vi.fn(async () => { throw new Error("down"); });
+      expect(await classifyV2({ ...err.input, thread: afterRepairs }, err.deps)).toMatchObject({ priceOutcome: null, action: { road: "haiku_error" } });
+      const call = fixture({ asked_call: 0.95, needs_repairs: 0.9 });
+      expect(await classifyV2({ ...call.input, thread: afterRepairs }, call.deps)).toMatchObject({ action: { road: "ALERT_call_me" } });
+    });
+  });
   it("Haiku transport failure holds even after a repairs reply", async () => {
     const { input, deps } = fixture({ named_price: 0.65, no_repairs: 0.99 });
     deps.haiku = vi.fn(async () => { throw new Error("private provider body"); });

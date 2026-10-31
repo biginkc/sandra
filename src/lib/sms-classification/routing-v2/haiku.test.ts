@@ -25,23 +25,14 @@ describe("Haiku request shape", () => {
     expect(HAIKU_SYSTEM_PROMPT).toBe(EXPECTED_SYSTEM);
     expect(HAIKU_OPTIONS_BLOCK).toBe(EXPECTED_OPTIONS);
   });
-  it("matches haiku.py (model, no temperature, thinking disabled, same prompt) + JSON-only structured output, max_tokens 200 (A-3 round 2)", () => {
+  it("matches haiku.py (model, no temperature, thinking disabled, same prompt) + stop at \"}\", max_tokens 200, no output_config (C5)", () => {
     const r = buildHaikuRequest(["US: hi", "SELLER: yes"]);
+    expect(r).not.toHaveProperty("output_config");
     expect(r).toEqual({
       model: "claude-haiku-5-5",
       max_tokens: 200,
       thinking: { type: "disabled" },
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: {
-            type: "object",
-            properties: { road: { type: "string" }, confidence: { type: "number" } },
-            required: ["road", "confidence"],
-            additionalProperties: false,
-          },
-        },
-      },
+      stop_sequences: ["}"],
       system: EXPECTED_SYSTEM,
       messages: [{ role: "user", content: EXPECTED_OPTIONS + "\n\nCONVERSATION (oldest to newest):\nUS: hi\nSELLER: yes\n\nReturn JSON only." }],
     });
@@ -165,6 +156,23 @@ describe("Haiku client (mocked, no network)", () => {
     expect(url).toBe("https://api.anthropic.com/v1/messages");
     expect((init.headers as Record<string, string>)["x-api-key"]).toBe("test-key");
     expect(JSON.parse(String(init.body))).toEqual(buildHaikuRequest(["SELLER: call me"]));
+  });
+  const stopped = (text: string) =>
+    new Response(JSON.stringify({ content: [{ type: "text", text }], stop_reason: "stop_sequence", stop_sequence: "}", usage: { input_tokens: 1000, output_tokens: 12 } }), { status: 200 });
+  it("C5: a stop-sequence response (closing brace removed by the API) parses after re-appending it", async () => {
+    const fetch = vi.fn(async () => stopped('{"road": "asked_call", "confidence": 0.9'));
+    expect(await askHaiku(["SELLER: call me"], { fetch, apiKey: "k", sleep })).toMatchObject({ ok: true, option: "asked_call", confidence: 0.9 });
+  });
+  it("C5: prose before the JSON still escalates as invalid (hold + Haiku-error alert, never a send)", async () => {
+    const fetch = vi.fn(async () => stopped('The seller seems unsure, so needs_person fits.\n\n{"road": "needs_person", "confidence": 0.4'));
+    const r = await askHaiku(["SELLER: hmm"], { fetch, apiKey: "k", sleep });
+    expect(r).toMatchObject({ ok: false, reason: "haiku_invalid:parser" });
+    const d = { road: null, provenance: { by: "jev" as const, row: null, step: null, signal: null, probability: null }, haiku: "no_jev_answer" as const, opportunityAlert: false };
+    expect(applyHaikuPolicy(d as never, r, probs())).toMatchObject({ by: "haiku_failed", hold: true, alert: HAIKU_ERROR_ALERT });
+  });
+  it("C5: an end_turn answer (no stop sequence) is parsed as is", async () => {
+    const fetch = vi.fn(async () => msg('{"road":"maybe_later","confidence":0.7}'));
+    expect(await askHaiku(["SELLER: later"], { fetch, apiKey: "k", sleep })).toMatchObject({ ok: true, option: "maybe_later" });
   });
   it("retries once on 429/5xx then succeeds", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(new Response("x", { status: 529 })).mockResolvedValueOnce(msg('{"road":"lot","confidence":0.7}'));

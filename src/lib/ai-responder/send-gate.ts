@@ -111,7 +111,11 @@ export type SendGateDecision =
   | { action: "send"; rule: 6 }
   | ({ action: "skip"; flag: false } & SilentSkip)
   | { action: "skip"; flag: true; rule: 1; reason: "newer_inbound_unhandled" }
-  | { action: "skip"; flag: true; rule: 3; reason: "unrelated_conversational_text" }
+  | {
+      action: "skip"; flag: true; rule: 3; reason: "unrelated_conversational_text";
+      /** Who sent the text that fired rule 3 (additive; the reason string is unchanged). */
+      triggers?: ReadonlyArray<"ai_other_inbound" | "human_unrelated">;
+    }
   | { action: "retry"; rule: 4 }
   /** Early phase only, rule 1: too young to judge; the pre-send check decides. */
   | { action: "defer"; rule: 1 };
@@ -158,10 +162,11 @@ export function decideSendGate(
   }
 
   // Rule 3
-  if (
-    submitted.some((f) => f.author === "ai_other_inbound" || f.author === "human_unrelated")
-  ) {
-    return { action: "skip", flag: true, rule: 3, reason: "unrelated_conversational_text" };
+  const rule3Triggers = [...new Set(submitted
+    .map((f) => f.author)
+    .filter((a): a is "ai_other_inbound" | "human_unrelated" => a === "ai_other_inbound" || a === "human_unrelated"))];
+  if (rule3Triggers.length > 0) {
+    return { action: "skip", flag: true, rule: 3, reason: "unrelated_conversational_text", triggers: rule3Triggers };
   }
 
   // Rule 4

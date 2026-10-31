@@ -116,6 +116,19 @@ type Loose = { from: (t: string) => any }; // eslint-disable-line @typescript-es
 
 /** Fresh read of the org's flags. Any error = all off. */
 export async function readRoutingV2Flags(supabase: SupabaseClient<Database>, orgId: string): Promise<RoutingV2Flags> {
+  const r = await readRoutingV2FlagsResult(supabase, orgId);
+  return r.ok ? r.flags : ALL_OFF;
+}
+
+/**
+ * Like readRoutingV2Flags, but tells an unreadable flag row (a read error) apart from flags that
+ * are off / no active config. Callers that must not silently fall back to the legacy engine on a
+ * read error use this.
+ */
+export async function readRoutingV2FlagsResult(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+): Promise<{ ok: true; flags: RoutingV2Flags } | { ok: false }> {
   try {
     const { data, error } = await (supabase as unknown as Loose)
       .from("ai_responder_configs")
@@ -123,10 +136,11 @@ export async function readRoutingV2Flags(supabase: SupabaseClient<Database>, org
       .eq("org_id", orgId)
       .eq("active", true)
       .maybeSingle();
-    if (error || !data) return ALL_OFF;
-    return parseRoutingV2Flags((data as { routing_v2_flags?: unknown }).routing_v2_flags);
+    if (error) return { ok: false };
+    if (!data) return { ok: true, flags: ALL_OFF };
+    return { ok: true, flags: parseRoutingV2Flags((data as { routing_v2_flags?: unknown }).routing_v2_flags) };
   } catch {
-    return ALL_OFF;
+    return { ok: false };
   }
 }
 
