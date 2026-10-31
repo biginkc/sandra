@@ -7,7 +7,9 @@ import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import { assertStack, FINAL, Receipt } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
+import { assertClockAligned, FIXTURE_ZONES } from "./lib/clock";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
+let clockInfo: { skewMs: number; local: Record<string, string> } = { skewMs: -1, local: {} };
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
@@ -24,7 +26,8 @@ beforeAll(async () => {
   assertStack();
   await pg.connect();
   stubs.install();
-  setClockOffset(offsetToChicago(12, 0)); // business hours on the JS clock
+  setClockOffset(0); // no clock shift: real time, checked below (A2-RACE-ANALYSIS skew fix)
+  clockInfo = await assertClockAligned(pg, FIXTURE_ZONES);
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4-${Date.now()}`, FLAGS);
   await retirePriorRuns(pg);
@@ -120,7 +123,7 @@ describe("G4 §4.1 slot-time sweep", () => {
         await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set status = 'completed', next_run_at = null where id = $1; commit;".replace("$1", `'${enr}'`));
       }
     }
-    setClockOffset(offsetToChicago(12, 0));
+    setClockOffset(0); // back to real time after the deliberate 4.1 tick sweep
     R.line("DB tick outcomes by state (96 Chicago-clock ticks each, step 1 'any' window)", outcomes);
     R.check("DB sweep: sends never after the named time", dbLate === 0, { dbSent, dbLate });
     R.check("DB sweep: zero sends outside 08–21 property-local", dbQuiet === 0, { dbSent, dbQuiet });
@@ -191,7 +194,8 @@ describe("G4 §4.2 lengths", () => {
 // ------------------------------------------------------------------ §4.3 stop conditions
 describe("G4 §4.3 stop conditions", () => {
   it("reply retire / stops / takeover / reroute / races / inbound call / drip end", async () => {
-    const R = new Receipt("G4-4.3-stops.txt");
+    const R = new Receipt(process.env.G4_STOPS_RECEIPT ?? "G4-4.3-stops.txt");
+    R.line("clock: no JS shift; measured |app - DB| skew ms =", Math.round(clockInfo.skewMs), "local times:", clockInfo.local);
     const { createTestClient } = await import("@tests/integration/client");
     const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
     const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");
