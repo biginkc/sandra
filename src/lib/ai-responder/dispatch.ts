@@ -4735,7 +4735,13 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  const plan = skipPlanFor(decision, "presend")!;
+  const basePlan = skipPlanFor(decision, "presend")!;
+  // Stress A-2 (round 2): a queued routing v2 reply overtaken by a newer seller text (rule 1) is
+  // only cancelled. The newer text is routed by its own v2 dispatch; a person hold here would
+  // make that dispatch exit already_terminal and leave the drip paused.
+  const plan = args.routingV2OutboxId && decision.rule === 1
+    ? { ...basePlan, flagReason: null }
+    : basePlan;
   guard();
   await trace(
     supabase,
@@ -8983,9 +8989,34 @@ async function deliverRoutingV2OutboxIntent(
       // The seller did not get the reply: a person looks (today's nine-question hold family).
       // Only when THIS call cancelled the row: a row another consumer already sent, or the
       // provider fence already cancelled (superseded / takeover), never gets a false hold.
-      if (marked === "ok") await holdFor(reason.replace(/\s+/g, "_"));
+      // Stress A-2 (round 2): a reply overtaken by a NEWER SELLER TEXT is not a failure; that
+      // text is routed by its own v2 dispatch, which a hold here would block (already_terminal).
+      if (marked === "ok" && !(isV2SupersededReason(reason) && (await newerSellerTextExists(supabase, row)))) {
+        await holdFor(reason.replace(/\s+/g, "_"));
+      }
     },
   });
+}
+
+/** A queued v2 reply cancelled because something newer overtook it (the send gate's reasons). */
+export function isV2SupersededReason(reason: string): boolean {
+  return /^(superseded_before_send|superseded_by_newer_inbound)$/.test(reason);
+}
+
+/**
+ * Did the seller text again after this reply's inbound? Then that newer text owns the thread and
+ * is routed by its own dispatch. Fails toward the hold (a person looks) on a lookup error.
+ */
+async function newerSellerTextExists(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+  const { data: own, error: ownError } = await supabase
+    .from("messages").select("created_at").eq("id", row.inbound_message_id).maybeSingle();
+  if (ownError || !own?.created_at) return false;
+  const { data, error } = await supabase
+    .from("messages").select("id")
+    .eq("property_id", row.property_id).eq("direction", "inbound").eq("channel", "sms")
+    .gt("created_at", own.created_at).neq("id", row.inbound_message_id)
+    .limit(1);
+  return !error && (data ?? []).length > 0;
 }
 
 /** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */

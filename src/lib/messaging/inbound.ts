@@ -1233,6 +1233,14 @@ export async function handleInboundWebhook(
                 outcome: preGates.outcome,
                 runContext: runCtx,
               });
+              // Routing v2 AUDIT (round 2): a pre-gate skip (already held for a person, a
+              // number-source answer, ...) never reaches v2; record why, once.
+              scheduleRoutingV2Audit(supabase, {
+                propertyId: effectivePropertyId,
+                inboundMessageId: insertOutcome.messageId,
+                conversationId: insertOutcome.conversationId,
+                note: `pre_gate:${preGates.outcome.outcome}:${"reason" in preGates.outcome ? preGates.outcome.reason : ""}`,
+              });
             } else {
               // Same rule as the normal path: a property whose responder a
               // person turned off gets no Sandra keyword hold and no alert.
@@ -1267,6 +1275,13 @@ export async function handleInboundWebhook(
                     reason: keywordEscalation.reason,
                   },
                   runContext: runCtx,
+                });
+                // Routing v2 AUDIT (round 2): a delayed-path keyword hold never reaches v2.
+                scheduleRoutingV2Audit(supabase, {
+                  propertyId: effectivePropertyId,
+                  inboundMessageId: insertOutcome.messageId,
+                  conversationId: insertOutcome.conversationId,
+                  note: `keyword_hold:${keywordEscalation.reason}`,
                 });
               } else {
                 const scheduledAt = new Date(

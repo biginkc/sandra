@@ -1,10 +1,13 @@
+import { randomUUID } from "node:crypto";
+
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { BMH_ORG_ID, getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/delivery";
-import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
+import { handleInboundWebhook } from "@/lib/messaging/inbound";
+import { getMockMessageLog, MockMessagingProvider, resetMockState } from "@/lib/messaging/providers/mock";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
 
@@ -25,9 +28,29 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
   checkQuietHours: () => ({ ok: true, localTime: "12:00", zone: "America/Chicago" }),
 }));
+const recipientWindow = vi.hoisted(() => ({ open: true }));
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
-  checkRecipientQuietHours: () => ({ ok: true, state: "MO", localTime: "12:00", florida: false }),
+  // A test can close the seller's window so a queued v2 reply waits in the outbox.
+  checkRecipientQuietHours: () => recipientWindow.open
+    ? { ok: true, state: "MO", localTime: "12:00", florida: false }
+    : { ok: false, reason: "outside_window", state: "MO", localTime: "22:00" },
+}));
+
+// The REAL webhook path: handleInboundWebhook starts the delay workflow; the workflow runtime is
+// not available in vitest, so start() queues the real aiReplyDelayWorkflow body and runWorkflows()
+// runs it in-process (sleep resolves at once). Nothing else about the path is faked.
+const workflows = vi.hoisted(() => ({ pending: [] as Array<{ fn: (p: unknown) => Promise<unknown>; params: unknown }> }));
+vi.mock("workflow/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("workflow/api")>()),
+  start: async (fn: (p: unknown) => Promise<unknown>, args: unknown[]) => {
+    workflows.pending.push({ fn, params: args[0] });
+    return { runId: `v2-webhook-${workflows.pending.length}` };
+  },
+}));
+vi.mock("workflow", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("workflow")>()),
+  sleep: async () => undefined,
 }));
 
 const supabase = createTestClient();
@@ -393,6 +416,140 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(tr.find((t) => t.inbound_message_id === older.inboundMessageId)?.outcome).toBe("superseded");
       const { rows: [p] } = await pg.query("select needs_human_attention, last_ai_escalation_reason from properties where id = $1", [lead.propertyId]);
       expect(p.last_ai_escalation_reason ?? "").not.toMatch(/^reply_skipped/);
+    });
+  });
+  describe("the REAL webhook + delay workflow path (stress A-2 / AUD round 2)", () => {
+    async function seedV2DripsWh() {
+      await pg.query("begin");
+      await pg.query("select set_config('routing_v2.allow_drip_edit', 'on', true)");
+      for (const [key, name] of [["book_appointment", "Book appointment (routing v2)"], ["confirmed_owner", "Confirmed owner (routing v2)"]]) {
+        const { rows } = await pg.query("insert into sequences(org_id,name,active,routing_v2_key,routing_v2_version) values($1,$2,false,$3,1) returning id", [orgId, name, key]);
+        await pg.query("insert into sequence_steps(sequence_id,step_index,delay_after_previous_minutes,action_type,template_body) values($1,0,1440,'send_sms',$2),($1,1,1440,'send_sms',$3)", [rows[0].id, `${key} one`, `${key} two`]);
+      }
+      await pg.query("commit");
+    }
+    const enrollments = async (propertyId: string) => (await pg.query(
+      "select s.routing_v2_key k, e.status, coalesce(e.ended_reason, e.pause_reason) r from sequence_enrollments e join sequences s on s.id = e.sequence_id where e.property_id = $1 order by e.enrolled_at, e.id", [propertyId])).rows;
+    async function runWorkflows() {
+      for (let guard = 0; workflows.pending.length && guard < 20; guard++) {
+        const w = workflows.pending.shift()!;
+        await w.fn(w.params);
+      }
+      await settle();
+    }
+    async function say(lead: Awaited<ReturnType<typeof seedLead>>, body: string) {
+      const res = await handleInboundWebhook(new Request("https://v2.test/webhooks/mock", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-mock-signature": "valid" },
+        body: JSON.stringify({ externalId: `v2-wh-${randomUUID()}`, from: lead.phone, to: MOCK_SENDER_PRIMARY, body }),
+      }), { includeFullUrl: false, provider: new MockMessagingProvider() });
+      expect(res.status).toBe(200);
+      const { rows: [m] } = await pg.query("select id from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [lead.propertyId]);
+      return m.id as string;
+    }
+    async function setup() {
+      workflows.pending.length = 0;
+      recipientWindow.open = true;
+      const lead = await seedLead();
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      await pg.query("update ai_responder_configs set reply_delay_min_seconds = 30, reply_delay_max_seconds = 60 where org_id = $1", [orgId]);
+      await seedV2DripsWh();
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+      return lead;
+    }
+    async function yesThroughWebhook(lead: Awaited<ReturnType<typeof seedLead>>) {
+      // As in the stress run: a hot "yes, what's the offer" (open to selling), not a plain okay.
+      jevProbabilities = { open_to_selling: 0.95 };
+      await say(lead, "sure what's the offer");
+      await runWorkflows();
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      expect({ e: await enrollments(lead.propertyId), p: await prop(lead.propertyId) }).toMatchObject({ e: [{ k: "book_appointment", status: "active", r: null }] });
+    }
+    const auditRows = async (inboundId: string) => count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [inboundId]);
+    const prop = async (id: string) => (await pg.query("select needs_human_attention, last_ai_escalation_reason from properties where id = $1", [id])).rows[0];
+
+    it("a reply onto an ACTIVE drip through the webhook: drip retired (rerouted), new road active, nothing paused", async () => {
+      const lead = await setup();
+      await yesThroughWebhook(lead);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      const second = await say(lead, "Yes I own it");
+      await runWorkflows();
+      const rows = await enrollments(lead.propertyId);
+      expect({ rows, prop: await prop(lead.propertyId) }).toMatchObject({
+        rows: [{ k: "book_appointment", status: "completed", r: "rerouted" }, { k: "confirmed_owner", status: "active", r: null }],
+      });
+      expect(await auditRows(second)).toBe(1);
+    });
+
+    it("a reply onto a PAUSED drip through the webhook: retired and rerouted, never left paused", async () => {
+      const lead = await setup();
+      await yesThroughWebhook(lead);
+      await pg.query("update sequence_enrollments set status = 'paused', pause_reason = 'inbound_reply' where property_id = $1 and status = 'active'", [lead.propertyId]);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      await say(lead, "Yes I own it");
+      await runWorkflows();
+      const rows = await enrollments(lead.propertyId);
+      expect(rows.filter((e) => e.status === "paused")).toEqual([]);
+      expect(rows).toContainEqual({ k: "confirmed_owner", status: "active", r: null });
+    });
+
+    it("a reply racing the tick through the webhook: still routed, drip retired", async () => {
+      const lead = await setup();
+      await yesThroughWebhook(lead);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      await say(lead, "Yes I own it");
+      // The tick sends the drip's next text after the reply landed, before the delayed dispatch runs.
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "book_appointment two", metadata: { generated_by: "sequence_tick" }, created_at: new Date(Date.now() + 1000).toISOString(), sent_at: new Date(Date.now() + 1000).toISOString() });
+      await runWorkflows();
+      const rows = await enrollments(lead.propertyId);
+      expect(rows.filter((e) => e.status === "paused")).toEqual([]);
+      expect(rows).toEqual([{ k: "book_appointment", status: "completed", r: "rerouted" }, { k: "confirmed_owner", status: "active", r: null }]);
+    });
+
+    it("the older reply still queued when the newer text lands (stress run order): newer text routed, never parked, no reply_skipped hold", async () => {
+      const lead = await setup();
+      // The yes reply waits in the outbox (seller's window closed) while the next text arrives.
+      recipientWindow.open = false;
+      jevProbabilities = { open_to_selling: 0.95 };
+      await say(lead, "sure what's the offer");
+      await runWorkflows();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "book_appointment", status: "active", r: null }]);
+      jevProbabilities = { confirmed_owner: 0.95 };
+      const second = await say(lead, "Yes I own it");
+      // The window opens; the cron delivers the OLDER queued reply before the newer text's delayed dispatch.
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      await runWorkflows();
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      const rows = await enrollments(lead.propertyId);
+      const p = await prop(lead.propertyId);
+      const { rows: [stamp] } = await pg.query("select metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where id = $1", [second]);
+      expect({ rows, reason: p.last_ai_escalation_reason ?? null, stamp }).toEqual({
+        rows: [{ k: "book_appointment", status: "completed", r: "rerouted" }, { k: "confirmed_owner", status: "active", r: null }],
+        reason: null,
+        stamp: { o: "auto_closed", r: "routing_v2:confirmed_owner_drip" },
+      });
+      expect(await auditRows(second)).toBe(1);
+    });
+
+    it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {
+      const lead = await setup();
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'needs_reply' where id = $1", [lead.propertyId]);
+      jevProbabilities = { text_only: 0.95 };
+      const first = await say(lead, "hello?");
+      await runWorkflows();
+      const second = await say(lead, "anyone there");
+      await runWorkflows();
+      expect([await auditRows(first), await auditRows(second)]).toEqual([1, 1]);
+    });
+
+    it("AUD: a delayed-path keyword hold (\"talk to someone\") gets exactly one audit row", async () => {
+      const lead = await setup();
+      const inbound = await say(lead, "can I talk to someone please");
+      await runWorkflows();
+      const { rows: [stamp] } = await pg.query("select metadata->'processing'->'aiResponder'->>'outcome' o from messages where id = $1", [inbound]);
+      expect(stamp.o).not.toBe("auto_closed");
+      expect(await auditRows(inbound)).toBe(1);
     });
   });
 });
