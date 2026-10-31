@@ -12,6 +12,7 @@ import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 import { V2_REPLY_TEXTS, v2ReplyText } from "@/lib/sms-classification/routing-v2/reply-texts";
 import type { Json } from "@/lib/supabase/types";
 
+import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
 import { dispatchAiResponse, runRoutingV2OutboxReplies } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 
@@ -28,9 +29,14 @@ import type { AnthropicLike } from "./generate";
 // The property's own business-hours window. `openCalls` = stay open for that many more checks,
 // then close (a window that closes between the outbox's prepare and the send).
 const propertyWindow = vi.hoisted(() => ({ open: true, openCalls: null as number | null }));
-vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours")>()),
-  checkQuietHours: () => {
+vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/messaging/quiet-hours")>();
+  return {
+  ...real,
+  checkQuietHours: (state: string | null | undefined) => {
+    // An unreadable state is never "open" (B-1): pass the real answer through.
+    const actual = real.checkQuietHours(state);
+    if (!actual.ok && actual.reason === "unknown_state") return actual;
     let open = propertyWindow.open;
     if (propertyWindow.openCalls !== null) {
       open = propertyWindow.openCalls > 0;
@@ -40,7 +46,8 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => ({
       ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
       : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" };
   },
-}));
+  };
+});
 const recipientWindow = vi.hoisted(() => ({ open: true }));
 vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/messaging/quiet-hours-recipient")>()),
@@ -53,10 +60,15 @@ vi.mock("@/lib/messaging/quiet-hours-recipient", async (importOriginal) => ({
 // The REAL webhook path: handleInboundWebhook starts the delay workflow; the workflow runtime is
 // not available in vitest, so start() queues the real aiReplyDelayWorkflow body and runWorkflows()
 // runs it in-process (sleep resolves at once). Nothing else about the path is faked.
-const workflows = vi.hoisted(() => ({ pending: [] as Array<{ fn: (p: unknown) => Promise<unknown>; params: unknown }> }));
+const workflows = vi.hoisted(() => ({
+  pending: [] as Array<{ fn: (p: unknown) => Promise<unknown>; params: unknown }>,
+  /** When set, start() waits on it: a webhook held after its insert, before its delay stamp. */
+  gate: null as Promise<void> | null,
+}));
 vi.mock("workflow/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("workflow/api")>()),
   start: async (fn: (p: unknown) => Promise<unknown>, args: unknown[]) => {
+    if (workflows.gate) await workflows.gate;
     workflows.pending.push({ fn, params: args[0] });
     return { runId: `v2-webhook-${workflows.pending.length}` };
   },
@@ -71,6 +83,8 @@ const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const realFetch = globalThis.fetch;
 let jevProbabilities: Record<string, number> = {};
 let haikuAnswer: { road: string; confidence: number } | null = null;
+let jevByReply: Record<string, Record<string, number>> = {};
+let jevGates: Record<string, { gate: Promise<void>; reached: () => void }> = {};
 let jevCalls = 0;
 /** The existing eight-answer classification (the number-source detector) says the seller asked. */
 let numberAsked = false;
@@ -87,7 +101,13 @@ function installFakeJev() {
     }
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     jevCalls++;
-    const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+    const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown>; state?: { homeowner_reply?: string } };
+    // Per-text answers (bursts): a reply listed in jevByReply uses its own probabilities.
+    const own = body.state?.homeowner_reply !== undefined ? jevByReply[body.state.homeowner_reply] : undefined;
+    // A test can hold one text's classification open (its dispatch is mid-flight).
+    const held = body.state?.homeowner_reply !== undefined ? jevGates[body.state.homeowner_reply] : undefined;
+    if (held) { held.reached(); await held.gate; }
+    const probs = own ?? jevProbabilities;
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
       answers[id] = id === "property_type"
@@ -95,7 +115,7 @@ function installFakeJev() {
         : id === "asked_how_number_obtained"
           // The existing approved number-source question, asked in the same v2 call.
           ? { choice: numberAsked ? "yes" : "no", probabilities: numberAsked ? { yes: 0.95, no: 0.05 } : { yes: 0.05, no: 0.95 } }
-          : { choice: "noul", noul: jevProbabilities[id] ?? 0.02 };
+          : { choice: "noul", noul: probs[id] ?? 0.02 };
     }
     return new Response(JSON.stringify({ answers, model: "jev-test", usage: { input_tokens: 1, output_tokens: 1 } }), {
       status: 200, headers: { "content-type": "application/json" },
@@ -190,6 +210,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     resetMockState();
     jevProbabilities = {};
     haikuAnswer = null;
+    jevByReply = {};
+    jevGates = {};
     propertyWindow.open = true;
     propertyWindow.openCalls = null;
     jevCalls = 0;
@@ -481,6 +503,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     }
     async function setup() {
       workflows.pending.length = 0;
+      workflows.gate = null;
       recipientWindow.open = true;
       const lead = await seedLead();
       await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
@@ -594,9 +617,53 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(p.last_ai_escalation_reason).toMatch(/^(reply_skipped:newer_inbound|nine_reply_not_sent:)/);
     }
 
-    it("M-1: the newer text's webhook died after the insert (no handler): the cancelled older reply still holds for a person", async () => {
+    it("A-2 round 3, the EXACT stress order: yes -> Book drip, reply in flight; the newer text is saved but its webhook has not stamped it yet when the older reply cancels; the newer text is then routed (no reply_skipped hold, no already_terminal, drip rerouted)", async () => {
+      const lead = await setup();
+      recipientWindow.open = false; // the yes reply stays in flight (queued in the outbox)
+      jevProbabilities = { open_to_selling: 0.95 };
+      await say(lead, "sure what's the offer");
+      await runWorkflows();
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "book_appointment", status: "active", r: null }]);
+      // The newer text's webhook: hold it inside start(), i.e. after the inbound is saved and
+      // before its delay stamp / any claim.
+      let release!: () => void;
+      workflows.gate = new Promise<void>((r) => { release = r; });
+      jevProbabilities = { not_interested: 0.95 };
+      const webhook = say(lead, "not interested");
+      let newer: string | null = null;
+      for (let i = 0; i < 100 && !newer; i++) {
+        const { rows } = await pg.query("select id from messages where property_id = $1 and direction = 'inbound' and body = 'not interested'", [lead.propertyId]);
+        newer = rows[0]?.id ?? null;
+        if (!newer) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(newer).not.toBeNull();
+      expect(await stampOf(newer!)).toMatchObject({ o: null });
+      // The older reply goes to send now and is cancelled (superseded_before_send).
+      recipientWindow.open = true;
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });
+      const { rows: [older] } = await pg.query("select status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at asc limit 1", [lead.propertyId]);
+      expect(older.status).toBe("cancelled");
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      // The newer text's webhook finishes; its delayed dispatch runs.
+      workflows.gate = null;
+      release();
+      await webhook;
+      await runWorkflows();
+      await deliver();
+      expect(await stampOf(newer!)).toMatchObject({ o: "auto_closed", r: "routing_v2:not_interested_drip" });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: false });
+      expect(await enrollments(lead.propertyId)).toEqual([
+        { k: "book_appointment", status: "completed", r: "rerouted" }, { k: "not_interested", status: "active", r: null },
+      ]);
+    });
+
+    it("M-1: the newer text's webhook died after the insert (no stamp past the webhook lease): the cancelled older reply still holds", async () => {
       const lead = await olderReplyQueued();
-      await newerText(lead);
+      // Both texts landed long ago; the newer one never got a stamp or claim within the 5-minute
+      // webhook lease, so its webhook is dead (a young unstamped text is still in flight: A-2 r3).
+      await pg.query("update messages set created_at = now() - interval '20 minutes' where property_id = $1 and direction = 'inbound'", [lead.propertyId]);
+      const newer = await newerText(lead);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [newer]);
       await deliverOlderAndExpectHold(lead);
     });
 
@@ -759,6 +826,125 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
       expect(await count("select count(*)::int n from properties where id = $1 and needs_human_attention = true and is_dnc_locked = false", [lead.propertyId])).toBe(1);
       expect(await auditRows(later)).toBe(1);
+    });
+
+    it.each([["blank", ""], ["spelled out", "Missouri"]] as const)("B-1: a property whose state is %s (unreadable) ends HELD: the reply holds and the drip is paused for a person, never silent", async (_label, state) => {
+      const lead = await setup();
+      await pg.query("update properties set state = $2 where id = $1", [lead.propertyId, state]);
+      const id = await text(lead, "not interested", { not_interested: 0.95 });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await box(id)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:nine_window_unknown_state" });
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_reply_not_sent:nine_window_unknown_state" });
+      // The drip never reschedules +10h forever: the tick pauses it for a person.
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      expect(await enrollments(lead.propertyId)).toContainEqual({ k: "not_interested", status: "paused", r: "timezone_unconfirmed" });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+    });
+
+    async function seedWrongNumberAutomation() {
+      await pg.query("insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'wrong_number', 0.9, true) on conflict do nothing", [orgId]);
+      await pg.query("begin");
+      await pg.query("select set_config('sandra.template_approval', 'on', true)");
+      const { rows: t } = await pg.query("insert into public.sms_templates (org_id, name, content, approved_for_auto_send, approved_content, approved_at) values ($1, 'Auto reply wrong_number', $2, true, $2, now()) returning id", [orgId, APPROVED_REPLY_TEXTS.wrong_number]);
+      await pg.query("insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'wrong_number', $2)", [orgId, t[0].id]);
+      await pg.query("commit");
+    }
+    const dispoOf = async (id: string) => (await pg.query("select outreach_dispo, needs_human_attention from properties where id = $1", [id])).rows[0];
+
+    it("H1(i) round 3: v2 decides wrong person with wrong_number_all OFF (today's this-property close): the paused v2 drip is retired", async () => {
+      const lead = await setup();
+      await seedWrongNumberAutomation();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      // No webhook keyword matches this wording: v2 decides wrong_number_close.
+      const id = await text(lead, "That is not my place, never was", { wrong_person: 0.95 });
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and road = 'wrong_number_close'", [id])).toBe(1);
+      expect({ rows: await enrollments(lead.propertyId), p: await dispoOf(lead.propertyId) }).toEqual({
+        rows: [{ k: "not_interested", status: "completed", r: "rerouted" }],
+        p: { outreach_dispo: "wrong_number", needs_human_attention: false },
+      });
+    });
+
+    it("H1(i) round 3: the webhook's this-property wrong-number keyword close also retires the v2 drip (a phone-wide claim stays held + paused)", async () => {
+      const lead = await setup();
+      await text(lead, "not interested", { not_interested: 0.95 });
+      await text(lead, "I don't own that house", {});
+      expect({ rows: await enrollments(lead.propertyId), p: await dispoOf(lead.propertyId) }).toEqual({
+        rows: [{ k: "not_interested", status: "completed", r: "rerouted" }],
+        p: { outreach_dispo: "wrong_number", needs_human_attention: false },
+      });
+      const other = await seedLead();
+      await pg.query("update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || to_jsonb($2::text)) where org_id = $1", [orgId, other.propertyId]);
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: other.propertyId, contact_id: other.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: other.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+      await text(other, "not interested", { not_interested: 0.95 });
+      await text(other, "wrong number", {});
+      expect(await enrollments(other.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "inbound_reply" }]);
+      expect((await dispoOf(other.propertyId)).needs_human_attention).toBe(true);
+    });
+
+    // ---- H1(iii) round 4 (property 3d6fcb49): "No!" + "No thank you" + a third text within ~100 ms ----
+    const BURST = { "No!": { asked_stop: 0.65 }, "No thank you": { not_interested: 0.95 }, "ok": { just_ok: 0.95 } };
+    async function burstSetup() {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 }; // "No!" is a genuine possible stop
+      jevByReply = BURST;
+      return lead;
+    }
+    /** Nothing enrolled or sent survives the possible-stop hold, through the outbox and the tick. */
+    async function expectNothingSurvivesHold(lead: Awaited<ReturnType<typeof seedLead>>) {
+      await settle();
+      await deliver();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+      expect(await count("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply' and status = 'sent'", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      // Every enrollment made due, then the tick: no drip step goes out.
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "'; commit;");
+      const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
+      await runSequenceTick(supabase as never, { budgetMs: 20_000 });
+      await deliver();
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      expect(await count("select count(*)::int n from sequence_step_runs r join sequence_enrollments e on e.id = r.enrollment_id where e.property_id = $1 and r.message_id is not null", [lead.propertyId])).toBe(0);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    }
+    async function burst(lead: Awaited<ReturnType<typeof seedLead>>, order: string[]) {
+      await Promise.all(order.map((body, i) => new Promise((r) => setTimeout(r, i * 40)).then(() => say(lead, body))));
+      const batch = workflows.pending.splice(0); // the three delayed dispatches run at the same time
+      await Promise.all(batch.map((w) => w.fn(w.params)));
+    }
+
+    it("H1(iii) 3d6fcb49 order A: \"No!\" then \"No thank you\" then \"ok\" within ~100 ms, decided in parallel: held as a possible stop, nothing enrolled or sent survives", async () => {
+      const lead = await burstSetup();
+      await burst(lead, ["No!", "No thank you", "ok"]);
+      await expectNothingSurvivesHold(lead);
+    });
+
+    it("H1(iii) 3d6fcb49 order B: \"No thank you\" then \"No!\" then \"ok\": held as a possible stop, nothing enrolled or sent survives", async () => {
+      const lead = await burstSetup();
+      await burst(lead, ["No thank you", "No!", "ok"]);
+      await expectNothingSurvivesHold(lead);
+    });
+
+    it("H1(iii) 3d6fcb49 hold lands mid-enrollment: \"No thank you\" passed its gates and is classifying when the \"No!\" hold commits; its transition then enrolls: drip paused, nothing sent", async () => {
+      const lead = await burstSetup();
+      await say(lead, "No!");
+      await say(lead, "No thank you"); // newer: latest reply wins, so it enrolls the Not interested drip
+      const batch = workflows.pending.splice(0);
+      const [stopRun, niRun] = batch;
+      let release!: () => void;
+      let reached!: () => void;
+      const reachedP = new Promise<void>((r) => { reached = r; });
+      jevGates["No thank you"] = { gate: new Promise<void>((r) => { release = r; }), reached };
+      const niDispatch = niRun!.fn(niRun!.params); // past the pre-gates, now waiting inside Jev
+      await reachedP;
+      await stopRun!.fn(stopRun!.params);          // the possible-stop hold commits meanwhile
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      release();
+      await niDispatch;                              // its transition enrolls on the now-held lead
+      await expectNothingSurvivesHold(lead);
     });
 
     it("AUD: a second text to a lead already held for a person gets exactly one audit row (webhook path)", async () => {

@@ -25,7 +25,9 @@ import {
   markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
+  retireV2DripsForProperty,
 } from "@/lib/ai-responder/dispatch";
+import { WEBHOOK_PROCESSING_LEASE_MS } from "./webhook-lease";
 import {
   computeReplyDelaySeconds,
   loadAiReplyDelayConfig,
@@ -88,7 +90,6 @@ export { matchesStopKeyword };
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
-const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 // Moved verbatim to ./wrong-number-scope (routing v2 cutover reuses it without importing
 // this module, which imports the responder). Re-exported so every caller is unchanged.
@@ -654,6 +655,12 @@ export async function handleInboundWebhook(
               },
               extra: { propertyId, externalId: ev.externalId },
             });
+          }
+          // H1(i): a this-property wrong number is closed with no person hold, so a v2 drip
+          // (only routing v2 creates those) is ended, not left paused on a lead nobody owns.
+          // Phone-wide / hostile wording is held for a person below: its drip stays paused.
+          if (wrongScope !== "all" && !hostileWrongNumber) {
+            await retireV2DripsForProperty(supabase, propertyId, null);
           }
         }
         const insertOutcome = await insertInboundMessage(supabase, {

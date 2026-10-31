@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   flags: null as unknown as RoutingV2Flags,
   flagsUnreadable: false,
   v2Enrollments: [] as Array<{ id: string }>,
+  v2Decisions: [] as Array<{ id: string }>,
   classify: vi.fn(),
   record: vi.fn(),
   evidence: vi.fn(),
@@ -53,7 +54,7 @@ const ON: RoutingV2Flags = { ...ALL_OFF, questions_live: true, replies: true, dr
 function fakeSupabase() {
   const rpcCalls: Array<{ name: string; args: unknown }> = [];
   const chain = (table: string) => {
-    const rows = table === "properties" ? [{ decision_context_revision: 7 }] : table === "messages" ? [{ created_at: "2026-10-30T12:00:00Z" }] : table === "sequence_enrollments" ? h.v2Enrollments : [];
+    const rows = table === "properties" ? [{ decision_context_revision: 7 }] : table === "messages" ? [{ created_at: "2026-10-30T12:00:00Z" }] : table === "sequence_enrollments" ? h.v2Enrollments : table === "routing_v2_live_decisions" ? h.v2Decisions : [];
     const c: Record<string, unknown> = {};
     for (const m of ["select", "eq", "neq", "in", "is", "not", "or", "ilike", "gte", "lte", "order", "limit", "update", "insert", "upsert", "delete"]) c[m] = () => c;
     c.maybeSingle = async () => ({ data: rows[0] ?? null, error: null });
@@ -91,6 +92,7 @@ beforeEach(() => {
   h.flags = ON;
   h.flagsUnreadable = false;
   h.v2Enrollments = [];
+  h.v2Decisions = [];
   for (const f of [h.classify, h.record, h.evidence, h.transition, h.stop, h.phone, h.legacy]) f.mockReset();
   h.legacy.mockResolvedValue({ kind: "jev_no_action", askedHowNumberObtained: undefined });
   h.stop.mockResolvedValue({ kind: "human_review", reason: "flag_off" });
@@ -119,6 +121,14 @@ describe("routing v2 live dispatch hook", () => {
     expect(out).not.toBeNull();
     expect(h.classify).not.toHaveBeenCalled();
     expect(JSON.stringify({ out, rpcCalls })).toContain("nine_needs_person");
+  });
+
+  it("N-2: unreadable flags on a lead with only a v2 decision / audit row (no enrollment) also hold", async () => {
+    h.flagsUnreadable = true;
+    h.v2Decisions = [{ id: "d1" }];
+    const { client } = fakeSupabase();
+    expect(await runRoutingV2LiveStep(client, args())).not.toBeNull();
+    expect(h.classify).not.toHaveBeenCalled();
   });
 
   it("unreadable flags on a lead v2 never touched: today's engine exactly (null)", async () => {
