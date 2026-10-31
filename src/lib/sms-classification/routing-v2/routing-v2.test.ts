@@ -336,9 +336,24 @@ describe("D-1: Jarrad's three not-interested phrases (never a stop)", () => {
     "%j with Jev asked_stop 0.92 → Not interested drip (code)", (reply) => {
       expect(route(reply, { asked_stop: 0.92 })).toMatchObject({ road: "not_interested_drip", provenance: { by: "code", check: "not_interested_phrase" }, haiku: null });
     });
-  it("legal or hostile still win over the phrase", () => {
-    expect(route("Do not bother", { legal: 0.8, asked_stop: 0.9 })).toMatchObject({ road: "stop", provenance: { signal: "legal" } });
-    expect(route("Do not bother", { hostile: 0.65 })).toMatchObject({ road: "stop" });
+  // Master A-012 (round 2): the whole-message phrase wins over every Jev score. The stress
+  // failures at dbdd5940e: hostile 0.64 / 0.78 / 0.84, asked_stop 0.87, legal in the 0.60–0.69 band.
+  const PHRASES = ["Do not bother", "Do NOT check back", "No need to call me back"];
+  it.each(PHRASES.flatMap((reply) => [
+    [reply, { hostile: 0.64 }], [reply, { hostile: 0.78 }], [reply, { hostile: 0.84 }],
+    [reply, { asked_stop: 0.87 }], [reply, { legal: 0.65 }], [reply, { legal: 0.65, hostile: 0.84, asked_stop: 0.87 }],
+  ] as Array<[string, Partial<Record<V2QuestionId, number>>]>))("%j at %j → Not interested drip, whatever Jev scored", (reply, p) => {
+    expect(route(reply, p)).toMatchObject({ road: "not_interested_drip", provenance: { by: "code", check: "not_interested_phrase" }, haiku: null });
+  });
+  it("any extra content is no match: normal precedence (stop / legal / the seller's other answer)", () => {
+    expect(isNotInterestedPhrase("Do not bother. STOP")).toBe(false);
+    expect(route("Do not bother. STOP", { asked_stop: 0.95 })).toMatchObject({ road: "stop", provenance: { by: "jev", signal: "asked_stop" } });
+    expect(isNotInterestedPhrase("Do not bother me again or I'll call my lawyer")).toBe(false);
+    expect(route("Do not bother me again or I'll call my lawyer", { legal: 0.9, hostile: 0.8 })).toMatchObject({ road: "stop", provenance: { by: "jev", signal: "legal" } });
+    expect(route("Do not bother me again or I'll call my lawyer", { legal: 0.65 })).toMatchObject({ road: "stop", haiku: "decider_band" });
+    expect(isNotInterestedPhrase("Do not bother, sold it")).toBe(false);
+    expect(route("Do not bother, sold it", { hostile: 0.78 })).toMatchObject({ road: "stop", provenance: { by: "jev", signal: "hostile" } });
+    expect(route("Do not bother, sold it", { already_sold: 0.95 }).provenance).not.toMatchObject({ check: "not_interested_phrase" });
   });
   it("only the whole phrase: a longer stop request is still Jev's", () => {
     expect(isNotInterestedPhrase("Do not bother texting me ever again")).toBe(false);
