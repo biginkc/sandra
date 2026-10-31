@@ -106,7 +106,7 @@ async function seedDrips(pg: Client, orgId: string): Promise<void> {
 }
 
 /** Reply quiet hours use the phone's area code; drip quiet hours / slot times use property state. */
-export const AREA: Record<string, string> = { HI: "808", MO: "816", KS: "913", OH: "614", CO: "303", CA: "213", "": "816" };
+export const AREA: Record<string, string> = { GU: "671", HI: "808", MO: "816", KS: "913", OH: "614", CO: "303", CA: "213", "": "816" };
 const STATES: Array<{ state: string; fips: string | null; w: number }> = [
   { state: "MO", fips: null, w: 60 }, { state: "KS", fips: "20091", w: 20 }, { state: "OH", fips: null, w: 5 },
   { state: "CO", fips: null, w: 5 }, { state: "CA", fips: null, w: 5 }, { state: "", fips: null, w: 5 },

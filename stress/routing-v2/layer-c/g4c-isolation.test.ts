@@ -33,7 +33,7 @@ beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
   setClockOffset(0); // skew 0: real time only
   CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
-  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Guam (GU/671)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4c-${Date.now()}`, { questions_live: true, replies: true, drips: true, canary_percent: 100 });
   await retirePriorRuns(pg);
@@ -110,8 +110,8 @@ it("G4c §5.4 isolation", async () => {
     { prodSends: sends(prod!.phone), testSends: sends(tNon2!.phone), testRefusals: (await refusals(tNon2!.propertyId)).length });
 
   // 4. taint stripped from the derived row by a bug -> still refused (lead tag re-read at the boundary).
-  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }), testRunId: RUN });
-  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }), testRunId: RUN });
+  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-strip`, from: tStrip!.phone, to: org.sender, body: "TONLY text only" });
   await settle();
   await new Promise((r) => setTimeout(r, 1500));

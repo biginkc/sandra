@@ -136,23 +136,23 @@ it("G3 blast-day replay", async () => {
   const all = [...evs, ...dupes].sort((a, b) => a.at - b.at);
 
   // Quiet-hours opening at skew 0 (no clock shift): the first 150 arrivals are addressed to leads re-homed to
-  // Hawaii (state HI, phone area 808, Pacific/Honolulu), which is in recipient quiet hours at real time. Everything
+  // Guam (state GU, phone area 671, Pacific/Guam), which is in recipient quiet hours at real time. Everything
   // else runs at real time on in-hours zones (guarded by assertClockAligned).
   const quietCount = Math.min(150, Math.floor(rows.length / 10));
   const quietLeads = [...new Set(all.slice(0, quietCount).map((e) => e.lead))];
   for (const l of quietLeads) {
-    const phone = `+1808${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
+    const phone = `+1671${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
     await pg.query("update public.contacts set phone_1 = $1 where id = $2", [phone, l.contactId]);
     await pg.query("update public.messages set to_address = $1 where property_id = $2 and direction = 'outbound'", [phone, l.propertyId]);
-    await pg.query("update public.properties set state = 'HI', fips_code = null where id = $1", [l.propertyId]);
-    l.phone = phone; l.state = "HI";
+    await pg.query("update public.properties set state = 'GU', fips_code = null where id = $1", [l.propertyId]);
+    l.phone = phone; l.state = "GU";
   }
-  R.line(`quiet fixture: ${quietLeads.length} leads re-homed to HI/808; Honolulu local time now ${assertZoneQuiet("Pacific/Honolulu")}; replaces the old 07:50-Chicago JS clock shift`);
+  R.line(`quiet fixture: ${quietLeads.length} leads re-homed to GU/671; Guam local time now ${assertZoneQuiet("Pacific/Guam")}; replaces the old 07:50-Chicago JS clock shift`);
   phase = "quiet_0750";
   for (const e of all.slice(0, quietCount)) await deliverWebhook({ externalId: e.ext, from: e.lead.phone, to: org.sender, body: e.body });
   await drainInflight(120_000);
   await runRoutingV2OutboxReplies(db, { limit: 200 });
-  const quietSends = getMockMessageLog().filter((m) => m.to.startsWith("+1808")).length;
+  const quietSends = getMockMessageLog().filter((m) => m.to.startsWith("+1671")).length;
   R.line(`quiet phase (HI leads, real clock): ${quietCount} deliveries, sends to HI leads during phase = ${quietSends}`);
   R.line("main replay + burst run at REAL time (no clock shift)");
 

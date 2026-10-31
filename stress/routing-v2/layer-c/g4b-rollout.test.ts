@@ -28,7 +28,7 @@ beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
   setClockOffset(0); // skew 0: real time only
   CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
-  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Guam (GU/671)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4b-${Date.now()}`, {});
   await retirePriorRuns(pg);
@@ -127,8 +127,8 @@ it("G4b stage tests + flag-off rollback", async () => {
   // Flag-off while queued: a deferred (quiet-hours) reply, a due drip step, then questions_live off.
   await setFlags(pg, BMH, ALL);
   stubs.jevOverride = (r) => r.includes("QTEXT") ? { text_only: 0.95 } : r.includes("QYES") ? { open_to_selling: 0.95 } : null;
-  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: "HI", fips: null }) });
-  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: "GU", fips: null }) });
+  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-q1`, from: qa!.phone, to: org.sender, body: "QTEXT text only" });
   await deliverWebhook({ externalId: `${org.runId}-q2`, from: qb!.phone, to: org.sender, body: "QYES yes interested" });
   await settle();
@@ -151,9 +151,9 @@ it("G4b stage tests + flag-off rollback", async () => {
     { queuedBefore: queued, sendsBefore, sendsAfter, outbox: boxAfter, enrollments: enrAfter, properties: human });
 
   // Flip between decision and send.
-  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }) });
+  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }) });
   await setFlags(pg, BMH, ALL);
-  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+  assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-race`, from: ra!.phone, to: org.sender, body: "QTEXT only text" });
   await settle();
   await readdressToInHours(pg, ra!); // deliverable now without moving the clock

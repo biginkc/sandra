@@ -24,7 +24,7 @@ beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
   setClockOffset(0); // skew 0: real time only
   CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
-  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Guam (GU/671)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4d-${Date.now()}`, { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, canary_percent: 100 });
   await retirePriorRuns(pg);
@@ -127,9 +127,9 @@ it("outbox crash recovery + >200 owner alerts paged", async () => {
   const settleAll = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
   // Queue a reply that waits (recipient quiet hours: 05:00 in CA), then open the window.
   const queueReply = async (tag: string) => {
-    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }) });
+    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }) });
     stubs.jevOverride = () => ({ text_only: 0.95 });
-    assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
+    assertZoneQuiet("Pacific/Guam"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
     await deliverWebhook({ externalId: `${org.runId}-crash-${tag}`, from: lead!.phone, to: org.sender, body: `text only please ${tag}` });
     await settleAll();
     await new Promise((r) => setTimeout(r, 1500)); // detached kick: waits on quiet hours, never claims

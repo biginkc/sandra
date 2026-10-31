@@ -14,7 +14,7 @@ vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.c
 
 /**
  * G4e quiet-hours resume (bounded, local, deterministic). NO clock is moved: the reply is deferred because the
- * recipient is a Hawaii (808 / state HI) lead in real quiet hours; "the window opens" = readdressToInHours, which
+ * recipient is a Guam (671 / state GU) lead in real quiet hours; "the window opens" = readdressToInHours, which
  * rewrites exactly the fields the outbox prepare reads (see the receipt header). N iterations per case, fresh leads.
  * G4E_MODE=cases (default) | bonus_defer | bonus_resume (real-clock Hawaii 08:00 HST check).
  */
@@ -31,7 +31,7 @@ const FLAGS = { questions_live: true, replies: true, drips: true, haiku: true, p
 beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
   const clock = await assertClockAligned(pg, FIXTURE_ZONES);
-  R.line(`clock: NO shift; |app - DB| skew = ${Math.round(clock.skewMs)} ms; local`, clock.local, `; Honolulu ${new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Honolulu", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date())}`);
+  R.line(`clock: NO shift; |app - DB| skew = ${Math.round(clock.skewMs)} ms; local`, clock.local, `; Guam ${new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Guam", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date())}`);
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4e-${Date.now()}`, FLAGS);
   if (MODE !== "bonus_resume" && !process.env.G4E_KEEP) await retirePriorRuns(pg);
@@ -48,7 +48,7 @@ const HEADER = [
   "    inbound messages.from_address (input.inboundFromPhone); checkRecipientQuietHours(area code -> zone, JS Date) -> 'wait' when closed;",
   "  - property window = checkQuietHours(properties.state, JS Date) -> 'wait' when closed (unknown state goes on and is refused at send);",
   "  - send.ts step 4 re-checks checkQuietHours(property.state) at send time.",
-  "  readdressToInHours rewrites contacts.phone_1, the property's inbound from_address / outbound to_address and properties.state (HI -> MO, 808 -> 816):",
+  "  readdressToInHours rewrites contacts.phone_1, the property's inbound from_address / outbound to_address and properties.state (GU -> MO, 671 -> 816):",
   "  exactly the inputs of both windows. No clock (JS or DB) is moved; app and DB clocks are asserted aligned (< 2 s).",
 ];
 
@@ -62,11 +62,11 @@ it(`G4e quiet resume (${MODE})`, async () => {
   let n = 0;
   const ext = () => `${org.runId}-e-${n++}`;
   const sendsTo = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const hi = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }), address: () => `${n} Resume Rd` }))[0]!;
+  const hi = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "GU", fips: null }), address: () => `${n} Resume Rd` }))[0]!;
   const box = async (p: string) => (await pg.query("select id, org_id, property_id, inbound_message_id, kind, payload, created_at::text, status, cancel_reason from routing_v2_outbox where property_id = $1 and kind = 'reply' order by created_at", [p])).rows;
   const keyed = async (outboxId: string) => (await pg.query("select count(*)::int n from messages where idempotency_key = $1", [outboxId])).rows[0].n;
   const defer = async (l: Lead, body: string) => {
-    assertZoneQuiet("Pacific/Honolulu");
+    assertZoneQuiet("Pacific/Guam");
     await assertClockAligned(pg, FIXTURE_ZONES);
     await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body });
     await settle(); await pause(400);
@@ -85,12 +85,12 @@ it(`G4e quiet resume (${MODE})`, async () => {
   }
   if (MODE === "bonus_resume") {
     const ids = JSON.parse(readFileSync(BONUS_FILE, "utf8")) as Array<{ id: string; phone: string; prop: string }>;
-    const hst = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Honolulu", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date());
+    const hst = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Guam", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date());
     await runRoutingV2OutboxReplies(db, { limit: 200 });
     await runRoutingV2OutboxReplies(db, { limit: 200 });
     const rows = (await pg.query("select id, status, cancel_reason from routing_v2_outbox where id = any($1)", [ids.map((x) => x.id)])).rows;
     const k = await Promise.all(ids.map((x) => keyed(x.id)));
-    R.check(`bonus resume at REAL Honolulu ${hst} (no fixture move): every deferred HI reply sent exactly once, keyed by its outbox id`,
+    R.check(`bonus resume at REAL Guam ${hst} (no fixture move): every deferred GU reply sent exactly once, keyed by its outbox id`,
       rows.every((r) => r.status === "sent") && k.every((c) => c === 1), { rows, keyedMessagesPerOutboxId: k });
     return;
   }
