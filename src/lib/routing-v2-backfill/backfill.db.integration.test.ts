@@ -189,7 +189,7 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
   });
 
   it("dry-run: counts the candidate set, writes nothing", async () => {
-    const before = await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill'");
+    const before = await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill' and org_id = $1", [orgId]);
     const r = await run("dry_run", "bf-dry-1");
     expect(r.selection.candidates.map((c) => c.id).sort()).toEqual([freshId, ownerId, oldYesId, oldWrongId, newerId].sort());
     expect(r.selection.superseded.map((s) => s.inboundId)).toEqual([olderId]);
@@ -199,8 +199,9 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
       [tagged.propertyId]: "test_tagged", [takeover.propertyId]: "human_takeover_after_inbound",
     });
     expect(jevCalls).toBe(0);
-    expect(await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill'")).toBe(before);
-    expect(await n("select count(*)::int n from routing_v2_live_decisions")).toBe(0);
+    expect(await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill' and org_id = $1", [orgId])).toBe(before);
+    // Scoped to this test's leads: other suites on the same disposable stack may leave rows.
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where property_id = any($1::uuid[])", [leads.map((l) => l.propertyId)])).toBe(0);
     expect(markdownReport("sha-test", r).split("\n")[0]).toBe("SHA: sha-test");
   });
 
@@ -217,17 +218,18 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     expect(yes).toMatchObject({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true });
     expect(r.items.find((i) => i.inboundId === freshId)).toMatchObject({ wouldReply: true, wouldDrip: false });
     await settle();
-    expect(await n("select count(*)::int n from routing_v2_outbox")).toBe(0);
-    expect(await n("select count(*)::int n from routing_v2_reply_transitions")).toBe(0);
-    expect(await n("select count(*)::int n from sequence_enrollments where routing_v2_engine = 'v2'")).toBe(0);
-    expect(await n("select count(*)::int n from properties where needs_human_attention and id <> $1", [held.propertyId])).toBe(0);
+    const mine = [leads.map((l) => l.propertyId)];
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = any($1::uuid[])", mine)).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_reply_transitions where property_id = any($1::uuid[])", mine)).toBe(0);
+    expect(await n("select count(*)::int n from sequence_enrollments where routing_v2_engine = 'v2' and property_id = any($1::uuid[])", mine)).toBe(0);
+    expect(await n("select count(*)::int n from properties where needs_human_attention and id <> $1 and id = any($2::uuid[])", [held.propertyId, leads.map((l) => l.propertyId)])).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
     // The legacy claim was moved aside (kept, reversible) and the marker names the run.
     expect(await n("select count(*)::int n from ai_response_claims where response_kind = 'sms_ai_responder_v1:backfill_prior:bf-cls-1'")).toBe(5);
     const [m] = await q("select metadata->'routingV2Backfill'->'classify'->>'runId' r from messages where id = $1", [freshId]);
     expect(m.r).toBe("bf-cls-1");
     // Spend ledger: one Jev row per text.
-    expect(await n("select count(*)::int n from provider_spend_ledger where provider = 'jev'")).toBe(5);
+    expect(await n("select count(*)::int n from provider_spend_ledger where provider = 'jev' and property_id = any($1::uuid[])", [leads.map((l) => l.propertyId)])).toBe(5);
     // Resume of classify-only: nothing re-classified.
     const again = await run("classify_only", "bf-cls-1");
     expect(again.dispatched).toEqual([]);
