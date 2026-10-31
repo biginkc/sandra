@@ -143,7 +143,7 @@ describe.skipIf(process.env.RUN_HAIKU_AB !== "1")("Haiku A/B", () => {
           rec.outcome = res.action.road === "price_check" ? `price_check:${res.priceOutcome}` : res.action.road;
           rec.steps = res.action.steps; rec.finalBy = res.final?.by ?? null; rec.haikuElig = res.decision.haiku; rec.jevRoad = res.decision.road; rec.opp = res.decision.opportunityAlert;
           rec.haiku = hh ? { ok: hh.ok, option: hh.ok ? hh.option : null, conf: hh.ok ? hh.confidence : null, reason: hh.ok ? null : hh.reason, ms: hh.latencyMs, in: hh.inputTokens, out: hh.outputTokens, cost, stop: raw.stop, strictOk: raw.text !== undefined ? parseStrict(raw.text, arm) : null, text: hh.ok ? undefined : (raw.text ?? "").slice(0, 200) } : null;
-        } else rec.outcome = `failed:${res.reason}`;
+        } else rec.outcome = res.kind === "failed" ? `failed:${res.reason}` : res.kind;
         appendFileSync(out, JSON.stringify(rec) + "\n");
       }
     }));
