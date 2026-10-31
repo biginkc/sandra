@@ -27,6 +27,7 @@ export default defineConfig({
       "supabase/migrations/20261030400000_routing_v2_inbound_audit.integration.test.ts",
       "supabase/migrations/20261030410000_routing_v2_held_lead_drip_check.integration.test.ts",
       "supabase/migrations/20261030420000_routing_v2_hold_scope.integration.test.ts",
+      "supabase/migrations/20261030430000_routing_v2_hold_upgrade_takeover_scope.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",
