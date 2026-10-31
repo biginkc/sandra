@@ -9,12 +9,20 @@ const mocks = vi.hoisted(() => ({
   filters: [] as Array<[string, unknown]>,
   fail: false,
   onUpdate: null as null | ((v: Record<string, unknown>) => void),
+  rpcCalls: [] as Array<[string, unknown]>,
+  report: vi.fn(),
+  rpcOk: false,
+  rpcError: "Could not find the function public.routing_v2_mark_person_takeover",
 }));
 
-vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+vi.mock("@/lib/errors/report", () => ({ reportError: mocks.report }));
 vi.mock("./enrollment", () => ({ pausePropertyEnrollments: mocks.pause }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
+    rpc: async (fn: string, args: unknown) => {
+      mocks.rpcCalls.push([fn, args]);
+      return mocks.rpcOk && !mocks.fail ? { data: true, error: null } : { data: null, error: { message: mocks.rpcError } };
+    },
     from: (table: string) => {
       const b: Record<string, unknown> = {};
       b.select = () => b;
@@ -51,9 +59,38 @@ beforeEach(() => {
   mocks.live = [{ property_id: "p1" }];
   mocks.marker = { last_person_takeover_at: null };
   mocks.newerInbound = [];
+  mocks.rpcCalls = [];
+  mocks.rpcOk = false;
+  mocks.rpcError = "Could not find the function public.routing_v2_mark_person_takeover";
+  mocks.report.mockClear();
 });
 
 describe("pauseHotBookAppointmentOnTakeover", () => {
+  it("stamps the takeover on the DB clock through routing_v2_mark_person_takeover (no app-clock stamp)", async () => {
+    mocks.rpcOk = true;
+    expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
+    expect(mocks.rpcCalls).toEqual([["routing_v2_mark_person_takeover", { p_property_id: "p1" }]]);
+    expect(mocks.updates.some((u) => "last_person_takeover_at" in u)).toBe(false);
+  });
+
+  it("one routing lock per call: a multi-property takeover stamps each property separately (review N-6)", async () => {
+    mocks.rpcOk = true;
+    mocks.live = [{ property_id: "p1" }, { property_id: "p2" }];
+    await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1", "p2"], actor });
+    expect(mocks.rpcCalls).toEqual([
+      ["routing_v2_mark_person_takeover", { p_property_id: "p1" }],
+      ["routing_v2_mark_person_takeover", { p_property_id: "p2" }],
+    ]);
+  });
+
+  it("any error other than a missing function fails closed: no app-clock stamp, reported, the takeover pauses still run (review N-1)", async () => {
+    mocks.rpcError = "canceling statement due to lock timeout";
+    expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
+    expect(mocks.rpcCalls).toHaveLength(2);
+    expect(mocks.updates.some((u) => "last_person_takeover_at" in u)).toBe(false);
+    expect(mocks.report).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ tags: { surface: "hot_lead_takeover_stamp" } }));
+  });
+
   it("writes the takeover marker, then pauses enrolments created by the hot route, with the person as actor", async () => {
     expect(await pauseHotBookAppointmentOnTakeover({ propertyIds: ["p1"], actor })).toEqual({ paused: 1 });
     expect(mocks.updates[0]).toHaveProperty("last_person_takeover_at");

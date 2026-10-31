@@ -42,11 +42,33 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
   try {
     if (a.propertyIds.length === 0) return { paused };
     const admin = createAdminClient();
-    const { error: markError } = await admin
-      .from("properties")
-      .update({ last_person_takeover_at: new Date().toISOString() })
-      .in("id", a.propertyIds);
-    if (markError) throw new Error(markError.message);
+    // DB clock, under the routing v2 property lock (stress §14), ONE property per call so no
+    // transaction holds two routing locks (review N-6: no deadlock with the outbox reconcile).
+    // The app-clock stamp is only a fallback when the function does not exist yet (N-1); any
+    // other error fails closed: it is reported and the takeover pauses below still run.
+    const rpc = (admin as unknown as {
+      rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message?: string } | null }>;
+    }).rpc.bind(admin);
+    for (const propertyId of a.propertyIds) {
+      let { error: rpcError } = await rpc("routing_v2_mark_person_takeover", { p_property_id: propertyId });
+      if (rpcError && !/PGRST202|42883|does not exist|Could not find/i.test(rpcError.message ?? "")) {
+        ({ error: rpcError } = await rpc("routing_v2_mark_person_takeover", { p_property_id: propertyId }));
+        if (rpcError) {
+          reportError(new Error(rpcError.message ?? "takeover stamp failed"), {
+            tags: { surface: "hot_lead_takeover_stamp" },
+            extra: { propertyId },
+          });
+          continue;
+        }
+      }
+      if (rpcError) {
+        const { error: markError } = await admin
+          .from("properties")
+          .update({ last_person_takeover_at: new Date().toISOString() })
+          .eq("id", propertyId);
+        if (markError) throw new Error(markError.message);
+      }
+    }
     // 1) Re-label a TEMPORARY pause (a call in progress, a Norma call) FIRST, with the
     //    status/reason predicates evaluated by the database at update time (no snapshot):
     //    call cleanup resumes only a row still carrying its own reason, so a cleanup that

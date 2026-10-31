@@ -28,6 +28,7 @@ import {
   retireV2DripsForProperty,
 } from "@/lib/ai-responder/dispatch";
 import { WEBHOOK_PROCESSING_LEASE_MS } from "./webhook-lease";
+import { testBarrier } from "@/lib/testing/test-barriers";
 import {
   computeReplyDelaySeconds,
   loadAiReplyDelayConfig,
@@ -978,6 +979,7 @@ export async function handleInboundWebhook(
         }
       }
 
+      await testBarrier("webhook:inserted", { propertyId: effectivePropertyId, inboundMessageId: insertOutcome.messageId ?? null });
       // Pause before rep-SMS attribution so a lookup or takeover persistence
       // failure still leaves the automated sequence fail-safe paused. A
       // confirmed takeover below promotes this generic reason to the precise
@@ -1317,6 +1319,7 @@ export async function handleInboundWebhook(
                     detail: { delaySeconds },
                   });
 
+                  await testBarrier("webhook:before_stamp", { propertyId: effectivePropertyId, inboundMessageId: insertOutcome.messageId ?? null });
                   try {
                     await markInboundMessageState(
                       supabase,

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { testBarrier } from "@/lib/testing/test-barriers";
 import {
   sendSmsToContact,
   type SequenceAttemptOutcome,
@@ -229,8 +230,21 @@ export async function processEnrollmentTick(
   } catch (err) {
     return { status: "failed", enrollmentId: enrollment.id, message: err instanceof Error ? err.message : String(err) };
   }
+  await testBarrier("tick:after_send_check", { propertyId: enrollment.property_id, enrollmentId: enrollment.id });
   if (routingV2Gate.kind === "error") {
     return { status: "failed", enrollmentId: enrollment.id, message: routingV2Gate.message };
+  }
+  if (routingV2Gate.kind === "blocked" && routingV2Gate.reason === "reply_pending") {
+    // A-2 F5: this v2 drip's own road reply is still queued. The drip stays active and looks
+    // again a minute later; its step never goes out ahead of the reply.
+    const { error: waitError } = await client
+      .from("sequence_enrollments")
+      .update({ next_run_at: new Date(Date.now() + REPLY_PENDING_RETRY_MS).toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", enrollment.id)
+      .eq("status", "active")
+      .eq("current_step_index", enrollment.current_step_index);
+    if (waitError) return { status: "failed", enrollmentId: enrollment.id, message: waitError.message };
+    return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
   }
   if (routingV2Gate.kind === "blocked") {
     return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
@@ -1120,6 +1134,9 @@ export function routingV2ProviderClaimOutcome(
  * the enrollment in SQL; flag_off completed it; not_active / missing / cancelled claims changed
  * nothing, so they are reported as skips, never as "paused".
  */
+/** A v2 drip whose own road reply is still queued looks again this much later (A-2 F5). */
+const REPLY_PENDING_RETRY_MS = 60_000;
+
 function routingV2BlockedOutcome(enrollmentId: string, stepIndex: number, reason: string): TickOutcome {
   if (reason === "person_took_over" || reason === "suppressed") {
     return { status: "paused", enrollmentId, reason: `routing_v2_${reason}` };
