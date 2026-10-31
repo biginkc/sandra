@@ -373,6 +373,9 @@ where p.homeowner_contact_id is null
        or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out'))
   and r.contact_id is not null;
 
+-- Re-checked at write time: under READ COMMITTED a contact can become
+-- do_not_contact between the insert above and this update, and writing them
+-- as homeowner would permanently DNC-lock the lead.
 update public.properties p
 set homeowner_contact_id = b.contact_id
 from public.homeowner_link_backfill b
@@ -381,6 +384,17 @@ where p.id = b.property_id
   and p.homeowner_contact_id is null
   and p.deleted_at is null
   and not p.is_dnc_locked
-  and not p.is_training;
+  and not p.is_training
+  and not exists (
+    select 1 from public.contacts c
+    where c.id = b.contact_id and c.org_id = b.org_id and c.do_not_contact
+  );
+
+-- A row recorded but not written (the race above) must not be "undone" by
+-- the rollback into a state it never had; keep the table honest.
+delete from public.homeowner_link_backfill b
+using public.properties p
+where p.id = b.property_id
+  and p.homeowner_contact_id is distinct from b.contact_id;
 
 commit;

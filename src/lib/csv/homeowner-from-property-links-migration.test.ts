@@ -92,7 +92,16 @@ describe("homeowner from property links migration", () => {
     const backfill = forward.slice(forward.indexOf("insert into public.homeowner_link_backfill"));
     expect(backfill).toMatch(EXCLUDED_DISPOS);
     expect(backfill).toMatch(/update public\.properties p\s+set homeowner_contact_id = b\.contact_id\s+from public\.homeowner_link_backfill b/);
-    expect(backfill).toMatch(/p\.homeowner_contact_id is null[\s\S]*not p\.is_dnc_locked[\s\S]*not p\.is_training;/);
+    expect(backfill).toMatch(/p\.homeowner_contact_id is null[\s\S]*not p\.is_dnc_locked[\s\S]*not p\.is_training/);
+  });
+
+  it("re-checks do_not_contact at write time and drops recorded rows it did not write", () => {
+    const backfill = forward.slice(forward.indexOf("insert into public.homeowner_link_backfill"));
+    const update = backfill.slice(backfill.indexOf("update public.properties p"), backfill.indexOf("delete from public.homeowner_link_backfill"));
+    // A contact can flip to do_not_contact between the candidate insert and
+    // this update; writing them would permanently DNC-lock the lead.
+    expect(update).toMatch(/not exists \(\s*select 1 from public\.contacts c\s+where c\.id = b\.contact_id and c\.org_id = b\.org_id and c\.do_not_contact\s*\)/);
+    expect(backfill).toMatch(/delete from public\.homeowner_link_backfill b\s+using public\.properties p\s+where p\.id = b\.property_id\s+and p\.homeowner_contact_id is distinct from b\.contact_id;/);
   });
 
   it("rolls back only its own writes and restores the prior import functions", () => {
