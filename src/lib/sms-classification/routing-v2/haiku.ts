@@ -7,10 +7,11 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
  * Routing v2 PR-D: Haiku second opinion (shadow only). Request shape as the v7 replay
  * (scratchpad final/haiku.py): model `claude-haiku-5-5`, thinking disabled, no
  * temperature, the system prompt below and one option line per approved question.
- * Stress review A-3 (round 2): Haiku sometimes wrote prose BEFORE the JSON and ran out of tokens
- * first. The request now carries structured outputs (`output_config.format`, a JSON schema of
- * the same {road, confidence} answer) so the reply is JSON only, and max_tokens is 200 as a
- * guard. Prefill is not an option (Haiku 5.5 rejects assistant prefill). No prompt wording changed.
+ * A-3 / C5 (Haiku A/B 2026-10-31, arm d): the original request plus `stop_sequences: ["}"]` and
+ * max_tokens 200. The answer ends at its first closing brace (askHaiku re-appends it), so no
+ * trailing prose can follow; prose BEFORE the JSON still fails to parse and escalates (hold +
+ * Haiku-error alert, never a send). Structured outputs (`output_config`) are not used: they
+ * moved Haiku's judgement (unsure 31.5% vs 19.8%). No prompt wording changed.
  *
  * BUSINESS RULES: option lines are the Jarrad-approved question texts (questions.ts) plus the
  * approved `maybe_yes` text. The option ORDER follows ORDER-TABLE.md (v8 prompt, self-approved
@@ -20,16 +21,8 @@ import { PROPERTY_TYPE_CHOICES, PROPERTY_TYPE_INSTRUCTIONS, V2_QUESTIONS } from 
  */
 export const HAIKU_MODEL = "claude-haiku-5-5";
 export const HAIKU_MAX_TOKENS = 200;
-/** The answer shape the prompt already asks for, enforced by the API (structured outputs). */
-export const HAIKU_OUTPUT_FORMAT = {
-  type: "json_schema" as const,
-  schema: {
-    type: "object",
-    properties: { road: { type: "string" }, confidence: { type: "number" } },
-    required: ["road", "confidence"],
-    additionalProperties: false,
-  },
-};
+/** The answer is one flat JSON object: stop at its closing brace (re-appended before parsing). */
+export const HAIKU_STOP_SEQUENCES = ["}"] as const;
 export const HAIKU_URL = "https://api.anthropic.com/v1/messages";
 export const HAIKU_TIMEOUT_MS = 10_000;
 /** USD per million tokens, as used for the v7 replay cost (route_v7.py). Accounting only; no caps. */
@@ -72,7 +65,7 @@ export function buildHaikuRequest(threadLines: ReadonlyArray<string>) {
     model: HAIKU_MODEL,
     max_tokens: HAIKU_MAX_TOKENS,
     thinking: { type: "disabled" as const },
-    output_config: { format: HAIKU_OUTPUT_FORMAT },
+    stop_sequences: [...HAIKU_STOP_SEQUENCES],
     system: HAIKU_SYSTEM_PROMPT,
     messages: [{ role: "user" as const, content }],
   };
@@ -206,13 +199,15 @@ export async function askHaiku(threadLines: ReadonlyArray<string>, deps: HaikuDe
         const aborted = ctrl.signal.aborted || (e instanceof Error && e.name === "AbortError");
         return done({ ok: false, reason: aborted ? "haiku_invalid:timeout" : "haiku_invalid:parser" }, attempt);
       }
-      const d = (json ?? {}) as { content?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+      const d = (json ?? {}) as { content?: unknown; stop_reason?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
       const blocks = Array.isArray(d.content) ? d.content : [];
       const text = blocks
         .filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
         .map((b) => b.text)
         .join("");
-      return done(parseHaikuText(text), attempt, d.usage);
+      // The stop sequence is not returned: put the closing brace back before parsing.
+      const full = d.stop_reason === "stop_sequence" ? text + "}" : text;
+      return done(parseHaikuText(full), attempt, d.usage);
     } finally {
       clearTimeout(timer);
     }
