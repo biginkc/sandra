@@ -22,6 +22,7 @@ export default defineConfig({
       "supabase/migrations/20261030350000_routing_v2_one_canary_check.integration.test.ts",
       "supabase/migrations/20261030360000_routing_v2_outbox_never_silent.integration.test.ts",
       "supabase/migrations/20261030370000_routing_v2_test_run_send_isolation.integration.test.ts",
+      "supabase/migrations/20261030380000_routing_v2_model_spend_ledger.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",

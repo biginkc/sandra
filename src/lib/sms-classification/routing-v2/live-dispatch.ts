@@ -20,6 +20,54 @@ export const DEALMACHINE_NO_KEY: ValueLookupResult = Object.freeze({ kind: "no_v
 export const MODEL_STOP_NO_PHONE = Object.freeze({ kind: "human_review" as const, reason: "model_stop_failed:no_phone" as const });
 
 /**
+ * Live v2 Jev call policy (A-4): the same bounded retries as the legacy classifier
+ * (askJev's default: 2 retries with backoff on 429 / 5xx / timeout; auth and billing errors
+ * never retry). A Jev call only reads, and the decision is recorded once per inbound
+ * (routing_v2_live_decisions.inbound_message_id is unique), so a retry is idempotent.
+ */
+export const V2_LIVE_JEV_POLICY = Object.freeze({ maxRetries: 2, timeoutMs: 8000 });
+
+type SpendRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }> };
+const tokens = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : null);
+
+/**
+ * Spend ledger (A-6): one row per Jev call and per Haiku call for this inbound (count +
+ * tokens, + cost when reported). Accounting only, never blocks or changes routing.
+ */
+export async function recordV2ModelSpend(
+  db: SupabaseClient<Database>,
+  ctx: { orgId: string; propertyId: string; inboundMessageId: string },
+  result: V2Classification,
+  report: (e: unknown) => void,
+): Promise<void> {
+  if (result.kind === "off") return;
+  const rows: Array<Record<string, unknown>> = [{
+    p_provider: "jev", p_outcome: result.kind === "decided" ? "decided" : result.reason,
+    p_input_tokens: result.kind === "decided" ? tokens(result.jevUsage?.input_tokens) : null,
+    p_output_tokens: result.kind === "decided" ? tokens(result.jevUsage?.output_tokens) : null,
+    p_cost: null, p_cost_unit: "usd",
+  }];
+  if (result.kind === "decided" && result.haiku) {
+    const h = result.haiku as { ok?: boolean; reason?: string; inputTokens?: unknown; outputTokens?: unknown; costUsd?: unknown };
+    rows.push({
+      p_provider: "haiku", p_outcome: h.ok ? "answered" : (h.reason ?? "failed"),
+      p_input_tokens: tokens(h.inputTokens), p_output_tokens: tokens(h.outputTokens),
+      p_cost: typeof h.costUsd === "number" && Number.isFinite(h.costUsd) ? h.costUsd : null, p_cost_unit: "usd",
+    });
+  }
+  for (const row of rows) {
+    try {
+      const { error } = await (db as unknown as SpendRpc).rpc("fn_record_model_call", {
+        ...row, p_org_id: ctx.orgId, p_property_id: ctx.propertyId, p_inbound_message_id: ctx.inboundMessageId,
+      });
+      if (error) throw new Error(error.message);
+    } catch (e) {
+      report(e);
+    }
+  }
+}
+
+/**
  * Outbox delivery refusal reasons (not hold reasons: a refused reply holds as
  * `nine_reply_not_sent:<reason>`, an existing registered family).
  */

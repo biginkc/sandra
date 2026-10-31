@@ -136,6 +136,8 @@ import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-d
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
+  recordV2ModelSpend,
+  V2_LIVE_JEV_POLICY,
   V2_OUTBOX_REASON,
   liveHoldReason,
   liveStepFor,
@@ -8494,7 +8496,7 @@ export async function runRoutingV2LiveStep(
     const result = await classifyV2(
       { flags, propertyId: input.propertyId, reply: input.inboundBody, thread, numberSourceQuestion: true },
       v2ProviderDeps({
-        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", maxRetries: 0, timeoutMs: 8000 },
+        jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", ...V2_LIVE_JEV_POLICY },
         haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
         lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
       }),
@@ -8505,6 +8507,8 @@ export async function runRoutingV2LiveStep(
     classification = V2_JEV_FAILED;
   }
 
+  await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
+    (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
   const recorded = await recordLiveV2Decision(
     supabase,
     { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision },

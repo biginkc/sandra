@@ -28,6 +28,8 @@ export type V2Classification =
       model: string | null;
       latencyMs: number;
       priceOutcome: string | null;
+      /** Jev's reported token usage for the spend ledger (A-6); null when not reported. */
+      jevUsage?: { input_tokens?: number; output_tokens?: number } | null;
     };
 
 export type V2ClassificationInput = {
@@ -136,6 +138,6 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   return {
     kind: "decided", decision, final, action,
     probabilities: complete.probabilities, propertyType: complete.propertyType,
-    haiku, model: raw.model ?? null, latencyMs: raw.latencyMs, priceOutcome,
+    haiku, model: raw.model ?? null, latencyMs: raw.latencyMs, priceOutcome, jevUsage: raw.usage ?? null,
   };
 }

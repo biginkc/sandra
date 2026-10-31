@@ -112,9 +112,32 @@ describe("Haiku response parsing", () => {
     ['{"road":"made_up","confidence":0.7}', ok("made_up", 0.7)],
   ])("valid %s", (t, exp) => expect(parseHaikuText(t)).toEqual(exp));
   it.each([
-    "", "I think asked_call", '{"road":"a","confidence":"0.8"}', '{"road":"a","confidence":0.8}{"road":"b","confidence":0.8}',
+    "", "I think asked_call", '{"road":"a","confidence":"0.8"}',
     '{"road":"a","confidence":1.2}', '{"road":"a","confidence":-0.1}', '{"road":"","confidence":0.5}', '["a",0.5]', '{"confidence":0.5}',
+    // No complete leading object: prose first, or cut off inside the object.
+    'Sure: {"road":"a","confidence":0.8}', '{"road": "needs_person",', '{"road":"a","confidence":0.8',
   ])("invalid %j", (t) => expect(parseHaikuText(t)).toEqual({ ok: false, reason: "haiku_invalid:parser" }));
+
+  // Stress review A-3: the FIRST complete object wins; trailing prose / a second object is ignored.
+  it.each([
+    ['{"road":"a","confidence":0.8}{"road":"b","confidence":0.8}', ok("a", 0.8)],
+    ['{"road":"asked_who","confidence":0.7}\n\nNote: braces in prose {like this} are ignored', ok("asked_who", 0.7)],
+    ['{"road":"x}y","confidence":0.6} trailing', ok("x}y", 0.6)],
+    ['{"road":"a \\"q\\" b","confidence":0.6}', ok('a "q" b', 0.6)],
+  ])("first object of %j", (t, exp) => expect(parseHaikuText(t)).toEqual(exp));
+
+  const RAW = (JSON.parse(readFileSync(join(__dirname, "__fixtures__/haiku-parser-raw.json"), "utf8")) as { outputs: Array<{ stop: string; text: string }> }).outputs;
+  it("every raw stress output (incl. max_tokens tails) parses to its first object", () => {
+    expect(RAW).toHaveLength(16);
+    for (const { text } of RAW) expect(parseHaikuText(text).ok, text).toBe(true);
+  });
+  it('"lot 0.3 … correcting … needs_person": the FIRST object, 0.3 → a valid Haiku unsure, not an error', () => {
+    const correcting = RAW.find((r) => r.stop === "max_tokens" && r.text.includes("needs_person"))!;
+    expect(parseHaikuText(correcting.text)).toEqual(ok("lot", 0.3));
+    // Existing low-confidence behavior: below 0.50 Haiku is unsure, so Jev's road stands (no hold, no error alert).
+    const d = { road: "not_interested_drip" as const, provenance: { by: "jev" as const, row: "14", step: "not_interested", signal: "not_interested" as const, probability: 0.62 }, haiku: "decider_band" as const, opportunityAlert: false };
+    expect(applyHaikuPolicy(d, parseHaikuText(correcting.text) as never, probs())).toEqual({ road: "not_interested_drip", by: "jev_haiku_unsure", hold: false, alert: null, failureReason: null });
+  });
 });
 
 describe("Haiku client (mocked, no network)", () => {
