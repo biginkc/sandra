@@ -8529,12 +8529,16 @@ export async function runRoutingV2LiveStep(
     // enrollment, which the webhook just paused) must not fall back to the legacy engine, which
     // neither retires that drip nor holds (H1(i): a paused drip on a lead nobody owns). A person
     // looks. A property v2 never touched keeps today's behaviour exactly.
-    const { data: v2Enrollment, error: v2EnrollmentError } = await (supabase as unknown as {
-      from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } };
-    }).from("sequence_enrollments").select("id")
-      .eq("property_id", input.propertyId).eq("routing_v2_engine", "v2")
-      .limit(1);
-    if (v2EnrollmentError || (v2Enrollment ?? []).length > 0) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    // "v2 already routed" = a v2 enrollment, a v2 decision / audit row, or a v2 outbox row (N-2).
+    const loose = supabase as unknown as {
+      from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> }; limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } };
+    };
+    const traces = await Promise.all([
+      loose.from("sequence_enrollments").select("id").eq("property_id", input.propertyId).eq("routing_v2_engine", "v2").limit(1),
+      loose.from("routing_v2_live_decisions").select("id").eq("property_id", input.propertyId).limit(1),
+      loose.from("routing_v2_outbox").select("id").eq("property_id", input.propertyId).limit(1),
+    ]);
+    if (traces.some((t) => t.error || (t.data ?? []).length > 0)) return nineHoldAndComplete(supabase, a, "nine_needs_person");
     return null;
   }
   const flags: RoutingV2Flags = flagRead.flags;
