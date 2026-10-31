@@ -411,8 +411,26 @@ type AiDispatchPropertyGateRow = Pick<
 >;
 
 export type AiDispatchPreGateResult =
-  | { ok: true; property: AiDispatchPropertyGateRow }
+  | { ok: true; property: AiDispatchPropertyGateRow; routingV2Live?: boolean }
   | { ok: false; outcome: AiDispatchOutcome };
+
+/**
+ * Stress review A-2: is this inbound going to the routing v2 live engine? (Jev automatic +
+ * nine-question engine + routing_v2_flags.questions_live + canary-eligible property.) Any
+ * read problem = false (today's path).
+ */
+async function routingV2LiveFor(supabase: SupabaseClient<Database>, orgId: string, propertyId: string): Promise<boolean> {
+  try {
+    const flags = await readRoutingV2Flags(supabase, orgId);
+    if (!flags.questions_live || !isV2Eligible(flags, propertyId)) return false;
+    const { data: config } = await supabase.from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode").eq("org_id", orgId).eq("active", true).maybeSingle();
+    if (config?.classifier_provider !== "jev" || config.classifier_mode !== "automatic") return false;
+    return (await readClassifierEngine(supabase, orgId)) === "nine_questions";
+  } catch {
+    return false;
+  }
+}
 
 export async function applyKeywordEscalation(
   supabase: SupabaseClient<Database>,
@@ -564,6 +582,12 @@ export async function checkAiResponderDispatchPreGates(
     };
   }
 
+  // Stress review A-2 (latest reply wins): with routing v2 live, a newer seller text (rule 1),
+  // an auto reply to another inbound (rule 3) or a drip / campaign text (rule 5) sent since this
+  // inbound never parks or drops it here. Every reply is
+  // classified and recorded; the v2 transition keeps the newest reply's route (an older one
+  // queues only its owner alerts) and the outbox fence refuses a stale auto reply.
+  const routingV2Live = input.inboundMessageId ? await routingV2LiveFor(supabase, property.org_id, input.propertyId) : false;
   if (input.inboundMessageId) {
     // Q8 decision table at the early gate: rule 0 (suppression / disabled /
     // terminal) and rule 8 first, then rules 1-6, first match wins; the same
@@ -581,7 +605,8 @@ export async function checkAiResponderDispatchPreGates(
       // disabled property) keep their existing downstream handling (the skip
       // classifier still lets Jev classify): silent, nothing flagged here,
       // and rules 1-6 must not run for a dead lead.
-      const passThrough = decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal";
+      const passThrough = (decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal")
+        || (routingV2Live && decision.action === "skip" && (decision.rule === 1 || decision.rule === 3 || decision.rule === 5));
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
         await blocked(plan.trace);
@@ -608,7 +633,7 @@ export async function checkAiResponderDispatchPreGates(
   }
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
-  return { ok: true, property };
+  return routingV2Live ? { ok: true, property, routingV2Live } : { ok: true, property };
 }
 
 /**
@@ -893,7 +918,8 @@ async function dispatchAiResponseCore(
     return silentSkip(decision.reason, 0);
   }
 
-  if (input.conversationId) {
+  // Stress review A-2: the 45 s reply throttle never parks a v2 reply (see the pre-gates).
+  if (input.conversationId && !preGates.routingV2Live) {
     const recentReply = await findRecentAiReplyInThread(
       supabase,
       input.conversationId,
