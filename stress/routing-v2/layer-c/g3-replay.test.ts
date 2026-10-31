@@ -339,7 +339,26 @@ it("G3 blast-day replay", async () => {
   const inList = heldPaused.filter((r) => holdList.has(r.id)).length;
   R.check("H1(iv): every held+paused lead is in the hold list (needs_human_attention AND NOT is_dnc_locked, as hold-list.ts loadHoldSources) = 100%", inList === heldPaused.length,
     { heldPaused: heldPaused.length, inHoldList: inList, dncLocked: heldPaused.filter((r) => r.dnc).length });
+  // Per-lead trace for every failing H1 row (ids always; full trace capped at 400 leads).
+  const traceLead = async (pid: string) => {
+    const one = async (sql: string) => (await pg.query(sql, [pid])).rows;
+    return {
+      property: (await one("select id, needs_human_attention, last_ai_escalation_reason, outreach_dispo, is_dnc_locked from properties where id = $1"))[0],
+      inbounds: (await one("select id, created_at, left(body, 50) body, metadata->'processing'->'aiResponder'->>'outcome' outcome, metadata->'processing'->'aiResponder'->>'reason' reason from messages where property_id = $1 and direction = 'inbound' order by created_at")),
+      enrollments: (await one("select e.id, s.routing_v2_key key, e.status, e.pause_reason, e.ended_reason, e.routing_v2_inbound_id, e.current_step_index from sequence_enrollments e join sequences s on s.id = e.sequence_id where e.property_id = $1")),
+      outbox: (await one("select inbound_message_id, kind, status, cancel_reason, payload->>'key' key, payload->>'reason' alert from routing_v2_outbox where property_id = $1 order by created_at")),
+      decisions: (await one("select inbound_message_id, status, road, failure_reason from routing_v2_live_decisions where property_id = $1 order by created_at")),
+      transitions: (await one("select inbound_message_id, outcome, transition_seq from routing_v2_reply_transitions where property_id = $1 order by transition_seq")),
+    };
+  };
+  let traced = 0;
+  for (const [label, rows] of [["H1(i)", h1i], ["H1(ii)", h1ii], ["H1(iii)", h1iii]] as const) {
+    if (!rows.length) continue;
+    R.line(`${label} failing property ids (${rows.length}):`, rows.map((r) => r.id));
+    for (const r of rows) { if (traced++ >= 400) break; R.line(`TRACE ${label} ${r.id}`, await traceLead(r.id)); }
+  }
   R.line("held+paused leads by hold reason (informational)", heldPaused.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}));
+  R.line("A-8 exposure: after-repairs turns in this replay", { jevRequestsWithFollowUps: stubs.afterRepairsJevRequests, priceTooHighRepliesSent: (await q("select count(*)::int n from routing_v2_outbox where property_id = any($1) and kind = 'reply' and payload->>'key' = 'price_too_high' and status = 'sent'"))[0].n });
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
   const fu = (p: Record<string, number>) => ["needs_repairs", "flexible_price", "original_portion", "no_repairs"].some((k) => (p?.[k] ?? 0) >= 0.6);
@@ -466,6 +485,6 @@ it("G3 blast-day replay", async () => {
   const ledN = (p: string) => led.filter((r) => r.provider === p).reduce((a, r) => a + r.n, 0);
   const haikuDecisions = decisions.filter((d) => d.haiku && (d.haiku as { asked?: boolean }).asked !== false).length;
   R.check("A-6 (fdd5e8c82): one Jev ledger row per Jev v2 HTTP attempt incl. retries", ledN("jev") === jevV2, { ledgerJev: ledN("jev"), jevV2HttpAttempts: jevV2, v2Classifications: decisions.length, jevAbortedByClientTimeout: stubs.aborted, jevNineQuestionHttpCalls: jevNine });
-  R.check("A-3: every Haiku request uses structured outputs (json_schema) + max_tokens 200", stubs.haikuShapeBad === 0 && stubs.haikuShapeOk > 0, { ok: stubs.haikuShapeOk, bad: stubs.haikuShapeBad });
+  R.check("C5: every Haiku request is arm d (no output_config, max_tokens 200, stop_sequences [\"}\"])", stubs.haikuShapeBad === 0 && stubs.haikuShapeOk > 0, { ok: stubs.haikuShapeOk, bad: stubs.haikuShapeBad });
   R.check("A-6: one Haiku ledger row per Haiku consultation", ledN("haiku") === haikuDecisions, { ledgerHaiku: ledN("haiku"), decisionsWithHaiku: haikuDecisions, haikuHttpAttempts: stubs.count("haiku") });
 });

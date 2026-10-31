@@ -70,6 +70,7 @@ export class ProviderStubs {
   haikuOverride: ((thread: string) => { status: number; text?: string } | null) | null = null;
   haikuDelayMs = 0;
   haikuShapeOk = 0;
+  afterRepairsJevRequests = 0;
   haikuShapeBad = 0;
   /** DealMachine: force a status for every call (e.g. 429 storm) or an unmatched body. */
   dmForce: { status?: number; unmatched?: boolean } = {};
@@ -121,6 +122,7 @@ export class ProviderStubs {
     const v2 = "own_other_property" in body.questions && "just_ok" in body.questions;
     const nineQ = !v2 && Object.values(body.questions).some((q) => q.type === "noul");
     const provider = v2 ? "jev" : nineQ ? "jev_nine" : "jev_eight";
+    if (v2 && "needs_repairs" in body.questions) this.afterRepairsJevRequests++;
     this.track("jev", 1);
     try {
       if (this.killSwitch) throw new Error("worker killed");
@@ -176,8 +178,8 @@ export class ProviderStubs {
 
   private async anthropic(raw: string): Promise<Response> {
     const t0 = Date.now();
-    const body = JSON.parse(raw) as { model?: string; max_tokens?: number; output_config?: { format?: { type?: string } }; messages?: Array<{ content: string }> };
-    if (body.model === "claude-haiku-5-5") { if (body.max_tokens === 200 && body.output_config?.format?.type === "json_schema") this.haikuShapeOk++; else this.haikuShapeBad++; }
+    const body = JSON.parse(raw) as { model?: string; max_tokens?: number; output_config?: unknown; stop_sequences?: string[]; messages?: Array<{ content: string }> };
+    if (body.model === "claude-haiku-5-5") { if (body.max_tokens === 200 && body.output_config === undefined && JSON.stringify(body.stop_sequences) === '["}"]') this.haikuShapeOk++; else this.haikuShapeBad++; }
     if (body.model !== "claude-haiku-5-5") {
       this.calls.push({ provider: "llm", at: t0, status: 500, key: String(body.model), ms: 0 });
       return this.json(500, { error: "stress: LLM not stubbed" });
@@ -200,7 +202,10 @@ export class ProviderStubs {
         text = this.fault.haiku === "malformed5" && Math.random() < 0.05 ? "{road: not json" : JSON.stringify({ road: h.opt, confidence: h.conf });
       }
       this.calls.push({ provider: "haiku", at: t0, status: 200, key: lastSeller, ms: Date.now() - t0 });
-      return this.json(200, { content: [{ type: "text", text }], usage: { input_tokens: Math.ceil(content.length / 4), output_tokens: 12 } });
+      // C5: the API stops at the "}" stop sequence (not included in the text); the client re-appends it.
+      const stopAt = text.indexOf("}");
+      const stopped = stopAt >= 0 && Array.isArray(body.stop_sequences) && body.stop_sequences.includes("}");
+      return this.json(200, { content: [{ type: "text", text: stopped ? text.slice(0, stopAt) : text }], stop_reason: stopped ? "stop_sequence" : "end_turn", stop_sequence: stopped ? "}" : null, usage: { input_tokens: Math.ceil(content.length / 4), output_tokens: 12 } });
     } finally { this.track("haiku", -1); }
   }
 

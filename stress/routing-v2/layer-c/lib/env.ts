@@ -9,10 +9,10 @@ import path from "node:path";
 export const STACK_API_PORT = "59461";
 export const STACK_DB_PORT = "59462";
 export const SCRATCH = "/private/tmp/claude-502/-Users-jarradhenry-Sites-BMH-apps-Sandra/ee57f63d-e424-4187-9c5b-cd16541b6f53/scratchpad";
-export const RECEIPTS = "/Users/jarradhenry/Sites/BMH apps/Sandra/_claude_worktrees/routing-v2-evidence/receipts/stress-64ba15bb65c0";
+export const RECEIPTS = "/Users/jarradhenry/Sites/BMH apps/Sandra/_claude_worktrees/routing-v2-evidence/receipts/stress-84eda34d5213";
 export const RECEIPTS2 = RECEIPTS;
 export const FINAL = path.join(SCRATCH, "final");
-export const EXPECTED_HEAD = process.env.STRESS_EXPECTED_HEAD ?? "64ba15bb65c0cd3ac249a0c8d7188e613224a45a";
+export const EXPECTED_HEAD = process.env.STRESS_EXPECTED_HEAD ?? "84eda34d5213d133f5d688333b7a749e765bc160";
 
 export function headSha(): string {
   return execSync("git rev-parse HEAD", { cwd: path.resolve(__dirname, "../../../.."), encoding: "utf8" }).trim();
