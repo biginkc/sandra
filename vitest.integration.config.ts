@@ -185,6 +185,7 @@ export default defineConfig({
       "supabase/migrations/20261030420000_routing_v2_hold_scope.integration.test.ts",
       "supabase/migrations/20261030430000_routing_v2_hold_upgrade_takeover_scope.integration.test.ts",
       "supabase/migrations/20261030440000_routing_v2_phone_action_safety_hold.integration.test.ts",
+      "supabase/migrations/20261030450000_routing_v2_fence_held_lead.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
