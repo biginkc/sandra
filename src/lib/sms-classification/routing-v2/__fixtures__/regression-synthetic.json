@@ -1,7 +1,9 @@
 {
  "source": "routing-v2-evidence/regression-expectations.jsonl (stress runner, roads derived from approved policy with rule citations). SYNTHETIC rows only: pack wordings from the harness pack (stress/routing-v2/fixtures/pack.synthetic.json), recorded live Jev/Haiku answers. No real seller reply text and no text hashes are committed (Jarrad 2026-10-31); the real-reply rows run locally only via ROUTING_V2_EXPECTATIONS.",
  "excluded": {
-  "synthetic:f23-s-007": "its text matches a real seller reply exactly"
+  "synthetic:f23-s-007": "its text matches a real seller reply once case, whitespace and punctuation are ignored (kept in the local-only file)",
+  "synthetic:f23-s-008": "its text matches a real seller reply once case, whitespace and punctuation are ignored (kept in the local-only file)",
+  "synthetic:f23-s-009": "its text matches a real seller reply once case, whitespace and punctuation are ignored (kept in the local-only file)"
  },
  "rows": [
   {
@@ -2793,102 +2795,6 @@
     "commercial": 0,
     "rental": 0,
     "didnt_say": 0.94
-   },
-   "recorded_haiku": null,
-   "fail_reason": null
-  },
-  {
-   "row_id": "synthetic:f23-s-008",
-   "status": "LABELED",
-   "rule": "D1",
-   "citation": "Master A-012 + BUILD-PLAN \u00a716 (2026-10-30): the three exact whole-message phrases -> Not interested drip, over every Jev score; route.ts NOT_INTERESTED_PHRASES",
-   "text": "Do not bother.",
-   "expected_roads": [
-    "not_interested_drip"
-   ],
-   "assertions": [],
-   "recorded_probs": {
-    "asked_stop": 0.5,
-    "legal": 0.09,
-    "hostile": 0.83,
-    "wrong_person": 0.03,
-    "already_sold": 0.03,
-    "tenant": 0.02,
-    "listed": 0.03,
-    "asked_call": 0.01,
-    "inbound_call": 0.02,
-    "reason_to_sell": 0.03,
-    "named_price": 0.02,
-    "talked_price": 0.02,
-    "asked_offer": 0.02,
-    "open_to_selling": 0.02,
-    "maybe_later": 0.03,
-    "not_interested": 0.92,
-    "asked_who": 0.03,
-    "which_property": 0.09,
-    "where_located": 0.02,
-    "future_action": 0.03,
-    "confirmed_owner": 0.23,
-    "just_ok": 0.03,
-    "text_only": 0.02,
-    "how_it_works": 0.02,
-    "own_other_property": 0.02,
-    "someone_else_property": 0.02
-   },
-   "recorded_property_type": {
-    "residential": 0.02,
-    "lot": 0,
-    "commercial": 0,
-    "rental": 0,
-    "didnt_say": 0.98
-   },
-   "recorded_haiku": null,
-   "fail_reason": null
-  },
-  {
-   "row_id": "synthetic:f23-s-009",
-   "status": "LABELED",
-   "rule": "D1",
-   "citation": "Master A-012 + BUILD-PLAN \u00a716 (2026-10-30): the three exact whole-message phrases -> Not interested drip, over every Jev score; route.ts NOT_INTERESTED_PHRASES",
-   "text": "No need to call me back.",
-   "expected_roads": [
-    "not_interested_drip"
-   ],
-   "assertions": [],
-   "recorded_probs": {
-    "asked_stop": 0.29,
-    "legal": 0.08,
-    "hostile": 0.41,
-    "wrong_person": 0.03,
-    "already_sold": 0.03,
-    "tenant": 0.01,
-    "listed": 0.03,
-    "asked_call": 0.03,
-    "inbound_call": 0.03,
-    "reason_to_sell": 0.03,
-    "named_price": 0.02,
-    "talked_price": 0.02,
-    "asked_offer": 0.02,
-    "open_to_selling": 0.02,
-    "maybe_later": 0.04,
-    "not_interested": 0.83,
-    "asked_who": 0.03,
-    "which_property": 0.09,
-    "where_located": 0.02,
-    "future_action": 0.03,
-    "confirmed_owner": 0.22,
-    "just_ok": 0.06,
-    "text_only": 0.03,
-    "how_it_works": 0.02,
-    "own_other_property": 0.02,
-    "someone_else_property": 0.02
-   },
-   "recorded_property_type": {
-    "residential": 0.03,
-    "lot": 0,
-    "commercial": 0,
-    "rental": 0,
-    "didnt_say": 0.97
    },
    "recorded_haiku": null,
    "fail_reason": null
