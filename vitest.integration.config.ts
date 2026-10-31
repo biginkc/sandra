@@ -189,6 +189,7 @@ export default defineConfig({
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
+      "src/lib/routing-v2-backfill/backfill.db.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
       "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",
       "src/lib/hot-sellers/hot-acceptance-matrix.db.integration.test.ts",

@@ -362,7 +362,67 @@ export type AiDispatchInput = {
   nineDeferral?: NineDeferral;
   /** A deferred run re-deciding from scratch: how many deferrals came before (loop bound only). */
   nineDeferCount?: number;
+  /**
+   * Routing v2 backfill (scripts/routing-v2-backfill.ts) re-dispatching an OLD unanswered seller
+   * text through this same entry. Absent on every live path (webhook / delay workflow), so live
+   * behaviour is unchanged. See docs/routing-v2-backfill.md.
+   */
+  routingV2Backfill?: RoutingV2BackfillContext;
 };
+
+/** Backfill modes that reach the dispatch (dry-run never dispatches). */
+export type RoutingV2BackfillContext = {
+  runId: string;
+  /**
+   * apply = the full live treatment (replies <= --text-max-age-days old). sort_only = older
+   * replies: decided and sorted (stops, holds, closes, hot alerts into Jarrad's queue) but NO
+   * auto reply and NO drip (Jarrad 2026-10-31).
+   */
+  mode: "classify_only" | "apply" | "sort_only";
+  /** Apply only: this inbound was classified by an earlier backfill classify-only run; act on that stored decision, never classify again. */
+  reuseStoredDecision?: boolean;
+};
+
+/** Claim / outcome reason of a classify-only backfill dispatch: decision recorded, nothing carried out. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_ONLY = "routing_v2:backfill_classify_only";
+
+/**
+ * Roads whose approved seller text only makes sense right after the seller's message, so an OLD
+ * reply must not get it. In backfill apply these hold for a person (existing reason, existing
+ * hold alert copy) instead of sending. No text is invented or reworded for the backlog.
+ * - driving_reply+book_appointment: "Okay, thank you for letting me know. I'll reach out to you
+ *   later." answers "I'm driving"; days later it is wrong.
+ */
+export const ROUTING_V2_BACKFILL_HOLD_ROADS: ReadonlySet<string> = new Set(["driving_reply+book_appointment"]);
+
+/** Hot roads: in sort-only their owner alerts are raised and the lead goes to Jarrad's queue. */
+const ROUTING_V2_SORT_ONLY_HOT_ROADS: ReadonlySet<string> = new Set([
+  "book_appointment", "reaction+book_appointment", "driving_reply+book_appointment", "price_check", "ALERT_call_me",
+]);
+
+export type RoutingV2SortOnlyKind =
+  /** Same as live: Jev failed / stop / bad number / any hold road (nothing is ever sent on these). */
+  | "live_failed" | "live_stop" | "live_bad_number" | "live_hold"
+  /** Close this property, no reply: existing AI disposition writer (this property only). */
+  | "close_wrong_number" | "close_not_interested"
+  /** Hot or alert road: its stored owner alerts + a needs-person hold (no reply, no drip). */
+  | "alert_and_hold"
+  /** Every other road: decision recorded, nothing carried out. */
+  | "record_only";
+
+/** What sort-only does with a stored decision (pure; the report uses the same function). */
+export function routingV2SortOnlyKind(e: Pick<StoredLiveEvidence, "status" | "action" | "failure_reason">): RoutingV2SortOnlyKind {
+  const step = liveStepFor(e as StoredLiveEvidence);
+  if (step.kind === "failed") return "live_failed";
+  if (step.kind === "stop") return "live_stop";
+  if (step.kind === "bad_number") return "live_bad_number";
+  if (step.kind === "wrong_number") return "close_wrong_number";
+  if (step.kind === "hold") return "live_hold";
+  const road = e.action?.road ?? "";
+  if (road === "not_interested_drip") return "close_not_interested";
+  if (ROUTING_V2_SORT_ONLY_HOT_ROADS.has(road) || (e.action?.steps ?? []).some((s) => s.kind === "alert")) return "alert_and_hold";
+  return "record_only";
+}
 
 export type AiDispatchOptions = {
   checkSuperseded?: boolean;
@@ -8643,6 +8703,19 @@ async function runRoutingV2LiveStepInner(
   if (revisionError || !revisionRow) return nineHoldAndComplete(supabase, a, "nine_needs_person");
   const expectedRevision = revisionRow.decision_context_revision;
 
+  // Backfill apply of a text an earlier classify-only run already decided: carry out exactly
+  // the stored decision Jarrad reviewed (no second Jev / Haiku call). The decision row is
+  // immutable, so classifying again could not change it anyway.
+  if ((input.routingV2Backfill?.mode === "apply" || input.routingV2Backfill?.mode === "sort_only") && input.routingV2Backfill.reuseStoredDecision) {
+    const stored = await readLiveV2Evidence(supabase, inboundMessageId);
+    if (stored && (stored.status === "decided" || stored.status === "failed")) {
+      if (stored.property_id !== input.propertyId || stored.org_id !== property.org_id) {
+        return nineHoldAndComplete(supabase, a, "nine_needs_person");
+      }
+      return applyRoutingV2LiveEvidence(supabase, a, flags, stored);
+    }
+  }
+
   let classification: Exclude<V2Classification, { kind: "off" }>;
   // Jev attempts actually made, for the spend ledger even if something after Jev throws.
   let jevAttempts: readonly JevAttemptOutcome[] = [];
@@ -8700,6 +8773,12 @@ async function runRoutingV2LiveStepInner(
   if (!evidence || evidence.property_id !== input.propertyId || evidence.org_id !== property.org_id) {
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
+  if (input.routingV2Backfill?.mode === "classify_only") {
+    // Backfill classify-only: the decision is recorded (the per-road report reads it); no
+    // transition, reply, drip, alert or hold. A later backfill apply carries out this row.
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_CLASSIFY_ONLY });
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_ONLY };
+  }
   return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
 }
 
@@ -8727,6 +8806,14 @@ async function applyRoutingV2LiveEvidence(
     return nineHoldAndComplete(supabase, a, reason);
   };
 
+  if (input.routingV2Backfill?.mode === "sort_only") {
+    return applyRoutingV2SortOnly(supabase, a, flags, evidence, holdWithAlerts);
+  }
+  if (input.routingV2Backfill?.mode === "apply" && step.kind === "transition" && evidence.action && ROUTING_V2_BACKFILL_HOLD_ROADS.has(evidence.action.road)) {
+    // An old reply on a road whose approved text only fits a fresh message: its owner alerts
+    // are raised and a person looks; no reply, no drip.
+    return holdWithAlerts("nine_needs_person");
+  }
   if (step.kind === "failed") {
     // Same as today's nine engine on a failed classification: hostile wording waits for a
     // person's confirmation; otherwise the classifier-failure hold.
@@ -8781,6 +8868,60 @@ async function applyRoutingV2LiveEvidence(
   // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
   return nineHoldAndComplete(supabase, a, "nine_needs_person");
 }
+
+/**
+ * Backfill sort-only (replies older than --text-max-age-days): sort the lead from the stored
+ * decision without ever texting the seller or starting a drip. Stops, bad numbers, holds and
+ * failures take the live path (none of them sends). Wrong person / sold / tenant and not
+ * interested are closed on THIS property through the existing AI disposition writer; hot and
+ * alert roads raise their stored owner alerts and hold for a person; the rest is recorded only.
+ */
+async function applyRoutingV2SortOnly(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  holdWithAlerts: (reason: "nine_asked_stop" | "nine_needs_person") => Promise<AiDispatchOutcome>,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const kind = routingV2SortOnlyKind(evidence);
+  const step = liveStepFor(evidence);
+  if (kind === "live_failed") {
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${step.kind === "failed" ? step.reason : "unknown"}`);
+  }
+  if (kind === "live_stop") return routeRoutingV2Stop(supabase, a, flags, evidence, holdWithAlerts);
+  if (kind === "live_bad_number") return routeRoutingV2PhoneAction(supabase, a, flags, evidence, "bad_number");
+  if (kind === "live_hold") return holdWithAlerts(step.kind === "hold" ? liveHoldReason(step.reason) : "nine_needs_person");
+  if (kind === "alert_and_hold") return holdWithAlerts("nine_needs_person");
+  if (kind === "close_wrong_number" || kind === "close_not_interested") {
+    const dispo = kind === "close_wrong_number" ? "wrong_number" : "not_interested";
+    // The disposition review's ai_reason (like the nine engine's `nine_questions:<answer>`), not a hold reason.
+    const aiReason = `routing_v2_backfill_sort_only:${evidence.road ?? dispo}`;
+    const result = await setResponderDispo(supabase, {
+      runContext: runCtx,
+      propertyId: input.propertyId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      dispo,
+      reason: aiReason,
+      expectedRevision: evidence.expected_revision,
+      ...(dispo === "wrong_number" ? { wrongScope: "this_property" as const } : {}),
+    });
+    await trace(supabase, {
+      kind: "action", name: "routing_v2_backfill_sort_only", result: result.updated ? "applied" : "skipped",
+      detail: { engine: "routing_v2", road: evidence.road, dispo, ...(result.updated ? {} : { reason: result.reason }) },
+    }, runCtx);
+    if (!result.updated && result.reason !== "already_terminal") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+    return { outcome: "auto_closed", reason: `routing_v2:backfill_sort_only:${dispo}` };
+  }
+  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED });
+  return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED };
+}
+
+/** Sort-only on a road with nothing to sort (reply / drip only): decision recorded, nothing else. */
+export const ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED = "routing_v2:backfill_sort_only:recorded";
 
 /** The seller's number for a phone-level action: the inbound's own from address. */
 async function routingV2InboundPhone(supabase: SupabaseClient<Database>, input: AiDispatchInput): Promise<string | null> {
