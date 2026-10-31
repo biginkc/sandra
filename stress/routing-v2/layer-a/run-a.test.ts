@@ -16,6 +16,10 @@ import { askHaiku, type HaikuCallResult, type HaikuThreadMessage } from "@/lib/s
 import { extractDollarAmount } from "@/lib/sms-classification/routing-v2/price-amount";
 import { v2ReplyText } from "@/lib/sms-classification/routing-v2/reply-texts";
 import { askJev, type JevAskResult } from "@/lib/sms-classification/providers/jev-gateway";
+import * as liveDispatch from "@/lib/sms-classification/routing-v2/live-dispatch";
+
+/** The live Jev policy at the tested SHA when exported (fix head: maxRetries 2 / 8 s); else the old live value. */
+const JEV_POLICY = (liveDispatch as { V2_LIVE_JEV_POLICY?: { maxRetries: number; timeoutMs: number } }).V2_LIVE_JEV_POLICY ?? { maxRetries: 0, timeoutMs: 8000 };
 
 type Item = {
   id: string; family: number | string; source: string; reply: string; thread: string[];
@@ -77,7 +81,7 @@ describe.skipIf(process.env.RUN_LAYER_A !== "1")("layer A live run", () => {
         { flags: FLAGS, propertyId: PID, reply: it.reply, thread: toThread(it), numberSourceQuestion: true },
         {
           jev: async (req) => {
-            try { raw = await askJev(req, { fetch, apiKey: jevKey, maxRetries: 0, timeoutMs: 8000 }); return raw; }
+            try { raw = await askJev(req, { fetch, apiKey: jevKey, ...JEV_POLICY }); return raw; }
             catch (e) { jevErr = e instanceof Error ? `${e.name}:${(e as { kind?: string }).kind ?? ""}:${e.message.slice(0, 120)}` : String(e); throw e; }
           },
           haiku: async (thread) => { haikuRes = await askHaiku(thread, { fetch, apiKey: anthKey }); return haikuRes; },

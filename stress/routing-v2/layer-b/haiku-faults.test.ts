@@ -126,8 +126,10 @@ describe("§2.3 Haiku outcomes", () => {
     const f = applyHaikuPolicy(d, { ok: true, option: "listed", confidence: 0.9 }, probs);
     expect(f.road).toBe("listed_drip");
   });
-  it("strict parser: prose, two objects, string confidence, empty, out-of-range → parser failure; fenced JSON ok", () => {
-    for (const t of ["I think it's stop", '{"road":"stop","confidence":0.9}{"road":"x","confidence":1}', '{"road":"stop","confidence":"0.9"}', "", '{"road":"stop","confidence":1.5}', "[]", '{"confidence":0.9}']) {
+  it("parser (A-3 fix, first JSON object wins): prose-only, string confidence, empty, out-of-range → parser failure; fenced JSON ok; trailing prose / second object → first object", () => {
+    expect(parseHaikuText('{"road":"stop","confidence":0.9}{"road":"x","confidence":1}')).toEqual({ ok: true, option: "stop", confidence: 0.9 });
+    expect(parseHaikuText('{"road": "lot", "confidence": 0.3}\n\nWait—correcting this: needs_person')).toEqual({ ok: true, option: "lot", confidence: 0.3 });
+    for (const t of ["I think it's stop", '{"road":"stop","confidence":"0.9"}', "", '{"road":"stop","confidence":1.5}', "[]", '{"confidence":0.9}']) {
       expect(parseHaikuText(t).ok, t).toBe(false);
     }
     expect(parseHaikuText('```json\n{"road":"stop","confidence":0.9}\n```')).toEqual({ ok: true, option: "stop", confidence: 0.9 });

@@ -120,7 +120,7 @@ export function stateFor(i: number): { state: string; fips: string | null } {
 /** Bulk-seed leads: contact + opt-in consent + property + one delivered outbound campaign text. */
 export async function seedLeads(pg: Client, org: RunOrg, n: number, opts: {
   ourLast?: (i: number) => string; state?: (i: number) => { state: string; fips: string | null };
-  address?: (i: number) => string; firstName?: (i: number) => string | null; phoneBase?: number;
+  address?: (i: number) => string; firstName?: (i: number) => string | null; phoneBase?: number; testRunId?: string; phone?: (i: number) => string;
 } = {}): Promise<Lead[]> {
   const base = opts.phoneBase ?? 2_000_000 + Math.floor(Math.random() * 5_000_000);
   const leads: Lead[] = [];
@@ -129,7 +129,7 @@ export async function seedLeads(pg: Client, org: RunOrg, n: number, opts: {
     const ids = Array.from({ length: Math.min(chunk, n - s) }, (_, k) => s + k);
     const rows = ids.map((i) => {
       const st = (opts.state ?? stateFor)(i);
-      return { i, phone: `+1${AREA[st.state] ?? "816"}${base + i}`, contactId: randomUUID(), propertyId: randomUUID(), st,
+      return { i, phone: opts.phone?.(i) ?? `+1${AREA[st.state] ?? "816"}${base + i}`, contactId: randomUUID(), propertyId: randomUUID(), st,
         address: opts.address?.(i) ?? `${100 + i} Stress Run Ave`, first: opts.firstName ? opts.firstName(i) : "Pat" };
     });
     await pg.query(
@@ -148,6 +148,7 @@ export async function seedLeads(pg: Client, org: RunOrg, n: number, opts: {
        select $1, 'sms', 'outbound', 'delivered', p, c, $2, ph, b, now() - interval '3 hours' from unnest($3::uuid[], $4::uuid[], $5::text[], $6::text[]) as t(p, c, ph, b)`,
       [org.orgId, org.sender, rows.map((r) => r.propertyId), rows.map((r) => r.contactId), rows.map((r) => r.phone),
         rows.map((r) => opts.ourLast?.(r.i) ?? `Hi, would you consider an offer on ${r.address}?`)]);
+    if (opts.testRunId) await pg.query("update public.properties set test_run_id = $1 where id = any($2)", [opts.testRunId, rows.map((r) => r.propertyId)]);
     for (const r of rows) leads.push({ propertyId: r.propertyId, contactId: r.contactId, phone: r.phone, state: r.st.state, address: r.address, idx: r.i });
   }
   return leads;

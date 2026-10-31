@@ -248,7 +248,17 @@ it("G3 blast-day replay", async () => {
   const maxClaims = Math.max(0, ...claims.map((c) => c.n));
   R.check("exactly one classification claim per inbound (ai_response_claims)", maxClaims <= 1, { inboundsWithClaim: claims.length, maxPerInbound: maxClaims });
 
-  const decisions = await q("select inbound_message_id, status, road, provenance, action, failure_reason, haiku, latency_ms, created_at from routing_v2_live_decisions where property_id = any($1)");
+  const auditRows = await q("select inbound_message_id, status, road, provenance, action, failure_reason, haiku, latency_ms, created_at from routing_v2_live_decisions where property_id = any($1)");
+  const auditByInbound = new Map<string, number>();
+  for (const a of auditRows) auditByInbound.set(a.inbound_message_id, (auditByInbound.get(a.inbound_message_id) ?? 0) + 1);
+  const auditStatus: Record<string, number> = {};
+  for (const a of auditRows) auditStatus[a.status] = (auditStatus[a.status] ?? 0) + 1;
+  R.check("AUD: exactly one v2 audit row per inbound (routing_v2_live_decisions incl. not_routed)", inbound.every((m) => auditByInbound.get(m.id) === 1),
+    { inbound: inbound.length, withExactlyOne: inbound.filter((m) => auditByInbound.get(m.id) === 1).length, withNone: inbound.filter((m) => !auditByInbound.has(m.id)).length, withMoreThanOne: inbound.filter((m) => (auditByInbound.get(m.id) ?? 0) > 1).length, byStatus: auditStatus });
+  const notRoutedReasons: Record<string, number> = {};
+  for (const a of auditRows) if (a.status === "not_routed") { const k = String(a.failure_reason ?? a.road ?? "?").split(":").slice(0, 2).join(":"); notRoutedReasons[k] = (notRoutedReasons[k] ?? 0) + 1; }
+  R.line("not_routed audit reasons", Object.fromEntries(Object.entries(notRoutedReasons).sort((x, y) => y[1] - x[1]).slice(0, 15)));
+  const decisions = auditRows.filter((d) => d.status !== "not_routed");
   const decByInbound = new Map(decisions.map((d) => [d.inbound_message_id as string, d]));
   R.check("at most one live decision per inbound", decisions.length === decByInbound.size, { decisions: decisions.length, distinct: decByInbound.size });
 
@@ -317,7 +327,11 @@ it("G3 blast-day replay", async () => {
   const precheck = inbound.length - dispatched;
   R.line(`delay workflows started ${track.size}; inbounds that reached dispatch (claim rows) ${dispatched}; prechecked at webhook (STOP/DNC/hostile/legal phrases, no workflow) ${precheck}`);
   const jev429 = stubs.count("jev", (c) => c.status === 429), jev5xx = stubs.count("jev", (c) => c.status >= 500);
-  R.check("Jev v2 calls = one per v2-classified inbound (no re-classification on retry/duplicate/re-executed step)", jevV2 === decisions.length,
+  const jev200 = stubs.count("jev", (c) => c.status === 200);
+  const decidedN = decisions.filter((d) => d.status === "decided").length;
+  R.check("A-4/no re-classification: exactly one successful Jev answer per decided inbound (retries only after a failed attempt)", jev200 === decidedN,
+    { jevSuccessful: jev200, decided: decidedN, failedDecisions: decisions.length - decidedN });
+  R.check("Jev v2 calls = one per v2-classified inbound (before A-4; with retries this counts attempts)", jevV2 === decisions.length,
     { jevV2Calls: jevV2, v2Decisions: decisions.length, formula_inbounds_minus_prechecks_minus_dupes: dispatched, extra: jevV2 - decisions.length, jev429, jev5xx, jevAbortedByTimeout: stubs.aborted, reexecutedSteps: reexecuted });
   R.line(`Jev nine-question calls (legacy classify-only for held/terminal leads, classifyOnlyForHotText): ${jevNine}`);
   R.line(`ADDITIONAL Jev calls by v2 path: eight-answer classification for the number-source detector = ${jevEight} (one per reply road) — not in the §3.3 formula`);
@@ -340,7 +354,7 @@ it("G3 blast-day replay", async () => {
   const dmBilled = stubs.count("dealmachine", (c) => c.status === 200);
   const dmMax = stubs.maxPerMinute("dealmachine");
   R.check("DealMachine calls <= 60 in any rolling minute (stub log)", dmMax <= 60, { dmCalls, maxPerMinute: dmMax, http429: stubs.count("dealmachine", (c) => c.status === 429), creditOut402: stubs.count("dealmachine", (c) => c.status === 402) });
-  const ledger = await q("select provider, status, count(*)::int n from provider_spend_ledger where property_id = any($1) group by 1, 2");
+  const ledger = await q("select provider, status, count(*)::int n from provider_spend_ledger where provider = 'dealmachine' and property_id = any($1) group by 1, 2");
   const ledgerN = ledger.reduce((s, r) => s + r.n, 0);
   R.check("one spend-ledger row per DealMachine HTTP call", ledgerN === dmCalls, { ledgerRows: ledgerN, stubCalls: dmCalls, byStatus: ledger });
   const priceProps = new Set(decisions.filter((d) => d.road === "price_check").map((d) => d.property_id ?? "")).size;
@@ -361,10 +375,10 @@ it("G3 blast-day replay", async () => {
   const decided = decisions.filter((d) => d.status === "decided");
   const missingProv = decided.filter((d) => !d.provenance || !d.action);
   R.check("every decided v2 row has action + provenance", missingProv.length === 0, { decided: decided.length, missing: missingProv.length });
-  const dispatchedNoDecision = [...track.keys()].filter((id) => !decByInbound.has(id));
+  const dispatchedNoDecision = [...track.keys()].filter((id) => !auditByInbound.has(id));
   R.check("every dispatched inbound has a v2 audit row", dispatchedNoDecision.length === 0, { dispatched: track.size, withoutDecisionRow: dispatchedNoDecision.length,
     sampleOutcomes: dispatchedNoDecision.slice(0, 6).map((id) => track.get(id)?.outcome) });
-  R.check("every inbound (incl. webhook prechecks) has a v2 audit row", inbound.every((m) => decByInbound.has(m.id)), { inbound: inbound.length, withRow: inbound.filter((m) => decByInbound.has(m.id)).length });
+  R.line("inbounds with a decided/failed v2 decision (classified by v2):", inbound.filter((m) => decByInbound.has(m.id)).length, "of", inbound.length);
 
   // Road agreement with the v7 replay for first replies outside fault windows (no Haiku fault).
   let agree = 0, compared = 0; const dis: Record<string, number> = {};
@@ -401,5 +415,11 @@ it("G3 blast-day replay", async () => {
   for (const w of webhookErrors) byBody.set(`${w.status} ${w.body}`, (byBody.get(`${w.status} ${w.body}`) ?? 0) + 1);
   R.line(`webhook non-200 by response body (${webhookErrors.length}):`, Object.fromEntries(byBody));
   R.line("reportError histogram (surface | message), top 25:", Object.fromEntries([...errHist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25)));
-  R.check("one Jev call per v2 decision (number-source asked inside the v2 call; no eight-answer call)", jevEight === 0 && jevV2 === decisions.length, { jevV2, decisions: decisions.length, jevEight });
+  R.check("D2: no separate number-source Jev call (eight-answer calls = 0)", jevEight === 0, { jevV2, decisions: decisions.length, jevEight });
+  const led = await q("select provider, outcome, count(*)::int n, sum(coalesce(input_tokens,0))::int tin, sum(coalesce(output_tokens,0))::int tout from provider_spend_ledger where property_id = any($1) group by 1, 2");
+  R.line("spend ledger rows by provider/outcome (A-6):", led);
+  const ledN = (p: string) => led.filter((r) => r.provider === p).reduce((a, r) => a + r.n, 0);
+  const haikuDecisions = decisions.filter((d) => d.haiku && (d.haiku as { asked?: boolean }).asked !== false).length;
+  R.check("A-6: one Jev ledger row per v2 classification (decided + failed)", ledN("jev") === decisions.length, { ledgerJev: ledN("jev"), v2Classifications: decisions.length, jevV2HttpAttempts: jevV2, jevNineQuestionHttpCalls_unledgered: jevNine });
+  R.check("A-6: one Haiku ledger row per Haiku consultation", ledN("haiku") === haikuDecisions, { ledgerHaiku: ledN("haiku"), decisionsWithHaiku: haikuDecisions, haikuHttpAttempts: stubs.count("haiku") });
 });

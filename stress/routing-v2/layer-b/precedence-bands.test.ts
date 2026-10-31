@@ -161,6 +161,12 @@ describe("§2.2 band edges (exact floats)", () => {
     expect(dec({ asked_who: 0.91, inbound_call: 0.51 })).toMatchObject({ road: "who_reply_drip", haiku: null });
     expect(dec({ asked_stop: 0.75, not_interested: 0.55 })).toMatchObject({ road: "stop", haiku: null });
   });
+  it("A-1: a confident stop/legal/hostile (>=0.70) anywhere in rows 1-2 is final even when an earlier stop-row signal is in the band", () => {
+    expect(dec({ asked_stop: 0.85, hostile: 0.68 })).toMatchObject({ road: "stop", haiku: null });
+    expect(dec({ asked_stop: 0.7, hostile: 0.69 })).toMatchObject({ road: "stop", haiku: null });
+    expect(dec({ legal: 0.62, hostile: 0.75 })).toMatchObject({ road: "stop", haiku: null });
+    expect(dec({ asked_stop: 0.65, hostile: 0.62 })).toMatchObject({ road: "stop", haiku: "decider_band" });
+  });
   it("no other_band trigger: non-deciding 0.50–0.59 → no Haiku; 0.60 → becomes a candidate by order", () => {
     expect(dec({ not_interested: 0.9, inbound_call: 0.55 })).toMatchObject({ road: "not_interested_drip", haiku: null });
     expect(dec({ not_interested: 0.9, inbound_call: 0.6 })).toMatchObject({ road: "ALERT_said_theyll_call", haiku: "decider_band" });
