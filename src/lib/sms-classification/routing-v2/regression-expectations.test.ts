@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { V2_ROAD_ACTIONS } from "./actions";
 import { applyHaikuPolicy, type FinalDecision } from "./haiku-policy";
 import type { HaikuAnswer, HaikuFailure } from "./haiku";
 import type { PropertyTypeOption, V2QuestionId } from "./questions";
@@ -64,8 +65,34 @@ const runRow = (row: ExpectationRow, body: () => void) => {
   else it(name, body);
 };
 
+const SYNTHETIC = JSON.parse(readFileSync(join(__dirname, "__fixtures__/regression-synthetic.json"), "utf8")) as { rows: SyntheticRow[] };
+/** Every road a person can see: the approved roads, the Haiku-unsure alert and the two holds. */
+const VALID_ROADS = new Set<string>([...Object.keys(V2_ROAD_ACTIONS), "ALERT_haiku_unsure", "possible_stop", "HOLD_haiku_error"]);
+
+describe("label-free invariants over the synthetic rows (CI; replace the dropped per-road count pin)", () => {
+  it("every synthetic row resolves to a known road", () => {
+    for (const row of SYNTHETIC.rows) {
+      const haiku = row.recorded_haiku ? ok(row.recorded_haiku[0], row.recorded_haiku[1]) : null;
+      const { road } = evaluate(row.text!, row.recorded_probs, row.recorded_property_type, haiku);
+      expect(VALID_ROADS.has(road), `${row.row_id}: ${road}`).toBe(true);
+    }
+  });
+  it("a Haiku parser failure on any Haiku-band row never routes to a send: it is a hold", () => {
+    let banded = 0;
+    for (const row of SYNTHETIC.rows) {
+      const d = routeV2({ reply: row.text!, probabilities: row.recorded_probs, propertyType: row.recorded_property_type });
+      if (!d.haiku) continue;
+      banded++;
+      const f = applyHaikuPolicy(d, { ok: false, reason: "haiku_invalid:parser" }, row.recorded_probs);
+      expect(roadOf(f), row.row_id).toBe("HOLD_haiku_error");
+      expect(f.hold, row.row_id).toBe(true);
+    }
+    expect(banded).toBeGreaterThan(0);
+  });
+});
+
 describe("regression expectations: synthetic rows (committed, run in CI)", () => {
-  const fixture = JSON.parse(readFileSync(join(__dirname, "__fixtures__/regression-synthetic.json"), "utf8")) as { rows: SyntheticRow[] };
+  const fixture = SYNTHETIC;
   it("covers the labeled synthetic table (no UNLABELED rows committed)", () => {
     expect(fixture.rows.length).toBeGreaterThan(50);
     expect(fixture.rows.every((r) => r.status === "LABELED" || r.status === "KNOWN_FAIL")).toBe(true);
@@ -97,7 +124,14 @@ describe("regression expectations: real-reply rows (local only, ROUTING_V2_EXPEC
   );
   const rows = readFileSync(LOCAL, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as ExpectationRow & { _header?: boolean })
     .filter((r) => !r._header && r.row_id.startsWith("replay:") && (r.status === "LABELED" || r.status === "KNOWN_FAIL"));
-  it("has real-reply rows to check", () => expect(rows.length).toBeGreaterThan(0));
+  // Pinned to the exact table (regression-expectations.jsonl, built at 30d35369b): 1,814 rows,
+  // 84 of them real-reply LABELED / KNOWN_FAIL. A different file fails here instead of silently
+  // checking fewer rows.
+  it("is the expected table: 1,814 rows, 84 real-reply LABELED / KNOWN_FAIL", () => {
+    const all = readFileSync(LOCAL, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { _header?: boolean });
+    expect(all.filter((r) => !r._header)).toHaveLength(1814);
+    expect(rows).toHaveLength(84);
+  });
   for (const row of rows) {
     runRow(row, () => {
       const i = Number(row.row_id.slice("replay:".length));
@@ -108,4 +142,19 @@ describe("regression expectations: real-reply rows (local only, ROUTING_V2_EXPEC
       assertRow(row, evaluate(row.text!, probabilities, propertyType, V8.get(i) ?? null));
     });
   }
+});
+
+const REAL = process.env.ROUTING_V2_REAL_REPLIES;
+describe("privacy: no committed synthetic text equals a real seller reply (local only, ROUTING_V2_REAL_REPLIES)", () => {
+  if (!REAL) {
+    it.skip("SKIPPED: ROUTING_V2_REAL_REPLIES is not set (the real replies are local only).", () => {});
+    return;
+  }
+  // Case, whitespace and punctuation are ignored (review B1 of 72229239848d).
+  const norm = (t: string | null | undefined) => (t ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  it("no committed synthetic text matches a real reply after normalization", () => {
+    const real = new Set((JSON.parse(readFileSync(REAL, "utf8")) as Array<{ reply?: string }>).map((r) => norm(r.reply)).filter(Boolean));
+    expect(real.size).toBeGreaterThan(100);
+    expect(SYNTHETIC.rows.filter((r) => real.has(norm(r.text))).map((r) => r.row_id)).toEqual([]);
+  });
 });
