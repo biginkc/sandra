@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JevAskResult } from "../providers/jev-gateway";
 import { OPT_OUT_PHRASES } from "@/lib/sequences/opt-out";
-import { classifyV2, type V2ClassificationDeps } from "./classify";
+import { classifyV2, JevAttemptsError, type V2ClassificationDeps } from "./classify";
 import { ALL_OFF, type RoutingV2Flags } from "./flags";
 import { isAfterRepairsReply } from "./price-check";
 import { PROPERTY_TYPE_OPTIONS, REPAIRS_FOLLOW_UP_IDS, V2_QUESTION_IDS } from "./questions";
@@ -100,6 +100,14 @@ describe("v2 decision preparation", () => {
     deps.jev = vi.fn(async () => { throw new Error("private data"); });
     expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_failed" });
     expect(deps.haiku).not.toHaveBeenCalled();
+  });
+  it("carries the Jev attempts it made into the result (spend ledger), decided or failed", async () => {
+    const { input, deps } = fixture({ text_only: 0.95 });
+    const answers = (await (deps.jev as unknown as () => Promise<JevAskResult>)()).answers!;
+    deps.jev = vi.fn(async () => ({ answers, latencyMs: 1, attempts: ["timeout", "ok"] as const }));
+    expect(await classifyV2(input, deps)).toMatchObject({ kind: "decided", jevAttempts: ["timeout", "ok"] });
+    deps.jev = vi.fn(async () => { throw new JevAttemptsError(new Error("x"), ["server_error", "server_error", "server_error"]); });
+    expect(await classifyV2(input, deps)).toEqual({ kind: "failed", reason: "jev_failed", jevAttempts: ["server_error", "server_error", "server_error"] });
   });
   it("asks follow-ups after an approved repairs reply with any exact footer", async () => {
     for (const footer of OPT_OUT_PHRASES) {

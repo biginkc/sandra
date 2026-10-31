@@ -41,12 +41,21 @@ export async function recordV2ModelSpend(
   report: (e: unknown) => void,
 ): Promise<void> {
   if (result.kind === "off") return;
-  const rows: Array<Record<string, unknown>> = [{
-    p_provider: "jev", p_outcome: result.kind === "decided" ? "decided" : result.reason,
-    p_input_tokens: result.kind === "decided" ? tokens(result.jevUsage?.input_tokens) : null,
-    p_output_tokens: result.kind === "decided" ? tokens(result.jevUsage?.output_tokens) : null,
-    p_cost: null, p_cost_unit: "usd",
-  }];
+  // One Jev row per HTTP attempt actually made (stress review): failed attempts carry their
+  // failure kind and no tokens; the answering attempt carries the outcome and the tokens. No
+  // attempt made (e.g. refused before any request) = no Jev row. Unreported = one row.
+  const attempts = result.jevAttempts ?? ["ok"];
+  const final = result.kind === "decided" ? "decided" : result.reason;
+  const rows: Array<Record<string, unknown>> = attempts.map((attempt) => {
+    const answered = attempt === "ok";
+    return {
+      p_provider: "jev",
+      p_outcome: answered ? final : `attempt_failed:${attempt}`,
+      p_input_tokens: answered && result.kind === "decided" ? tokens(result.jevUsage?.input_tokens) : null,
+      p_output_tokens: answered && result.kind === "decided" ? tokens(result.jevUsage?.output_tokens) : null,
+      p_cost: null, p_cost_unit: "usd",
+    };
+  });
   if (result.kind === "decided" && result.haiku) {
     const h = result.haiku as { ok?: boolean; reason?: string; inputTokens?: unknown; outputTokens?: unknown; costUsd?: unknown };
     rows.push({

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { vi } from "vitest";
 import { askJev } from "../providers/jev-gateway";
+import { JevAttemptsError, v2ProviderDeps } from "./classify";
 import { liveHoldReason, liveStepFor, recordRoutingV2Audit, recordV2ModelSpend, storedFinalDecision, storedV2Decision, V2_LIVE_JEV_POLICY, type StoredLiveEvidence } from "./live-dispatch";
 
 const base: StoredLiveEvidence = {
@@ -47,6 +48,19 @@ describe("A-4: live v2 Jev retries match the legacy classifier", () => {
     await expect(askJev({ state: {}, questions: {} }, { fetch, apiKey: "k", ...V2_LIVE_JEV_POLICY })).resolves.toMatchObject({ answers: {} });
     expect(fetch).toHaveBeenCalledTimes(3);
   }, 20_000);
+  it("the live v2 Jev dep reports every HTTP attempt it made (answer or failure)", async () => {
+    const lookupValue = vi.fn();
+    const ok = vi.fn()
+      .mockResolvedValueOnce(new Response("x", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ answers: {} }), { status: 200 }));
+    const deps = v2ProviderDeps({ jev: { fetch: ok, apiKey: "k", ...V2_LIVE_JEV_POLICY }, haiku: {} as never, lookupValue });
+    await expect(deps.jev({ state: {}, questions: {} })).resolves.toMatchObject({ attempts: ["server_error", "ok"] });
+    const denied = vi.fn().mockResolvedValue(new Response("no", { status: 401 }));
+    const failing = v2ProviderDeps({ jev: { fetch: denied, apiKey: "k", ...V2_LIVE_JEV_POLICY }, haiku: {} as never, lookupValue });
+    const err = await failing.jev({ state: {}, questions: {} }).catch((e) => e);
+    expect(err).toBeInstanceOf(JevAttemptsError);
+    expect(err.attempts).toEqual(["auth"]);
+  }, 20_000);
 });
 
 describe("A-6: Jev / Haiku spend ledger rows", () => {
@@ -67,6 +81,23 @@ describe("A-6: Jev / Haiku spend ledger rows", () => {
     const report = vi.fn();
     await recordV2ModelSpend({ rpc: async () => ({ error: { message: "down" } }) } as never, ctx, { kind: "failed", reason: "jev_failed" }, report);
     expect(report).toHaveBeenCalledOnce();
+  });
+  it("one Jev row per HTTP attempt: failed attempts without tokens, the answering attempt with them", async () => {
+    const { calls, db } = rpcDb();
+    await recordV2ModelSpend(db, ctx, { kind: "decided", jevUsage: { input_tokens: 1200, output_tokens: 300 }, jevAttempts: ["timeout", "server_error", "ok"], haiku: null } as never, () => {});
+    expect(calls).toEqual([
+      expect.objectContaining({ p_provider: "jev", p_outcome: "attempt_failed:timeout", p_input_tokens: null }),
+      expect.objectContaining({ p_provider: "jev", p_outcome: "attempt_failed:server_error", p_input_tokens: null }),
+      expect.objectContaining({ p_provider: "jev", p_outcome: "decided", p_input_tokens: 1200, p_output_tokens: 300 }),
+    ]);
+  });
+  it("Jev never called (no attempt made): no Jev row; every attempt of a failed call is counted", async () => {
+    const none = rpcDb();
+    await recordV2ModelSpend(none.db, ctx, { kind: "failed", reason: "jev_failed", jevAttempts: [] }, () => {});
+    expect(none.calls).toEqual([]);
+    const failed = rpcDb();
+    await recordV2ModelSpend(failed.db, ctx, { kind: "failed", reason: "jev_failed", jevAttempts: ["timeout", "timeout", "timeout"] }, () => {});
+    expect(failed.calls.map((c) => c.p_outcome)).toEqual(["attempt_failed:timeout", "attempt_failed:timeout", "attempt_failed:timeout"]);
   });
 });
 
