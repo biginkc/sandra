@@ -9257,19 +9257,57 @@ export async function sweepUnstampedV2Inbounds(
     ]);
     let result: "handled" | "not_v2" | "held";
     if ((claim ?? []).length > 0 || (decision ?? []).length > 0) result = "handled";
-    else if (!(await routingV2LiveFor(supabase, m.org_id, m.property_id))) result = "not_v2";
     else {
-      await markPropertyNeedsAttention(supabase, m.property_id, "nine_needs_person");
-      await recordRoutingV2Audit(supabase, {
-        orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
-        note: "webhook_lease_expired_unstamped",
-      }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
-      held++;
-      result = "held";
+      // Review B2: an unreadable flag / config / engine is NOT "not v2". The text is left
+      // unmarked for the next pass (a flaky database must never let a dead v2 text escape).
+      const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);
+      if (live === "error") {
+        reportError(new Error("routing v2 sweep: v2-live state unreadable; left for the next pass"), {
+          tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id },
+        });
+        continue;
+      }
+      if (live === "no") result = "not_v2";
+      else {
+        // Not marked "held" unless the hold is really there (markPropertyNeedsAttention proves it).
+        if (!(await markPropertyNeedsAttention(supabase, m.property_id, "nine_needs_person"))) continue;
+        await recordRoutingV2Audit(supabase, {
+          orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
+          note: "webhook_lease_expired_unstamped",
+        }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
+        held++;
+        result = "held";
+      }
     }
     await markSwept(supabase, m, result, nowMs);
   }
   return held;
+}
+
+/**
+ * Is this lead on the routing v2 live path, for the sweep? Unlike routingV2LiveFor (which treats
+ * any read failure as "no"), every read is error-checked: an unreadable flag row, config or
+ * engine is "error", so the caller retries instead of deciding (review B2).
+ */
+export async function routingV2LiveForSweep(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<"yes" | "no" | "error"> {
+  try {
+    const flags = await readRoutingV2FlagsResult(supabase, orgId);
+    if (!flags.ok) return "error";
+    if (!flags.flags.questions_live || !isV2Eligible(flags.flags, propertyId)) return "no";
+    const { data: config, error } = await supabase.from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode").eq("org_id", orgId).eq("active", true).maybeSingle();
+    if (error) return "error";
+    if (config?.classifier_provider !== "jev" || config.classifier_mode !== "automatic") return "no";
+    const engine = await readClassifierEngine(supabase, orgId);
+    if (engine === "unreadable") return "error";
+    return engine === "nine_questions" ? "yes" : "no";
+  } catch {
+    return "error";
+  }
 }
 
 /** Mark a text as examined by the sweep; only while it still has no responder stamp. */
