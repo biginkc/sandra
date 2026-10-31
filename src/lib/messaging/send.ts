@@ -1,6 +1,7 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
+import { assertSendAllowed } from "./send-allowlist";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -533,6 +534,11 @@ export type SendSmsInput = {
   /** Tenant-scoped replay key for a manual rep SMS submission. */
   idempotencyKey?: string | null;
   /**
+   * §5.4: the work item's test tag (e.g. a routing v2 outbox row's test_run_id). The lead's
+   * own properties.test_run_id is always read at the provider boundary too.
+   */
+  testRunId?: string | null;
+  /**
    * Service-owned rep SMS reservation. When present, this ledger is the
    * replay authority and messages.idempotency_key is intentionally ignored.
    */
@@ -1058,6 +1064,24 @@ async function sendSmsToContactInner(
       propertyId: input.propertyId, body: input.body,
       enrollmentId: input.sequenceContext?.enrollmentId,
     });
+    // §5.4 final send boundary: a test-tagged lead / work item may reach only an owned
+    // (TEST_DEST_ALLOWLIST) number. No test tag = unchanged. Refused = never reaches the provider.
+    if (!(await assertSendAllowed(supabase, {
+      orgId: propertyResult.data.org_id,
+      propertyId: input.propertyId,
+      destination: destination.phone,
+      origin: input.origin,
+      testRunId: input.testRunId ?? null,
+      messageId: pending.id,
+    }))) {
+      const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
+      if (input.repSmsReceipt) {
+        await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+          providerError: "refused_non_owned",
+        });
+      }
+      return { status: "blocked_before_provider", messageId: pending.id, retired };
+    }
     if (input.beforeProviderSubmit) {
       let proceed = false;
       try {
@@ -2090,6 +2114,22 @@ async function releaseQueuedMessageInner(
     await assertCanarySendBinding(supabase, {
       propertyId: msg.property_id, body: claimed.body,
     });
+    // §5.4 final send boundary (queued release path): same allowlist rule as an immediate send.
+    if (msg.property_id && !(await assertSendAllowed(supabase, {
+      orgId: msg.org_id ?? null,
+      propertyId: msg.property_id,
+      destination: msg.to_address ?? "",
+      origin: "queued_release",
+      messageId: msg.id,
+    }))) {
+      const { error: refuseError } = await supabase
+        .from("messages")
+        .update({ status: "failed", failed_at: new Date().toISOString(), error_message: "refused_non_owned" })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (refuseError) return { status: "db_error", error: refuseError.message };
+      return { status: "blocked_before_provider", messageId: msg.id, retired: true };
+    }
     const result = await provider.sendSms({
       to: msg.to_address,
       body: claimed.body,

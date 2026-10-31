@@ -4564,6 +4564,8 @@ type ResponderSendArgs = {
   routingV2OutboxId?: string;
   /** Routing v2 phone action (PR-G): its durable send id, used as the provider idempotency key. */
   providerIdempotencyKey?: string;
+  /** §5.4: the work item's test tag (routing v2 outbox row), checked at the provider boundary. */
+  testRunId?: string | null;
   /** Routing v2 phone action (PR-G): final flags/canary/suppression check right before the provider. */
   routingV2SendAllowed?: () => Promise<boolean>;
   input: AiDispatchInput;
@@ -6509,6 +6511,7 @@ async function deliverResponderMessage(
     ...(args.routingV2OutboxId || args.providerIdempotencyKey
       ? { idempotencyKey: args.providerIdempotencyKey ?? args.routingV2OutboxId }
       : {}),
+    ...(args.testRunId ? { testRunId: args.testRunId } : {}),
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     // Fired inside the send, right after the provider accepts and before its
     // receipt persistence / reconciliation.
@@ -8818,6 +8821,8 @@ export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
 type RoutingV2OutboxRow = {
   id: string; org_id: string; property_id: string; inbound_message_id: string;
   kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
+  /** §5.4 taint inherited from the lead at insert (20261030370000). */
+  test_run_id?: string | null;
 };
 type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
 
@@ -8904,6 +8909,7 @@ async function deliverRoutingV2OutboxIntent(
         async send() {
           const sent = await sendResponderMessage(supabase, {
             routingV2OutboxId: row.id,
+            ...(row.test_run_id ? { testRunId: row.test_run_id } : {}),
             input,
             body: reply.body,
             model: config.model,

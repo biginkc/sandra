@@ -243,4 +243,63 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(sentTo(lead.phone)).toHaveLength(0);
     }
   });
+
+  describe("§5.4 final send boundary (test-run taint)", () => {
+    const tagLead = (propertyId: string) => pg.query("update properties set test_run_id = 'stress-run-1' where id = $1", [propertyId]);
+    afterAll(() => { delete process.env.TEST_DEST_ALLOWLIST; });
+
+    it("a test-tagged lead to a non-owned number: refused at the boundary, zero provider calls, recorded", async () => {
+      const lead = await seedLead();
+      await tagLead(lead.propertyId);
+      process.env.TEST_DEST_ALLOWLIST = "+18165550142";
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      expect(sentTo(lead.phone)).toHaveLength(0);
+      const { rows: [box] } = await pg.query("select test_run_id, status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.test_run_id).toBe("stress-run-1"); // taint reached the outbox row
+      expect(box.status).not.toBe("sent");
+      const { rows: [refusal] } = await pg.query("select reason, destination_last4 from test_send_refusals where property_id = $1", [lead.propertyId]);
+      expect(refusal).toEqual({ reason: "refused_non_owned", destination_last4: lead.phone.slice(-4) });
+    });
+
+    it("the outbox row's own tag lost by a bug: the lead's tag still refuses it", async () => {
+      const lead = await seedLead();
+      process.env.TEST_DEST_ALLOWLIST = "+18165550142";
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      // Hold delivery back until the tag is in place: no detached delivery before it.
+      await tagLead(lead.propertyId);
+      await pg.query("alter table routing_v2_outbox disable trigger trg_routing_v2_outbox_inherit_test_run");
+      try {
+        await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      } finally {
+        await pg.query("alter table routing_v2_outbox enable trigger trg_routing_v2_outbox_inherit_test_run");
+      }
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      const { rows: [box] } = await pg.query("select test_run_id from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead.propertyId]);
+      expect(box.test_run_id).toBeNull();
+      expect(sentTo(lead.phone)).toHaveLength(0);
+    });
+
+    it("a test-tagged lead on an allowlisted (owned) number in any format: sent once", async () => {
+      const lead = await seedLead();
+      await tagLead(lead.propertyId);
+      const d = lead.phone.replace(/\D/g, "").slice(-10);
+      process.env.TEST_DEST_ALLOWLIST = `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+      await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });
+      const input = await inbound(lead, "text only");
+      jevProbabilities = { text_only: 0.95 };
+      await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+      await settle();
+      await runRoutingV2OutboxReplies(supabase, { limit: 5 });
+      expect(sentTo(lead.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
+      expect(await count("select count(*)::int n from test_send_refusals where property_id = $1", [lead.propertyId])).toBe(0);
+    });
+  });
 });
