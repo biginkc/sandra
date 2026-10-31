@@ -163,6 +163,10 @@ export class ProviderStubs {
         } else if (q.type === "choice") {
           const best = Object.entries(ptype).sort((a, b) => b[1] - a[1])[0]![0];
           answers[id] = { type: "choice", choice: best, confidence: ptype[best], probabilities: ptype };
+        } else if (["needs_repairs", "flexible_price", "original_portion", "no_repairs"].includes(id)) {
+          // A-8 metric: half of after-repairs requests say "needs repairs" (deterministic by reply text).
+          let h = 0; for (const ch of reply) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+          answers[id] = { choice: "noul", noul: id === "needs_repairs" && h % 2 === 0 ? 0.8 : 0.02 };
         } else answers[id] = { choice: "noul", noul: rec?.[id] ?? 0.02 };
       }
       this.calls.push({ provider, at: t0, status: 200, key: reply, ms: Date.now() - t0 });

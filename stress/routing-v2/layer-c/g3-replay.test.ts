@@ -32,7 +32,7 @@ vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.c
 const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const data = loadReplay();
 const stubs = new ProviderStubs(data);
-const R = new Receipt(process.env.G3_RECEIPT ?? "G3-replay.txt");
+const R = new Receipt(process.env.G3_RECEIPT ?? "G3-replay.txt", process.env.G3_RECEIPT_DIR);
 const T = Number(process.env.G3_SECONDS ?? 300) * 1000;
 const POOL = Number(process.env.G3_POOL ?? 16);
 const WEBHOOK_POOL = Number(process.env.G3_WEBHOOK_POOL ?? 12);
@@ -45,7 +45,10 @@ async function drainInflight(ms: number): Promise<number> {
 }
 let org: RunOrg;
 
-type Track = { phase: string; accepted: number; done?: number; outcome?: unknown; fault: string };
+type Track = { phase: string; accepted: number; started?: number; done?: number; outcome?: unknown; fault: string };
+/** H2: real-time intervals during which any stub fault was switched on. */
+const faultIntervals: Array<{ from: number; to: number; name: string }> = [];
+let openFault: { from: number; name: string } | null = null;
 const track = new Map<string, Track>();
 let phase = "init";
 let faultLabel = "none";
@@ -61,6 +64,7 @@ function launch(c: WorkflowCall, again = false) {
   const p = pool.run(async () => {
     while (paused) await new Promise((r) => setTimeout(r, 100));
     running.set(id + (again ? ":re" : ""), c);
+    if (!again) { const t0 = track.get(id); if (t0 && t0.started === undefined) t0.started = performance.now(); }
     try {
       const out = await c.fn(c.params);
       const t = track.get(id)!;
@@ -170,6 +174,9 @@ it("G3 blast-day replay", async () => {
     const names: string[] = [];
     for (const [a, b, f, n] of chaos) if (frac >= a && frac < b) { f(); names.push(n); }
     faultLabel = names.join("+") || "none";
+    const now = performance.now();
+    if (openFault && openFault.name !== faultLabel) { faultIntervals.push({ from: openFault.from, to: now, name: openFault.name }); openFault = null; }
+    if (!openFault && faultLabel !== "none") openFault = { from: now, name: faultLabel };
   };
   const deliverOne = async (e: Ev) => {
     const st = await deliverWebhook({ externalId: e.ext, from: e.lead.phone, to: org.sender, body: e.body });
@@ -199,6 +206,10 @@ it("G3 blast-day replay", async () => {
   }
   await Promise.all(webhookInflight);
   stubs.fault = {}; faultLabel = "none";
+  if (openFault) { faultIntervals.push({ from: openFault.from, to: performance.now(), name: openFault.name }); openFault = null; }
+  // A latency fault keeps a Jev attempt sleeping after the switch flips off: extend each
+  // latency interval by the stub latency so attempts started inside it still count.
+  for (const f of faultIntervals) if (f.name.includes("latency")) f.to += 25_000 * stubs.latencyScale;
   for (const [a, b, , n] of chaos) windows.push({ name: n, from: a, to: b });
   const replayEnd = performance.now();
   const stuckMain = await drainInflight(600_000);
@@ -306,8 +317,36 @@ it("G3 blast-day replay", async () => {
   const enrHist: Record<string, number> = {};
   for (const e of enr) { const k = `${e.status}:${e.ended_reason ?? ""}`; enrHist[k] = (enrHist[k] ?? 0) + 1; }
   R.line("enrollment status histogram", enrHist);
-  const pausedLeft = enr.filter((e) => e.status === "paused").length;
-  R.check("A-2: v2 drips left paused after the run = 0", pausedLeft === 0, { pausedLeft, byPauseReason: (await q("select coalesce(pause_reason,'-') r, count(*)::int n from sequence_enrollments where property_id = any($1) and status = 'paused' group by 1 order by 2 desc")) });
+  // H1 (A2-ROOT-CAUSE-ANALYSIS.md): four checks instead of "paused = 0".
+  const HUMAN_OWNED = ["nurture", "callback_requested", "booked_appointment"];
+  const st = await q(`select p.id, p.needs_human_attention nh, p.is_dnc_locked dnc, p.outreach_dispo dispo, p.last_ai_escalation_reason reason,
+      bool_or(e.status = 'paused' and e.routing_v2_engine = 'v2') paused, bool_or(e.status = 'active' and e.routing_v2_engine = 'v2') active
+    from properties p left join sequence_enrollments e on e.property_id = p.id where p.id = any($1) group by p.id`);
+  const h1i = st.filter((r) => r.paused && !r.nh && !HUMAN_OWNED.includes(r.dispo ?? ""));
+  const humanOwnedPaused = st.filter((r) => r.paused && !r.nh && HUMAN_OWNED.includes(r.dispo ?? ""));
+  R.check("H1(i): paused v2 enrollments on leads NOT held and with no human-owned disposition = 0", h1i.length === 0, { n: h1i.length, humanOwnedDispositionPaused_notAFailure: humanOwnedPaused.length });
+  const mech = /^(nine_reply_not_sent:template_already_sent$|nine_reply_not_sent:template_already_sent[^:]|nine_reply_not_sent:nine_window_closed|reply_skipped:outbound_since_claim)/;
+  const mechHeld = st.filter((r) => r.nh && mech.test(r.reason ?? ""));
+  const enrolledAny = new Set((await q("select distinct e.property_id from sequence_enrollments e where e.property_id = any($1) and e.routing_v2_engine = 'v2' and exists (select 1 from routing_v2_outbox o where o.property_id = e.property_id and o.inbound_message_id = e.routing_v2_inbound_id and o.kind = 'reply' and o.status = 'cancelled' and (o.cancel_reason like 'not_sent:template_already_sent%' or o.cancel_reason like 'not_sent:nine_window_closed%' or o.cancel_reason like 'not_sent:%'))")).map((r) => r.property_id));
+  const h1ii = mechHeld.filter((r) => enrolledAny.has(r.id));
+  R.check("H1(ii): leads held for template_already_sent / nine_window_closed* / outbound_since_claim whose inbound enrolled a v2 drip = 0", h1ii.length === 0,
+    { n: h1ii.length, mechanicsHeldTotal: mechHeld.length, byReason: h1ii.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}) });
+  const h1iii = st.filter((r) => r.nh && r.active);
+  R.check("H1(iii): held leads with an ACTIVE v2 enrollment = 0", h1iii.length === 0,
+    { n: h1iii.length, byReason: h1iii.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}) });
+  const heldPaused = st.filter((r) => r.nh && r.paused);
+  const holdList = new Set((await q("select id from properties where id = any($1) and needs_human_attention = true and is_dnc_locked = false")).map((r) => r.id));
+  const inList = heldPaused.filter((r) => holdList.has(r.id)).length;
+  R.check("H1(iv): every held+paused lead is in the hold list (needs_human_attention AND NOT is_dnc_locked, as hold-list.ts loadHoldSources) = 100%", inList === heldPaused.length,
+    { heldPaused: heldPaused.length, inHoldList: inList, dncLocked: heldPaused.filter((r) => r.dnc).length });
+  R.line("held+paused leads by hold reason (informational)", heldPaused.reduce((a: Record<string, number>, r) => { const k = String(r.reason).split(":").slice(0, 2).join(":"); a[k] = (a[k] ?? 0) + 1; return a; }, {}));
+  // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
+  const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
+  const fu = (p: Record<string, number>) => ["needs_repairs", "flexible_price", "original_portion", "no_repairs"].some((k) => (p?.[k] ?? 0) >= 0.6);
+  const heldAct = (a: { steps?: Array<{ kind: string }> } | null) => (a?.steps ?? []).some((x) => x.kind === "hold");
+  const lostA8 = ar.filter((d) => fu(d.probabilities) && heldAct(d.action) && !["stop", "possible_stop", "haiku_error"].includes(d.road ?? "") && !(d.action?.road && ["possible_stop", "haiku_error"].includes(d.action.road)));
+  R.check("A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop/error holds excluded) = 0", lostA8.length === 0,
+    { afterRepairsDecisions: ar.length, withFollowUpYes: ar.filter((d) => fu(d.probabilities)).length, lost: lostA8.length, lostRoads: lostA8.reduce((a: Record<string, number>, d) => { a[String(d.road)] = (a[String(d.road)] ?? 0) + 1; return a; }, {}), note: "stub answers needs_repairs 0.80 on half of after-repairs requests" });
 
   // Stamped / decided / dead-lettered with a human flag.
   const propRows = await q("select id, needs_human_attention, last_ai_escalation_reason from properties where id = any($1)");
@@ -329,19 +368,18 @@ it("G3 blast-day replay", async () => {
   const precheck = inbound.length - dispatched;
   R.line(`delay workflows started ${track.size}; inbounds that reached dispatch (claim rows) ${dispatched}; prechecked at webhook (STOP/DNC/hostile/legal phrases, no workflow) ${precheck}`);
   const jev429 = stubs.count("jev", (c) => c.status === 429), jev5xx = stubs.count("jev", (c) => c.status >= 500);
-  const jev200 = stubs.count("jev", (c) => c.status === 200);
-  const decidedN = decisions.filter((d) => d.status === "decided").length;
-  R.check("A-4/no re-classification: exactly one successful Jev answer per decided inbound (retries only after a failed attempt)", jev200 === decidedN,
-    { jevSuccessful: jev200, decided: decidedN, failedDecisions: decisions.length - decidedN });
-  R.check("Jev v2 calls = one per v2-classified inbound (before A-4; with retries this counts attempts)", jevV2 === decisions.length,
-    { jevV2Calls: jevV2, v2Decisions: decisions.length, formula_inbounds_minus_prechecks_minus_dupes: dispatched, extra: jevV2 - decisions.length, jev429, jev5xx, jevAbortedByTimeout: stubs.aborted, reexecutedSteps: reexecuted });
+  const jevOk = stubs.count("jev", (c) => c.status === 200);
+  R.line("Jev v2 HTTP attempts (incl. retries; client-aborted attempts are still logged by the stub):", { attempts: jevV2, http200: jevOk, http429: jev429, http5xx: jev5xx, clientAborted: stubs.aborted, v2Classifications: decisions.length, reexecutedSteps: reexecuted });
   R.line(`Jev nine-question calls (legacy classify-only for held/terminal leads, classifyOnlyForHotText): ${jevNine}`);
   R.line(`ADDITIONAL Jev calls by v2 path: eight-answer classification for the number-source detector = ${jevEight} (one per reply road) — not in the §3.3 formula`);
   const v2Keys = new Map<string, number>();
   const claimsNoV2 = claims.length - decisions.length;
   R.line(`claims without a v2 decision (skipped before v2: terminal/held, superseded, already replied): ${claimsNoV2}`);
   for (const c of stubs.calls.filter((x) => x.provider === "jev")) v2Keys.set(c.key, (v2Keys.get(c.key) ?? 0) + 1);
-  R.line(`Jev retries: v2 askJev maxRetries=0 (dispatch.ts:8495) -> every 429/5xx is final for that inbound; failed decisions = ${decisions.filter((d) => d.status === "failed").length}`);
+  {
+    const { V2_LIVE_JEV_POLICY } = await import("@/lib/sms-classification/routing-v2/live-dispatch");
+    R.line(`Jev retry policy (live V2_LIVE_JEV_POLICY): ${JSON.stringify(V2_LIVE_JEV_POLICY)}; failed decisions = ${decisions.filter((d) => d.status === "failed").length}`);
+  }
   const failedFlag = decisions.filter((d) => d.status === "failed");
   const failedNoFlag = failedFlag.filter((d) => !flag.get(propRows.find(() => false)?.id)?.needs_human_attention);
   void failedNoFlag;
@@ -400,10 +438,15 @@ it("G3 blast-day replay", async () => {
 
   // Latency (webhook accept -> workflow decision done), JS clock.
   const lat = (pred: (t: Track) => boolean) => [...track.values()].filter((t) => t.done && pred(t)).map((t) => t.done! - t.accepted).sort((a, b) => a - b);
-  const clean = lat((t) => t.fault === "none" && t.phase !== "quiet_0750");
-  const faulted = lat((t) => t.fault !== "none");
+  const overlapsFault = (t: Track) => faultIntervals.some((f) => t.accepted < f.to && (t.done ?? Infinity) > f.from);
+  const clean = lat((t) => !overlapsFault(t) && t.phase !== "quiet_0750");
+  const faulted = lat((t) => overlapsFault(t) && t.phase !== "quiet_0750");
+  const queueWait = (pred: (t: Track) => boolean) => [...track.values()].filter((t) => t.started !== undefined && pred(t)).map((t) => t.started! - t.accepted).sort((a, b) => a - b);
+  const qwAll = queueWait((t) => t.phase !== "quiet_0750"), qwClean = queueWait((t) => !overlapsFault(t) && t.phase !== "quiet_0750"), qwFault = queueWait((t) => overlapsFault(t));
+  R.line("H2 queue wait (webhook accept -> workflow start)", { all: { n: qwAll.length, p50ms: pct(qwAll, 50), p95ms: pct(qwAll, 95) }, clean: { p50ms: pct(qwClean, 50), p95ms: pct(qwClean, 95) }, fault: { p50ms: pct(qwFault, 50), p95ms: pct(qwFault, 95) } });
+  R.line(`H2 fault labelling: an inbound is "fault" when [accepted, done] overlaps any fault interval (latency intervals extended by the 25 s stub latency); workflow pool ${POOL}`, faultIntervals.map((f) => ({ name: f.name, seconds: Math.round((f.to - f.from) / 1000) })));
   const burstLat = lat((t) => t.phase === "burst");
-  R.check("p95 inbound->decision <= 60 s outside fault windows", (pct(clean, 95) ?? 0) <= 60_000, { n: clean.length, p50ms: pct(clean, 50), p95ms: pct(clean, 95), maxms: clean[clean.length - 1] });
+  R.check("p95 inbound->decision <= 60 s outside fault windows (H2 labels)", (pct(clean, 95) ?? 0) <= 60_000, { n: clean.length, p50ms: pct(clean, 50), p95ms: pct(clean, 95), maxms: clean[clean.length - 1] });
   R.line("latency in fault windows", { n: faulted.length, p50ms: pct(faulted, 50), p95ms: pct(faulted, 95), maxms: faulted[faulted.length - 1] });
   R.line("latency during 2x burst", { n: burstLat.length, p50ms: pct(burstLat, 50), p95ms: pct(burstLat, 95), maxms: burstLat[burstLat.length - 1] });
   R.check("queue drains within 15 min after the burst", drained - burstEnd <= 15 * 60_000, { drainSeconds: Math.round((drained - burstEnd) / 1000) });

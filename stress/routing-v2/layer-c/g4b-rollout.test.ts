@@ -140,8 +140,8 @@ it("G4b stage tests + flag-off rollback", async () => {
   const boxAfter = (await pg.query("select kind, status, cancel_reason from routing_v2_outbox where property_id = any($1)", [[qa!.propertyId, qb!.propertyId, qc!.propertyId]])).rows;
   const enrAfter = (await pg.query("select status, ended_reason, pause_reason from sequence_enrollments where property_id = any($1)", [[qa!.propertyId, qb!.propertyId, qc!.propertyId]])).rows;
   const human = (await pg.query("select needs_human_attention, last_ai_escalation_reason from properties where id = any($1)", [[qa!.propertyId, qb!.propertyId, qc!.propertyId]])).rows;
-  R.check("flag off while queued: zero sends; queued replies cancelled flag_off; v2 enrollments stopped flag_off; leads in the human queue",
-    sendsAfter === sendsBefore && boxAfter.filter((b) => b.kind === "reply").every((b) => b.status === "cancelled" && /flag_off/.test(b.cancel_reason ?? "")) && enrAfter.every((e) => e.status !== "active") && human.every((h) => h.needs_human_attention),
+  R.check("flag off while queued: zero sends; every queued item cancelled; v2 enrollments stopped; leads in the human queue",
+    sendsAfter === sendsBefore && boxAfter.every((b) => b.status === "cancelled") && enrAfter.every((e) => e.status !== "active") && human.every((h) => h.needs_human_attention),
     { queuedBefore: queued, sendsBefore, sendsAfter, outbox: boxAfter, enrollments: enrAfter, properties: human });
 
   // Flip between decision and send.

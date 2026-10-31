@@ -39,11 +39,11 @@ export function assertStack(): void {
 export class Receipt {
   readonly file: string;
   readonly file2: string;
-  constructor(name: string) {
-    mkdirSync(RECEIPTS, { recursive: true });
-    mkdirSync(RECEIPTS2, { recursive: true });
-    this.file = path.join(RECEIPTS, name);
-    this.file2 = path.join(RECEIPTS2, name);
+  constructor(name: string, dir?: string) {
+    const d = dir || RECEIPTS;
+    mkdirSync(d, { recursive: true });
+    this.file = path.join(d, name);
+    this.file2 = this.file;
     writeFileSync(this.file, `${headSha()}\n`);
 
     this.line(`# ${name} — routing v2 stress Layer C — ${new Date().toISOString()} — stack api :${STACK_API_PORT} db :${STACK_DB_PORT}`);
