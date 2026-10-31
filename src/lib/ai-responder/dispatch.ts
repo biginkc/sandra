@@ -9257,7 +9257,14 @@ async function deliverRoutingV2OutboxIntent(
       const expired = expiredError
         ? (/PGRST202|42883|does not exist|Could not find/i.test(expiredError.message) ? now() - Date.parse(row.created_at) > ROUTING_V2_REPLY_MAX_AGE_MS : null)
         : expiredData === true;
-      if (expired === null) return { kind: "wait", reason: V2_OUTBOX_EXPIRY_UNREADABLE };
+      if (expired === null) {
+        // Review N-2: a persistent error would stall replies quietly; report it (the drip stays
+        // blocked by reply_pending meanwhile, so this fails safe).
+        reportError(new Error(expiredError?.message ?? "routing_v2_outbox_expired unreadable"), {
+          tags: { surface: "routing_v2_outbox_expiry" }, extra: { outboxId: row.id },
+        });
+        return { kind: "wait", reason: V2_OUTBOX_EXPIRY_UNREADABLE };
+      }
       if (expired) return { kind: "refused", reason: V2_OUTBOX_REASON.expired };
       const key = row.payload.key;
       if (typeof key !== "string") return { kind: "refused", reason: V2_OUTBOX_REASON.malformedIntent };
@@ -9527,7 +9534,13 @@ export async function sweepUnstampedV2Inbounds(
       // A dead newest text is a person case about the seller's text (safety): always written.
       // Not marked "held" unless the hold is really there.
       const hold = await writeV2Hold(supabase, m.property_id, m.id, "nine_needs_person", "safety");
-      if (hold === "error" || hold === "missing") continue;
+      if (hold === "error") {
+        // Review N-1: the hold could not be written: fail closed now (the v2 drips paused); the
+        // text stays unmarked, so the next pass re-attempts the hold.
+        await pauseV2DripsFailClosed(supabase, m.property_id);
+        continue;
+      }
+      if (hold === "missing") continue;
       await recordRoutingV2Audit(supabase, {
         orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
         note: `webhook_lease_expired_${m.why}`,
@@ -9543,8 +9556,8 @@ export async function sweepUnstampedV2Inbounds(
 }
 
 /**
- * Is this lead on the routing v2 live path, for the sweep? Unlike routingV2LiveFor (which treats
- * any read failure as "no"), every read is error-checked: an unreadable flag row, config or
+ * Is this lead on the routing v2 live path? (The early gate's single strict read and the sweep.)
+ * Every read is error-checked: an unreadable flag row, config or
  * engine is "error", so the caller retries instead of deciding (review B2).
  */
 export async function routingV2LiveForSweep(

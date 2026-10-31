@@ -862,7 +862,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await box(id)).toMatchObject({ status: "cancelled", cancel_reason: "not_sent:nine_window_unknown_state" });
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_reply_not_sent:nine_window_unknown_state" });
       // The drip never reschedules +10h forever: the tick pauses it for a person.
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
       // Paused for the person: by the held-lead send check (410000, the lead is already held) or
@@ -936,7 +936,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await count("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply' and status = 'sent'", [lead.propertyId])).toBe(0);
       expect(sentTo(lead.phone)).toHaveLength(0);
       // Every enrollment made due, then the tick: no drip step goes out.
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
       await deliver();
@@ -983,7 +983,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
 
     // ---- 410000 (review of 30d35369b, BLOCKING): the hold is checked at drip SEND time ----
     async function tickDue(lead: Awaited<ReturnType<typeof seedLead>>) {
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
     }
@@ -1062,7 +1062,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       const sentBefore = sentTo(lead.phone).length;
       await pg.query("update properties set state = '' where id = $1", [lead.propertyId]);
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
       expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "paused", r: "timezone_unconfirmed" }]);
@@ -1227,7 +1227,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
 
     forced("M2(i): reply vs tick, the tick passes its send check first: <=1 old step, then retired; new road active, no hold", async (lead) => {
       await say(lead, A_TEXT); await runWorkflows(); await deliver();
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const before = sentTo(lead.phone).length;
       const t = gate("tick:after_send_check", (c) => c.propertyId === lead.propertyId);
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
@@ -1245,7 +1245,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     forced("M2(ii): reply vs tick, the transition goes first: 0 old steps; new road active, no hold", async (lead) => {
       await say(lead, A_TEXT); await runWorkflows(); await deliver();
       const b = await say(lead, B_TEXT); await runWorkflows();
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active' and routing_v2_inbound_id is distinct from '" + b + "'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active' and routing_v2_inbound_id is distinct from '" + b + "'; commit;");
       const before = sentTo(lead.phone).length;
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
@@ -1267,7 +1267,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     forced("M4: the new drip's step comes due before its reply is sent: the send check says reply_pending, the drip stays active, 0 drip sends; the reply goes; the next tick sends step 1", async (lead) => {
       recipientWindow.open = false;
       const b = await say(lead, B_TEXT); await runWorkflows();
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       const { runSequenceTick } = await import("@/app/api/cron/sequence-tick/handlers");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
       expect(await enrollments(lead.propertyId)).toEqual([{ k: "not_interested", status: "active", r: null }]);
@@ -1275,7 +1275,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       recipientWindow.open = true;
       await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
       expect(sentTo(lead.phone).map((m) => m.body)).toEqual([v2ReplyText("not_interested")]);
-      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
+      await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = least(now(), '" + new Date().toISOString() + "'::timestamptz) - interval '1 minute' where property_id = '" + lead.propertyId + "' and status = 'active'; commit;");
       await runSequenceTick(supabase as never, { budgetMs: 20_000 });
       expect(sentTo(lead.phone).map((m) => m.body).slice(1)).toEqual([expect.stringMatching(/^not_interested (one|two)\b/)]);
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
@@ -1332,7 +1332,9 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       ["(c) claim lease expired", { processing: { aiResponder: { outcome: "delayed", workflowRunId: "dead-run", scheduledAt: "NOW" } } }, true],
     ] as const)("M8 %s: the older reply is cancelled with NO hold; the sweep then holds the dead newest text (nine_needs_person, safety), one audit row; the trigger pauses the drip; 0 sends", (_label, meta, claim) => forcedRun(async (lead) => {
       const a = await aRoutedReplyQueued(lead);
-      const resolved = JSON.parse(JSON.stringify(meta).replace('"OLD"', JSON.stringify(new Date(Date.now() - 3600_000).toISOString())).replace('"NOW"', JSON.stringify(new Date().toISOString())));
+      // DB clock for the stored times (the sweep ages them on the DB clock, whatever the app's is).
+      const { rows: [dbt] } = await pg.query("select (now() - interval '1 hour') as old, now() as cur");
+      const resolved = JSON.parse(JSON.stringify(meta).replace('"OLD"', JSON.stringify(new Date(dbt.old).toISOString())).replace('"NOW"', JSON.stringify(new Date(dbt.cur).toISOString())));
       const dead = await newerText(lead, resolved);
       await pg.query("update messages set created_at = now() - interval '30 minutes' where id = $1", [a]);
       await pg.query("update messages set created_at = now() - interval '6 minutes' where id = $1", [dead]);
@@ -1478,7 +1480,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await tickDue(lead);
       // Held at the early gate (rule 0: the hold no longer yields) or, if it raced past it, at the transition.
       const stamp = await stampOf(c);
-      expect(stamp.o === "skipped:rule_0" || stamp.r === "routing_v2:already_held").toBe(true);
+      // (or, with a rep text still the latest outbound, C is itself a rep takeover: also held, no reply)
+      expect(stamp.o === "skipped:rule_0" || stamp.r === "routing_v2:already_held" || (stamp.o === "escalated" && stamp.r === "rep_sms_human_takeover")).toBe(true);
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: reason });
       expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("safety");
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
@@ -1509,7 +1512,9 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await supabase.from("messages").insert({
         org_id: orgId, channel: "sms", direction: "outbound", status: "sent", property_id: lead.propertyId, contact_id: lead.contactId,
         conversation_id: a.conversation_id, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "rep text (test)",
-        sent_at: new Date(Date.now() - 1000).toISOString(),
+        // The rep text went out just before the seller's reply on every clock the webhook compares
+        // (the DB's, and the provider/app event time).
+        sent_at: new Date(Math.min(Date.now(), new Date((await pg.query("select now() as t")).rows[0].t).getTime()) - 1000).toISOString(),
         metadata: { repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: randomUUID(), senderAssignmentId: randomUUID() } },
       });
       const b = await say(lead, "ok call me tomorrow"); await runWorkflows();
@@ -1687,6 +1692,31 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
       }
     }), 3_600_000);
+
+    // Opus + Fable reviews of 531f2034f581 (B1): after the sweep handled a dead run and a person
+    // cleared the hold, the lead's next ordinary text routes exactly as on a clean lead.
+    forced("M24: worker dies after a stop decision, the sweep holds, a person clears the hold, then an ordinary text routes normally (1 reply, its drip active)", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await say(lead, "I think I'm all set");
+      const dead = gate("dispatch:after_decision", (c) => c.inboundMessageId === a);
+      const wa = takeWorkflow(a); void wa.fn(wa.params).catch(() => {});
+      await dead.reached;
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 hour' where inbound_message_id = $1", [a]);
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [a]);
+      await runRoutingV2OutboxReplies(supabase, { limit: 10 });          // the sweep holds and closes the dead claim
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "lease_dead_swept" });
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);   // a person clears it
+      haikuAnswer = null;
+      const c = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(await stampOf(c)).toMatchObject({ o: "auto_closed", r: "routing_v2:not_interested_drip" });
+      expect(sentTo(lead.phone).filter((m) => m.body === v2ReplyText("not_interested"))).toHaveLength(1);
+      expect((await enrollments(lead.propertyId)).filter((e) => e.status === "active")).toEqual([{ k: "not_interested", status: "active", r: null }]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    });
 
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
