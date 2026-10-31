@@ -7798,30 +7798,30 @@ export async function markPropertyNeedsAttention(
     return false;
   }
   if (!updated) {
-    // Nothing matched `needs_human_attention = false`: either a human was
-    // already told (the flag exists: success) or the property is gone / the
-    // write silently matched nothing. Prove which before claiming success.
-    const { data: current, error: readError } = (await supabase
-      .from("properties")
-      .select("needs_human_attention, hold_kind" as "needs_human_attention")
-      .eq("id", propertyId)
-      .maybeSingle()) as unknown as {
-      data: { needs_human_attention: boolean | null; hold_kind?: string | null } | null;
-      error: { message: string } | null;
-    };
-    const exists = !readError && current?.needs_human_attention === true;
-    if (!exists) {
-      reportError(new Error(readError?.message ?? "attention flag not persisted"), {
-        tags: { surface: "ai_responder_mark_attention" },
-        extra: { propertyId, reason },
-      });
-    } else if (current?.hold_kind === "mechanics") {
-      // Review B-1 (3288da8ef6b3): this hold (the seller's words, a person, a keyword / legal
-      // hold) lands on a lead already held only for our own unsent reply. It must not keep that
-      // label, or the next text would clear it: upgrade to safety through the one hold writer.
-      await upgradeMechanicsHold(supabase, propertyId, reason);
+    // Nothing matched `needs_human_attention = false`. Reviews of 3288da8ef6b3 / 251a3321672a
+    // (B-1, N-2, N-3): write this hold through the one hold writer, atomically, without reading
+    // first: it holds a lead that became unheld meanwhile, and upgrades a lead held only for our
+    // own unsent reply (mechanics) to safety so the next text cannot clear it.
+    const r = await writeSafetyHold(supabase, propertyId, null, reason);
+    if (r === "upgraded" || r === "already_held") return true;
+    if (r === "missing" || r === "error") return false;
+    if (r === "unavailable") {
+      // The function is not deployed yet: prove the flag exists (pre-420000 behaviour).
+      const { data: current, error: readError } = await supabase
+        .from("properties")
+        .select("needs_human_attention")
+        .eq("id", propertyId)
+        .maybeSingle();
+      const exists = !readError && current?.needs_human_attention === true;
+      if (!exists) {
+        reportError(new Error(readError?.message ?? "attention flag not persisted"), {
+          tags: { surface: "ai_responder_mark_attention" },
+          extra: { propertyId, reason },
+        });
+      }
+      return exists;
     }
-    return exists;
+    // r === "held": this call set the flag; reconcile below as for the plain write.
   }
   onSet?.(now);
   // Reconciliation of a SUCCESSFUL flag: the lead-event ledger entry is
@@ -9207,18 +9207,36 @@ async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: R
 }
 
 /**
- * Review B-1: a safety hold re-asserted on a lead held only for our own unsent reply turns the
- * mechanics label into safety (never the reverse), through routing_v2_write_hold. Best effort:
- * a failure is reported; the DB trigger upgrades any writer that sets the flag or reason too.
+ * A safety hold through routing_v2_write_hold (reviews B-1 / B-1'): holds an unheld lead, upgrades
+ * a mechanics hold to safety (never the reverse), leaves any other hold as it is. "unavailable" =
+ * the function is not deployed; "error" = any other failure (reported; callers retry / fail).
  */
-async function upgradeMechanicsHold(supabase: SupabaseClient<Database>, propertyId: string, reason: string) {
+export async function writeSafetyHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null,
+  reason: string,
+): Promise<"held" | "upgraded" | "already_held" | "missing" | "unavailable" | "error"> {
   const db = supabase as unknown as LooseRpc;
-  const { error } = await db.rpc("routing_v2_write_hold", {
-    p_property_id: propertyId, p_inbound_message_id: null, p_reason: reason, p_kind: "safety",
-  });
-  if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
-    reportError(new Error(error.message), { tags: { surface: "ai_responder_mark_attention_upgrade" }, extra: { propertyId, reason } });
+  let data: unknown;
+  let error: { message: string } | null;
+  try {
+    ({ data, error } = await db.rpc("routing_v2_write_hold", {
+      p_property_id: propertyId, p_inbound_message_id: inboundMessageId, p_reason: reason, p_kind: "safety",
+    }));
+  } catch {
+    // supabase-js returns errors rather than throwing; a client without rpc (older test
+    // doubles) is treated like a missing function: the caller proves the flag by reading it.
+    return "unavailable";
   }
+  if (error) {
+    if (/PGRST202|42883|does not exist|Could not find/i.test(error.message)) return "unavailable";
+    reportError(new Error(error.message), { tags: { surface: "ai_responder_safety_hold" }, extra: { propertyId, reason } });
+    return "error";
+  }
+  if (data === "held" || data === "upgraded" || data === "already_held") return data;
+  reportError(new Error(`safety hold not written: ${String(data)}`), { tags: { surface: "ai_responder_safety_hold" }, extra: { propertyId, reason } });
+  return "missing";
 }
 
 /**

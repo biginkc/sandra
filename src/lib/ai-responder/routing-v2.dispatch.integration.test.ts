@@ -1501,6 +1501,22 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await expectCStaysHeld(lead, reason);
     });
 
+    // Review B-1' (251a3321672a): a rep (Maria-through-Mel) texting a lead held only for our own
+    // unsent reply; the seller's answer is a rep takeover; the next seller text must not clear it.
+    forced("M16: mechanics hold (A's reply refused), then a rep SMS, then the seller (B, rep takeover), then C: C stays held, no reply, no drip", async (lead) => {
+      await mechanicsHoldOnA(lead);
+      const { rows: [a] } = await pg.query("select conversation_id from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [lead.propertyId]);
+      await supabase.from("messages").insert({
+        org_id: orgId, channel: "sms", direction: "outbound", status: "sent", property_id: lead.propertyId, contact_id: lead.contactId,
+        conversation_id: a.conversation_id, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "rep text (test)",
+        sent_at: new Date(Date.now() - 1000).toISOString(),
+        metadata: { repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: randomUUID(), senderAssignmentId: randomUUID() } },
+      });
+      await say(lead, "ok call me tomorrow"); await runWorkflows();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "rep_sms_human_takeover" });
+      await expectCStaysHeld(lead, "rep_sms_human_takeover");
+    });
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);

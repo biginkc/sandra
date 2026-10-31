@@ -62,7 +62,13 @@ function makeClient(input?: {
   messageError?: { message: string } | null;
   propertyUpdate?: QueryResponse;
   threadUpdate?: QueryResponse;
+  rpc?: QueryResponse;
 }) {
+  const rpcCalls: Array<[string, unknown]> = [];
+  const rpc = vi.fn(async (fn: string, args: unknown) => {
+    rpcCalls.push([fn, args]);
+    return input?.rpc ?? { data: "upgraded", error: null };
+  });
   const calls: Array<{
     table: string;
     operation: string;
@@ -148,8 +154,9 @@ function makeClient(input?: {
   });
 
   return {
-    client: { from } as unknown as SupabaseClient<Database>,
+    client: { from, rpc } as unknown as SupabaseClient<Database>,
     calls,
+    rpcCalls,
   };
 }
 
@@ -660,6 +667,61 @@ describe("Maria-through-Mel human SMS takeover", () => {
         sourceMessageStatus: "sent",
       }),
     });
+  });
+
+  it("on an already-held lead (0 rows) writes the person hold through routing_v2_write_hold as safety (review B-1')", async () => {
+    const { client, rpcCalls } = makeClient({ propertyUpdate: { data: null, error: null } });
+    await recordRepSmsHumanTakeover(client, { propertyId: "property-1", conversationId: "conversation-1", inboundMessageId: inboundId, source: {
+        outboundMessageId: outboundId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        actorUserId: "rep-1",
+        senderAssignmentId: "sender-1",
+        fromNumber: "+18163706846",
+        messageStatus: "sent",
+        sentAt: "2026-09-17T12:00:00.000Z",
+      } });
+    expect(rpcCalls).toEqual([["routing_v2_write_hold", { p_property_id: "property-1", p_inbound_message_id: inboundId, p_reason: REP_SMS_HUMAN_TAKEOVER_REASON, p_kind: "safety" }]]);
+  });
+
+  it("a fresh hold (1 row) needs no second write", async () => {
+    const { client, rpcCalls } = makeClient();
+    await recordRepSmsHumanTakeover(client, { propertyId: "property-1", conversationId: "conversation-1", inboundMessageId: inboundId, source: {
+        outboundMessageId: outboundId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        actorUserId: "rep-1",
+        senderAssignmentId: "sender-1",
+        fromNumber: "+18163706846",
+        messageStatus: "sent",
+        sentAt: "2026-09-17T12:00:00.000Z",
+      } });
+    expect(rpcCalls).toEqual([]);
+  });
+
+  it("a real error from the safety hold write throws for webhook retry; a missing function does not", async () => {
+    const failing = makeClient({ propertyUpdate: { data: null, error: null }, rpc: { data: null, error: { message: "deadlock detected" } } });
+    await expect(recordRepSmsHumanTakeover(failing.client, { propertyId: "property-1", conversationId: "conversation-1", inboundMessageId: inboundId, source: {
+        outboundMessageId: outboundId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        actorUserId: "rep-1",
+        senderAssignmentId: "sender-1",
+        fromNumber: "+18163706846",
+        messageStatus: "sent",
+        sentAt: "2026-09-17T12:00:00.000Z",
+      } })).rejects.toBeInstanceOf(RepSmsHumanTakeoverPersistenceError);
+    const missing = makeClient({ propertyUpdate: { data: null, error: null }, rpc: { data: null, error: { message: "Could not find the function public.routing_v2_write_hold" } } });
+    await expect(recordRepSmsHumanTakeover(missing.client, { propertyId: "property-1", conversationId: "conversation-1", inboundMessageId: inboundId, source: {
+        outboundMessageId: outboundId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        actorUserId: "rep-1",
+        senderAssignmentId: "sender-1",
+        fromNumber: "+18163706846",
+        messageStatus: "sent",
+        sentAt: "2026-09-17T12:00:00.000Z",
+      } })).resolves.toBeUndefined();
   });
 
   it("surfaces a primary persistence failure for webhook retry", async () => {

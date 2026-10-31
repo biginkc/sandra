@@ -44,8 +44,9 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
     const admin = createAdminClient();
     // DB clock, under the routing v2 property lock (stress §14), ONE property per call so no
     // transaction holds two routing locks (review N-6: no deadlock with the outbox reconcile).
-    // The app-clock stamp is only a fallback when the function does not exist yet (N-1); any
-    // other error fails closed: it is reported and the takeover pauses below still run.
+    // If the function is missing, or still fails after one retry (reported), the app-clock stamp
+    // is written instead (review N-1 of 251a3321672a): a late-stamped takeover still fires the
+    // v2 takeover fence (queued auto replies cancelled, drips paused); a missed one would not.
     const rpc = (admin as unknown as {
       rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message?: string } | null }>;
     }).rpc.bind(admin);
@@ -58,7 +59,6 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
             tags: { surface: "hot_lead_takeover_stamp" },
             extra: { propertyId },
           });
-          continue;
         }
       }
       if (rpcError) {
