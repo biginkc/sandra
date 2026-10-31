@@ -6,7 +6,10 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 import { assertStack, Receipt } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
+import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
+import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
+void offsetToChicago;
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
@@ -18,11 +21,14 @@ const stubs = new ProviderStubs(data);
 let org: RunOrg;
 const R = new Receipt("G4b-rollout.txt");
 const pending: Promise<unknown>[] = [];
+let CLOCK: { skewMs: number; local: Record<string, string> } = { skewMs: -1, local: {} };
 const ALL = { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, alert_on_time_only: true, wrong_number_all: true, model_stop_suppression: true, canary_percent: 100 };
 
 beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
-  setClockOffset(offsetToChicago(12, 0)); // business hours on the JS clock (the stack may be at night)
+  setClockOffset(0); // skew 0: real time only
+  CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4b-${Date.now()}`, {});
   await retirePriorRuns(pg);
@@ -121,13 +127,13 @@ it("G4b stage tests + flag-off rollback", async () => {
   // Flag-off while queued: a deferred (quiet-hours) reply, a due drip step, then questions_live off.
   await setFlags(pg, BMH, ALL);
   stubs.jevOverride = (r) => r.includes("QTEXT") ? { text_only: 0.95 } : r.includes("QYES") ? { open_to_selling: 0.95 } : null;
-  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: "CA", fips: null }) });
-  setClockOffset(offsetToChicago(7, 0)); // 05:00 in CA: recipient quiet hours -> replies wait in the outbox
+  const [qa, qb, qc] = await seedLeads(pg, org, 3, { state: () => ({ state: "HI", fips: null }) });
+  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-q1`, from: qa!.phone, to: org.sender, body: "QTEXT text only" });
   await deliverWebhook({ externalId: `${org.runId}-q2`, from: qb!.phone, to: org.sender, body: "QYES yes interested" });
   await settle();
   await runRoutingV2OutboxReplies(db, { limit: 50 });
-  setClockOffset(offsetToChicago(12, 0));
+  qc!.state = "MO"; await readdressToInHours(pg, qc!); // qc is the in-hours lead (was "12:00 Chicago")
   await deliverWebhook({ externalId: `${org.runId}-q3`, from: qc!.phone, to: org.sender, body: "QYES yes" });
   await settle();
   await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = any($1) and status = 'active'; commit;".replace("$1", `array['${qa!.propertyId}','${qb!.propertyId}','${qc!.propertyId}']::uuid[]`));
@@ -145,12 +151,12 @@ it("G4b stage tests + flag-off rollback", async () => {
     { queuedBefore: queued, sendsBefore, sendsAfter, outbox: boxAfter, enrollments: enrAfter, properties: human });
 
   // Flip between decision and send.
-  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: "CA", fips: null }) });
+  const [ra] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }) });
   await setFlags(pg, BMH, ALL);
-  setClockOffset(offsetToChicago(7, 0));
+  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-race`, from: ra!.phone, to: org.sender, body: "QTEXT only text" });
   await settle();
-  setClockOffset(offsetToChicago(12, 0));
+  await readdressToInHours(pg, ra!); // deliverable now without moving the clock
   const decided = (await pg.query("select status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [ra!.propertyId])).rows[0]?.status;
   await setFlags(pg, BMH, { ...ALL, replies: false });
   await runRoutingV2OutboxReplies(db, { limit: 50 });

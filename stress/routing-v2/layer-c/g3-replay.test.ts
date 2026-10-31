@@ -19,7 +19,9 @@ console.error = (...a: unknown[]) => {
   realErr(...a);
 };
 import { createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
+import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
+void offsetToChicago;
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
@@ -95,6 +97,8 @@ it("G3 blast-day replay", async () => {
   const { checkRecipientQuietHours } = await import("@/lib/messaging/quiet-hours-recipient");
   const db = createTestClient();
   resetMockState();
+  const clock = await assertClockAligned(pg, FIXTURE_ZONES);
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(clock.skewMs)} ms; local`, clock.local);
   const runId = `g3-${Date.now()}`;
   org = await createRunOrg(pg, runId, { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, alert_on_time_only: true, canary_percent: 100 });
   R.line("run", runId, "flags all slices on except wrong_number_all/model_stop_suppression (PR-G/PR-I paths still exercised via stop/wrong roads); canary_percent 100");
@@ -131,19 +135,26 @@ it("G3 blast-day replay", async () => {
   });
   const all = [...evs, ...dupes].sort((a, b) => a.at - b.at);
 
-  // Quiet-hours opening: the first 150 arrivals happen at 07:50 Chicago (JS clock), then real time.
+  // Quiet-hours opening at skew 0 (no clock shift): the first 150 arrivals are addressed to leads re-homed to
+  // Hawaii (state HI, phone area 808, Pacific/Honolulu), which is in recipient quiet hours at real time. Everything
+  // else runs at real time on in-hours zones (guarded by assertClockAligned).
   const quietCount = Math.min(150, Math.floor(rows.length / 10));
-  setClockOffset(offsetToChicago(7, 50));
+  const quietLeads = [...new Set(all.slice(0, quietCount).map((e) => e.lead))];
+  for (const l of quietLeads) {
+    const phone = `+1808${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
+    await pg.query("update public.contacts set phone_1 = $1 where id = $2", [phone, l.contactId]);
+    await pg.query("update public.messages set to_address = $1 where property_id = $2 and direction = 'outbound'", [phone, l.propertyId]);
+    await pg.query("update public.properties set state = 'HI', fips_code = null where id = $1", [l.propertyId]);
+    l.phone = phone; l.state = "HI";
+  }
+  R.line(`quiet fixture: ${quietLeads.length} leads re-homed to HI/808; Honolulu local time now ${assertZoneQuiet("Pacific/Honolulu")}; replaces the old 07:50-Chicago JS clock shift`);
   phase = "quiet_0750";
   for (const e of all.slice(0, quietCount)) await deliverWebhook({ externalId: e.ext, from: e.lead.phone, to: org.sender, body: e.body });
   await drainInflight(120_000);
   await runRoutingV2OutboxReplies(db, { limit: 200 });
-  const quietSends = getMockMessageLog().length;
-  R.line(`quiet phase (JS clock 07:50 America/Chicago): ${quietCount} deliveries, sends during phase = ${quietSends}`);
-  // Business hours for the rest of the run: JS clock 10:00 Chicago (the stack itself may be at night).
-  const DAY = offsetToChicago(10, 0);
-  setClockOffset(DAY);
-  R.line("main replay + burst run on a JS clock of 10:00 America/Chicago (quiet-hours checks read the JS clock)");
+  const quietSends = getMockMessageLog().filter((m) => m.to.startsWith("+1808")).length;
+  R.line(`quiet phase (HI leads, real clock): ${quietCount} deliveries, sends to HI leads during phase = ${quietSends}`);
+  R.line("main replay + burst run at REAL time (no clock shift)");
 
   // Chaos script on the compressed timeline.
   const chaos: Array<[number, number, () => void, string]> = [
@@ -450,7 +461,7 @@ it("G3 blast-day replay", async () => {
   // Quiet hours: every mock send's recipient-local time inside 08:00-21:00.
   const qViol = mock.filter((m) => !checkRecipientQuietHours(m.to, m.createdAt).ok);
   R.check("zero sends outside 08-21 recipient-local (mock provider log, send-time clock)", qViol.length === 0, { sends: mock.length, violations: qViol.length, sample: qViol.slice(0, 5).map((m) => ({ to: m.to, at: m.createdAt.toISOString() })) });
-  R.line(`sends during the 07:50 Chicago phase: ${quietSends} (allowed only where the recipient is already past 08:00 local, e.g. Eastern; per-recipient check above)`);
+  R.line(`sends to HI (quiet) leads during the quiet phase: ${quietSends} (allowed only where the recipient is already past 08:00 local, e.g. Eastern; per-recipient check above)`);
   const deferred = outbox.filter((o) => o.kind === "reply" && inbound.find((m) => m.id === o.inbound_message_id && track.get(m.id)?.phase === "quiet_0750"));
   R.line("replies decided during the quiet phase -> status", deferred.reduce((a: Record<string, number>, o) => { a[o.status] = (a[o.status] ?? 0) + 1; return a; }, {}));
 

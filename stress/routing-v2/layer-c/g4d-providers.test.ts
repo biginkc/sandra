@@ -4,7 +4,10 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 import { assertStack, Receipt } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, type RunOrg } from "./lib/seed";
+import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
+import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
+void offsetToChicago;
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
@@ -15,10 +18,13 @@ const stubs = new ProviderStubs(loadReplay());
 let org: RunOrg;
 const R = new Receipt("G4d-providers.txt");
 const pending: Promise<unknown>[] = [];
+let CLOCK: { skewMs: number; local: Record<string, string> } = { skewMs: -1, local: {} };
 
 beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
-  setClockOffset(offsetToChicago(12, 0)); // business hours on the JS clock (the stack may be at night)
+  setClockOffset(0); // skew 0: real time only
+  CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4d-${Date.now()}`, { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, canary_percent: 100 });
   await retirePriorRuns(pg);
@@ -121,14 +127,14 @@ it("outbox crash recovery + >200 owner alerts paged", async () => {
   const settleAll = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
   // Queue a reply that waits (recipient quiet hours: 05:00 in CA), then open the window.
   const queueReply = async (tag: string) => {
-    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "CA", fips: null }) });
+    const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }) });
     stubs.jevOverride = () => ({ text_only: 0.95 });
-    setClockOffset(offsetToChicago(7, 0));
+    assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
     await deliverWebhook({ externalId: `${org.runId}-crash-${tag}`, from: lead!.phone, to: org.sender, body: `text only please ${tag}` });
     await settleAll();
     await new Promise((r) => setTimeout(r, 1500)); // detached kick: waits on quiet hours, never claims
     stubs.jevOverride = null;
-    setClockOffset(offsetToChicago(12, 0));
+    await readdressToInHours(pg, lead!); // window "opens" by re-addressing, not by moving the clock
     const row = (await pg.query("select id, org_id, property_id, inbound_message_id, kind, payload, created_at::text, status from routing_v2_outbox where property_id = $1 and kind = 'reply'", [lead!.propertyId])).rows[0];
     return { lead: lead!, row };
   };
@@ -202,9 +208,7 @@ it("outbox crash recovery + >200 owner alerts paged", async () => {
   stubs.jevOverride = null;
   const queued = (await pg.query("select count(*)::int n from routing_v2_outbox where kind = 'alert' and property_id = any($1)", [leads.map((l) => l.propertyId)])).rows[0].n;
   const owner = (await pg.query("select gen_random_uuid() id")).rows[0].id;
-  setClockOffset(0);
   const res = await loadV2OutboxAlerts(db as never, BMH, new Date(since).toISOString(), Date.now(), owner);
-  setClockOffset(offsetToChicago(12, 0));
   const mine = new Set(leads.map((l) => l.propertyId));
   const paged = res.promotions.filter((p) => mine.has((p as { propertyId?: string }).propertyId ?? "")).length;
   R2.check(">200 owner alerts queued -> all returned by the paged loader", queued >= 200 && paged === queued && res.complete, { queued, pagedForTheseLeads: paged, promotionsTotal: res.promotions.length, complete: res.complete });

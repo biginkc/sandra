@@ -18,3 +18,11 @@ export async function assertClockAligned(pg: Client, zones: string[]): Promise<{
   return { skewMs, local };
 }
 export const FIXTURE_ZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"];
+
+/** The quiet fixture zone must really be in quiet hours (outside 08:00-21:00) right now; fail fast otherwise. */
+export function assertZoneQuiet(zone: string): string {
+  const hm = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date());
+  const h = Number(hm.slice(0, 2));
+  if (h >= 8 && h < 21) throw new Error(`quiet fixture zone ${zone} is in business hours (${hm}); the quiet-hours cases cannot run at skew 0 now`);
+  return hm;
+}

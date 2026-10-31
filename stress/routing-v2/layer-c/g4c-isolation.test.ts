@@ -7,7 +7,10 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 import { assertStack, Receipt } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
+import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
+import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
+void offsetToChicago;
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
 vi.mock("workflow", async (o) => (await import("./lib/wf-mock")).workflowMocks.core(o as never));
@@ -21,13 +24,16 @@ const stubs = new ProviderStubs(loadReplay());
 let org: RunOrg;
 const R = new Receipt("G4c-isolation.txt");
 const pending: Promise<unknown>[] = [];
+let CLOCK: { skewMs: number; local: Record<string, string> } = { skewMs: -1, local: {} };
 const ROOT = path.resolve(__dirname, "../../..");
 const FAKE_OWNED = ["+18165550142", "+19135550177"];
 const RUN = `stress-g4c-${Date.now()}`;
 
 beforeAll(async () => {
   assertStack(); await pg.connect(); stubs.install();
-  setClockOffset(offsetToChicago(12, 0));
+  setClockOffset(0); // skew 0: real time only
+  CLOCK = await assertClockAligned(pg, FIXTURE_ZONES);
+  R.line(`clock: NO shift; measured |app - DB| skew = ${Math.round(CLOCK.skewMs)} ms; local`, CLOCK.local, "; quiet fixture zone Pacific/Honolulu (HI/808)");
   workflowSink.onStart = (c: WorkflowCall) => { pending.push(c.fn(c.params).catch((e) => ({ error: String(e) }))); };
   org = await createRunOrg(pg, `g4c-${Date.now()}`, { questions_live: true, replies: true, drips: true, canary_percent: 100 });
   await retirePriorRuns(pg);
@@ -104,13 +110,13 @@ it("G4c §5.4 isolation", async () => {
     { prodSends: sends(prod!.phone), testSends: sends(tNon2!.phone), testRefusals: (await refusals(tNon2!.propertyId)).length });
 
   // 4. taint stripped from the derived row by a bug -> still refused (lead tag re-read at the boundary).
-  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: "CA", fips: null }), testRunId: RUN });
-  setClockOffset(offsetToChicago(7, 0)); // CA 05:00: reply waits in the outbox
+  const [tStrip] = await seedLeads(pg, org, 1, { state: () => ({ state: "HI", fips: null }), testRunId: RUN });
+  assertZoneQuiet("Pacific/Honolulu"); // HI lead: recipient quiet hours at real time (was a 07:00-Chicago JS shift)
   await deliverWebhook({ externalId: `${org.runId}-strip`, from: tStrip!.phone, to: org.sender, body: "TONLY text only" });
   await settle();
   await new Promise((r) => setTimeout(r, 1500));
   await pg.query("update public.routing_v2_outbox set test_run_id = null where property_id = $1", [tStrip!.propertyId]);
-  setClockOffset(offsetToChicago(12, 0));
+  await readdressToInHours(pg, tStrip!); // deliverable now; the test tag stays on the lead
   await runRoutingV2OutboxReplies(db, { limit: 50 });
   R.check("derived outbox row with its tag stripped -> still refused (lead tag re-read)", sends(tStrip!.phone) === 0 && (await refusals(tStrip!.propertyId)).length > 0,
     { sends: sends(tStrip!.phone), refusals: await refusals(tStrip!.propertyId) });

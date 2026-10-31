@@ -87,8 +87,10 @@ describe("G4 §4.1 slot-time sweep", () => {
     const { getMockMessageLog, resetMockState } = await import("@/lib/messaging/providers/mock");
     const { createTestClient } = await import("@tests/integration/client");
     const db = createTestClient();
-    const st = [{ state: "MO", fips: null }, { state: "KS", fips: "20091" }, { state: "OH", fips: null }, { state: "CO", fips: null }, { state: "CA", fips: null }, { state: "", fips: null }];
-    const ticks = Array.from({ length: 96 }, (_, k) => k * 15);
+    const st = [{ state: "MO", fips: null }, { state: "KS", fips: "20091" }, { state: "OH", fips: null }, { state: "CO", fips: null }, { state: "CA", fips: null }, { state: "", fips: null }, { state: "HI", fips: null }];
+    // Skew 0: the DB clock cannot move in lockstep with the JS clock, so the per-tick JS sweep is replaced by the
+    // pure planSlot sweep above plus ONE real-time DB tick per zone (incl. HI = quiet now).
+    const ticks = [0];
     const leads = await seedLeads(pg, org, st.length * ticks.length, { state: (i) => st[i % st.length]!, address: (i) => `${i} Slot Sweep Rd` });
     // A prior inbound from each lead to the run's sender (no dispatch): the sticky "from" number a drip send needs.
     await pg.query("insert into public.messages (org_id, channel, direction, status, property_id, contact_id, from_address, to_address, body, created_at) select $1, 'sms', 'inbound', 'received', p, c, ph, $2, 'seed inbound (sticky sender)', now() - interval '2 hours' from unnest($3::uuid[], $4::uuid[], $5::text[]) t(p, c, ph)",
@@ -98,10 +100,10 @@ describe("G4 §4.1 slot-time sweep", () => {
     const outcomes: Record<string, number> = {};
     const lines: string[] = [];
     let dbLate = 0, dbQuiet = 0, dbSent = 0;
-    const zoneOf: Record<string, string> = { MO: "America/Chicago", KS: "America/Chicago", OH: "America/New_York", CO: "America/Denver", CA: "America/Los_Angeles" };
+    const zoneOf: Record<string, string> = { HI: "Pacific/Honolulu", MO: "America/Chicago", KS: "America/Chicago", OH: "America/New_York", CO: "America/Denver", CA: "America/Los_Angeles" };
     for (let k = 0; k < ticks.length; k++) {
       const tmin = ticks[k]!;
-      setClockOffset(offsetToChicago(Math.floor(tmin / 60), tmin % 60));
+      void tmin;
       for (let s = 0; s < st.length; s++) {
         const lead = leads[k * st.length + s]!;
         const { rows: [{ id: enr }] } = await pg.query("select public.routing_v2_enroll($1, $2, $3, $4, null) id", [BMH, lead.propertyId, lead.contactId, seq]);
@@ -124,7 +126,7 @@ describe("G4 §4.1 slot-time sweep", () => {
       }
     }
     setClockOffset(0); // back to real time after the deliberate 4.1 tick sweep
-    R.line("DB tick outcomes by state (96 Chicago-clock ticks each, step 1 'any' window)", outcomes);
+    R.line("DB tick outcomes by state (ONE real-time tick each, skew 0; HI is in quiet hours now)", outcomes);
     R.check("DB sweep: sends never after the named time", dbLate === 0, { dbSent, dbLate });
     R.check("DB sweep: zero sends outside 08–21 property-local", dbQuiet === 0, { dbSent, dbQuiet });
     R.check("DB sweep: unknown state never sends (fail closed)", !Object.keys(outcomes).some((k) => k.startsWith("blank|sent")), Object.fromEntries(Object.entries(outcomes).filter(([k]) => k.startsWith("blank"))));
