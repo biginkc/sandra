@@ -3,7 +3,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertClockAligned, FIXTURE_ZONES } from "./lib/clock";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { assertStack, finishNoLiveClassifier, Receipt } from "./lib/env";
+import { assertStack, finishNoLiveClassifier, headSha, Receipt } from "./lib/env";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
 import { loadReplay, ProviderStubs } from "./lib/stubs";
 
@@ -185,8 +185,8 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
   };
   const sh = (s: unknown) => String(s ?? "-").replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>");
   const tally = (modes: Record<string, number>, k: string) => { modes[k] = (modes[k] ?? 0) + 1; };
-  const verdict = (pass: number) => (pass === N ? "PASS" : "FAIL-expected-at-a0c9");
-  R2.line("head under test: a0c905d423909a2f4024b08ed8c197013b02890b (478 migrations; 460000 not applied)");
+  const verdict = (pass: number) => (pass === N ? "PASS" : "FAIL");
+  R2.line(`head under test: ${headSha()}`);
 
   // F4: crash after the decision persists, before transition/hold; sweep; later text held, 0 sends.
   {
@@ -267,7 +267,7 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
       const s = sends(l.phone) - s0; total += s;
       const expired = after?.status === "cancelled" && /expired/.test(after?.cancel_reason ?? "");
       const sentOk = after?.status === "sent" && s === 1;
-      const ok = parked >= 1 && before?.status === "pending" && (sc.wantExpire ? expired && after.hold_pending === true && s === 0 : sentOk);
+      const ok = parked >= 1 && before?.status === "pending" && (sc.wantExpire ? expired && (after.hold_pending === true || (p.nh === true && /expired/.test(p.r ?? ""))) && s === 0 : sentOk);
       if (ok) pass++;
       tally(modes, `${ok ? "PASS" : "FAIL"} parkedInlineKicks=${parked} before=${before?.status}:${before?.cancel_reason ?? ""} ready=${ready?.status} consumer=${res} err=${err ? sh(err).slice(0, 60) : "n"} after=${after?.status}:${after?.cancel_reason ?? ""}:hold_pending=${after?.hold_pending} hold=${p.nh ? p.r : "-"} sends=${s}`);
     }
@@ -276,7 +276,10 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
   }
   // F7: crash after decision persist; sweep; a person dismisses through fn_resolve_hold (the app's clear path); new ordinary text routes normally.
   {
-    const user = (await pg.query("select user_id from memberships where org_id = $1 and role in ('owner','acquisitions') limit 1", [BMH])).rows[0]?.user_id;
+    // The fresh stack has no members: a run-owned stress owner (auth user + owner membership in the BMH org) is the person.
+    const user = "00000000-0000-4000-8000-00000000f7f7";
+    await pg.query("insert into auth.users (id, email, aud, role) values ($1, 'stress-f7-owner@example.test', 'authenticated', 'authenticated') on conflict (id) do nothing", [user]);
+    await pg.query("insert into public.memberships (user_id, org_id, role) select $1, $2, 'owner' where not exists (select 1 from public.memberships where user_id = $1 and org_id = $2)", [user, BMH]);
     let pass = 0; const modes: Record<string, number> = {};
     for (let i = 0; i < N; i++) {
       const l = await fresh();
@@ -304,6 +307,97 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
     }
     R2.line(`${verdict(pass)} F7 crash at decision persist -> sweep -> person dismisses (fn_resolve_hold) -> ordinary TONLY routes normally: ${pass}/${N}`);
     R2.line("   modes", modes);
+  }
+  await setFlags(pg, BMH, FLAGS);
+});
+
+/**
+ * F8-F10 baselines (round 16, Astra findings). Run alone with RECEIPT_SUFFIX set so the F1-F7 receipts are not rewritten.
+ * Safety decision = existing fixture "You can talk to my lawyer about it" (M15 keyword:legal_contract) — the hold road has
+ * no app barrier after the decision, so the worker "death" is the hold write raising: a temporary per-lead trigger on
+ * properties (raise when needs_human_attention flips to true for a lead listed in stress_hold_fail). F8 drops the trigger
+ * after the crash (cron DOWN: no sweep, no outbox consumer; claim + inbound backdated 2 h in SQL), F9 keeps it through B.
+ * B = "TONLY text only please". F10 = M16 rep SMS row, seller reply handled with the app clock -1 h (fake Date only).
+ */
+it(`F8 / F9 / F10 x${N}`, async () => {
+  const R3 = new Receipt("G4g-F8-F9-F10.txt");
+  const c = await assertClockAligned(pg, FIXTURE_ZONES);
+  R3.line(`clock: NO shift; |app - DB| skew = ${Math.round(c.skewMs)} ms; local`, c.local);
+  const { getMockMessageLog } = await import("@/lib/messaging/providers/mock");
+  await setFlags(pg, BMH, FLAGS);
+  let n = 0;
+  const ext = () => `${org.runId}-f810-${n++}`;
+  const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Dead Ct` }))[0]!;
+  const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
+  const lastIn = async (id: string) => (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [id])).rows[0];
+  const claim = async (mid: string) => (await pg.query("select status, outcome, error_message em from ai_response_claims where inbound_message_id = $1", [mid])).rows[0];
+  const dec = async (mid: string) => (await pg.query("select status from routing_v2_live_decisions where inbound_message_id = $1", [mid])).rows.map((x) => x.status).join(",") || "0";
+  const drips = async (id: string) => (await pg.query("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [id])).rows[0].n;
+  const sh = (s: unknown) => String(s ?? "-").replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>").slice(0, 90);
+  const verdict = (p: number) => (p === N ? "PASS" : "FAIL-expected-at-b6a0");
+  await pg.query(`create table if not exists public.stress_hold_fail (property_id uuid primary key);
+    create or replace function public.stress_hold_fail_fn() returns trigger language plpgsql as $$ begin
+      if new.needs_human_attention and not coalesce(old.needs_human_attention, false) and exists (select 1 from public.stress_hold_fail f where f.property_id = new.id)
+      then raise exception 'stress: hold write failed'; end if; return new; end $$;
+    drop trigger if exists stress_hold_fail_trg on public.properties;
+    create trigger stress_hold_fail_trg before update on public.properties for each row execute function public.stress_hold_fail_fn();`);
+  try {
+    for (const which of ["F8", "F9"] as const) {
+      let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+      for (let i = 0; i < N; i++) {
+        const l = await fresh();
+        await pg.query("insert into public.stress_hold_fail values ($1) on conflict do nothing", [l.propertyId]);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "You can talk to my lawyer about it" }); await settle();
+        const a = await lastIn(l.propertyId); const ca = await claim(a.id); const da = await dec(a.id); const pa = await prop(l.propertyId);
+        if (which === "F8") {
+          await pg.query("delete from public.stress_hold_fail where property_id = $1", [l.propertyId]);
+          await pg.query("update messages set created_at = now() - interval '2 hours' where id = $1", [a.id]);
+          await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours', created_at = now() - interval '2 hours' where inbound_message_id = $1", [a.id]).catch(() => pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours' where inbound_message_id = $1", [a.id]));
+        }
+        const s0 = sends(l.phone);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); await pause(500);
+        await pg.query("delete from public.stress_hold_fail where property_id = $1", [l.propertyId]);
+        const b = await lastIn(l.propertyId); const p = await prop(l.propertyId); const dr = await drips(l.propertyId);
+        const queued = (await pg.query("select count(*)::int n from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply' and status in ('pending','claimed','sent')", [b.id])).rows[0].n;
+        const s = sends(l.phone) - s0; total += s;
+        const routed = /^routing_v2:/.test(b.r ?? "") && b.o === "auto_closed";
+        const ok = !routed && s === 0 && dr === 0 && queued === 0;
+        if (ok) pass++;
+        const k = `${ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} A-claim=${ca?.status}:${sh(ca?.outcome)}:${sh(ca?.em)} A-decision=${da} holdAfterA=${pa.nh ? pa.r : "-"} B-stamp=${b.o}:${sh(b.r)} B-decision=${await dec(b.id)} hold=${p.nh ? p.r : "-"} replyQueued=${queued} sends=${s} activeDrips=${dr}`;
+        modes[k] = (modes[k] ?? 0) + 1;
+      }
+      R3.line(`${verdict(pass)} ${which} ${which === "F8" ? "worker dies at the safety hold write, cron DOWN >1 h (no sweep / consumer), then B" : "every hold write fails (per-lead trigger) through B, no sweep"}: ${pass}/${N}; sends ${total}`);
+      R3.line("   modes", modes);
+    }
+  } finally {
+    await pg.query("drop trigger if exists stress_hold_fail_trg on public.properties; drop function if exists public.stress_hold_fail_fn(); drop table if exists public.stress_hold_fail;");
+  }
+  // F10
+  {
+    let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+    for (let i = 0; i < N; i++) {
+      const l = await fresh();
+      const conv = null; // fresh lead: no thread yet (M16 reuses the prior inbound's conversation_id)
+      await pg.query(`insert into public.messages (org_id, channel, direction, status, property_id, contact_id, conversation_id, from_address, to_address, body, sent_at, metadata)
+        values ($1, 'sms', 'outbound', 'sent', $2, $3, $4, $5, $6, '[stress placeholder rep sms]', now(), $7)`,
+        [org.orgId, l.propertyId, l.contactId, conv, org.sender, l.phone, JSON.stringify({ repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: "00000000-0000-4000-8000-0000000000aa", senderAssignmentId: null } })]);
+      await pause(2500);
+      const s0 = sends(l.phone);
+      vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 3600_000);
+      try { await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); }
+      finally { vi.useRealTimers(); }
+      await assertClockAligned(pg, FIXTURE_ZONES);
+      await pause(500);
+      const b = await lastIn(l.propertyId); const p = await prop(l.propertyId);
+      const s = sends(l.phone) - s0; total += s;
+      const ok = p.nh === true && /rep_sms_human_takeover/.test(p.r ?? "") && s === 0;
+      if (ok) pass++;
+      const k = `${ok ? "PASS" : "FAIL"} B-stamp=${b.o}:${sh(b.r)} B-decision=${await dec(b.id)} hold=${p.nh ? p.r : "-"} sends=${s} activeDrips=${await drips(l.propertyId)}`;
+      modes[k] = (modes[k] ?? 0) + 1;
+    }
+    R3.line(`${verdict(pass)} F10 rep SMS, then seller reply handled with app clock -1 h -> rep_sms_human_takeover, 0 auto sends: ${pass}/${N}; sends ${total}`);
+    R3.line("   modes", modes);
   }
   await setFlags(pg, BMH, FLAGS);
 });

@@ -411,13 +411,30 @@ it("G3 blast-day replay", async () => {
       join properties p on p.id = e.property_id where e.property_id = any($1) and e.routing_v2_engine = 'v2' and r.attempt_outcome in ('accepted','sent','delivered')
       and p.needs_human_attention and p.last_ai_escalation_at is not null and r.created_at > p.last_ai_escalation_at`);
     const allSends = await q("select count(*)::int n from sequence_step_runs r join sequence_enrollments e on e.id = r.enrollment_id where e.property_id = any($1) and e.routing_v2_engine = 'v2' and r.attempt_outcome in ('accepted','sent','delivered')");
-    R.check("410000: v2 drip steps sent to a lead held for a person = 0", bad.length === 0, { held: bad.length, v2DripStepSendsInRun: allSends[0].n, sample: bad.slice(0, 5) });
+    R.check("held-lead drip check (migration routing_v2_held_lead_drip_check, was 410000): v2 drip steps sent to a lead held for a person = 0", bad.length === 0, { held: bad.length, v2DripStepSendsInRun: allSends[0].n, sample: bad.slice(0, 5) });
   }
   {
     // 450000 provider fence (in-run): sends to held leads after the hold vs held/fence refusals.
     const sentToHeld = (await q("select count(*)::int n from messages m join properties p on p.id = m.property_id where m.property_id = any($1) and m.direction = 'outbound' and m.status in ('sent','delivered') and p.needs_human_attention and p.last_ai_escalation_at is not null and coalesce(m.sent_at, m.created_at) > p.last_ai_escalation_at"))[0].n;
     const refusals = await q("select o.cancel_reason r, count(*)::int n from routing_v2_outbox o where o.property_id = any($1) and o.kind = 'reply' and o.status = 'cancelled' and (o.cancel_reason like '%held%' or o.cancel_reason like '%fence%') group by 1");
-    R.check("450000: outbound sends to a lead held for a person after the hold = 0", sentToHeld === 0, { sentToHeld, heldOrFenceRefusals: refusals });
+    R.check("held-lead fence (migration routing_v2_fence_held_lead, was 450000): outbound sends to a lead held for a person after the hold = 0", sentToHeld === 0, { sentToHeld, heldOrFenceRefusals: refusals });
+  }
+  {
+    // hold_pending accounting (routing_v2_outbox_never_silent): after the drain no row may still owe a hold, and every
+    // cancelled not_sent reply row on a lead must have its hold (or the lead is held / superseded by a newer text).
+    const owed = (await q("select count(*)::int n from routing_v2_outbox o where o.property_id = any($1) and o.hold_pending"))[0].n;
+    const notSent = await q(`select o.cancel_reason r, bool_or(p.needs_human_attention) held, count(*)::int n from routing_v2_outbox o join properties p on p.id = o.property_id
+      where o.property_id = any($1) and o.kind = 'reply' and o.status = 'cancelled' and o.cancel_reason like 'not_sent:%' group by 1`);
+    const unheld = (await q(`select count(*)::int n from routing_v2_outbox o join properties p on p.id = o.property_id where o.property_id = any($1) and o.kind = 'reply'
+      and o.status = 'cancelled' and o.cancel_reason like 'not_sent:%' and not p.needs_human_attention
+      and not exists (select 1 from messages m where m.property_id = o.property_id and m.direction = 'inbound' and m.created_at > (select created_at from messages where id = o.inbound_message_id))`))[0].n;
+    R.check("hold_pending accounting: rows still owing a hold after drain = 0; not_sent replies on an unheld lead with no newer text = 0", owed === 0 && unheld === 0, { holdPendingLeft: owed, notSentUnheld: unheld, notSentByReason: notSent });
+  }
+  {
+    // Sweep closures (routing_v2_effects_durable): texts the sweep marked, by result, and dead claims left open.
+    const swept = await q("select metadata->'processing'->'routingV2Sweep'->>'result' r, count(*)::int n from messages where property_id = any($1) and direction = 'inbound' and metadata->'processing'->'routingV2Sweep' is not null group by 1");
+    const deadOpen = (await q("select count(*)::int n from ai_response_claims c join messages m on m.id = c.inbound_message_id where m.property_id = any($1) and c.status = 'processing' and c.lease_expires_at < now() - interval '10 minutes'"))[0].n;
+    R.check("sweep closures: dead claims (processing, lease expired > 10 min) left open after the drain = 0", deadOpen === 0, { sweptByResult: swept, deadClaimsOpen: deadOpen });
   }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");

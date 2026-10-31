@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { Client } from "pg";
@@ -20,6 +20,16 @@ import { V2_REPLY_TEXTS, V2_TEMPLATE_KEYS } from "@/lib/sms-classification/routi
  * from the §4.2 length check.
  */
 const ROOT = path.resolve(__dirname, "../../../..");
+
+/** Resolve a migration by its name, not its version: round 17 re-timestamps the routing v2
+ *  migrations (pure renames), so a hard-coded version would break. Exactly one match required. */
+export function migrationByName(name: string): string {
+  const dir = path.join(ROOT, "supabase/migrations");
+  const hits = readdirSync(dir).filter((f) => f.endsWith(`_${name}.sql`) && !f.includes("integration"));
+  if (hits.length !== 1) throw new Error(`migration ${name}: expected exactly one file, found ${hits.length}`);
+  return path.join(dir, hits[0]!);
+}
+
 export const PLACEHOLDER_SOURCES: Record<string, number> = {
   "Book appointment": 9, "Listed, not selling": 3, "Maybe later": 3, "Not interested": 3,
   "Asked who is texting": 3, "Confirmed owner": 3,
@@ -86,12 +96,12 @@ async function seedDrips(pg: Client, orgId: string): Promise<void> {
         [rows[0].id, i, i === 0 ? 0 : 1440, `[stress placeholder ${name} step ${i + 1}]`]);
     }
   }
-  const m181 = readFileSync(path.join(ROOT, "supabase/migrations/20261030181000_routing_v2_versioned_drips.sql"), "utf8").split("\n");
+  const m181 = readFileSync(migrationByName("routing_v2_versioned_drips"), "utf8").split("\n");
   const start = m181.findIndex((l) => l.startsWith("drop table if exists routing_v2_seed"));
   let end = start;
   while (!m181[end]!.startsWith("end $$;")) end++;
   const seed181 = m181.slice(start, end + 1).join("\n");
-  const m270 = readFileSync(path.join(ROOT, "supabase/migrations/20261030270000_routing_v2_legacy_drip_snapshots.sql"), "utf8");
+  const m270 = readFileSync(migrationByName("routing_v2_legacy_drip_snapshots"), "utf8");
   const seed270 = m270.slice(m270.indexOf("do $$"), m270.lastIndexOf("end $$;") + "end $$;".length);
   const scope = (sql: string) => {
     const out = sql.replace("select distinct org_id from public.ai_responder_configs", `select distinct org_id from public.ai_responder_configs where org_id = '${orgId}'`);
