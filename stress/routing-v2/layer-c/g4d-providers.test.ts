@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import { afterAll, beforeAll, it, vi } from "vitest";
 
-import { assertStack, Receipt } from "./lib/env";
+import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, type RunOrg } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
@@ -29,7 +29,7 @@ beforeAll(async () => {
   org = await createRunOrg(pg, `g4d-${Date.now()}`, { questions_live: true, replies: true, drips: true, haiku: true, price_check: true, canary_percent: 100 });
   await retirePriorRuns(pg);
 });
-afterAll(async () => { setClockOffset(0); stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); setClockOffset(0); stubs.uninstall(); await pg.end(); });
 
 it("G4d provider controls", async () => {
   const { createTestClient } = await import("@tests/integration/client");

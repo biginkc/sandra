@@ -4,7 +4,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
 
-import { assertStack, FINAL, Receipt } from "./lib/env";
+import { assertStack, FINAL, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
 import { assertClockAligned, FIXTURE_ZONES } from "./lib/clock";
@@ -32,7 +32,7 @@ beforeAll(async () => {
   org = await createRunOrg(pg, `g4-${Date.now()}`, FLAGS);
   await retirePriorRuns(pg);
 });
-afterAll(async () => { setClockOffset(0); stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); setClockOffset(0); stubs.uninstall(); await pg.end(); });
 const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
 
 // ------------------------------------------------------------------ §4.1 slot times

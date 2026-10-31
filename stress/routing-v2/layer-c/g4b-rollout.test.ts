@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, it, vi } from "vitest";
 
-import { assertStack, Receipt } from "./lib/env";
+import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
@@ -33,7 +33,7 @@ beforeAll(async () => {
   org = await createRunOrg(pg, `g4b-${Date.now()}`, {});
   await retirePriorRuns(pg);
 });
-afterAll(async () => { setClockOffset(0); stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); setClockOffset(0); stubs.uninstall(); await pg.end(); });
 const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
 
 it("G4b stage tests + flag-off rollback", async () => {

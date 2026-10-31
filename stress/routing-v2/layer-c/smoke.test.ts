@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
-import { assertStack } from "./lib/env";
+import { assertStack, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { retirePriorRuns, createRunOrg, seedLeads, type RunOrg } from "./lib/seed";
 import { loadReplay, ProviderStubs } from "./lib/stubs";
@@ -14,7 +14,7 @@ const stubs = new ProviderStubs(loadReplay());
 let org: RunOrg;
 
 beforeAll(async () => { assertStack(); await pg.connect(); stubs.install(); });
-afterAll(async () => { stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); stubs.uninstall(); await pg.end(); });
 
 it("smoke: webhook -> workflow -> v2 decision -> outbox -> mock send", async () => {
   const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");

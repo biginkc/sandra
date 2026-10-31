@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { FINAL } from "./env";
+import { liveClassifierAttempt } from "./no-live-classifier";
 
 /**
  * In-process provider stubs (Jev / Haiku / DealMachine) behind a fault script. Every request to a
@@ -182,7 +183,7 @@ export class ProviderStubs {
     if (body.model === "claude-haiku-5-5") { if (body.max_tokens === 200 && body.output_config === undefined && JSON.stringify(body.stop_sequences) === '["}"]') this.haikuShapeOk++; else this.haikuShapeBad++; }
     if (body.model !== "claude-haiku-5-5") {
       this.calls.push({ provider: "llm", at: t0, status: 500, key: String(body.model), ms: 0 });
-      return this.json(500, { error: "stress: LLM not stubbed" });
+      liveClassifierAttempt(`anthropic model ${String(body.model)} not served by the stub`);
     }
     this.track("haiku", 1);
     try {

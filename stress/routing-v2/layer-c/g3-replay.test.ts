@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { Client } from "pg";
 import { afterAll, beforeAll, it, vi } from "vitest";
 
-import { assertStack, pct, Receipt } from "./lib/env";
+import { assertStack, pct, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, Pool, webhookErrors, workflowSink, type WorkflowCall } from "./lib/driver";
 
 /** reportError histogram (surface | message), captured from console.error. */
@@ -86,7 +86,7 @@ beforeAll(async () => {
   stubs.install();
   workflowSink.onStart = (c) => launch(c);
 });
-afterAll(async () => { setClockOffset(0); stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); setClockOffset(0); stubs.uninstall(); await pg.end(); });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

@@ -4,7 +4,7 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, it, vi } from "vitest";
 
-import { assertStack, Receipt } from "./lib/env";
+import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
@@ -38,7 +38,7 @@ beforeAll(async () => {
   org = await createRunOrg(pg, `g4c-${Date.now()}`, { questions_live: true, replies: true, drips: true, canary_percent: 100 });
   await retirePriorRuns(pg);
 });
-afterAll(async () => { delete process.env.TEST_DEST_ALLOWLIST; setClockOffset(0); stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); delete process.env.TEST_DEST_ALLOWLIST; setClockOffset(0); stubs.uninstall(); await pg.end(); });
 const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
 
 it("G4c §5.4 isolation", async () => {

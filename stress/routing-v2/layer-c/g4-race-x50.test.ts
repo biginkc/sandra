@@ -3,7 +3,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertClockAligned, FIXTURE_ZONES } from "./lib/clock";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { assertStack, Receipt } from "./lib/env";
+import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { BMH, createRunOrg, retirePriorRuns, seedLeads, type Lead, type RunOrg } from "./lib/seed";
 import { loadReplay, ProviderStubs } from "./lib/stubs";
 
@@ -31,7 +31,7 @@ beforeAll(async () => {
   await retirePriorRuns(pg);
   stubs.jevOverride = (r) => r.includes("YESBOOK") ? { open_to_selling: 0.95 } : r.includes("NOTINT") ? { not_interested: 0.95 } : r.includes("LATER") ? { maybe_later: 0.95 } : null;
 });
-afterAll(async () => { stubs.uninstall(); await pg.end(); });
+afterAll(async () => { finishNoLiveClassifier(); stubs.uninstall(); await pg.end(); });
 const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

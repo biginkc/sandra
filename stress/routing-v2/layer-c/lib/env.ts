@@ -18,7 +18,11 @@ export function headSha(): string {
   return execSync("git rev-parse HEAD", { cwd: path.resolve(__dirname, "../../../.."), encoding: "utf8" }).trim();
 }
 
+import { assertNoRealClassifierKeys, CLASSIFIER_SOURCES, installNoLiveClassifier, LIVE } from "./no-live-classifier";
+
 export function assertStack(): void {
+  assertNoRealClassifierKeys();
+  installNoLiveClassifier();
   const api = process.env.TEST_SUPABASE_URL ?? "";
   const db = process.env.TEST_SUPABASE_DB_URL ?? "";
   if (!api.includes(`127.0.0.1:${STACK_API_PORT}`)) throw new Error(`TEST_SUPABASE_URL is not the stress stack (:${STACK_API_PORT})`);
@@ -37,9 +41,11 @@ export function assertStack(): void {
 }
 
 export class Receipt {
+  static all: Receipt[] = [];
   readonly file: string;
   readonly file2: string;
   constructor(name: string, dir?: string) {
+    Receipt.all.push(this);
     const d = dir || RECEIPTS;
     const sfx = process.env.RECEIPT_SUFFIX ?? "";
     if (sfx) name = name.replace(/\.txt$/, `${sfx}.txt`);
@@ -65,4 +71,11 @@ export function pct(sorted: number[], p: number): number | null {
   if (!sorted.length) return null;
   const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[i]!;
+}
+
+/** afterAll: write the classifier line into every receipt of this run; fail when any live call was attempted. */
+export function finishNoLiveClassifier(): void {
+  const line = `classifier: ${CLASSIFIER_SOURCES}; live classifier calls attempted = ${LIVE.attempts}`;
+  for (const r of Receipt.all) r.line(line);
+  if (LIVE.attempts !== 0) throw new Error(`stress: ${LIVE.attempts} live classifier call(s) attempted`);
 }
