@@ -39,7 +39,7 @@ export function skippedCsv(sha: string, r: BackfillRunResult): string {
 const ITEM_COLUMNS: Array<keyof ItemResult> = [
   "inboundId", "propertyId", "ageDays", "bucket", "mode", "treatment", "road", "decisionStatus", "outcome", "jevCalls", "haikuCalls", "haikuUsd",
   "repliesQueued", "repliesSent", "alertsQueued", "dripsStarted", "holdCreated", "holdReason", "suppressionCreated",
-  "wouldReply", "wouldDrip", "wouldAlert", "wouldHold", "wouldClose", "error",
+  "wouldReply", "wouldDrip", "wouldAlert", "wouldHold", "wouldClose", "groupChanged", "appliedWithoutStoredDecision", "error",
 ];
 
 export function itemsCsv(sha: string, r: BackfillRunResult): string {
@@ -132,6 +132,10 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
         ["Holds created (each raises today's hold alert)", tot((i) => i.holdCreated)],
         ["Suppressions created", tot((i) => i.suppressionCreated)],
         ...(r.mode === "classify_only" ? [["Holds actually written by classify-only (must be 0)", tot((i) => i.holdCreated)] as Array<string | number>] : []),
+        ...(r.mode === "apply" ? [
+          ["Group changed since classify-only (crossed the cutoff)", tot((i) => i.groupChanged)] as Array<string | number>,
+          ["Applied without a stored classify-only decision (not reviewed)", tot((i) => i.appliedWithoutStoredDecision)] as Array<string | number>,
+        ] : []),
       ]));
       if (treatment === "sort_only" && its.some((i) => i.road === "price_check")) {
         lines.push("");

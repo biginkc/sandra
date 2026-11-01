@@ -712,6 +712,11 @@ export async function checkAiResponderDispatchPreGates(
   // inbound never parks or drops it here. Every reply is
   // classified and recorded; the v2 transition keeps the newest reply's route (an older one
   // queues only its owner alerts) and the outbox fence refuses a stale auto reply.
+  // Routing v2 backfill: v2 not live for this text right now = skipped before any gate can flag it.
+  if (input.routingV2Backfill && !routingV2Live) {
+    await blocked(ROUTING_V2_BACKFILL_V2_NOT_LIVE);
+    return { ok: false, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE } };
+  }
   if (input.inboundMessageId) {
     // Q8 decision table at the early gate: rule 0 (suppression / disabled /
     // terminal) and rule 8 first, then rules 1-6, first match wins; the same
@@ -735,6 +740,10 @@ export async function checkAiResponderDispatchPreGates(
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
         await blocked(plan.trace);
+        if (plan.flagReason && input.routingV2Backfill?.mode === "classify_only") {
+          // Classify-only never writes a hold: a flagging gate skips the text (counted).
+          return { ok: false, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE } };
+        }
         if (plan.flagReason) {
           const flagged = await markPropertyNeedsAttention(
             supabase,
@@ -856,6 +865,12 @@ async function dispatchAiResponseCore(
   // A responder-off property (a person's takeover switch) is checked FIRST: it runs no
   // engine and writes no hold either way, so an unreadable switch there changes nothing
   // (it falls through to the silent responder-off skip below).
+  // Routing v2 backfill: the config read here (the one every later branch uses) must itself say
+  // Jev automatic + nine questions, or the text is skipped. Closes the gap between the pre-gate's
+  // live read and this one (a flip in between can never route a backfill text to another engine).
+  if (input.routingV2Backfill && !(config?.classifier_provider === "jev" && config.classifier_mode === "automatic" && engineRead === "nine_questions")) {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE };
+  }
   if (engineRead === "unreadable" && property.ai_responder_disabled !== true) {
     // The switch state is unknown: run neither engine, a person looks (not a hot hold).
     await markPropertyNeedsAttention(supabase, input.propertyId, CLASSIFIER_ENGINE_UNREADABLE, deps.runContext);
@@ -963,6 +978,9 @@ async function dispatchAiResponseCore(
     input.contactId,
     input.conversationId ?? null,
   );
+  if ((countedTurns === null || consentState === null) && input.routingV2Backfill?.mode === "classify_only") {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE };
+  }
   if (countedTurns === null || consentState === null) {
     // Rule 7: a gate that cannot be evaluated never passes. No reply exists
     // yet (nothing to dead-letter), so flag a human with `send_check_failed`.
@@ -8816,7 +8834,16 @@ async function runRoutingV2LiveStepInner(
       action: (storedRow.action as V2Action | null) ?? null,
     }, input);
     const replayed = await recordLiveV2DecisionRow(supabase, storedRow, replayHold);
-    if (replayed === "hold_failed" || replayed === "failed") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    if (replayed === "hold_failed") {
+      // Same fail-closed handling as a live safety decision whose hold could not be recorded.
+      await pauseV2DripsFailClosed(supabase, input.propertyId);
+      reportError(new Error("routing v2 backfill: replayed safety decision and hold could not be recorded"), {
+        tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId },
+      });
+      await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
+      return { outcome: "escalated", reason: replayHold ?? "nine_needs_person" };
+    }
+    if (replayed === "failed") return nineHoldAndComplete(supabase, a, "nine_needs_person");
     const stored = await readLiveV2Evidence(supabase, inboundMessageId);
     if (!stored || stored.property_id !== input.propertyId || stored.org_id !== property.org_id) return nineHoldAndComplete(supabase, a, "nine_needs_person");
     return applyRoutingV2LiveEvidence(supabase, a, flags, stored);

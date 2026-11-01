@@ -297,6 +297,8 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     expect(audit).toEqual({ status: "not_routed", failure_reason: `backfill_superseded:${RUN}` });
     for (const l of [held, answered, tagged, takeover]) expect(sentTo(l.phone)).toHaveLength(0);
     expect(r.items.find((i) => i.inboundId === T.fresh)).toMatchObject({ treatment: "full", repliesQueued: 1 });
+    // Every applied text had a stored classify-only decision under the same group.
+    expect(r.items.filter((i) => i.groupChanged || i.appliedWithoutStoredDecision)).toEqual([]);
     const md = markdownReport("sha-test", r);
     expect(md).toContain("## Full treatment");
     expect(md).toContain("## Sort only");
@@ -351,6 +353,8 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     await settle();
     expect(r.items.map((i) => i.inboundId)).toEqual([first, second]);
     expect(r.items[1]).toMatchObject({ outcome: "skipped:routing_v2:backfill_v2_not_live", repliesQueued: 0, dripsStarted: 0 });
+    expect(r.items[0]).toMatchObject({ appliedWithoutStoredDecision: true });
+    expect(markdownReport("sha", r)).toContain("Applied without a stored classify-only decision (not reviewed) | 2");
     expect(sentTo(b.phone)).toHaveLength(0);
     expect(await n("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and created_at > now() - interval '1 hour'", [b.propertyId])).toBe(0);
     expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [b.propertyId])).toBe(0);

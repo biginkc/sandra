@@ -116,6 +116,10 @@ export type ItemResult = {
   wouldAlert: boolean;
   wouldHold: boolean;
   wouldClose: boolean;
+  /** Apply: classify-only reviewed this text under the other group (it crossed the cutoff since). */
+  groupChanged: boolean;
+  /** Apply: no stored classify-only decision, so it was classified fresh (Jarrad never reviewed it). */
+  appliedWithoutStoredDecision: boolean;
   error: string | null;
 };
 
@@ -236,7 +240,7 @@ export function wouldDo(d: StoredDecision | null, treatment: Treatment): Pick<It
   };
 }
 
-async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error">> {
+async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error" | "groupChanged" | "appliedWithoutStoredDecision">> {
   const loose = db as unknown as Loose;
   const [{ data: dec }, { data: spend }, { data: box }, { data: enr }, { data: prop }] = await Promise.all([
     loose.from("routing_v2_live_decisions").select("status, road, failure_reason, action").eq("inbound_message_id", c.id).maybeSingle(),
@@ -364,7 +368,12 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     // run drops to sort-only.
     const ageNow = (dbNow() - Date.parse(c.createdAt)) / 86_400_000;
     const treatment = treatmentFor(ageNow, textMaxAgeDays);
-    const base = { inboundId: c.id, propertyId: c.propertyId, ageDays: Math.round(c.ageDays * 10) / 10, bucket: c.bucket, mode: opts.mode, treatment };
+    const reviewed = c.marker?.classify;
+    const base = {
+      inboundId: c.id, propertyId: c.propertyId, ageDays: Math.round(ageNow * 10) / 10, bucket: c.bucket, mode: opts.mode, treatment,
+      groupChanged: opts.mode === "apply" && !!reviewed?.decision && !!reviewed.treatment && reviewed.treatment !== treatment,
+      appliedWithoutStoredDecision: opts.mode === "apply" && !reviewed?.decision,
+    };
     try {
       const { input } = await loadDispatchInput(db, c);
       if (opts.mode === "classify_only" && keywordHoldLikely(input.inboundBody, escalationKeywords)) {

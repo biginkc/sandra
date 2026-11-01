@@ -44,7 +44,16 @@ sense right after the seller's message:
   reply or drip, on any road (stop, legal, needs-a-person and Jev failures included). It stores the
   decision on the seller text (`messages.metadata.routingV2Backfill.classify.decision`) and the
   report shows what apply WOULD do, plus "holds actually written by classify-only (must be 0)".
-  The only writes are that marker, the spend ledger (one Jev row per text) and the claim move below.
+  What classify-only DOES write, all bookkeeping that no seller or lead state reads:
+  - the backfill marker on the seller text (with the decision);
+  - the spend ledger (one Jev row per text, plus Haiku if on);
+  - the claim move below, plus one new completed responder claim (`routing_v2:backfill_classify_only`);
+  - trace / pipeline-run rows for the dispatch;
+  - for price texts with the price check on: the DealMachine value lookup (a provider call) and
+    its value-cache row, exactly as live.
+  A rare error or race that would otherwise flag the lead (an unreadable consent / turn check, a
+  send-gate flag, an unreadable engine) skips the text and counts it instead
+  (`routing_v2:backfill_classify_only_unavailable`).
 - If routing v2 is not live for a text when it is dispatched (flags, canary or engine are checked
   again for every text, so turning `questions_live` off stops the run), the text is skipped and
   counted as `routing_v2:backfill_v2_not_live`. The old engine never answers a backfill text.
@@ -84,6 +93,8 @@ $S --apply --run-id bf-2026-11-01 --batch-max-age-days 14 --out ~/routing-v2-bac
 $S --apply --run-id bf-2026-11-01 --out ~/routing-v2-backfill      # 15–60 days: sort only
 ```
 
+The apply report counts texts whose group changed since classify-only (crossed day 14) and
+texts applied without a stored decision (classified fresh, so Jarrad never reviewed them).
 Apply records the exact decision classify-only stored (a stop / hold decision through the same
 atomic recorder as live) and carries it out, with no second model call. If the lead changed in
 between (a person acted, a text went out), the transition holds for a person instead of acting.
@@ -120,7 +131,9 @@ No database migration is needed.
 ### Undoing the claim move for one text
 
 Only for a text that a backfill classified but did NOT apply (an applied text has a real
-outcome; leave it). In the SQL editor, for inbound id `<id>`:
+outcome; leave it), and only when that classify-only finished normally (its marker shows
+`classify.outcome` starting with `skipped:routing_v2:backfill_classify_only`). A text whose
+classify-only crashed or was skipped may have a different claim state; look at it by hand. In the SQL editor, for inbound id `<id>`:
 
 ```sql
 begin;
