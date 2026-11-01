@@ -2142,6 +2142,7 @@ async function releaseQueuedMessageInner(
         propertyId: msg.property_id,
         destination: msg.to_address ?? "",
         origin: "queued_release",
+        queuedSendOrigin: queuedOrigin,
         messageId: msg.id,
       })
       : { allowed: true as const };

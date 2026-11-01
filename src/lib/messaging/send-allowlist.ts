@@ -123,13 +123,16 @@ export async function checkSendAllowed(
     /** The work item's own tag (e.g. a routing v2 outbox row); the lead's tag is always read too. */
     testRunId?: string | null;
     messageId?: string | null;
+    /** queued_release only: who queued the row (metadata.sendOrigin). A person's queued text is not automated. */
+    queuedSendOrigin?: "automated" | "manual";
     env?: Record<string, string | undefined>;
   },
 ): Promise<SendAllowCheck> {
   const env = input.env ?? process.env;
   // Astra review of 7e6e72c13839 (round 18): an unresolved safety obligation blocks every automated
-  // send on the lead (all paths, flags on or off); a person's own send is not blocked here.
-  if (input.origin === "automated" || input.origin === "queued_release") {
+  // send on the lead (all paths, flags on or off); a person's own send (immediate, or a text the
+  // person queued and then released) is not blocked here: only a real hold stops a person.
+  if (input.origin === "automated" || (input.origin === "queued_release" && input.queuedSendOrigin !== "manual")) {
     const open = await hasUnresolvedSafetyObligation(supabase, input.propertyId);
     if (open !== "no") {
       if (open === "unknown") {

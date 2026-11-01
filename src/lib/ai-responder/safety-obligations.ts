@@ -21,6 +21,7 @@ type LooseFrom = {
   };
 };
 const MISSING = /PGRST202|PGRST205|42883|42P01|does not exist|Could not find/i;
+const DENIED = /42501|permission denied/i;
 
 export type ObligationSource = "decision" | "keyword" | "rep_takeover" | "legacy" | "hold_failed";
 
@@ -51,9 +52,17 @@ export async function hasUnresolvedSafetyObligation(
   supabase: SupabaseClient<Database>,
   propertyId: string,
 ): Promise<"yes" | "no" | "unknown"> {
+  const read = (client: unknown) => (client as LooseFrom).from("routing_v2_safety_obligations")
+    .select("id").eq("property_id", propertyId).is("resolved_at", null).limit(1);
   try {
-    const { data, error } = await (supabase as unknown as LooseFrom).from("routing_v2_safety_obligations")
-      .select("id").eq("property_id", propertyId).is("resolved_at", null).limit(1);
+    let { data, error } = await read(supabase);
+    if (error && DENIED.test(`${error.code ?? ""} ${error.message}`)) {
+      // The store is service-role only. A send released from a person's session (user-scoped
+      // client, e.g. the outbox "Send next" button) reads it with the server's admin client, so
+      // a lead without an obligation is never refused just because the caller cannot see the table.
+      const { createAdminClient } = await import("@/lib/supabase/admin");
+      ({ data, error } = await read(createAdminClient()));
+    }
     if (error) return MISSING.test(error.message) ? "no" : "unknown";
     return (data ?? []).length > 0 ? "yes" : "no";
   } catch (e) {
