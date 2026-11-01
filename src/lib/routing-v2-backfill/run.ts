@@ -147,6 +147,19 @@ export type BackfillRunResult = {
 
 export class BackfillRefusal extends Error {}
 
+/**
+ * Apply needs the backfill recorder (migration 20261031150000). Probe it with an empty row: the
+ * function's own "is this the newest text" check finds no such text and returns without writing
+ * (the advisory lock on a null key is a no-op). A missing function = PostgREST "function not
+ * found" (PGRST202 / 42883). Same answer as to_regprocedure, through the REST client the CLI has.
+ */
+export async function backfillRecorderPresent(db: { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { code?: string; message: string } | null }> }): Promise<boolean> {
+  const { data, error } = await db.rpc("routing_v2_backfill_record_live_decision", { p_row: {}, p_hold_reason: null });
+  if (!error) return data === "newer_inbound";
+  if (error.code === "PGRST202" || error.code === "42883" || /Could not find the function|does not exist/i.test(error.message)) return false;
+  throw new BackfillRefusal("could not check for routing_v2_backfill_record_live_decision");
+}
+
 function flagSummary(state: OrgV2State): Record<string, boolean | number> {
   const f = state.flags;
   return {
@@ -381,6 +394,9 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
   const startedAt = new Date(dbNow()).toISOString();
   const sinceIso = new Date(dbNow() - maxAgeDays * 86_400_000).toISOString();
 
+  if (opts.mode === "apply" && !(await backfillRecorderPresent(db as unknown as Parameters<typeof backfillRecorderPresent>[0]))) {
+    throw new BackfillRefusal("migration 20261031150000 (routing_v2_backfill_record_live_decision) is not applied: apply it through the normal migration workflow before --apply");
+  }
   const { facts, state } = await loadSelectionFacts(db, opts.orgId, sinceIso, dbNow());
   const flagCheck = checkFlags(state, opts.mode, opts.forceFlags === true);
   if (flagCheck.refuse) throw new BackfillRefusal(flagCheck.refuse);

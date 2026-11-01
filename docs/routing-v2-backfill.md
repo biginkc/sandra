@@ -89,8 +89,9 @@ sense right after the seller's message:
 
 Apply and sort-only call `routing_v2_backfill_record_live_decision` (migration
 20261031150000). It must be applied in production through the normal Sandra migration workflow
-before any `--apply` run. Without it, apply fails closed: every text errors and nothing is recorded.
-Dry-run and classify-only do not need it.
+before any `--apply` run. The CLI checks for it first and refuses `--apply` when it is missing.
+(Without that check, apply would still send nothing, but it would fail closed per lead: each lead it
+touched would get a needs-a-person hold.) Dry-run and classify-only do not need it.
 
 ## Run sequence for Jarrad
 
@@ -160,8 +161,6 @@ suppressions created.
 select id from messages where metadata->'routingV2Backfill'->'apply'->>'runId' = 'bf-2026-11-01';
 ```
 
-No database migration is needed.
-
 ### Undoing a classify-only run for one text
 
 Classify-only never touches the live responder claim. To forget its stored decision for a text
@@ -174,7 +173,7 @@ do $$ begin
   if not exists (
     select 1 from messages m
     where m.id = '<id>'
-      and m.metadata->'routingV2Backfill'->'classify'->>'outcome' like 'skipped:routing_v2:backfill_classify_only%'
+      and m.metadata->'routingV2Backfill'->'classify'->>'outcome' = 'skipped:routing_v2:backfill_classify_only'
       and not (m.metadata->'routingV2Backfill' ? 'apply')
       and not (m.metadata->'routingV2Backfill' ? 'applyStarted'))
   or exists (select 1 from ai_response_claims where inbound_message_id = '<id>' and status = 'processing')

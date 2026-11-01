@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ALL_OFF } from "@/lib/sms-classification/routing-v2/flags";
 
 import { ArgError, guardTarget, isLocalSupabaseUrl, last4, parseArgs } from "./args";
-import { BackfillItemError, backfillPriorKind, checkFlags, errorCode, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
+import { BackfillItemError, BackfillRefusal, backfillPriorKind, backfillRecorderPresent, checkFlags, errorCode, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
 import { adminClientTargetUrl } from "@/lib/supabase/admin";
 
 const ORG = "00000000-0000-0000-0000-000000000bbb";
@@ -116,5 +116,19 @@ describe("classify-only keyword pre-check", () => {
   it("names texts the up-front keyword hold would catch; a price-only text is not one", () => {
     expect(keywordHoldLikely("My mother died last week", null)).toBe(true);
     expect(keywordHoldLikely("Sounds good, call me tomorrow", null)).toBe(false);
+  });
+});
+
+describe("apply preflight: the backfill recorder migration must be applied", () => {
+  const db = (result: { data: unknown; error: { code?: string; message: string } | null }) => ({ rpc: async () => result });
+  it("present: the empty probe returns newer_inbound", async () => {
+    expect(await backfillRecorderPresent(db({ data: "newer_inbound", error: null }))).toBe(true);
+  });
+  it("absent: function-not-found means refuse --apply", async () => {
+    expect(await backfillRecorderPresent(db({ data: null, error: { code: "PGRST202", message: "Could not find the function public.routing_v2_backfill_record_live_decision" } }))).toBe(false);
+    expect(await backfillRecorderPresent(db({ data: null, error: { code: "42883", message: "function does not exist" } }))).toBe(false);
+  });
+  it("any other error: refuse to guess", async () => {
+    await expect(backfillRecorderPresent(db({ data: null, error: { code: "08006", message: "connection failure" } }))).rejects.toBeInstanceOf(BackfillRefusal);
   });
 });
