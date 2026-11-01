@@ -35,6 +35,8 @@ import { hasOpeningIdentity, openingIdentityError } from "./opening-identity";
 
 /** §5.4: the lead's test tag could not be read (transient); see checkSendAllowed. */
 const TEST_TAG_UNREADABLE = "test_tag_unreadable";
+/** A routing v2 safety obligation is unresolved on the lead: an automated send waits (Opus N6 on #956). */
+const OBLIGATION_UNRESOLVED = "obligation_unresolved";
 /** A queued text whose test tag could not be read is retried this much later. */
 const TEST_TAG_RETRY_MS = 5 * 60_000;
 
@@ -472,6 +474,12 @@ export type SendSmsInput = {
    * `evaluateAutomatedSuppression` in ./suppression.
    */
   origin: "automated" | "manual";
+  /**
+   * A person clicked Send on this text (a held draft from the Messages v2 hold card). It keeps
+   * origin "automated" for every consent / suppression re-check, but it is never refused by the
+   * routing v2 safety-obligation gate: a person sending is not an automated send.
+   */
+  personInitiated?: boolean;
   /** Contact to send to. We prefer a saved mobile across phone_1/2/3. */
   contactId: string;
   /** Linked property — required for quiet-hours zone + thread continuity. */
@@ -1085,6 +1093,7 @@ async function sendSmsToContactInner(
       propertyId: input.propertyId,
       destination: destination.phone,
       origin: input.origin,
+      personInitiated: input.personInitiated === true,
       testRunId: input.testRunId ?? null,
       messageId: pending.id,
     });
@@ -1099,7 +1108,7 @@ async function sendSmsToContactInner(
       // an unreadable consent / suppression state (every caller already retries or holds it).
       return allow.why === "refused_non_owned"
         ? { status: "blocked_before_provider", messageId: pending.id, retired, refusal: TEST_SEND_REFUSED }
-        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: TEST_TAG_UNREADABLE };
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: allow.why === "safety_obligation_open" ? OBLIGATION_UNRESOLVED : TEST_TAG_UNREADABLE };
     }
     if (input.beforeProviderSubmit) {
       let proceed = false;
@@ -2142,10 +2151,11 @@ async function releaseQueuedMessageInner(
         propertyId: msg.property_id,
         destination: msg.to_address ?? "",
         origin: "queued_release",
+        queuedSendOrigin: queuedOrigin,
         messageId: msg.id,
       })
       : { allowed: true as const };
-    if (!allow.allowed && allow.why === "taint_lookup_failed") {
+    if (!allow.allowed && (allow.why === "taint_lookup_failed" || allow.why === "safety_obligation_open")) {
       // A database blip must delay this queued text, never kill it: back to queued, a little
       // later (nothing reached the provider). The drain retries it on a later tick.
       const { error: requeueError } = await supabase
@@ -2154,7 +2164,7 @@ async function releaseQueuedMessageInner(
         .eq("id", msg.id)
         .eq("status", "pending");
       if (requeueError) return { status: "db_error", error: requeueError.message };
-      return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: TEST_TAG_UNREADABLE };
+      return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: allow.why === "safety_obligation_open" ? OBLIGATION_UNRESOLVED : TEST_TAG_UNREADABLE };
     }
     if (!allow.allowed) {
       const { error: refuseError } = await supabase

@@ -47,6 +47,13 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => {
       ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
       : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" };
   },
+  // Keep the reply-delay clamp (delay.ts) on the same mocked clock as checkQuietHours: an open
+  // window is local noon, so a reply's delay is not clamped to 0 when the suite runs at night.
+  getQuietHoursLocalTime: (state: string | null | undefined, now?: Date) => {
+    const actual = real.getQuietHoursLocalTime(state, now);
+    if (!actual || !propertyWindow.open) return actual;
+    return { ...actual, hour: 12, minute: 0, second: 0 };
+  },
   };
 });
 const recipientWindow = vi.hoisted(() => ({ open: true }));
@@ -251,6 +258,88 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     await settle();
     expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [input.inboundMessageId])).toBe(0);
     expect(await count("select count(*)::int n from routing_v2_outbox where property_id = $1", [lead.propertyId])).toBe(0);
+  });
+
+  it("M38 (Opus N1 at 46ee0f732bc1): a fallback marker with NO obligation row refuses the shared send check (legacy automated send and today's flags-off engine reply): 0 sends", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    // An earlier outbound on the thread (the opening text), so the send is an ordinary follow-up.
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    expect((await pg.query("select public.routing_v2_mark_obligation_unrecorded($1, null, 'nine_asked_stop') as r", [lead.propertyId])).rows[0].r).toBe(true);
+    expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1", [lead.propertyId])).toBe(0);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    const direct = await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" });
+    expect(direct, JSON.stringify(direct)).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+    const input = await inbound(lead, "Text only please");
+    jevProbabilities = { text_only: 0.95 };
+    await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+    await settle();
+    expect(sentTo(lead.phone)).toEqual([]);
+  });
+
+  it("M39 (Astra B1 at dc331c85974): a fallback marker written between a reclaim's read and its write survives (claimed false, marker intact, automated send refused); a stale owner never marks a reclaimed claim", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    const newInbound = async () => (await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address) values ($1,$2,$3,'inbound','sms','received','ok',$4,$5) returning id", [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY])).rows[0].id as string;
+    const { claimAiResponse } = await import("./claims");
+    const claimArgs = (inboundMessageId: string) => ({ orgId, inboundMessageId, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null });
+    const expire = (id: string) => pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1", [id]);
+    const markAs = (inboundId: string, claimId: string | null, claimedAt: string | null | undefined) =>
+      pg.query("select public.routing_v2_mark_obligation_unrecorded($1,$2,'nine_asked_stop',$3,$4::timestamptz) as r", [lead.propertyId, inboundId, claimId, claimedAt ?? null]).then((r) => r.rows[0].r as boolean);
+
+    // (1) A owns the claim, its lease runs out; B starts a reclaim and is paused after its read;
+    //     A (still the owner) writes the marker; B's write must refuse.
+    const m1 = await newInbound();
+    const a = await claimAiResponse(supabase as never, claimArgs(m1));
+    expect(a.claimed).toBe(true);
+    await expire(m1);
+    setTestBarrier("claim:reclaim_after_read", async (c) => {
+      if (c.inboundMessageId !== m1) return;
+      expect(await markAs(m1, a.claimId, a.claimed ? a.claimedAt : null)).toBe(true);
+    });
+    const b = await claimAiResponse(supabase as never, claimArgs(m1));
+    clearTestBarriers();
+    expect(b.claimed).toBe(false);
+    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m1])).rows).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
+    expect((await pg.query("select public.routing_v2_has_unresolved_obligation($1) as r", [lead.propertyId])).rows[0].r).toBe(true);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    expect(await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" }))
+      .toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+
+    expect(sentTo(lead.phone)).toEqual([]);
+  });
+
+  it("M39b (Astra second pass at f67102de9a8f): reverse order on an otherwise-unheld lead: B reclaims first, A's marker CAS is refused but the case is recorded on the inbound; B dies; lease expires; a flags-off sweep never stamps not_v2; send refused; the lead ends held", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    const m = (await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address, created_at) values ($1,$2,$3,'inbound','sms','received','ok',$4,$5, now() - interval '10 minutes') returning id", [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY])).rows[0].id as string;
+    const { claimAiResponse } = await import("./claims");
+    const claimArgs = { orgId, inboundMessageId: m, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null };
+    const expire = () => pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [m]);
+    const a = await claimAiResponse(supabase as never, claimArgs);
+    expect(a.claimed).toBe(true);
+    await expire();
+    const b = await claimAiResponse(supabase as never, claimArgs); // B reclaims BEFORE A writes its marker
+    expect(b.claimed).toBe(true);
+    // A: recorder + obligation failed; its marker CAS is refused (claimed_at moved) but the case is recorded.
+    const { markObligationUnrecorded } = await import("./safety-obligations");
+    expect(await markObligationUnrecorded(supabase, { propertyId: lead.propertyId, inboundMessageId: m, reason: "nine_asked_stop", claimId: a.claimId, claimedAt: a.claimed ? a.claimedAt : null })).toBe(true);
+    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m])).rows).toEqual([{ status: "processing", error_message: null }]);
+    expect((await pg.query("select public.routing_v2_has_unresolved_obligation($1) as r", [lead.propertyId])).rows[0].r).toBe(true);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    expect(await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" }))
+      .toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+    // B dies (never records); its lease expires; flags are off; the sweep runs.
+    await expire();
+    expect((await pg.query("select needs_human_attention h from properties where id = $1", [lead.propertyId])).rows[0].h).toBe(false);
+    await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId);
+    expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [m])).rows[0].r).not.toBe("not_v2");
+    expect((await pg.query("select needs_human_attention h from properties where id = $1", [lead.propertyId])).rows[0].h).toBe(true);
+    // The case was recovered by the obligation pass: a real hold, the obligation resolved with it.
+    expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and inbound_message_id = $2 and resolved_by = 'hold_durable'", [lead.propertyId, m])).toBe(1);
+    expect(sentTo(lead.phone)).toEqual([]);
   });
 
   it("eligible: one decision, one transition, the approved reply sent exactly once keyed by the outbox id", async () => {
@@ -1718,7 +1807,10 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await runRoutingV2OutboxReplies(supabase, { limit: 10 });          // the sweep holds and closes the dead claim
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
       expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "lease_dead_swept" });
-      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);   // a person clears it
+      // A person clears it through the real path (resolve the lead's obligations, then clear).
+      const { resolveSafetyObligationsByPerson } = await import("./safety-obligations");
+      await resolveSafetyObligationsByPerson(supabase, lead.propertyId);
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);
       haikuAnswer = null;
       const c = await say(lead, B_TEXT); await runWorkflows(); await settle();
       await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
@@ -1746,6 +1838,11 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, error_message, lease_expires_at) values ($1,$2,$3,$4,$5,$6, now() - interval '2 hours')",
         [orgId, m.id, lead.propertyId, lead.contactId, claim === "dead" ? "processing" : "error", claim === "dead" ? null : "flag_failed"]);
       await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' where inbound_message_id = $1", [m.id]);
+      // A pre-store row is carried into the obligation store by 20261031140100's backfill.
+      // (On a database before that migration the decision row + claim above are the representation.)
+      if ((await pg.query("select to_regclass('public.routing_v2_safety_obligations') is not null as t")).rows[0].t) {
+        await pg.query("insert into routing_v2_safety_obligations (org_id, property_id, inbound_message_id, reason, source, created_at) values ($1,$2,$3,'nine_needs_person','legacy', now() - interval '2 hours')", [orgId, lead.propertyId, m.id]);
+      }
       return m.id as string;
     };
     forced("M25: a possible stop whose hold cannot be written: no decision row, claim v2_safety_hold_failed, the newer text blocked (0 sends); once writes work the per-property delivery holds the lead", async (lead) => {
@@ -1759,6 +1856,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       // no decision row (only the after-response audit row, status not_routed)
       expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status <> 'not_routed'", [a])).toBe(0);
       expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "v2_safety_hold_failed" });
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where inbound_message_id = $1 and resolved_at is null", [a])).toBe(1);
       haikuAnswer = null;
       const b = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, B_TEXT); await runWorkflows(); await settle(); return id; });
       expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
@@ -1827,6 +1925,193 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
     });
 
+    // ---- Astra fourth review of 7e6e72c13839 (round 18): one obligation store ----
+    forced("M30: the recorder fails (obligation opened), the claim is reclaimed by a retry, then B: still blocked (0 sends); the per-property sweep holds and resolves it", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      haikuAnswer = null;
+      // Stress F11 / Astra P1-1: A's lease runs out and the REAL retry reclaim in claims.ts takes the
+      // claim back (status processing, live lease, error marker v2_safety_hold_failed cleared). B then
+      // arrives while A is still processing.
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1", [a]);
+      const { claimAiResponse } = await import("./claims");
+      const reclaim = await claimAiResponse(supabase as never, { orgId, inboundMessageId: a, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null });
+      expect(reclaim.claimed).toBe(true);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toMatchObject({ status: "processing", error_message: null });
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      expect(sentTo(lead.phone)).toEqual([]);
+      const bStamp = await stampOf(b);
+      expect(bStamp.r === "routing_v2:already_held" || bStamp.o === "skipped:rule_0").toBe(true);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M31: the recorder fails on safety text A (obligation, no hold), then B \"Nobody by that name here\" on the wrong-number road (wrong_number_all off, automation + template on, lead not otherwise held): B sends nothing", async (lead) => {
+      if (!(await count("select count(*)::int n from auto_reply_templates where org_id = $1 and outcome = 'wrong_number'", [orgId]))) await seedWrongNumberAutomation();
+      // The wrong-number automation must really be on for every iteration (an earlier test may have
+      // left the threshold row off), so the only thing that can stop B's send is the obligation.
+      await pg.query("insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'wrong_number', 0.9, true) on conflict (org_id, outcome) do update set min_confidence = 0.9, automation_enabled = true", [orgId]);
+      // Stress F12 (rebuilt) / Astra P1-2: A's safety hold cannot be written, exactly as in M30.
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      haikuAnswer = null;
+      expect(await pg.query("select needs_human_attention, hold_kind from properties where id = $1", [lead.propertyId]).then((r) => r.rows[0])).toMatchObject({ needs_human_attention: false, hold_kind: null });
+      // B: a wrong-person reply; this-property close (closeNineWrongPersonThisProperty) would send the template.
+      jevProbabilities = { wrong_person: 0.95 }; jevByReply = { "Nobody by that name here": { wrong_person: 0.95 } };
+      const b = await say(lead, "Nobody by that name here"); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M32: an unresolved obligation, flags turned off, the sweep runs (hold still failing), flags back on, then B: blocked; the obligation is still recovered later", async (lead) => {
+      await legacySafetyDecision(lead, "stop texting me maybe", "dead");
+      const { rows: [cfg] } = await pg.query("select routing_v2_flags from ai_responder_configs where org_id = $1", [orgId]);
+      await pg.query("update ai_responder_configs set routing_v2_flags = '{}'::jsonb where org_id = $1", [orgId]);
+      await withHoldRefused(lead.propertyId, async () => { await runRoutingV2OutboxReplies(supabase, { limit: 10 }); });
+      await pg.query("update ai_responder_configs set routing_v2_flags = $2::jsonb where org_id = $1", [orgId, JSON.stringify(cfg.routing_v2_flags)]);
+      const b = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, B_TEXT); await runWorkflows(); await settle(); return id; });
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+    });
+    forced("M33: stacked reasons: held for R1 (a needs-confirm review), then a safety hold on top, then an automated clear of R1: still held; B gets nothing; a person's clear ends it", async (lead) => {
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'jev_dnc_needs_confirm' where id = $1", [lead.propertyId]);
+      const { markPropertyNeedsAttention } = await import("./dispatch");
+      expect(await markPropertyNeedsAttention(supabase, lead.propertyId, "nine_asked_stop")).toBe(true);
+      // The review-resolved trigger's own clear (20261008300200): reason-filtered, not a person.
+      await pg.query("update properties set needs_human_attention = false, last_ai_escalation_reason = null where id = $1 and last_ai_escalation_reason = 'jev_dnc_needs_confirm'", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await stampOf(b)).toMatchObject({ o: "skipped:rule_0" });
+      const { resolveSafetyObligationsByPerson } = await import("./safety-obligations");
+      await resolveSafetyObligationsByPerson(supabase, lead.propertyId);
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    });
+
+    // ---- Opus review of #956 at 36321be81c39 (B1, B2, B4) ----
+    let personUserId: string | null = null;
+    async function person(): Promise<string> {
+      if (!personUserId) {
+        const { data, error } = await supabase.auth.admin.createUser({ email: `rv2-person-${randomUUID()}@example.invalid`, password: randomUUID() + randomUUID(), email_confirm: true });
+        if (error || !data.user) throw error ?? new Error("no user");
+        personUserId = data.user.id;
+      }
+      // beforeEach deletes this org's memberships; an owner membership for the person (no acquisitions flags).
+      await pg.query("insert into memberships (user_id, org_id, role, access_status) values ($1, $2, 'owner', 'active') on conflict (user_id, org_id) do update set role = 'owner', access_status = 'active'", [personUserId, orgId]);
+      return personUserId;
+    }
+    async function holdDeps() {
+      const userId = await person();
+      const { sendHumanDraft } = await import("./dispatch");
+      return { admin: supabase, orgId, userId, sendHumanDraft, recordLeadEvent: async () => {}, resumeRun: async () => null, recordStep: async () => {}, reportError: (e: unknown) => { throw e; } } as never;
+    }
+    async function seenOf(propertyId: string) {
+      const { rows: [p] } = await pg.query("select last_ai_escalation_reason r, last_ai_escalation_at::text a from properties where id = $1", [propertyId]);
+      return { through: new Date(Date.now() + 1000).toISOString(), flagReason: p.r as string | null, flagAt: (p.a as string | null) ?? null };
+    }
+    async function stackedHold(lead: Awaited<ReturnType<typeof seedLead>>) {
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'draft_held', last_ai_escalation_at = now() where id = $1", [lead.propertyId]);
+      const { markPropertyNeedsAttention } = await import("./dispatch");
+      expect(await markPropertyNeedsAttention(supabase, lead.propertyId, "nine_asked_stop")).toBe(true); // legacy re-escalation: stacked
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(1);
+    }
+    for (const flagsOn of [true, false]) {
+      forced(`M34 (B1): a stacked hold (legacy re-escalation on a held lead) is cleared by the REAL Messages v2 Dismiss and Take over (flags ${flagsOn ? "on" : "off"})`, async (lead) => {
+        const saved = (await pg.query("select routing_v2_flags f from ai_responder_configs where org_id = $1", [orgId])).rows[0].f;
+        if (!flagsOn) await pg.query("update ai_responder_configs set routing_v2_flags = '{}'::jsonb where org_id = $1", [orgId]);
+        try { await m34Body(lead); } finally {
+          await pg.query("update ai_responder_configs set routing_v2_flags = $2 where org_id = $1", [orgId, JSON.stringify(saved)]);
+        }
+      });
+    }
+    async function m34Body(lead: Awaited<ReturnType<typeof seedLead>>) {
+        const { dismissHold, takeOverHold } = await import("@/app/(dashboard)/messages-v2/hold-actions");
+        await stackedHold(lead);
+        const dismissed = await dismissHold(await holdDeps(), { propertyId: lead.propertyId, reason: "handled by phone", seen: await seenOf(lead.propertyId) });
+        expect(dismissed.ok).toBe(true);
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_by = 'person'", [lead.propertyId])).toBe(1);
+        await stackedHold(lead);
+        const taken = await takeOverHold(await holdDeps(), { propertyId: lead.propertyId, seen: await seenOf(lead.propertyId) });
+        expect(taken.ok).toBe(true);
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+    }
+    forced("M35 (B2): an open obligation never refuses a person's own draft reply (sendHumanDraft): it is sent", async (lead) => {
+      await legacySafetyDecision(lead, "stop texting me maybe", "flag_failed");
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(1);
+      // The held draft answers a newer seller text that nothing has answered yet.
+      const { rows: [m] } = await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address) values ($1,$2,$3,'inbound','sms','received','are you there',$4,$5) returning id",
+        [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY]);
+      const { sendHumanDraft } = await import("./dispatch");
+      const r = await sendHumanDraft(supabase, { orgId, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null, inboundMessageId: m.id as string, inboundFromPhone: lead.phone, body: "person reply (test)", userId: await person(), edited: false });
+      expect(r, JSON.stringify(r)).toMatchObject({ status: "sent" });
+      expect(sentTo(lead.phone).map((m) => m.body)).toEqual(["person reply (test)"]);
+    });
+    forced("M36 (B4): the recorder fails AND the obligation insert fails: the fallback marker blocks B (0 sends); the sweep promotes it and the hold lands", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const fn = `refuse_ob_${lead.propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${lead.propertyId}' then raise exception 'forced obligation failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before insert on public.routing_v2_safety_obligations for each row execute function public.${fn}()`);
+      let a: string;
+      try {
+        a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.routing_v2_safety_obligations`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+      haikuAnswer = null;
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1", [lead.propertyId])).toBe(0);
+      await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 }); // B's reply, if any, is delivered here
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toMatchObject({ status: "completed", error_message: "v2_safety_obligation_promoted" }); // the per-property sweep promoted the marker
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M37 (B4): obligation AND fallback marker both unwritable: the claim is never completed (lease expiry re-runs the text)", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const fn = `refuse_obm_${lead.propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${lead.propertyId}' and (tg_table_name = 'routing_v2_safety_obligations' or new.error_message = 'v2_safety_obligation_unrecorded') then raise exception 'forced failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before insert on public.routing_v2_safety_obligations for each row execute function public.${fn}()`);
+      await pg.query(`create trigger ${fn}_c before insert or update on public.ai_response_claims for each row execute function public.${fn}()`);
+      let a = "";
+      let thrown: unknown = null;
+      try {
+        // Astra second pass at f67102de9a8f: nothing durable could be written, so the run fails hard
+        // (never "escalated" as if handled).
+        await withHoldRefused(lead.propertyId, async () => {
+          a = await say(lead, "I think I'm all set");
+          try { await runWorkflows(); } catch (e) { thrown = e; }
+          await settle();
+        });
+      } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.routing_v2_safety_obligations`);
+        await pg.query(`drop trigger if exists ${fn}_c on public.ai_response_claims`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+      haikuAnswer = null;
+      expect(String(thrown)).toMatch(/safety case could not be recorded/);
+      const claim = (await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0];
+      expect(claim.status).not.toBe("completed");
+      expect(claim.error_message).not.toBe("v2_safety_hold_failed");
+    });
+
     // ---- Follow-up PR (Opus N1 / Fable N-B): a keyword hold that cannot be written ----
     const sayRaw = async (lead: Awaited<ReturnType<typeof seedLead>>, body: string, externalId: string) => (await handleInboundWebhook(new Request("https://v2.test/webhooks/mock", {
       method: "POST",
@@ -1881,8 +2166,13 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [m.id]);
         await pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [m.id]);
         expect(await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId)).toBe(1);
-        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
-        expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [m.id])).rows[0].r).toBe("held");
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
+        // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+        // #956 merge: the hold comes from the obligation recovery (the obligation resolves with it), not
+        // from a per-text sweep mark; the text is never relabelled not_v2.
+        expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [m.id])).rows[0].r).not.toBe("not_v2");
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
         expect(await hotEvents()).toBe(1);
         expect(sentTo(lead.phone)).toEqual([]);
       } finally {
@@ -1927,7 +2217,9 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
         expect(await claimOf(r.id)).toEqual([{ status: "error", error_message: "v2_safety_hold_failed" }]);
         expect(await ageAndSweep(lead, r.id)).toBe(1);
-        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
+        // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
         expect(sentTo(lead.phone)).toEqual([]);
       } finally {
@@ -1942,8 +2234,11 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         expect(r.status).toBe(500);
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
         expect((await claimOf(r.id)).map((c) => c.status)).toEqual(["processing"]);
-        expect(await ageAndSweep(lead, r.id)).toBe(1);
-        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        // #956 merge: the sweep handles the lead's open obligation AND the expired processing claim.
+        expect(await ageAndSweep(lead, r.id)).toBe(2);
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
+        // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
         expect(sentTo(lead.phone)).toEqual([]);
       } finally {

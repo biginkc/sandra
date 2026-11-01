@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { APPROVED_REPLY_TEXTS } from "@/lib/ai-responder/approved-reply-texts";
 import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { reapplyRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
  * 20261030250000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
@@ -1015,13 +1016,24 @@ describe("B0. post-commit fence and undo/send serialization", () => {
   // A second connection writes messages here. Creating this migration's FKs inside the test
   // transaction would lock `messages` against it, so this block installs the migration
   // COMMITTED on the isolated stack first and removes it afterwards.
+  // Shared-stack safety (test-only). This block needs 250000's own bodies COMMITTED (a second
+  // connection runs them). On a stack that lacked the migration it is installed and removed as
+  // before. On a fully migrated stack, committing 250000's ROLLBACK used to drop routing_v2_phone_*
+  // and everything newer migrations built on them for every suite that ran later; instead the
+  // newer migrations are re-applied (committed, in order), restoring exactly the schema they define.
   const admin = new Client({ connectionString: url });
+  let installedHere = false;
   beforeAll(async () => {
     await admin.connect();
+    installedHere = (await admin.query("select to_regclass('public.routing_v2_phone_actions') is null as m")).rows[0].m as boolean;
     await admin.query(`begin; ${MIGRATION}; commit;`);
   });
   afterAll(async () => {
-    await admin.query(`begin; ${ROLLBACK}; commit;`);
+    if (installedHere) {
+      await admin.query(`begin; ${ROLLBACK}; commit;`);
+    } else {
+      await reapplyRoutingV2After(admin, "20261030250000");
+    }
     await admin.end();
   });
 

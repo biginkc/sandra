@@ -633,4 +633,38 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     // The live look ran (it classified the text); the backfill's completed claim did not stop it.
     expect(jevCalls).toBeGreaterThan(calls);
   });
+
+  it("replay whose safety hold cannot be recorded: the same fail-closed path as live (#956 obligation, claim marker)", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Quit texting this phone", 2, { asked_stop: 0.95 });
+    await run("classify_only", "bf-holdfail", { limit: 1 });
+    const r = await run("apply", "bf-holdfail", { limit: 1 }, {
+      dispatch: async (...args) => {
+        // The recorder vanishes after the preflight: the replayed stop decision cannot be recorded.
+        await pg.query("alter function public.routing_v2_backfill_record_live_decision(jsonb, text) rename to routing_v2_backfill_record_live_decision_off");
+        try {
+          const { dispatchAiResponse } = await import("@/lib/ai-responder/dispatch");
+          return await dispatchAiResponse(...args);
+        } finally {
+          await pg.query("alter function public.routing_v2_backfill_record_live_decision_off(jsonb, text) rename to routing_v2_backfill_record_live_decision");
+        }
+      },
+    });
+    // The hold reason is the live one for this wording (this text also reads as hostile).
+    expect(r.items.map((i) => i.inboundId)).toEqual([id]);
+    expect(r.items[0].outcome).toMatch(/^escalated:(nine_asked_stop|hostile_needs_confirm)/);
+    // The obligation was opened; the per-property delivery that follows re-attempts the hold, and
+    // once it lands durably the obligation resolves (hold_durable), exactly as live.
+    const [ob] = await q("select resolved_by from routing_v2_safety_obligations where inbound_message_id = $1 and source = 'hold_failed'", [id]);
+    expect(ob === undefined ? "missing" : (ob.resolved_by ?? "open")).toMatch(/^(open|hold_durable)$/);
+    const [held] = await q("select needs_human_attention h from properties where id = $1", [lead.propertyId]);
+    expect(held.h || ob?.resolved_by == null).toBe(true);
+    const [c] = await q("select status, error_message from ai_response_claims where inbound_message_id = $1 and response_kind = 'sms_ai_responder_v1'", [id]);
+    expect(c).toEqual({ status: "error", error_message: "v2_safety_hold_failed" });
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status in ('decided','failed')", [id])).toBe(0);
+    await settle();
+    expect(sentTo(lead.phone)).toHaveLength(0);
+  });
 });
