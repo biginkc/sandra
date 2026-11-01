@@ -3424,6 +3424,7 @@ async function classifyOnlyForHotText(
   input: AiDispatchInput,
   property: GateProperty & { last_ai_escalation_reason?: string | null },
   runCtx: MaybeRunContext,
+  opts: { holdFailed?: boolean } = {},
 ): Promise<void> {
   const orgId = property.org_id;
   try {
@@ -3447,16 +3448,22 @@ async function classifyOnlyForHotText(
     if (!input.conversationId) return;
     const { data: claim, error: claimError } = await supabase
       .from("ai_response_claims")
-      .select("id, status, lease_expires_at")
+      .select("id, status, lease_expires_at, outcome, error_message")
       .eq("inbound_message_id", inboundId)
       .limit(1);
     if (claimError) return;
-    const prior = (claim ?? [])[0] as { status: string; lease_expires_at: string | null } | undefined;
+    const prior = (claim ?? [])[0] as
+      | { status: string; lease_expires_at: string | null; outcome?: string | null; error_message?: string | null }
+      | undefined;
     // Done ('completed') or another run's live lease: stop. A released
     // 'error' claim (an earlier hot-text write failed) or an expired
     // 'processing' claim (a crashed run) is retried.
     if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > (await dbNowMs(supabase))))) return;
-    const retryOfFailedWrite = prior?.status === "error";
+    // Only a hot-text write that really failed is retried. An error claim for another reason (a
+    // keyword hold that could not be written, Astra B1) keeps the existing-classification check
+    // below, so a late redelivery never pays for a second classification.
+    const retryOfFailedWrite = prior?.status === "error"
+      && (prior.error_message === "hot_text_event_not_recorded" || prior.outcome === "hot_text_write_failed");
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode, escalation_keywords")
@@ -3507,8 +3514,17 @@ async function classifyOnlyForHotText(
         await completeAiResponseClaim(supabase, {
           claimId: claim2.claimId,
           outcome: "hot_text_write_failed",
-          errorMessage: "hot_text_event_not_recorded",
+          errorMessage: opts.holdFailed ? "v2_safety_hold_failed" : "hot_text_event_not_recorded",
           releaseLease: true,
+        });
+      } else if (opts.holdFailed) {
+        // Astra B1: the keyword hold was not written. This claim must never read as handled: the
+        // sweep recovers a text with no claim, an expired processing claim, or this failure state,
+        // never a completed claim. One write, so no repair step can fail or be skipped.
+        await completeAiResponseClaim(supabase, {
+          claimId: claim2.claimId,
+          outcome: classifyOnlyOutcome,
+          errorMessage: "v2_safety_hold_failed",
         });
       } else {
         await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
@@ -3533,6 +3549,12 @@ export async function checkHotTextAfterKeywordHold(
   escalationKeywords: ReadonlyArray<string> | null,
   runCtx: MaybeRunContext,
   knownProperty?: GateProperty & { last_ai_escalation_reason?: string | null },
+  /**
+   * Astra B1 (reviews of 1d7825003 / 051ee6d4f): the keyword hold itself could NOT be written.
+   * The hot-only claim is then completed straight into the sweep-recoverable failure state
+   * (error / v2_safety_hold_failed), in the same write, never `completed` first.
+   */
+  opts: { holdFailed?: boolean } = {},
 ): Promise<void> {
   if (holdReason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) || !input.inboundMessageId) return;
   if (!isPriceKeyword(input.inboundBody, escalationKeywords)) return;
@@ -3551,6 +3573,7 @@ export async function checkHotTextAfterKeywordHold(
     input,
     { ...property, needs_human_attention: true, last_ai_escalation_reason: holdReason },
     runCtx,
+    opts,
   );
 }
 
