@@ -68,6 +68,8 @@ export class ProviderStubs {
   dmLatencyMs = 50;
   /** Override: answer for any reply text (tests). */
   jevOverride: ((reply: string) => Partial<Probs> | null) | null = null;
+  /** Optional park: awaited before a v2 Jev answer is returned (holds a run mid-classification, after its claim). */
+  jevGate: ((reply: string) => Promise<void> | null) | null = null;
   haikuOverride: ((thread: string) => { status: number; text?: string } | null) | null = null;
   haikuDelayMs = 0;
   haikuShapeOk = 0;
@@ -156,6 +158,7 @@ export class ProviderStubs {
         this.calls.push({ provider, at: t0, status: 200, key: reply, ms: Date.now() - t0 });
         return this.json(200, { answers, model: "jev-stub", usage: { input_tokens: 1, output_tokens: 1 } });
       }
+      await this.jevGate?.(reply);
       const rec = (this.jevOverride?.(reply) as Probs | null | undefined) ?? this.data.probsByReply.get(reply)?.probs ?? null;
       const ptype = this.data.probsByReply.get(reply)?.ptype ?? { residential: 0.02, lot: 0, commercial: 0, rental: 0, didnt_say: 0.96 };
       const answers: Record<string, unknown> = {};

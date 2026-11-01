@@ -195,12 +195,12 @@ export async function setFlags(pg: Client, orgId: string, flags: Record<string, 
  * re-addressed to an in-hours (816, MO) number: contact phone + the property's inbound from_address are rewritten.
  */
 export async function readdressToInHours(pg: Client, lead: Lead): Promise<string> {
-  const phone = `+1816${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
+  const phone = `+1${AREA[IS] ?? "816"}${String(2_000_000 + Math.floor(Math.random() * 7_000_000))}`;
   await pg.query("update public.contacts set phone_1 = $1 where id = $2", [phone, lead.contactId]);
   await pg.query("update public.messages set from_address = $1 where property_id = $2 and direction = 'inbound'", [phone, lead.propertyId]);
   await pg.query("update public.messages set to_address = $1 where property_id = $2 and direction = 'outbound'", [phone, lead.propertyId]);
-  await pg.query("update public.properties set state = 'MO' where id = $1", [lead.propertyId]);
-  lead.phone = phone; lead.state = "MO";
+  await pg.query("update public.properties set state = $2 where id = $1", [lead.propertyId, IS]);
+  lead.phone = phone; lead.state = IS;
   return phone;
 }
 export const QUIET_ZONE = { state: "HI", fips: null as string | null, tz: "Pacific/Honolulu" };
@@ -208,5 +208,7 @@ export const QUIET_ZONE = { state: "HI", fips: null as string | null, tz: "Pacif
 /** Quiet fixture zone, chosen per run (QUIET_STATE env): GU (Pacific/Guam) or PR (America/Puerto_Rico). Never a clock move. */
 export const QUIET_TZ_BY_STATE: Record<string, string> = { GU: "Pacific/Guam", PR: "America/Puerto_Rico", HI: "Pacific/Honolulu" };
 export const QS = process.env.QUIET_STATE ?? "GU";
+/** In-hours fixture state (default MO; CA when Central is past 21:00). */
+export const IS = process.env.IN_STATE ?? "MO";
 export const QA = AREA[QS]!;
 export const QT = QUIET_TZ_BY_STATE[QS]!;

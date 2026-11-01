@@ -5,7 +5,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 
 import { assertStack, Receipt, finishNoLiveClassifier } from "./lib/env";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
-import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg, QS, QA, QT } from "./lib/seed";
+import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg, QS, QA, QT, IS } from "./lib/seed";
 import { assertClockAligned, assertZoneQuiet, FIXTURE_ZONES } from "./lib/clock";
 import { readdressToInHours } from "./lib/seed";
 import { loadReplay, offsetToChicago, ProviderStubs, setClockOffset } from "./lib/stubs";
@@ -56,7 +56,7 @@ it("G4b stage tests + flag-off rollback", async () => {
   };
   const runStage = async (flags: Record<string, unknown>, label: string) => {
     await setFlags(pg, BMH, flags);
-    const leads = await seedLeads(pg, org, sample.length, { ourLast: (i) => sample[i]!.our_last ?? "Hi", state: () => ({ state: "MO", fips: null }), address: (i) => `${i} Stage ${label} Ct` });
+    const leads = await seedLeads(pg, org, sample.length, { ourLast: (i) => sample[i]!.our_last ?? "Hi", state: () => ({ state: IS, fips: null }), address: (i) => `${i} Stage ${label} Ct` });
     const res = [];
     for (let i = 0; i < sample.length; i++) {
       const ext = `${org.runId}-${label}-${i}`;
@@ -87,7 +87,7 @@ it("G4b stage tests + flag-off rollback", async () => {
     haiku: { body: "SLICE hmm maybe not", probs: { not_interested: 0.55 }, check: async () => stubs.count("haiku", (c) => c.key.startsWith("SLICE hmm")) },
     price_check: { body: "SLICE I want 250000 for it", probs: { named_price: 0.95, talked_price: 0.9 }, check: async (p) => (await pg.query("select price_outcome from routing_v2_live_decisions where property_id = $1", [p])).rows[0]?.price_outcome ?? null },
     alert_on_time_only: { body: "SLICE yes sure", probs: { open_to_selling: 0.95 }, check: async (p) => (await pg.query("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert' and status <> 'cancelled'", [p])).rows[0].n },
-    wrong_number_all: { body: "SLICE wrong person", probs: { wrong_person: 0.95 }, check: async (p) => (await pg.query("select count(*)::int n from routing_v2_phone_actions where source_property_id = $1", [p])).rows[0].n },
+    wrong_number_all: { body: "Nobody by that name here", probs: { wrong_person: 0.95 }, check: async (p) => (await pg.query("select count(*)::int n from routing_v2_phone_actions where source_property_id = $1", [p])).rows[0].n },
     model_stop_suppression: { body: "SLICE please quit it", probs: { asked_stop: 0.95 }, check: async (p) => (await pg.query("select count(*)::int n from routing_v2_model_stop_events where property_id = $1", [p])).rows[0].n },
   };
   stubs.jevOverride = (r) => Object.values(roadCase).find((c) => c.body === r)?.probs ?? null;
@@ -95,10 +95,14 @@ it("G4b stage tests + flag-off rollback", async () => {
     const out: Record<string, unknown> = {};
     for (const on of [true, false]) {
       await setFlags(pg, BMH, { ...ALL, [slice]: on });
-      const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }) });
+      const [lead] = await seedLeads(pg, org, 1, { state: () => ({ state: IS, fips: null }) });
       const before = stubs.count("haiku", (x) => x.key.startsWith("SLICE hmm"));
+      // wrong_number_all: the phone action waits for its 30 s inbound settle window and the workflow retries after a
+      // real sleep; the harness workflow sleep is a no-op by default, which exhausted the retries in milliseconds.
+      if (slice === "wrong_number_all") workflowSink.realSleepMaxMs = 45_000;
       await deliverWebhook({ externalId: `${org.runId}-slice-${slice}-${on}`, from: lead!.phone, to: org.sender, body: c.body });
       await settle();
+      workflowSink.realSleepMaxMs = 0;
       const v = await c.check(lead!.propertyId, lead!.phone);
       out[on ? "on" : "off"] = slice === "haiku" ? (v as number) - before : v;
       out[(on ? "on" : "off") + "_road"] = (await pg.query("select road from routing_v2_live_decisions where property_id = $1", [lead!.propertyId])).rows[0]?.road;
@@ -133,7 +137,7 @@ it("G4b stage tests + flag-off rollback", async () => {
   await deliverWebhook({ externalId: `${org.runId}-q2`, from: qb!.phone, to: org.sender, body: "QYES yes interested" });
   await settle();
   await runRoutingV2OutboxReplies(db, { limit: 50 });
-  qc!.state = "MO"; await readdressToInHours(pg, qc!); // qc is the in-hours lead (was "12:00 Chicago")
+  qc!.state = IS; await readdressToInHours(pg, qc!); // qc is the in-hours lead (was "12:00 Chicago")
   await deliverWebhook({ externalId: `${org.runId}-q3`, from: qc!.phone, to: org.sender, body: "QYES yes" });
   await settle();
   await pg.query("begin; set local session_replication_role = replica; update public.sequence_enrollments set next_run_at = now() - interval '1 minute' where property_id = any($1) and status = 'active'; commit;".replace("$1", `array['${qa!.propertyId}','${qb!.propertyId}','${qc!.propertyId}']::uuid[]`));

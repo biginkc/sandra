@@ -4,7 +4,7 @@ import { afterAll, beforeAll, it, vi } from "vitest";
 import { assertClockAligned, FIXTURE_ZONES } from "./lib/clock";
 import { deliverWebhook, workflowSink, type WorkflowCall } from "./lib/driver";
 import { assertStack, finishNoLiveClassifier, headSha, Receipt } from "./lib/env";
-import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg } from "./lib/seed";
+import { BMH, createRunOrg, retirePriorRuns, seedLeads, setFlags, type Lead, type RunOrg, IS } from "./lib/seed";
 import { loadReplay, ProviderStubs } from "./lib/stubs";
 
 vi.mock("workflow/api", async (o) => (await import("./lib/wf-mock")).workflowMocks.api(o as never));
@@ -59,7 +59,7 @@ it(`F1 / F2 x${N}`, async () => {
   let n = 0;
   const ext = () => `${org.runId}-f-${n++}`;
   const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Fence Ct` }))[0]!;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: IS, fips: null }), address: () => `${n} Fence Ct` }))[0]!;
   const say = async (l: Lead, body: string) => { await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body }); await settle(); await pause(300); await runRoutingV2OutboxReplies(db, { limit: 50 }); await pause(300); };
 
   // F1
@@ -167,7 +167,7 @@ it(`F4 / F5 / F6 / F7 x${N}`, async () => {
   let n = 0;
   const ext = () => `${org.runId}-f47-${n++}`;
   const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Crash Ct` }))[0]!;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: IS, fips: null }), address: () => `${n} Crash Ct` }))[0]!;
   const sweep = async () => { try { await runRoutingV2OutboxReplies(db, { limit: 50 }); } catch (e) { return String(e); } return null; };
   const say = async (l: Lead, body: string) => { await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body }); await settle(); await pause(300); const e = await sweep(); await pause(300); return e; };
   const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
@@ -328,7 +328,7 @@ it(`F8 / F9 / F10 x${N}`, async () => {
   let n = 0;
   const ext = () => `${org.runId}-f810-${n++}`;
   const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Dead Ct` }))[0]!;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: IS, fips: null }), address: () => `${n} Dead Ct` }))[0]!;
   const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
   const lastIn = async (id: string) => (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [id])).rows[0];
   const claim = async (mid: string) => (await pg.query("select status, outcome, error_message em from ai_response_claims where inbound_message_id = $1", [mid])).rows[0];
@@ -409,8 +409,9 @@ it(`F8 / F9 / F10 x${N}`, async () => {
  *   escalated/v2_safety_hold_failed; trigger dropped; claim lease backdated 2 h; A RE-RUN through the app's own workflow body
  *   (the captured aiReplyDelayWorkflow start params replayed = a workflow retry) and parked at dispatch:after_early_gate
  *   (barrier throws = dies before classification); then B "TONLY text only please". No sweep in between.
- * F12: A "You can talk to my lawyer about it" with the keyword hold write failing (per-lead trigger on properties, as F9);
- *   flags wrong_number_all OFF, replies ON; B "SLICE wrong person" (G4b fixture, stub wrong_person 0.95). B must send 0.
+ * F12: A = F11's safety text with the recorder failing (claim error/v2_safety_hold_failed, no hold, no opt-out confirm);
+ *   flags wrong_number_all OFF, replies ON; B "Nobody by that name here" (builder fixture, dispatch.routing-v2-live.test.ts;
+ *   not a webhook wrong-number keyword; stub wrong_person 0.95). B must send 0.
  * F13: A "TONLY text only please" crashes at dispatch:after_decision (decision persisted, effects not durable); claim +
  *   inbound backdated 2 h; flags all off; sweep (marks it not_v2); flags back on; B "TONLY text only please"; then a sweep
  *   with flags on. B blocked + 0 sends; A recoverable (hold lands or obligation still visible).
@@ -425,13 +426,13 @@ it(`F11 / F12 / F13 x${N}`, async () => {
   const { setTestBarrier, clearTestBarriers } = await import("@/lib/testing/test-barriers");
   const db = createTestClient();
   const prevJev = stubs.jevOverride; const prevHaiku = stubs.haikuOverride;
-  stubs.jevOverride = (r) => r.includes("TONLY") ? { text_only: 0.95 } : r.includes("NOTINT") ? { not_interested: 0.95 } : r.includes("QSTOP") ? { asked_stop: 0.65 } : r.includes("SLICE wrong person") ? { wrong_person: 0.95 } : null;
+  stubs.jevOverride = (r) => r.includes("TONLY") ? { text_only: 0.95 } : r.includes("NOTINT") ? { not_interested: 0.95 } : r.includes("QSTOP") ? { asked_stop: 0.65 } : r === "Nobody by that name here" ? { wrong_person: 0.95 } : null;
   stubs.haikuOverride = (thread) => /SELLER: QSTOP[^\n]*$/.test(thread.split("\n\nReturn JSON")[0]!) ? { status: 200, text: JSON.stringify({ road: "asked_stop", confidence: 0.9 }) } : null;
   await setFlags(pg, BMH, FLAGS);
   let n = 0;
   const ext = () => `${org.runId}-f1113-${n++}`;
   const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
-  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Obligation Ct` }))[0]!;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: IS, fips: null }), address: () => `${n} Obligation Ct` }))[0]!;
   const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
   const lastIn = async (id: string) => (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r, metadata->'processing'->'routingV2Sweep'->>'result' sw from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [id])).rows[0];
   const claim = async (mid: string) => (await pg.query("select status, outcome, error_message em from ai_response_claims where inbound_message_id = $1", [mid])).rows[0];
@@ -476,19 +477,30 @@ it(`F11 / F12 / F13 x${N}`, async () => {
         await pg.query("delete from public.stress_fail_lead where property_id = $1", [l.propertyId]);
         const a = await lastIn(l.propertyId); const ca = await claim(a.id); const da = await dec(a.id); const pa = await prop(l.propertyId);
         await age(a.id);
-        let parked = 0; let rerun = "no_start_captured";
-        setTestBarrier("dispatch:after_early_gate", async (ctx) => { if (ctx.propertyId !== l.propertyId || parked) return; parked++; throw new Error("stress-park:after_early_gate"); });
-        if (startA) { rerun = await (startA as WorkflowCall).fn((startA as WorkflowCall).params).then((r) => sh(JSON.stringify(r)).slice(0, 60), (e) => `threw:${sh(String(e)).slice(0, 50)}`); }
-        clearTestBarriers();
+        // Faithful reclaim (Astra): replay A through the app's own workflow body; claimAiResponse reclaims the expired
+        // claim (status processing, error_message cleared); A is parked INSIDE classification (stub Jev gate, after the
+        // reclaim); B arrives while A is still processing; then A is released.
+        let parked = 0; let rerun = "no_start_captured"; let release: () => void = () => {};
+        const gate = new Promise<void>((r) => { release = r; });
+        let entered: () => void = () => {}; const enteredP = new Promise<void>((r) => { entered = r; });
+        stubs.jevGate = (reply) => (reply.startsWith("QSTOP") && !parked++ ? (entered(), gate) : null);
+        let rerunP: Promise<string> = Promise.resolve(rerun);
+        if (startA) rerunP = (startA as WorkflowCall).fn((startA as WorkflowCall).params).then((r) => sh(JSON.stringify(r)).slice(0, 60), (e) => `threw:${sh(String(e)).slice(0, 50)}`);
+        await Promise.race([enteredP, pause(15_000)]);
+        const caParked = await claim(a.id);
         const ca2 = await claim(a.id);
         const s0 = sends(l.phone);
         await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); await pause(500);
-        const r = await blockedB(l, s0); total += r.s;
-        if (r.ok) pass++;
-        const k = `${r.ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} A-claim=${ca?.status}:${sh(ca?.outcome)}:${sh(ca?.em)} A-decision=${da} holdAfterA=${pa.nh ? pa.r : "-"} rerun=${rerun} parkedAtEarlyGate=${parked} A-claimAfterRerun=${ca2?.status}:${sh(ca2?.outcome)}:${sh(ca2?.em)} ${r.txt}`;
+        const r = await blockedB(l, s0);
+        release(); rerun = await rerunP; stubs.jevGate = null; await settle(); await pause(300);
+        const sAfter = sends(l.phone) - s0; total += sAfter;
+        const caEnd = await claim(a.id); const pEnd = await prop(l.propertyId);
+        const ok = r.ok && sAfter === 0;
+        if (ok) pass++;
+        const k = `${ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} A-claim=${ca?.status}:${sh(ca?.outcome)}:${sh(ca?.em)} A-decision=${da} holdAfterA=${pa.nh ? pa.r : "-"} parkedInJev=${parked} A-claimWhileParked=${caParked?.status}:${sh(caParked?.em)} A-claimAtB=${ca2?.status}:${sh(ca2?.em)} ${r.txt} | A-released rerun=${rerun} A-claimEnd=${caEnd?.status}:${sh(caEnd?.outcome)}:${sh(caEnd?.em)} holdEnd=${pEnd.nh ? pEnd.r : "-"} sendsIncludingAfterRelease=${sAfter}`;
         modes[k] = (modes[k] ?? 0) + 1;
       }
-      R4.line(`${verdict(pass)} F11 recorder fails on safety text A -> lease expired -> A re-run (workflow replay) parked at dispatch:after_early_gate -> B: ${pass}/${N}; sends ${total}`);
+      R4.line(`${verdict(pass)} F11 recorder fails on safety text A -> lease expired -> A reclaimed (workflow replay -> claimAiResponse) and parked inside classification -> B while A processing -> release A: ${pass}/${N}; sends ${total}`);
       R4.line("   modes", modes);
     }
     // F12
@@ -497,23 +509,25 @@ it(`F11 / F12 / F13 x${N}`, async () => {
       for (let i = 0; i < N; i++) {
         await setFlags(pg, BMH, FLAGS);
         const l = await fresh();
-        await pg.query("insert into public.stress_fail_lead values ($1, 'hold') on conflict do nothing", [l.propertyId]);
-        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "You can talk to my lawyer about it" }); await settle();
+        // A = F11's safety text with the atomic recorder failing: claim error/v2_safety_hold_failed, NO hold, no opt-out-confirm hold.
+        await pg.query("insert into public.stress_fail_lead values ($1, 'decision') on conflict do nothing", [l.propertyId]);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "QSTOP I am all set for good, thanks" }); await settle();
+        const caA = await claim((await lastIn(l.propertyId)).id);
         const a = await lastIn(l.propertyId); const pa = await prop(l.propertyId);
         await pg.query("delete from public.stress_fail_lead where property_id = $1", [l.propertyId]);
         await setFlags(pg, BMH, { ...FLAGS, wrong_number_all: false });
         const s0 = sends(l.phone);
-        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "SLICE wrong person" }); await settle(); await pause(300);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "Nobody by that name here" }); await settle(); await pause(300);
         await runRoutingV2OutboxReplies(db, { limit: 50 }); await pause(300);
         const r = await blockedB(l, s0); total += r.s;
         const phoneActs = (await pg.query("select count(*)::int n from routing_v2_phone_actions where source_property_id = $1", [l.propertyId])).rows[0].n;
         const ok = r.s === 0;
         if (ok) pass++;
-        const k = `${ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} holdAfterA=${pa.nh ? pa.r : "-"} ${r.txt} phoneActions=${phoneActs}`;
+        const k = `${ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} A-claim=${caA?.status}:${sh(caA?.em)} holdAfterA=${pa.nh ? pa.r : "-"} ${r.txt} phoneActions=${phoneActs}`;
         modes[k] = (modes[k] ?? 0) + 1;
       }
       await setFlags(pg, BMH, FLAGS);
-      R4.line(`${verdict(pass)} F12 keyword hold write fails on A, then wrong-person B with wrong_number_all OFF + replies ON -> B sends 0: ${pass}/${N}; sends ${total}`);
+      R4.line(`${verdict(pass)} F12 A = safety text whose recorder fails (marker, no hold), then wrong-person B \"Nobody by that name here\" with wrong_number_all OFF + replies ON -> B sends 0: ${pass}/${N}; sends ${total}`);
       R4.line("   modes", modes);
     }
   } finally {

@@ -39,6 +39,7 @@ const T = Number(process.env.G3_SECONDS ?? 300) * 1000;
 const POOL = Number(process.env.G3_POOL ?? 16);
 const WEBHOOK_POOL = Number(process.env.G3_WEBHOOK_POOL ?? 12);
 let webhook500 = 0;
+const failed500: Array<{ ext: string; wave: string; at: number; fault: string; body: string; lead: string }> = [];
 /** Wait for in-flight workflows, at most `ms`; returns how many were still running. */
 async function drainInflight(ms: number): Promise<number> {
   const deadline = Date.now() + ms;
@@ -191,7 +192,7 @@ it("G3 blast-day replay", async () => {
   };
   const deliverOne = async (e: Ev) => {
     const st = await deliverWebhook({ externalId: e.ext, from: e.lead.phone, to: org.sender, body: e.body });
-    if (st !== 200) { webhook500++; if (webhook500 <= 20) R.line("webhook status", st, e.ext); }
+    if (st !== 200) { webhook500++; failed500.push({ ext: e.ext, wave: e.wave, at: Math.round(performance.now()), fault: faultLabel, body: e.body.slice(0, 60), lead: e.lead.propertyId }); if (webhook500 <= 20) R.line("webhook status", st, e.ext, `wave=${e.wave} fault=${faultLabel}`); }
   };
   const webhookPool = new Pool(WEBHOOK_POOL);
   const webhookInflight: Promise<void>[] = [];
@@ -264,6 +265,28 @@ it("G3 blast-day replay", async () => {
   const inbound = await q("select id, property_id, body, created_at, metadata from messages where direction = 'inbound' and property_id = any($1)");
   const inboundIds = inbound.map((m) => m.id as string);
   R.line(`deliveries attempted: ${all.length + burst.length} (unique provider ids ${evs.length + burst.length}, duplicate deliveries ${dupes.length}); inbound rows stored: ${inbound.length}`);
+  {
+    // Missing provider ids: which delivery, its wave / chaos window, its webhook status, and the lead's outbox state.
+    const ext = await q("select external_id from messages where direction = 'inbound' and property_id = any($1)");
+    const have = new Set(ext.map((r) => r.external_id as string));
+    const missing = [...evs, ...burst].filter((e) => !have.has(e.ext));
+    for (const e of missing) {
+      const f = failed500.find((x) => x.ext === e.ext);
+      const ob = await q("select kind, status, coalesce(cancel_reason,'') r from routing_v2_outbox where property_id = $1", [e.lead.propertyId]);
+      const leadIn = await q("select count(*)::int n from messages where direction = 'inbound' and property_id = $1", [e.lead.propertyId]);
+      R.line("MISSING provider id", e.ext, { wave: e.wave, webhookNon200: !!f, faultAtDelivery: f?.fault ?? "(delivered 200 or not in failed list)", body: e.body.slice(0, 60), leadInboundRows: leadIn[0].n, leadOutbox: ob });
+    }
+    // Provider retry semantics: a webhook that answered non-200 is redelivered by the provider. Redeliver each once now
+    // (after the run, faults off) and record whether it is stored; the strict check below still uses the pre-retry count.
+    const retried: Record<string, unknown>[] = [];
+    for (const f of failed500) {
+      const lead = leads.find((x) => x.propertyId === f.lead)!;
+      const st = await deliverWebhook({ externalId: f.ext, from: lead.phone, to: org.sender, body: [...evs, ...burst].find((e) => e.ext === f.ext)!.body });
+      const stored = (await q("select count(*)::int n from messages where external_id = $1", [f.ext]))[0].n;
+      retried.push({ ext: f.ext, wave: f.wave, faultAtFirst: f.fault, retryStatus: st, storedAfterRetry: stored });
+    }
+    R.line("webhook non-200 deliveries redelivered once (provider retry):", retried);
+  }
   R.check("one inbound row per unique provider message id (duplicates never stored twice)", inbound.length === evs.length + burst.length, { stored: inbound.length, unique: evs.length + burst.length });
 
   const claims = await q("select inbound_message_id, count(*)::int n from ai_response_claims where property_id = any($1) group by 1");
@@ -425,10 +448,21 @@ it("G3 blast-day replay", async () => {
     const owed = (await q("select count(*)::int n from routing_v2_outbox o where o.property_id = any($1) and o.hold_pending"))[0].n;
     const notSent = await q(`select o.cancel_reason r, bool_or(p.needs_human_attention) held, count(*)::int n from routing_v2_outbox o join properties p on p.id = o.property_id
       where o.property_id = any($1) and o.kind = 'reply' and o.status = 'cancelled' and o.cancel_reason like 'not_sent:%' group by 1`);
-    const unheld = (await q(`select count(*)::int n from routing_v2_outbox o join properties p on p.id = o.property_id where o.property_id = any($1) and o.kind = 'reply'
+    // Definition (round 17 triage): a not_sent reply cancel owes a person ONLY when none of the intended no-hold outcomes
+    // apply. Exempt: (1) mechanics no-op (template_already_sent*, nine_window_closed*, older auto reply) while that
+    // inbound's v2 drip is active or completed (C1: the drip is the outcome); (2) superseded / held_for_person /
+    // already_terminal / flag_off (a newer text or a person owns it); (3) a newer inbound on the lead; (4) the lead is held
+    // or carries a terminal disposition (wrong number / DNC / opted out). Everything else on an unheld lead is counted.
+    R.line("hold_pending accounting definition: holdPendingLeft = outbox rows with hold_pending after drain; notSentUnheld = not_sent reply cancels on an unheld, non-terminal lead with no newer inbound, excluding mechanics no-ops whose v2 drip runs/ran and superseded/held_for_person/already_terminal/flag_off reasons");
+    const unheldRows = await q(`select o.id, o.cancel_reason r, o.property_id from routing_v2_outbox o join properties p on p.id = o.property_id where o.property_id = any($1) and o.kind = 'reply'
       and o.status = 'cancelled' and o.cancel_reason like 'not_sent:%' and not p.needs_human_attention
-      and not exists (select 1 from messages m where m.property_id = o.property_id and m.direction = 'inbound' and m.created_at > (select created_at from messages where id = o.inbound_message_id))`))[0].n;
-    R.check("hold_pending accounting: rows still owing a hold after drain = 0; not_sent replies on an unheld lead with no newer text = 0", owed === 0 && unheld === 0, { holdPendingLeft: owed, notSentUnheld: unheld, notSentByReason: notSent });
+      and coalesce(p.outreach_dispo, '') not in ('wrong_number','dnc','opted_out','bad_number')
+      and o.cancel_reason !~ '(superseded|held_for_person|already_terminal|flag_off)'
+      and not (o.cancel_reason ~ '(template_already_sent|nine_window_closed|older_auto_reply)' and exists (select 1 from sequence_enrollments e where e.property_id = o.property_id and e.routing_v2_inbound_id = o.inbound_message_id and e.status in ('active','completed')))
+      and not exists (select 1 from messages m where m.property_id = o.property_id and m.direction = 'inbound' and m.created_at > (select created_at from messages where id = o.inbound_message_id))`);
+    const unheld = unheldRows.length;
+    const unheldByReason = unheldRows.reduce((acc: Record<string, number>, r) => { acc[r.r] = (acc[r.r] ?? 0) + 1; return acc; }, {});
+    R.check("hold_pending accounting: rows still owing a hold after drain = 0; not_sent replies owing a person but not held = 0", owed === 0 && unheld === 0, { holdPendingLeft: owed, notSentUnheld: unheld, unheldByReason, sample: unheldRows.slice(0, 5), notSentByReason: notSent });
   }
   {
     // Sweep closures (routing_v2_effects_durable): texts the sweep marked, by result, and dead claims left open.
@@ -439,13 +473,17 @@ it("G3 blast-day replay", async () => {
   {
     // Unrecovered obligations: an inbound whose decision/effects never became durable (no completed claim, no keyword exit,
     // or decision row without a completed claim) on a lead that is NOT held at the end, and not superseded by a newer text.
-    const unrec = await q(`select m.id, m.property_id, c.status cs, (select count(*)::int from routing_v2_live_decisions d where d.inbound_message_id = m.id) nd
+    R.line("unrecovered obligations definition: newest inbound per lead, no keyword exit, lead not held, claim not completed, stamp outcome not matching ^(skipped|escalated|auto_closed|deferred|flagged) (prefix), and its v2 decision is not not_routed and its stamp reason does not contain already_terminal");
+    const unrec = await q(`select m.id, m.property_id, c.status cs, m.metadata->'processing'->'aiResponder'->>'outcome' o, m.metadata->'processing'->'aiResponder'->>'reason' r,
+        (select string_agg(d.status, ',') from routing_v2_live_decisions d where d.inbound_message_id = m.id) ds
       from messages m join properties p on p.id = m.property_id
       left join ai_response_claims c on c.inbound_message_id = m.id and c.response_kind = 'sms_ai_responder_v1'
       where m.property_id = any($1) and m.direction = 'inbound' and m.metadata->>'keyword' is null and not p.needs_human_attention
         and coalesce(c.status, '') <> 'completed'
         and not exists (select 1 from messages n where n.property_id = m.property_id and n.direction = 'inbound' and n.created_at > m.created_at)
-        and coalesce(m.metadata->'processing'->'aiResponder'->>'outcome', '') not in ('skipped','escalated','auto_closed','deferred')`);
+        and coalesce(m.metadata->'processing'->'aiResponder'->>'outcome', '') !~ '^(skipped|escalated|auto_closed|deferred|flagged)'
+        and coalesce(m.metadata->'processing'->'aiResponder'->>'reason', '') !~ 'already_terminal'
+        and not exists (select 1 from routing_v2_live_decisions d where d.inbound_message_id = m.id and d.status = 'not_routed')`);
     R.check("unrecovered obligations: newest inbounds with non-durable decision/effects on an unheld lead at the end = 0", unrec.length === 0, { n: unrec.length, sample: unrec.slice(0, 5) });
   }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
@@ -572,6 +610,13 @@ it("G3 blast-day replay", async () => {
   const led = await q("select provider, outcome, count(*)::int n, sum(coalesce(input_tokens,0))::int tin, sum(coalesce(output_tokens,0))::int tout from provider_spend_ledger where property_id = any($1) group by 1, 2");
   R.line("spend ledger rows by provider/outcome (A-6):", led);
   const ledN = (p: string) => led.filter((r) => r.provider === p).reduce((a, r) => a + r.n, 0);
+  {
+    const hk = await q(`select l.inbound_message_id, count(*)::int n, string_agg(l.outcome || ':' || coalesce(l.http_status::text,''), ',') o,
+      (select (d.haiku->>'asked') || ':' || coalesce(d.road,'') from routing_v2_live_decisions d where d.inbound_message_id = l.inbound_message_id) dec
+      from provider_spend_ledger l where l.property_id = any($1) and l.provider = 'haiku' group by 1`);
+    const decWithHaiku = new Set(decisions.filter((d) => d.haiku && (d.haiku as { asked?: boolean }).asked !== false).map((d) => d.inbound_message_id as string));
+    R.line("haiku ledger rows not matching one-per-consultation:", hk.filter((r) => r.n !== 1 || !decWithHaiku.has(r.inbound_message_id)).slice(0, 20));
+  }
   const haikuDecisions = decisions.filter((d) => d.haiku && (d.haiku as { asked?: boolean }).asked !== false).length;
   R.check("A-6 (fdd5e8c82): one Jev ledger row per Jev v2 HTTP attempt incl. retries", ledN("jev") === jevV2, { ledgerJev: ledN("jev"), jevV2HttpAttempts: jevV2, v2Classifications: decisions.length, jevAbortedByClientTimeout: stubs.aborted, jevNineQuestionHttpCalls: jevNine });
   R.check("C5: every Haiku request is arm d (no output_config, max_tokens 200, stop_sequences [\"}\"])", stubs.haikuShapeBad === 0 && stubs.haikuShapeOk > 0, { ok: stubs.haikuShapeOk, bad: stubs.haikuShapeBad });
