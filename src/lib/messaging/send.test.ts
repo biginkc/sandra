@@ -167,7 +167,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -202,7 +202,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -237,7 +237,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -262,7 +262,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome.status).toBe("blocked_fresh_state_unavailable");
@@ -293,7 +293,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", messageId: "msg-1" });
@@ -319,7 +319,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
@@ -340,16 +340,16 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
   it("takeover audit: the person is the actor when the caller passes one, else the system", async () => {
     vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
-    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234", takeoverActorId: "user-7" });
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", takeoverActorId: "user-7" });
     expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "user", actorId: "user-7" } });
-    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234" });
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145" });
     expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "system" } });
   });
 
   it("a scheduled seller appointment reminder is not a takeover", async () => {
     vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
     const outcome = await sendSmsToContact(fakeSupabase(sentScript()), {
-      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234",
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
       metadata: { kind: "seller_appointment_reminder", reminderId: "r1", taskId: "t1" },
     });
     expect(outcome).toMatchObject({ status: "sent" });
@@ -364,7 +364,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contacts: [...script.contacts, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
       properties: [...script.properties, { data: PROPERTY_ROW, error: null }],
     }), {
-      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234",
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
     });
     expect(outcome).toMatchObject({ status: "sent" });
     expect(takeover.pause).not.toHaveBeenCalled();
@@ -408,7 +408,7 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     contactId: CONTACT_ID,
     propertyId: PROPERTY_ID,
     body: "hello",
-    from: "+18165551234",
+    from: "+18165550145",
     metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-1" },
   };
 
@@ -510,7 +510,7 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
   it.each(["automated", "manual"] as const)("§5.4: a %s (drip / bulk / rep) send with an unreadable test tag gets the same retryable status", async (origin) => {
     const { provider, supabase } = scripted();
     allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
-    const outcome = await sendSmsToContact(supabase, { origin, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165551234" });
+    const outcome = await sendSmsToContact(supabase, { origin, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145" });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "test_tag_unreadable" });
   });
@@ -581,7 +581,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
     const provider = {
       ...fakeProvider(),
       providerId: "sendillo",
-      getDefaultFromNumber: () => "+18165551234",
+      getDefaultFromNumber: () => "+18165550145",
     };
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
     vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
@@ -630,7 +630,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -666,7 +666,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Just checking whether you had a chance to consider it.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toMatchObject({ status: "sent", messageId: "message-follow-up" });
@@ -694,7 +694,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -723,7 +723,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Would you consider a cash offer?",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "automated" },
@@ -767,7 +767,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
       queueOnly: true,
     });
 
@@ -795,7 +795,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: firstBody,
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual", openingIdentityRequired: true },
@@ -817,7 +817,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
     expect(provider.sendSms).toHaveBeenCalledWith({
       to: CONTACT_ROW.phone_1,
       body: claimedBody,
-      from: "+18165551234",
+      from: "+18165550145",
     });
     // A person's queued text finally going out is a takeover: the Book appointment drip stops.
     expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
@@ -831,7 +831,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
         {
           data: {
             id: "queued-t", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
-            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
           },
           error: null,
@@ -872,7 +872,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
         {
           data: {
             id: "queued-r", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
-            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
           },
           error: null,
@@ -897,7 +897,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
         {
           data: {
             id: "queued-9", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
-            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165551234",
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "automated", openingIdentityRequired: true },
           },
           error: null,
@@ -929,7 +929,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Hi there, Mel with BMH here. Previous opener.",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual", openingIdentityRequired: true },
@@ -969,7 +969,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Hi, Mel with BMH here. Previous opener.",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual" },
@@ -1022,7 +1022,7 @@ describe("sendSmsToContact — Sendillo organization scope", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -1042,7 +1042,7 @@ describe("sendSmsToContact — Sendillo organization scope", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -1089,7 +1089,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
     status: "sent",
     external_id: "provider-existing",
     error_message: null,
-    from_address: "+18165551234",
+    from_address: "+18165550145",
     to_address: CONTACT_ROW.phone_1,
     metadata: null,
     ...overrides,
@@ -1109,7 +1109,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1130,7 +1130,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1152,7 +1152,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1178,7 +1178,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "edited after response loss",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1208,7 +1208,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1252,7 +1252,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Hi, Mel with BMH here.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -1285,7 +1285,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Hi, Mel with BMH here.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
