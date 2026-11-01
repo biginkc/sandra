@@ -40,6 +40,8 @@ export type BackfillMarker = {
   apply?: { runId: string; at: string; outcome?: string; treatment?: string; priorClaimId?: string };
   superseded?: { runId: string; at: string; byInboundId: string };
   skipped?: { runId: string; at: string; reason: string };
+  /** Written just before an apply dispatch: a decision row with this and no `apply` is an interrupted backfill apply (resumable). */
+  applyStarted?: { runId: string; at: string };
 };
 
 export type InboundRow = {
@@ -186,7 +188,8 @@ export function selectCandidates(
 export function skipReasonFor(row: InboundRow, facts: SelectionFacts, mode: SelectionMode): SkipReason | null {
   if (alreadyBackfilled(row.marker, mode)) return "already_backfilled";
   // A live (or flag-on) v2 decision that no backfill classify-only run wrote: the engine owns it.
-  if (row.hasLiveDecision && !row.marker?.classify) return "already_routed_live";
+  // An interrupted backfill apply (applyStarted, no apply) is resumable, not "routed live".
+  if (row.hasLiveDecision && !row.marker?.classify && !row.marker?.applyStarted) return "already_routed_live";
   const latest = facts.latestOutbound.get(row.propertyId);
   if (latest && ms(latest.humanAt) > ms(row.createdAt)) return "answered_by_human";
   if (latest && ms(latest.at) > ms(row.createdAt)) return "answered_by_automation";

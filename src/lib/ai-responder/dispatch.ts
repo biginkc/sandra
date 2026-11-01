@@ -392,10 +392,19 @@ export type RoutingV2BackfillContext = {
    * decision row, hold, pause, cancel, alert, obligation, reply or drip (Opus review B1).
    */
   onClassified?: (row: Record<string, unknown>) => Promise<void>;
+  /**
+   * Apply / sort-only resume: an interrupted backfill apply already recorded this text's decision
+   * (routing_v2_live_decisions); carry out that row instead of classifying again.
+   */
+  resumeRecordedDecision?: boolean;
 };
 
 /** A backfill text the v2 engine did not take (flags / canary / engine off, or unreadable): skipped, never the legacy engine. */
 export const ROUTING_V2_BACKFILL_V2_NOT_LIVE = "routing_v2:backfill_v2_not_live";
+/** Classify-only: the text would take the up-front keyword hold (a side effect): skipped, reported as keyword_hold. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD = "routing_v2:backfill_classify_only_keyword_hold";
+/** Apply / sort-only: a newer seller text exists on the property, so this older one is not acted on. */
+export const ROUTING_V2_BACKFILL_NEWER_INBOUND = "routing_v2:backfill_newer_inbound";
 /** Classify-only could not decide without a side effect (a hold, a recorder failure): skipped. */
 export const ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE = "routing_v2:backfill_classify_only_unavailable";
 
@@ -940,6 +949,11 @@ async function dispatchAiResponseCore(
       result: "skipped",
       detail: { why: "disabled_per_property" },
     }, deps.runContext);
+  }
+  if (keywordHit && !keywordGated && input.routingV2Backfill?.mode === "classify_only") {
+    // Classify-only (enforced here, with the keywords just read): the up-front keyword hold is a
+    // side effect, so the text is skipped and counted instead (Astra review 1).
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD };
   }
   const keywordEscalation = deferPriceKeyword || keywordGated
     ? ({ escalated: false } as const)
@@ -1591,7 +1605,7 @@ async function classifyAndHandleNonRouteOutcomes(
       if (v2) return { handled: true, outcome: v2 };
       if (input.routingV2Backfill) {
         // The v2 step declined after the pre-gate said live (a flag flip / read error in between).
-        await completeClaim(supabase, input.propertyId, { claimId: responseClaim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_V2_NOT_LIVE });
+        await completeClaim(supabase, input.propertyId, { claimId: responseClaim.claimId, outcome: ROUTING_V2_BACKFILL_V2_NOT_LIVE });
         return { handled: true, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE } };
       }
       // Opus review of 93a8070932bd (B1): a lead still held here got past the early gate only
@@ -8823,6 +8837,22 @@ async function runRoutingV2LiveStepInner(
   // exactly as live (a safety decision with its atomic hold), then carry it out. No second
   // Jev / Haiku call. The row keeps the classify-time revision, so a lead that changed since
   // (a person acted, a text went out) makes the transition hold for a person instead of acting.
+  if (input.routingV2Backfill && input.routingV2Backfill.mode !== "classify_only") {
+    // Newest-inbound fence (Astra review 3): a newer seller text on this lead owns it. Checked
+    // before anything is recorded, so no hold, suppression, close or alert comes from an older text.
+    const newer = await backfillNewerInboundExists(supabase, input.propertyId, inboundMessageId);
+    if (newer !== "no") {
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+      return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+    }
+    if (input.routingV2Backfill.resumeRecordedDecision) {
+      const recordedEarlier = await readLiveV2Evidence(supabase, inboundMessageId);
+      if (recordedEarlier && (recordedEarlier.status === "decided" || recordedEarlier.status === "failed")) {
+        if (recordedEarlier.property_id !== input.propertyId || recordedEarlier.org_id !== property.org_id) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+        return applyRoutingV2LiveEvidence(supabase, a, flags, recordedEarlier);
+      }
+    }
+  }
   const storedRow = input.routingV2Backfill?.mode !== "classify_only" ? input.routingV2Backfill?.storedDecisionRow : undefined;
   if (storedRow) {
     if (storedRow.property_id !== input.propertyId || storedRow.org_id !== property.org_id || storedRow.inbound_message_id !== inboundMessageId) {
@@ -8900,7 +8930,7 @@ async function runRoutingV2LiveStepInner(
     } catch {
       return backfillClassifyOnlySkipOr(supabase, a, () => nineHoldAndComplete(supabase, a, "nine_needs_person"));
     }
-    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_CLASSIFY_ONLY });
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_CLASSIFY_ONLY });
     return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_ONLY };
   }
   // Astra review of b6a00a0a2f17 (A): a safety decision is recorded together with its effects.
@@ -8932,6 +8962,17 @@ async function runRoutingV2LiveStepInner(
   return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
 }
 
+/** A newer inbound SMS on the property than this one ("yes" / "no" / "error" = treat as newer). */
+async function backfillNewerInboundExists(supabase: SupabaseClient<Database>, propertyId: string, inboundMessageId: string): Promise<"yes" | "no" | "error"> {
+  const { data: me, error } = await supabase.from("messages").select("created_at").eq("id", inboundMessageId).maybeSingle();
+  if (error || !me) return "error";
+  const { data: newer, error: newerError } = await supabase.from("messages").select("id, created_at")
+    .eq("property_id", propertyId).eq("direction", "inbound").eq("channel", "sms").gte("created_at", me.created_at)
+    .neq("id", inboundMessageId).limit(20);
+  if (newerError) return "error";
+  return (newer ?? []).some((m) => m.created_at > me.created_at || m.id > inboundMessageId) ? "yes" : "no";
+}
+
 /** Classify-only never writes a hold: a path that would hold skips the text instead (counted). */
 async function backfillClassifyOnlySkipOr(
   supabase: SupabaseClient<Database>,
@@ -8939,7 +8980,7 @@ async function backfillClassifyOnlySkipOr(
   live: () => Promise<AiDispatchOutcome>,
 ): Promise<AiDispatchOutcome> {
   if (a.input.routingV2Backfill?.mode !== "classify_only") return live();
-  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE });
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE });
   return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE };
 }
 
@@ -9113,7 +9154,7 @@ async function applyRoutingV2SortOnly(
     await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
     return { outcome: "auto_closed", reason: `routing_v2:backfill_sort_only:${dispo}` };
   }
-  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED });
+  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED });
   return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED };
 }
 

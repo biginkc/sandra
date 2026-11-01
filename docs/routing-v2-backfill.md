@@ -13,8 +13,9 @@ backlog.
 | 15–60 days (`--max-age-days`, default 60) | **Sort only**: no auto reply, no drip. Stops are handled (suppressed or held), legal / needs-a-person texts are held, wrong person / sold / tenant and not interested are closed on that property, bad numbers are marked, and hot texts (yes, offer, okay, price, call me, said they'd call, any alert road) raise their alert and go to Jarrad's queue (held for a person). Everything else is recorded only. |
 
 `--text-max-age-days` above 14 is refused unless `--i-know-this-widens-texting` is also passed.
-Age is measured on the database clock, and the group is decided when each text is dispatched, so
-a text that turns 15 days old during a long run gets sort only.
+Age is measured on the database clock in whole days (14.9 days is still day 14, full treatment),
+and the group is decided when each text is dispatched, so a text that turns 15 days old during a
+long run gets sort only.
 
 **Pending Jarrad:** in the sort-only group, every price text (including "price too high", which
 has no alert of its own live) goes to Jarrad's queue with the existing "Named a price" alert. That
@@ -47,13 +48,22 @@ sense right after the seller's message:
   What classify-only DOES write, all bookkeeping that no seller or lead state reads:
   - the backfill marker on the seller text (with the decision);
   - the spend ledger (one Jev row per text, plus Haiku if on);
-  - the claim move below, plus one new completed responder claim (`routing_v2:backfill_classify_only`);
+  - the claim move below, plus one new responder claim that finishes `status = completed`,
+    `outcome = routing_v2:backfill_classify_only`;
   - trace / pipeline-run rows for the dispatch;
   - for price texts with the price check on: the DealMachine value lookup (a provider call) and
     its value-cache row, exactly as live.
   A rare error or race that would otherwise flag the lead (an unreadable consent / turn check, a
   send-gate flag, an unreadable engine) skips the text and counts it instead
-  (`routing_v2:backfill_classify_only_unavailable`).
+  (`routing_v2:backfill_classify_only_unavailable`). A text that would take the up-front keyword
+  hold is skipped and reported as `keyword_hold`; this is enforced inside the dispatch with the
+  keyword list it reads, so a keyword added mid-run is honoured.
+- A text whose responder claim is in an error state (for example `v2_safety_hold_failed`, a live
+  safety barrier) is never touched: skipped and counted as `claim_error_state`.
+- Apply / sort-only never act on a text once a newer seller text exists on the lead (checked
+  before anything is recorded): skipped as `routing_v2:backfill_newer_inbound`.
+- `--rate` is capped at 60 per minute. The production check uses the URL the admin client
+  actually connects to.
 - If routing v2 is not live for a text when it is dispatched (flags, canary or engine are checked
   again for every text, so turning `questions_live` off stops the run), the text is skipped and
   counted as `routing_v2:backfill_v2_not_live`. The old engine never answers a backfill text.
@@ -99,8 +109,11 @@ Apply records the exact decision classify-only stored (a stop / hold decision th
 atomic recorder as live) and carries it out, with no second model call. If the lead changed in
 between (a person acted, a text went out), the transition holds for a person instead of acting.
 Use ONE run id for the whole sequence. If a run stops partway, run the same command again (or
-`--resume <run id>`): texts already applied or superseded are never routed twice. `--limit N`
-caps one run.
+`--resume <run id>`): texts already applied or superseded are never routed twice, and a text
+whose apply stopped after its decision was recorded is finished from that recorded decision. If
+the run crashed mid-text, wait 5 minutes first (the crashed claim's lease); until then that text
+reports `claim_in_progress` and is left alone. `--limit N` caps one run. An error after a text
+was dispatched still reports what was really queued or sent for it (read back from the database).
 
 ## Report
 
@@ -130,17 +143,28 @@ No database migration is needed.
 
 ### Undoing the claim move for one text
 
-Only for a text that a backfill classified but did NOT apply (an applied text has a real
-outcome; leave it), and only when that classify-only finished normally (its marker shows
-`classify.outcome` starting with `skipped:routing_v2:backfill_classify_only`). A text whose
-classify-only crashed or was skipped may have a different claim state; look at it by hand. In the SQL editor, for inbound id `<id>`:
+Only for a text that a backfill classified and that NO apply has started on, and never while an
+apply run is going. The SQL refuses anything else (it changes nothing unless every check holds).
+In the SQL editor, for inbound id `<id>`:
 
 ```sql
 begin;
--- 1. The claim the backfill dispatch created (classify-only leaves it completed / skipped).
+-- 0. Refuse unless: classify-only finished normally, no apply started or finished, no live claim.
+do $$ begin
+  if not exists (
+    select 1 from messages m
+    where m.id = '<id>'
+      and m.metadata->'routingV2Backfill'->'classify'->>'outcome' like 'skipped:routing_v2:backfill_classify_only%'
+      and not (m.metadata->'routingV2Backfill' ? 'apply')
+      and not (m.metadata->'routingV2Backfill' ? 'applyStarted'))
+  or exists (select 1 from ai_response_claims where inbound_message_id = '<id>' and status = 'processing')
+  then raise exception 'not undoable: applied, apply started, classify-only did not finish, or a claim is live';
+  end if;
+end $$;
+-- 1. The claim the classify-only dispatch created.
 delete from ai_response_claims
   where inbound_message_id = '<id>' and response_kind = 'sms_ai_responder_v1'
-    and error_message = 'routing_v2:backfill_classify_only';
+    and status = 'completed' and outcome = 'routing_v2:backfill_classify_only';
 -- 2. Put the original claim back (the oldest one the backfill moved).
 update ai_response_claims set response_kind = 'sms_ai_responder_v1', updated_at = now()
   where id = (select id from ai_response_claims

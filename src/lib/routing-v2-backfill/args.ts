@@ -4,6 +4,8 @@
 import { DEFAULT_MAX_AGE_DAYS, DEFAULT_RATE_PER_MINUTE, DEFAULT_TEXT_MAX_AGE_DAYS, type BackfillMode } from "./run";
 
 export const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
+/** Hard ceiling on dispatches per minute at the CLI (Jarrad's 60/min). */
+export const MAX_RATE_PER_MINUTE = 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/;
 
@@ -53,7 +55,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--max-age-days": out.maxAgeDays = num(a, next(), { min: 1 }); break;
       case "--text-max-age-days": out.textMaxAgeDays = num(a, next(), { min: 0, integer: true }); break;
       case "--batch-max-age-days": out.batchMaxAgeDays = num(a, next(), { min: 0 }); break;
-      case "--rate": out.ratePerMinute = num(a, next(), { min: 1 }); break;
+      case "--rate": out.ratePerMinute = num(a, next(), { min: 1 }); break; // ceiling checked below
       case "--force-flags": out.forceFlags = true; break;
       case "--i-know-this-is-prod": out.iKnowThisIsProd = true; break;
       case "--i-know-this-widens-texting": out.iKnowThisWidensTexting = true; break;
@@ -66,6 +68,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (!UUID.test(out.orgId)) throw new ArgError("--org <uuid> is required");
   if (out.runId !== null && !RUN_ID.test(out.runId)) throw new ArgError("run id: 3-64 letters, digits, - or _");
   if (out.maxAgeDays > DEFAULT_MAX_AGE_DAYS) throw new ArgError(`--max-age-days is at most ${DEFAULT_MAX_AGE_DAYS}`);
+  if (out.ratePerMinute > MAX_RATE_PER_MINUTE) throw new ArgError(`--rate is at most ${MAX_RATE_PER_MINUTE} per minute`);
   if (out.textMaxAgeDays > out.maxAgeDays) throw new ArgError("--text-max-age-days cannot exceed --max-age-days");
   if (out.textMaxAgeDays > DEFAULT_TEXT_MAX_AGE_DAYS && !out.iKnowThisWidensTexting) {
     throw new ArgError(`--text-max-age-days above ${DEFAULT_TEXT_MAX_AGE_DAYS} sends replies to older texts; pass --i-know-this-widens-texting`);

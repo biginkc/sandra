@@ -21,6 +21,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   dispatchAiResponse,
   inboundStampOutcomeOf,
+  ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD,
   ROUTING_V2_BACKFILL_CLASSIFY_ONLY,
   ROUTING_V2_BACKFILL_HOLD_ROADS,
   routingV2SortOnlyKind,
@@ -175,13 +176,13 @@ export function keywordHoldLikely(body: string, escalationKeywords: ReadonlyArra
 
 export async function writeMarker(db: Db, messageId: string, patch: Partial<BackfillMarker>): Promise<void> {
   const { data, error } = await db.from("messages").select("metadata").eq("id", messageId).maybeSingle();
-  if (error || !data) throw new Error(`backfill marker read: ${error?.message ?? "no row"}`);
+  if (error || !data) throw new BackfillItemError("marker_write_failed");
   const meta = data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata) ? (data.metadata as Record<string, unknown>) : {};
   const prev = (meta.routingV2Backfill && typeof meta.routingV2Backfill === "object" ? meta.routingV2Backfill : {}) as BackfillMarker;
   const { data: updated, error: upErr } = await db.from("messages")
     .update({ metadata: { ...meta, routingV2Backfill: { ...prev, ...patch } } as Json })
     .eq("id", messageId).select("id").maybeSingle();
-  if (upErr || !updated) throw new Error(`backfill marker write: ${upErr?.message ?? "no row"}`);
+  if (upErr || !updated) throw new BackfillItemError("marker_write_failed");
 }
 
 /**
@@ -195,22 +196,49 @@ export function backfillPriorKind(runId: string, claimId: string): string {
   return `${RESPONSE_KIND}:backfill_prior:${runId}:${claimId}`;
 }
 
-export async function reopenClaim(db: Db, inboundId: string, runId: string, nowMs: number = Date.now()): Promise<string | null> {
+export type ReopenResult =
+  | { kind: "moved"; claimId: string }
+  | { kind: "none" }
+  /** A claim in an error state (a safety marker such as v2_safety_hold_failed, flag_failed...): never moved; the text is skipped. */
+  | { kind: "skip"; reason: "claim_error_state" };
+
+export async function reopenClaim(db: Db, inboundId: string, runId: string, nowMs: number = Date.now()): Promise<ReopenResult> {
   const { data, error } = await db.from("ai_response_claims")
-    .select("id, status, lease_expires_at").eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
-  if (error) throw new Error(`claim read: ${error.message}`);
-  if (!data) return null;
+    .select("id, status, lease_expires_at, updated_at").eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
+  if (error) throw new BackfillItemError("claim_read_failed");
+  if (!data) return { kind: "none" };
   if (data.status === "processing") {
     // A live lease: someone is dispatching this text right now. An expired one (a crashed run)
     // is reclaimed by the dispatch's own claim step, so it stays where it is.
-    if (Date.parse(data.lease_expires_at) > nowMs) throw new Error("claim_in_progress");
-    return null;
+    if (Date.parse(data.lease_expires_at) > nowMs) throw new BackfillItemError("claim_in_progress");
+    return { kind: "none" };
   }
+  // Only a finished claim is moved. An error claim can be a live safety barrier the apply gate
+  // and the sweep read under this response_kind (Astra review 2): leave it, skip the text.
+  if (data.status !== "completed") return { kind: "skip", reason: "claim_error_state" };
   const { data: moved, error: moveErr } = await db.from("ai_response_claims")
     .update({ response_kind: backfillPriorKind(runId, data.id), updated_at: new Date().toISOString() })
-    .eq("id", data.id).eq("response_kind", RESPONSE_KIND).select("id").maybeSingle();
-  if (moveErr || !moved) throw new Error(moveErr ? `claim_move_failed:${moveErr.code ?? "unknown"}` : "claim_move_lost_race");
-  return data.id;
+    // Compare-and-set: a concurrent reclaim / completion changes status or updated_at.
+    .eq("id", data.id).eq("response_kind", RESPONSE_KIND).eq("status", "completed").eq("updated_at", data.updated_at)
+    .select("id").maybeSingle();
+  if (moveErr) throw new BackfillItemError("claim_move_failed");
+  if (!moved) throw new BackfillItemError("claim_move_lost_race");
+  return { kind: "moved", claimId: data.id };
+}
+
+/** Errors that end one text, as closed codes (never raw error text). */
+export class BackfillItemError extends Error {
+  constructor(readonly code: BackfillErrorCode) { super(code); }
+}
+export const BACKFILL_ERROR_CODES = [
+  "claim_read_failed", "claim_in_progress", "claim_move_failed", "claim_move_lost_race",
+  "inbound_read_failed", "marker_write_failed", "unexpected_error",
+] as const;
+export type BackfillErrorCode = (typeof BACKFILL_ERROR_CODES)[number];
+
+/** Closed mapping: a known backfill code, else "unexpected_error". No message text ever passes through. */
+export function errorCode(e: unknown): BackfillErrorCode {
+  return e instanceof BackfillItemError ? e.code : "unexpected_error";
 }
 
 type StoredDecision = { status: string; road: string | null; failure_reason: string | null; action: { road: string; steps?: Array<{ kind: string }> } | null };
@@ -281,7 +309,7 @@ async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: stri
 
 async function loadDispatchInput(db: Db, c: Candidate): Promise<{ input: AiDispatchInput; escalationBody: string }> {
   const { data, error } = await db.from("messages").select("body, to_address, from_address, contact_id, conversation_id").eq("id", c.id).maybeSingle();
-  if (error || !data?.contact_id) throw new Error(`inbound read: ${error?.message ?? "no contact"}`);
+  if (error || !data?.contact_id) throw new BackfillItemError("inbound_read_failed");
   return {
     input: {
       propertyId: c.propertyId,
@@ -389,7 +417,14 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
           result.supersededMarked++;
         }
       }
-      const priorClaimId = await reopenClaim(db, c.id, opts.runId, dbNow());
+      const reopened = await reopenClaim(db, c.id, opts.runId, dbNow());
+      if (reopened.kind === "skip") {
+        result.items.push({ ...base, ...emptyEffects(), road: "not_dispatched", outcome: `skipped:${reopened.reason}`, error: null });
+        continue;
+      }
+      const priorClaimId = reopened.kind === "moved" ? reopened.claimId : null;
+      const resumeRecordedDecision = opts.mode === "apply" && c.hasLiveDecision && !!c.marker?.applyStarted && !c.marker?.classify?.decision;
+      if (opts.mode === "apply") await writeMarker(db, c.id, { applyStarted: { runId: opts.runId, at: itemStarted } });
       const storedRow = opts.mode === "apply" ? (c.marker?.classify?.decision ?? null) : null;
       const dispatchMode = opts.mode === "classify_only" ? "classify_only" : treatment === "full" ? "apply" : "sort_only";
       let classifiedRow: Record<string, unknown> | null = null;
@@ -404,6 +439,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
           runId: opts.runId,
           mode: dispatchMode,
           ...(storedRow ? { storedDecisionRow: storedRow } : {}),
+          ...(resumeRecordedDecision ? { resumeRecordedDecision: true } : {}),
           ...(dispatchMode === "classify_only" ? { onClassified } : {}),
         },
       }, { anthropic: deps.anthropic, sleep, dispatch });
@@ -420,6 +456,10 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
       }
       const outcomeText = `${outcome.outcome}:${"reason" in outcome ? outcome.reason : ""}`;
       const effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, classifiedRow as StoredDecision | null);
+      if ("reason" in outcome && outcome.reason === ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD) {
+        effects.road = "keyword_hold";
+        effects.wouldHold = true;
+      }
       await writeMarker(db, c.id, {
         [opts.mode === "apply" ? "apply" : "classify"]: {
           runId: opts.runId, at: itemStarted, outcome: outcomeText.slice(0, 200), treatment,
@@ -432,7 +472,10 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         log(`note: ${c.id} classify-only ended before the decision: ${outcomeText}`);
       }
     } catch (e) {
-      result.items.push({ ...base, ...emptyEffects(), road: "error", outcome: "error", error: errorCode(e) });
+      // Reconcile from the database: an error after delivery must not report the send as zero (Astra review 6).
+      let effects: ReturnType<typeof emptyEffects> = emptyEffects();
+      try { effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, null); } catch { /* keep zeros */ }
+      result.items.push({ ...base, ...effects, road: effects.road === "not_dispatched" ? "error" : effects.road, outcome: "error", error: errorCode(e) });
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
   }
@@ -440,16 +483,10 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
   return result;
 }
 
-/** Errors become short codes: never a database "Key (...)=(...)" detail or a value from a row. */
-export function errorCode(e: unknown): string {
-  const message = e instanceof Error ? e.message : String(e);
-  return message.replace(/\(.*?\)=\(.*?\)/g, "(…)").replace(/\+?\d[\d\s().-]{6,}\d/g, "…").slice(0, 120);
-}
-
 function emptyEffects() {
   return {
-    road: "not_dispatched", decisionStatus: null, jevCalls: 0, haikuCalls: 0, haikuUsd: 0, repliesQueued: 0, repliesSent: 0,
-    alertsQueued: 0, dripsStarted: 0, holdCreated: false, holdReason: null, suppressionCreated: false,
+    road: "not_dispatched", decisionStatus: null as string | null, jevCalls: 0, haikuCalls: 0, haikuUsd: 0, repliesQueued: 0, repliesSent: 0,
+    alertsQueued: 0, dripsStarted: 0, holdCreated: false, holdReason: null as string | null, suppressionCreated: false,
     wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false,
   };
 }

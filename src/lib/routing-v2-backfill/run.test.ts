@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { ALL_OFF } from "@/lib/sms-classification/routing-v2/flags";
 
 import { ArgError, guardTarget, isLocalSupabaseUrl, last4, parseArgs } from "./args";
-import { backfillPriorKind, checkFlags, errorCode, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
+import { BackfillItemError, backfillPriorKind, checkFlags, errorCode, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
+import { adminClientTargetUrl } from "@/lib/supabase/admin";
 
 const ORG = "00000000-0000-0000-0000-000000000bbb";
 const on = { ...ALL_OFF, questions_live: true, replies: true, drips: true };
@@ -44,9 +45,27 @@ describe("texting cutoff guard, claim names, error codes", () => {
     expect(backfillPriorKind("bf-1", "c1")).toBe("sms_ai_responder_v1:backfill_prior:bf-1:c1");
     expect(backfillPriorKind("bf-1", "c1")).not.toBe(backfillPriorKind("bf-1", "c2"));
   });
-  it("errors never carry a row value or a phone", () => {
-    expect(errorCode(new Error('duplicate key value violates unique constraint "x" Key (inbound_message_id, response_kind)=(abc, k) already exists'))).not.toMatch(/abc/);
-    expect(errorCode(new Error("send failed to +1 (816) 555-0142"))).not.toMatch(/0142/);
+  it("error codes are a closed mapping: no raw error text ever passes through", () => {
+    expect(errorCode(new Error("Key (x)=(abc) already exists"))).toBe("unexpected_error");
+    expect(errorCode(new Error("Jane Doe <jane@example.com> said hi"))).toBe("unexpected_error");
+    expect(errorCode(new BackfillItemError("claim_in_progress"))).toBe("claim_in_progress");
+  });
+  it("--rate is capped at 60 per minute", () => {
+    expect(() => parseArgs(["--org", ORG, "--rate", "61"])).toThrow(/at most 60/);
+    expect(parseArgs(["--org", ORG, "--rate", "30"]).ratePerMinute).toBe(30);
+  });
+  it("the guard checks the URL the admin client really uses (a hosted TEST url under VITEST is prod)", () => {
+    const saved = { t: process.env.TEST_SUPABASE_URL, p: process.env.NEXT_PUBLIC_SUPABASE_URL };
+    try {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = "http://127.0.0.1:54321";
+      process.env.TEST_SUPABASE_URL = "https://example-staging.supabase.co";
+      const target = adminClientTargetUrl();
+      expect(target).toBe("https://example-staging.supabase.co");
+      expect(() => guardTarget(parseArgs(["--org", ORG]), target, "x")).toThrow(/i-know-this-is-prod/);
+    } finally {
+      if (saved.t === undefined) delete process.env.TEST_SUPABASE_URL; else process.env.TEST_SUPABASE_URL = saved.t;
+      if (saved.p === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL; else process.env.NEXT_PUBLIC_SUPABASE_URL = saved.p;
+    }
   });
 });
 

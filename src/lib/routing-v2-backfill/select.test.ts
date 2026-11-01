@@ -117,6 +117,11 @@ describe("idempotence / resume", () => {
     expect(s.superseded).toEqual([]);
     expect(s.skipped.map((k) => k.reason)).toEqual(["already_backfilled"]);
   });
+  it("an interrupted backfill apply (decision row + applyStarted, no apply) is resumable, not routed-live", () => {
+    const started = { applyStarted: { runId: "bf-3", at: daysAgo(1) } };
+    const s = sel(facts([row("x", P1, 5, { marker: started, hasLiveDecision: true })]), "apply");
+    expect(s.candidates.map((c) => c.id)).toEqual(["x"]);
+  });
   it("an older text already superseded is not superseded again", () => {
     const s = sel(facts([row("old", P1, 9, { marker: superseded }), row("new", P1, 2)]), "apply");
     expect(s.candidates.map((c) => c.id)).toEqual(["new"]);

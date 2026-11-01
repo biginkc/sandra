@@ -8,6 +8,7 @@ import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
+import { clearTestBarriers, setTestBarrier } from "@/lib/testing/test-barriers";
 
 import { markdownReport } from "./report";
 import { runBackfill, type BackfillMode } from "./run";
@@ -132,6 +133,12 @@ const run = (mode: BackfillMode, runId: string, extra: Record<string, unknown> =
   runBackfill(supabase, { orgId, mode, runId, ratePerMinute: 6000, ...extra }, { anthropic: NO_ANTHROPIC, sleep: async () => undefined, ...deps });
 /** ONE run id for the whole documented sequence (classify-only -> apply -> resume). */
 const RUN = "bf-2026-11-01";
+/** Isolated --limit 1 cases: every other lead of this file is test-tagged (skipped) first. */
+const parkOthers = (keep: string) => pg.query("update properties set test_run_id = 'parked' where org_id = $1 and id <> $2 and test_run_id is null", [orgId, keep]);
+const addToCanary = (...ids: string[]) => pg.query(
+  "update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || to_jsonb($2::text[])) where org_id = $1",
+  [orgId, ids],
+);
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 100)); };
 
 describe("routing v2 backfill (disposable local stack, mock provider, stubbed Jev)", () => {
@@ -328,7 +335,9 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
         throw new Error("simulated crash");
       },
     });
-    expect(crashed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, "simulated crash"]]);
+    expect(crashed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, "unexpected_error"]]);
+    // The error came AFTER the dispatch queued the reply: the report counts it from the database.
+    expect(crashed.items[0].repliesQueued).toBe(1);
     const resumed = await run("apply", "bf-crash", { limit: 1 });
     expect(resumed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
     await settle();
@@ -360,5 +369,91 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [b.propertyId])).toBe(0);
     expect(await n("select count(*)::int n from sms_classification_runs where source_inbound_message_id = $1", [second])).toBe(0);
     await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"questions_live\": true}'::jsonb where org_id = $1", [orgId]);
+  });
+
+  it("classify-only enforces the keyword hold INSIDE dispatch (a keyword added mid-run): skipped, no hold", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const [{ kw }] = await q("select escalation_keywords kw from ai_responder_configs where org_id = $1", [orgId]);
+    await pg.query("update ai_responder_configs set escalation_keywords = array['died'] where org_id = $1", [orgId]);
+    const id = await sellerText(lead, "Can I talk to a real person", 1, { asked_call: 0.95 });
+    try {
+      const r = await run("classify_only", "bf-kw", { limit: 1 }, {
+        dispatch: async (...args) => {
+          // The runner's pre-check already ran with the old list; the dispatch reads the new one.
+          await pg.query("update ai_responder_configs set escalation_keywords = array['died','real person'] where org_id = $1", [orgId]);
+          const { dispatchAiResponse } = await import("@/lib/ai-responder/dispatch");
+          return dispatchAiResponse(...args);
+        },
+      });
+      expect(r.items.map((i) => [i.inboundId, i.road, i.holdCreated])).toEqual([[id, "keyword_hold", false]]);
+      const [p] = await q("select needs_human_attention h from properties where id = $1", [lead.propertyId]);
+      expect(p.h).toBe(false);
+      expect(await n("select count(*)::int n from hold_alert_deliveries where property_id = $1", [lead.propertyId])).toBe(0);
+    } finally {
+      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, kw]);
+    }
+  });
+
+  it("a claim in an error state (a live safety barrier) is never moved: the text is skipped", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Text only thanks", 1, { text_only: 0.95 });
+    await pg.query("update ai_response_claims set status = 'error', error_message = 'v2_safety_hold_failed', completed_at = null where inbound_message_id = $1", [id]);
+    const r = await run("apply", "bf-err", { limit: 1 });
+    expect(r.items.map((i) => [i.inboundId, i.outcome, i.error])).toEqual([[id, "skipped:claim_error_state", null]]);
+    const [c] = await q("select response_kind, status, error_message from ai_response_claims where inbound_message_id = $1", [id]);
+    expect(c).toEqual({ response_kind: "sms_ai_responder_v1", status: "error", error_message: "v2_safety_hold_failed" });
+    await settle();
+    expect(sentTo(lead.phone)).toHaveLength(0);
+    // Leave it to a person so later --limit 1 runs do not pick it again.
+    await pg.query("update properties set needs_human_attention = true where id = $1", [lead.propertyId]);
+  });
+
+  it("sort-only: a newer seller text after selection fences the old one (no close, no hold)", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Nope not interested", 20, { not_interested: 0.95 });
+    const r = await run("apply", "bf-newer", { limit: 1 }, {
+      dispatch: async (...args) => {
+        await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: "Actually yes call me" });
+        const { dispatchAiResponse } = await import("@/lib/ai-responder/dispatch");
+        return dispatchAiResponse(...args);
+      },
+    });
+    expect(r.items.map((i) => [i.inboundId, i.treatment, i.outcome])).toEqual([[id, "sort_only", "skipped:routing_v2:backfill_newer_inbound"]]);
+    const [p] = await q("select outreach_dispo d, needs_human_attention h from properties where id = $1", [lead.propertyId]);
+    expect(p).toEqual({ d: null, h: false });
+    // Only the audit row (not_routed); no decision was recorded from the older text.
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status in ('decided','failed')", [id])).toBe(0);
+  });
+
+  it("fresh apply interrupted after the decision row, then resumed with the same id: carries out that decision (no second Jev call)", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Text only works for me", 1, { text_only: 0.95 });
+    setTestBarrier("dispatch:after_decision", async (ctx) => { if (ctx.inboundMessageId === id) throw new Error("crash after decision"); });
+    let first;
+    try {
+      first = await run("apply", "bf-fresh", { limit: 1 });
+    } finally {
+      clearTestBarriers();
+    }
+    expect(first.items.map((i) => [i.inboundId, i.error])).toEqual([[id, "unexpected_error"]]);
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [id])).toBe(1);
+    // The crashed run's claim keeps its 5-minute lease: a resume inside it is refused (claim_in_progress).
+    const early = await run("apply", "bf-fresh", { limit: 1 });
+    expect(early.items.map((i) => i.error)).toEqual(["claim_in_progress"]);
+    await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1 and status = 'processing'", [id]);
+    const calls = jevCalls;
+    const resumed = await run("apply", "bf-fresh", { limit: 1 });
+    expect(resumed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
+    expect(jevCalls).toBe(calls);
+    await settle();
+    expect(sentTo(lead.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
   });
 });

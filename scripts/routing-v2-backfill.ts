@@ -23,7 +23,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ArgError, guardTarget, parseArgs } from "../src/lib/routing-v2-backfill/args";
 import { candidatesCsv, itemsCsv, markdownReport, skippedCsv } from "../src/lib/routing-v2-backfill/report";
 import { BackfillRefusal, runBackfill } from "../src/lib/routing-v2-backfill/run";
-import { createAdminClient } from "../src/lib/supabase/admin";
+import { adminClientTargetUrl, createAdminClient } from "../src/lib/supabase/admin";
 
 function gitSha(): string {
   try {
@@ -37,7 +37,7 @@ function gitSha(): string {
 
 /** The database side's clock, from the API gateway's Date header (seconds precision). */
 async function dbNowMs(): Promise<number> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+  const url = adminClientTargetUrl() ?? "";
   const res = await fetch(`${url}/rest/v1/`, { method: "HEAD", headers: { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "" } });
   const date = Date.parse(res.headers.get("date") ?? "");
   if (Number.isNaN(date)) throw new Error("database clock unreadable (no Date header)");
@@ -46,7 +46,9 @@ async function dbNowMs(): Promise<number> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { runId, prod } = guardTarget(args, process.env.NEXT_PUBLIC_SUPABASE_URL, new Date().toISOString());
+  // Guard the URL the admin client will actually connect to (Astra review 4), not a guess.
+  const target = adminClientTargetUrl();
+  const { runId, prod } = guardTarget(args, target, new Date().toISOString());
   const sha = gitSha();
   const outDir = resolve(args.outDir ?? join(tmpdir(), "routing-v2-backfill", runId), args.mode);
   console.log(`routing v2 backfill: mode=${args.mode} run=${runId} org=${args.orgId} target=${prod ? "PRODUCTION" : "local"} sha=${sha}`);
