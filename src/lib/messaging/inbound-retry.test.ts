@@ -595,7 +595,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
     mocks.computeDelay.mockReturnValueOnce(10);
     mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
-    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer" });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer", flagOk: true });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: false }));
     expect(mocks.checkHot).not.toHaveBeenCalled();
