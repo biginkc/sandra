@@ -260,6 +260,23 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     expect(await count("select count(*)::int n from routing_v2_outbox where property_id = $1", [lead.propertyId])).toBe(0);
   });
 
+  it("M38 (Opus N1 at 46ee0f732bc1): a fallback marker with NO obligation row refuses the shared send check (legacy automated send and today's flags-off engine reply): 0 sends", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    // An earlier outbound on the thread (the opening text), so the send is an ordinary follow-up.
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    expect((await pg.query("select public.routing_v2_mark_obligation_unrecorded($1, null, 'nine_asked_stop') as r", [lead.propertyId])).rows[0].r).toBe(true);
+    expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1", [lead.propertyId])).toBe(0);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    const direct = await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" });
+    expect(direct, JSON.stringify(direct)).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+    const input = await inbound(lead, "Text only please");
+    jevProbabilities = { text_only: 0.95 };
+    await dispatchAiResponse(supabase, input, { anthropic: NO_ANTHROPIC });
+    await settle();
+    expect(sentTo(lead.phone)).toEqual([]);
+  });
+
   it("eligible: one decision, one transition, the approved reply sent exactly once keyed by the outbox id", async () => {
     const lead = await seedLead();
     await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });

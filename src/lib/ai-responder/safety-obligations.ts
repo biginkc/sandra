@@ -11,15 +11,6 @@ import type { Database } from "@/lib/supabase/types";
 type LooseRpc = {
   rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
 };
-type LooseFrom = {
-  from: (t: string) => {
-    select: (c: string) => {
-      eq: (k: string, v: unknown) => {
-        is: (k: string, v: null) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { code?: string; message: string } | null }> };
-      };
-    };
-  };
-};
 const MISSING = /PGRST202|PGRST205|42883|42P01|does not exist|Could not find/i;
 const DENIED = /42501|permission denied/i;
 
@@ -45,26 +36,29 @@ export async function openSafetyObligation(
 }
 
 /**
- * Is any safety obligation of this lead unresolved? "unknown" = could not be read (callers fail
- * closed); a database without the store is "no".
+ * Is any safety obligation of this lead unresolved? Asks the database's own predicate
+ * (routing_v2_has_unresolved_obligation), so the open obligation rows AND the fallback marker
+ * (v2_safety_obligation_unrecorded) are one answer everywhere (Opus N1 at 46ee0f732bc1).
+ * "unknown" = could not be read (callers fail closed); a database without the predicate is "no".
  */
 export async function hasUnresolvedSafetyObligation(
   supabase: SupabaseClient<Database>,
   propertyId: string,
 ): Promise<"yes" | "no" | "unknown"> {
-  const read = (client: unknown) => (client as LooseFrom).from("routing_v2_safety_obligations")
-    .select("id").eq("property_id", propertyId).is("resolved_at", null).limit(1);
+  const ask = (client: unknown) => (client as LooseRpc).rpc("routing_v2_has_unresolved_obligation", { p_property_id: propertyId });
   try {
-    let { data, error } = await read(supabase);
-    if (error && DENIED.test(`${error.code ?? ""} ${error.message}`)) {
-      // The store is service-role only. A send released from a person's session (user-scoped
-      // client, e.g. the outbox "Send next" button) reads it with the server's admin client, so
-      // a lead without an obligation is never refused just because the caller cannot see the table.
+    let { data, error } = await ask(supabase);
+    if (error && DENIED.test(`${(error as { code?: string }).code ?? ""} ${error.message}`)) {
+      // The predicate is service-role only. A send released from a person's session (user-scoped
+      // client, e.g. the outbox "Send next" button) asks with the server's admin client, so a lead
+      // without an obligation is never refused just because the caller cannot run it.
       const { createAdminClient } = await import("@/lib/supabase/admin");
-      ({ data, error } = await read(createAdminClient()));
+      ({ data, error } = await ask(createAdminClient()));
     }
     if (error) return MISSING.test(error.message) ? "no" : "unknown";
-    return (data ?? []).length > 0 ? "yes" : "no";
+    if (data === true) return "yes";
+    if (data === false) return "no";
+    return "unknown";
   } catch (e) {
     // Opus N4 on #956: never "no" from an exception; the caller fails closed.
     reportError(e, { tags: { surface: "routing_v2_safety_obligation_read" }, extra: { propertyId } });

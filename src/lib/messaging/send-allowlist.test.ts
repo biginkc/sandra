@@ -8,7 +8,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 const adminObligations = vi.hoisted(() => ({ data: [] as unknown[], error: null as { message: string } | null }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
-    from: () => ({ select: () => ({ eq: () => ({ is: () => ({ limit: async () => ({ data: adminObligations.data, error: adminObligations.error }) }) }) }) }),
+    rpc: async () => ({ data: adminObligations.error ? null : adminObligations.data.length > 0, error: adminObligations.error }),
   }),
 }));
 
@@ -50,11 +50,11 @@ describe("§5.4 send allowlist (pure)", () => {
 function fakeDb(lead: { data?: unknown; error?: { code?: string; message: string } | null }) {
   const inserts: Array<Record<string, unknown>> = [];
   const db = {
+    // The routing v2 obligation predicate (none open on these leads).
+    rpc: async () => ({ data: false, error: null }),
     from: (t: string) => ({
       select: () => ({ eq: () => ({
         maybeSingle: async () => ({ data: lead.data ?? null, error: lead.error ?? null }),
-        // The routing v2 obligation read (none open on these leads).
-        is: () => ({ limit: async () => ({ data: [], error: null }) }),
       }) }),
       insert: async (row: Record<string, unknown>) => { inserts.push({ table: t, ...row }); return { error: null }; },
     }),
@@ -110,11 +110,12 @@ describe("§5.4 assertSendAllowed (boundary)", () => {
 function obligationDb(obligations: { data?: unknown[]; error?: { message: string } | null }) {
   const reads: string[] = [];
   const db = {
+    rpc: async (fn: string) => {
+      reads.push(fn);
+      return { data: obligations.error ? null : (obligations.data ?? []).length > 0, error: obligations.error ?? null };
+    },
     from: (t: string) => {
       reads.push(t);
-      if (t === "routing_v2_safety_obligations") {
-        return { select: () => ({ eq: () => ({ is: () => ({ limit: async () => ({ data: obligations.data ?? [], error: obligations.error ?? null }) }) }) }) };
-      }
       return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }), insert: async () => ({ error: null }) };
     },
   };
@@ -128,7 +129,7 @@ describe("round 18 safety-obligation gate at the send boundary", () => {
     expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "queued_release" })).toEqual({ allowed: false, why: "safety_obligation_open" });
   });
   it("an exception from the obligation read (e.g. a malformed client) fails closed, never 'no obligation'", async () => {
-    const throwing = { from: () => ({ select: () => ({ eq: () => ({ is: () => { throw new TypeError("boom"); }, maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }) }) };
+    const throwing = { rpc: () => { throw new TypeError("boom"); }, from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }) }) };
     expect(await checkSendAllowed(throwing as never, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
   });
   it("a person-initiated send (a held draft's Send) is never gated on an open obligation", async () => {
@@ -150,7 +151,7 @@ describe("round 18 safety-obligation gate at the send boundary", () => {
   it("a text the person queued and then released is never gated on obligations, even unreadable from a user-scoped client", async () => {
     const denied = obligationDb({ error: { message: "permission denied for table routing_v2_safety_obligations" } });
     expect(await checkSendAllowed(denied.db, { ...send, origin: "queued_release", queuedSendOrigin: "manual" })).toEqual({ allowed: true });
-    expect(denied.reads).not.toContain("routing_v2_safety_obligations");
+    expect(denied.reads).not.toContain("routing_v2_has_unresolved_obligation");
     expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "manual" })).toEqual({ allowed: true });
   });
 });
