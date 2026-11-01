@@ -1902,7 +1902,8 @@ const ROWS: Row[] = [
       jevEscalation = NON_HOT_ESC;
       const input = { propertyId: h.propertyId, contactId: (await admin.from("properties").select("homeowner_contact_id").eq("id", h.propertyId).single()).data!.homeowner_contact_id!, conversationId: (await admin.from("messages").select("conversation_id").eq("id", a).single()).data!.conversation_id!, inboundMessageId: a, inboundBody: body };
       const kw = await applyKeywordEscalation(admin, { propertyId: h.propertyId, inboundBody: body, escalationKeywords: kws, jevAutomatic: true });
-      expect(kw).toEqual({ escalated: true, reason: "keyword:legal_contract" });
+      // flagOk (round 17): the keyword hold is proven written (a failed write fails closed instead).
+      expect(kw).toEqual({ escalated: true, reason: "keyword:legal_contract", flagOk: true });
       await checkHotTextAfterKeywordHold(admin, input as never, kw.escalated ? kw.reason : "", kws, null);
       await checkHotTextAfterKeywordHold(admin, input as never, "keyword:legal_contract", kws, null);
       expect(await h.hotTextEvents()).toBe(1);
