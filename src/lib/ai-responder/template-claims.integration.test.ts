@@ -51,6 +51,14 @@ async function seedClaim(
     [orgId, inbound, propertyId, over.status, over.lease, outbound, over.outcome],
   );
   claimIds[key] = rows[0].id;
+  // trg_ai_response_claims_db_clock (20261031132200) puts an inserted lease on the DB clock, so a
+  // past lease written by the INSERT above lands as now(). Its UPDATE branch keeps any lease that
+  // is not later than now(): set a stale (past) lease after the insert. A future lease is left as
+  // inserted (an UPDATE would cap it at now()).
+  await db.query(
+    `update public.ai_response_claims set lease_expires_at = $2::timestamptz where id = $1 and $2::timestamptz < now()`,
+    [claimIds[key], over.lease],
+  );
 }
 
 describe("template-sent stale-claim sweeper", () => {
