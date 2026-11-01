@@ -9,13 +9,13 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
- * 20261031132300 (Astra fourth review of 7e6e72c13839): routing_v2_safety_obligations is the one
+ * 20261031140100 (Astra fourth review of 7e6e72c13839): routing_v2_safety_obligations is the one
  * source of truth; one predicate gates the apply, the fence and the drip send check; only a
  * durable hold, a person or a suppression resolves. Each test is rolled back.
  */
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
 const sql = (name: string, dir = __dirname) => readFileSync(path.join(dir, name), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
-const M = "20261031132300_routing_v2_safety_obligations.sql";
+const M = "20261031140100_routing_v2_safety_obligations.sql";
 const RB = path.join(__dirname, "../rollbacks");
 
 beforeAll(() => db.connect());
@@ -36,7 +36,7 @@ const legacyDecision = (id: string, action: { road: string; steps: unknown[] } =
 
 beforeEach(async () => {
   await db.query("begin");
-  await unwindRoutingV2After(db, "20261031132300");
+  await unwindRoutingV2After(db, "20261031140100");
   await db.query(sql(M));
   org = randomUUID();
   await db.query("set local session_replication_role = replica");

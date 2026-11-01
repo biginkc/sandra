@@ -9,13 +9,13 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
- * 20261031140100 (Opus N1 on #954): the model-stop release wrapper asks the one obligation store
- * (20261031132300) and never audits a release that did not happen. One rolled-back transaction
+ * 20261031140300 (Opus N1 on #954): the model-stop release wrapper asks the one obligation store
+ * (20261031140100) and never audits a release that did not happen. One rolled-back transaction
  * per test; fully migrated stack.
  */
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
 const sql = (name: string, dir = __dirname) => readFileSync(path.join(dir, name), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
-const M = "20261031140100_routing_v2_model_stop_release_obligations.sql";
+const M = "20261031140300_routing_v2_model_stop_release_obligations.sql";
 const RB = path.join(__dirname, "../rollbacks");
 const PHONE = "+18165550133";
 const STOP = { road: "stop", steps: [{ kind: "hold", reason: "asked_stop" }] };
@@ -55,7 +55,7 @@ const openObligations = async () => (await db.query("select count(*)::int n from
 
 beforeEach(async () => {
   await db.query("begin");
-  await unwindRoutingV2After(db, "20261031140100");
+  await unwindRoutingV2After(db, "20261031140300");
   await db.query(sql(M));
   org = randomUUID();
   await db.query("set local session_replication_role = replica");
@@ -115,7 +115,7 @@ describe("routing_v2_apply_model_stop_and_release on the obligation store", () =
 
 describe("rollback", () => {
   it("restores 20261031140000's body (old signals) exactly", async () => {
-    await db.query(sql("20261031140100_routing_v2_model_stop_release_obligations.sql", RB));
+    await db.query(sql("20261031140300_routing_v2_model_stop_release_obligations.sql", RB));
     const def = (await db.query("select pg_get_functiondef('public.routing_v2_apply_model_stop_and_release(uuid,text,uuid,uuid,uuid,jsonb)'::regprocedure) d")).rows[0].d as string;
     expect(def).toContain("effects_applied_at is null");
     expect(def).not.toContain("public.routing_v2_has_unresolved_obligation(p_property_id)");

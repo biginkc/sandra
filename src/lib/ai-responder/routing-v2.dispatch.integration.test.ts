@@ -1814,7 +1814,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, error_message, lease_expires_at) values ($1,$2,$3,$4,$5,$6, now() - interval '2 hours')",
         [orgId, m.id, lead.propertyId, lead.contactId, claim === "dead" ? "processing" : "error", claim === "dead" ? null : "flag_failed"]);
       await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' where inbound_message_id = $1", [m.id]);
-      // A pre-store row is carried into the obligation store by 20261031132300's backfill.
+      // A pre-store row is carried into the obligation store by 20261031140100's backfill.
       // (On a database before that migration the decision row + claim above are the representation.)
       if ((await pg.query("select to_regclass('public.routing_v2_safety_obligations') is not null as t")).rows[0].t) {
         await pg.query("insert into routing_v2_safety_obligations (org_id, property_id, inbound_message_id, reason, source, created_at) values ($1,$2,$3,'nine_needs_person','legacy', now() - interval '2 hours')", [orgId, lead.propertyId, m.id]);
@@ -2134,7 +2134,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [m.id]);
         await pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [m.id]);
         expect(await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId)).toBe(1);
-        // #956 merge: the keyword path's open obligation (20261031132300) carries the real reason, so the
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
         // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
         expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
         // #956 merge: the hold comes from the obligation recovery (the obligation resolves with it), not
@@ -2185,7 +2185,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
         expect(await claimOf(r.id)).toEqual([{ status: "error", error_message: "v2_safety_hold_failed" }]);
         expect(await ageAndSweep(lead, r.id)).toBe(1);
-        // #956 merge: the keyword path's open obligation (20261031132300) carries the real reason, so the
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
         // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
         expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
         expect(await hotEventsOf(lead.propertyId)).toBe(1);
@@ -2204,7 +2204,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         expect((await claimOf(r.id)).map((c) => c.status)).toEqual(["processing"]);
         // #956 merge: the sweep handles the lead's open obligation AND the expired processing claim.
         expect(await ageAndSweep(lead, r.id)).toBe(2);
-        // #956 merge: the keyword path's open obligation (20261031132300) carries the real reason, so the
+        // #956 merge: the keyword path's open obligation (20261031140100) carries the real reason, so the
         // sweep's obligation recovery holds the lead under keyword:legal_contract (not the generic one).
         expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
         expect(await hotEventsOf(lead.propertyId)).toBe(1);

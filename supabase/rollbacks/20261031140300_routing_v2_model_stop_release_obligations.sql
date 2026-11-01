@@ -1,11 +1,4 @@
--- 20261031140100: the model-stop release wrapper asks the one obligation store (Astra N2 / Opus N1 on
--- #954, reconciled by #956, whichever landed second). 20261031140000's
--- routing_v2_apply_model_stop_and_release decided "another safety obligation" from the old signals
--- (decision rows whose effects never landed, v2_safety_hold_failed claims). Since 20261031132300 /
--- 132400 the obligation store (rows + fallback marker) is the one representation, so the wrapper
--- now calls routing_v2_has_unresolved_obligation. Everything else is 140000's body unchanged (lock
--- order, lock timeouts, suppression call, hold-about-this-inbound rule, audit only a real release).
--- Rollback: supabase/rollbacks/20261031140100_routing_v2_model_stop_release_obligations.sql
+-- Rollback of 20261031140300: restores 20261031140000's routing_v2_apply_model_stop_and_release exactly.
 begin;
 set local lock_timeout = '5s';
 
@@ -66,10 +59,26 @@ begin
   if prop.hold_kind is distinct from 'safety' or prop.hold_inbound_message_id is distinct from p_inbound_message_id then
     return r || jsonb_build_object('hold', 'kept_other_hold');
   end if;
-  -- 20261031140100 (Astra N2 / Opus N1 on #954, reconciled with #956): one question, one store.
-  -- Any unresolved safety obligation of the lead (20261031132300 rows or the 20261031132400
-  -- fallback marker) keeps the hold.
-  if public.routing_v2_has_unresolved_obligation(p_property_id) then
+  -- Astra N1: only another SAFETY obligation keeps the hold: the apply gate's own test
+  -- (20261031132200), i.e. an older text not handled by the sweep with a safety decision whose
+  -- effects never landed, or a v2 safety hold that could not be written. An ordinary decision
+  -- (a normal reply) never records effects and is not an obligation.
+  -- (Astra N2: when the obligations ledger, #956, lands, this becomes
+  -- routing_v2_has_unresolved_obligation; reconciled in whichever PR lands second.)
+  if exists (
+    select 1 from public.messages om
+    where om.property_id = p_property_id and om.direction = 'inbound' and om.id <> p_inbound_message_id
+      and om.metadata->'processing'->'routingV2Sweep' is null
+      and (exists (select 1 from public.routing_v2_live_decisions d
+                   where d.inbound_message_id = om.id and d.effects_applied_at is null
+                     and d.status in ('decided','failed') and (d.status = 'failed' or d.action is null or d.action->>'road' = 'stop'
+           or (d.action->>'road' is distinct from 'bad_number'
+               and exists (select 1 from jsonb_array_elements(coalesce(d.action->'steps', '[]'::jsonb)) s where s->>'kind' = 'hold')
+               and not exists (select 1 from jsonb_array_elements(coalesce(d.action->'steps', '[]'::jsonb)) s where s->>'kind' = 'wrong_number_close'))))
+           or exists (select 1 from public.ai_response_claims oc
+                      where oc.inbound_message_id = om.id and oc.response_kind = 'sms_ai_responder_v1'
+                        and oc.status = 'error' and oc.error_message = 'v2_safety_hold_failed'))
+  ) then
     return r || jsonb_build_object('hold', 'kept_other_obligation');
   end if;
   update public.properties

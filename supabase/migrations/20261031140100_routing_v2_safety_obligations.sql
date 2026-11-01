@@ -1,4 +1,4 @@
--- 20261031132300: Astra fourth review of 7e6e72c13839. One first-class representation of an
+-- 20261031140100: Astra fourth review of 7e6e72c13839. One first-class representation of an
 -- unresolved safety obligation: routing_v2_safety_obligations (also the stacked-reasons store,
 -- folding in the N-2 follow-up). One predicate, routing_v2_has_unresolved_obligation, used by the
 -- apply gate, the outbox fence, the drip send check and (in the app) the generic send guard for
@@ -169,7 +169,7 @@ begin
   perform pg_advisory_xact_lock(hashtext('routing_v2:' || p_property_id::text));
   select * into prop from public.properties where id = p_property_id for update;
   if not found then return 'missing'; end if;
-  -- 20261031132300 (Astra fourth review of 7e6e72c13839): every safety hold is a first-class
+  -- 20261031140100 (Astra fourth review of 7e6e72c13839): every safety hold is a first-class
   -- obligation, written BEFORE any effect. It is resolved here only when THIS hold lands
   -- (held / upgraded, same transaction); on a lead already held for another reason it stays open
   -- (stacked reasons): an automated clear can then not end the hold; only a person (or a
@@ -319,7 +319,7 @@ begin
   --  * a v2 safety hold that could not be written at all (claim error v2_safety_hold_failed).
   -- The only exits: the sweep handled it (its mark), or its effects were recorded (a hold that a
   -- person has since cleared counts: clearing a hold records them). No time exit.
-  -- 20261031132300: one source of truth. Any unresolved safety obligation of this lead blocks
+  -- 20261031140100: one source of truth. Any unresolved safety obligation of this lead blocks
   -- this newer text (whatever claim state, age or flags); resolved only by a durable hold, a
   -- person, or a suppression.
   if public.routing_v2_has_unresolved_obligation(p_property_id) then
@@ -434,7 +434,7 @@ begin
     where id = e.id and status = 'active';
     return 'held_for_person';
   end if;
-  -- 20261031132300: an unresolved safety obligation stops every v2 drip of the lead too.
+  -- 20261031140100: an unresolved safety obligation stops every v2 drip of the lead too.
   if public.routing_v2_has_unresolved_obligation(e.property_id) then
     update public.sequence_enrollments
     set status = 'paused', pause_reason = 'held_for_person', updated_at = now()
@@ -515,7 +515,7 @@ begin
   -- before the provider. Owner alerts are not refused by a hold.
   elsif v.kind = 'reply' and v_held then
     v_reason := 'held_for_person';
-  -- 20261031132300: an unresolved safety obligation refuses every automatic reply of the lead.
+  -- 20261031140100: an unresolved safety obligation refuses every automatic reply of the lead.
   elsif v.kind = 'reply' and public.routing_v2_has_unresolved_obligation(v.property_id) then
     v_reason := 'held_for_person';
   -- 20261031132000 (Astra P2 #3): a reply older than 24 hours (DB clock) is never sent late; a
@@ -556,7 +556,7 @@ as $$
     and m.metadata->>'keyword' is null
     and m.metadata->'processing'->'routingV2Sweep' is null
     and (
-      -- 20261031132300: unrecovered safety obligations live in routing_v2_safety_obligations
+      -- 20261031140100: unrecovered safety obligations live in routing_v2_safety_obligations
       -- (routing_v2_obligation_candidates); this list is the dead-run / dead-webhook sweep only.
       (m.created_at > now() - interval '24 hours'
         and (c.status = 'processing'

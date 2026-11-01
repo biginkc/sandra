@@ -5,7 +5,7 @@ import type { Database } from "@/lib/supabase/types";
 import { testBarrier } from "@/lib/testing/test-barriers";
 
 const RESPONSE_KIND = "sms_ai_responder_v1";
-/** Routing v2 obligation fallback marker (migration 20261031132400); a claim carrying it is never reclaimed. */
+/** Routing v2 obligation fallback marker (migration 20261031140200); a claim carrying it is never reclaimed. */
 export const OBLIGATION_UNRECORDED_MARKER = "v2_safety_obligation_unrecorded";
 const CLAIM_LEASE_MS = 5 * 60_000;
 

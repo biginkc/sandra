@@ -1,106 +1,29 @@
--- 20261031132400: obligations - person resolution, honest clears, fail-closed fallback (Opus review
--- of #956 at 36321be81c39: B1, B4, N2).
---   B1  fn_resolve_hold (Messages v2 Dismiss / Take over) resolves the lead's safety obligations as
---       the person, in its own transaction, before the flag update, and reports flagCleared only
---       when the row really ended held (a trigger-kept clear is not a clear).
---   N2  A kept hold shows the reason of the oldest OPEN obligation (not the reason just resolved).
---   B4  When the obligation itself cannot be written on a failure path, a durable fallback marker
---       is written on the inbound's claim (status completed, error_message
---       'v2_safety_obligation_unrecorded'; a completed claim is never reclaimed). The one predicate
---       treats that marker as an unresolved obligation; the sweep promotes it into a real
---       obligation; a person's resolution or a suppression retires it.
--- Rollback: supabase/rollbacks/20261031132400_routing_v2_obligations_person_and_fallback.sql
+-- Rollback of 20261031140200: restores the 20261031140100 obligation functions and the
+-- 20261008150200 fn_resolve_hold exactly; drops the fallback-marker functions and index.
+-- Fallback marker rows (claims with error_message v2_safety_obligation_*) are left as data.
 begin;
 set local lock_timeout = '5s';
-
--- B4: the one predicate also sees the fallback marker.
+drop function if exists public.routing_v2_promote_unrecorded_markers(integer,uuid);
+drop function if exists public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz);
+drop index if exists public.idx_ai_response_claims_obligation_unrecorded;
 create or replace function public.routing_v2_has_unresolved_obligation(p_property_id uuid)
 returns boolean language sql stable security definer set search_path = public, pg_temp as $$
   select exists (select 1 from public.routing_v2_safety_obligations o
-                 where o.property_id = p_property_id and o.resolved_at is null)
-      or exists (select 1 from public.ai_response_claims c
-                 where c.property_id = p_property_id and c.error_message = 'v2_safety_obligation_unrecorded');
+                 where o.property_id = p_property_id and o.resolved_at is null);
 $$;
+
 revoke all on function public.routing_v2_has_unresolved_obligation(uuid) from public, anon, authenticated;
 grant execute on function public.routing_v2_has_unresolved_obligation(uuid) to service_role;
 
-create index if not exists idx_ai_response_claims_obligation_unrecorded
-  on public.ai_response_claims (property_id) where error_message = 'v2_safety_obligation_unrecorded';
-
--- B4: write the fallback marker (outcome carries the reason).
--- Astra review of dc331c85974 (B1): compare-and-set on both sides. A run marks ITS OWN claim only
--- while that claim is still its own (same id, same claimed_at as taken, not completed); if another
--- run reclaimed it meanwhile, nothing is written (that run is re-running this text) and false is
--- returned. Without a claim (the webhook keyword path) a new completed claim row is inserted, and an
--- existing claim of the inbound is never overwritten. The reclaim (claims.ts) in turn refuses a
--- completed or marked claim, so a written marker cannot be erased by a reclaim.
-create or replace function public.routing_v2_mark_obligation_unrecorded(
-  p_property_id uuid, p_inbound_message_id uuid, p_reason text,
-  p_claim_id uuid default null, p_claimed_at timestamptz default null)
-returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
-declare v_org uuid;
-begin
-  select p.org_id into v_org from public.properties p where p.id = p_property_id;
-  if v_org is null then return false; end if;
-  if p_claim_id is not null then
-    if p_claimed_at is null then return false; end if;
-    update public.ai_response_claims
-      set status = 'completed', completed_at = now(), outcome = coalesce(p_reason, 'nine_needs_person'),
-          error_message = 'v2_safety_obligation_unrecorded', updated_at = now()
-      where id = p_claim_id and property_id = p_property_id and claimed_at = p_claimed_at
-        and status <> 'completed' and error_message is distinct from 'v2_safety_obligation_unrecorded';
-    return found;
-  end if;
-  if p_inbound_message_id is null then
-    insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
-    values (v_org, 'routing_v2_obligation_fallback', null, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now());
-    return true;
-  end if;
-  insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
-  values (v_org, 'sms_ai_responder_v1', p_inbound_message_id, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now())
-  on conflict (inbound_message_id, response_kind) where inbound_message_id is not null do nothing;
-  return found;
-end;
-$$;
-revoke all on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) from public, anon, authenticated;
-grant execute on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) to service_role;
-
--- B4: the sweep turns markers into real obligations (one transaction per call).
-create or replace function public.routing_v2_promote_unrecorded_markers(p_limit integer default 50, p_property_id uuid default null)
-returns integer language plpgsql security definer set search_path = public, pg_temp as $$
-declare c record; n integer := 0;
-begin
-  for c in
-    select x.id, x.property_id, x.inbound_message_id, x.outcome from public.ai_response_claims x
-    where x.error_message = 'v2_safety_obligation_unrecorded' and (p_property_id is null or x.property_id = p_property_id)
-    order by x.created_at limit greatest(coalesce(p_limit, 50), 1)
-    for update skip locked
-  loop
-    perform public.routing_v2_open_obligation(c.property_id, c.inbound_message_id, coalesce(c.outcome, 'nine_needs_person'), 'hold_failed');
-    update public.ai_response_claims set error_message = 'v2_safety_obligation_promoted', updated_at = now() where id = c.id;
-    n := n + 1;
-  end loop;
-  return n;
-end;
-$$;
-revoke all on function public.routing_v2_promote_unrecorded_markers(integer,uuid) from public, anon, authenticated;
-grant execute on function public.routing_v2_promote_unrecorded_markers(integer,uuid) to service_role;
-
--- B1: a person's resolution also retires fallback markers.
 create or replace function public.routing_v2_resolve_obligations_by_person(p_property_id uuid)
-returns integer language plpgsql security definer set search_path = public, pg_temp as $$
-declare n integer;
-begin
-  update public.ai_response_claims set error_message = 'v2_safety_obligation_resolved_by_person', updated_at = now()
-  where property_id = p_property_id and error_message = 'v2_safety_obligation_unrecorded';
+returns integer language sql security definer set search_path = public, pg_temp as $$
   with u as (
     update public.routing_v2_safety_obligations set resolved_at = now(), resolved_by = 'person'
     where property_id = p_property_id and resolved_at is null
     returning 1
-  ) select count(*)::int into n from u;
-  return n;
-end;
+  ) select count(*)::int from u;
 $$;
+
 revoke all on function public.routing_v2_resolve_obligations_by_person(uuid) from public, anon, authenticated;
 grant execute on function public.routing_v2_resolve_obligations_by_person(uuid) to service_role;
 
@@ -110,38 +33,31 @@ begin
   if coalesce(old.is_dnc_locked, false) = false and coalesce(new.is_dnc_locked, false) = true then
     update public.routing_v2_safety_obligations set resolved_at = now(), resolved_by = 'suppression'
     where property_id = new.id and resolved_at is null;
-    update public.ai_response_claims set error_message = 'v2_safety_obligation_resolved_by_suppression', updated_at = now()
-    where property_id = new.id and error_message = 'v2_safety_obligation_unrecorded';
   end if;
   return null;
 end;
 $$;
+
 revoke all on function public.routing_v2_suppression_resolves_obligations() from public, anon, authenticated;
 
--- N2: a kept hold shows the oldest OPEN obligation's reason.
 create or replace function public.routing_v2_hold_obligation_keep()
 returns trigger language plpgsql security definer set search_path = public, pg_temp as $$
-declare v_open text;
 begin
   if coalesce(old.needs_human_attention, false) = true and coalesce(new.needs_human_attention, false) = false
      and public.routing_v2_has_unresolved_obligation(new.id) then
-    select o.reason into v_open from public.routing_v2_safety_obligations o
-      where o.property_id = new.id and o.resolved_at is null order by o.created_at limit 1;
-    if v_open is null then
-      select c.outcome into v_open from public.ai_response_claims c
-        where c.property_id = new.id and c.error_message = 'v2_safety_obligation_unrecorded' order by c.created_at limit 1;
-    end if;
     new.needs_human_attention := true;
-    new.last_ai_escalation_reason := coalesce(v_open, old.last_ai_escalation_reason);
+    new.last_ai_escalation_reason := coalesce(old.last_ai_escalation_reason,
+      (select o.reason from public.routing_v2_safety_obligations o
+       where o.property_id = new.id and o.resolved_at is null order by o.created_at limit 1));
     new.last_ai_escalation_at := coalesce(old.last_ai_escalation_at, now());
     new.hold_kind := 'safety';
   end if;
   return new;
 end;
 $$;
+
 revoke all on function public.routing_v2_hold_obligation_keep() from public, anon, authenticated;
 
--- B1: Messages v2 Dismiss / Take over (body of 20261008150200 plus the two marked blocks).
 create or replace function public.fn_resolve_hold(
   p_org_id uuid,
   p_property_id uuid,
@@ -280,16 +196,6 @@ begin
     and x.created_at <= v_cutoff;
   get diagnostics v_drafts = row_count;
 
-  -- 20261031132400 (Opus B1 on #956): a person's Dismiss / Take over of the hold they saw is the
-  -- person resolution of this lead's safety obligations, in this same transaction; otherwise the
-  -- obligation keep trigger would silently put the hold back. Only when the hold the card showed
-  -- is the one being cleared (never on a stale card, never on a lead that is not held).
-  if v_property.needs_human_attention
-     and v_property.last_ai_escalation_reason is not distinct from p_flag_reason
-     and v_property.last_ai_escalation_at is not distinct from p_flag_at then
-    perform public.routing_v2_resolve_obligations_by_person(p_property_id);
-  end if;
-
   -- The flag is cleared only if it is still the one the card displayed (the
   -- check above already refused a changed flag; this repeats it in the WHERE so
   -- the guard is part of the write itself).
@@ -303,11 +209,6 @@ begin
     and p.last_ai_escalation_reason is not distinct from p_flag_reason
     and p.last_ai_escalation_at is not distinct from p_flag_at;
   v_flag_cleared := found;
-  -- A clear a trigger kept is not a clear: report what the row really says.
-  if v_flag_cleared then
-    select not coalesce(p.needs_human_attention, false) into v_flag_cleared
-    from public.properties p where p.id = p_property_id;
-  end if;
 
   if p_action = 'take_over' and not v_property.ai_responder_disabled then
     update public.properties p

@@ -4,7 +4,7 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 /**
- * Routing v2 safety obligations (migration 20261031132300): the one representation of "a person
+ * Routing v2 safety obligations (migration 20261031140100): the one representation of "a person
  * must still be told about this lead". Every helper here is best effort and reports its own
  * failures; callers keep failing closed around them.
  */

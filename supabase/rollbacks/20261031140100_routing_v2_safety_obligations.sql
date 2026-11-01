@@ -1,4 +1,4 @@
--- Rollback of 20261031132300: restores the previous bodies and the 132200 hold-cleared trigger;
+-- Rollback of 20261031140100: restores the previous bodies and the 132200 hold-cleared trigger;
 -- drops the obligation store and its functions / triggers (open obligations are lost: their leads
 -- fall back to the 132200 gate).
 begin;

@@ -9,11 +9,11 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
- * 20261031132400 (Opus review of #956 at 36321be81c39: B1, B4, N2). Each test is rolled back.
+ * 20261031140200 (Opus review of #956 at 36321be81c39: B1, B4, N2). Each test is rolled back.
  */
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
 const sql = (name: string, dir = __dirname) => readFileSync(path.join(dir, name), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
-const M = "20261031132400_routing_v2_obligations_person_and_fallback.sql";
+const M = "20261031140200_routing_v2_obligations_person_and_fallback.sql";
 const RB = path.join(__dirname, "../rollbacks");
 
 beforeAll(() => db.connect());
@@ -24,7 +24,7 @@ let org: string, property: string, contact: string, older: string, user: string;
 
 beforeEach(async () => {
   await db.query("begin");
-  await unwindRoutingV2After(db, "20261031132400");
+  await unwindRoutingV2After(db, "20261031140200");
   await db.query(sql(M));
   org = randomUUID();
   await db.query("set local session_replication_role = replica");
