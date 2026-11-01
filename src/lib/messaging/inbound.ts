@@ -1041,12 +1041,25 @@ export async function handleInboundWebhook(
         ReturnType<typeof findRepSmsHumanTakeoverSource>
       > = null;
       try {
+        // Astra review of b6a00a0a2f17 (E): the rep text's sent_at is on the DB clock, so the
+        // seller's reply is placed by its own row's created_at (DB clock), never by the
+        // provider's / this server's event time.
+        let inboundReceivedAt = ev.receivedAt.toISOString();
+        if (insertOutcome.messageId) {
+          const { data: inboundRow, error: inboundRowError } = await supabase
+            .from("messages")
+            .select("created_at")
+            .eq("id", insertOutcome.messageId)
+            .maybeSingle();
+          if (inboundRowError) throw new Error(inboundRowError.message);
+          if (inboundRow?.created_at) inboundReceivedAt = inboundRow.created_at;
+        }
         takeoverSource = await findRepSmsHumanTakeoverSource(supabase, {
           conversationId: insertOutcome.conversationId,
           propertyId: effectivePropertyId,
           contactId: effectiveContactId,
           inboundMessageId: insertOutcome.messageId,
-          inboundReceivedAt: ev.receivedAt.toISOString(),
+          inboundReceivedAt,
           inboundToNumber: ev.to,
         });
       } catch (e) {
@@ -1271,8 +1284,18 @@ export async function handleInboundWebhook(
                     escalationKeywords: delayConfig!.escalationKeywords,
                     runContext: runCtx,
                     jevAutomatic: delayConfig!.jevAutomatic === true,
+                    inboundMessageId: insertOutcome.messageId,
+                    orgId: preGates.property.org_id,
                   });
 
+              if (keywordEscalation.escalated && !keywordEscalation.flagOk) {
+                // Stress F8/F9 (round 17): the hold did not land. The text is NOT marked escalated
+                // (it already failed closed: v2 drips paused, pending v2 replies cancelled, an
+                // unrecovered safety marker stored); the webhook is retryable so the hold is tried
+                // again on redelivery, and the sweep recovers it meanwhile.
+                await failInboundWebhookForRetry(supabase, provider.providerId, ev.externalId,
+                  new Error(`keyword hold not written: ${keywordEscalation.reason}`));
+              }
               if (keywordEscalation.escalated) {
                 // A mixed price + non-price text was held for a person under
                 // its non-price reason; let the shared hot decision alert it

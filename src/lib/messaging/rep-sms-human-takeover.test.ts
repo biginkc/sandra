@@ -779,3 +779,67 @@ describe("Maria-through-Mel human SMS takeover", () => {
     );
   });
 });
+
+/**
+ * Astra review of b6a00a0a2f17 (P1-3): an in-memory query double that evaluates the lookup's
+ * filters (eq / neq / lte / is / not / order / limit) over real rows. The rep's sent_at is on the
+ * DB clock (send.ts writes 'now'); the webhook passes the inbound ROW's created_at (DB clock).
+ */
+function evaluatingClient(rows: Array<Record<string, unknown>>) {
+  const from = () => {
+    const filters: Array<(r: Record<string, unknown>) => boolean> = [];
+    const orders: Array<[string, boolean]> = [];
+    let lim = Infinity;
+    const q: Record<string, unknown> = {};
+    const v = (x: unknown) => (typeof x === "string" && /^\d{4}-\d\d-\d\dT/.test(x) ? Date.parse(x) : x);
+    q.select = () => q;
+    q.eq = (c: string, x: unknown) => { filters.push((r) => r[c] === x); return q; };
+    q.neq = (c: string, x: unknown) => { filters.push((r) => r[c] !== x); return q; };
+    q.lte = (c: string, x: unknown) => { filters.push((r) => r[c] != null && (v(r[c]) as number) <= (v(x) as number)); return q; };
+    q.is = (c: string, x: unknown) => { filters.push((r) => (x === null ? r[c] == null : r[c] === x)); return q; };
+    q.not = (c: string, op: string, x: unknown) => { filters.push((r) => (op === "is" && x === null ? r[c] != null : true)); return q; };
+    q.order = (c: string, o?: { ascending?: boolean }) => { orders.push([c, o?.ascending !== false]); return q; };
+    q.limit = (n: number) => { lim = n; return q; };
+    q.then = (res: (x: unknown) => unknown, rej?: (e: unknown) => unknown) => {
+      let out = rows.filter((r) => filters.every((f) => f(r)));
+      out = out.sort((a, b) => {
+        for (const [c, asc] of orders) {
+          const av = v(a[c]) as number, bv = v(b[c]) as number;
+          if (av === bv) continue;
+          return (av < bv ? -1 : 1) * (asc ? 1 : -1);
+        }
+        return 0;
+      });
+      return Promise.resolve({ data: out.slice(0, lim), error: null }).then(res, rej);
+    };
+    return q;
+  };
+  return { from } as unknown as SupabaseClient<Database>;
+}
+
+describe("rep takeover lookup on the DB clock (Astra P1-3)", () => {
+  const conv = "conversation-1";
+  const repRow = {
+    id: outboundId, channel: "sms", direction: "outbound", conversation_id: conv, property_id: "property-1", contact_id: "contact-1",
+    created_at: "2026-10-31T12:00:00.000Z", sent_at: "2026-10-31T12:00:00.000Z", from_address: "+18165550143", status: "sent", metadata: mariaThroughMel,
+  };
+  const inboundRow = {
+    id: inboundId, channel: "sms", direction: "inbound", conversation_id: conv, property_id: "property-1", contact_id: "contact-1",
+    created_at: "2026-10-31T12:00:10.000Z", sent_at: null,
+  };
+  const lookup = (receivedAt: string) => findRepSmsHumanTakeoverSource(evaluatingClient([repRow, inboundRow]), {
+    conversationId: conv, propertyId: "property-1", contactId: "contact-1", inboundMessageId: inboundId,
+    inboundReceivedAt: receivedAt, inboundToNumber: "+18165550143",
+  });
+
+  it("with the inbound row's created_at (DB clock) the rep's reply is found, whatever this server's clock says", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-31T11:00:10.000Z"), toFake: ["Date"] });   // app clock 1 h behind
+    try {
+      expect(await lookup(inboundRow.created_at)).toMatchObject({ outboundMessageId: outboundId });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("an app-clock event time 1 h behind would miss it (why the webhook passes the row's created_at)", async () => {
+    expect(await lookup("2026-10-31T11:00:10.000Z")).toBeNull();
+  });
+});

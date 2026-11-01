@@ -1338,10 +1338,16 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       const dead = await newerText(lead, resolved);
       await pg.query("update messages set created_at = now() - interval '30 minutes' where id = $1", [a]);
       await pg.query("update messages set created_at = now() - interval '6 minutes' where id = $1", [dead]);
-      if (claim) await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, lease_expires_at) values ($1,$2,$3,$4,'processing', now() - interval '1 hour')", [orgId, dead, lead.propertyId, lead.contactId]);
-      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });   // A's reply only (no sweep)
+      if (claim) {
+        // A claim is stamped on the DB clock when written (round 17, C); its lease then runs out.
+        await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, lease_expires_at) values ($1,$2,$3,$4,'processing', now() + interval '5 minutes')", [orgId, dead, lead.propertyId, lead.contactId]);
+        await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 hour' where inbound_message_id = $1", [dead]);
+      }
+      // The per-property delivery runs this lead's sweep step first (round 17, D): the dead newest
+      // text is held (safety) right away; A's reply is cancelled, never a mechanics hold for A.
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
       expect((await box(a)).status).toBe("cancelled");
-      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
       await runRoutingV2OutboxReplies(supabase, { limit: 10 });                                 // the cron: sweep
       expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
       expect((await pg.query("select hold_kind from properties where id = $1", [lead.propertyId])).rows[0].hold_kind).toBe("safety");
@@ -1514,7 +1520,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
         conversation_id: a.conversation_id, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "rep text (test)",
         // The rep text went out just before the seller's reply on every clock the webhook compares
         // (the DB's, and the provider/app event time).
-        sent_at: new Date(Math.min(Date.now(), new Date((await pg.query("select now() as t")).rows[0].t).getTime()) - 1000).toISOString(),
+        // The rep's send is stamped by the DB (send.ts writes sent_at = 'now').
+        sent_at: new Date(new Date((await pg.query("select now() as t")).rows[0].t).getTime() - 1000).toISOString(),
         metadata: { repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: randomUUID(), senderAssignmentId: randomUUID() } },
       });
       const b = await say(lead, "ok call me tomorrow"); await runWorkflows();
@@ -1622,13 +1629,16 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       const dead = gate("dispatch:after_decision", (c) => c.inboundMessageId === a);
       const wa = takeWorkflow(a); void wa.fn(wa.params).catch(() => {});   // the worker "dies" at the barrier (never released)
       await dead.reached;
-      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);   // decision stored, no hold yet
+      // Round 17 (A): the safety decision and its hold commit together, so the lead is already held
+      // when the worker dies after the decision.
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true });
       const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
       await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
       await tickDue(lead);
       expect(sentTo(lead.phone)).toEqual([]);
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
-      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      const bStamp = await stampOf(b);
+      expect(bStamp.o === "skipped:rule_0" || bStamp.r === "routing_v2:already_held").toBe(true);
       // The dead run's lease runs out; the next cron pass lands the hold.
       await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 hour' where inbound_message_id = $1", [a]);
       await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [a]);
@@ -1716,6 +1726,105 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(sentTo(lead.phone).filter((m) => m.body === v2ReplyText("not_interested"))).toHaveLength(1);
       expect((await enrollments(lead.propertyId)).filter((e) => e.status === "active")).toEqual([{ k: "not_interested", status: "active", r: null }]);
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+    });
+
+    // ---- Astra third review of b6a00a0a2f17 (round 17) ----
+    const withHoldRefused = async <T,>(propertyId: string, run: () => Promise<T>): Promise<T> => {
+      const fn = `refuse_hold_${propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.id = '${propertyId}' and new.needs_human_attention then raise exception 'forced hold failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before update of needs_human_attention on public.properties for each row execute function public.${fn}()`);
+      try { return await run(); } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.properties`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+    };
+    const legacySafetyDecision = async (lead: Awaited<ReturnType<typeof seedLead>>, body: string, claim: "dead" | "flag_failed") => {
+      const { rows: [m] } = await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address, created_at) values ($1,$2,$3,'inbound','sms','received',$4,$5,$6, now() - interval '2 hours') returning id",
+        [orgId, lead.propertyId, lead.contactId, body, lead.phone, MOCK_SENDER_PRIMARY]);
+      await pg.query("insert into routing_v2_live_decisions (org_id, property_id, inbound_message_id, status, road, expected_revision, action) values ($1,$2,$3,'decided','stop',0,$4)",
+        [orgId, lead.propertyId, m.id, JSON.stringify({ road: "stop", steps: [{ kind: "hold", reason: "asked_stop" }] })]);
+      await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, error_message, lease_expires_at) values ($1,$2,$3,$4,$5,$6, now() - interval '2 hours')",
+        [orgId, m.id, lead.propertyId, lead.contactId, claim === "dead" ? "processing" : "error", claim === "dead" ? null : "flag_failed"]);
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' where inbound_message_id = $1", [m.id]);
+      return m.id as string;
+    };
+    forced("M25: a possible stop whose hold cannot be written: no decision row, claim v2_safety_hold_failed, the newer text blocked (0 sends); once writes work the per-property delivery holds the lead", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await withHoldRefused(lead.propertyId, async () => {
+        const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle();
+        return id;
+      });
+      // no decision row (only the after-response audit row, status not_routed)
+      expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status <> 'not_routed'", [a])).toBe(0);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "v2_safety_hold_failed" });
+      haikuAnswer = null;
+      const b = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, B_TEXT); await runWorkflows(); await settle(); return id; });
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });   // per-property: the sweep step runs first
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+    forced("M26: an unrecovered (legacy-style) safety decision, its run dead for 2 h and the cron down: the newer text is still blocked; the per-property delivery recovers it (hold)", async (lead) => {
+      const a = await legacySafetyDecision(lead, "stop texting me maybe", "dead");
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });   // no cron: the per-property step
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [a])).rows[0].r).toBe("held");
+    });
+    forced("M27: a safety decision whose hold write failed (claim error/flag_failed): the newer text is blocked until the sweep recovers it", async (lead) => {
+      await legacySafetyDecision(lead, "lawyer letter coming", "flag_failed");
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M28: a rep text (DB-clock sent_at), then the seller replies while the app clock is 1 h behind: still a rep takeover (hold rep_sms_human_takeover), 0 sends", async (lead) => {
+      // A first seller text opens the conversation; the rep then writes in it.
+      const first = await say(lead, "hello?"); await runWorkflows(); await deliver();
+      const { rows: [c2] } = await pg.query("select conversation_id from messages where id = $1", [first]);
+      const before = sentTo(lead.phone).length;
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);
+      await pg.query("insert into messages (org_id, channel, direction, status, property_id, contact_id, conversation_id, from_address, to_address, body, sent_at, metadata) values ($1,'sms','outbound','sent',$2,$3,$4,$5,$6,'rep text (test)', now() - interval '1 second', $7)",
+        [orgId, lead.propertyId, lead.contactId, c2.conversation_id, MOCK_SENDER_PRIMARY, lead.phone, JSON.stringify({ repSms: { workflow: "maria-through-mel", persona: "Mel", assistant: "Maria", actorUserId: randomUUID(), senderAssignmentId: randomUUID() } })]);
+      const RealDate = Date;
+      class Behind extends RealDate {
+        constructor(...args: unknown[]) { if (args.length === 0) super(RealDate.now() - 3600_000); else super(...(args as [string])); }
+        static now() { return RealDate.now() - 3600_000; }
+      }
+      let b: string;
+      try { globalThis.Date = Behind as DateConstructor; b = await say(lead, "ok call me tomorrow"); }
+      finally { globalThis.Date = RealDate; }
+      await runWorkflows(); await settle();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "rep_sms_human_takeover" });
+      expect(await stampOf(b!)).toMatchObject({ o: "escalated" });
+      expect(sentTo(lead.phone).slice(before)).toEqual([]);
+    });
+
+    forced("M29: a keyword (legal / needs-person) text whose hold cannot be written: not marked escalated (webhook retryable), the newer text blocked, 0 sends; the per-property delivery then holds the lead", async (lead) => {
+      const kw = "can I talk to someone please";
+      // Webhook path: the webhook fails (retryable) and the text is not marked escalated. Dispatch
+      // path: the claim records flag_failed (never handled). Either way it failed closed.
+      await withHoldRefused(lead.propertyId, async () => {
+        try { await say(lead, kw); await runWorkflows(); await settle(); } catch { /* retryable webhook */ }
+      });
+      const { rows: [k] } = await pg.query("select m.id, m.metadata->'processing'->'aiResponder'->>'outcome' o, c.status cs, c.error_message ce from messages m left join ai_response_claims c on c.inbound_message_id = m.id where m.property_id = $1 and m.body = $2", [lead.propertyId, kw]);
+      expect(k.o !== "escalated" || (k.cs === "error" && k.ce === "flag_failed")).toBe(true);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
     });
 
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {

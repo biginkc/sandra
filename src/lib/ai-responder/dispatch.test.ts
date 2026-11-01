@@ -836,9 +836,16 @@ function createMockSupabase(state: MockState) {
     let insertData: Partial<AiClaimRow> | null = null;
     let updateData: Partial<AiClaimRow> | null = null;
 
+    const ltFilters = new Map<string, unknown>();
     const matches = (row: AiClaimRow) => {
       for (const [field, value] of eqFilters) {
         if (row[field as keyof AiClaimRow] !== value) return false;
+      }
+      // `.lt(col, "now")`: the database's clock ('now'); the fake's clock is Date.now().
+      for (const [field, value] of ltFilters) {
+        const bound = value === "now" ? Date.now() : Date.parse(String(value));
+        // (a lease released in the same millisecond is past by the time the DB evaluates it)
+        if (!(Date.parse(String(row[field as keyof AiClaimRow] ?? "")) <= bound)) return false;
       }
       return true;
     };
@@ -900,6 +907,10 @@ function createMockSupabase(state: MockState) {
     const query = {
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
+        return query;
+      },
+      lt(field: string, value: unknown) {
+        ltFilters.set(field, value);
         return query;
       },
       insert(value: Partial<AiClaimRow>) {

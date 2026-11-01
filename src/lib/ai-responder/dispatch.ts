@@ -137,6 +137,7 @@ import {
 } from "@/lib/sms-classification/routing-v2/wrong-number-all";
 import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { recordLiveV2Decision } from "@/lib/sms-classification/routing-v2/live-decisions";
+import type { V2Action } from "@/lib/sms-classification/routing-v2/actions";
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
@@ -419,6 +420,51 @@ export type AiDispatchPreGateResult =
   | { ok: true; property: AiDispatchPropertyGateRow; routingV2Live?: boolean }
   | { ok: false; outcome: AiDispatchOutcome };
 
+/**
+ * Stress F8/F9 at b6a00a0a2f17 (round 17): a keyword / legal / possible-stop hold that could not be
+ * written fails closed. The lead's v2 drips are paused, its pending v2 auto replies cancelled, and
+ * (v2 live) an unrecovered safety marker is stored for the inbound (a failed decision row with no
+ * effects): the apply gate blocks the lead's newer texts and the sweep re-attempts the hold.
+ */
+async function keywordHoldFailClosed(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; inboundMessageId?: string | null; orgId?: string | null; reason: string },
+): Promise<void> {
+  try {
+    await keywordHoldFailClosedInner(supabase, a);
+  } catch (e) {
+    reportError(e, { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
+  }
+}
+
+async function keywordHoldFailClosedInner(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; inboundMessageId?: string | null; orgId?: string | null; reason: string },
+): Promise<void> {
+  reportError(new Error("keyword hold could not be written; failing closed"), {
+    tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId, reason: a.reason },
+  });
+  await pauseV2DripsFailClosed(supabase, a.propertyId);
+  const loose = supabase as unknown as {
+    from: (t: string) => {
+      update: (v: Record<string, unknown>) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } } };
+      insert: (r: Record<string, unknown>) => PromiseLike<{ error: { code?: string; message: string } | null }>;
+    };
+  };
+  const cancel = await loose.from("routing_v2_outbox").update({ status: "cancelled", cancel_reason: "held_for_person" })
+    .eq("property_id", a.propertyId).eq("kind", "reply").eq("status", "pending");
+  if (cancel.error) reportError(new Error(cancel.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
+  if (!a.orgId || !a.inboundMessageId) return;
+  if ((await routingV2LiveForSweep(supabase, a.orgId, a.propertyId)) === "no") return;
+  const marker = await loose.from("routing_v2_live_decisions").insert({
+    org_id: a.orgId, property_id: a.propertyId, inbound_message_id: a.inboundMessageId,
+    status: "failed", failure_reason: `keyword_hold_failed:${a.reason}`.slice(0, 200), expected_revision: 0,
+  });
+  if (marker.error && marker.error.code !== "23505") {
+    reportError(new Error(marker.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
+  }
+}
+
 export async function applyKeywordEscalation(
   supabase: SupabaseClient<Database>,
   args: {
@@ -435,8 +481,11 @@ export async function applyKeywordEscalation(
      * number does not win.
      */
     jevAutomatic?: boolean;
+    /** The inbound and its org (round 17): a hold that cannot be written fails closed for it. */
+    inboundMessageId?: string | null;
+    orgId?: string | null;
   },
-): Promise<{ escalated: true; reason: string } | { escalated: false }> {
+): Promise<{ escalated: true; reason: string; flagOk: boolean } | { escalated: false }> {
   const keywordMatch = matchEscalationKeyword(args.inboundBody, {
     allowedPhrases: args.escalationKeywords ?? undefined,
   });
@@ -458,8 +507,9 @@ export async function applyKeywordEscalation(
       result: "block",
       detail: { tier: otherTier, alsoPrice: true },
     }, args.runContext);
-    await markPropertyNeedsAttention(supabase, args.propertyId, mixedReason, args.runContext);
-    return { escalated: true, reason: mixedReason };
+    const mixedOk = await markPropertyNeedsAttention(supabase, args.propertyId, mixedReason, args.runContext);
+    if (!mixedOk) await keywordHoldFailClosed(supabase, { ...args, reason: mixedReason });
+    return { escalated: true, reason: mixedReason, flagOk: mixedOk };
   }
   if (!keywordMatch) {
     await trace(
@@ -485,13 +535,14 @@ export async function applyKeywordEscalation(
     },
     args.runContext,
   );
-  await markPropertyNeedsAttention(
+  const flagOk = await markPropertyNeedsAttention(
     supabase,
     args.propertyId,
     reason,
     args.runContext,
   );
-  return { escalated: true, reason };
+  if (!flagOk) await keywordHoldFailClosed(supabase, { ...args, reason });
+  return { escalated: true, reason, flagOk };
 }
 
 export async function checkAiResponderDispatchPreGates(
@@ -801,6 +852,8 @@ async function dispatchAiResponseCore(
         escalationKeywords: config?.escalation_keywords ?? null,
         runContext: deps.runContext,
         jevAutomatic: !!config && config.active === true && isJevAutomatic(config),
+        inboundMessageId: input.inboundMessageId ?? null,
+        orgId: property.org_id,
       });
 
   if (keywordEscalation.escalated) {
@@ -809,7 +862,11 @@ async function dispatchAiResponseCore(
     // run the held-lead classify-only check, which alerts Jarrad once only if
     // stop / DNC / wrong / bad number does not win (and its own gates pass).
     await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
-    return { outcome: "escalated", reason: keywordEscalation.reason };
+    const escalatedOutcome: AiDispatchOutcome = { outcome: "escalated", reason: keywordEscalation.reason };
+    // Stress F8/F9 (round 17): a hold that did not land is never recorded as handled (claim
+    // flag_failed); it already failed closed (drips paused, replies cancelled, safety marker).
+    if (!keywordEscalation.flagOk) markFlagFailed(escalatedOutcome);
+    return escalatedOutcome;
   }
 
   // --------------------------------------------------------------------------
@@ -3398,7 +3455,7 @@ async function classifyOnlyForHotText(
     // Done ('completed') or another run's live lease: stop. A released
     // 'error' claim (an earlier hot-text write failed) or an expired
     // 'processing' claim (a crashed run) is retried.
-    if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > Date.now()))) return;
+    if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > (await dbNowMs(supabase))))) return;
     const retryOfFailedWrite = prior?.status === "error";
     const { data: cfg } = await supabase
       .from("ai_responder_configs")
@@ -4172,7 +4229,9 @@ async function evaluateSendGate(
     mechanicsYield?: "decided" | "outbox";
   },
 ): Promise<GateEvaluation> {
-  const nowMs = Date.now();
+  // Astra review of b6a00a0a2f17 (C): the gate compares DB-written times (inbound created_at,
+  // claim leases, sent_at), so "now" is the DB's.
+  const nowMs = await dbNowMs(supabase);
 
   // Rule 0 evidence (suppression / disabled / consent / terminal): silent by
   // design and decided before anything else is read.
@@ -8695,11 +8754,21 @@ async function runRoutingV2LiveStepInner(
 
   await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
     (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
-  const recorded = await recordLiveV2Decision(
-    supabase,
-    { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision },
-    classification,
-  );
+  const decisionContext = { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision };
+  // Astra review of b6a00a0a2f17 (A): a safety decision is recorded together with its effects.
+  const safetyHoldReason = v2SafetyHoldReason(classification, input);
+  const recorded = await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason);
+  if (recorded === "hold_failed") {
+    // Nothing was recorded: no decision row, no hold. Fail closed now (the lead's v2 drips paused)
+    // and close the claim as v2_safety_hold_failed: the apply gate blocks this lead's newer texts
+    // and the sweep (per-property delivery or the cron) re-attempts the hold until it lands.
+    await pauseV2DripsFailClosed(supabase, input.propertyId);
+    reportError(new Error("routing v2: safety decision and hold could not be recorded"), {
+      tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId },
+    });
+    await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
+    return { outcome: "escalated", reason: safetyHoldReason ?? "nine_needs_person" };
+  }
   await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });
   // A duplicate never acts on this run's classification: only the stored original does.
   const evidence = recorded === "failed" ? null : await readLiveV2Evidence(supabase, inboundMessageId);
@@ -8713,6 +8782,30 @@ async function runRoutingV2LiveStepInner(
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
   return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
+}
+
+/**
+ * The hold reason a stored decision's own path writes, for a SAFETY decision (a failed
+ * classification, the stop road, a hold step); null for any other road. Mirrors
+ * applyRoutingV2LiveEvidence so the atomic hold carries the same reason that path would write.
+ */
+function v2SafetyHoldReason(
+  classification: { kind: string; reason?: string; action?: V2Action | null },
+  input: AiDispatchInput,
+): string | null {
+  const hostile = isHostileInbound(input.inboundBody)
+    ? (input.inboundMessageId ? `${HOSTILE_NEEDS_CONFIRM_REASON}:${input.inboundMessageId}` : HOSTILE_NEEDS_CONFIRM_REASON)
+    : null;
+  const failed = classification.kind === "failed";
+  const step = liveStepFor({
+    status: failed ? "failed" : "decided",
+    action: failed ? null : classification.action ?? null,
+    failure_reason: failed ? classification.reason ?? null : null,
+  } as StoredLiveEvidence);
+  if (step.kind === "failed") return hostile ?? `jev_automatic_failed:${step.reason}`;
+  if (step.kind === "stop") return hostile ?? "nine_asked_stop";
+  if (step.kind === "hold") return liveHoldReason(step.reason);
+  return null;
 }
 
 /** Carry out one stored live v2 decision. Exported for the stage tests via the step above only. */
@@ -9045,7 +9138,7 @@ export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
 type RoutingV2OutboxRow = {
   id: string; org_id: string; property_id: string; inbound_message_id: string;
   kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
-  /** §5.4 taint inherited from the lead at insert (20261030370000). */
+  /** §5.4 taint inherited from the lead at insert (20261031131100). */
   test_run_id?: string | null;
 };
 type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
@@ -9228,6 +9321,17 @@ async function deliverRoutingV2OutboxIntent(
   });
 }
 
+/** The database clock (routing_v2_db_now); this server's clock only if it cannot be read. */
+async function dbNowMs(supabase: SupabaseClient<Database>): Promise<number> {
+  try {
+    const { data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_db_now", {});
+    const ms = !error && typeof data === "string" ? Date.parse(data) : Number.NaN;
+    return Number.isNaN(ms) ? Date.now() : ms;
+  } catch {
+    return Date.now();
+  }
+}
+
 /** Fail closed: every active v2 drip of the property is paused for a person (best effort, reported). */
 async function pauseV2DripsFailClosed(supabase: SupabaseClient<Database>, propertyId: string): Promise<void> {
   const { error } = await (supabase as unknown as {
@@ -9302,7 +9406,7 @@ export async function writeSafetyHold(
 }
 
 /**
- * The one writer of v2 holds (routing_v2_write_hold, 20261030420000), with bounded retries.
+ * The one writer of v2 holds (routing_v2_write_hold, 20261031131600), with bounded retries.
  * 'mechanics' = our own reply could not go out: written only if no newer seller text exists
  * ('superseded'); 'safety' = the seller's words / a person: always written. Returns 'error' when
  * the hold could not be written.
@@ -9360,6 +9464,7 @@ export async function sweepUnstampedV2Inbounds(
   supabase: SupabaseClient<Database>,
   _nowMs: number = Date.now(),
   shouldStop: () => boolean = () => false,
+  propertyId?: string,
 ): Promise<number> {
   // A-2 F3: candidates come from SQL, aged on the DB clock (never the app clock): an inbound SMS
   // with no stamp past the webhook lease, a 'delayed' stamp whose workflow never ran (scheduled
@@ -9368,6 +9473,7 @@ export async function sweepUnstampedV2Inbounds(
   const db = supabase as unknown as LooseRpc;
   const { data, error } = await db.rpc("routing_v2_sweep_candidates", {
     p_lease_seconds: Math.round(WEBHOOK_PROCESSING_LEASE_MS / 1000), p_limit: 50,
+    ...(propertyId ? { p_property_id: propertyId } : {}),
   });
   if (error) {
     if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
@@ -9376,8 +9482,16 @@ export async function sweepUnstampedV2Inbounds(
     return 0;
   }
   let held = 0;
-  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; why: string }>) {
+  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; why: string; created_at?: string }>) {
     if (shouldStop()) break;
+    // Astra review of b6a00a0a2f17 (B): an unrecovered safety obligation never ages out; one still
+    // open after a day is reported (and stays a candidate until its hold lands).
+    if ((m.why === "decision_unrecovered" || m.why === "safety_hold_failed") && m.created_at
+        && Date.parse(m.created_at) < (await dbNowMs(supabase)) - 24 * 3600_000) {
+      reportError(new Error("routing v2: a safety obligation is still unrecovered after 24 h"), {
+        tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id, why: m.why },
+      });
+    }
     // Review B2: an unreadable v2 state is NOT "not v2". The text is left unmarked for the next
     // pass (a flaky database must never let a dead v2 text escape).
     const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);
@@ -9491,6 +9605,15 @@ export async function runRoutingV2OutboxReplies(
       if (mark.error) reportError(new Error(mark.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
       else held++;
     }
+  }
+  if (opts.propertyId) {
+    // Astra review of b6a00a0a2f17 (D): recovery never waits for the cron. The per-property
+    // delivery (right after a dispatch) first runs this property's sweep step, so an unrecovered
+    // safety obligation of an older text is held before anything for the newer one goes out.
+    held += await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, opts.propertyId).catch((e) => {
+      reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" }, extra: { propertyId: opts.propertyId } });
+      return 0;
+    });
   }
   const { data, error } = await db.rpc("routing_v2_due_outbox_replies", {
     p_limit: opts.limit ?? 20,
