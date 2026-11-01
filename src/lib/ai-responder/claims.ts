@@ -34,8 +34,11 @@ export async function claimAiResponse(
     propertyId: string;
     contactId: string;
     conversationId: string | null | undefined;
+    /** Default sms_ai_responder_v1 (the live claim). The routing v2 backfill's classify-only passes its own key. */
+    responseKind?: string;
   },
 ): Promise<AiResponseClaim> {
+  const responseKind = args.responseKind ?? RESPONSE_KIND;
   const mode = singleFlightMode();
   if (mode === "off" || !args.inboundMessageId) {
     return { claimed: true, claimId: null, mode };
@@ -47,7 +50,7 @@ export async function claimAiResponse(
     .from("ai_response_claims")
     .insert({
       org_id: args.orgId,
-      response_kind: RESPONSE_KIND,
+      response_kind: responseKind,
       inbound_message_id: args.inboundMessageId,
       property_id: args.propertyId,
       contact_id: args.contactId,
@@ -83,7 +86,7 @@ export async function claimAiResponse(
     .from("ai_response_claims")
     .select("id, status, lease_expires_at")
     .eq("inbound_message_id", args.inboundMessageId)
-    .eq("response_kind", RESPONSE_KIND)
+    .eq("response_kind", responseKind)
     .maybeSingle();
   if (existingError || !existing) {
     reportError(new Error(existingError?.message ?? "missing conflicting claim"), {
