@@ -129,17 +129,23 @@ describe("formatNotification", () => {
   });
 
   it("task_assigned → 'Task assigned: <title>' with type label + due in body", () => {
-    // dueAt one day from a fixed "now" — the formatter uses real-time
-    // now, so we feed dueAt = real-now + 1d to land in "tomorrow" reliably.
-    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const out = formatNotification("task_assigned", {
-      taskTitle: "Follow up on 123 Main St",
-      taskType: "follow_up",
-      dueAt: tomorrow,
-    });
-    expect(out.title).toBe("Task assigned: Follow up on 123 Main St");
-    expect(out.body).toContain("Follow-up");
-    expect(out.body).toContain("Due tomorrow");
+    // A fixed "now": real-now + 24h is still "today" on a 25-hour DST-end day
+    // (e.g. 2026-11-01 in America/Chicago), so the clock is frozen on a normal day.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T17:00:00Z"));
+    try {
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const out = formatNotification("task_assigned", {
+        taskTitle: "Follow up on 123 Main St",
+        taskType: "follow_up",
+        dueAt: tomorrow,
+      });
+      expect(out.title).toBe("Task assigned: Follow up on 123 Main St");
+      expect(out.body).toContain("Follow-up");
+      expect(out.body).toContain("Due tomorrow");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("task_assigned truncates long titles at 60 chars", () => {
