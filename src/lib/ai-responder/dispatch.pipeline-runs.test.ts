@@ -88,20 +88,20 @@ describe("dispatch evidence steps", () => {
       const result = await applyKeywordEscalation(updateClient(), {
         propertyId: "p-1", inboundBody: "How much? My lawyer is involved", escalationKeywords: kws, runContext: ctx, jevAutomatic: true,
       });
-      expect(result).toEqual({ escalated: true, reason: "keyword:legal_contract" });
+      expect(result).toEqual({ escalated: true, reason: "keyword:legal_contract", flagOk: true });
       expect(recordLeadEvent).toHaveBeenCalledTimes(1);
     });
     it("non-Jev: the same mixed text keeps the up-front price hold", async () => {
       const result = await applyKeywordEscalation(updateClient(), {
         propertyId: "p-1", inboundBody: "How much? My lawyer is involved", escalationKeywords: kws, runContext: ctx,
       });
-      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer" });
+      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer", flagOk: true });
     });
     it("non-Jev: price-only still holds keyword:price_offer", async () => {
       const result = await applyKeywordEscalation(updateClient(), {
         propertyId: "p-1", inboundBody: "How much?", escalationKeywords: kws, runContext: ctx,
       });
-      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer" });
+      expect(result).toEqual({ escalated: true, reason: "keyword:price_offer", flagOk: true });
     });
   });
 

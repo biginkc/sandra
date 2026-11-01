@@ -125,6 +125,9 @@ export async function claimAiResponse(
     })
     .eq("id", existing.id)
     .eq("lease_expires_at", existing.lease_expires_at)
+    // Astra review of b6a00a0a2f17 (C): the lease is on the DB clock (trigger), so "expired" is
+    // decided by Postgres ('now'), never by this server's clock.
+    .lt("lease_expires_at", "now")
     .select("id")
     .maybeSingle();
   if (reclaimError) {
