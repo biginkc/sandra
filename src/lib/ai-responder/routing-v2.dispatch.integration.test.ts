@@ -1833,10 +1833,8 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       headers: { "content-type": "application/json", "x-mock-signature": "valid" },
       body: JSON.stringify({ externalId, from: lead.phone, to: MOCK_SENDER_PRIMARY, body }),
     }), { includeFullUrl: false, provider: new MockMessagingProvider() })).status;
-    it("N1: a mixed price + legal text whose keyword hold cannot be written: the hot-text alert still lands once, the webhook answers 500 with the event marked error (not processed), the text is not stamped; the redelivery holds it, answers 200 and adds no second alert", async () => {
-      const lead = await setup();
-      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
-      // The hot-text alert needs exactly one active owner to go to.
+    /** The hot-text alert needs exactly one active owner to go to; returns the prior env pick. */
+    async function seedHotOwner() {
       const owner = randomUUID();
       await pg.query("begin");
       await pg.query("set local session_replication_role = replica");
@@ -1844,8 +1842,58 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("delete from memberships where org_id = $1 and role = 'owner'", [orgId]);
       await pg.query("insert into memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active')", [orgId, owner]);
       await pg.query("commit");
-      const priorPick = process.env.HOT_LEAD_ASSIGNEE_USER_ID;
+      const prior = process.env.HOT_LEAD_ASSIGNEE_USER_ID;
       process.env.HOT_LEAD_ASSIGNEE_USER_ID = owner;
+      return prior;
+    }
+    /** The v2 recovery marker (a failed decision row) cannot be inserted for this lead either. */
+    const withMarkerRefused = async <T,>(propertyId: string, run: () => Promise<T>): Promise<T> => {
+      const fn = `refuse_marker_${propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${propertyId}' then raise exception 'forced marker failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before insert on public.routing_v2_live_decisions for each row execute function public.${fn}()`);
+      try { return await run(); } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.routing_v2_live_decisions`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+    };
+    it("B1 (Astra, 1d7825003): hold write AND recovery-marker insert both fail on a mixed price + legal text: the hot alert lands once, the webhook answers 500; writes restored, NO redelivery, aged past the lease: the sweep holds the lead, no second alert, 0 sends", async () => {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
+      const priorPick = await seedHotOwner();
+      try {
+        jevProbabilities = { open_to_selling: 0.95 };
+        const body = "How much? My lawyer is involved";
+        const status = await withMarkerRefused(lead.propertyId, () => withHoldRefused(lead.propertyId, async () => {
+          const st = await sayRaw(lead, body, `v2-wh-b1-${randomUUID()}`); await runWorkflows(); await settle();
+          return st;
+        }));
+        expect(status).toBe(500);
+        const { rows: [m] } = await pg.query("select id from messages where property_id = $1 and body = $2", [lead.propertyId, body]);
+        const hotEvents = () => count("select count(*)::int n from lead_events where property_id = $1 and source_type = 'hot_seller_text'", [lead.propertyId]);
+        expect(await hotEvents()).toBe(1);
+        expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1", [m.id])).toBe(0);
+        // The hot check claimed this inbound; the claim must not hide it from the sweep.
+        expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m.id])).rows)
+          .toEqual([{ status: "error", error_message: "v2_safety_hold_failed" }]);
+        expect((await stampOf(m.id)).o).toBeNull();
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        // Writes work again; the provider never redelivers; the text ages past the webhook lease.
+        await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [m.id]);
+        await pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [m.id]);
+        expect(await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId)).toBe(1);
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [m.id])).rows[0].r).toBe("held");
+        expect(await hotEvents()).toBe(1);
+        expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        if (priorPick === undefined) delete process.env.HOT_LEAD_ASSIGNEE_USER_ID; else process.env.HOT_LEAD_ASSIGNEE_USER_ID = priorPick;
+      }
+    });
+
+    it("N1: a mixed price + legal text whose keyword hold cannot be written: the hot-text alert still lands once, the webhook answers 500 with the event marked error (not processed), the text is not stamped; the redelivery holds it, answers 200 and adds no second alert", async () => {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
+      const priorPick = await seedHotOwner();
       try {
       jevProbabilities = { open_to_selling: 0.95 };
       const body = "How much? My lawyer is involved";

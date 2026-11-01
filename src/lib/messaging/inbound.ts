@@ -1313,6 +1313,13 @@ export async function handleInboundWebhook(
                     runCtx,
                   );
                 }
+                if (!keywordEscalation.flagOk) {
+                  // Astra B1 (review of 1d7825003): the hot check above may have claimed and
+                  // completed this inbound, which would hide it from the sweep (unstamped
+                  // recovery needs no claim). Mark the claim as a v2 safety hold that could not be
+                  // written: the sweep then re-holds the lead and the apply gate blocks newer texts.
+                  await keepFailedKeywordHoldRecoverable(supabase, insertOutcome.messageId, effectivePropertyId);
+                }
                 if (keywordEscalation.flagOk) {
                   await stampAiResponderTerminalOutcome(supabase, {
                     messageId: insertOutcome.messageId,
@@ -1790,6 +1797,41 @@ async function markWebhookEventError(
     throw new Error(
       `markWebhookEventError: expected one webhook event for ${providerId}/${externalId}`,
     );
+  }
+}
+
+/**
+ * Astra B1 (review of 1d7825003): a keyword hold that could not be written must stay recoverable by
+ * the sweep even when no provider redelivers the webhook. The held-lead hot check may have left a
+ * completed (or released error) responder claim on the inbound; recovery of an unstamped text
+ * requires no claim, so such a claim is turned into the existing "v2 safety hold could not be
+ * written" marker (error / v2_safety_hold_failed), which the sweep re-holds (no age limit) and the
+ * apply gate blocks on. No claim (nothing to change) leaves the unstamped recovery path as it was.
+ * A failure here is reported; the webhook still answers 500.
+ */
+async function keepFailedKeywordHoldRecoverable(
+  supabase: SupabaseClient<Database>,
+  inboundMessageId: string,
+  propertyId: string,
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from("ai_response_claims")
+      .update({
+        status: "error",
+        error_message: "v2_safety_hold_failed",
+        completed_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("inbound_message_id", inboundMessageId)
+      .eq("response_kind", "sms_ai_responder_v1")
+      .neq("status", "processing");
+    if (error) throw new Error(error.message);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "inbound_keyword_hold_recoverable" },
+      extra: { propertyId, inboundMessageId },
+    });
   }
 }
 

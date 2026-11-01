@@ -14,14 +14,16 @@ import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
  * Every other case keeps the hold. One rolled-back transaction per test; fully migrated stack.
  */
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
+/** A second session: holds the locks a concurrent phone action / recorder would hold. */
+const other = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL!) });
 const sql = (name: string, dir = __dirname) => readFileSync(path.join(dir, name), "utf8").replace(/^\s*(begin|commit);\s*$/gim, "");
 const M = "20261031140000_routing_v2_model_stop_release_hold.sql";
 const RB = path.join(__dirname, "../rollbacks");
 const PHONE = "+18165550131";
 const STOP = { road: "stop", steps: [{ kind: "hold", reason: "asked_stop" }] };
 
-beforeAll(() => db.connect());
-afterAll(() => db.end());
+beforeAll(async () => { await db.connect(); await other.connect(); });
+afterAll(async () => { await other.end(); await db.end(); });
 afterEach(() => db.query("rollback"));
 
 let org: string, property: string, contact: string, inbound: string, older: string;
@@ -125,6 +127,60 @@ describe("routing_v2_apply_model_stop_and_release", () => {
     await db.query("insert into routing_v2_live_decisions (org_id, property_id, inbound_message_id, status, road, expected_revision, action) values ($1,$2,$3,'decided','stop',0,$4)", [org, property, older, JSON.stringify(STOP)]);
     expect(await release()).toMatchObject({ status: "suppressed", hold: "kept_other_obligation" });
     expect(await held()).toEqual({ h: true, r: "nine_asked_stop" });
+  });
+
+  it("Astra N1: an ordinary earlier decision (a normal reply, effects never recorded) is not an obligation: released", async () => {
+    await db.query("insert into routing_v2_live_decisions (org_id, property_id, inbound_message_id, status, road, expected_revision, action) values ($1,$2,$3,'decided','who_reply_drip',0,$4)",
+      [org, property, older, JSON.stringify({ road: "who_reply_drip", steps: [{ kind: "reply", key: "identity" }] })]);
+    await record(inbound, "nine_asked_stop");
+    expect(await release()).toMatchObject({ status: "suppressed", hold: "released" });
+    expect(await held()).toEqual({ h: false, r: null });
+  });
+
+  it("Astra N1: an older safety decision the sweep already handled is not an obligation: released", async () => {
+    await db.query("insert into routing_v2_live_decisions (org_id, property_id, inbound_message_id, status, road, expected_revision, action) values ($1,$2,$3,'decided','stop',0,$4)", [org, property, older, JSON.stringify(STOP)]);
+    await db.query("update messages set metadata = jsonb_build_object('processing', jsonb_build_object('routingV2Sweep', jsonb_build_object('result','held'))) where id = $1", [older]);
+    await record(inbound, "nine_asked_stop");
+    expect(await release()).toMatchObject({ status: "suppressed", hold: "released" });
+  });
+
+  it("Astra N3: the phone lock is taken FIRST (same order as fn_routing_v2_phone_action_apply_all) and its wait is capped: phone busy -> not_eligible within ~2 s, nothing suppressed, hold kept", async () => {
+    await record(inbound, "nine_asked_stop");
+    await other.query("select pg_advisory_lock(hashtext('routing_v2_phone:' || $1::text || ':' || public.routing_v2_phone_digits($2)))", [org, PHONE]);
+    try {
+      const t0 = Date.now();
+      expect(await release()).toMatchObject({ status: "not_eligible", reason: "lock_timeout", hold: "none" });
+      expect(Date.now() - t0).toBeLessThan(5000);
+    } finally {
+      await other.query("select pg_advisory_unlock_all()");
+    }
+    expect(await suppressed()).toBe(0);
+    expect(await held()).toEqual({ h: true, r: "nine_asked_stop" });
+  });
+
+  it("Astra N3: the property lock is taken only AFTER the suppression; if it stays busy the suppression stands and the hold is kept (capped wait)", async () => {
+    // The hold as the atomic recorder writes it, without taking the property lock in this session
+    // (the recorder's transaction-scoped lock would make the other session wait on this test).
+    await db.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'nine_asked_stop', hold_kind = 'safety', hold_inbound_message_id = $2 where id = $1", [property, inbound]);
+    await other.query("select pg_advisory_lock(hashtext('routing_v2:' || $1::text))", [property]);
+    try {
+      const t0 = Date.now();
+      expect(await release()).toMatchObject({ status: "suppressed", hold: "kept_lock_timeout" });
+      expect(Date.now() - t0).toBeLessThan(8000);
+    } finally {
+      await other.query("select pg_advisory_unlock_all()");
+    }
+    expect(await suppressed()).toBe(1);
+    expect(await held()).toEqual({ h: true, r: "nine_asked_stop" });
+  });
+
+  it("Astra N2: a release a database guard refuses is not audited and reports kept_by_database", async () => {
+    await record(inbound, "nine_asked_stop");
+    await db.query(`create function pg_temp.keep_hold() returns trigger language plpgsql as $$ begin new.needs_human_attention := true; return new; end $$`);
+    await db.query("create trigger keep_hold before update of needs_human_attention on properties for each row execute function pg_temp.keep_hold()");
+    expect(await release()).toMatchObject({ status: "suppressed", hold: "kept_by_database" });
+    expect(await held()).toMatchObject({ h: true });
+    expect(await clearedEvents()).toEqual([]);
   });
 
   it("is service-role only", async () => {
