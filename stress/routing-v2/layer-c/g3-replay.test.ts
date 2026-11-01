@@ -436,6 +436,18 @@ it("G3 blast-day replay", async () => {
     const deadOpen = (await q("select count(*)::int n from ai_response_claims c join messages m on m.id = c.inbound_message_id where m.property_id = any($1) and c.status = 'processing' and c.lease_expires_at < now() - interval '10 minutes'"))[0].n;
     R.check("sweep closures: dead claims (processing, lease expired > 10 min) left open after the drain = 0", deadOpen === 0, { sweptByResult: swept, deadClaimsOpen: deadOpen });
   }
+  {
+    // Unrecovered obligations: an inbound whose decision/effects never became durable (no completed claim, no keyword exit,
+    // or decision row without a completed claim) on a lead that is NOT held at the end, and not superseded by a newer text.
+    const unrec = await q(`select m.id, m.property_id, c.status cs, (select count(*)::int from routing_v2_live_decisions d where d.inbound_message_id = m.id) nd
+      from messages m join properties p on p.id = m.property_id
+      left join ai_response_claims c on c.inbound_message_id = m.id and c.response_kind = 'sms_ai_responder_v1'
+      where m.property_id = any($1) and m.direction = 'inbound' and m.metadata->>'keyword' is null and not p.needs_human_attention
+        and coalesce(c.status, '') <> 'completed'
+        and not exists (select 1 from messages n where n.property_id = m.property_id and n.direction = 'inbound' and n.created_at > m.created_at)
+        and coalesce(m.metadata->'processing'->'aiResponder'->>'outcome', '') not in ('skipped','escalated','auto_closed','deferred')`);
+    R.check("unrecovered obligations: newest inbounds with non-durable decision/effects on an unheld lead at the end = 0", unrec.length === 0, { n: unrec.length, sample: unrec.slice(0, 5) });
+  }
   // H3 / A-8: after-repairs follow-ups >= 0.60 lost because the main decision held (stop / error holds excluded).
   const ar = await q("select d.road, d.action, d.probabilities, d.price_outcome from routing_v2_live_decisions d where d.property_id = any($1) and d.status = 'decided' and (d.probabilities ? 'needs_repairs' or d.probabilities ? 'no_repairs')");
   const fu = (p: Record<string, number>) => ["needs_repairs", "flexible_price", "original_portion", "no_repairs"].some((k) => (p?.[k] ?? 0) >= 0.6);

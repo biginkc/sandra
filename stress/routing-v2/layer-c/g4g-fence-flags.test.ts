@@ -401,3 +401,159 @@ it(`F8 / F9 / F10 x${N}`, async () => {
   }
   await setFlags(pg, BMH, FLAGS);
 });
+
+/**
+ * F11-F13 baselines (Astra review of 7e6e). Run alone with RECEIPT_SUFFIX so earlier receipts are kept.
+ * F11: safety text A "QSTOP I am all set for good, thanks" (M14 fixture; stub asked_stop 0.65 -> possible-stop hold) with
+ *   the atomic recorder forced to fail (per-lead trigger raising on routing_v2_live_decisions insert) -> claim
+ *   escalated/v2_safety_hold_failed; trigger dropped; claim lease backdated 2 h; A RE-RUN through the app's own workflow body
+ *   (the captured aiReplyDelayWorkflow start params replayed = a workflow retry) and parked at dispatch:after_early_gate
+ *   (barrier throws = dies before classification); then B "TONLY text only please". No sweep in between.
+ * F12: A "You can talk to my lawyer about it" with the keyword hold write failing (per-lead trigger on properties, as F9);
+ *   flags wrong_number_all OFF, replies ON; B "SLICE wrong person" (G4b fixture, stub wrong_person 0.95). B must send 0.
+ * F13: A "TONLY text only please" crashes at dispatch:after_decision (decision persisted, effects not durable); claim +
+ *   inbound backdated 2 h; flags all off; sweep (marks it not_v2); flags back on; B "TONLY text only please"; then a sweep
+ *   with flags on. B blocked + 0 sends; A recoverable (hold lands or obligation still visible).
+ */
+it(`F11 / F12 / F13 x${N}`, async () => {
+  const R4 = new Receipt("G4g-F11-F12-F13.txt");
+  const c = await assertClockAligned(pg, FIXTURE_ZONES);
+  R4.line(`clock: NO shift; |app - DB| skew = ${Math.round(c.skewMs)} ms; local`, c.local);
+  const { getMockMessageLog } = await import("@/lib/messaging/providers/mock");
+  const { createTestClient } = await import("@tests/integration/client");
+  const { runRoutingV2OutboxReplies } = await import("@/lib/ai-responder/dispatch");
+  const { setTestBarrier, clearTestBarriers } = await import("@/lib/testing/test-barriers");
+  const db = createTestClient();
+  const prevJev = stubs.jevOverride; const prevHaiku = stubs.haikuOverride;
+  stubs.jevOverride = (r) => r.includes("TONLY") ? { text_only: 0.95 } : r.includes("NOTINT") ? { not_interested: 0.95 } : r.includes("QSTOP") ? { asked_stop: 0.65 } : r.includes("SLICE wrong person") ? { wrong_person: 0.95 } : null;
+  stubs.haikuOverride = (thread) => /SELLER: QSTOP[^\n]*$/.test(thread.split("\n\nReturn JSON")[0]!) ? { status: 200, text: JSON.stringify({ road: "asked_stop", confidence: 0.9 }) } : null;
+  await setFlags(pg, BMH, FLAGS);
+  let n = 0;
+  const ext = () => `${org.runId}-f1113-${n++}`;
+  const sends = (phone: string) => getMockMessageLog().filter((m) => m.to === phone).length;
+  const fresh = async () => (await seedLeads(pg, org, 1, { state: () => ({ state: "MO", fips: null }), address: () => `${n} Obligation Ct` }))[0]!;
+  const prop = async (id: string) => (await pg.query("select needs_human_attention nh, last_ai_escalation_reason r from properties where id = $1", [id])).rows[0];
+  const lastIn = async (id: string) => (await pg.query("select id, metadata->'processing'->'aiResponder'->>'outcome' o, metadata->'processing'->'aiResponder'->>'reason' r, metadata->'processing'->'routingV2Sweep'->>'result' sw from messages where property_id = $1 and direction = 'inbound' order by created_at desc limit 1", [id])).rows[0];
+  const claim = async (mid: string) => (await pg.query("select status, outcome, error_message em from ai_response_claims where inbound_message_id = $1", [mid])).rows[0];
+  const dec = async (mid: string) => (await pg.query("select status from routing_v2_live_decisions where inbound_message_id = $1", [mid])).rows.map((x) => x.status).join(",") || "0";
+  const drips = async (id: string) => (await pg.query("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [id])).rows[0].n;
+  const replyQ = async (mid: string) => (await pg.query("select count(*)::int n from routing_v2_outbox where inbound_message_id = $1 and kind = 'reply' and status in ('pending','claimed','sent')", [mid])).rows[0].n;
+  const sh = (s: unknown) => String(s ?? "-").replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>").slice(0, 90);
+  const verdict = (p: number) => (p === N ? "PASS" : "FAIL-expected-at-0378");
+  const age = async (mid: string) => {
+    await pg.query("update messages set created_at = now() - interval '2 hours' where id = $1", [mid]);
+    await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours' where inbound_message_id = $1", [mid]);
+  };
+  const blockedB = async (l: Lead, s0: number) => {
+    const b = await lastIn(l.propertyId); const p = await prop(l.propertyId); const dr = await drips(l.propertyId); const q = await replyQ(b.id);
+    const s = sends(l.phone) - s0;
+    const routed = b.o === "auto_closed" && /^routing_v2:/.test(b.r ?? "");
+    return { b, p, dr, q, s, ok: !routed && s === 0 && dr === 0 && q === 0, txt: `B-stamp=${b.o}:${sh(b.r)} B-decision=${await dec(b.id)} hold=${p.nh ? p.r : "-"} replyQueued=${q} sends=${s} activeDrips=${dr}` };
+  };
+  await pg.query(`create table if not exists public.stress_fail_lead (property_id uuid not null, what text not null, primary key (property_id, what));
+    create or replace function public.stress_fail_hold_fn() returns trigger language plpgsql as $$ begin
+      if new.needs_human_attention and not coalesce(old.needs_human_attention, false) and exists (select 1 from public.stress_fail_lead f where f.property_id = new.id and f.what = 'hold')
+      then raise exception 'stress: hold write failed'; end if; return new; end $$;
+    create or replace function public.stress_fail_decision_fn() returns trigger language plpgsql as $$ begin
+      if exists (select 1 from public.stress_fail_lead f where f.property_id = new.property_id and f.what = 'decision')
+      then raise exception 'stress: decision record failed'; end if; return new; end $$;
+    drop trigger if exists stress_fail_hold_trg on public.properties;
+    create trigger stress_fail_hold_trg before update on public.properties for each row execute function public.stress_fail_hold_fn();
+    drop trigger if exists stress_fail_decision_trg on public.routing_v2_live_decisions;
+    create trigger stress_fail_decision_trg before insert on public.routing_v2_live_decisions for each row execute function public.stress_fail_decision_fn();`);
+  try {
+    // F11
+    {
+      let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+      for (let i = 0; i < N; i++) {
+        const l = await fresh();
+        await pg.query("insert into public.stress_fail_lead values ($1, 'decision') on conflict do nothing", [l.propertyId]);
+        let startA: WorkflowCall | null = null;
+        const prevOn = workflowSink.onStart;
+        workflowSink.onStart = (wc: WorkflowCall) => { if (!startA) startA = wc; prevOn?.(wc); };
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "QSTOP I am all set for good, thanks" }); await settle();
+        workflowSink.onStart = prevOn;
+        await pg.query("delete from public.stress_fail_lead where property_id = $1", [l.propertyId]);
+        const a = await lastIn(l.propertyId); const ca = await claim(a.id); const da = await dec(a.id); const pa = await prop(l.propertyId);
+        await age(a.id);
+        let parked = 0; let rerun = "no_start_captured";
+        setTestBarrier("dispatch:after_early_gate", async (ctx) => { if (ctx.propertyId !== l.propertyId || parked) return; parked++; throw new Error("stress-park:after_early_gate"); });
+        if (startA) { rerun = await (startA as WorkflowCall).fn((startA as WorkflowCall).params).then((r) => sh(JSON.stringify(r)).slice(0, 60), (e) => `threw:${sh(String(e)).slice(0, 50)}`); }
+        clearTestBarriers();
+        const ca2 = await claim(a.id);
+        const s0 = sends(l.phone);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); await pause(500);
+        const r = await blockedB(l, s0); total += r.s;
+        if (r.ok) pass++;
+        const k = `${r.ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} A-claim=${ca?.status}:${sh(ca?.outcome)}:${sh(ca?.em)} A-decision=${da} holdAfterA=${pa.nh ? pa.r : "-"} rerun=${rerun} parkedAtEarlyGate=${parked} A-claimAfterRerun=${ca2?.status}:${sh(ca2?.outcome)}:${sh(ca2?.em)} ${r.txt}`;
+        modes[k] = (modes[k] ?? 0) + 1;
+      }
+      R4.line(`${verdict(pass)} F11 recorder fails on safety text A -> lease expired -> A re-run (workflow replay) parked at dispatch:after_early_gate -> B: ${pass}/${N}; sends ${total}`);
+      R4.line("   modes", modes);
+    }
+    // F12
+    {
+      let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+      for (let i = 0; i < N; i++) {
+        await setFlags(pg, BMH, FLAGS);
+        const l = await fresh();
+        await pg.query("insert into public.stress_fail_lead values ($1, 'hold') on conflict do nothing", [l.propertyId]);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "You can talk to my lawyer about it" }); await settle();
+        const a = await lastIn(l.propertyId); const pa = await prop(l.propertyId);
+        await pg.query("delete from public.stress_fail_lead where property_id = $1", [l.propertyId]);
+        await setFlags(pg, BMH, { ...FLAGS, wrong_number_all: false });
+        const s0 = sends(l.phone);
+        await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "SLICE wrong person" }); await settle(); await pause(300);
+        await runRoutingV2OutboxReplies(db, { limit: 50 }); await pause(300);
+        const r = await blockedB(l, s0); total += r.s;
+        const phoneActs = (await pg.query("select count(*)::int n from routing_v2_phone_actions where source_property_id = $1", [l.propertyId])).rows[0].n;
+        const ok = r.s === 0;
+        if (ok) pass++;
+        const k = `${ok ? "PASS" : "FAIL"} A-stamp=${a.o}:${sh(a.r)} holdAfterA=${pa.nh ? pa.r : "-"} ${r.txt} phoneActions=${phoneActs}`;
+        modes[k] = (modes[k] ?? 0) + 1;
+      }
+      await setFlags(pg, BMH, FLAGS);
+      R4.line(`${verdict(pass)} F12 keyword hold write fails on A, then wrong-person B with wrong_number_all OFF + replies ON -> B sends 0: ${pass}/${N}; sends ${total}`);
+      R4.line("   modes", modes);
+    }
+  } finally {
+    await pg.query(`drop trigger if exists stress_fail_hold_trg on public.properties; drop trigger if exists stress_fail_decision_trg on public.routing_v2_live_decisions;
+      drop function if exists public.stress_fail_hold_fn(); drop function if exists public.stress_fail_decision_fn(); drop table if exists public.stress_fail_lead;`);
+    await setFlags(pg, BMH, FLAGS);
+  }
+  // F13
+  {
+    let pass = 0; const modes: Record<string, number> = {}; let total = 0;
+    for (let i = 0; i < N; i++) {
+      await setFlags(pg, BMH, FLAGS);
+      const l = await fresh();
+      let fired = 0;
+      setTestBarrier("dispatch:after_decision", async (ctx) => { if (ctx.propertyId !== l.propertyId || fired) return; fired++; throw new Error("stress-crash:after_decision"); });
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle();
+      clearTestBarriers();
+      const a = await lastIn(l.propertyId); const ca = await claim(a.id); const da = await dec(a.id);
+      await age(a.id);
+      await setFlags(pg, BMH, {});
+      await runRoutingV2OutboxReplies(db, { limit: 50 }).catch(() => null);
+      const aOff = await lastIn(l.propertyId); const pOff = await prop(l.propertyId);
+      await setFlags(pg, BMH, FLAGS);
+      const s0 = sends(l.phone);
+      await deliverWebhook({ externalId: ext(), from: l.phone, to: org.sender, body: "TONLY text only please" }); await settle(); await pause(500);
+      const r = await blockedB(l, s0);
+      await runRoutingV2OutboxReplies(db, { limit: 50 }).catch(() => null); await pause(300);
+      const pLater = await prop(l.propertyId);
+      const aRow = (await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' sw from messages where id = $1", [a.id])).rows[0];
+      const ca2 = await claim(a.id);
+      const recoverable = pLater.nh === true || (ca2?.status === "processing");
+      const s = sends(l.phone) - s0; total += s;
+      const ok = fired === 1 && r.ok && s === 0 && recoverable;
+      if (ok) pass++;
+      const k = `${ok ? "PASS" : "FAIL"} barrier=${fired} A-claim=${ca?.status}:${sh(ca?.outcome)} A-decision=${da} sweepFlagsOff: A-mark=${aOff.sw ?? "-"} hold=${pOff.nh ? pOff.r : "-"} | ${r.txt} | laterSweep: hold=${pLater.nh ? pLater.r : "-"} A-mark=${aRow?.sw ?? "-"} A-claim=${ca2?.status}:${sh(ca2?.em)} totalSends=${s}`;
+      modes[k] = (modes[k] ?? 0) + 1;
+    }
+    R4.line(`${verdict(pass)} F13 A decision persisted, effects not durable -> flags off + sweep (not_v2) -> flags on -> B blocked, A recoverable: ${pass}/${N}; sends ${total}`);
+    R4.line("   modes", modes);
+  }
+  stubs.jevOverride = prevJev; stubs.haikuOverride = prevHaiku;
+  await setFlags(pg, BMH, FLAGS);
+});
