@@ -1,5 +1,6 @@
 import "server-only";
 
+import { openSafetyObligation } from "@/lib/ai-responder/safety-obligations";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
@@ -434,6 +435,12 @@ export async function recordRepSmsHumanTakeover(
       p_kind: "safety",
     });
     if (holdError && !/PGRST202|42883|does not exist|Could not find/i.test(holdError.message)) {
+      // Round 18: the person hold did not land; the obligation (one source of truth) blocks every
+      // automated send and newer text on the lead until it lands or a person resolves it.
+      await openSafetyObligation(supabase, {
+        propertyId: input.propertyId, inboundMessageId: input.inboundMessageId,
+        reason: REP_SMS_HUMAN_TAKEOVER_REASON, source: "rep_takeover",
+      });
       throw new RepSmsHumanTakeoverPersistenceError(
         `recordRepSmsHumanTakeover hold: ${holdError.message}`,
       );

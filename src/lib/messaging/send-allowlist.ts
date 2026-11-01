@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { hasUnresolvedSafetyObligation } from "@/lib/ai-responder/safety-obligations";
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
@@ -94,6 +95,8 @@ export async function loadLeadTestRunId(
 
 export type SendAllowCheck =
   | { allowed: true }
+  /** Round 18: the lead has an unresolved routing v2 safety obligation: no automated send (retry later). */
+  | { allowed: false; why: "safety_obligation_open" }
   /** A confirmed test-tagged send to a non-owned number: terminal, never retried. */
   | { allowed: false; why: typeof REFUSED_NON_OWNED }
   /** The lead's test tag could not be read: refused now (fail closed), retryable later. */
@@ -124,6 +127,19 @@ export async function checkSendAllowed(
   },
 ): Promise<SendAllowCheck> {
   const env = input.env ?? process.env;
+  // Astra review of 7e6e72c13839 (round 18): an unresolved safety obligation blocks every automated
+  // send on the lead (all paths, flags on or off); a person's own send is not blocked here.
+  if (input.origin === "automated" || input.origin === "queued_release") {
+    const open = await hasUnresolvedSafetyObligation(supabase, input.propertyId);
+    if (open !== "no") {
+      if (open === "unknown") {
+        reportError(new Error("send guard: safety obligations unreadable; automated send refused"), {
+          tags: { surface: "send_allowlist", reason: "safety_obligation_unreadable" }, extra: { propertyId: input.propertyId },
+        });
+      }
+      return { allowed: false, why: "safety_obligation_open" };
+    }
+  }
   const lead = await loadLeadTestRunId(supabase, input.propertyId);
   if (!lead.ok && !input.testRunId?.trim()) {
     // Fail closed (stress review): a lead whose test tag cannot be read might be tagged, so it

@@ -125,6 +125,7 @@ import {
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
+import { openSafetyObligation } from "./safety-obligations";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
@@ -454,15 +455,9 @@ async function keywordHoldFailClosedInner(
   const cancel = await loose.from("routing_v2_outbox").update({ status: "cancelled", cancel_reason: "held_for_person" })
     .eq("property_id", a.propertyId).eq("kind", "reply").eq("status", "pending");
   if (cancel.error) reportError(new Error(cancel.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
-  if (!a.orgId || !a.inboundMessageId) return;
-  if ((await routingV2LiveForSweep(supabase, a.orgId, a.propertyId)) === "no") return;
-  const marker = await loose.from("routing_v2_live_decisions").insert({
-    org_id: a.orgId, property_id: a.propertyId, inbound_message_id: a.inboundMessageId,
-    status: "failed", failure_reason: `keyword_hold_failed:${a.reason}`.slice(0, 200), expected_revision: 0,
-  });
-  if (marker.error && marker.error.code !== "23505") {
-    reportError(new Error(marker.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
-  }
+  // Round 18: the unresolved obligation (flags on or off) blocks newer texts and every automated
+  // send on the lead until the hold lands (the sweep re-attempts it) or a person resolves it.
+  await openSafetyObligation(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason, source: "keyword" });
 }
 
 export async function applyKeywordEscalation(
@@ -8763,6 +8758,9 @@ async function runRoutingV2LiveStepInner(
     // and close the claim as v2_safety_hold_failed: the apply gate blocks this lead's newer texts
     // and the sweep (per-property delivery or the cron) re-attempts the hold until it lands.
     await pauseV2DripsFailClosed(supabase, input.propertyId);
+    // Round 18: the unresolved obligation is the one source of truth; it survives any reclaim of
+    // this claim and blocks every automated send and every newer text until a hold lands.
+    await openSafetyObligation(supabase, { propertyId: input.propertyId, inboundMessageId, reason: safetyHoldReason ?? "nine_needs_person", source: "hold_failed" });
     reportError(new Error("routing v2: safety decision and hold could not be recorded"), {
       tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId },
     });
@@ -9471,6 +9469,31 @@ export async function sweepUnstampedV2Inbounds(
   // time past by the lease), or a claim still 'processing' long after its lease expired; none
   // with a v2 decision / audit row, a keyword exit, or a previous sweep mark.
   const db = supabase as unknown as LooseRpc;
+  // Round 18: unresolved safety obligations are recovered first, regardless of flags (a flag
+  // change or a not_v2 mark never discharges one): the hold is written; the obligation resolves in
+  // the same transaction when it lands. Ones still open after a day are reported once per pass.
+  let held = 0;
+  const ob = await db.rpc("routing_v2_obligation_candidates", { p_limit: 50, ...(propertyId ? { p_property_id: propertyId } : {}) });
+  if (ob.error) {
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(ob.error.message)) {
+      reportError(new Error(ob.error.message), { tags: { surface: "routing_v2_obligation_sweep" } });
+    }
+  } else {
+    const dbNow = await dbNowMs(supabase);
+    let stale = 0;
+    for (const o of (ob.data ?? []) as Array<{ property_id: string; inbound_message_id: string | null; reason: string; created_at: string }>) {
+      if (shouldStop()) break;
+      if (Date.parse(o.created_at) < dbNow - 24 * 3600_000) stale++;
+      const r = await writeV2Hold(supabase, o.property_id, o.inbound_message_id as string, o.reason, "safety");
+      if (r === "error") { await pauseV2DripsFailClosed(supabase, o.property_id); continue; }
+      if (r === "held" || r === "upgraded") held++;
+    }
+    if (stale > 0) {
+      reportError(new Error(`routing v2: ${stale} safety obligation(s) still unresolved after 24 h`), {
+        tags: { surface: "routing_v2_obligation_sweep" }, extra: { count: stale },
+      });
+    }
+  }
   const { data, error } = await db.rpc("routing_v2_sweep_candidates", {
     p_lease_seconds: Math.round(WEBHOOK_PROCESSING_LEASE_MS / 1000), p_limit: 50,
     ...(propertyId ? { p_property_id: propertyId } : {}),
@@ -9479,19 +9502,10 @@ export async function sweepUnstampedV2Inbounds(
     if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
       reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
     }
-    return 0;
+    return held;
   }
-  let held = 0;
   for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; why: string; created_at?: string }>) {
     if (shouldStop()) break;
-    // Astra review of b6a00a0a2f17 (B): an unrecovered safety obligation never ages out; one still
-    // open after a day is reported (and stays a candidate until its hold lands).
-    if ((m.why === "decision_unrecovered" || m.why === "safety_hold_failed") && m.created_at
-        && Date.parse(m.created_at) < (await dbNowMs(supabase)) - 24 * 3600_000) {
-      reportError(new Error("routing v2: a safety obligation is still unrecovered after 24 h"), {
-        tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id, why: m.why },
-      });
-    }
     // Review B2: an unreadable v2 state is NOT "not v2". The text is left unmarked for the next
     // pass (a flaky database must never let a dead v2 text escape).
     const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);

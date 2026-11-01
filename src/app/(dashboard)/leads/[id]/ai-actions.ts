@@ -12,6 +12,7 @@ import {
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { resolveSafetyObligationsByPerson } from "@/lib/ai-responder/safety-obligations";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -35,6 +36,9 @@ export async function clearNeedsHumanAttention(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
+    // Round 18: a person resolving the lead resolves its routing v2 safety obligations first (the
+    // only non-automated way an obligation ends), so the clear below is not kept by the trigger.
+    await resolveSafetyObligationsByPerson(createAdminClient(), propertyId);
     const { data: updated, error } = await supabase
       .from("properties")
       .update({

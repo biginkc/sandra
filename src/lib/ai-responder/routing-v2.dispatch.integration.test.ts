@@ -47,6 +47,13 @@ vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => {
       ? { ok: true, localTime: "12:00", zone: "America/Chicago" }
       : { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" };
   },
+  // Keep the reply-delay clamp (delay.ts) on the same mocked clock as checkQuietHours: an open
+  // window is local noon, so a reply's delay is not clamped to 0 when the suite runs at night.
+  getQuietHoursLocalTime: (state: string | null | undefined, now?: Date) => {
+    const actual = real.getQuietHoursLocalTime(state, now);
+    if (!actual || !propertyWindow.open) return actual;
+    return { ...actual, hour: 12, minute: 0, second: 0 };
+  },
   };
 });
 const recipientWindow = vi.hoisted(() => ({ open: true }));
@@ -1718,7 +1725,10 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await runRoutingV2OutboxReplies(supabase, { limit: 10 });          // the sweep holds and closes the dead claim
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
       expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "lease_dead_swept" });
-      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);   // a person clears it
+      // A person clears it through the real path (resolve the lead's obligations, then clear).
+      const { resolveSafetyObligationsByPerson } = await import("./safety-obligations");
+      await resolveSafetyObligationsByPerson(supabase, lead.propertyId);
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);
       haikuAnswer = null;
       const c = await say(lead, B_TEXT); await runWorkflows(); await settle();
       await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
@@ -1746,6 +1756,11 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, contact_id, status, error_message, lease_expires_at) values ($1,$2,$3,$4,$5,$6, now() - interval '2 hours')",
         [orgId, m.id, lead.propertyId, lead.contactId, claim === "dead" ? "processing" : "error", claim === "dead" ? null : "flag_failed"]);
       await pg.query("update ai_response_claims set lease_expires_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' where inbound_message_id = $1", [m.id]);
+      // A pre-store row is carried into the obligation store by 20261031132300's backfill.
+      // (On a database before that migration the decision row + claim above are the representation.)
+      if ((await pg.query("select to_regclass('public.routing_v2_safety_obligations') is not null as t")).rows[0].t) {
+        await pg.query("insert into routing_v2_safety_obligations (org_id, property_id, inbound_message_id, reason, source, created_at) values ($1,$2,$3,'nine_needs_person','legacy', now() - interval '2 hours')", [orgId, lead.propertyId, m.id]);
+      }
       return m.id as string;
     };
     forced("M25: a possible stop whose hold cannot be written: no decision row, claim v2_safety_hold_failed, the newer text blocked (0 sends); once writes work the per-property delivery holds the lead", async (lead) => {
@@ -1759,6 +1774,7 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       // no decision row (only the after-response audit row, status not_routed)
       expect(await count("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status <> 'not_routed'", [a])).toBe(0);
       expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toEqual({ status: "error", error_message: "v2_safety_hold_failed" });
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where inbound_message_id = $1 and resolved_at is null", [a])).toBe(1);
       haikuAnswer = null;
       const b = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, B_TEXT); await runWorkflows(); await settle(); return id; });
       expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
@@ -1825,6 +1841,78 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
       expect(sentTo(lead.phone)).toEqual([]);
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+
+    // ---- Astra fourth review of 7e6e72c13839 (round 18): one obligation store ----
+    forced("M30: the recorder fails (obligation opened), the claim is reclaimed by a retry, then B: still blocked (0 sends); the per-property sweep holds and resolves it", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      haikuAnswer = null;
+      // Stress F11 / Astra P1-1: A's lease runs out and the REAL retry reclaim in claims.ts takes the
+      // claim back (status processing, live lease, error marker v2_safety_hold_failed cleared). B then
+      // arrives while A is still processing.
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1", [a]);
+      const { claimAiResponse } = await import("./claims");
+      const reclaim = await claimAiResponse(supabase as never, { orgId, inboundMessageId: a, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null });
+      expect(reclaim.claimed).toBe(true);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toMatchObject({ status: "processing", error_message: null });
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      expect(sentTo(lead.phone)).toEqual([]);
+      const bStamp = await stampOf(b);
+      expect(bStamp.r === "routing_v2:already_held" || bStamp.o === "skipped:rule_0").toBe(true);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M31: the recorder fails on safety text A (obligation, no hold), then B \"Nobody by that name here\" on the wrong-number road (wrong_number_all off, automation + template on, lead not otherwise held): B sends nothing", async (lead) => {
+      if (!(await count("select count(*)::int n from auto_reply_templates where org_id = $1 and outcome = 'wrong_number'", [orgId]))) await seedWrongNumberAutomation();
+      // The wrong-number automation must really be on for every iteration (an earlier test may have
+      // left the threshold row off), so the only thing that can stop B's send is the obligation.
+      await pg.query("insert into public.jev_outcome_thresholds (org_id, outcome, min_confidence, automation_enabled) values ($1, 'wrong_number', 0.9, true) on conflict (org_id, outcome) do update set min_confidence = 0.9, automation_enabled = true", [orgId]);
+      // Stress F12 (rebuilt) / Astra P1-2: A's safety hold cannot be written, exactly as in M30.
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      haikuAnswer = null;
+      expect(await pg.query("select needs_human_attention, hold_kind from properties where id = $1", [lead.propertyId]).then((r) => r.rows[0])).toMatchObject({ needs_human_attention: false, hold_kind: null });
+      // B: a wrong-person reply; this-property close (closeNineWrongPersonThisProperty) would send the template.
+      jevProbabilities = { wrong_person: 0.95 }; jevByReply = { "Nobody by that name here": { wrong_person: 0.95 } };
+      const b = await say(lead, "Nobody by that name here"); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M32: an unresolved obligation, flags turned off, the sweep runs (hold still failing), flags back on, then B: blocked; the obligation is still recovered later", async (lead) => {
+      await legacySafetyDecision(lead, "stop texting me maybe", "dead");
+      const { rows: [cfg] } = await pg.query("select routing_v2_flags from ai_responder_configs where org_id = $1", [orgId]);
+      await pg.query("update ai_responder_configs set routing_v2_flags = '{}'::jsonb where org_id = $1", [orgId]);
+      await withHoldRefused(lead.propertyId, async () => { await runRoutingV2OutboxReplies(supabase, { limit: 10 }); });
+      await pg.query("update ai_responder_configs set routing_v2_flags = $2::jsonb where org_id = $1", [orgId, JSON.stringify(cfg.routing_v2_flags)]);
+      const b = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, B_TEXT); await runWorkflows(); await settle(); return id; });
+      expect(await stampOf(b)).toMatchObject({ r: "routing_v2:already_held" });
+      expect(sentTo(lead.phone)).toEqual([]);
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+    });
+    forced("M33: stacked reasons: held for R1 (a needs-confirm review), then a safety hold on top, then an automated clear of R1: still held; B gets nothing; a person's clear ends it", async (lead) => {
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'jev_dnc_needs_confirm' where id = $1", [lead.propertyId]);
+      const { markPropertyNeedsAttention } = await import("./dispatch");
+      expect(await markPropertyNeedsAttention(supabase, lead.propertyId, "nine_asked_stop")).toBe(true);
+      // The review-resolved trigger's own clear (20261008300200): reason-filtered, not a person.
+      await pg.query("update properties set needs_human_attention = false, last_ai_escalation_reason = null where id = $1 and last_ai_escalation_reason = 'jev_dnc_needs_confirm'", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      const b = await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await stampOf(b)).toMatchObject({ o: "skipped:rule_0" });
+      const { resolveSafetyObligationsByPerson } = await import("./safety-obligations");
+      await resolveSafetyObligationsByPerson(supabase, lead.propertyId);
+      await pg.query("update properties set needs_human_attention = false where id = $1", [lead.propertyId]);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
     });
 
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {

@@ -2145,7 +2145,7 @@ async function releaseQueuedMessageInner(
         messageId: msg.id,
       })
       : { allowed: true as const };
-    if (!allow.allowed && allow.why === "taint_lookup_failed") {
+    if (!allow.allowed && (allow.why === "taint_lookup_failed" || allow.why === "safety_obligation_open")) {
       // A database blip must delay this queued text, never kill it: back to queued, a little
       // later (nothing reached the provider). The drain retries it on a later tick.
       const { error: requeueError } = await supabase
