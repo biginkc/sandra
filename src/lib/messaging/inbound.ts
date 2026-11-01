@@ -1207,6 +1207,9 @@ export async function handleInboundWebhook(
         continue;
       }
 
+      // Opus N1 at 0378182042c6: a keyword / legal hold that could not be written. Set inside the
+      // AI-responder block below, acted on after it (never inside its catch, which would swallow it).
+      let keywordHoldRetryReason: string | null = null;
       if (effectiveContactId && !inboundState.aiResponder) {
         try {
           const dispatchInput: AiDispatchInput = {
@@ -1289,12 +1292,13 @@ export async function handleInboundWebhook(
                   });
 
               if (keywordEscalation.escalated && !keywordEscalation.flagOk) {
-                // Stress F8/F9 (round 17): the hold did not land. The text is NOT marked escalated
-                // (it already failed closed: v2 drips paused, pending v2 replies cancelled, an
-                // unrecovered safety marker stored); the webhook is retryable so the hold is tried
-                // again on redelivery, and the sweep recovers it meanwhile.
-                await failInboundWebhookForRetry(supabase, provider.providerId, ev.externalId,
-                  new Error(`keyword hold not written: ${keywordEscalation.reason}`));
+                // Stress F8/F9 (round 17) + Opus N1: the hold did not land. applyKeywordEscalation
+                // already failed closed (v2 drips paused, pending v2 replies cancelled, and with v2
+                // live an unrecovered safety marker stored for the sweep). The text is NOT marked
+                // escalated; the hot-text check below still runs; then, after this block, the
+                // webhook event is marked errored (not processed) and the request answers 500 so
+                // the provider redelivers and the hold is tried again.
+                keywordHoldRetryReason = keywordEscalation.reason;
               }
               if (keywordEscalation.escalated) {
                 // A mixed price + non-price text was held for a person under
@@ -1309,22 +1313,24 @@ export async function handleInboundWebhook(
                     runCtx,
                   );
                 }
-                await stampAiResponderTerminalOutcome(supabase, {
-                  messageId: insertOutcome.messageId,
-                  conversationId: insertOutcome.conversationId,
-                  outcome: {
-                    outcome: "escalated",
-                    reason: keywordEscalation.reason,
-                  },
-                  runContext: runCtx,
-                });
-                // Routing v2 AUDIT (round 2): a delayed-path keyword hold never reaches v2.
-                scheduleRoutingV2Audit(supabase, {
-                  propertyId: effectivePropertyId,
-                  inboundMessageId: insertOutcome.messageId,
-                  conversationId: insertOutcome.conversationId,
-                  note: `keyword_hold:${keywordEscalation.reason}`,
-                });
+                if (keywordEscalation.flagOk) {
+                  await stampAiResponderTerminalOutcome(supabase, {
+                    messageId: insertOutcome.messageId,
+                    conversationId: insertOutcome.conversationId,
+                    outcome: {
+                      outcome: "escalated",
+                      reason: keywordEscalation.reason,
+                    },
+                    runContext: runCtx,
+                  });
+                  // Routing v2 AUDIT (round 2): a delayed-path keyword hold never reaches v2.
+                  scheduleRoutingV2Audit(supabase, {
+                    propertyId: effectivePropertyId,
+                    inboundMessageId: insertOutcome.messageId,
+                    conversationId: insertOutcome.conversationId,
+                    note: `keyword_hold:${keywordEscalation.reason}`,
+                  });
+                }
               } else {
                 const scheduledAt = new Date(
                   Date.now() + delaySeconds * 1000,
@@ -1453,6 +1459,27 @@ export async function handleInboundWebhook(
           finalOutcome: "skipped",
           reason: "no_contact",
         });
+      }
+
+      if (keywordHoldRetryReason !== null) {
+        // Opus N1: never acknowledge a text whose keyword hold is not written. The event is marked
+        // errored (a redelivery re-claims it; the inbound intent stays incomplete), and the throw
+        // answers 500 (handled by the outer catch), so a provider that retries non-2xx (Dialpad)
+        // redelivers it and the hold is tried again. Without a redelivery the fail-closed effects
+        // stand: drips stay paused and, with v2 live, the sweep re-holds from the stored marker.
+        await finishRun(supabase, runCtx, {
+          status: "error",
+          finalOutcome: "error",
+          // The run reason it already had when this path threw (a known reason; the event's
+          // error_message names the keyword hold).
+          reason: "ai_responder_exception",
+        });
+        await failInboundWebhookForRetry(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+          new Error(`keyword hold not written: ${keywordHoldRetryReason}`),
+        );
       }
 
       await markWebhookEventProcessed(

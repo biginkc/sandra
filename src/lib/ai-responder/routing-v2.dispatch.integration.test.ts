@@ -1827,6 +1827,90 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
     });
 
+    // ---- Follow-up PR (Opus N1 / Fable N-B): a keyword hold that cannot be written ----
+    const sayRaw = async (lead: Awaited<ReturnType<typeof seedLead>>, body: string, externalId: string) => (await handleInboundWebhook(new Request("https://v2.test/webhooks/mock", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mock-signature": "valid" },
+      body: JSON.stringify({ externalId, from: lead.phone, to: MOCK_SENDER_PRIMARY, body }),
+    }), { includeFullUrl: false, provider: new MockMessagingProvider() })).status;
+    it("N1: a mixed price + legal text whose keyword hold cannot be written: the hot-text alert still lands once, the webhook answers 500 with the event marked error (not processed), the text is not stamped; the redelivery holds it, answers 200 and adds no second alert", async () => {
+      const lead = await setup();
+      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
+      // The hot-text alert needs exactly one active owner to go to.
+      const owner = randomUUID();
+      await pg.query("begin");
+      await pg.query("set local session_replication_role = replica");
+      await pg.query("insert into auth.users (id, email) values ($1, $2)", [owner, `owner-${owner}@test.local`]);
+      await pg.query("delete from memberships where org_id = $1 and role = 'owner'", [orgId]);
+      await pg.query("insert into memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active')", [orgId, owner]);
+      await pg.query("commit");
+      const priorPick = process.env.HOT_LEAD_ASSIGNEE_USER_ID;
+      process.env.HOT_LEAD_ASSIGNEE_USER_ID = owner;
+      try {
+      jevProbabilities = { open_to_selling: 0.95 };
+      const body = "How much? My lawyer is involved";
+      const externalId = `v2-wh-n1-${randomUUID()}`;
+      const status = await withHoldRefused(lead.propertyId, async () => {
+        const st = await sayRaw(lead, body, externalId); await runWorkflows(); await settle();
+        return st;
+      });
+      expect(status).toBe(500);
+      const event = async () => (await pg.query("select processing_status s from webhook_events where external_id = $1", [externalId])).rows[0].s as string;
+      expect(await event()).toBe("error");
+      const { rows: [m] } = await pg.query("select id from messages where property_id = $1 and body = $2", [lead.propertyId, body]);
+      expect((await stampOf(m.id)).o).toBeNull();
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      const hotEvents = () => count("select count(*)::int n from lead_events where property_id = $1 and source_type = 'hot_seller_text'", [lead.propertyId]);
+      expect(await hotEvents()).toBe(1);
+      expect(sentTo(lead.phone)).toEqual([]);
+      // Redelivery once writes work again.
+      expect(await sayRaw(lead, body, externalId)).toBe(200);
+      await runWorkflows(); await settle();
+      expect(await event()).toBe("processed");
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+      expect(await stampOf(m.id)).toMatchObject({ o: "escalated", r: "keyword:legal_contract" });
+      expect(await count("select count(*)::int n from messages where property_id = $1 and body = $2", [lead.propertyId, body])).toBe(1);
+      expect(await hotEvents()).toBe(1);
+      expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        if (priorPick === undefined) delete process.env.HOT_LEAD_ASSIGNEE_USER_ID; else process.env.HOT_LEAD_ASSIGNEE_USER_ID = priorPick;
+      }
+    });
+
+    // ---- Follow-up PR (Fable N-1 / Opus N6): model_stop_suppression hold-and-suppress ----
+    const modelStops = async (lead: Awaited<ReturnType<typeof seedLead>>) => count("select count(*)::int n from sms_phone_suppressions where org_id = $1 and phone_e164 = $2 and source = 'model_stop'", [orgId, lead.phone]);
+    const stopFlags = (extra: Record<string, unknown>) => pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || $2::jsonb where org_id = $1", [orgId, JSON.stringify(extra)]);
+    it("N-1 flag ON, Jev-decided stop (asked_stop 0.95): suppressed automatically and NOT left held for a person; 0 sends", async () => {
+      const lead = await setup();
+      await stopFlags({ model_stop_suppression: true });
+      jevProbabilities = { asked_stop: 0.95 };
+      const a = await say(lead, "I think I'm all set"); await runWorkflows(); await settle();
+      expect(await stampOf(a)).toMatchObject({ r: "routing_v2:model_stop" });
+      expect(await modelStops(lead)).toBe(1);
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+      expect(await count("select count(*)::int n from lead_events where property_id = $1 and event_type = 'ai_escalation_cleared' and payload->>'reason' = 'model_stop_suppressed'", [lead.propertyId])).toBe(1);
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect(await count("select count(*)::int n from sequence_enrollments where property_id = $1 and status = 'active'", [lead.propertyId])).toBe(0);
+    });
+    it("N-1 flag ON, Haiku-decided stop (asked_stop 0.65, Haiku asked_stop): held for a person, nothing suppressed; 0 sends", async () => {
+      const lead = await setup();
+      await stopFlags({ model_stop_suppression: true, haiku: true });
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevProbabilities = { asked_stop: 0.65 };
+      await say(lead, "I think I'm all set"); await runWorkflows(); await settle();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      expect(await modelStops(lead)).toBe(0);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    it("N-1 flag OFF, the same confident stop: today's human review (held nine_asked_stop), nothing suppressed; 0 sends", async () => {
+      const lead = await setup();
+      jevProbabilities = { asked_stop: 0.95 };
+      await say(lead, "I think I'm all set"); await runWorkflows(); await settle();
+      expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_asked_stop" });
+      expect(await modelStops(lead)).toBe(0);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);
