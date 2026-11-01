@@ -7,7 +7,22 @@ const REACTION = /^\s*(Liked|Loved|Laughed at|Emphasized|Questioned|Disliked)\s+
 const BOUNCE = /no sms capabilit|unable to receive/i;
 const DRIVING = /i'?m driving|i am driving|driving,? can'?t text|sent from my car|do not disturb while driving/i;
 
-export type CodeCheck = "reaction" | "bad_number" | "driving";
+export type CodeCheck = "reaction" | "bad_number" | "driving" | "not_interested_phrase";
+
+/**
+ * Jarrad 2026-10-30 (BUILD-PLAN §16): "Do NOT check back" (and "Do not bother", "No need to
+ * call me back") → Not interested drip, NOT a stop. Exactly these three, matched as the whole
+ * message, ignoring case, punctuation and extra spaces. No other phrase is added here.
+ * Master A-012 (relayed by Jarrad, round 2): the whole-message phrase wins over every Jev
+ * score (legal / hostile / asked_stop, any band). Any other content = no match = normal
+ * precedence. The carrier STOP keyword and the webhook keyword gate run before this, unchanged.
+ */
+const NOT_INTERESTED_PHRASES: ReadonlySet<string> = new Set(["do not check back", "do not bother", "no need to call me back"]);
+
+export function isNotInterestedPhrase(reply: string): boolean {
+  const norm = reply.toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+  return NOT_INTERESTED_PHRASES.has(norm);
+}
 
 export function codePreCheck(reply: string): CodeCheck | null {
   if (REACTION.test(reply)) return "reaction";
@@ -20,7 +35,11 @@ const CODE_ROADS: Record<CodeCheck, V2Road> = {
   reaction: "reaction+book_appointment",
   bad_number: "bad_number",
   driving: "driving_reply+book_appointment",
+  not_interested_phrase: "not_interested_drip",
 };
+
+/** "A Jev stop / legal / hostile ≥0.70 is final" (Jarrad 2026-10-30): no Haiku, whatever else scored. */
+const STOP_FINAL_AT = 0.7;
 
 /** ORDER-TABLE rows 1–2: these beat the code pre-checks. */
 const STOP_FIRST_STEPS: ReadonlySet<string> = new Set(["legal_hostile", "asked_stop"]);
@@ -54,8 +73,29 @@ function signalProbability(input: V2RouteInput, signal: V2Signal): number {
 /** Pure router. Callers must pass a complete, validated probability set (see assertCompleteV2). */
 export function routeV2(input: V2RouteInput): V2Decision {
   const opportunityAlert = OPPORTUNITY_SIGNALS.some((q) => input.probabilities[q] >= DEFAULT_CUTOFF);
+  // D-1 (Master A-012): one of the three whole-message phrases is the Not interested drip,
+  // whatever Jev scored (legal / hostile / asked_stop at any probability).
+  if (isNotInterestedPhrase(input.reply)) {
+    return { road: CODE_ROADS.not_interested_phrase, provenance: { by: "code", check: "not_interested_phrase" }, haiku: null, opportunityAlert };
+  }
   // Stop/legal/hostile (ORDER-TABLE rows 1–2) are evaluated before the code pre-checks, so
   // "STOP, I'm driving" or a hostile reaction still routes to stop.
+  const row1 = V2_ORDER.find((step) => step.step === "legal_hostile")!;
+  const row2 = V2_ORDER.find((step) => step.step === "asked_stop")!;
+  const finalStop = (step: typeof row1, signal: V2Signal, p: number): V2Decision => ({
+    road: "stop", provenance: { by: "jev", row: step.row, step: step.step, signal, probability: p }, haiku: null, opportunityAlert,
+  });
+  // A confident stop-family answer is final, even when another stop-family signal sits in the
+  // Haiku band (review A-1): legal / hostile first (row 1), then asked_stop (row 2).
+  for (const { signal } of row1.signals) {
+    const p = signalProbability(input, signal);
+    if (p >= STOP_FINAL_AT) return finalStop(row1, signal, p);
+  }
+  const askedStop = row2.signals[0]!;
+  const askedStopP = signalProbability(input, askedStop.signal);
+  const row1Band = row1.signals.some(({ signal, cutoff }) => signalProbability(input, signal) >= cutoff);
+  if (row1Band && askedStopP >= STOP_FINAL_AT) return finalStop(row2, askedStop.signal, askedStopP);
+  if (askedStopP >= STOP_FINAL_AT) return finalStop(row2, askedStop.signal, askedStopP);
   let checked = false;
   for (const step of V2_ORDER) {
     if (!checked && !STOP_FIRST_STEPS.has(step.step)) {

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import type { Database } from "@/lib/supabase/types";
 
 import { resolveSellerZone } from "./seller-timezone";
@@ -69,6 +70,11 @@ export async function routingV2TickGate(
   });
   if (error) return { kind: "error", message: `routing_v2_send_check_failed: ${error.message}` };
   if (check !== "ok") return { kind: "blocked", reason: String(check) };
+  // B-1: a property whose state cannot be read has no send window at all; the send would refuse
+  // it as quiet hours and the tick would reschedule +10h forever. Hold it for a person instead
+  // (the same "Couldn't send" hold as an unconfirmed slot time zone). No state parsing here.
+  const stateWindow = checkQuietHours(input.propertyState);
+  if (!stateWindow.ok && stateWindow.reason === "unknown_state") return { kind: "hold", reason: "timezone_unconfirmed" };
 
   if (!input.templateBody || !hasSlotToken(input.templateBody)) {
     return { kind: "send", slotLabel: null };

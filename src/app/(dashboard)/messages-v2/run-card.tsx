@@ -151,6 +151,11 @@ export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean 
   );
 }
 
+/** Routing v2 (PR-I): Sandra wrote an automatic `model_stop` suppression for this text. */
+export function hasUndoableModelStop(run: Pick<RunWithSteps, "steps">): boolean {
+  return run.steps.some((s) => s.kind === "action" && s.result === "applied" && s.name === "routing_v2_stop");
+}
+
 export type UndoControls = {
   /** Returns the undo record id while the action is still undoable, else null. */
   find: (inboundMessageId: string) => Promise<string | null>;
@@ -217,11 +222,14 @@ export function RunCard({
   label,
   isOwner = false,
   undoControls,
+  stopUndoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   isOwner?: boolean;
   undoControls?: UndoControls;
+  /** Routing v2: lift an automatic model_stop suppression (audited; carrier STOP stays). */
+  stopUndoControls?: UndoControls;
 }) {
   const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
@@ -307,6 +315,9 @@ export function RunCard({
 
       {undoControls && hasUndoableJevAction(run) && (
         <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
+      )}
+      {stopUndoControls && hasUndoableModelStop(run) && (
+        <UndoJevButton inboundMessageId={run.inbound_message_id} controls={stopUndoControls} />
       )}
 
       {threadHref && (

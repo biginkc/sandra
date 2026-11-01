@@ -3,7 +3,7 @@
 import { cn } from "@/lib/utils";
 
 import { chicagoClock } from "./chicago-time";
-import { hasUndoableJevAction, UndoJevButton, type UndoControls } from "./run-card";
+import { hasUndoableJevAction, hasUndoableModelStop, UndoJevButton, type UndoControls } from "./run-card";
 import { deriveTape, type TapeTone } from "./tape";
 import type { RunThread } from "./tape-data";
 import type { RunLabel, RunWithSteps } from "./types";
@@ -67,10 +67,13 @@ export function TapeCard({
   flagReason,
   flagPinned,
   undoControls,
+  stopUndoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   thread?: RunThread;
+  /** Routing v2: lift an automatic model_stop suppression (audited; carrier STOP stays). */
+  stopUndoControls?: UndoControls;
   /** True when flagReason is the waiting-list snapshot's reason: it then wins over the run's own reason and outcome. */
   flagPinned?: boolean;
   /** The hold's flag reason, only when this run is the hold's current run (see withEffectiveReason). */
@@ -142,6 +145,9 @@ export function TapeCard({
                 <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
               )}
             </div>
+          )}
+          {stopUndoControls && hasUndoableModelStop(run) && (
+            <UndoJevButton inboundMessageId={run.inbound_message_id} controls={stopUndoControls} />
           )}
         </div>
       )}

@@ -91,6 +91,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "already_flagged",
   "evidence_truncated",
   "superseded_before_send",
+  "superseded_by_newer_inbound",
   "superseded_by_broadcast",
   "rep_text_scheduled",
   "sent_late",
@@ -132,6 +133,8 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "nine_automation_disabled:",
   "model:",
   "already_flagged:",
+  // Routing v2 cutover: run outcome reason routing_v2:<road> (auto_closed, never a hold).
+  "routing_v2:",
 ];
 
 /** Marker appended once a timeout flag's dead-letter row exists (`send_timeout:<id>:backed`). */

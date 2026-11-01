@@ -1,6 +1,6 @@
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { hotTextKey, isHotReason, leadReplyKey } from "@/lib/hot-sellers/hot";
-import { parseRoutingV2Flags, v2SliceAllowed } from "@/lib/sms-classification/routing-v2/flags";
+import { alertOnTimeOnlyInForce, parseRoutingV2Flags, v2SliceAllowed } from "@/lib/sms-classification/routing-v2/flags";
 import { DEFAULT_CUTOFF, OPPORTUNITY_SIGNALS } from "@/lib/sms-classification/routing-v2/order";
 
 import type { HotPromotion } from "./types";
@@ -14,7 +14,7 @@ import { MAX_ATTEMPTS } from "./types";
  * the inbound, shares the hotTextKey delivery identity, 30-min settle until routed, 7-day
  * lookback, owner-only, deleted properties excluded, price-hold routes skipped, read-only.
  *
- * Gated by `routing_v2_flags` (questions_live + replies + shadow + canary eligibility), read fresh
+ * Gated by `routing_v2_flags` (questions_live + replies + canary eligibility), read fresh
  * on every cron pass, so this is also the send-time check for the alert fan-out.
  * Flag off = returns nothing and makes no other query.
  */
@@ -78,7 +78,7 @@ export function isV2Opportunity(
 
 /**
  * Send-time re-check for one opportunity alert. One fresh flags read is the single source of
- * truth: shadow + replies slice + canary eligibility, AND the inbound's latest decision is
+ * truth: replies slice + canary eligibility, AND the inbound's latest decision is
  * re-read and re-judged with that snapshot's alert_on_time_only. Any error = false.
  */
 export async function v2OpportunityStillAllowed(
@@ -96,9 +96,9 @@ export async function v2OpportunityStillAllowed(
       .maybeSingle();
     if (error) return false;
     const flags = parseRoutingV2Flags((data as { routing_v2_flags?: unknown } | null)?.routing_v2_flags);
-    if (!inboundId || !flags.shadow || !v2SliceAllowed(flags, "replies", propertyId)) return false;
+    if (!inboundId || !v2SliceAllowed(flags, "replies", propertyId)) return false;
     const { data: rows, error: rowError } = await db
-      .from("routing_v2_shadow_decisions")
+      .from("routing_v2_live_decisions")
       .select("id, property_id, inbound_message_id, created_at, status, road, opportunity_alert, probabilities")
       .eq("org_id", orgId)
       .eq("inbound_message_id", inboundId)
@@ -108,7 +108,7 @@ export async function v2OpportunityStillAllowed(
     if (rowError) return false;
     const latest = ((rows ?? []) as V2DecisionRow[])[0];
     if (!latest || latest.property_id !== propertyId) return false;
-    return isV2Opportunity(latest, { alertOnTimeOnly: flags.alert_on_time_only });
+    return isV2Opportunity(latest, { alertOnTimeOnly: alertOnTimeOnlyInForce(flags, propertyId) });
   } catch {
     return false;
   }
@@ -130,16 +130,15 @@ export async function loadV2Opportunities(
     .maybeSingle();
   if (cfgError) return { promotions: [], complete: true }; // fail closed = off
   const flags = parseRoutingV2Flags((cfg as { routing_v2_flags?: unknown } | null)?.routing_v2_flags);
-  // The source table is only written while flags.shadow is on. The cutover PR must point this
-  // at the live v2 decision log.
-  if (!flags.questions_live || !flags.replies || !flags.shadow) return { promotions: [], complete: true };
+  // Shadow decisions never authorize live alerts; this reads only persisted live decisions.
+  if (!flags.questions_live || !flags.replies) return { promotions: [], complete: true };
 
   const since = new Date(Math.max(Date.parse(alertsSince) || 0, nowMs - LOOKBACK_MS)).toISOString();
   const candidates = new Map<string, V2DecisionRow>();
   let before: V2DecisionRow | null = null;
   for (;;) {
     let q = db
-      .from("routing_v2_shadow_decisions")
+      .from("routing_v2_live_decisions")
       .select("id, property_id, inbound_message_id, created_at, status, road, opportunity_alert, probabilities")
       .eq("org_id", orgId)
       .gte("created_at", since);
@@ -154,7 +153,7 @@ export async function loadV2Opportunities(
     if (page.length < PAGE) break;
     before = page[page.length - 1]!;
   }
-  const rows = [...candidates.values()].filter((r) => isV2Opportunity(r, { alertOnTimeOnly: flags.alert_on_time_only }) && v2SliceAllowed(flags, "replies", r.property_id));
+  const rows = [...candidates.values()].filter((r) => isV2Opportunity(r, { alertOnTimeOnly: alertOnTimeOnlyInForce(flags, r.property_id) }) && v2SliceAllowed(flags, "replies", r.property_id));
   const promotions: HotPromotion[] = [];
   let complete = true;
   for (let offset = 0; offset < rows.length; offset += PAGE) {

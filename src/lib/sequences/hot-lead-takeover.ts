@@ -42,11 +42,41 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
   try {
     if (a.propertyIds.length === 0) return { paused };
     const admin = createAdminClient();
-    const { error: markError } = await admin
-      .from("properties")
-      .update({ last_person_takeover_at: new Date().toISOString() })
-      .in("id", a.propertyIds);
-    if (markError) throw new Error(markError.message);
+    // DB clock, under the routing v2 property lock (stress §14), ONE property per call so no
+    // transaction holds two routing locks (review N-6). Astra review of 921b71c2a133 (P1): the
+    // fallback never uses the app clock (a clock running behind would stamp the takeover before the
+    // seller's text and the drip check would miss it). If the function is missing, or still fails
+    // after one retry (reported), a plain update writes the DB's own time ('now' is evaluated by
+    // Postgres). If that fails too, fail closed: every active v2 drip of the property is paused and
+    // its pending v2 auto replies are cancelled, and it is reported.
+    const rpc = (admin as unknown as {
+      rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message?: string } | null }>;
+    }).rpc.bind(admin);
+    for (const propertyId of a.propertyIds) {
+      let { error: rpcError } = await rpc("routing_v2_mark_person_takeover", { p_property_id: propertyId });
+      if (rpcError && !/PGRST202|42883|does not exist|Could not find/i.test(rpcError.message ?? "")) {
+        ({ error: rpcError } = await rpc("routing_v2_mark_person_takeover", { p_property_id: propertyId }));
+        if (rpcError) {
+          reportError(new Error(rpcError.message ?? "takeover stamp failed"), {
+            tags: { surface: "hot_lead_takeover_stamp" },
+            extra: { propertyId },
+          });
+        }
+      }
+      if (rpcError) {
+        const { error: markError } = await admin
+          .from("properties")
+          .update({ last_person_takeover_at: "now" })
+          .eq("id", propertyId);
+        if (markError) {
+          reportError(new Error(markError.message), {
+            tags: { surface: "hot_lead_takeover_stamp_fallback" },
+            extra: { propertyId },
+          });
+          await failClosedV2Takeover(admin, propertyId);
+        }
+      }
+    }
     // 1) Re-label a TEMPORARY pause (a call in progress, a Norma call) FIRST, with the
     //    status/reason predicates evaluated by the database at update time (no snapshot):
     //    call cleanup resumes only a row still carrying its own reason, so a cleanup that
@@ -79,4 +109,53 @@ export async function pauseHotBookAppointmentOnTakeover(a: {
     reportError(e, { tags: { surface: "hot_lead_takeover_pause" }, extra: { count: a.propertyIds.length } });
   }
   return { paused };
+}
+
+/**
+ * The takeover could not be stamped at all: no v2 automation may continue on this property.
+ * Every active v2 drip is paused for the person, every pending or claimed v2 auto reply is cancelled,
+ * and the lead is held for a person (safety).
+ * Best effort; each failure is reported (the person's own action never fails because of this).
+ */
+async function failClosedV2Takeover(admin: ReturnType<typeof createAdminClient>, propertyId: string) {
+  const now = new Date().toISOString();
+  // routing_v2_engine is not in the generated types yet (added by the routing v2 migrations).
+  const { error: pauseError } = await (admin as unknown as {
+    from: (t: string) => {
+      update: (v: Record<string, unknown>) => {
+        eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } };
+      };
+    };
+  }).from("sequence_enrollments")
+    .update({ status: "paused", pause_reason: "person_took_over", next_run_at: null, updated_at: now })
+    .eq("property_id", propertyId)
+    .eq("routing_v2_engine", "v2")
+    .eq("status", "active");
+  if (pauseError) {
+    reportError(new Error(pauseError.message), { tags: { surface: "hot_lead_takeover_fail_closed_pause" }, extra: { propertyId } });
+  }
+  const { error: cancelError } = await (admin as unknown as {
+    from: (t: string) => {
+      update: (v: Record<string, unknown>) => {
+        eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { in: (c: string, v: unknown[]) => PromiseLike<{ error: { message: string } | null }> } };
+      };
+    };
+  }).from("routing_v2_outbox")
+    .update({ status: "cancelled", cancel_reason: "human_takeover" })
+    .eq("property_id", propertyId)
+    .eq("kind", "reply")
+    .in("status", ["pending", "claimed"]);
+  if (cancelError) {
+    reportError(new Error(cancelError.message), { tags: { surface: "hot_lead_takeover_fail_closed_cancel" }, extra: { propertyId } });
+  }
+  // Opus review of 93a8070932bd (N1): a person hold (safety) too, so a later seller text gets no
+  // auto reply or drip either (a newer text could otherwise be routed while the stamp is missing).
+  const { error: holdError } = await (admin as unknown as {
+    rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+  }).rpc("routing_v2_write_hold", {
+    p_property_id: propertyId, p_inbound_message_id: null, p_reason: "nine_needs_person", p_kind: "safety",
+  });
+  if (holdError) {
+    reportError(new Error(holdError.message), { tags: { surface: "hot_lead_takeover_fail_closed_hold" }, extra: { propertyId } });
+  }
 }

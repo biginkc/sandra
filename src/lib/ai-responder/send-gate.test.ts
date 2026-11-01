@@ -114,10 +114,14 @@ describe("Q8 rule 3: an unrelated conversational text was submitted", () => {
       flag: true,
       rule: 3,
       reason: "unrelated_conversational_text",
+      triggers: ["ai_other_inbound"],
     });
   });
   it("rule 3 any other conversational text that does not answer the seller: flagged", () => {
-    expect(decide([fact("human_unrelated")])).toMatchObject({ action: "skip", flag: true, rule: 3 });
+    expect(decide([fact("human_unrelated")])).toMatchObject({ action: "skip", flag: true, rule: 3, triggers: ["human_unrelated"] });
+  });
+  it("rule 3 reports every trigger author (A-2 C3)", () => {
+    expect(decide([fact("ai_other_inbound"), fact("human_unrelated"), fact("ai_other_inbound")])).toMatchObject({ rule: 3, triggers: ["ai_other_inbound", "human_unrelated"] });
   });
   it("rule 3 ordering: beats a queued competitor and a broadcast", () => {
     expect(decide([fact("broadcast"), fact("human_after_inbound", "queued"), fact("ai_other_inbound")])).toMatchObject({

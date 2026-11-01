@@ -73,6 +73,8 @@ export function leadReplyHeadline(p: HotPromotion): string {
 }
 
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  // Routing v2 owner alert: today's hold-alert copy with the approved v2 label.
+  if (p.kind === "routing_v2_alert") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(p.label ?? "hold")}). ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "selling_opportunity") return `Possible selling opportunity: ${escapeSlack(p.name)} mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale. ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "lead_reply") return `${escapeSlack(leadReplyHeadline(p))}. ${leadLink(baseUrl, p.propertyId)}`;
   // A failed hand-off uses the existing hold alert copy.
@@ -82,6 +84,7 @@ export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string 
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
+  if (p.kind === "routing_v2_alert") return `Hot hold: ${p.name} (${p.label ?? "hold"}). ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "selling_opportunity") return `Possible selling opportunity from ${p.name}. May be another property or a referral. Review conversation: ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "lead_reply") return `${leadReplyHeadline(p)}. ${leadLink(baseUrl, p.propertyId)}`;
   if (p.kind === "hot_failed") return `Hot hold: ${p.name} (${holdReasonLabel(p.reason ?? "hold")}). ${leadLink(baseUrl, p.propertyId)}`;

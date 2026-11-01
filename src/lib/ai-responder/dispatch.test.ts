@@ -836,9 +836,16 @@ function createMockSupabase(state: MockState) {
     let insertData: Partial<AiClaimRow> | null = null;
     let updateData: Partial<AiClaimRow> | null = null;
 
+    const ltFilters = new Map<string, unknown>();
     const matches = (row: AiClaimRow) => {
       for (const [field, value] of eqFilters) {
         if (row[field as keyof AiClaimRow] !== value) return false;
+      }
+      // `.lt(col, "now")`: the database's clock ('now'); the fake's clock is Date.now().
+      for (const [field, value] of ltFilters) {
+        const bound = value === "now" ? Date.now() : Date.parse(String(value));
+        // (a lease released in the same millisecond is past by the time the DB evaluates it)
+        if (!(Date.parse(String(row[field as keyof AiClaimRow] ?? "")) <= bound)) return false;
       }
       return true;
     };
@@ -900,6 +907,10 @@ function createMockSupabase(state: MockState) {
     const query = {
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
+        return query;
+      },
+      lt(field: string, value: unknown) {
+        ltFilters.set(field, value);
         return query;
       },
       insert(value: Partial<AiClaimRow>) {
@@ -5259,6 +5270,28 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-ab"), anthropic);
       expect(result).toEqual({ outcome: "escalated", reason: "send_blocked:abort_unconfirmed" });
       deadLettered(state, "send_blocked:abort_unconfirmed", "inbound-ab");
+    });
+
+    it("§5.4: a test-send refusal is terminal: skipped test_send_refused, one send attempt, no retry, no dead letter or flag", async () => {
+      for (const retired of [true, false]) {
+        const state = setup();
+        seedInboundAt(state, `inbound-tsr-${retired}`, at("18:00:00"));
+        vi.mocked(sendSmsToContact).mockReset();
+        vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_before_provider", messageId: "m1", retired, refusal: "test_send_refused" } as never);
+        const result = await dispatchAiResponse(createMockSupabase(state) as never, inp(`inbound-tsr-${retired}`), anthropic);
+        expect(result).toEqual({ outcome: "skipped", reason: "test_send_refused" });
+        expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+        expect(state.deadLetters ?? []).toEqual([]);
+        expect(state.property.last_ai_escalation_reason ?? null).toBeNull();
+      }
+    });
+
+    it("an unreadable test tag takes today's unreadable-state road (send_check_failed: a person looks), never a refusal", async () => {
+      const state = setup();
+      seedInboundAt(state, "inbound-tlf", at("18:00:00"));
+      vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_fresh_state_unavailable", messageId: "m1", error: "test_tag_unreadable" } as never);
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-tlf"), anthropic);
+      expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
     });
 
     it("an earlier attempt's FAILED stamped row is flagged, never 'already replied'", async () => {

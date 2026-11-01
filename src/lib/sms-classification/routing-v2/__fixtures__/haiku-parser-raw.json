@@ -1,0 +1,69 @@
+{
+ "source": "stress 7e6b4c8aa64e G1-haiku-parser-raw.txt (Haiku output text only; seller replies omitted)",
+ "outputs": [
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"asked_who\", \"confidence\": 0.7}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"asked_who\", \"confidence\": 0.7}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"asked_who\", \"confidence\": 0.8}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"which_property\", \"confidence\": 0.8}"
+  },
+  {
+   "stop": "max_tokens",
+   "text": "{\"road\": \"lot\", \"confidence\": 0.3}\n\nNote: \"This is a condo\" indicates a property type, but the lot option is for lot or vacant land, and a condo is a residential unit, not vacant land. The closest fitting category among the options is ambiguous here, so confidence is low; needs_person may be more"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"lot\", \"confidence\": 0.3}"
+  },
+  {
+   "stop": "max_tokens",
+   "text": "{\"road\": \"lot\", \"confidence\": 0.3}\n\nWait\u2014correcting this: a condo is a residential unit, not lot/vacant land or commercial. The seller stated the property type but it doesn't match lot or commercial. The closest fit among the options is none clearly, so:\n\n{\"road\": \"needs_person\","
+  },
+  {
+   "stop": "max_tokens",
+   "text": "{\"road\": \"lot\", \"confidence\": 0.3}\n\nWait\u2014correcting that: a condo is a residential unit, not lot/vacant land or commercial. The seller indicated the property type but it doesn't match lot or commercial, and it doesn't clearly fit any other option. Best fit is needs_person.\n\n"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"not_interested\", \"confidence\": 0.82}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"not_interested\", \"confidence\": 0.8}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"not_interested\", \"confidence\": 0.85}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"not_interested\", \"confidence\": 0.85}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"maybe_later\", \"confidence\": 0.6}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"maybe_later\", \"confidence\": 0.6}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"maybe_later\", \"confidence\": 0.6}"
+  },
+  {
+   "stop": "end_turn",
+   "text": "{\"road\": \"maybe_later\", \"confidence\": 0.6}"
+  }
+ ]
+}

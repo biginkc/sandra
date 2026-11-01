@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import {
   createClient as createSupabaseClient,
   type SupabaseClient,
@@ -25,7 +25,10 @@ import {
   markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
+  retireV2DripsForProperty,
 } from "@/lib/ai-responder/dispatch";
+import { WEBHOOK_PROCESSING_LEASE_MS } from "./webhook-lease";
+import { testBarrier } from "@/lib/testing/test-barriers";
 import {
   computeReplyDelaySeconds,
   loadAiReplyDelayConfig,
@@ -75,9 +78,11 @@ import {
   type PipelineRunContext,
 } from "@/lib/pipeline-runs";
 import { scheduleRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
+import { recordRoutingV2Audit } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON, isHostileInbound } from "@/lib/ai-responder/hostile";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
+import { classifyWrongNumberScope } from "./wrong-number-scope";
 import { DNC_KEYWORDS, isCarrierStopKeyword, matchesStopKeyword } from "./stop-signals";
 import type { MessagingProvider } from "./types";
 
@@ -86,21 +91,10 @@ export { matchesStopKeyword };
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
-const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
-export function classifyWrongNumberScope(
-  body: string,
-): "this_property" | "all" {
-  if (
-    /\bwrong (?:number|person)\b/i.test(body) ||
-    /\bnever (?:owned|own) (?:any )?propert(?:y|ies)\b/i.test(body) ||
-    /\bnobody by that name\b/i.test(body) ||
-    /\bno one by that name\b/i.test(body)
-  ) {
-    return "all";
-  }
-  return "this_property";
-}
+// Moved verbatim to ./wrong-number-scope (routing v2 cutover reuses it without importing
+// this module, which imports the responder). Re-exported so every caller is unchanged.
+export { classifyWrongNumberScope };
 
 async function setInboundDisposition(
   supabase: SupabaseClient<Database>,
@@ -642,8 +636,9 @@ export async function handleInboundWebhook(
         // applied; the conversation is held for a person instead.
         const hostileWrongNumber = isHostileInbound(ev.body);
         if (propertyId) {
+          let wrongNumberApplied = false;
           if (!hostileWrongNumber) {
-            await setInboundDisposition(supabase, {
+            wrongNumberApplied = await setInboundDisposition(supabase, {
               propertyId,
               disposition: "wrong_number",
               sourceId: resumeDecision.webhookEventId,
@@ -662,6 +657,13 @@ export async function handleInboundWebhook(
               },
               extra: { propertyId, externalId: ev.externalId },
             });
+          }
+          // H1(i): a this-property wrong number is closed with no person hold, so a v2 drip
+          // (only routing v2 creates those) is ended, not left paused on a lead nobody owns.
+          // Only when the close actually applied here (as the dispatch side retires only on a
+          // closed outcome). Phone-wide / hostile wording is held below: its drip stays paused.
+          if (wrongNumberApplied && wrongScope !== "all") {
+            await retireV2DripsForProperty(supabase, propertyId, null);
           }
         }
         const insertOutcome = await insertInboundMessage(supabase, {
@@ -977,6 +979,7 @@ export async function handleInboundWebhook(
         }
       }
 
+      await testBarrier("webhook:inserted", { propertyId: effectivePropertyId, inboundMessageId: insertOutcome.messageId ?? null });
       // Pause before rep-SMS attribution so a lookup or takeover persistence
       // failure still leaves the automated sequence fail-safe paused. A
       // confirmed takeover below promotes this generic reason to the precise
@@ -1038,12 +1041,25 @@ export async function handleInboundWebhook(
         ReturnType<typeof findRepSmsHumanTakeoverSource>
       > = null;
       try {
+        // Astra review of b6a00a0a2f17 (E): the rep text's sent_at is on the DB clock, so the
+        // seller's reply is placed by its own row's created_at (DB clock), never by the
+        // provider's / this server's event time.
+        let inboundReceivedAt = ev.receivedAt.toISOString();
+        if (insertOutcome.messageId) {
+          const { data: inboundRow, error: inboundRowError } = await supabase
+            .from("messages")
+            .select("created_at")
+            .eq("id", insertOutcome.messageId)
+            .maybeSingle();
+          if (inboundRowError) throw new Error(inboundRowError.message);
+          if (inboundRow?.created_at) inboundReceivedAt = inboundRow.created_at;
+        }
         takeoverSource = await findRepSmsHumanTakeoverSource(supabase, {
           conversationId: insertOutcome.conversationId,
           propertyId: effectivePropertyId,
           contactId: effectiveContactId,
           inboundMessageId: insertOutcome.messageId,
-          inboundReceivedAt: ev.receivedAt.toISOString(),
+          inboundReceivedAt,
           inboundToNumber: ev.to,
         });
       } catch (e) {
@@ -1119,6 +1135,14 @@ export async function handleInboundWebhook(
             propertyEnrollmentsPauseCompleted = true;
           }
           repSmsHumanTakeover = true;
+          // Routing v2 AUDIT (stress at c7b95a1964d1): a rep-SMS takeover never reaches v2;
+          // record why, once, like the keyword and pre-gate exits.
+          scheduleRoutingV2Audit(supabase, {
+            propertyId: effectivePropertyId,
+            inboundMessageId: insertOutcome.messageId,
+            conversationId: insertOutcome.conversationId,
+            note: `rep_sms_takeover:${REP_SMS_HUMAN_TAKEOVER_REASON}`,
+          });
         } catch (e) {
           // The source is confirmed, so an incomplete durable write must not
           // be treated like an ordinary inbound. Keep the property attention
@@ -1241,6 +1265,14 @@ export async function handleInboundWebhook(
                 outcome: preGates.outcome,
                 runContext: runCtx,
               });
+              // Routing v2 AUDIT (round 2): a pre-gate skip (already held for a person, a
+              // number-source answer, ...) never reaches v2; record why, once.
+              scheduleRoutingV2Audit(supabase, {
+                propertyId: effectivePropertyId,
+                inboundMessageId: insertOutcome.messageId,
+                conversationId: insertOutcome.conversationId,
+                note: `pre_gate:${preGates.outcome.outcome}:${"reason" in preGates.outcome ? preGates.outcome.reason : ""}`,
+              });
             } else {
               // Same rule as the normal path: a property whose responder a
               // person turned off gets no Sandra keyword hold and no alert.
@@ -1252,8 +1284,18 @@ export async function handleInboundWebhook(
                     escalationKeywords: delayConfig!.escalationKeywords,
                     runContext: runCtx,
                     jevAutomatic: delayConfig!.jevAutomatic === true,
+                    inboundMessageId: insertOutcome.messageId,
+                    orgId: preGates.property.org_id,
                   });
 
+              if (keywordEscalation.escalated && !keywordEscalation.flagOk) {
+                // Stress F8/F9 (round 17): the hold did not land. The text is NOT marked escalated
+                // (it already failed closed: v2 drips paused, pending v2 replies cancelled, an
+                // unrecovered safety marker stored); the webhook is retryable so the hold is tried
+                // again on redelivery, and the sweep recovers it meanwhile.
+                await failInboundWebhookForRetry(supabase, provider.providerId, ev.externalId,
+                  new Error(`keyword hold not written: ${keywordEscalation.reason}`));
+              }
               if (keywordEscalation.escalated) {
                 // A mixed price + non-price text was held for a person under
                 // its non-price reason; let the shared hot decision alert it
@@ -1275,6 +1317,13 @@ export async function handleInboundWebhook(
                     reason: keywordEscalation.reason,
                   },
                   runContext: runCtx,
+                });
+                // Routing v2 AUDIT (round 2): a delayed-path keyword hold never reaches v2.
+                scheduleRoutingV2Audit(supabase, {
+                  propertyId: effectivePropertyId,
+                  inboundMessageId: insertOutcome.messageId,
+                  conversationId: insertOutcome.conversationId,
+                  note: `keyword_hold:${keywordEscalation.reason}`,
                 });
               } else {
                 const scheduledAt = new Date(
@@ -1301,6 +1350,7 @@ export async function handleInboundWebhook(
                     detail: { delaySeconds },
                   });
 
+                  await testBarrier("webhook:before_stamp", { propertyId: effectivePropertyId, inboundMessageId: insertOutcome.messageId ?? null });
                   try {
                     await markInboundMessageState(
                       supabase,
@@ -1863,6 +1913,13 @@ function scheduleShadowAfterStamp(
   input: AiDispatchInput,
   liveOutcome: AiDispatchOutcome["outcome"],
 ): void {
+  // Routing v2 AUDIT: the live path is done with this inbound; record why if v2 did not decide it.
+  scheduleRoutingV2Audit(supabase, {
+    propertyId: input.propertyId,
+    inboundMessageId: input.inboundMessageId ?? null,
+    conversationId: input.conversationId ?? null,
+    note: `dispatch:${liveOutcome}`,
+  });
   scheduleRoutingV2Shadow(
     supabase,
     {
@@ -1974,6 +2031,26 @@ async function recordKeywordExitRun(
     });
   } catch {
     // Evidence is best-effort; never affect message handling.
+  }
+  // Routing v2 AUDIT: a keyword exit never reaches the v2 engine; one not_routed row per inbound.
+  scheduleRoutingV2Audit(supabase, {
+    orgId: args.orgId,
+    propertyId: args.insertOutcome.propertyId ?? null,
+    inboundMessageId: args.insertOutcome.messageId ?? null,
+    conversationId: args.insertOutcome.conversationId ?? null,
+    note: `${args.gate}:${args.reason}`,
+  });
+}
+
+/** Routing v2 AUDIT, after the response (never delays or alters the live path). */
+function scheduleRoutingV2Audit(supabase: SupabaseClient<Database>, input: Parameters<typeof recordRoutingV2Audit>[1]): void {
+  const task = async () => {
+    await recordRoutingV2Audit(supabase, input, (e) => reportError(e, { tags: { surface: "routing_v2_audit" } }));
+  };
+  try {
+    after(task);
+  } catch {
+    void task();
   }
 }
 

@@ -17,6 +17,8 @@ import {
   setReplyGenerationAction,
   undoJevAppliedAction,
   findJevUndoAction,
+  findModelStopSuppression,
+  liftModelStopSuppression,
 } from "./actions";
 import { loadRunLabels } from "./labels";
 import { loadHoldsByIds, loadMessagesV2Page } from "./holds-by-activity";
@@ -275,6 +277,8 @@ export default async function MessagesV2Page({
         setReplyGeneration={setReplyGenerationAction}
         undoJevAction={undoJevAppliedAction}
         findJevUndo={findJevUndoAction}
+        liftModelStop={liftModelStopSuppression}
+        findModelStop={findModelStopSuppression}
         replayBatchId={replayBatchId}
         nurtureAutoDrip={nurtureAutoDrip}
         coverage={coverage === "unavailable" ? null : coverage}

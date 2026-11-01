@@ -284,6 +284,15 @@ export async function runHoldAlertsForOrg(
             }
             if (!allowed) return { status: "skipped", reason: "routing_v2_flag_off" };
           }
+          if (p.outboxId) {
+            let gate = "gate_error";
+            try {
+              gate = (await deps.v2OutboxAlertGate?.(p.outboxId, p.key)) ?? "gate_missing";
+            } catch {
+              gate = "gate_error";
+            }
+            if (gate !== "ok") return { status: "skipped", reason: `routing_v2_alert:${gate}` };
+          }
           return channel === "slack"
             ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
             : deps.sendSms(owner, hotPromotionSmsText(p, link));
