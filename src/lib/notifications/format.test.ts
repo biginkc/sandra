@@ -180,6 +180,26 @@ describe("formatNotification", () => {
     }
   });
 
+  it("task_assigned on the DST fall-back day labels by calendar day, not by 24 hours", () => {
+    // now = 2026-11-01 00:30 CDT (05:30Z). Chicago falls back at 02:00, so this calendar day
+    // is 25 hours long: now + 24h (2026-11-01 23:30 CST) is still TODAY, and the next
+    // calendar day is TOMORROW. Pins why the case above freezes its clock.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T05:30:00Z"));
+    try {
+      const plus24h = formatNotification("task_assigned", {
+        taskTitle: "Walkthrough", taskType: "follow_up", dueAt: "2026-11-02T05:30:00Z", timezone: "America/Chicago",
+      });
+      expect(plus24h.body).toBe("Due today · Follow-up");
+      const nextDay = formatNotification("task_assigned", {
+        taskTitle: "Walkthrough", taskType: "follow_up", dueAt: "2026-11-02T15:00:00Z", timezone: "America/Chicago",
+      });
+      expect(nextDay.body).toBe("Due tomorrow · Follow-up");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("task_assigned tolerates missing fields", () => {
     const out = formatNotification("task_assigned", {});
     expect(out.title).toContain("new task");
