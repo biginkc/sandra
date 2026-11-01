@@ -648,8 +648,10 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
       expect(response.status).toBe(500);
       expect(mocks.checkHot).toHaveBeenCalledTimes(1);
       expect(mocks.checkHot.mock.calls[0][2]).toBe("keyword:legal_contract");
-      // Astra B1: the hot check's claim is turned into the sweep-recoverable hold-failed marker.
-      expect(claimUpdates).toEqual([expect.objectContaining({ status: "error", error_message: "v2_safety_hold_failed" })]);
+      // Astra B1: the hot check is told the hold failed, so it completes its own claim straight
+      // into the sweep-recoverable failure state; the webhook never repairs a claim afterwards.
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: true });
+      expect(claimUpdates).toEqual([]);
       expect(escalatedStamps()).toEqual([]);
       expect(mocks.recordThread).not.toHaveBeenCalled();
       expect(statuses).toContain("error");
@@ -680,6 +682,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
       const { response, statuses, claimUpdates } = await runCapturing();
       expect(response.status).toBe(200);
       expect(claimUpdates).toEqual([]);
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: false });
       expect(mocks.checkHot).toHaveBeenCalledTimes(1);
       expect(escalatedStamps()).toHaveLength(1);
       expect(statuses).toContain("processed");

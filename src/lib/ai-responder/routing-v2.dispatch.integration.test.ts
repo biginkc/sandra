@@ -1890,6 +1890,89 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       }
     });
 
+    /** Claim writes for this lead are refused: "repair" = any write after the claim left processing; "all" = every update (the completion never lands, as if the worker died after classifying). */
+    const withClaimWritesRefused = async <T,>(propertyId: string, mode: "repair" | "all", run: () => Promise<T>): Promise<T> => {
+      const fn = `refuse_claim_${mode}_${propertyId.replace(/-/g, "")}`;
+      const cond = mode === "repair" ? "and old.status <> 'processing'" : "";
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${propertyId}' ${cond} then raise exception 'forced claim write failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before update on public.ai_response_claims for each row execute function public.${fn}()`);
+      try { return await run(); } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.ai_response_claims`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+    };
+    async function b1DoubleFailure(lead: Awaited<ReturnType<typeof seedLead>>, claimMode: "none" | "repair" | "all", externalId = `v2-wh-b1-${randomUUID()}`) {
+      await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
+      jevProbabilities = { open_to_selling: 0.95 };
+      const body = "How much? My lawyer is involved";
+      const send = async () => { const st = await sayRaw(lead, body, externalId); await runWorkflows(); await settle(); return st; };
+      const status = await withMarkerRefused(lead.propertyId, () => withHoldRefused(lead.propertyId,
+        () => claimMode === "none" ? send() : withClaimWritesRefused(lead.propertyId, claimMode, send)));
+      const { rows: [m] } = await pg.query("select id from messages where property_id = $1 and body = $2", [lead.propertyId, body]);
+      return { status, id: m.id as string, body, externalId };
+    }
+    const hotEventsOf = (propertyId: string) => count("select count(*)::int n from lead_events where property_id = $1 and source_type = 'hot_seller_text'", [propertyId]);
+    const claimOf = async (id: string) => (await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [id])).rows;
+    async function ageAndSweep(lead: Awaited<ReturnType<typeof seedLead>>, id: string) {
+      await pg.query("update messages set created_at = now() - interval '10 minutes' where id = $1", [id]);
+      await pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [id]);
+      return sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId);
+    }
+    it("B1b (Astra, 051ee6d4f): hold + marker fail AND any claim write after completion is refused (no repair can land): the hot-only claim is completed straight into error/v2_safety_hold_failed; no redelivery; the sweep holds the lead, one alert, 0 sends", async () => {
+      const lead = await setup();
+      const priorPick = await seedHotOwner();
+      try {
+        const r = await b1DoubleFailure(lead, "repair");
+        expect(r.status).toBe(500);
+        expect(await hotEventsOf(lead.propertyId)).toBe(1);
+        expect(await claimOf(r.id)).toEqual([{ status: "error", error_message: "v2_safety_hold_failed" }]);
+        expect(await ageAndSweep(lead, r.id)).toBe(1);
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        expect(await hotEventsOf(lead.propertyId)).toBe(1);
+        expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        if (priorPick === undefined) delete process.env.HOT_LEAD_ASSIGNEE_USER_ID; else process.env.HOT_LEAD_ASSIGNEE_USER_ID = priorPick;
+      }
+    });
+    it("B1c (Astra, 051ee6d4f) crash boundary: hold + marker fail and the claim's completion never lands (worker dies after classifying): the claim stays processing; no redelivery; past its lease the sweep holds the lead, one alert, 0 sends", async () => {
+      const lead = await setup();
+      const priorPick = await seedHotOwner();
+      try {
+        const r = await b1DoubleFailure(lead, "all");
+        expect(r.status).toBe(500);
+        expect(await hotEventsOf(lead.propertyId)).toBe(1);
+        expect((await claimOf(r.id)).map((c) => c.status)).toEqual(["processing"]);
+        expect(await ageAndSweep(lead, r.id)).toBe(1);
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "nine_needs_person" });
+        expect(await hotEventsOf(lead.propertyId)).toBe(1);
+        expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        if (priorPick === undefined) delete process.env.HOT_LEAD_ASSIGNEE_USER_ID; else process.env.HOT_LEAD_ASSIGNEE_USER_ID = priorPick;
+      }
+    });
+    it("B1d (Astra non-blocking, 051ee6d4f): a LATE redelivery after the claim's lease expired does not pay for a second classification; the hold lands, one alert", async () => {
+      const lead = await setup();
+      const priorPick = await seedHotOwner();
+      try {
+        const r = await b1DoubleFailure(lead, "none");
+        expect(r.status).toBe(500);
+        const runs = () => count("select count(*)::int n from sms_classification_runs where source_inbound_message_id = $1", [r.id]);
+        const runsBefore = await runs();
+        expect(runsBefore).toBe(1);
+        await pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [r.id]);
+        const callsBefore = jevCalls;
+        expect(await sayRaw(lead, r.body, r.externalId)).toBe(200);
+        await runWorkflows(); await settle();
+        expect(jevCalls - callsBefore).toBe(0);
+        expect(await runs()).toBe(1);
+        expect(await prop(lead.propertyId)).toMatchObject({ needs_human_attention: true, last_ai_escalation_reason: "keyword:legal_contract" });
+        expect(await hotEventsOf(lead.propertyId)).toBe(1);
+        expect(sentTo(lead.phone)).toEqual([]);
+      } finally {
+        if (priorPick === undefined) delete process.env.HOT_LEAD_ASSIGNEE_USER_ID; else process.env.HOT_LEAD_ASSIGNEE_USER_ID = priorPick;
+      }
+    });
+
     it("N1: a mixed price + legal text whose keyword hold cannot be written: the hot-text alert still lands once, the webhook answers 500 with the event marked error (not processed), the text is not stamped; the redelivery holds it, answers 200 and adds no second alert", async () => {
       const lead = await setup();
       await pg.query("update ai_responder_configs set escalation_keywords = $2 where org_id = $1", [orgId, ["price", "how much", "lawyer"]]);
