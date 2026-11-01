@@ -154,7 +154,7 @@ describe("routing v2 live dispatch hook", () => {
     const { client } = fakeSupabase();
     expect(await runRoutingV2LiveStep(client, args())).toEqual({ outcome: "auto_closed", reason: "routing_v2:who_reply_drip" });
     expect(h.classify).toHaveBeenCalledOnce();
-    expect(h.record).toHaveBeenCalledWith(client, expect.objectContaining({ expectedRevision: 7, inboundMessageId: "in1" }), expect.objectContaining({ kind: "decided" }));
+    expect(h.record).toHaveBeenCalledWith(client, expect.objectContaining({ expectedRevision: 7, inboundMessageId: "in1" }), expect.objectContaining({ kind: "decided" }), null);
     expect(h.transition).toHaveBeenCalledExactlyOnceWith(client, { orgId: "org1", propertyId: PROPERTY, contactId: "c1", inboundMessageId: "in1" });
   });
 
@@ -164,7 +164,8 @@ describe("routing v2 live dispatch hook", () => {
     await runRoutingV2LiveStep(client, args());
     expect(h.classify).not.toHaveBeenCalled();
     expect(rpcCalls.filter((c) => c.name === "fn_record_model_call")).toEqual([]);
-    expect(h.record).toHaveBeenCalledWith(client, expect.anything(), expect.objectContaining({ kind: "failed", reason: "jev_failed", jevAttempts: [] }));
+    // Round 17 (A): a failed classification is a safety decision: recorded with its hold reason.
+    expect(h.record).toHaveBeenCalledWith(client, expect.anything(), expect.objectContaining({ kind: "failed", reason: "jev_failed", jevAttempts: [] }), "jev_automatic_failed:jev_failed");
   });
 
   it("a duplicate run acts only on the stored original", async () => {
