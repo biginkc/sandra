@@ -9045,7 +9045,7 @@ export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
 type RoutingV2OutboxRow = {
   id: string; org_id: string; property_id: string; inbound_message_id: string;
   kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
-  /** §5.4 taint inherited from the lead at insert (20261030370000). */
+  /** §5.4 taint inherited from the lead at insert (20261031131100). */
   test_run_id?: string | null;
 };
 type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
@@ -9302,7 +9302,7 @@ export async function writeSafetyHold(
 }
 
 /**
- * The one writer of v2 holds (routing_v2_write_hold, 20261030420000), with bounded retries.
+ * The one writer of v2 holds (routing_v2_write_hold, 20261031131600), with bounded retries.
  * 'mechanics' = our own reply could not go out: written only if no newer seller text exists
  * ('superseded'); 'safety' = the seller's words / a person: always written. Returns 'error' when
  * the hold could not be written.
