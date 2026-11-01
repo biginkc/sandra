@@ -837,9 +837,19 @@ function createMockSupabase(state: MockState) {
     let updateData: Partial<AiClaimRow> | null = null;
 
     const ltFilters = new Map<string, unknown>();
+    const neqFilters = new Map<string, unknown>();
+    let orMarker: string | null = null;
     const matches = (row: AiClaimRow) => {
       for (const [field, value] of eqFilters) {
         if (row[field as keyof AiClaimRow] !== value) return false;
+      }
+      for (const [field, value] of neqFilters) {
+        if (row[field as keyof AiClaimRow] === value) return false;
+      }
+      // `.or("error_message.is.null,error_message.neq.<marker>")` (the reclaim's marker guard).
+      if (orMarker !== null) {
+        const em = (row as { error_message?: string | null }).error_message ?? null;
+        if (!(em === null || em !== orMarker)) return false;
       }
       // `.lt(col, "now")`: the database's clock ('now'); the fake's clock is Date.now().
       for (const [field, value] of ltFilters) {
@@ -911,6 +921,14 @@ function createMockSupabase(state: MockState) {
       },
       lt(field: string, value: unknown) {
         ltFilters.set(field, value);
+        return query;
+      },
+      neq(field: string, value: unknown) {
+        neqFilters.set(field, value);
+        return query;
+      },
+      or(expr: string) {
+        orMarker = /error_message\.neq\.([a-z0-9_]+)/.exec(expr)?.[1] ?? null;
         return query;
       },
       insert(value: Partial<AiClaimRow>) {

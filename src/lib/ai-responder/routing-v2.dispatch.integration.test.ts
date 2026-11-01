@@ -277,6 +277,47 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     expect(sentTo(lead.phone)).toEqual([]);
   });
 
+  it("M39 (Astra B1 at dc331c85974): a fallback marker written between a reclaim's read and its write survives (claimed false, marker intact, automated send refused); a stale owner never marks a reclaimed claim", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    const newInbound = async () => (await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address) values ($1,$2,$3,'inbound','sms','received','ok',$4,$5) returning id", [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY])).rows[0].id as string;
+    const { claimAiResponse } = await import("./claims");
+    const claimArgs = (inboundMessageId: string) => ({ orgId, inboundMessageId, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null });
+    const expire = (id: string) => pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1", [id]);
+    const markAs = (inboundId: string, claimId: string | null, claimedAt: string | null | undefined) =>
+      pg.query("select public.routing_v2_mark_obligation_unrecorded($1,$2,'nine_asked_stop',$3,$4::timestamptz) as r", [lead.propertyId, inboundId, claimId, claimedAt ?? null]).then((r) => r.rows[0].r as boolean);
+
+    // (1) A owns the claim, its lease runs out; B starts a reclaim and is paused after its read;
+    //     A (still the owner) writes the marker; B's write must refuse.
+    const m1 = await newInbound();
+    const a = await claimAiResponse(supabase as never, claimArgs(m1));
+    expect(a.claimed).toBe(true);
+    await expire(m1);
+    setTestBarrier("claim:reclaim_after_read", async (c) => {
+      if (c.inboundMessageId !== m1) return;
+      expect(await markAs(m1, a.claimId, a.claimed ? a.claimedAt : null)).toBe(true);
+    });
+    const b = await claimAiResponse(supabase as never, claimArgs(m1));
+    clearTestBarriers();
+    expect(b.claimed).toBe(false);
+    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m1])).rows).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
+    expect((await pg.query("select public.routing_v2_has_unresolved_obligation($1) as r", [lead.propertyId])).rows[0].r).toBe(true);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    expect(await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" }))
+      .toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+
+    // (2) The other order: B reclaims first, then A (stale owner) tries to mark: nothing is written.
+    const m2 = await newInbound();
+    const a2 = await claimAiResponse(supabase as never, claimArgs(m2));
+    await expire(m2);
+    const b2 = await claimAiResponse(supabase as never, claimArgs(m2));
+    expect(b2.claimed).toBe(true);
+    expect(await markAs(m2, a2.claimId, a2.claimed ? a2.claimedAt : null)).toBe(false);
+    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m2])).rows).toEqual([{ status: "processing", error_message: null }]);
+    expect(sentTo(lead.phone)).toEqual([]);
+  });
+
   it("eligible: one decision, one transition, the approved reply sent exactly once keyed by the outbox id", async () => {
     const lead = await seedLead();
     await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: [lead.propertyId] });

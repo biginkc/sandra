@@ -8085,7 +8085,7 @@ async function notifyAdminsOfProviderFailure(
 type NineStepArgs = {
   input: AiDispatchInput;
   property: AiDispatchPropertyGateRow;
-  claim: { claimId: string | null };
+  claim: { claimId: string | null; claimedAt?: string | null };
   runCtx?: MaybeRunContext;
   /** Absent on the reply-ineligible (decoupled) path: no reply can be sent. */
   templateCtx?: TemplateStepContext;
@@ -8782,7 +8782,12 @@ async function runRoutingV2LiveStepInner(
     // this claim (never reclaimed) and blocks like an obligation; if even that fails, the claim is
     // left as it is (processing) so lease expiry and the sweep re-run this text: never completed
     // without a durable record.
-    await markObligationUnrecorded(supabase, { propertyId: input.propertyId, inboundMessageId, reason: holdReason });
+    // Astra B1 at dc331c85974: conditional on this run still owning its claim (id + claimed_at); if
+    // another run reclaimed it meanwhile, that run is re-running this text and nothing is overwritten.
+    await markObligationUnrecorded(supabase, {
+      propertyId: input.propertyId, inboundMessageId, reason: holdReason,
+      claimId: a.claim.claimId, claimedAt: a.claim.claimedAt ?? null,
+    });
     return { outcome: "escalated", reason: holdReason };
   }
   await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });

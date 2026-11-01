@@ -88,11 +88,16 @@ export async function resolveSafetyObligationsByPerson(
  */
 export async function markObligationUnrecorded(
   supabase: SupabaseClient<Database>,
-  a: { propertyId: string; inboundMessageId: string | null; reason: string },
+  a: {
+    propertyId: string; inboundMessageId: string | null; reason: string;
+    /** The run's own claim (id + claimed_at as taken): the marker is written only while that claim is still this run's. */
+    claimId?: string | null; claimedAt?: string | null;
+  },
 ): Promise<boolean> {
   try {
     const { data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_obligation_unrecorded", {
       p_property_id: a.propertyId, p_inbound_message_id: a.inboundMessageId, p_reason: a.reason,
+      p_claim_id: a.claimId ?? null, p_claimed_at: a.claimedAt ?? null,
     });
     if (error) {
       reportError(new Error(error.message), { tags: { surface: "routing_v2_safety_obligation_fallback" }, extra: { propertyId: a.propertyId } });

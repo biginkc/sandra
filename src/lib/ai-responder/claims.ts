@@ -2,14 +2,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
+import { testBarrier } from "@/lib/testing/test-barriers";
 
 const RESPONSE_KIND = "sms_ai_responder_v1";
+/** Routing v2 obligation fallback marker (migration 20261031132400); a claim carrying it is never reclaimed. */
+export const OBLIGATION_UNRECORDED_MARKER = "v2_safety_obligation_unrecorded";
 const CLAIM_LEASE_MS = 5 * 60_000;
 
 type SingleFlightMode = "off" | "shadow" | "enforce";
 
 export type AiResponseClaim =
-  | { claimed: true; claimId: string | null; mode: SingleFlightMode }
+  | {
+      claimed: true;
+      claimId: string | null;
+      mode: SingleFlightMode;
+      /** The claim row's claimed_at as this run took it (DB clock): a later write can be made conditional on it. */
+      claimedAt?: string | null;
+    }
   | {
       claimed: false;
       reason: "already_claimed" | "already_replied";
@@ -47,11 +56,11 @@ export async function claimAiResponse(
       claimed_at: now.toISOString(),
       lease_expires_at: leaseExpiresAt,
     })
-    .select("id")
+    .select("id, claimed_at")
     .single();
 
   if (!error && inserted) {
-    return { claimed: true, claimId: inserted.id, mode };
+    return { claimed: true, claimId: inserted.id, mode, claimedAt: (inserted as { claimed_at?: string | null }).claimed_at ?? null };
   }
 
   if (error?.code !== "23505") {
@@ -114,6 +123,7 @@ export async function claimAiResponse(
     };
   }
 
+  await testBarrier("claim:reclaim_after_read", { inboundMessageId: args.inboundMessageId, propertyId: args.propertyId });
   const { data: reclaimed, error: reclaimError } = await supabase
     .from("ai_response_claims")
     .update({
@@ -128,7 +138,12 @@ export async function claimAiResponse(
     // Astra review of b6a00a0a2f17 (C): the lease is on the DB clock (trigger), so "expired" is
     // decided by Postgres ('now'), never by this server's clock.
     .lt("lease_expires_at", "now")
-    .select("id")
+    // Astra review of dc331c85974 (B1): never reclaim a claim that was completed, or that carries
+    // the routing v2 obligation fallback marker, after this run read it (compare-and-set on status
+    // and marker, not only id + lease): the reclaim would erase the marker.
+    .neq("status", "completed")
+    .or(`error_message.is.null,error_message.neq.${OBLIGATION_UNRECORDED_MARKER}`)
+    .select("id, claimed_at")
     .maybeSingle();
   if (reclaimError) {
     reportError(new Error(reclaimError.message), {
@@ -137,7 +152,7 @@ export async function claimAiResponse(
     });
   }
   if (reclaimed) {
-    return { claimed: true, claimId: reclaimed.id, mode };
+    return { claimed: true, claimId: reclaimed.id, mode, claimedAt: (reclaimed as { claimed_at?: string | null }).claimed_at ?? null };
   }
 
   if (mode !== "enforce") return { claimed: true, claimId: existing.id, mode };

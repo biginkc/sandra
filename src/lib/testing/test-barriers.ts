@@ -13,7 +13,8 @@ export type TestBarrierName =
   | "outbox:before_hold"
   | "outbox:before_fence"
   | "dispatch:after_decision"
-  | "tick:after_send_check";
+  | "tick:after_send_check"
+  | "claim:reclaim_after_read";
 
 export type TestBarrierContext = { propertyId?: string | null; inboundMessageId?: string | null; enrollmentId?: string | null };
 type Handler = (ctx: TestBarrierContext) => Promise<void> | void;

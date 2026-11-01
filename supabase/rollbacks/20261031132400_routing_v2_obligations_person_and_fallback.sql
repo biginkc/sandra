@@ -4,7 +4,7 @@
 begin;
 set local lock_timeout = '5s';
 drop function if exists public.routing_v2_promote_unrecorded_markers(integer,uuid);
-drop function if exists public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text);
+drop function if exists public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz);
 drop index if exists public.idx_ai_response_claims_obligation_unrecorded;
 create or replace function public.routing_v2_has_unresolved_obligation(p_property_id uuid)
 returns boolean language sql stable security definer set search_path = public, pg_temp as $$

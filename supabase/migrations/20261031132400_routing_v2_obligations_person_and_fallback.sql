@@ -27,13 +27,30 @@ grant execute on function public.routing_v2_has_unresolved_obligation(uuid) to s
 create index if not exists idx_ai_response_claims_obligation_unrecorded
   on public.ai_response_claims (property_id) where error_message = 'v2_safety_obligation_unrecorded';
 
--- B4: write the fallback marker (upsert on the inbound's claim; outcome carries the reason).
-create or replace function public.routing_v2_mark_obligation_unrecorded(p_property_id uuid, p_inbound_message_id uuid, p_reason text)
+-- B4: write the fallback marker (outcome carries the reason).
+-- Astra review of dc331c85974 (B1): compare-and-set on both sides. A run marks ITS OWN claim only
+-- while that claim is still its own (same id, same claimed_at as taken, not completed); if another
+-- run reclaimed it meanwhile, nothing is written (that run is re-running this text) and false is
+-- returned. Without a claim (the webhook keyword path) a new completed claim row is inserted, and an
+-- existing claim of the inbound is never overwritten. The reclaim (claims.ts) in turn refuses a
+-- completed or marked claim, so a written marker cannot be erased by a reclaim.
+create or replace function public.routing_v2_mark_obligation_unrecorded(
+  p_property_id uuid, p_inbound_message_id uuid, p_reason text,
+  p_claim_id uuid default null, p_claimed_at timestamptz default null)
 returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
 declare v_org uuid;
 begin
   select p.org_id into v_org from public.properties p where p.id = p_property_id;
   if v_org is null then return false; end if;
+  if p_claim_id is not null then
+    if p_claimed_at is null then return false; end if;
+    update public.ai_response_claims
+      set status = 'completed', completed_at = now(), outcome = coalesce(p_reason, 'nine_needs_person'),
+          error_message = 'v2_safety_obligation_unrecorded', updated_at = now()
+      where id = p_claim_id and property_id = p_property_id and claimed_at = p_claimed_at
+        and status <> 'completed' and error_message is distinct from 'v2_safety_obligation_unrecorded';
+    return found;
+  end if;
   if p_inbound_message_id is null then
     insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
     values (v_org, 'routing_v2_obligation_fallback', null, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now());
@@ -41,14 +58,12 @@ begin
   end if;
   insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
   values (v_org, 'sms_ai_responder_v1', p_inbound_message_id, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now())
-  on conflict (inbound_message_id, response_kind) where inbound_message_id is not null do update
-    set status = 'completed', completed_at = now(), outcome = excluded.outcome,
-        error_message = 'v2_safety_obligation_unrecorded', updated_at = now();
-  return true;
+  on conflict (inbound_message_id, response_kind) where inbound_message_id is not null do nothing;
+  return found;
 end;
 $$;
-revoke all on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text) from public, anon, authenticated;
-grant execute on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text) to service_role;
+revoke all on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) from public, anon, authenticated;
+grant execute on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) to service_role;
 
 -- B4: the sweep turns markers into real obligations (one transaction per call).
 create or replace function public.routing_v2_promote_unrecorded_markers(p_limit integer default 50, p_property_id uuid default null)

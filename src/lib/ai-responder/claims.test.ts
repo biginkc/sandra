@@ -79,3 +79,59 @@ describe("claim write results are explicit", () => {
     expect(await expireAiResponseClaimLease(failing({ message: "boom" }) as never, { claimId: "c1", errorMessage: "x" })).toBe(false);
   });
 });
+
+describe("claimAiResponse reclaim never erases the routing v2 obligation fallback marker (Astra B1 at dc331c85974)", () => {
+  /** One claim row; filters are evaluated against the row as it is at write time. */
+  function interleaving(onRead: (row: Record<string, unknown>) => void) {
+    const row: Record<string, unknown> = { id: "c1", status: "processing", error_message: null, lease_expires_at: new Date(Date.now() - 60_000).toISOString() };
+    const updates: Array<Record<string, unknown>> = [];
+    const client = {
+      from: () => ({
+        insert: () => ({ select: () => ({ single: async () => ({ data: null, error: { code: "23505", message: "duplicate" } }) }) }),
+        select: () => {
+          const q = { eq: () => q, maybeSingle: async () => { const snapshot = { ...row }; onRead(row); return { data: snapshot, error: null }; } };
+          return q;
+        },
+        update: (value: Record<string, unknown>) => {
+          const checks: Array<() => boolean> = [];
+          const q = {
+            eq: (c: string, v: unknown) => { checks.push(() => row[c] === v); return q; },
+            lt: () => q, // the lease is expired in this fixture
+            neq: (c: string, v: unknown) => { checks.push(() => row[c] !== v); return q; },
+            or: (expr: string) => {
+              const marker = /error_message\.neq\.([a-z0-9_]+)/.exec(expr)?.[1];
+              checks.push(() => row.error_message === null || row.error_message !== marker);
+              return q;
+            },
+            select: () => ({
+              maybeSingle: async () => {
+                if (!checks.every((c) => c())) return { data: null, error: null };
+                Object.assign(row, value); updates.push(value);
+                return { data: { id: row.id, claimed_at: value.claimed_at }, error: null };
+              },
+            }),
+          };
+          return q;
+        },
+      }),
+    };
+    return { client, row, updates };
+  }
+  const args = { orgId: "o", inboundMessageId: "m1", propertyId: "p", contactId: "c", conversationId: null };
+
+  it("a marker written between the reclaim's read and its write: claimed false, the marker stays", async () => {
+    const { claimAiResponse } = await import("./claims");
+    const { client, row, updates } = interleaving((r) => { Object.assign(r, { status: "completed", error_message: "v2_safety_obligation_unrecorded" }); });
+    const out = await claimAiResponse(client as never, args);
+    expect(out.claimed).toBe(false);
+    expect(row).toMatchObject({ status: "completed", error_message: "v2_safety_obligation_unrecorded" });
+    expect(updates).toEqual([]);
+  });
+
+  it("an expired processing claim with no marker is still reclaimed", async () => {
+    const { claimAiResponse } = await import("./claims");
+    const { client, row } = interleaving(() => {});
+    expect((await claimAiResponse(client as never, args)).claimed).toBe(true);
+    expect(row).toMatchObject({ status: "processing", error_message: null });
+  });
+});

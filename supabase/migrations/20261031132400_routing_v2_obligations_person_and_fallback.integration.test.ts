@@ -100,10 +100,21 @@ describe("B4: the fallback marker", () => {
     expect((await db.query("select reason from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [property])).rows).toEqual([{ reason: "keyword:legal_contract" }]);
     expect(await has()).toBe(true);
   });
-  it("upserts onto an existing claim of the inbound", async () => {
-    await db.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, status) values ($1,$2,$3,'processing')", [org, older, property]);
-    expect(await mark()).toBe(true);
-    expect((await db.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [older])).rows).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
+  it("Astra B1: an existing claim is marked only by its owner (id + claimed_at as taken); a reclaimed claim (newer claimed_at) or no claim id writes nothing", async () => {
+    const c = (await db.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, status) values ($1,$2,$3,'processing') returning id, claimed_at::text t", [org, older, property])).rows[0];
+    expect(await mark()).toBe(false); // no claim id: an existing claim is never overwritten
+    const markOwn = (claimedAt: string) => db.query("select public.routing_v2_mark_obligation_unrecorded($1,$2,'nine_asked_stop',$3,$4::timestamptz) as r", [property, older, c.id, claimedAt]).then((r) => r.rows[0].r as boolean);
+    // Another run reclaims it (the DB-clock trigger moves claimed_at): the stale owner writes nothing.
+    // (Inside this one test transaction now() never moves, so the reclaim's new claimed_at is set directly.)
+    await db.query("set local session_replication_role = replica");
+    await db.query("update ai_response_claims set claimed_at = claimed_at + interval '1 second' where id = $1", [c.id]);
+    await db.query("set local session_replication_role = origin");
+    expect(await markOwn(c.t)).toBe(false);
+    expect((await db.query("select status, error_message from ai_response_claims where id = $1", [c.id])).rows).toEqual([{ status: "processing", error_message: null }]);
+    const fresh = (await db.query("select claimed_at::text t from ai_response_claims where id = $1", [c.id])).rows[0].t as string;
+    expect(await markOwn(fresh)).toBe(true);
+    expect((await db.query("select status, error_message from ai_response_claims where id = $1", [c.id])).rows).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
+    expect(await markOwn(fresh)).toBe(false); // already marked / completed: idempotent, nothing rewritten
   });
   it("a marker without an inbound still blocks", async () => {
     expect(await mark(null)).toBe(true);
@@ -124,7 +135,7 @@ describe("B4: the fallback marker", () => {
     expect(await held()).toMatchObject({ h: true, r: "keyword:legal_contract" });
   });
   it("fallback functions are service-role only", async () => {
-    for (const fn of ["routing_v2_mark_obligation_unrecorded(uuid,uuid,text)", "routing_v2_promote_unrecorded_markers(integer,uuid)"]) {
+    for (const fn of ["routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz)", "routing_v2_promote_unrecorded_markers(integer,uuid)"]) {
       const acl = (await db.query("select has_function_privilege('authenticated', $1, 'execute') a, has_function_privilege('service_role', $1, 'execute') s", [`public.${fn}`])).rows[0];
       expect(acl).toEqual({ a: false, s: true });
     }
@@ -137,7 +148,7 @@ describe("rollback", () => {
     const def = (n: string) => db.query("select pg_get_functiondef($1::regprocedure) d", [n]).then((r) => r.rows[0].d as string);
     expect(await def("public.fn_resolve_hold(uuid,uuid,uuid,text,text,timestamptz,text,timestamptz)")).not.toContain("routing_v2_resolve_obligations_by_person");
     expect(await def("public.routing_v2_has_unresolved_obligation(uuid)")).not.toContain("v2_safety_obligation_unrecorded");
-    expect((await db.query("select to_regprocedure('public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text)') is null g")).rows[0].g).toBe(true);
+    expect((await db.query("select to_regprocedure('public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz)') is null g")).rows[0].g).toBe(true);
     expect((await db.query("select to_regprocedure('public.routing_v2_promote_unrecorded_markers(integer,uuid)') is null g")).rows[0].g).toBe(true);
   });
 });
