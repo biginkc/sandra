@@ -13,11 +13,35 @@
 begin;
 set local lock_timeout = '5s';
 
--- B4: the one predicate also sees the fallback marker.
+-- B4 (+ Astra second pass at f67102de9a8f): a claim-INDEPENDENT fallback record. When the obligation
+-- itself cannot be written, the run records the case on the inbound in this small table (no claim
+-- ownership involved, so a reclaim by another run can neither block nor erase it). The run's own
+-- claim is additionally completed with the marker when it still owns it.
+create table if not exists public.routing_v2_obligation_fallbacks (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  property_id uuid not null references public.properties(id) on delete cascade,
+  inbound_message_id uuid references public.messages(id) on delete cascade,
+  reason text not null,
+  created_at timestamptz not null default now(),
+  resolved_at timestamptz,
+  resolved_by text check (resolved_by in ('promoted', 'person', 'suppression'))
+);
+create unique index if not exists idx_routing_v2_obligation_fallbacks_inbound
+  on public.routing_v2_obligation_fallbacks (inbound_message_id) where inbound_message_id is not null;
+create index if not exists idx_routing_v2_obligation_fallbacks_open
+  on public.routing_v2_obligation_fallbacks (property_id) where resolved_at is null;
+alter table public.routing_v2_obligation_fallbacks enable row level security;
+revoke all on public.routing_v2_obligation_fallbacks from public, anon, authenticated;
+grant select, insert, update on public.routing_v2_obligation_fallbacks to service_role;
+
+-- The one predicate: open obligation rows, an open fallback record, or a claim marker.
 create or replace function public.routing_v2_has_unresolved_obligation(p_property_id uuid)
 returns boolean language sql stable security definer set search_path = public, pg_temp as $$
   select exists (select 1 from public.routing_v2_safety_obligations o
                  where o.property_id = p_property_id and o.resolved_at is null)
+      or exists (select 1 from public.routing_v2_obligation_fallbacks f
+                 where f.property_id = p_property_id and f.resolved_at is null)
       or exists (select 1 from public.ai_response_claims c
                  where c.property_id = p_property_id and c.error_message = 'v2_safety_obligation_unrecorded');
 $$;
@@ -27,13 +51,10 @@ grant execute on function public.routing_v2_has_unresolved_obligation(uuid) to s
 create index if not exists idx_ai_response_claims_obligation_unrecorded
   on public.ai_response_claims (property_id) where error_message = 'v2_safety_obligation_unrecorded';
 
--- B4: write the fallback marker (outcome carries the reason).
--- Astra review of dc331c85974 (B1): compare-and-set on both sides. A run marks ITS OWN claim only
--- while that claim is still its own (same id, same claimed_at as taken, not completed); if another
--- run reclaimed it meanwhile, nothing is written (that run is re-running this text) and false is
--- returned. Without a claim (the webhook keyword path) a new completed claim row is inserted, and an
--- existing claim of the inbound is never overwritten. The reclaim (claims.ts) in turn refuses a
--- completed or marked claim, so a written marker cannot be erased by a reclaim.
+-- Write the fallback. Always records the claim-independent fallback row first; then, only while
+-- the run still owns its claim (same id, same claimed_at as taken, not completed), also completes
+-- that claim with the marker so it is never reclaimed (compare-and-set; never widened). Returns
+-- true when the case is durably recorded (the fallback row), false otherwise.
 create or replace function public.routing_v2_mark_obligation_unrecorded(
   p_property_id uuid, p_inbound_message_id uuid, p_reason text,
   p_claim_id uuid default null, p_claimed_at timestamptz default null)
@@ -42,34 +63,43 @@ declare v_org uuid;
 begin
   select p.org_id into v_org from public.properties p where p.id = p_property_id;
   if v_org is null then return false; end if;
-  if p_claim_id is not null then
-    if p_claimed_at is null then return false; end if;
+  if p_inbound_message_id is null then
+    insert into public.routing_v2_obligation_fallbacks (org_id, property_id, inbound_message_id, reason)
+    values (v_org, p_property_id, null, coalesce(p_reason, 'nine_needs_person'));
+  else
+    insert into public.routing_v2_obligation_fallbacks (org_id, property_id, inbound_message_id, reason)
+    values (v_org, p_property_id, p_inbound_message_id, coalesce(p_reason, 'nine_needs_person'))
+    on conflict (inbound_message_id) where inbound_message_id is not null
+      do update set resolved_at = null, resolved_by = null, reason = excluded.reason;
+  end if;
+  if p_claim_id is not null and p_claimed_at is not null then
     update public.ai_response_claims
       set status = 'completed', completed_at = now(), outcome = coalesce(p_reason, 'nine_needs_person'),
           error_message = 'v2_safety_obligation_unrecorded', updated_at = now()
       where id = p_claim_id and property_id = p_property_id and claimed_at = p_claimed_at
         and status <> 'completed' and error_message is distinct from 'v2_safety_obligation_unrecorded';
-    return found;
   end if;
-  if p_inbound_message_id is null then
-    insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
-    values (v_org, 'routing_v2_obligation_fallback', null, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now());
-    return true;
-  end if;
-  insert into public.ai_response_claims (org_id, response_kind, inbound_message_id, property_id, status, completed_at, outcome, error_message, lease_expires_at)
-  values (v_org, 'sms_ai_responder_v1', p_inbound_message_id, p_property_id, 'completed', now(), coalesce(p_reason, 'nine_needs_person'), 'v2_safety_obligation_unrecorded', now())
-  on conflict (inbound_message_id, response_kind) where inbound_message_id is not null do nothing;
-  return found;
+  return true;
 end;
 $$;
 revoke all on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) from public, anon, authenticated;
 grant execute on function public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz) to service_role;
 
--- B4: the sweep turns markers into real obligations (one transaction per call).
+-- The sweep turns fallback records and claim markers into real obligations (one transaction).
 create or replace function public.routing_v2_promote_unrecorded_markers(p_limit integer default 50, p_property_id uuid default null)
 returns integer language plpgsql security definer set search_path = public, pg_temp as $$
 declare c record; n integer := 0;
 begin
+  for c in
+    select f.id, f.property_id, f.inbound_message_id, f.reason from public.routing_v2_obligation_fallbacks f
+    where f.resolved_at is null and (p_property_id is null or f.property_id = p_property_id)
+    order by f.created_at limit greatest(coalesce(p_limit, 50), 1)
+    for update skip locked
+  loop
+    perform public.routing_v2_open_obligation(c.property_id, c.inbound_message_id, c.reason, 'hold_failed');
+    update public.routing_v2_obligation_fallbacks set resolved_at = now(), resolved_by = 'promoted' where id = c.id;
+    n := n + 1;
+  end loop;
   for c in
     select x.id, x.property_id, x.inbound_message_id, x.outcome from public.ai_response_claims x
     where x.error_message = 'v2_safety_obligation_unrecorded' and (p_property_id is null or x.property_id = p_property_id)
@@ -86,11 +116,13 @@ $$;
 revoke all on function public.routing_v2_promote_unrecorded_markers(integer,uuid) from public, anon, authenticated;
 grant execute on function public.routing_v2_promote_unrecorded_markers(integer,uuid) to service_role;
 
--- B1: a person's resolution also retires fallback markers.
+-- B1: a person's resolution also retires fallback records and markers.
 create or replace function public.routing_v2_resolve_obligations_by_person(p_property_id uuid)
 returns integer language plpgsql security definer set search_path = public, pg_temp as $$
 declare n integer;
 begin
+  update public.routing_v2_obligation_fallbacks set resolved_at = now(), resolved_by = 'person'
+  where property_id = p_property_id and resolved_at is null;
   update public.ai_response_claims set error_message = 'v2_safety_obligation_resolved_by_person', updated_at = now()
   where property_id = p_property_id and error_message = 'v2_safety_obligation_unrecorded';
   with u as (
@@ -110,6 +142,8 @@ begin
   if coalesce(old.is_dnc_locked, false) = false and coalesce(new.is_dnc_locked, false) = true then
     update public.routing_v2_safety_obligations set resolved_at = now(), resolved_by = 'suppression'
     where property_id = new.id and resolved_at is null;
+    update public.routing_v2_obligation_fallbacks set resolved_at = now(), resolved_by = 'suppression'
+    where property_id = new.id and resolved_at is null;
     update public.ai_response_claims set error_message = 'v2_safety_obligation_resolved_by_suppression', updated_at = now()
     where property_id = new.id and error_message = 'v2_safety_obligation_unrecorded';
   end if;
@@ -118,7 +152,7 @@ end;
 $$;
 revoke all on function public.routing_v2_suppression_resolves_obligations() from public, anon, authenticated;
 
--- N2: a kept hold shows the oldest OPEN obligation's reason.
+-- N2: a kept hold shows the oldest OPEN obligation's reason (else a fallback record's or marker's).
 create or replace function public.routing_v2_hold_obligation_keep()
 returns trigger language plpgsql security definer set search_path = public, pg_temp as $$
 declare v_open text;
@@ -127,6 +161,10 @@ begin
      and public.routing_v2_has_unresolved_obligation(new.id) then
     select o.reason into v_open from public.routing_v2_safety_obligations o
       where o.property_id = new.id and o.resolved_at is null order by o.created_at limit 1;
+    if v_open is null then
+      select f.reason into v_open from public.routing_v2_obligation_fallbacks f
+        where f.property_id = new.id and f.resolved_at is null order by f.created_at limit 1;
+    end if;
     if v_open is null then
       select c.outcome into v_open from public.ai_response_claims c
         where c.property_id = new.id and c.error_message = 'v2_safety_obligation_unrecorded' order by c.created_at limit 1;
@@ -140,6 +178,53 @@ begin
 end;
 $$;
 revoke all on function public.routing_v2_hold_obligation_keep() from public, anon, authenticated;
+
+-- The sweep's mark never says not_v2 about a text with an unresolved safety case.
+create or replace function public.routing_v2_mark_inbound_swept(p_message_id uuid, p_result text)
+returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp
+as $$
+declare v_marked boolean;
+begin
+  -- 20261031140200 (Astra second pass at f67102de9a8f): a text that carries (or carried) a safety
+  -- case (an obligation or fallback record about this inbound, or a claim marker) is never stamped
+  -- not_v2: it is stamped safety_case instead (the obligation pass recovers it; flags never
+  -- discharge it).
+  if p_result = 'not_v2' and (
+       exists (select 1 from public.routing_v2_safety_obligations o where o.inbound_message_id = p_message_id)
+    or exists (select 1 from public.routing_v2_obligation_fallbacks f where f.inbound_message_id = p_message_id)
+    or exists (select 1 from public.ai_response_claims c where c.inbound_message_id = p_message_id
+               and c.error_message in ('v2_safety_obligation_unrecorded', 'v2_safety_obligation_promoted'))) then
+    p_result := 'safety_case';
+  end if;
+  -- 20261031132200: also allowed on a text with an unrecovered safety obligation; a 'held' mark
+  -- records the decision's effects as applied (in the same transaction) and closes a dead claim.
+  with u as (
+    update public.messages
+      set metadata = jsonb_set(
+        jsonb_set(coalesce(metadata, '{}'::jsonb), '{processing}', coalesce(metadata->'processing', '{}'::jsonb), true),
+        '{processing,routingV2Sweep}', jsonb_build_object('at', now(), 'result', p_result), true)
+      where id = p_message_id
+        and (metadata->'processing'->'aiResponder' is null or metadata->'processing'->'aiResponder'->>'outcome' = 'delayed'
+             or exists (select 1 from public.ai_response_claims c
+                        where c.inbound_message_id = p_message_id and c.response_kind = 'sms_ai_responder_v1'
+                          and (c.status = 'processing' or (c.status = 'error' and c.error_message in ('flag_failed','v2_safety_hold_failed'))))
+             or exists (select 1 from public.routing_v2_live_decisions d where d.inbound_message_id = p_message_id and d.effects_applied_at is null))
+      returning 1
+  ) select exists (select 1 from u) into v_marked;
+  if v_marked and p_result = 'held' then
+    update public.ai_response_claims
+      set status = 'error', error_message = 'lease_dead_swept', updated_at = now()
+      where inbound_message_id = p_message_id and response_kind = 'sms_ai_responder_v1' and status = 'processing';
+    update public.routing_v2_live_decisions set effects_applied_at = now()
+      where inbound_message_id = p_message_id and effects_applied_at is null;
+  end if;
+  return v_marked;
+end;
+$$;
+
+revoke all on function public.routing_v2_mark_inbound_swept(uuid,text) from public, anon, authenticated;
+grant execute on function public.routing_v2_mark_inbound_swept(uuid,text) to service_role;
 
 -- B1: Messages v2 Dismiss / Take over (body of 20261008150200 plus the two marked blocks).
 create or replace function public.fn_resolve_hold(

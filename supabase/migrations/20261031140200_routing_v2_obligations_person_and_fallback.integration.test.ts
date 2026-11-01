@@ -92,29 +92,57 @@ describe("N2: a kept hold shows the OPEN obligation's reason", () => {
 
 describe("B4: the fallback marker", () => {
   const mark = async (inbound: string | null = older) => (await db.query("select public.routing_v2_mark_obligation_unrecorded($1,$2,'keyword:legal_contract') as r", [property, inbound])).rows[0].r as boolean;
-  it("blocks through the one predicate, is completed (never reclaimed), and the sweep promotes it into an obligation", async () => {
+  const fallbackOpen = async () => (await db.query("select count(*)::int n from routing_v2_obligation_fallbacks where property_id = $1 and resolved_at is null", [property])).rows[0].n as number;
+  it("without a claim: a claim-independent fallback record blocks through the one predicate; the sweep promotes it into an obligation", async () => {
     expect(await mark()).toBe(true);
+    expect(await fallbackOpen()).toBe(1);
     expect(await has()).toBe(true);
-    expect((await db.query("select status from ai_response_claims where inbound_message_id = $1", [older])).rows[0].status).toBe("completed");
+    expect((await db.query("select count(*)::int n from ai_response_claims where inbound_message_id = $1", [older])).rows[0].n).toBe(0);
     expect((await db.query("select public.routing_v2_promote_unrecorded_markers(50, $1) as n", [property])).rows[0].n).toBe(1);
+    expect(await fallbackOpen()).toBe(0);
     expect((await db.query("select reason from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [property])).rows).toEqual([{ reason: "keyword:legal_contract" }]);
     expect(await has()).toBe(true);
   });
-  it("Astra B1: an existing claim is marked only by its owner (id + claimed_at as taken); a reclaimed claim (newer claimed_at) or no claim id writes nothing", async () => {
+  it("Astra B1 (both orders): the fallback record is always written; the claim is completed with the marker only by its owner (id + claimed_at as taken)", async () => {
     const c = (await db.query("insert into ai_response_claims (org_id, inbound_message_id, property_id, status) values ($1,$2,$3,'processing') returning id, claimed_at::text t", [org, older, property])).rows[0];
-    expect(await mark()).toBe(false); // no claim id: an existing claim is never overwritten
+    const claimRow = async () => (await db.query("select status, error_message from ai_response_claims where id = $1", [c.id])).rows;
+    expect(await mark()).toBe(true); // no claim id: recorded on the inbound; the existing claim is untouched
+    expect(await claimRow()).toEqual([{ status: "processing", error_message: null }]);
+    expect(await fallbackOpen()).toBe(1);
     const markOwn = (claimedAt: string) => db.query("select public.routing_v2_mark_obligation_unrecorded($1,$2,'nine_asked_stop',$3,$4::timestamptz) as r", [property, older, c.id, claimedAt]).then((r) => r.rows[0].r as boolean);
-    // Another run reclaims it (the DB-clock trigger moves claimed_at): the stale owner writes nothing.
-    // (Inside this one test transaction now() never moves, so the reclaim's new claimed_at is set directly.)
+    // Another run reclaims it (claimed_at moves; set directly: now() is fixed inside this transaction).
     await db.query("set local session_replication_role = replica");
     await db.query("update ai_response_claims set claimed_at = claimed_at + interval '1 second' where id = $1", [c.id]);
     await db.query("set local session_replication_role = origin");
-    expect(await markOwn(c.t)).toBe(false);
-    expect((await db.query("select status, error_message from ai_response_claims where id = $1", [c.id])).rows).toEqual([{ status: "processing", error_message: null }]);
+    // Reverse order (Astra second pass): the stale owner still records the case durably (fallback row),
+    // and leaves the reclaimed claim alone.
+    expect(await markOwn(c.t)).toBe(true);
+    expect(await claimRow()).toEqual([{ status: "processing", error_message: null }]);
+    expect(await fallbackOpen()).toBe(1);
+    expect(await has()).toBe(true);
     const fresh = (await db.query("select claimed_at::text t from ai_response_claims where id = $1", [c.id])).rows[0].t as string;
     expect(await markOwn(fresh)).toBe(true);
-    expect((await db.query("select status, error_message from ai_response_claims where id = $1", [c.id])).rows).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
-    expect(await markOwn(fresh)).toBe(false); // already marked / completed: idempotent, nothing rewritten
+    expect(await claimRow()).toEqual([{ status: "completed", error_message: "v2_safety_obligation_unrecorded" }]);
+  });
+  it("Astra second pass: the sweep's not_v2 mark is refused for a text with an open fallback record or obligation (stamped safety_case)", async () => {
+    const stamp = async () => (await db.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [older])).rows[0].r as string | null;
+    await mark();
+    await db.query("select public.routing_v2_mark_inbound_swept($1, 'not_v2')", [older]);
+    expect(await stamp()).toBe("safety_case");
+    await db.query("select public.routing_v2_promote_unrecorded_markers(50, $1)", [property]);
+    await db.query("update messages set metadata = metadata #- '{processing,routingV2Sweep}' where id = $1", [older]);
+    await db.query("select public.routing_v2_mark_inbound_swept($1, 'not_v2')", [older]);
+    expect(await stamp()).toBe("safety_case"); // now an obligation about this inbound
+  });
+  it("a person's resolution and a suppression retire fallback records", async () => {
+    await mark();
+    await db.query("select public.routing_v2_resolve_obligations_by_person($1)", [property]);
+    expect(await fallbackOpen()).toBe(0);
+    expect(await has()).toBe(false);
+    await mark();
+    expect(await has()).toBe(true);
+    await db.query("update properties set is_dnc_locked = true where id = $1", [property]);
+    expect(await has()).toBe(false);
   });
   it("a marker without an inbound still blocks", async () => {
     expect(await mark(null)).toBe(true);
@@ -150,5 +178,7 @@ describe("rollback", () => {
     expect(await def("public.routing_v2_has_unresolved_obligation(uuid)")).not.toContain("v2_safety_obligation_unrecorded");
     expect((await db.query("select to_regprocedure('public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz)') is null g")).rows[0].g).toBe(true);
     expect((await db.query("select to_regprocedure('public.routing_v2_promote_unrecorded_markers(integer,uuid)') is null g")).rows[0].g).toBe(true);
+    expect((await db.query("select to_regclass('public.routing_v2_obligation_fallbacks') is null g")).rows[0].g).toBe(true);
+    expect(await def("public.routing_v2_mark_inbound_swept(uuid,text)")).not.toContain("safety_case");
   });
 });

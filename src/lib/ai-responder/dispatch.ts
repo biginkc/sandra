@@ -458,8 +458,8 @@ async function keywordHoldFailClosedInner(
   // Round 18: the unresolved obligation (flags on or off) blocks newer texts and every automated
   // send on the lead until the hold lands (the sweep re-attempts it) or a person resolves it.
   const recorded = await openSafetyObligation(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason, source: "keyword" });
-  // Opus B4 on #956: if even the obligation cannot be written, the durable fallback marker blocks
-  // instead (same predicate); if that fails too, the error is reported (#954 makes the webhook retry).
+  // Opus B4 on #956: if even the obligation cannot be written, the claim-independent fallback record
+  // blocks instead (same predicate); if that fails too, the error is reported (#954 makes the webhook retry).
   if (!recorded && !(await markObligationUnrecorded(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason }))) {
     reportError(new Error("keyword hold: obligation and fallback marker both unwritable"), {
       tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId, reason: a.reason },
@@ -8801,16 +8801,19 @@ async function runRoutingV2LiveStepInner(
       await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
       return { outcome: "escalated", reason: holdReason };
     }
-    // Opus B4 on #956: the obligation could not be written either. The fallback marker completes
-    // this claim (never reclaimed) and blocks like an obligation; if even that fails, the claim is
-    // left as it is (processing) so lease expiry and the sweep re-run this text: never completed
-    // without a durable record.
-    // Astra B1 at dc331c85974: conditional on this run still owning its claim (id + claimed_at); if
-    // another run reclaimed it meanwhile, that run is re-running this text and nothing is overwritten.
-    await markObligationUnrecorded(supabase, {
+    // Opus B4 on #956 / Astra second pass at f67102de9a8f: the obligation could not be written
+    // either. The fallback records the case on the inbound in a claim-independent table (a reclaim
+    // can neither block nor erase it), and also completes this run's own claim with the marker while
+    // it still owns it (id + claimed_at compare-and-set; a reclaimed claim is left to its new run).
+    const fallbackRecorded = await markObligationUnrecorded(supabase, {
       propertyId: input.propertyId, inboundMessageId, reason: holdReason,
       claimId: a.claim.claimId, claimedAt: a.claim.claimedAt ?? null,
     });
+    if (!fallbackRecorded) {
+      // Nothing durable could be written: never report success. A hard error fails this run (the
+      // claim stays processing for lease expiry and the sweep; the caller retries / redelivers).
+      throw new Error("routing v2: safety case could not be recorded (obligation and fallback both failed)");
+    }
     return { outcome: "escalated", reason: holdReason };
   }
   await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });

@@ -307,14 +307,38 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
     expect(await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" }))
       .toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
 
-    // (2) The other order: B reclaims first, then A (stale owner) tries to mark: nothing is written.
-    const m2 = await newInbound();
-    const a2 = await claimAiResponse(supabase as never, claimArgs(m2));
-    await expire(m2);
-    const b2 = await claimAiResponse(supabase as never, claimArgs(m2));
-    expect(b2.claimed).toBe(true);
-    expect(await markAs(m2, a2.claimId, a2.claimed ? a2.claimedAt : null)).toBe(false);
-    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m2])).rows).toEqual([{ status: "processing", error_message: null }]);
+    expect(sentTo(lead.phone)).toEqual([]);
+  });
+
+  it("M39b (Astra second pass at f67102de9a8f): reverse order on an otherwise-unheld lead: B reclaims first, A's marker CAS is refused but the case is recorded on the inbound; B dies; lease expires; a flags-off sweep never stamps not_v2; send refused; the lead ends held", async () => {
+    await seedOrg({});
+    const lead = await seedLead();
+    await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell 2 Vee Ln?", created_at: new Date(Date.now() - 3600_000).toISOString() });
+    const m = (await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address, created_at) values ($1,$2,$3,'inbound','sms','received','ok',$4,$5, now() - interval '10 minutes') returning id", [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY])).rows[0].id as string;
+    const { claimAiResponse } = await import("./claims");
+    const claimArgs = { orgId, inboundMessageId: m, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null };
+    const expire = () => pg.query("update ai_response_claims set lease_expires_at = now() - interval '10 minutes' where inbound_message_id = $1", [m]);
+    const a = await claimAiResponse(supabase as never, claimArgs);
+    expect(a.claimed).toBe(true);
+    await expire();
+    const b = await claimAiResponse(supabase as never, claimArgs); // B reclaims BEFORE A writes its marker
+    expect(b.claimed).toBe(true);
+    // A: recorder + obligation failed; its marker CAS is refused (claimed_at moved) but the case is recorded.
+    const { markObligationUnrecorded } = await import("./safety-obligations");
+    expect(await markObligationUnrecorded(supabase, { propertyId: lead.propertyId, inboundMessageId: m, reason: "nine_asked_stop", claimId: a.claimId, claimedAt: a.claimed ? a.claimedAt : null })).toBe(true);
+    expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [m])).rows).toEqual([{ status: "processing", error_message: null }]);
+    expect((await pg.query("select public.routing_v2_has_unresolved_obligation($1) as r", [lead.propertyId])).rows[0].r).toBe(true);
+    const { sendSmsToContact } = await import("@/lib/messaging/send");
+    expect(await sendSmsToContact(supabase, { origin: "automated", contactId: lead.contactId, propertyId: lead.propertyId, body: "automated send (test)" }))
+      .toMatchObject({ status: "blocked_fresh_state_unavailable", error: "obligation_unresolved" });
+    // B dies (never records); its lease expires; flags are off; the sweep runs.
+    await expire();
+    expect((await pg.query("select needs_human_attention h from properties where id = $1", [lead.propertyId])).rows[0].h).toBe(false);
+    await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, lead.propertyId);
+    expect((await pg.query("select metadata->'processing'->'routingV2Sweep'->>'result' r from messages where id = $1", [m])).rows[0].r).not.toBe("not_v2");
+    expect((await pg.query("select needs_human_attention h from properties where id = $1", [lead.propertyId])).rows[0].h).toBe(true);
+    // The case was recovered by the obligation pass: a real hold, the obligation resolved with it.
+    expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and inbound_message_id = $2 and resolved_by = 'hold_durable'", [lead.propertyId, m])).toBe(1);
     expect(sentTo(lead.phone)).toEqual([]);
   });
 
@@ -2066,15 +2090,23 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${lead.propertyId}' and (tg_table_name = 'routing_v2_safety_obligations' or new.error_message = 'v2_safety_obligation_unrecorded') then raise exception 'forced failure (test)'; end if; return new; end $f$`);
       await pg.query(`create trigger ${fn} before insert on public.routing_v2_safety_obligations for each row execute function public.${fn}()`);
       await pg.query(`create trigger ${fn}_c before insert or update on public.ai_response_claims for each row execute function public.${fn}()`);
-      let a: string;
+      let a = "";
+      let thrown: unknown = null;
       try {
-        a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+        // Astra second pass at f67102de9a8f: nothing durable could be written, so the run fails hard
+        // (never "escalated" as if handled).
+        await withHoldRefused(lead.propertyId, async () => {
+          a = await say(lead, "I think I'm all set");
+          try { await runWorkflows(); } catch (e) { thrown = e; }
+          await settle();
+        });
       } finally {
         await pg.query(`drop trigger if exists ${fn} on public.routing_v2_safety_obligations`);
         await pg.query(`drop trigger if exists ${fn}_c on public.ai_response_claims`);
         await pg.query(`drop function if exists public.${fn}()`);
       }
       haikuAnswer = null;
+      expect(String(thrown)).toMatch(/safety case could not be recorded/);
       const claim = (await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0];
       expect(claim.status).not.toBe("completed");
       expect(claim.error_message).not.toBe("v2_safety_hold_failed");

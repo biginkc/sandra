@@ -6,6 +6,8 @@ set local lock_timeout = '5s';
 drop function if exists public.routing_v2_promote_unrecorded_markers(integer,uuid);
 drop function if exists public.routing_v2_mark_obligation_unrecorded(uuid,uuid,text,uuid,timestamptz);
 drop index if exists public.idx_ai_response_claims_obligation_unrecorded;
+-- The claim-independent fallback records (open ones are discarded with the table, as with 140100's).
+drop table if exists public.routing_v2_obligation_fallbacks;
 create or replace function public.routing_v2_has_unresolved_obligation(p_property_id uuid)
 returns boolean language sql stable security definer set search_path = public, pg_temp as $$
   select exists (select 1 from public.routing_v2_safety_obligations o
@@ -242,5 +244,41 @@ grant execute on function public.fn_resolve_hold(uuid, uuid, uuid, text, text, t
 
 comment on function public.fn_resolve_hold(uuid, uuid, uuid, text, text, timestamptz, text, timestamptz) is
   'Messages v2: Dismiss / Take over a hold atomically and version-aware (returns status STALE and changes nothing when the card is out of date). Leases the property against a concurrent Send. Service role only; re-checks owner||acquisitions for p_user_id.';
+
+-- routing_v2_mark_inbound_swept as 20261031132200 defined it.
+create or replace function public.routing_v2_mark_inbound_swept(p_message_id uuid, p_result text)
+returns boolean
+language plpgsql volatile security definer set search_path = public, pg_temp
+as $$
+declare v_marked boolean;
+begin
+  -- 20261031132200: also allowed on a text with an unrecovered safety obligation; a 'held' mark
+  -- records the decision's effects as applied (in the same transaction) and closes a dead claim.
+  with u as (
+    update public.messages
+      set metadata = jsonb_set(
+        jsonb_set(coalesce(metadata, '{}'::jsonb), '{processing}', coalesce(metadata->'processing', '{}'::jsonb), true),
+        '{processing,routingV2Sweep}', jsonb_build_object('at', now(), 'result', p_result), true)
+      where id = p_message_id
+        and (metadata->'processing'->'aiResponder' is null or metadata->'processing'->'aiResponder'->>'outcome' = 'delayed'
+             or exists (select 1 from public.ai_response_claims c
+                        where c.inbound_message_id = p_message_id and c.response_kind = 'sms_ai_responder_v1'
+                          and (c.status = 'processing' or (c.status = 'error' and c.error_message in ('flag_failed','v2_safety_hold_failed'))))
+             or exists (select 1 from public.routing_v2_live_decisions d where d.inbound_message_id = p_message_id and d.effects_applied_at is null))
+      returning 1
+  ) select exists (select 1 from u) into v_marked;
+  if v_marked and p_result = 'held' then
+    update public.ai_response_claims
+      set status = 'error', error_message = 'lease_dead_swept', updated_at = now()
+      where inbound_message_id = p_message_id and response_kind = 'sms_ai_responder_v1' and status = 'processing';
+    update public.routing_v2_live_decisions set effects_applied_at = now()
+      where inbound_message_id = p_message_id and effects_applied_at is null;
+  end if;
+  return v_marked;
+end;
+$$;
+
+revoke all on function public.routing_v2_mark_inbound_swept(uuid,text) from public, anon, authenticated;
+grant execute on function public.routing_v2_mark_inbound_swept(uuid,text) to service_role;
 
 commit;
