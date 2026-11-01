@@ -122,6 +122,16 @@ describe("idempotence / resume", () => {
     const s = sel(facts([row("x", P1, 5, { marker: started, hasLiveDecision: true })]), "apply");
     expect(s.candidates.map((c) => c.id)).toEqual(["x"]);
   });
+  it("an interrupted apply's OWN reply is not an answer by someone else; another reply still is", () => {
+    const started = { applyStarted: { runId: "bf-3", at: daysAgo(1) } };
+    const own = { at: daysAgo(4), humanAt: null, aiReplies: [{ at: daysAgo(4), inboundRef: "x" }], nonAiAt: null };
+    expect(sel(facts([row("x", P1, 5, { marker: started, hasLiveDecision: true })], { outbound: [[P1, own]] }), "apply").candidates.map((c) => c.id)).toEqual(["x"]);
+    // Not interrupted: the same reply means it was answered.
+    expect(sel(facts([row("x", P1, 5)], { outbound: [[P1, own]] }), "apply").skipped.map((k) => k.reason)).toEqual(["answered_by_automation"]);
+    // Interrupted, but a drip went out after the text: answered by automation.
+    const drip = { at: daysAgo(4), humanAt: null, aiReplies: [], nonAiAt: daysAgo(4) };
+    expect(sel(facts([row("x", P1, 5, { marker: started, hasLiveDecision: true })], { outbound: [[P1, drip]] }), "apply").skipped.map((k) => k.reason)).toEqual(["answered_by_automation"]);
+  });
   it("an older text already superseded is not superseded again", () => {
     const s = sel(facts([row("old", P1, 9, { marker: superseded }), row("new", P1, 2)]), "apply");
     expect(s.candidates.map((c) => c.id)).toEqual(["new"]);

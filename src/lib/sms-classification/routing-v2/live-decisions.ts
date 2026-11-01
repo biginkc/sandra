@@ -69,8 +69,9 @@ export async function recordLiveV2Decision(
    * ("hold_failed"). Without a reason the row is inserted as before.
    */
   safetyHoldReason?: string | null,
-): Promise<"recorded" | "duplicate" | "failed" | "hold_failed"> {
-  return recordLiveV2DecisionRow(db, liveDecisionRow(context, result), safetyHoldReason);
+  opts: { backfillNewestFence?: boolean } = {},
+): Promise<"recorded" | "duplicate" | "failed" | "hold_failed" | "newer_inbound"> {
+  return recordLiveV2DecisionRow(db, liveDecisionRow(context, result), safetyHoldReason, opts);
 }
 
 /**
@@ -81,7 +82,23 @@ export async function recordLiveV2DecisionRow(
   db: SupabaseClient<Database>,
   row: Record<string, unknown>,
   safetyHoldReason?: string | null,
-): Promise<"recorded" | "duplicate" | "failed" | "hold_failed"> {
+  /**
+   * Routing v2 backfill: record only if this inbound is still the newest seller text on the lead,
+   * checked atomically with the decision and its safety effects (routing_v2_backfill_record_live_decision).
+   */
+  opts: { backfillNewestFence?: boolean } = {},
+): Promise<"recorded" | "duplicate" | "failed" | "hold_failed" | "newer_inbound"> {
+  if (opts.backfillNewestFence) {
+    try {
+      const { data, error } = await (db as unknown as {
+        rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+      }).rpc("routing_v2_backfill_record_live_decision", { p_row: row, p_hold_reason: safetyHoldReason ?? null });
+      if (error) return safetyHoldReason ? "hold_failed" : "failed";
+      return data === "newer_inbound" ? "newer_inbound" : data === "duplicate" ? "duplicate" : data === "recorded" ? "recorded" : "failed";
+    } catch {
+      return safetyHoldReason ? "hold_failed" : "failed";
+    }
+  }
   if (safetyHoldReason) {
     try {
       const { data, error } = await (db as unknown as {

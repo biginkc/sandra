@@ -123,7 +123,7 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
         ["Texts dispatched", its.length],
         ["Errors (their effects are read back from the database and counted below; see items CSV)", its.filter((i) => i.error).length],
         ["Errors whose effects could not be read (counts unknown, not zero)", its.filter((i) => i.effectsUnknown).length],
-        ...(r.mode === "apply" ? [["Interrupted texts (rerun the same command to finish them)", its.filter((i) => i.error).length] as Array<string | number>] : []),
+
         ["Jev calls", tot((i) => i.jevCalls)],
         ["Haiku calls", tot((i) => i.haikuCalls)],
         ["Haiku cost (USD)", tot((i) => i.haikuUsd).toFixed(4)],
@@ -150,6 +150,7 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
       lines.push("");
     }
     lines.push(`Older texts marked backfill_superseded this run: ${r.supersededMarked}`);
+    lines.push(`Interrupted texts outstanding (applyStarted, no finished apply; rerun the same command to finish them): ${r.interruptedBefore} before this run, ${r.interruptedAfter} after.`);
     lines.push("");
   }
   lines.push("Files: candidates.csv (property id + last inbound age), skipped.csv, items.csv (one row per dispatched text). No phone numbers or message text are written.");

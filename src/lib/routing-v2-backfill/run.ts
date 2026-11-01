@@ -140,6 +140,9 @@ export type BackfillRunResult = {
   dispatched: Candidate[];
   items: ItemResult[];
   supersededMarked: number;
+  /** Interrupted backfill applies (applyStarted, no apply) in the window, before and after this run. */
+  interruptedBefore: number;
+  interruptedAfter: number;
 };
 
 export class BackfillRefusal extends Error {}
@@ -234,7 +237,7 @@ export class BackfillItemError extends Error {
 }
 export const BACKFILL_ERROR_CODES = [
   "claim_read_failed", "claim_in_progress", "claim_move_failed", "claim_move_lost_race",
-  "inbound_read_failed", "marker_write_failed", "effects_read_failed", "claim_restore_failed", "unexpected_error",
+  "inbound_read_failed", "marker_write_failed", "effects_read_failed", "unexpected_error",
 ] as const;
 export type BackfillErrorCode = (typeof BACKFILL_ERROR_CODES)[number];
 
@@ -340,39 +343,6 @@ async function loadDispatchInput(db: Db, c: Candidate): Promise<{ input: AiDispa
   };
 }
 
-/**
- * Classify-only leaves the responder claim exactly as it found it (Astra review 2b-1): the claim
- * its dispatch created is removed and the original claim is put back, so a live workflow that
- * still owns the text is never told `already_replied`. Apply moves the original again later.
- */
-async function dispatchLikeWorkflowRestoring(
-  db: Db,
-  restore: { inboundId: string; priorClaimId: string | null } | null,
-  input: AiDispatchInput,
-  deps: Required<Pick<BackfillDeps, "anthropic" | "sleep">> & { dispatch: typeof dispatchAiResponse },
-): Promise<AiDispatchOutcome> {
-  try {
-    return await dispatchLikeWorkflow(db, input, deps);
-  } finally {
-    if (restore) await restoreClaimAfterClassify(db, restore.inboundId, restore.priorClaimId);
-  }
-}
-
-export async function restoreClaimAfterClassify(db: Db, inboundId: string, priorClaimId: string | null): Promise<void> {
-  // Only a claim this classify-only dispatch finished (completed, backfill outcome) is removed.
-  const { error: delError } = await db.from("ai_response_claims").delete()
-    .eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).eq("status", "completed").like("outcome", "routing_v2:backfill_%");
-  if (delError) throw new BackfillItemError("claim_restore_failed");
-  if (!priorClaimId) return;
-  const { data: current, error: readError } = await db.from("ai_response_claims").select("id")
-    .eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
-  if (readError) throw new BackfillItemError("claim_restore_failed");
-  if (current) return; // a live run claimed the text meanwhile: it owns it now
-  const { error } = await db.from("ai_response_claims").update({ response_kind: RESPONSE_KIND, updated_at: new Date().toISOString() })
-    .eq("id", priorClaimId).like("response_kind", `${RESPONSE_KIND}:backfill_prior:%`);
-  if (error) throw new BackfillItemError("claim_restore_failed");
-}
-
 /** The delay workflow's retry loop (aiReplyDelayWorkflow), minus the durable sleep. */
 async function dispatchLikeWorkflow(
   db: Db,
@@ -424,7 +394,12 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     runId: opts.runId, orgId: opts.orgId, mode: opts.mode, startedAt, finishedAt: startedAt,
     options: { maxAgeDays, ratePerMinute, textMaxAgeDays, limit: opts.limit ?? null, forceFlags: opts.forceFlags === true, batchMaxAgeDays: opts.batchMaxAgeDays ?? null },
     flags: flagSummary(state), flagWarnings: flagCheck.warnings, selection, dispatched: queue, items: [], supersededMarked: 0,
+    interruptedBefore: 0, interruptedAfter: 0,
   };
+  // Counted from the database markers, not from what this run selected (Astra 3rd pass, 2).
+  const interruptedIds = new Set(facts.inbounds.filter((r) => r.marker?.applyStarted && !r.marker?.apply).map((r) => r.id));
+  result.interruptedBefore = interruptedIds.size;
+  result.interruptedAfter = interruptedIds.size;
   if (opts.mode === "dry_run") {
     result.finishedAt = new Date(now()).toISOString();
     return result;
@@ -467,7 +442,8 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
           result.supersededMarked++;
         }
       }
-      const reopened = await reopenClaim(db, c.id, opts.runId, dbNow());
+      // Classify-only claims under its own key and never touches the live responder claim.
+      const reopened: ReopenResult = opts.mode === "classify_only" ? { kind: "none" } : await reopenClaim(db, c.id, opts.runId, dbNow());
       if (reopened.kind === "skip") {
         result.items.push({ ...base, ...emptyEffects(), road: "not_dispatched", outcome: `skipped:${reopened.reason}`, error: null });
         continue;
@@ -484,7 +460,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         // Saved before the claim completes, so a crash right after keeps the decision.
         await writeMarker(db, c.id, { classify: { runId: opts.runId, at: itemStarted, outcome: "classified", treatment, decision: row } });
       };
-      const outcome = await dispatchLikeWorkflowRestoring(db, opts.mode === "classify_only" ? { inboundId: c.id, priorClaimId } : null, {
+      const outcome = await dispatchLikeWorkflow(db, {
         ...input,
         routingV2Backfill: {
           runId: opts.runId,
@@ -530,6 +506,13 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
       result.items.push({ ...base, ...effects, effectsUnknown, road: effects.road === "not_dispatched" ? "error" : effects.road, outcome: "error", error: errorCode(e) });
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
+  }
+  if (opts.mode === "apply") {
+    for (const it of result.items) {
+      if (it.error && it.outcome === "error") interruptedIds.add(it.inboundId);
+      else if (!it.error && interruptedIds.has(it.inboundId)) interruptedIds.delete(it.inboundId);
+    }
+    result.interruptedAfter = interruptedIds.size;
   }
   result.finishedAt = new Date(now()).toISOString();
   return result;

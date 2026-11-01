@@ -6,6 +6,7 @@ import { BMH_ORG_ID, getCanonicalTestOrgId } from "@tests/integration/fixtures/m
 import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/delivery";
 import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
+import { claimAiResponse } from "@/lib/ai-responder/claims";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
 import { APPROVED_REPLY_TEXTS } from "@/lib/ai-responder/approved-reply-texts";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
@@ -41,6 +42,8 @@ const realFetch = globalThis.fetch;
 const jevByReply: Record<string, Record<string, number>> = {};
 /** Seller texts whose Jev call fails (provider error): the Jev-failed road. */
 const jevFails = new Set<string>();
+/** Runs while Jev is classifying this seller text (to model something arriving mid-classification). */
+const jevDuring: Record<string, () => Promise<void>> = {};
 let jevCalls = 0;
 
 function installFakeJev() {
@@ -52,6 +55,8 @@ function installFakeJev() {
     jevCalls++;
     const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown>; state?: { homeowner_reply?: string } };
     if (jevFails.has(body.state?.homeowner_reply ?? "")) return new Response("{}", { status: 500 });
+    const during = jevDuring[body.state?.homeowner_reply ?? ""];
+    if (during) await during();
     const probs = jevByReply[body.state?.homeowner_reply ?? ""] ?? {};
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
@@ -277,8 +282,10 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     // The decision lives on the marker; the legacy claim was moved aside under a unique name.
     const [m] = await q("select metadata->'routingV2Backfill'->'classify' c from messages where id = $1", [T.fresh]);
     expect(m.c).toMatchObject({ runId: RUN, decision: expect.objectContaining({ road: "text_only_reply", inbound_message_id: T.fresh }) });
-    // Classify-only left every responder claim exactly as it found it (no moved claim, the original back).
+    // Classify-only never touched the live responder claim: nothing moved, the originals intact,
+    // and its own claims live under their own key.
     expect(await n("select count(*)::int n from ai_response_claims where response_kind like 'sms_ai_responder_v1:backfill_prior:%'", [])).toBe(0);
+    expect(await n("select count(*)::int n from ai_response_claims where inbound_message_id = any($1::uuid[]) and response_kind = 'sms_ai_responder_v1:backfill_classify'", [candidateIds()])).toBe(candidateIds().length);
     expect(await n("select count(*)::int n from ai_response_claims where inbound_message_id = any($1::uuid[]) and response_kind = 'sms_ai_responder_v1' and status = 'completed' and outcome = 'skipped'", [candidateIds()])).toBe(candidateIds().length);
     const [lp] = await q("select count(*)::int n from ai_response_claims where inbound_message_id = $1 and response_kind = 'sms_ai_responder_v1' and outcome = 'skipped'", [livePendingId]);
     expect(lp.n).toBe(1);
@@ -530,5 +537,79 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     } finally {
       await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"model_stop_suppression\": false}'::jsonb where org_id = $1", [orgId]);
     }
+  });
+
+  it("classify-only never borrows the live claim: a live run claiming mid-classification succeeds", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Text me the details", 1, { text_only: 0.95 });
+    // A text the live path has not claimed yet (no legacy claim).
+    await pg.query("delete from ai_response_claims where inbound_message_id = $1", [id]);
+    let live: Awaited<ReturnType<typeof claimAiResponse>> | null = null;
+    jevDuring["Text me the details"] = async () => {
+      live = await claimAiResponse(supabase, { orgId, inboundMessageId: id, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null });
+    };
+    try {
+      const r = await run("classify_only", "bf-own-claim", { limit: 1 });
+      expect(r.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
+    } finally {
+      delete jevDuring["Text me the details"];
+    }
+    expect(live).toMatchObject({ claimed: true });
+    const [c] = await q("select status from ai_response_claims where inbound_message_id = $1 and response_kind = 'sms_ai_responder_v1'", [id]);
+    expect(c.status).toBe("processing"); // the live run still owns it; classify-only never touched it
+  });
+
+  it("apply: a seller text that arrives WHILE Jev classifies wins (no hold, no drip pause, no cancel)", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Stop messaging me please", 2, { asked_stop: 0.95 });
+    const { rows: seq } = await pg.query("insert into sequences(org_id,name,active) values($1,'Legacy drip 2',true) returning id", [orgId]);
+    const { rows: enr } = await pg.query("insert into sequence_enrollments(org_id,sequence_id,property_id,contact_id,status) values($1,$2,$3,$4,'active') returning id", [orgId, seq[0].id, lead.propertyId, lead.contactId]);
+    jevDuring["Stop messaging me please"] = async () => {
+      await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body: "Sorry, ignore that, I might sell" });
+    };
+    let r;
+    try {
+      r = await run("apply", "bf-midclass", { limit: 1 });
+    } finally {
+      delete jevDuring["Stop messaging me please"];
+    }
+    expect(r.items.map((i) => [i.inboundId, i.outcome])).toEqual([[id, "skipped:routing_v2:backfill_newer_inbound"]]);
+    const [p] = await q("select needs_human_attention h from properties where id = $1", [lead.propertyId]);
+    expect(p.h).toBe(false);
+    const [e] = await q("select status from sequence_enrollments where id = $1", [enr[0].id]);
+    expect(e.status).toBe("active");
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and status = 'cancelled'", [lead.propertyId])).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where inbound_message_id = $1 and status in ('decided','failed')", [id])).toBe(0);
+  });
+
+  it("wrong-person reply sent, crash before the close, resume: no second text, the decision finishes", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Wrong person, I do not own that place", 3, { wrong_person: 0.95 });
+    setTestBarrier("dispatch:before_wrong_person_close", async (ctx) => { if (ctx.inboundMessageId === id) throw new Error("crash before close"); });
+    let first;
+    try { first = await run("apply", "bf-wrong", { limit: 1 }); } finally { clearTestBarriers(); }
+    expect(first.items.map((i) => i.error)).toEqual(["unexpected_error"]);
+    expect(first.interruptedAfter).toBeGreaterThanOrEqual(1);
+    await settle();
+    expect(sentTo(lead.phone).map((m) => m.body)).toEqual([APPROVED_REPLY_TEXTS.wrong_number]);
+    const [mid] = await q("select outreach_dispo d from properties where id = $1", [lead.propertyId]);
+    expect(mid.d).toBeNull();
+    await pg.query("update ai_response_claims set lease_expires_at = now() - interval '1 minute' where inbound_message_id = $1 and status = 'processing'", [id]);
+    // Its own reply is not "answered by automation": the resume selects it and finishes.
+    const resumed = await run("apply", "bf-wrong", { limit: 1 });
+    expect(resumed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
+    expect(resumed.interruptedBefore).toBeGreaterThanOrEqual(1);
+    expect(resumed.interruptedAfter).toBe(resumed.interruptedBefore - 1);
+    await settle();
+    expect(sentTo(lead.phone)).toHaveLength(1); // never sent twice
+    const [end] = await q("select outreach_dispo d, needs_human_attention h from properties where id = $1", [lead.propertyId]);
+    // Finished: this property is closed as wrong number, not left to a person.
+    expect(end).toEqual({ d: "wrong_number", h: false });
   });
 });

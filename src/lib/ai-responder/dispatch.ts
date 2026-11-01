@@ -403,6 +403,8 @@ export type RoutingV2BackfillContext = {
 export const ROUTING_V2_BACKFILL_V2_NOT_LIVE = "routing_v2:backfill_v2_not_live";
 /** Classify-only: the text would take the up-front keyword hold (a side effect): skipped, reported as keyword_hold. */
 export const ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD = "routing_v2:backfill_classify_only_keyword_hold";
+/** Classify-only's own claim key: the live responder claim (sms_ai_responder_v1) is never touched. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND = "sms_ai_responder_v1:backfill_classify";
 /** Apply / sort-only: a newer seller text exists on the property, so this older one is not acted on. */
 export const ROUTING_V2_BACKFILL_NEWER_INBOUND = "routing_v2:backfill_newer_inbound";
 /** Classify-only could not decide without a side effect (a hold, a recorder failure): skipped. */
@@ -751,6 +753,9 @@ export async function checkAiResponderDispatchPreGates(
       // and rules 1-6 must not run for a dead lead.
       const passThrough = (decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal")
         || (backfillResumeOwnHold && decision.action === "skip" && decision.rule === 0 && decision.reason === "already_terminal")
+        // An interrupted backfill apply already sent its OWN reply to this text (e.g. the wrong-person
+        // reply, then crashed before the close): the resume finishes the decision, never sends again.
+        || (!!input.routingV2Backfill?.resumeRecordedDecision && decision.action === "skip" && decision.rule === 2 && decision.answeredBy === "ai")
         || (routingV2Live && decision.action === "skip" && (decision.rule === 1 || decision.rule === 3 || decision.rule === 5));
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
@@ -1185,6 +1190,8 @@ async function dispatchAiResponseCore(
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -1499,6 +1506,8 @@ async function classifyAndApplyDespiteReplyIneligibility(
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -2942,6 +2951,8 @@ async function retryWithCarriedReply(
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -8881,7 +8892,11 @@ async function runRoutingV2LiveStepInner(
       reason: (storedRow.failure_reason as string | null) ?? undefined,
       action: (storedRow.action as V2Action | null) ?? null,
     }, input);
-    const replayed = await recordLiveV2DecisionRow(supabase, storedRow, replayHold);
+    const replayed = await recordLiveV2DecisionRow(supabase, storedRow, replayHold, { backfillNewestFence: true });
+    if (replayed === "newer_inbound") {
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+      return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+    }
     if (replayed === "hold_failed") {
       // Same fail-closed handling as a live safety decision whose hold could not be recorded.
       await pauseV2DripsFailClosed(supabase, input.propertyId);
@@ -8956,7 +8971,16 @@ async function runRoutingV2LiveStepInner(
   }
   // Astra review of b6a00a0a2f17 (A): a safety decision is recorded together with its effects.
   const safetyHoldReason = v2SafetyHoldReason(classification, input);
-  const recorded = await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason);
+  // Backfill (apply / sort-only): the newest-inbound check is repeated INSIDE the recorder's
+  // transaction, so a seller text that arrived while Jev was classifying wins (Astra 3rd pass, 1).
+  // (The live call keeps its exact four-argument form.)
+  const recorded = input.routingV2Backfill
+    ? await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason, { backfillNewestFence: true })
+    : await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason);
+  if (recorded === "newer_inbound") {
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+  }
   if (recorded === "hold_failed") {
     // Nothing was recorded: no decision row, no hold. Fail closed now (the lead's v2 drips paused)
     // and close the claim as v2_safety_hold_failed: the apply gate blocks this lead's newer texts
@@ -9983,6 +10007,7 @@ async function closeNineWrongPersonThisProperty(
     return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
   }
   const messageId: string | null = wrongStep.outboundMessageId;
+  await testBarrier("dispatch:before_wrong_person_close", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
   // Our own reply is ONE outbound SMS row, which moves decision_context_revision by
   // exactly one (trg_messages_bump_decision_context_revision). Account for that and
   // nothing else: any further movement (a person texting, a takeover, an assignment)

@@ -128,16 +128,23 @@ export async function loadLatestOutbound(db: Db, propertyIds: readonly string[],
   for (const ids of chunks(propertyIds, 50)) {
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await db.from("messages")
-        .select("property_id, created_at, sent_at, campaign_id, generated_by:metadata->>generated_by, kind:metadata->>kind")
+        .select("property_id, created_at, sent_at, campaign_id, generated_by:metadata->>generated_by, kind:metadata->>kind, inbound_ref:metadata->>inbound_message_id")
         .in("property_id", ids).eq("direction", "outbound").in("status", ANSWERING_STATUSES).gte("created_at", sinceIso)
         .order("created_at", { ascending: false }).range(from, from + PAGE - 1);
       if (error) fail("outbound messages", error);
-      for (const m of (data ?? []) as unknown as Array<{ property_id: string; created_at: string; sent_at: string | null; campaign_id: string | null; generated_by: string | null; kind: string | null }>) {
+      for (const m of (data ?? []) as unknown as Array<{ property_id: string; created_at: string; sent_at: string | null; campaign_id: string | null; generated_by: string | null; kind: string | null; inbound_ref: string | null }>) {
         const at = m.sent_at && Date.parse(m.sent_at) > Date.parse(m.created_at) ? m.sent_at : m.created_at;
+        const ai = m.generated_by === "ai_responder_v1";
         const human = !m.campaign_id && !m.kind && !(m.generated_by && AUTOMATED_GENERATORS.has(m.generated_by));
-        const prev = out.get(m.property_id) ?? { at: at, humanAt: null };
+        const prev = out.get(m.property_id) ?? { at, humanAt: null, aiReplies: [] };
         const later = (a: string | null, b: string | null) => (!a ? b : !b ? a : Date.parse(a) >= Date.parse(b) ? a : b);
-        out.set(m.property_id, { at: later(prev.at, at)!, humanAt: human ? later(prev.humanAt, at) : prev.humanAt });
+        out.set(m.property_id, {
+          at: later(prev.at, at)!,
+          humanAt: human ? later(prev.humanAt, at) : prev.humanAt,
+          // AI replies keep which seller text they answered, so a resume can tell its OWN reply apart.
+          aiReplies: ai ? [...(prev.aiReplies ?? []), { at, inboundRef: m.inbound_ref }] : (prev.aiReplies ?? []),
+          nonAiAt: ai ? (prev.nonAiAt ?? null) : later(prev.nonAiAt ?? null, at),
+        });
       }
       if ((data ?? []).length < PAGE) break;
     }

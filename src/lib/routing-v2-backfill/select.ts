@@ -76,7 +76,24 @@ export type PropertyFacts = {
 export type ContactFacts = { doNotContact: boolean; smsOptedOut: boolean; consentOptedOut: boolean };
 
 /** Newest answering outbound per property, and the newest one a person sent. */
-export type LatestOutbound = { at: string; humanAt: string | null };
+export type LatestOutbound = {
+  at: string;
+  humanAt: string | null;
+  /** AI responder replies with the seller text each answered (metadata.inbound_message_id). */
+  aiReplies?: ReadonlyArray<{ at: string; inboundRef: string | null }>;
+  /** Newest outbound that is not an AI responder reply. */
+  nonAiAt?: string | null;
+};
+
+/** Newest outbound on the lead OTHER than an AI reply to `inboundId` (an interrupted apply's own reply). */
+export function latestOtherThanOwnReply(latest: LatestOutbound, inboundId: string): string | null {
+  let best: string | null = latest.nonAiAt ?? null;
+  for (const r of latest.aiReplies ?? []) {
+    if (r.inboundRef === inboundId) continue;
+    if (!best || Date.parse(r.at) > Date.parse(best)) best = r.at;
+  }
+  return best;
+}
 
 export type SelectionFacts = {
   inbounds: ReadonlyArray<InboundRow>;
@@ -198,7 +215,9 @@ export function skipReasonFor(row: InboundRow, facts: SelectionFacts, mode: Sele
   if (row.livePending && !interrupted) return "live_pending";
   const latest = facts.latestOutbound.get(row.propertyId);
   if (latest && ms(latest.humanAt) > ms(row.createdAt)) return "answered_by_human";
-  if (latest && ms(latest.at) > ms(row.createdAt)) return "answered_by_automation";
+  // An interrupted apply's own reply (the wrong-person reply sent just before a crash) is not an
+  // answer by someone else: the resume must still finish the close (Astra 3rd pass, 2).
+  if (latest && ms(interrupted ? latestOtherThanOwnReply(latest, row.id) : latest.at) > ms(row.createdAt)) return "answered_by_automation";
   const p = facts.properties.get(row.propertyId);
   if (!p) return "property_missing";
   if (p.testRunId) return "test_tagged";
