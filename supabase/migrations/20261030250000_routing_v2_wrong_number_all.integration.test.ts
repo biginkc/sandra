@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { Client } from "pg";
@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { APPROVED_REPLY_TEXTS } from "@/lib/ai-responder/approved-reply-texts";
 import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { reapplyRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
  * 20261030250000: routing v2 PR-G phone-level actions (wrong_number_all, bad_number).
@@ -1031,8 +1032,7 @@ describe("B0. post-commit fence and undo/send serialization", () => {
     if (installedHere) {
       await admin.query(`begin; ${ROLLBACK}; commit;`);
     } else {
-      const newer = readdirSync(__dirname).filter((f) => /^\d{14}_routing_v2_.*\.sql$/.test(f) && f.slice(0, 14) > "20261030250000").sort();
-      for (const f of newer) await admin.query(`begin; ${strip(readFileSync(path.join(__dirname, f), "utf8"))}; commit;`);
+      await reapplyRoutingV2After(admin, "20261030250000");
     }
     await admin.end();
   });
