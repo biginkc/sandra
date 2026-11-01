@@ -39,7 +39,7 @@ export function skippedCsv(sha: string, r: BackfillRunResult): string {
 const ITEM_COLUMNS: Array<keyof ItemResult> = [
   "inboundId", "propertyId", "ageDays", "bucket", "mode", "treatment", "road", "decisionStatus", "outcome", "jevCalls", "haikuCalls", "haikuUsd",
   "repliesQueued", "repliesSent", "alertsQueued", "dripsStarted", "holdCreated", "holdReason", "suppressionCreated",
-  "wouldReply", "wouldDrip", "wouldAlert", "wouldHold", "wouldClose", "groupChanged", "appliedWithoutStoredDecision", "error",
+  "wouldReply", "wouldDrip", "wouldAlert", "wouldHold", "wouldClose", "groupChanged", "appliedWithoutStoredDecision", "effectsUnknown", "error",
 ];
 
 export function itemsCsv(sha: string, r: BackfillRunResult): string {
@@ -121,7 +121,9 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
       const holdReasons = countBy(its.filter((i) => i.holdCreated), (i) => i.holdReason ?? "unknown");
       lines.push(table(["Measure", "Count"], [
         ["Texts dispatched", its.length],
-        ["Errors (nothing done; see items CSV)", its.filter((i) => i.error).length],
+        ["Errors (their effects are read back from the database and counted below; see items CSV)", its.filter((i) => i.error).length],
+        ["Errors whose effects could not be read (counts unknown, not zero)", its.filter((i) => i.effectsUnknown).length],
+        ...(r.mode === "apply" ? [["Interrupted texts (rerun the same command to finish them)", its.filter((i) => i.error).length] as Array<string | number>] : []),
         ["Jev calls", tot((i) => i.jevCalls)],
         ["Haiku calls", tot((i) => i.haikuCalls)],
         ["Haiku cost (USD)", tot((i) => i.haikuUsd).toFixed(4)],

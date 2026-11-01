@@ -121,6 +121,8 @@ export type ItemResult = {
   groupChanged: boolean;
   /** Apply: no stored classify-only decision, so it was classified fresh (Jarrad never reviewed it). */
   appliedWithoutStoredDecision: boolean;
+  /** An error item whose effects could not be read back: counts are unknown, not zero. */
+  effectsUnknown: boolean;
   error: string | null;
 };
 
@@ -232,7 +234,7 @@ export class BackfillItemError extends Error {
 }
 export const BACKFILL_ERROR_CODES = [
   "claim_read_failed", "claim_in_progress", "claim_move_failed", "claim_move_lost_race",
-  "inbound_read_failed", "marker_write_failed", "unexpected_error",
+  "inbound_read_failed", "marker_write_failed", "effects_read_failed", "claim_restore_failed", "unexpected_error",
 ] as const;
 export type BackfillErrorCode = (typeof BACKFILL_ERROR_CODES)[number];
 
@@ -268,23 +270,36 @@ export function wouldDo(d: StoredDecision | null, treatment: Treatment): Pick<It
   };
 }
 
-async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error" | "groupChanged" | "appliedWithoutStoredDecision">> {
+async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error" | "groupChanged" | "appliedWithoutStoredDecision" | "effectsUnknown">> {
   const loose = db as unknown as Loose;
-  const [{ data: dec }, { data: spend }, { data: box }, { data: enr }, { data: prop }] = await Promise.all([
+  const reads = await Promise.all([
     loose.from("routing_v2_live_decisions").select("status, road, failure_reason, action").eq("inbound_message_id", c.id).maybeSingle(),
-    loose.from("provider_spend_ledger").select("provider, cost").eq("inbound_message_id", c.id).gte("created_at", startedIso),
-    loose.from("routing_v2_outbox").select("kind, status").eq("inbound_message_id", c.id),
+    loose.from("provider_spend_ledger").select("provider, cost").eq("inbound_message_id", c.id).gte("started_at", startedIso),
+    loose.from("routing_v2_outbox").select("id, kind, status").eq("inbound_message_id", c.id),
     loose.from("sequence_enrollments").select("id").eq("routing_v2_inbound_id", c.id),
     loose.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", c.propertyId).maybeSingle(),
+    // Every text to this seller since the item started, whatever sent it: the outbox consumer AND
+    // the direct senders (the wrong-number reply goes out without the outbox).
+    db.from("messages").select("id, status, idempotency_key").eq("property_id", c.propertyId).eq("direction", "outbound")
+      .gte("created_at", startedIso).in("status", ["pending", "queued", "sent", "delivered"]),
   ]);
+  // An unreadable effect is an error, never a zero (Astra review 2b-4).
+  if (reads.some((r: { error: unknown }) => r.error)) throw new BackfillItemError("effects_read_failed");
+  const [{ data: dec }, { data: spend }, { data: box }, { data: enr }, { data: prop }, { data: sentRows }] = reads as Array<{ data: unknown }> as never as [
+    { data: unknown }, { data: unknown }, { data: unknown }, { data: unknown }, { data: unknown }, { data: Array<{ id: string; status: string; idempotency_key: string | null }> | null },
+  ];
   // Classify-only writes no decision row: its decision is the row it handed back.
   const d = mode === "classify_only" ? classifiedRow : (dec as StoredDecision | null);
   const ledger = (spend ?? []) as Array<{ provider: string; cost: number | null }>;
-  const outbox = (box ?? []) as Array<{ kind: string; status: string }>;
+  const outbox = (box ?? []) as Array<{ id: string; kind: string; status: string }>;
+  const outboxIds = new Set(outbox.map((o) => o.id));
+  const sellerTexts = sentRows ?? [];
+  const directTexts = sellerTexts.filter((m) => !m.idempotency_key || !outboxIds.has(m.idempotency_key));
   let suppressionCreated = false;
   const phone = normalizePhone(c.fromAddress ?? "");
   if (phone && mode === "apply") {
-    const { data: sup } = await db.from("sms_phone_suppressions").select("id").eq("org_id", orgId).eq("phone_e164", phone).gte("created_at", startedIso).limit(1);
+    const { data: sup, error: supError } = await db.from("sms_phone_suppressions").select("id").eq("org_id", orgId).eq("phone_e164", phone).gte("created_at", startedIso).limit(1);
+    if (supError) throw new BackfillItemError("effects_read_failed");
     suppressionCreated = (sup ?? []).length > 0;
   }
   const p = prop as { needs_human_attention?: boolean; last_ai_escalation_reason?: string | null } | null;
@@ -294,10 +309,11 @@ async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: stri
     jevCalls: ledger.filter((l) => l.provider === "jev").length,
     haikuCalls: ledger.filter((l) => l.provider === "haiku").length,
     haikuUsd: ledger.filter((l) => l.provider === "haiku").reduce((s, l) => s + (Number(l.cost) || 0), 0),
-    repliesQueued: outbox.filter((o) => o.kind === "reply").length,
-    repliesSent: outbox.filter((o) => o.kind === "reply" && o.status === "sent").length,
+    // Outbox replies + texts a direct sender queued; sent = texts that really went out.
+    repliesQueued: outbox.filter((o) => o.kind === "reply").length + directTexts.length,
+    repliesSent: sellerTexts.filter((m) => m.status === "sent" || m.status === "delivered").length,
     alertsQueued: outbox.filter((o) => o.kind === "alert").length,
-    dripsStarted: (enr ?? []).length,
+    dripsStarted: ((enr ?? []) as unknown[]).length,
     // Candidates are never held at selection, so a hold now was written by this dispatch.
     // Measured in every mode: classify-only must show 0.
     holdCreated: p?.needs_human_attention === true,
@@ -322,6 +338,39 @@ async function loadDispatchInput(db: Db, c: Candidate): Promise<{ input: AiDispa
     },
     escalationBody: data.body ?? "",
   };
+}
+
+/**
+ * Classify-only leaves the responder claim exactly as it found it (Astra review 2b-1): the claim
+ * its dispatch created is removed and the original claim is put back, so a live workflow that
+ * still owns the text is never told `already_replied`. Apply moves the original again later.
+ */
+async function dispatchLikeWorkflowRestoring(
+  db: Db,
+  restore: { inboundId: string; priorClaimId: string | null } | null,
+  input: AiDispatchInput,
+  deps: Required<Pick<BackfillDeps, "anthropic" | "sleep">> & { dispatch: typeof dispatchAiResponse },
+): Promise<AiDispatchOutcome> {
+  try {
+    return await dispatchLikeWorkflow(db, input, deps);
+  } finally {
+    if (restore) await restoreClaimAfterClassify(db, restore.inboundId, restore.priorClaimId);
+  }
+}
+
+export async function restoreClaimAfterClassify(db: Db, inboundId: string, priorClaimId: string | null): Promise<void> {
+  // Only a claim this classify-only dispatch finished (completed, backfill outcome) is removed.
+  const { error: delError } = await db.from("ai_response_claims").delete()
+    .eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).eq("status", "completed").like("outcome", "routing_v2:backfill_%");
+  if (delError) throw new BackfillItemError("claim_restore_failed");
+  if (!priorClaimId) return;
+  const { data: current, error: readError } = await db.from("ai_response_claims").select("id")
+    .eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
+  if (readError) throw new BackfillItemError("claim_restore_failed");
+  if (current) return; // a live run claimed the text meanwhile: it owns it now
+  const { error } = await db.from("ai_response_claims").update({ response_kind: RESPONSE_KIND, updated_at: new Date().toISOString() })
+    .eq("id", priorClaimId).like("response_kind", `${RESPONSE_KIND}:backfill_prior:%`);
+  if (error) throw new BackfillItemError("claim_restore_failed");
 }
 
 /** The delay workflow's retry loop (aiReplyDelayWorkflow), minus the durable sleep. */
@@ -362,7 +411,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
   const startedAt = new Date(dbNow()).toISOString();
   const sinceIso = new Date(dbNow() - maxAgeDays * 86_400_000).toISOString();
 
-  const { facts, state } = await loadSelectionFacts(db, opts.orgId, sinceIso);
+  const { facts, state } = await loadSelectionFacts(db, opts.orgId, sinceIso, dbNow());
   const flagCheck = checkFlags(state, opts.mode, opts.forceFlags === true);
   if (flagCheck.refuse) throw new BackfillRefusal(flagCheck.refuse);
   const selection = selectCandidates(facts, { nowMs: dbNow(), maxAgeDays, mode: opts.mode });
@@ -398,6 +447,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     const treatment = treatmentFor(ageNow, textMaxAgeDays);
     const reviewed = c.marker?.classify;
     const base = {
+      effectsUnknown: false,
       inboundId: c.id, propertyId: c.propertyId, ageDays: Math.round(ageNow * 10) / 10, bucket: c.bucket, mode: opts.mode, treatment,
       groupChanged: opts.mode === "apply" && !!reviewed?.decision && !!reviewed.treatment && reviewed.treatment !== treatment,
       appliedWithoutStoredDecision: opts.mode === "apply" && !reviewed?.decision,
@@ -423,7 +473,8 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         continue;
       }
       const priorClaimId = reopened.kind === "moved" ? reopened.claimId : null;
-      const resumeRecordedDecision = opts.mode === "apply" && c.hasLiveDecision && !!c.marker?.applyStarted && !c.marker?.classify?.decision;
+      // An interrupted backfill apply: finish the decision it already recorded (its own hold included).
+      const resumeRecordedDecision = opts.mode === "apply" && c.hasLiveDecision && !!c.marker?.applyStarted && !c.marker?.apply;
       if (opts.mode === "apply") await writeMarker(db, c.id, { applyStarted: { runId: opts.runId, at: itemStarted } });
       const storedRow = opts.mode === "apply" ? (c.marker?.classify?.decision ?? null) : null;
       const dispatchMode = opts.mode === "classify_only" ? "classify_only" : treatment === "full" ? "apply" : "sort_only";
@@ -433,7 +484,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         // Saved before the claim completes, so a crash right after keeps the decision.
         await writeMarker(db, c.id, { classify: { runId: opts.runId, at: itemStarted, outcome: "classified", treatment, decision: row } });
       };
-      const outcome = await dispatchLikeWorkflow(db, {
+      const outcome = await dispatchLikeWorkflowRestoring(db, opts.mode === "classify_only" ? { inboundId: c.id, priorClaimId } : null, {
         ...input,
         routingV2Backfill: {
           runId: opts.runId,
@@ -474,8 +525,9 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     } catch (e) {
       // Reconcile from the database: an error after delivery must not report the send as zero (Astra review 6).
       let effects: ReturnType<typeof emptyEffects> = emptyEffects();
-      try { effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, null); } catch { /* keep zeros */ }
-      result.items.push({ ...base, ...effects, road: effects.road === "not_dispatched" ? "error" : effects.road, outcome: "error", error: errorCode(e) });
+      let effectsUnknown = false;
+      try { effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, null); } catch { effectsUnknown = true; }
+      result.items.push({ ...base, ...effects, effectsUnknown, road: effects.road === "not_dispatched" ? "error" : effects.road, outcome: "error", error: errorCode(e) });
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
   }

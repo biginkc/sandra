@@ -48,8 +48,9 @@ sense right after the seller's message:
   What classify-only DOES write, all bookkeeping that no seller or lead state reads:
   - the backfill marker on the seller text (with the decision);
   - the spend ledger (one Jev row per text, plus Haiku if on);
-  - the claim move below, plus one new responder claim that finishes `status = completed`,
-    `outcome = routing_v2:backfill_classify_only`;
+  - nothing on the responder claim in the end: classify-only moves the text's claim aside for
+    its dispatch, then removes the claim that dispatch created and puts the original back, so a
+    live workflow that still owns the text is never told "already replied";
   - trace / pipeline-run rows for the dispatch;
   - for price texts with the price check on: the DealMachine value lookup (a provider call) and
     its value-cache row, exactly as live.
@@ -58,10 +59,13 @@ sense right after the seller's message:
   (`routing_v2:backfill_classify_only_unavailable`). A text that would take the up-front keyword
   hold is skipped and reported as `keyword_hold`; this is enforced inside the dispatch with the
   keyword list it reads, so a keyword added mid-run is honoured.
+- A text whose delayed live reply is still pending (the webhook's `delayed` stamp, under a day
+  old) belongs to the live path: skipped and counted as `live_pending`.
 - A text whose responder claim is in an error state (for example `v2_safety_hold_failed`, a live
   safety barrier) is never touched: skipped and counted as `claim_error_state`.
-- Apply / sort-only never act on a text once a newer seller text exists on the lead (checked
-  before anything is recorded): skipped as `routing_v2:backfill_newer_inbound`.
+- No backfill text acts once a newer seller text exists on the lead. This is checked before the
+  keyword hold and again before anything is recorded: skipped as `routing_v2:backfill_newer_inbound`.
+  A backfill keyword hold never runs the old engine's follow-up classification.
 - `--rate` is capped at 60 per minute. The production check uses the URL the admin client
   actually connects to.
 - If routing v2 is not live for a text when it is dispatched (flags, canary or engine are checked
@@ -110,7 +114,11 @@ atomic recorder as live) and carries it out, with no second model call. If the l
 between (a person acted, a text went out), the transition holds for a person instead of acting.
 Use ONE run id for the whole sequence. If a run stops partway, run the same command again (or
 `--resume <run id>`): texts already applied or superseded are never routed twice, and a text
-whose apply stopped after its decision was recorded is finished from that recorded decision. If
+whose apply stopped after its decision was recorded is finished from that recorded decision,
+including a stop / needs-a-person decision whose hold was already written (its suppression or
+alerts are completed on the rerun; only when the lead's hold is the one written for that text).
+The live sweep does not finish those remaining effects for backfill texts, so keep rerunning
+until the report shows 0 "interrupted texts". If
 the run crashed mid-text, wait 5 minutes first (the crashed claim's lease); until then that text
 reports `claim_in_progress` and is left alone. `--limit N` caps one run. An error after a text
 was dispatched still reports what was really queued or sent for it (read back from the database).
@@ -141,36 +149,27 @@ select id from messages where metadata->'routingV2Backfill'->'apply'->>'runId' =
 
 No database migration is needed.
 
-### Undoing the claim move for one text
+### Undoing a classify-only run for one text
 
-Only for a text that a backfill classified and that NO apply has started on, and never while an
-apply run is going. The SQL refuses anything else (it changes nothing unless every check holds).
-In the SQL editor, for inbound id `<id>`:
+Classify-only already puts the responder claim back as it found it. To forget its stored
+decision for a text (only when no apply has started or finished on it, and never while an apply
+run is going):
 
 ```sql
 begin;
--- 0. Refuse unless: classify-only finished normally, no apply started or finished, no live claim.
 do $$ begin
   if not exists (
     select 1 from messages m
     where m.id = '<id>'
-      and m.metadata->'routingV2Backfill'->'classify'->>'outcome' like 'skipped:routing_v2:backfill_classify_only%'
+      and m.metadata->'routingV2Backfill' ? 'classify'
       and not (m.metadata->'routingV2Backfill' ? 'apply')
       and not (m.metadata->'routingV2Backfill' ? 'applyStarted'))
-  or exists (select 1 from ai_response_claims where inbound_message_id = '<id>' and status = 'processing')
-  then raise exception 'not undoable: applied, apply started, classify-only did not finish, or a claim is live';
+  then raise exception 'not undoable: apply started or finished, or never classified';
   end if;
 end $$;
--- 1. The claim the classify-only dispatch created.
-delete from ai_response_claims
-  where inbound_message_id = '<id>' and response_kind = 'sms_ai_responder_v1'
-    and status = 'completed' and outcome = 'routing_v2:backfill_classify_only';
--- 2. Put the original claim back (the oldest one the backfill moved).
-update ai_response_claims set response_kind = 'sms_ai_responder_v1', updated_at = now()
-  where id = (select id from ai_response_claims
-              where inbound_message_id = '<id>' and response_kind like 'sms_ai_responder_v1:backfill_prior:%'
-              order by created_at limit 1);
--- 3. Forget the classify-only decision.
 update messages set metadata = metadata - 'routingV2Backfill' where id = '<id>';
 commit;
 ```
+
+An applied text's claim stays renamed `sms_ai_responder_v1:backfill_prior:<run id>:<claim id>`
+on purpose: the apply produced a real outcome with its own claim.

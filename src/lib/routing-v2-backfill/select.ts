@@ -56,6 +56,8 @@ export type InboundRow = {
   marker: BackfillMarker | null;
   /** A routing_v2_live_decisions row exists for this inbound. */
   hasLiveDecision: boolean;
+  /** The webhook scheduled the delayed live reply (aiResponder stamp 'delayed') and it is still live-owned (< 24 h). */
+  livePending?: boolean;
 };
 
 export type PropertyFacts = {
@@ -104,13 +106,14 @@ export type SkipReason =
   | "property_missing"
   | "already_backfilled"
   | "already_routed_live"
+  | "live_pending"
   | "outside_window";
 
 export const SKIP_REASONS: ReadonlyArray<SkipReason> = [
   "answered_by_human", "answered_by_automation", "needs_human_attention", "terminal_disposition", "dnc_locked",
   "phone_suppressed", "contact_do_not_contact", "opted_out", "test_tagged", "human_takeover_after_inbound",
   "ai_responder_disabled", "v2_not_live", "webhook_keyword", "no_contact", "property_missing",
-  "already_backfilled", "already_routed_live", "outside_window",
+  "already_backfilled", "already_routed_live", "live_pending", "outside_window",
 ];
 
 export type Candidate = InboundRow & { ageDays: number; bucket: AgeBucket; supersedes: string[] };
@@ -189,7 +192,10 @@ export function skipReasonFor(row: InboundRow, facts: SelectionFacts, mode: Sele
   if (alreadyBackfilled(row.marker, mode)) return "already_backfilled";
   // A live (or flag-on) v2 decision that no backfill classify-only run wrote: the engine owns it.
   // An interrupted backfill apply (applyStarted, no apply) is resumable, not "routed live".
+  const interrupted = row.hasLiveDecision && !!row.marker?.applyStarted && !row.marker?.apply;
   if (row.hasLiveDecision && !row.marker?.classify && !row.marker?.applyStarted) return "already_routed_live";
+  // The delayed live workflow still owns this text: never touched (Astra review 2b-1).
+  if (row.livePending && !interrupted) return "live_pending";
   const latest = facts.latestOutbound.get(row.propertyId);
   if (latest && ms(latest.humanAt) > ms(row.createdAt)) return "answered_by_human";
   if (latest && ms(latest.at) > ms(row.createdAt)) return "answered_by_automation";
@@ -198,7 +204,9 @@ export function skipReasonFor(row: InboundRow, facts: SelectionFacts, mode: Sele
   if (p.testRunId) return "test_tagged";
   if (!row.contactId) return "no_contact";
   if (p.lastPersonTakeoverAt && ms(p.lastPersonTakeoverAt) >= ms(row.createdAt)) return "human_takeover_after_inbound";
-  if (p.needsHumanAttention) return "needs_human_attention";
+  // An interrupted apply's own safety hold is not a reason to abandon it (Astra review 2b-3): the
+  // dispatch finishes that decision only if the hold is the one written for this text.
+  if (p.needsHumanAttention && !interrupted) return "needs_human_attention";
   if (p.isDncLocked) return "dnc_locked";
   if (facts.suppressedInboundIds.has(row.id)) return "phone_suppressed";
   const c = facts.contacts.get(row.contactId);

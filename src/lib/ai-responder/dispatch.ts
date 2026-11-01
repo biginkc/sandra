@@ -137,7 +137,7 @@ import {
 } from "@/lib/sms-classification/routing-v2/wrong-number-all";
 import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { liveDecisionRow, recordLiveV2Decision, recordLiveV2DecisionRow } from "@/lib/sms-classification/routing-v2/live-decisions";
-import type { V2Action } from "@/lib/sms-classification/routing-v2/actions";
+import type { V2Action, V2Step } from "@/lib/sms-classification/routing-v2/actions";
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
@@ -695,7 +695,12 @@ export async function checkAiResponderDispatchPreGates(
         : await routingV2LiveForSweep(supabase, property.org_id, input.propertyId))
     : "no";
   const routingV2Live = v2LiveState === "yes";
-  if (isTerminalAiResponderProperty(property)
+  // Routing v2 backfill resume (Astra review 2b-3): an interrupted apply whose atomic recorder
+  // already wrote THIS text's safety hold must still finish that decision's remaining effects
+  // (suppression, alerts). Only when the lead's hold is the one written for this very text.
+  const backfillResumeOwnHold = routingV2Live && !!input.routingV2Backfill?.resumeRecordedDecision && property.needs_human_attention
+    && (await backfillHoldIsFor(supabase, input.propertyId, input.inboundMessageId ?? null));
+  if (isTerminalAiResponderProperty(property) && !backfillResumeOwnHold
       && !(routingV2Live && (await mechanicsHoldYieldsTo(supabase, property, input.inboundMessageId, { v2Live: true })))) {
     // PR 2: a lead that already needs a person, or carries a human-owned
     // disposition (nurture / callback / booked), still gets ONE classify-only
@@ -745,6 +750,7 @@ export async function checkAiResponderDispatchPreGates(
       // classifier still lets Jev classify): silent, nothing flagged here,
       // and rules 1-6 must not run for a dead lead.
       const passThrough = (decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal")
+        || (backfillResumeOwnHold && decision.action === "skip" && decision.rule === 0 && decision.reason === "already_terminal")
         || (routingV2Live && decision.action === "skip" && (decision.rule === 1 || decision.rule === 3 || decision.rule === 5));
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
@@ -855,6 +861,12 @@ async function dispatchAiResponseCore(
   // = skipped and counted; never the legacy engine, never a reply or a drip (Opus review B2).
   if (input.routingV2Backfill && !preGates.routingV2Live) {
     return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE };
+  }
+  // Newest-inbound fence (Astra review 2b-2): before the keyword branch and everything after it,
+  // an older backfill text never acts once a newer seller text exists (any mode).
+  if (input.routingV2Backfill && input.inboundMessageId
+      && (await backfillNewerInboundExists(supabase, input.propertyId, input.inboundMessageId)) !== "no") {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
   }
 
   const { data: config } = await supabase
@@ -972,7 +984,10 @@ async function dispatchAiResponseCore(
     // If the text ALSO carries an allowed price signal, the lead is now held:
     // run the held-lead classify-only check, which alerts Jarrad once only if
     // stop / DNC / wrong / bad number does not win (and its own gates pass).
-    await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
+    // A backfill text never reaches the legacy classifier: the keyword hold stands for a person.
+    if (!input.routingV2Backfill) {
+      await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
+    }
     const escalatedOutcome: AiDispatchOutcome = { outcome: "escalated", reason: keywordEscalation.reason };
     // Stress F8/F9 (round 17): a hold that did not land is never recorded as handled (claim
     // flag_failed); it already failed closed (drips paused, replies cancelled, safety marker).
@@ -8858,6 +8873,9 @@ async function runRoutingV2LiveStepInner(
     if (storedRow.property_id !== input.propertyId || storedRow.org_id !== property.org_id || storedRow.inbound_message_id !== inboundMessageId) {
       return nineHoldAndComplete(supabase, a, "nine_needs_person");
     }
+    if (input.routingV2Backfill?.mode === "sort_only" && storedRow.action) {
+      storedRow.action = withSortOnlyPriceAlert(storedRow.action as V2Action);
+    }
     const replayHold = v2SafetyHoldReason({
       kind: storedRow.status === "failed" ? "failed" : "decided",
       reason: (storedRow.failure_reason as string | null) ?? undefined,
@@ -8920,6 +8938,9 @@ async function runRoutingV2LiveStepInner(
 
   await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
     (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
+  if (input.routingV2Backfill?.mode === "sort_only" && classification.kind === "decided") {
+    classification = { ...classification, action: withSortOnlyPriceAlert(classification.action) };
+  }
   const decisionContext = { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision };
   if (input.routingV2Backfill?.mode === "classify_only") {
     // Backfill classify-only (Opus review B1): the decision row goes to the caller, NOT to the
@@ -8960,6 +8981,14 @@ async function runRoutingV2LiveStepInner(
     return nineHoldAndComplete(supabase, a, "nine_needs_person");
   }
   return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
+}
+
+/** Is the lead's current hold the one written for this inbound (hold_inbound_message_id)? */
+async function backfillHoldIsFor(supabase: SupabaseClient<Database>, propertyId: string, inboundMessageId: string | null): Promise<boolean> {
+  if (!inboundMessageId) return false;
+  const { data, error } = await (supabase as unknown as { from: (t: string) => any }) // eslint-disable-line @typescript-eslint/no-explicit-any
+    .from("properties").select("hold_inbound_message_id").eq("id", propertyId).maybeSingle();
+  return !error && (data as { hold_inbound_message_id?: string | null } | null)?.hold_inbound_message_id === inboundMessageId;
 }
 
 /** A newer inbound SMS on the property than this one ("yes" / "no" / "error" = treat as newer). */
@@ -9119,19 +9148,7 @@ async function applyRoutingV2SortOnly(
   if (kind === "live_stop") return routeRoutingV2Stop(supabase, a, flags, evidence, holdWithAlerts);
   if (kind === "live_bad_number") return routeRoutingV2PhoneAction(supabase, a, flags, evidence, "bad_number");
   if (kind === "live_hold") return holdWithAlerts(step.kind === "hold" ? liveHoldReason(step.reason) : "nine_needs_person");
-  if (kind === "alert_and_hold") {
-    const steps = evidence.action?.steps ?? [];
-    if (evidence.action && !steps.some((s) => s.kind === "alert")) {
-      // A hot road with no alert of its own (price check "too high": reply only). Sort-only sends no
-      // reply, so the lead must still reach Jarrad with the existing "Named a price" owner alert
-      // (builder's reading of "alert hot roads", pending Jarrad; flagged in the backfill report).
-      const withAlert: StoredLiveEvidence = { ...evidence, action: { ...evidence.action, steps: [...steps, { kind: "alert", reason: SORT_ONLY_PRICE_ALERT }] } };
-      const queued = await queueLiveHoldAlerts(supabase, withAlert, { flags, propertyId: input.propertyId, contactId: input.contactId, inboundMessageId: input.inboundMessageId! });
-      await trace(supabase, { kind: "hold", name: "routing_v2_hold", result: "held", detail: { engine: "routing_v2", road: evidence.road, alertsQueued: queued, backfill: "sort_only_price_alert" } }, runCtx);
-      return nineHoldAndComplete(supabase, a, "nine_needs_person");
-    }
-    return holdWithAlerts("nine_needs_person");
-  }
+  if (kind === "alert_and_hold") return holdWithAlerts("nine_needs_person");
   if (kind === "close_wrong_number" || kind === "close_not_interested") {
     const dispo = kind === "close_wrong_number" ? "wrong_number" : "not_interested";
     // The disposition review's ai_reason (like the nine engine's `nine_questions:<answer>`), not a hold reason.
@@ -9160,6 +9177,18 @@ async function applyRoutingV2SortOnly(
 
 /** The owner alert (not a hold reason) a sort-only price text raises: the existing "Named a price". */
 const SORT_ONLY_PRICE_ALERT = "named_price" as const;
+
+/**
+ * Sort-only (Astra review 2b-5): a hot road with no alert of its own (price check "too high":
+ * reply only) gets the existing "Named a price" owner alert IN ITS STORED ACTION, before the
+ * decision is recorded, so the recorded evidence and the queued alert agree (the database
+ * validator compares them). Builder's reading of "alert hot roads", pending Jarrad; flagged in
+ * the backfill report. Any other action is returned unchanged.
+ */
+export function withSortOnlyPriceAlert<T extends { road: string; steps: readonly V2Step[] } | null | undefined>(action: T): T {
+  if (!action || action.road !== "price_check" || action.steps.some((s) => s.kind === "alert")) return action;
+  return { ...action, steps: [...action.steps, { kind: "alert", reason: SORT_ONLY_PRICE_ALERT }] } as T;
+}
 
 /** Sort-only on a road with nothing to sort (reply / drip only): decision recorded, nothing else. */
 export const ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED = "routing_v2:backfill_sort_only:recorded";

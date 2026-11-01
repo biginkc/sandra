@@ -61,14 +61,14 @@ export function propertyV2Live(state: OrgV2State, propertyId: string): boolean {
 
 type RawInbound = {
   id: string; property_id: string; contact_id: string | null; conversation_id: string | null;
-  created_at: string; from_address: string | null; keyword: string | null; backfill: BackfillMarker | null;
+  created_at: string; from_address: string | null; keyword: string | null; backfill: BackfillMarker | null; ai_outcome: string | null;
 };
 
-export async function loadInbounds(db: Db, orgId: string, sinceIso: string): Promise<Array<InboundRow & { orgId: string }>> {
+export async function loadInbounds(db: Db, orgId: string, sinceIso: string, nowMs: number = Date.now()): Promise<Array<InboundRow & { orgId: string }>> {
   const rows: RawInbound[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db.from("messages")
-      .select("id, property_id, contact_id, conversation_id, created_at, from_address, keyword:metadata->>keyword, backfill:metadata->routingV2Backfill")
+      .select("id, property_id, contact_id, conversation_id, created_at, from_address, keyword:metadata->>keyword, backfill:metadata->routingV2Backfill, ai_outcome:metadata->processing->aiResponder->>outcome")
       .eq("org_id", orgId).eq("direction", "inbound").eq("channel", "sms")
       .not("property_id", "is", null).gte("created_at", sinceIso)
       .order("created_at", { ascending: true }).order("id", { ascending: true })
@@ -89,6 +89,9 @@ export async function loadInbounds(db: Db, orgId: string, sinceIso: string): Pro
     createdAt: r.created_at, fromAddress: r.from_address, webhookKeyword: r.keyword ?? null,
     marker: r.backfill && typeof r.backfill === "object" ? r.backfill : null,
     hasLiveDecision: decided.has(r.id),
+    // 'delayed' = the webhook scheduled the live reply workflow; inside a day the live path (or
+    // its sweep) still owns it. Older than that the workflow is long dead.
+    livePending: r.ai_outcome === "delayed" && Date.parse(r.created_at) > nowMs - 86_400_000,
   }));
 }
 
@@ -183,9 +186,10 @@ export async function loadSelectionFacts(
   db: Db,
   orgId: string,
   sinceIso: string,
+  nowMs: number = Date.now(),
 ): Promise<{ facts: SelectionFacts; state: OrgV2State }> {
   const state = await readOrgV2State(db, orgId);
-  const inbounds = await loadInbounds(db, orgId, sinceIso);
+  const inbounds = await loadInbounds(db, orgId, sinceIso, nowMs);
   const newest = new Map<string, InboundRow>();
   for (const r of inbounds) {
     const prev = newest.get(r.propertyId);
