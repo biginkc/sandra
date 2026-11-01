@@ -43,6 +43,8 @@ type ActionCase = {
   filterColumn: string;
   filterValue: boolean;
   payload: { from: boolean; to: boolean };
+  /** The action first reads the lead with the caller's client (attention clear: Opus B3 on #956). */
+  readsHeldFirst?: boolean;
 };
 
 function actionCases(): ActionCase[] {
@@ -54,6 +56,7 @@ function actionCases(): ActionCase[] {
       filterColumn: "needs_human_attention",
       filterValue: true,
       payload: { from: true, to: false },
+      readsHeldFirst: true,
     },
     {
       name: "AI responder toggle",
@@ -91,6 +94,7 @@ function makeClient(options?: {
     }),
   };
   return {
+    builder,
     client: {
       auth: {
         getUser: vi.fn().mockResolvedValue({
@@ -116,7 +120,8 @@ describe("lead AI actions ledger", () => {
 
   for (const action of actionCases()) {
     it(`records only a confirmed ${action.name}`, async () => {
-      const { client, eq } = makeClient();
+      const { client, eq, builder } = makeClient();
+      if (action.readsHeldFirst) builder.maybeSingle.mockResolvedValueOnce({ data: { id: "property-1", needs_human_attention: true }, error: null });
       createClient.mockResolvedValue(client);
 
       await expect(action.run()).resolves.toMatchObject({ ok: true });
@@ -131,7 +136,8 @@ describe("lead AI actions ledger", () => {
     });
 
     it(`does not record a ${action.name} no-op`, async () => {
-      const { client } = makeClient({ updated: null });
+      const { client, builder } = makeClient({ updated: null });
+      if (action.readsHeldFirst) builder.maybeSingle.mockResolvedValueOnce({ data: { id: "property-1", needs_human_attention: true }, error: null });
       createClient.mockResolvedValue(client);
 
       await expect(action.run()).resolves.toMatchObject({ ok: true });
@@ -139,10 +145,11 @@ describe("lead AI actions ledger", () => {
     });
 
     it(`does not record a failed ${action.name} update`, async () => {
-      const { client } = makeClient({
+      const { client, builder } = makeClient({
         updated: null,
         updateError: { message: "write failed" },
       });
+      if (action.readsHeldFirst) builder.maybeSingle.mockResolvedValueOnce({ data: { id: "property-1", needs_human_attention: true }, error: null });
       createClient.mockResolvedValue(client);
 
       await expect(action.run()).resolves.toMatchObject({ ok: false });
@@ -520,5 +527,43 @@ describe("listOutstandingSuppressionFailures", () => {
       ok: false,
       error: { code: "LIST_SUPPRESSION_FAILED" },
     });
+  });
+});
+
+describe("clearNeedsHumanAttention resolves obligations only for a lead the caller can see and that is held (Opus B3 on #956)", () => {
+  beforeEach(() => vi.clearAllMocks());
+  async function adminSpy() {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const rpc = vi.fn().mockResolvedValue({ data: 1, error: null });
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as never);
+    return rpc;
+  }
+  it("another org's lead (invisible under RLS): NOT_FOUND, no obligation resolved, nothing updated", async () => {
+    const rpc = await adminSpy();
+    const { client, builder } = makeClient();
+    builder.maybeSingle.mockResolvedValueOnce({ data: null, error: null });
+    createClient.mockResolvedValue(client);
+    await expect(clearNeedsHumanAttention("other-org-property")).resolves.toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(builder.update).not.toHaveBeenCalled();
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+  it("a lead that is not held: no obligation resolved, nothing updated", async () => {
+    const rpc = await adminSpy();
+    const { client, builder } = makeClient();
+    builder.maybeSingle.mockResolvedValueOnce({ data: { id: "property-1", needs_human_attention: false }, error: null });
+    createClient.mockResolvedValue(client);
+    await expect(clearNeedsHumanAttention("property-1")).resolves.toMatchObject({ ok: true });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(builder.update).not.toHaveBeenCalled();
+  });
+  it("a held lead: obligations resolved by the person, then the clear; a trigger-kept clear is HOLD_KEPT and not audited", async () => {
+    const rpc = await adminSpy();
+    const { client, builder } = makeClient({ updated: { id: "property-1", needs_human_attention: true } as never });
+    builder.maybeSingle.mockResolvedValueOnce({ data: { id: "property-1", needs_human_attention: true }, error: null });
+    createClient.mockResolvedValue(client);
+    await expect(clearNeedsHumanAttention("property-1")).resolves.toMatchObject({ ok: false, error: { code: "HOLD_KEPT" } });
+    expect(rpc).toHaveBeenCalledWith("routing_v2_resolve_obligations_by_person", { p_property_id: "property-1" });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
