@@ -35,7 +35,8 @@ export function ageBucket(days: number): AgeBucket {
 
 /** What a previous backfill run left on the inbound (messages.metadata.routingV2Backfill). */
 export type BackfillMarker = {
-  classify?: { runId: string; at: string; outcome?: string; treatment?: string; priorClaimId?: string };
+  /** `decision`: the decision row classify-only built (never written to routing_v2_live_decisions). */
+  classify?: { runId: string; at: string; outcome?: string; treatment?: string; priorClaimId?: string; decision?: Record<string, unknown> };
   apply?: { runId: string; at: string; outcome?: string; treatment?: string; priorClaimId?: string };
   superseded?: { runId: string; at: string; byInboundId: string };
   skipped?: { runId: string; at: string; reason: string };

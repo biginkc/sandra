@@ -12,6 +12,14 @@ backlog.
 | 0–14 days (`--text-max-age-days`, default 14) | **Full treatment**, same as a live reply: reply, drip, alerts, holds, suppression. |
 | 15–60 days (`--max-age-days`, default 60) | **Sort only**: no auto reply, no drip. Stops are handled (suppressed or held), legal / needs-a-person texts are held, wrong person / sold / tenant and not interested are closed on that property, bad numbers are marked, and hot texts (yes, offer, okay, price, call me, said they'd call, any alert road) raise their alert and go to Jarrad's queue (held for a person). Everything else is recorded only. |
 
+`--text-max-age-days` above 14 is refused unless `--i-know-this-widens-texting` is also passed.
+Age is measured on the database clock, and the group is decided when each text is dispatched, so
+a text that turns 15 days old during a long run gets sort only.
+
+**Pending Jarrad:** in the sort-only group, every price text (including "price too high", which
+has no alert of its own live) goes to Jarrad's queue with the existing "Named a price" alert. That
+is the builder's reading of "alert hot roads"; the report repeats this note.
+
 One road is held for a person even in the 0–14 day group, because its approved reply only makes
 sense right after the seller's message:
 
@@ -32,6 +40,14 @@ sense right after the seller's message:
 ## Safety
 
 - Default mode is `--dry-run`: reads only, writes nothing.
+- `--classify-only` writes no decision row, hold, drip pause, reply cancel, alert, obligation,
+  reply or drip, on any road (stop, legal, needs-a-person and Jev failures included). It stores the
+  decision on the seller text (`messages.metadata.routingV2Backfill.classify.decision`) and the
+  report shows what apply WOULD do, plus "holds actually written by classify-only (must be 0)".
+  The only writes are that marker, the spend ledger (one Jev row per text) and the claim move below.
+- If routing v2 is not live for a text when it is dispatched (flags, canary or engine are checked
+  again for every text, so turning `questions_live` off stops the run), the text is skipped and
+  counted as `routing_v2:backfill_v2_not_live`. The old engine never answers a backfill text.
 - A non-local database is refused unless `--i-know-this-is-prod` **and** `--run-id` are given.
 - The org must be on Jev automatic + nine questions with `questions_live` on, never forceable
   (otherwise the old engine would answer). `replies` and `drips` must be on, or `--force-flags`
@@ -68,9 +84,12 @@ $S --apply --run-id bf-2026-11-01 --batch-max-age-days 14 --out ~/routing-v2-bac
 $S --apply --run-id bf-2026-11-01 --out ~/routing-v2-backfill      # 15–60 days: sort only
 ```
 
-Apply carries out the exact decision classify-only recorded (no second model call). If a run
-stops partway, run the same command again (or `--resume <run id>`): texts already applied or
-superseded are never routed twice. `--limit N` caps one run.
+Apply records the exact decision classify-only stored (a stop / hold decision through the same
+atomic recorder as live) and carries it out, with no second model call. If the lead changed in
+between (a person acted, a text went out), the transition holds for a person instead of acting.
+Use ONE run id for the whole sequence. If a run stops partway, run the same command again (or
+`--resume <run id>`): texts already applied or superseded are never routed twice. `--limit N`
+caps one run.
 
 ## Report
 
@@ -86,7 +105,9 @@ suppressions created.
 - `messages.metadata.routingV2Backfill` on each touched seller text: `classify` / `apply` /
   `superseded` with the run id, time and outcome.
 - The text's earlier completed responder claim is kept, renamed to
-  `response_kind = 'sms_ai_responder_v1:backfill_prior:<run id>'`, so the re-dispatch can claim it.
+  `response_kind = 'sms_ai_responder_v1:backfill_prior:<run id>:<claim id>'` (unique per claim, so
+  one run id can be reused across classify-only, apply batches and resumes), so the re-dispatch
+  can claim it. A claim still being worked on (live lease) is never moved.
 - Everything the live path writes for that text (decision, transition, outbox, enrollment, spend
   ledger) is keyed by the text's id. Find a run's rows with:
 
@@ -95,3 +116,24 @@ select id from messages where metadata->'routingV2Backfill'->'apply'->>'runId' =
 ```
 
 No database migration is needed.
+
+### Undoing the claim move for one text
+
+Only for a text that a backfill classified but did NOT apply (an applied text has a real
+outcome; leave it). In the SQL editor, for inbound id `<id>`:
+
+```sql
+begin;
+-- 1. The claim the backfill dispatch created (classify-only leaves it completed / skipped).
+delete from ai_response_claims
+  where inbound_message_id = '<id>' and response_kind = 'sms_ai_responder_v1'
+    and error_message = 'routing_v2:backfill_classify_only';
+-- 2. Put the original claim back (the oldest one the backfill moved).
+update ai_response_claims set response_kind = 'sms_ai_responder_v1', updated_at = now()
+  where id = (select id from ai_response_claims
+              where inbound_message_id = '<id>' and response_kind like 'sms_ai_responder_v1:backfill_prior:%'
+              order by created_at limit 1);
+-- 3. Forget the classify-only decision.
+update messages set metadata = metadata - 'routingV2Backfill' where id = '<id>';
+commit;
+```

@@ -20,6 +20,8 @@ export type ParsedArgs = {
   ratePerMinute: number;
   forceFlags: boolean;
   iKnowThisIsProd: boolean;
+  /** Needed for --text-max-age-days above 14 (Jarrad's cutoff for sending to old texts). */
+  iKnowThisWidensTexting: boolean;
   outDir: string | null;
 };
 
@@ -34,7 +36,7 @@ function num(flag: string, v: string | undefined, { min, integer }: { min: numbe
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out: ParsedArgs = {
     mode: "dry_run", orgId: "", runId: null, resume: false, maxAgeDays: DEFAULT_MAX_AGE_DAYS, textMaxAgeDays: DEFAULT_TEXT_MAX_AGE_DAYS,
-    ratePerMinute: DEFAULT_RATE_PER_MINUTE, forceFlags: false, iKnowThisIsProd: false, outDir: null,
+    ratePerMinute: DEFAULT_RATE_PER_MINUTE, forceFlags: false, iKnowThisIsProd: false, iKnowThisWidensTexting: false, outDir: null,
   };
   const modes = new Set<string>();
   for (let i = 0; i < argv.length; i++) {
@@ -54,6 +56,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--rate": out.ratePerMinute = num(a, next(), { min: 1 }); break;
       case "--force-flags": out.forceFlags = true; break;
       case "--i-know-this-is-prod": out.iKnowThisIsProd = true; break;
+      case "--i-know-this-widens-texting": out.iKnowThisWidensTexting = true; break;
       case "--out": out.outDir = next() ?? null; break;
       default: throw new ArgError(`unknown argument ${a}`);
     }
@@ -64,6 +67,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (out.runId !== null && !RUN_ID.test(out.runId)) throw new ArgError("run id: 3-64 letters, digits, - or _");
   if (out.maxAgeDays > DEFAULT_MAX_AGE_DAYS) throw new ArgError(`--max-age-days is at most ${DEFAULT_MAX_AGE_DAYS}`);
   if (out.textMaxAgeDays > out.maxAgeDays) throw new ArgError("--text-max-age-days cannot exceed --max-age-days");
+  if (out.textMaxAgeDays > DEFAULT_TEXT_MAX_AGE_DAYS && !out.iKnowThisWidensTexting) {
+    throw new ArgError(`--text-max-age-days above ${DEFAULT_TEXT_MAX_AGE_DAYS} sends replies to older texts; pass --i-know-this-widens-texting`);
+  }
   return out;
 }
 

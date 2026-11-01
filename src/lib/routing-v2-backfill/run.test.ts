@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ALL_OFF } from "@/lib/sms-classification/routing-v2/flags";
 
 import { ArgError, guardTarget, isLocalSupabaseUrl, last4, parseArgs } from "./args";
-import { checkFlags, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
+import { backfillPriorKind, checkFlags, errorCode, keywordHoldLikely, treatmentFor, wouldDo } from "./run";
 
 const ORG = "00000000-0000-0000-0000-000000000bbb";
 const on = { ...ALL_OFF, questions_live: true, replies: true, drips: true };
@@ -31,6 +31,22 @@ describe("args + production guard", () => {
     expect(isLocalSupabaseUrl("http://localhost:54321")).toBe(true);
     expect(isLocalSupabaseUrl("http://127.0.0.1.evil.com")).toBe(false);
     expect(last4("+1 (816) 555-0142")).toBe("…0142");
+  });
+});
+
+describe("texting cutoff guard, claim names, error codes", () => {
+  it("--text-max-age-days above 14 needs --i-know-this-widens-texting", () => {
+    expect(() => parseArgs(["--org", ORG, "--text-max-age-days", "20"])).toThrow(/widens-texting/);
+    expect(parseArgs(["--org", ORG, "--text-max-age-days", "20", "--i-know-this-widens-texting"]).textMaxAgeDays).toBe(20);
+    expect(parseArgs(["--org", ORG, "--text-max-age-days", "7"]).textMaxAgeDays).toBe(7);
+  });
+  it("the moved-aside claim name is unique per claim row (one run id, many modes / resumes)", () => {
+    expect(backfillPriorKind("bf-1", "c1")).toBe("sms_ai_responder_v1:backfill_prior:bf-1:c1");
+    expect(backfillPriorKind("bf-1", "c1")).not.toBe(backfillPriorKind("bf-1", "c2"));
+  });
+  it("errors never carry a row value or a phone", () => {
+    expect(errorCode(new Error('duplicate key value violates unique constraint "x" Key (inbound_message_id, response_kind)=(abc, k) already exists'))).not.toMatch(/abc/);
+    expect(errorCode(new Error("send failed to +1 (816) 555-0142"))).not.toMatch(/0142/);
   });
 });
 
@@ -67,7 +83,8 @@ describe("age split (Jarrad 2026-10-31)", () => {
     expect(wouldDo(dec("not_interested_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only")).toMatchObject({ wouldReply: false, wouldDrip: false, wouldClose: true });
     expect(wouldDo(dec("maybe_later_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only")).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false });
     expect(wouldDo(dec("stop", [{ kind: "hold" }]), "sort_only")).toMatchObject({ wouldHold: true, wouldReply: false });
-    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only")).toMatchObject({ wouldHold: true, wouldReply: false });
+    // Price too high has no alert of its own live; sort-only still alerts (never a silent hold).
+    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only")).toMatchObject({ wouldHold: true, wouldReply: false, wouldAlert: true });
   });
 
   it("full treatment: the driving reply never goes to an old text (holds with its alerts instead)", () => {

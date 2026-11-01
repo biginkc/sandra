@@ -70,11 +70,23 @@ export async function recordLiveV2Decision(
    */
   safetyHoldReason?: string | null,
 ): Promise<"recorded" | "duplicate" | "failed" | "hold_failed"> {
+  return recordLiveV2DecisionRow(db, liveDecisionRow(context, result), safetyHoldReason);
+}
+
+/**
+ * Record an already-built decision row (the routing v2 backfill replays the row a classify-only
+ * run built). Same contract as recordLiveV2Decision.
+ */
+export async function recordLiveV2DecisionRow(
+  db: SupabaseClient<Database>,
+  row: Record<string, unknown>,
+  safetyHoldReason?: string | null,
+): Promise<"recorded" | "duplicate" | "failed" | "hold_failed"> {
   if (safetyHoldReason) {
     try {
       const { data, error } = await (db as unknown as {
         rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
-      }).rpc("routing_v2_record_live_decision", { p_row: liveDecisionRow(context, result), p_hold_reason: safetyHoldReason });
+      }).rpc("routing_v2_record_live_decision", { p_row: row, p_hold_reason: safetyHoldReason });
       if (!error) return data === "duplicate" ? "duplicate" : data === "recorded" ? "recorded" : "failed";
       // A database without the recorder: the plain insert below (its effects then stay unrecorded,
       // so the apply gate and the sweep treat it as unrecovered until its hold lands).
@@ -85,7 +97,7 @@ export async function recordLiveV2Decision(
     }
   }
   try {
-    const { error } = await (db as unknown as Loose).from("routing_v2_live_decisions").insert(liveDecisionRow(context, result));
+    const { error } = await (db as unknown as Loose).from("routing_v2_live_decisions").insert(row);
     if (!error) return "recorded";
     return error.code === "23505" ? "duplicate" : "failed";
   } catch {

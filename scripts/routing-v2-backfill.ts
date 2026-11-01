@@ -35,6 +35,15 @@ function gitSha(): string {
   }
 }
 
+/** The database side's clock, from the API gateway's Date header (seconds precision). */
+async function dbNowMs(): Promise<number> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+  const res = await fetch(`${url}/rest/v1/`, { method: "HEAD", headers: { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "" } });
+  const date = Date.parse(res.headers.get("date") ?? "");
+  if (Number.isNaN(date)) throw new Error("database clock unreadable (no Date header)");
+  return date;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { runId, prod } = guardTarget(args, process.env.NEXT_PUBLIC_SUPABASE_URL, new Date().toISOString());
@@ -59,6 +68,7 @@ async function main(): Promise<void> {
       ? ({ messages: { create: async () => { throw new Error("dry-run never calls a model"); } } } as unknown as Anthropic)
       : new Anthropic(),
     log: (line) => console.log(line),
+    dbNowMs,
   });
 
   mkdirSync(outDir, { recursive: true });

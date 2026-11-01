@@ -81,6 +81,11 @@ export type BackfillDeps = {
   log?: (line: string) => void;
   /** Test seam; defaults to the real dispatch. */
   dispatch?: typeof dispatchAiResponse;
+  /**
+   * The database clock in ms (ages are measured on it, not on this machine's clock). The CLI
+   * reads it from the API's Date header; default = this machine's clock (tests, local).
+   */
+  dbNowMs?: () => Promise<number>;
 };
 
 /** Per-text result row (CSV + report). Never carries a phone number or message text. */
@@ -180,16 +185,27 @@ export async function writeMarker(db: Db, messageId: string, patch: Partial<Back
  * would refuse the re-dispatch as `already_replied`. Move that claim aside, unchanged, under a
  * run-specific response_kind (reversible; see docs). Returns the moved claim's id, or null.
  */
-export async function reopenClaim(db: Db, inboundId: string, runId: string): Promise<string | null> {
+export function backfillPriorKind(runId: string, claimId: string): string {
+  // The claim's own id makes the name unique per claim row, so one run id can cover
+  // classify-only -> apply batches -> --resume without ever colliding (Opus review B3).
+  return `${RESPONSE_KIND}:backfill_prior:${runId}:${claimId}`;
+}
+
+export async function reopenClaim(db: Db, inboundId: string, runId: string, nowMs: number = Date.now()): Promise<string | null> {
   const { data, error } = await db.from("ai_response_claims")
-    .select("id, status").eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
+    .select("id, status, lease_expires_at").eq("inbound_message_id", inboundId).eq("response_kind", RESPONSE_KIND).maybeSingle();
   if (error) throw new Error(`claim read: ${error.message}`);
   if (!data) return null;
-  if (data.status === "processing") throw new Error("claim in progress (a live dispatch owns this text)");
+  if (data.status === "processing") {
+    // A live lease: someone is dispatching this text right now. An expired one (a crashed run)
+    // is reclaimed by the dispatch's own claim step, so it stays where it is.
+    if (Date.parse(data.lease_expires_at) > nowMs) throw new Error("claim_in_progress");
+    return null;
+  }
   const { data: moved, error: moveErr } = await db.from("ai_response_claims")
-    .update({ response_kind: `${RESPONSE_KIND}:backfill_prior:${runId}`, updated_at: new Date().toISOString() })
+    .update({ response_kind: backfillPriorKind(runId, data.id), updated_at: new Date().toISOString() })
     .eq("id", data.id).eq("response_kind", RESPONSE_KIND).select("id").maybeSingle();
-  if (moveErr || !moved) throw new Error(`claim move: ${moveErr?.message ?? "lost a race"}`);
+  if (moveErr || !moved) throw new Error(moveErr ? `claim_move_failed:${moveErr.code ?? "unknown"}` : "claim_move_lost_race");
   return data.id;
 }
 
@@ -204,7 +220,8 @@ export function wouldDo(d: StoredDecision | null, treatment: Treatment): Pick<It
     const kind = routingV2SortOnlyKind(d as never);
     return {
       wouldReply: false, wouldDrip: false,
-      wouldAlert: has("alert") && (kind === "alert_and_hold" || kind === "live_hold" || kind === "live_stop"),
+      // alert_and_hold always alerts (a hot road with no alert of its own gets "Named a price").
+      wouldAlert: kind === "alert_and_hold" || (has("alert") && (kind === "live_hold" || kind === "live_stop")),
       wouldHold: kind.startsWith("live_") || kind === "alert_and_hold",
       wouldClose: kind === "close_wrong_number" || kind === "close_not_interested",
     };
@@ -219,7 +236,7 @@ export function wouldDo(d: StoredDecision | null, treatment: Treatment): Pick<It
   };
 }
 
-async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error">> {
+async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error">> {
   const loose = db as unknown as Loose;
   const [{ data: dec }, { data: spend }, { data: box }, { data: enr }, { data: prop }] = await Promise.all([
     loose.from("routing_v2_live_decisions").select("status, road, failure_reason, action").eq("inbound_message_id", c.id).maybeSingle(),
@@ -228,7 +245,8 @@ async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: stri
     loose.from("sequence_enrollments").select("id").eq("routing_v2_inbound_id", c.id),
     loose.from("properties").select("needs_human_attention, last_ai_escalation_reason").eq("id", c.propertyId).maybeSingle(),
   ]);
-  const d = dec as StoredDecision | null;
+  // Classify-only writes no decision row: its decision is the row it handed back.
+  const d = mode === "classify_only" ? classifiedRow : (dec as StoredDecision | null);
   const ledger = (spend ?? []) as Array<{ provider: string; cost: number | null }>;
   const outbox = (box ?? []) as Array<{ kind: string; status: string }>;
   let suppressionCreated = false;
@@ -249,8 +267,9 @@ async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: stri
     alertsQueued: outbox.filter((o) => o.kind === "alert").length,
     dripsStarted: (enr ?? []).length,
     // Candidates are never held at selection, so a hold now was written by this dispatch.
-    holdCreated: mode === "apply" && p?.needs_human_attention === true,
-    holdReason: mode === "apply" && p?.needs_human_attention ? (p.last_ai_escalation_reason ?? null) : null,
+    // Measured in every mode: classify-only must show 0.
+    holdCreated: p?.needs_human_attention === true,
+    holdReason: p?.needs_human_attention ? (p.last_ai_escalation_reason ?? null) : null,
     suppressionCreated,
     ...wouldDo(d, treatment),
   };
@@ -303,13 +322,18 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
   const ratePerMinute = opts.ratePerMinute ?? DEFAULT_RATE_PER_MINUTE;
   const textMaxAgeDays = opts.textMaxAgeDays ?? DEFAULT_TEXT_MAX_AGE_DAYS;
   if (!(ratePerMinute > 0)) throw new BackfillRefusal("--rate must be > 0");
-  const startedAt = new Date(now()).toISOString();
-  const sinceIso = new Date(now() - maxAgeDays * 86_400_000).toISOString();
+  // Ages are measured on the database clock: skew = DB clock - this machine's clock.
+  let skewMs = 0;
+  const refreshSkew = async () => { if (deps.dbNowMs) skewMs = (await deps.dbNowMs()) - now(); };
+  await refreshSkew();
+  const dbNow = () => now() + skewMs;
+  const startedAt = new Date(dbNow()).toISOString();
+  const sinceIso = new Date(dbNow() - maxAgeDays * 86_400_000).toISOString();
 
   const { facts, state } = await loadSelectionFacts(db, opts.orgId, sinceIso);
   const flagCheck = checkFlags(state, opts.mode, opts.forceFlags === true);
   if (flagCheck.refuse) throw new BackfillRefusal(flagCheck.refuse);
-  const selection = selectCandidates(facts, { nowMs: now(), maxAgeDays, mode: opts.mode });
+  const selection = selectCandidates(facts, { nowMs: dbNow(), maxAgeDays, mode: opts.mode });
   // Newest first, so --limit and batches always take the freshest replies.
   let queue = selection.candidates.slice().sort((a, b) => a.ageDays - b.ageDays);
   if (opts.batchMaxAgeDays !== undefined) queue = queue.filter((c) => c.ageDays <= opts.batchMaxAgeDays!);
@@ -334,8 +358,12 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     const wait = nextStart - now();
     if (wait > 0) await sleep(wait);
     nextStart = Math.max(now(), nextStart) + intervalMs;
-    const itemStarted = new Date(now()).toISOString();
-    const treatment = treatmentFor(c.ageDays, textMaxAgeDays);
+    if (i > 0 && i % 50 === 0) await refreshSkew().catch(() => undefined);
+    const itemStarted = new Date(dbNow()).toISOString();
+    // Treatment is decided NOW, not at selection: a text that crossed the cutoff during a long
+    // run drops to sort-only.
+    const ageNow = (dbNow() - Date.parse(c.createdAt)) / 86_400_000;
+    const treatment = treatmentFor(ageNow, textMaxAgeDays);
     const base = { inboundId: c.id, propertyId: c.propertyId, ageDays: Math.round(c.ageDays * 10) / 10, bucket: c.bucket, mode: opts.mode, treatment };
     try {
       const { input } = await loadDispatchInput(db, c);
@@ -352,12 +380,23 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
           result.supersededMarked++;
         }
       }
-      const priorClaimId = await reopenClaim(db, c.id, opts.runId);
-      const reuseStoredDecision = opts.mode === "apply" && !!c.marker?.classify && c.hasLiveDecision;
+      const priorClaimId = await reopenClaim(db, c.id, opts.runId, dbNow());
+      const storedRow = opts.mode === "apply" ? (c.marker?.classify?.decision ?? null) : null;
       const dispatchMode = opts.mode === "classify_only" ? "classify_only" : treatment === "full" ? "apply" : "sort_only";
+      let classifiedRow: Record<string, unknown> | null = null;
+      const onClassified = async (row: Record<string, unknown>) => {
+        classifiedRow = row;
+        // Saved before the claim completes, so a crash right after keeps the decision.
+        await writeMarker(db, c.id, { classify: { runId: opts.runId, at: itemStarted, outcome: "classified", treatment, decision: row } });
+      };
       const outcome = await dispatchLikeWorkflow(db, {
         ...input,
-        routingV2Backfill: { runId: opts.runId, mode: dispatchMode, ...(reuseStoredDecision ? { reuseStoredDecision: true } : {}) },
+        routingV2Backfill: {
+          runId: opts.runId,
+          mode: dispatchMode,
+          ...(storedRow ? { storedDecisionRow: storedRow } : {}),
+          ...(dispatchMode === "classify_only" ? { onClassified } : {}),
+        },
       }, { anthropic: deps.anthropic, sleep, dispatch });
       if (opts.mode === "apply") {
         // The delay workflow's post-dispatch steps (dispatchStep + routingV2ShadowStep's audit).
@@ -371,22 +410,31 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         await runRoutingV2OutboxReplies(db, { propertyId: c.propertyId, limit: 5 });
       }
       const outcomeText = `${outcome.outcome}:${"reason" in outcome ? outcome.reason : ""}`;
-      const effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment);
+      const effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, classifiedRow as StoredDecision | null);
       await writeMarker(db, c.id, {
-        [opts.mode === "apply" ? "apply" : "classify"]: { runId: opts.runId, at: itemStarted, outcome: outcomeText.slice(0, 200), treatment, ...(priorClaimId ? { priorClaimId } : {}) },
+        [opts.mode === "apply" ? "apply" : "classify"]: {
+          runId: opts.runId, at: itemStarted, outcome: outcomeText.slice(0, 200), treatment,
+          ...(priorClaimId ? { priorClaimId } : {}),
+          ...(classifiedRow ? { decision: classifiedRow } : {}),
+        },
       } as Partial<BackfillMarker>);
       result.items.push({ ...base, ...effects, outcome: outcomeText, error: null });
       if (opts.mode === "classify_only" && !("reason" in outcome && outcome.reason === ROUTING_V2_BACKFILL_CLASSIFY_ONLY)) {
         log(`note: ${c.id} classify-only ended before the decision: ${outcomeText}`);
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      result.items.push({ ...base, ...emptyEffects(), road: "error", outcome: "error", error: message.slice(0, 200) });
+      result.items.push({ ...base, ...emptyEffects(), road: "error", outcome: "error", error: errorCode(e) });
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
   }
   result.finishedAt = new Date(now()).toISOString();
   return result;
+}
+
+/** Errors become short codes: never a database "Key (...)=(...)" detail or a value from a row. */
+export function errorCode(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.replace(/\(.*?\)=\(.*?\)/g, "(…)").replace(/\+?\d[\d\s().-]{6,}\d/g, "…").slice(0, 120);
 }
 
 function emptyEffects() {

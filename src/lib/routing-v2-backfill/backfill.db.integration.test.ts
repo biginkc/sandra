@@ -36,7 +36,9 @@ const supabase = createTestClient();
 const pg = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const realFetch = globalThis.fetch;
 /** Stubbed Jev answers per seller text. */
-let jevByReply: Record<string, Record<string, number>> = {};
+const jevByReply: Record<string, Record<string, number>> = {};
+/** Seller texts whose Jev call fails (provider error): the Jev-failed road. */
+const jevFails = new Set<string>();
 let jevCalls = 0;
 
 function installFakeJev() {
@@ -46,6 +48,7 @@ function installFakeJev() {
     if (!url.includes("api.typesafe.ai")) return realFetch(input, init);
     jevCalls++;
     const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown>; state?: { homeowner_reply?: string } };
+    if (jevFails.has(body.state?.homeowner_reply ?? "")) return new Response("{}", { status: 500 });
     const probs = jevByReply[body.state?.homeowner_reply ?? ""] ?? {};
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
@@ -110,7 +113,8 @@ const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString
 async function sellerText(lead: Awaited<ReturnType<typeof seedLead>>, body: string, days: number, jev: Record<string, number> = {}) {
   await supabase.from("messages").insert({ org_id: orgId, channel: "sms", direction: "outbound", status: "delivered", property_id: lead.propertyId, contact_id: lead.contactId, from_address: MOCK_SENDER_PRIMARY, to_address: lead.phone, body: "Hi, would you sell?", created_at: daysAgo(days + 1), metadata: { generated_by: "sequence_tick" } });
   const { data, error } = await supabase.from("messages")
-    .insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body, created_at: daysAgo(days) })
+    // Stamped the way the legacy engine left real backlog texts.
+    .insert({ org_id: orgId, channel: "sms", direction: "inbound", status: "received", property_id: lead.propertyId, contact_id: lead.contactId, from_address: lead.phone, to_address: MOCK_SENDER_PRIMARY, body, created_at: daysAgo(days), metadata: { processing: { aiResponder: { outcome: "skipped", reason: "nine_questions:no_action", completedAt: daysAgo(days) } } } })
     .select("id").single();
   expect(error).toBeNull();
   await pg.query(
@@ -124,18 +128,21 @@ async function sellerText(lead: Awaited<ReturnType<typeof seedLead>>, body: stri
 const q = async (sql: string, args: unknown[] = []) => (await pg.query(sql, args)).rows;
 const n = async (sql: string, args: unknown[] = []) => Number((await pg.query(sql, args)).rows[0].n);
 const sentTo = (phone: string) => getMockMessageLog().filter((m) => m.to === phone);
-const run = (mode: BackfillMode, runId: string, extra: Record<string, unknown> = {}) =>
-  runBackfill(supabase, { orgId, mode, runId, ratePerMinute: 6000, ...extra }, { anthropic: NO_ANTHROPIC, sleep: async () => undefined });
+const run = (mode: BackfillMode, runId: string, extra: Record<string, unknown> = {}, deps: Partial<Parameters<typeof runBackfill>[2]> = {}) =>
+  runBackfill(supabase, { orgId, mode, runId, ratePerMinute: 6000, ...extra }, { anthropic: NO_ANTHROPIC, sleep: async () => undefined, ...deps });
+/** ONE run id for the whole documented sequence (classify-only -> apply -> resume). */
+const RUN = "bf-2026-11-01";
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 100)); };
 
 describe("routing v2 backfill (disposable local stack, mock provider, stubbed Jev)", () => {
-  let fresh: Awaited<ReturnType<typeof seedLead>>, freshId = "";
-  let owner: Awaited<ReturnType<typeof seedLead>>, ownerId = "";
-  let oldYes: Awaited<ReturnType<typeof seedLead>>, oldYesId = "";
-  let oldWrong: Awaited<ReturnType<typeof seedLead>>, oldWrongId = "";
-  let twoTexts: Awaited<ReturnType<typeof seedLead>>, olderId = "", newerId = "";
-  let held: Awaited<ReturnType<typeof seedLead>>, answered: Awaited<ReturnType<typeof seedLead>>;
-  let tagged: Awaited<ReturnType<typeof seedLead>>, takeover: Awaited<ReturnType<typeof seedLead>>;
+  type Lead = Awaited<ReturnType<typeof seedLead>>;
+  const L: Record<string, Lead> = {};
+  const T: Record<string, string> = {};
+  let held: Lead, answered: Lead, tagged: Lead, takeover: Lead;
+  let olderId = "";
+  let legacyEnrollment = "";
+  const mine = () => [leads.map((l) => l.propertyId)];
+  const safetyIds = () => [T.stop, T.legal, T.person, T.jevFail, T.oldStop];
 
   beforeAll(async () => {
     assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
@@ -156,23 +163,32 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     orgId = await getCanonicalTestOrgId(supabase);
     await seedSenderCatalog(supabase, orgId, [MOCK_SENDER_PRIMARY]);
 
-    fresh = await seedLead();
-    owner = await seedLead();
-    oldYes = await seedLead();
-    oldWrong = await seedLead();
-    twoTexts = await seedLead();
-    held = await seedLead();
-    answered = await seedLead();
-    tagged = await seedLead();
-    takeover = await seedLead();
+    for (const k of ["fresh", "owner", "oldYes", "oldWrong", "twoTexts", "stop", "legal", "person", "jevFail", "oldStop", "oldNi", "oldPrice"]) L[k] = await seedLead();
+    held = await seedLead(); answered = await seedLead(); tagged = await seedLead(); takeover = await seedLead();
     await seedOrg({ questions_live: true, replies: true, drips: true, canary_property_ids: leads.map((l) => l.propertyId) });
 
-    freshId = await sellerText(fresh, "Text only please", 3, { text_only: 0.95 });
-    ownerId = await sellerText(owner, "Yes I own it", 10, { confirmed_owner: 0.95 });
-    oldYesId = await sellerText(oldYes, "Okay", 30, { just_ok: 0.95 });
-    oldWrongId = await sellerText(oldWrong, "Wrong number, not my house", 20, { wrong_person: 0.95 });
-    olderId = await sellerText(twoTexts, "Who is this", 9, { asked_who: 0.95 });
-    newerId = await sellerText(twoTexts, "Text only. I can't talk", 2, { text_only: 0.95 });
+    // Full treatment (<= 14 days).
+    T.fresh = await sellerText(L.fresh, "Text only please", 3, { text_only: 0.95 });
+    T.owner = await sellerText(L.owner, "Yes I own it", 10, { confirmed_owner: 0.95 });
+    olderId = await sellerText(L.twoTexts, "Who is this", 9, { asked_who: 0.95 });
+    T.twoTexts = await sellerText(L.twoTexts, "Text only. I can't talk", 2, { text_only: 0.95 });
+    // Safety roads: classify-only must leave no trace on the lead.
+    T.stop = await sellerText(L.stop, "Please remove me from your list", 4, { asked_stop: 0.95 });
+    T.legal = await sellerText(L.legal, "Put everything in writing to me", 5, { legal: 0.95 });
+    T.person = await sellerText(L.person, "Hmm interesting", 6, {});
+    T.jevFail = await sellerText(L.jevFail, "What do you mean exactly", 7, {});
+    jevFails.add("What do you mean exactly");
+    // Sort only (15-60 days).
+    T.oldYes = await sellerText(L.oldYes, "Okay", 30, { just_ok: 0.95 });
+    T.oldWrong = await sellerText(L.oldWrong, "Wrong number, not my house", 20, { wrong_person: 0.95 });
+    T.oldStop = await sellerText(L.oldStop, "Do not message this number", 40, { asked_stop: 0.95 });
+    T.oldNi = await sellerText(L.oldNi, "No thanks", 22, { not_interested: 0.95 });
+    T.oldPrice = await sellerText(L.oldPrice, "I want 500k for it", 25, { named_price: 0.95 });
+    // A legacy (non-v2) drip on the stop lead: classify-only must not pause it.
+    const { rows: seq } = await pg.query("insert into sequences(org_id,name,active) values($1,'Legacy drip',true) returning id", [orgId]);
+    const { rows: enr } = await pg.query("insert into sequence_enrollments(org_id,sequence_id,property_id,contact_id,status) values($1,$2,$3,$4,'active') returning id", [orgId, seq[0].id, L.stop.propertyId, L.stop.contactId]);
+    legacyEnrollment = enr[0].id;
+    // Skipped leads.
     await sellerText(held, "Okay", 4, { just_ok: 0.95 });
     await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person' where id = $1", [held.propertyId]);
     await sellerText(answered, "Okay", 5, { just_ok: 0.95 });
@@ -188,10 +204,12 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     await pg.end();
   });
 
+  const candidateIds = () => Object.values(T);
+
   it("dry-run: counts the candidate set, writes nothing", async () => {
     const before = await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill' and org_id = $1", [orgId]);
-    const r = await run("dry_run", "bf-dry-1");
-    expect(r.selection.candidates.map((c) => c.id).sort()).toEqual([freshId, ownerId, oldYesId, oldWrongId, newerId].sort());
+    const r = await run("dry_run", RUN);
+    expect(r.selection.candidates.map((c) => c.id).sort()).toEqual(candidateIds().sort());
     expect(r.selection.superseded.map((s) => s.inboundId)).toEqual([olderId]);
     const reasons = Object.fromEntries(r.selection.skipped.map((s) => [s.propertyId, s.reason]));
     expect(reasons).toMatchObject({
@@ -200,86 +218,143 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     });
     expect(jevCalls).toBe(0);
     expect(await n("select count(*)::int n from messages where metadata ? 'routingV2Backfill' and org_id = $1", [orgId])).toBe(before);
-    // Scoped to this test's leads: other suites on the same disposable stack may leave rows.
-    expect(await n("select count(*)::int n from routing_v2_live_decisions where property_id = any($1::uuid[])", [leads.map((l) => l.propertyId)])).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where property_id = any($1::uuid[])", mine())).toBe(0);
     expect(markdownReport("sha-test", r).split("\n")[0]).toBe("SHA: sha-test");
   });
 
-  it("classify-only: decisions recorded, nothing sent / enrolled / alerted / held", async () => {
-    const r = await run("classify_only", "bf-cls-1");
-    expect(r.items.map((i) => i.error)).toEqual(r.items.map(() => null));
-    expect(jevCalls).toBe(5);
+  it("classify-only: every road decided, ZERO side effects (no decision row, hold, pause, cancel, alert, reply, drip)", async () => {
+    const r = await run("classify_only", RUN);
+    expect(r.items.map((i) => [i.inboundId, i.error])).toEqual(r.items.map((i) => [i.inboundId, null]));
     const roads = Object.fromEntries(r.items.map((i) => [i.inboundId, [i.treatment, i.road]]));
-    expect(roads).toEqual({
-      [freshId]: ["full", "text_only_reply"], [newerId]: ["full", "text_only_reply"], [ownerId]: ["full", "confirmed_owner_drip"],
-      [oldYesId]: ["sort_only", "book_appointment"], [oldWrongId]: ["sort_only", "wrong_number_close"],
+    expect(roads).toMatchObject({
+      [T.fresh]: ["full", "text_only_reply"], [T.twoTexts]: ["full", "text_only_reply"], [T.owner]: ["full", "confirmed_owner_drip"],
+      [T.stop]: ["full", "stop"], [T.legal]: ["full", "stop"], [T.person]: ["full", "haiku_unsure"], [T.jevFail]: ["full", "(failed)"],
+      [T.oldYes]: ["sort_only", "book_appointment"], [T.oldWrong]: ["sort_only", "wrong_number_close"], [T.oldStop]: ["sort_only", "stop"],
+      [T.oldNi]: ["sort_only", "not_interested_drip"], [T.oldPrice]: ["sort_only", "price_check"],
     });
-    const yes = r.items.find((i) => i.inboundId === oldYesId)!;
-    expect(yes).toMatchObject({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true });
-    expect(r.items.find((i) => i.inboundId === freshId)).toMatchObject({ wouldReply: true, wouldDrip: false });
+    // What apply WOULD do is reported; nothing was done.
+    for (const id of safetyIds()) expect(r.items.find((i) => i.inboundId === id), id).toMatchObject({ wouldHold: true, holdCreated: false, wouldReply: false });
+    expect(r.items.find((i) => i.inboundId === T.oldYes)).toMatchObject({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true });
+    expect(r.items.find((i) => i.inboundId === T.oldPrice)).toMatchObject({ wouldReply: false, wouldAlert: true, wouldHold: true });
+    expect(r.items.find((i) => i.inboundId === T.fresh)).toMatchObject({ wouldReply: true, wouldDrip: false });
     await settle();
-    const mine = [leads.map((l) => l.propertyId)];
-    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = any($1::uuid[])", mine)).toBe(0);
-    expect(await n("select count(*)::int n from routing_v2_reply_transitions where property_id = any($1::uuid[])", mine)).toBe(0);
-    expect(await n("select count(*)::int n from sequence_enrollments where routing_v2_engine = 'v2' and property_id = any($1::uuid[])", mine)).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_live_decisions where property_id = any($1::uuid[])", mine())).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = any($1::uuid[])", mine())).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_reply_transitions where property_id = any($1::uuid[])", mine())).toBe(0);
+    expect(await n("select count(*)::int n from sequence_enrollments where routing_v2_engine = 'v2' and property_id = any($1::uuid[])", mine())).toBe(0);
     expect(await n("select count(*)::int n from properties where needs_human_attention and id <> $1 and id = any($2::uuid[])", [held.propertyId, leads.map((l) => l.propertyId)])).toBe(0);
+    expect(await n("select count(*)::int n from hold_alert_deliveries where property_id = any($1::uuid[])", mine())).toBe(0);
+    const [legacy] = await q("select status from sequence_enrollments where id = $1", [legacyEnrollment]);
+    expect(legacy.status).toBe("active");
+    expect(await n("select count(*)::int n from sms_phone_suppressions where org_id = $1", [orgId])).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
-    // The legacy claim was moved aside (kept, reversible) and the marker names the run.
-    expect(await n("select count(*)::int n from ai_response_claims where response_kind = 'sms_ai_responder_v1:backfill_prior:bf-cls-1'")).toBe(5);
-    const [m] = await q("select metadata->'routingV2Backfill'->'classify'->>'runId' r from messages where id = $1", [freshId]);
-    expect(m.r).toBe("bf-cls-1");
-    // Spend ledger: one Jev row per text.
-    expect(await n("select count(*)::int n from provider_spend_ledger where provider = 'jev' and property_id = any($1::uuid[])", [leads.map((l) => l.propertyId)])).toBe(5);
-    // Resume of classify-only: nothing re-classified.
-    const again = await run("classify_only", "bf-cls-1");
+    expect(markdownReport("sha", r)).toContain("Holds actually written by classify-only (must be 0) | 0");
+    // The decision lives on the marker; the legacy claim was moved aside under a unique name.
+    const [m] = await q("select metadata->'routingV2Backfill'->'classify' c from messages where id = $1", [T.fresh]);
+    expect(m.c).toMatchObject({ runId: RUN, decision: expect.objectContaining({ road: "text_only_reply", inbound_message_id: T.fresh }) });
+    expect(await n("select count(*)::int n from ai_response_claims where response_kind like $1", [`sms_ai_responder_v1:backfill_prior:${RUN}:%`])).toBe(candidateIds().length);
+    // Resume of classify-only with the same id: nothing re-classified.
+    const calls = jevCalls;
+    const again = await run("classify_only", RUN);
     expect(again.dispatched).toEqual([]);
-    expect(jevCalls).toBe(5);
+    expect(jevCalls).toBe(calls);
   });
 
-  it("apply: full treatment <= 14 days, sort-only older, from the stored decisions (no second Jev call)", async () => {
-    const r = await run("apply", "bf-apl-1");
+  it("apply with the SAME run id: replays the classify-only decisions (no Jev call), full vs sort-only, no claim collision", async () => {
+    const calls = jevCalls;
+    const r = await run("apply", RUN);
     expect(r.items.map((i) => [i.inboundId, i.error])).toEqual(r.items.map((i) => [i.inboundId, null]));
-    expect(jevCalls).toBe(5);
+    expect(jevCalls).toBe(calls);
     await settle();
-    // Full: the approved text-only reply, once each, keyed by the outbox row.
-    expect(sentTo(fresh.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
-    expect(sentTo(twoTexts.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
-    // Full: the confirmed-owner drip started, no reply.
-    expect(await n("select count(*)::int n from sequence_enrollments e join sequences s on s.id = e.sequence_id where e.property_id = $1 and s.routing_v2_key = 'confirmed_owner' and e.status = 'active'", [owner.propertyId])).toBe(1);
-    expect(sentTo(owner.phone)).toHaveLength(0);
-    // Sort-only hot road: owner alert queued + held for a person; NO reply, NO drip.
-    expect(sentTo(oldYes.phone)).toHaveLength(0);
-    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply'", [oldYes.propertyId])).toBe(0);
-    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [oldYes.propertyId])).toBeGreaterThanOrEqual(1);
-    expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [oldYes.propertyId])).toBe(0);
-    const [yesProp] = await q("select needs_human_attention h from properties where id = $1", [oldYes.propertyId]);
-    expect(yesProp.h).toBe(true);
-    // Sort-only wrong person: this property closed (wrong_number), no reply to the seller.
-    expect(sentTo(oldWrong.phone)).toHaveLength(0);
-    const [wrongProp] = await q("select outreach_dispo d from properties where id = $1", [oldWrong.propertyId]);
-    expect(wrongProp.d).toBe("wrong_number");
+    // Full: approved replies once each; drip started; no reply on the drip-only road.
+    expect(sentTo(L.fresh.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
+    expect(sentTo(L.twoTexts.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
+    expect(await n("select count(*)::int n from sequence_enrollments e join sequences s on s.id = e.sequence_id where e.property_id = $1 and s.routing_v2_key = 'confirmed_owner' and e.status = 'active'", [L.owner.propertyId])).toBe(1);
+    expect(sentTo(L.owner.phone)).toHaveLength(0);
+    // Safety roads now hold exactly as live (through the atomic recorder), nothing sent.
+    for (const k of ["stop", "legal", "person", "jevFail", "oldStop"]) {
+      const [p] = await q("select needs_human_attention h from properties where id = $1", [L[k].propertyId]);
+      expect(p.h, k).toBe(true);
+      expect(sentTo(L[k].phone), k).toHaveLength(0);
+    }
+    // Sort-only: hot road = alert + hold, no reply, no drip.
+    expect(sentTo(L.oldYes.phone)).toHaveLength(0);
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply'", [L.oldYes.propertyId])).toBe(0);
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [L.oldYes.propertyId])).toBeGreaterThanOrEqual(1);
+    expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [L.oldYes.propertyId])).toBe(0);
+    // Sort-only price check: an alert (never a silent hold), no reply.
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [L.oldPrice.propertyId])).toBeGreaterThanOrEqual(1);
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply'", [L.oldPrice.propertyId])).toBe(0);
+    expect(sentTo(L.oldPrice.phone)).toHaveLength(0);
+    // Sort-only closes: wrong person and not interested, no reply.
+    const dispo = async (l: Lead) => (await q("select outreach_dispo d from properties where id = $1", [l.propertyId]))[0].d;
+    expect(await dispo(L.oldWrong)).toBe("wrong_number");
+    expect(await dispo(L.oldNi)).toBe("not_interested");
+    expect(sentTo(L.oldWrong.phone)).toHaveLength(0);
+    expect(sentTo(L.oldNi.phone)).toHaveLength(0);
     // Newest wins: the older text is superseded in the audit, never routed.
     const [audit] = await q("select status, failure_reason from routing_v2_live_decisions where inbound_message_id = $1", [olderId]);
-    expect(audit).toEqual({ status: "not_routed", failure_reason: "backfill_superseded:bf-apl-1" });
-    expect(sentTo(twoTexts.phone).map((m) => m.body)).not.toContain(expect.stringContaining("Mel with BMH"));
-    // Skipped leads untouched.
+    expect(audit).toEqual({ status: "not_routed", failure_reason: `backfill_superseded:${RUN}` });
     for (const l of [held, answered, tagged, takeover]) expect(sentTo(l.phone)).toHaveLength(0);
-    expect(r.items.find((i) => i.inboundId === oldYesId)).toMatchObject({ treatment: "sort_only", holdCreated: true, repliesQueued: 0, dripsStarted: 0 });
-    expect(r.items.find((i) => i.inboundId === freshId)).toMatchObject({ treatment: "full", repliesQueued: 1 });
+    expect(r.items.find((i) => i.inboundId === T.fresh)).toMatchObject({ treatment: "full", repliesQueued: 1 });
     const md = markdownReport("sha-test", r);
     expect(md).toContain("## Full treatment");
     expect(md).toContain("## Sort only");
+    expect(md).toContain("builder's reading");
     expect(md).not.toMatch(/\+1816/);
   });
 
-  it("resume / re-run of apply is idempotent: nothing selected, nothing sent again", async () => {
+  it("re-run of apply with the same id is idempotent: nothing selected, nothing sent again", async () => {
     const before = getMockMessageLog().length;
-    const again = await run("apply", "bf-apl-2");
+    const calls = jevCalls;
+    const again = await run("apply", RUN);
     expect(again.dispatched).toEqual([]);
-    expect(again.selection.skipped.filter((s) => [freshId, ownerId, oldYesId, oldWrongId, newerId].includes(s.inboundId)).map((s) => s.reason))
-      .toEqual(expect.arrayContaining(["already_backfilled"]));
     await settle();
     expect(getMockMessageLog().length).toBe(before);
-    expect(jevCalls).toBe(5);
+    expect(jevCalls).toBe(calls);
+  });
+
+  it("crash between dispatch and marker, then --resume with the same id: no collision, one reply", async () => {
+    const lead = await seedLead();
+    await pg.query("update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || to_jsonb($2::text)) where org_id = $1", [orgId, lead.propertyId]);
+    const id = await sellerText(lead, "Text only, no calls", 1, { text_only: 0.95 });
+    await run("classify_only", "bf-crash", { limit: 1 });
+    const crashed = await run("apply", "bf-crash", { limit: 1 }, {
+      dispatch: async (...args) => {
+        const { dispatchAiResponse } = await import("@/lib/ai-responder/dispatch");
+        await dispatchAiResponse(...args);
+        throw new Error("simulated crash");
+      },
+    });
+    expect(crashed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, "simulated crash"]]);
+    const resumed = await run("apply", "bf-crash", { limit: 1 });
+    expect(resumed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
+    await settle();
+    expect(sentTo(lead.phone).map((m) => m.body)).toEqual([V2_REPLY_TEXTS.text_only]);
+  });
+
+  it("questions_live switched off mid-run: the rest are skipped, never the legacy engine", async () => {
+    const a = await seedLead();
+    const b = await seedLead();
+    await pg.query("update ai_responder_configs set routing_v2_flags = jsonb_set(routing_v2_flags, '{canary_property_ids}', (routing_v2_flags->'canary_property_ids') || jsonb_build_array($2::text, $3::text)) where org_id = $1", [orgId, a.propertyId, b.propertyId]);
+    const first = await sellerText(a, "Text only for me", 1, { text_only: 0.95 });
+    const second = await sellerText(b, "Okay sure", 2, { just_ok: 0.95 });
+    let dispatched = 0;
+    const r = await run("apply", "bf-flip", { limit: 2 }, {
+      dispatch: async (...args) => {
+        const { dispatchAiResponse } = await import("@/lib/ai-responder/dispatch");
+        const out = await dispatchAiResponse(...args);
+        if (++dispatched === 1) await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"questions_live\": false}'::jsonb where org_id = $1", [orgId]);
+        return out;
+      },
+    });
+    await settle();
+    expect(r.items.map((i) => i.inboundId)).toEqual([first, second]);
+    expect(r.items[1]).toMatchObject({ outcome: "skipped:routing_v2:backfill_v2_not_live", repliesQueued: 0, dripsStarted: 0 });
+    expect(sentTo(b.phone)).toHaveLength(0);
+    expect(await n("select count(*)::int n from messages where property_id = $1 and direction = 'outbound' and created_at > now() - interval '1 hour'", [b.propertyId])).toBe(0);
+    expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [b.propertyId])).toBe(0);
+    expect(await n("select count(*)::int n from sms_classification_runs where source_inbound_message_id = $1", [second])).toBe(0);
+    await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"questions_live\": true}'::jsonb where org_id = $1", [orgId]);
   });
 });

@@ -131,7 +131,12 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
         ["Alerts queued (outbox alerts)", tot((i) => i.alertsQueued)],
         ["Holds created (each raises today's hold alert)", tot((i) => i.holdCreated)],
         ["Suppressions created", tot((i) => i.suppressionCreated)],
+        ...(r.mode === "classify_only" ? [["Holds actually written by classify-only (must be 0)", tot((i) => i.holdCreated)] as Array<string | number>] : []),
       ]));
+      if (treatment === "sort_only" && its.some((i) => i.road === "price_check")) {
+        lines.push("");
+        lines.push("Note: price_check texts in this group go to Jarrad's queue with the existing \"Named a price\" alert (even \"price too high\", which has no alert of its own live). This is the builder's reading of \"alert hot roads\", pending Jarrad.");
+      }
       if (holdReasons.size > 0) {
         lines.push("");
         lines.push("Hold reasons: " + [...holdReasons.entries()].map(([k, v]) => `${k} ${v}`).join(", "));
