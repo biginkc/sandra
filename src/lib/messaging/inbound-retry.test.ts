@@ -601,6 +601,96 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     expect(mocks.checkHot).not.toHaveBeenCalled();
   });
 
+  describe("keyword hold NOT written (flagOk: false; Fable N-B / Opus N1)", () => {
+    async function runCapturing() {
+      const handler = handlerClient([{ data: INSERTED, error: null }]);
+      const eventUpdates: Array<Record<string, unknown>> = [];
+      const claimUpdates: Array<Record<string, unknown>> = [];
+      const from = handler.client.from;
+      const client = {
+        from: vi.fn((table: string) => {
+          if (table === "ai_response_claims") {
+            return {
+              select: vi.fn(() => query({ data: [], error: null })),
+              update: vi.fn((v: Record<string, unknown>) => {
+                claimUpdates.push(v);
+                const b = query({ data: null, error: null });
+                (b as Record<string, unknown>).neq = vi.fn(() => b);
+                return b;
+              }),
+            };
+          }
+          if (table !== "webhook_events") return from(table);
+          return {
+            insert: vi.fn(() => query({ data: { id: "event-1" }, error: null })),
+            update: vi.fn((v: Record<string, unknown>) => { eventUpdates.push(v); return query({ data: [{ id: "event-1" }], error: null }); }),
+          };
+        }),
+      };
+      mocks.serviceClient = client;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      const response = await handleInboundWebhook(
+        new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+        { includeFullUrl: true, provider: provider() as never },
+      );
+      return { response, statuses: eventUpdates.map((u) => u.processing_status), claimUpdates };
+    }
+    const escalatedStamps = () => (mocks.markState.mock.calls as unknown as Array<[unknown, string, { aiResponder?: { outcome?: string } }]>)
+      .filter((c) => c[2]?.aiResponder?.outcome === "escalated");
+
+    it("Jev automatic + mixed price/legal text: the hot-text check still runs, the text is not stamped escalated, the event is marked error (never processed), the intent stays incomplete and the webhook answers 500", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract", flagOk: false });
+      const { response, statuses, claimUpdates } = await runCapturing();
+      expect(response.status).toBe(500);
+      expect(mocks.checkHot).toHaveBeenCalledTimes(1);
+      expect(mocks.checkHot.mock.calls[0][2]).toBe("keyword:legal_contract");
+      // Astra B1: the hot check is told the hold failed, so it completes its own claim straight
+      // into the sweep-recoverable failure state; the webhook never repairs a claim afterwards.
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: true });
+      expect(claimUpdates).toEqual([]);
+      expect(escalatedStamps()).toEqual([]);
+      expect(mocks.recordThread).not.toHaveBeenCalled();
+      expect(statuses).toContain("error");
+      expect(statuses).not.toContain("processed");
+      expect(mocks.markComplete).not.toHaveBeenCalled();
+      expect(mocks.startWorkflow).not.toHaveBeenCalled();
+      expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    });
+
+    it("non-Jev config: no hot check (as when the hold lands), still not stamped and the webhook answers 500", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:needs_person", flagOk: false });
+      const { response, statuses } = await runCapturing();
+      expect(response.status).toBe(500);
+      expect(mocks.checkHot).not.toHaveBeenCalled();
+      expect(escalatedStamps()).toEqual([]);
+      expect(statuses).toEqual(expect.arrayContaining(["error"]));
+      expect(statuses).not.toContain("processed");
+    });
+
+    it("control: the same text whose hold lands is stamped escalated, marked processed and answers 200", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract", flagOk: true });
+      const { response, statuses, claimUpdates } = await runCapturing();
+      expect(response.status).toBe(200);
+      expect(claimUpdates).toEqual([]);
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: false });
+      expect(mocks.checkHot).toHaveBeenCalledTimes(1);
+      expect(escalatedStamps()).toHaveLength(1);
+      expect(statuses).toContain("processed");
+      expect(statuses).not.toContain("error");
+      expect(mocks.markComplete).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("responder turned off on the property: the delayed path writes no keyword hold and no alert", async () => {
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["lawyer"], jevAutomatic: true });
     mocks.computeDelay.mockReturnValueOnce(10);

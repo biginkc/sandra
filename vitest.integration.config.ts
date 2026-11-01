@@ -189,6 +189,7 @@ export default defineConfig({
       "supabase/migrations/20261031132000_routing_v2_effects_durable.integration.test.ts",
       "supabase/migrations/20261031132100_routing_v2_gate_bounded.integration.test.ts",
       "supabase/migrations/20261031132200_routing_v2_safety_decision_atomic.integration.test.ts",
+      "supabase/migrations/20261031140000_routing_v2_model_stop_release_hold.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",

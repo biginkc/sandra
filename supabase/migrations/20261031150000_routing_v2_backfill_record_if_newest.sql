@@ -4,7 +4,7 @@
 -- decision row and (for a safety decision) its hold, drip pause and reply cancel, so a newer
 -- seller text that is already committed always wins: nothing is recorded or held for the old one.
 -- Used only by scripts/routing-v2-backfill.ts (the live path keeps routing_v2_record_live_decision).
--- Additive. Rollback: supabase/rollbacks/20261031132300_routing_v2_backfill_record_if_newest.sql
+-- Additive. Rollback: supabase/rollbacks/20261031150000_routing_v2_backfill_record_if_newest.sql
 begin;
 set local lock_timeout = '5s';
 

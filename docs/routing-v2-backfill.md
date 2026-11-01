@@ -66,7 +66,7 @@ sense right after the seller's message:
 - No backfill text acts once a newer seller text exists on the lead. This is checked before the
   keyword hold, and again inside the database transaction that records the decision and its
   safety hold / drip pause / reply cancel (`routing_v2_backfill_record_live_decision`, migration
-  20261031132300), so a text that arrives while Jev is classifying still wins: skipped as
+  20261031150000), so a text that arrives while Jev is classifying still wins: skipped as
   `routing_v2:backfill_newer_inbound`.
   A backfill keyword hold never runs the old engine's follow-up classification.
 - `--rate` is capped at 60 per minute. The production check uses the URL the admin client
@@ -88,7 +88,7 @@ sense right after the seller's message:
 ## Before the first apply
 
 Apply and sort-only call `routing_v2_backfill_record_live_decision` (migration
-20261031132300). It must be applied in production through the normal Sandra migration workflow
+20261031150000). It must be applied in production through the normal Sandra migration workflow
 before any `--apply` run. Without it, apply fails closed: every text errors and nothing is recorded.
 Dry-run and classify-only do not need it.
 
