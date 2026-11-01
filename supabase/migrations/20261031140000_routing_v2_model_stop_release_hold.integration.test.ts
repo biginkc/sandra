@@ -146,7 +146,8 @@ describe("routing_v2_apply_model_stop_and_release", () => {
 
   it("Astra N3: the phone lock is taken FIRST (same order as fn_routing_v2_phone_action_apply_all) and its wait is capped: phone busy -> not_eligible within ~2 s, nothing suppressed, hold kept", async () => {
     await record(inbound, "nine_asked_stop");
-    await other.query("select pg_advisory_lock(hashtext('routing_v2_phone:' || $1::text || ':' || public.routing_v2_phone_digits($2)))", [org, PHONE]);
+    // routing_v2_phone_lock's key (fn_routing_v2_phone_action_apply_all takes it first).
+    await other.query("select pg_advisory_lock(hashtext('routing_v2_phone:' || $1::text || ':' || right(regexp_replace($2, '\\D', '', 'g'), 10)))", [org, PHONE]);
     try {
       const t0 = Date.now();
       expect(await release()).toMatchObject({ status: "not_eligible", reason: "lock_timeout", hold: "none" });

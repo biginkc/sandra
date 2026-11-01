@@ -38,6 +38,7 @@ declare
   r jsonb;
   prop public.properties;
   v_still_held boolean;
+  v_digits text;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'FORBIDDEN' using errcode = '42501';
@@ -47,15 +48,17 @@ begin
   -- Every wait is capped; a busy lock = not_eligible (nothing written, the hold stays).
   set local lock_timeout = '2s';
   begin
+    -- The same key as routing_v2_phone_lock(org, phone) (inlined: no dependency on that helper).
+    v_digits := right(regexp_replace(coalesce(p_phone_e164, ''), '\D', '', 'g'), 10);
     if p_phone_e164 is not null then
-      perform public.routing_v2_phone_lock(p_org_id, p_phone_e164);
+      perform pg_advisory_xact_lock(hashtext('routing_v2_phone:' || p_org_id::text || ':' || v_digits));
     end if;
     perform 1 from public.contacts c
     where c.org_id = p_org_id
       and (c.id = p_contact_id
            or (p_phone_e164 is not null and (c.phone_1 = p_phone_e164 or c.phone_2 = p_phone_e164 or c.phone_3 = p_phone_e164
                or c.id in (select cp.contact_id from public.contact_phone_numbers cp
-                           where cp.org_id = p_org_id and cp.digits10 = public.routing_v2_phone_digits(p_phone_e164)))))
+                           where cp.org_id = p_org_id and cp.digits10 = v_digits))))
     order by c.id for update;
   exception when lock_not_available then
     return jsonb_build_object('status', 'not_eligible', 'reason', 'lock_timeout', 'hold', 'none');
