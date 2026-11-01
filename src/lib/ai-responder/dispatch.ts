@@ -3595,6 +3595,9 @@ async function classifyOnlyForHotText(
       .from("ai_response_claims")
       .select("id, status, lease_expires_at, outcome, error_message")
       .eq("inbound_message_id", inboundId)
+      // Only the live responder claim: a routing v2 backfill claim (classify-only's own key, or a
+      // moved-aside backfill_prior claim) never means the live hot-text look already ran.
+      .eq("response_kind", "sms_ai_responder_v1")
       .limit(1);
     if (claimError) return;
     const prior = (claim ?? [])[0] as

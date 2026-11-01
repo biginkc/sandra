@@ -7826,7 +7826,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           ["ai_responder_disabled property", (st: MockState) => { st.property.ai_responder_disabled = true; }],
           ["rep_sms_human_takeover flag", (st: MockState) => { st.property.last_ai_escalation_reason = "rep_sms_human_takeover"; }],
           ["existing ai_response_claims row for the inbound", (st: MockState) => {
-            st.aiClaims.push({ id: "claim-x", inbound_message_id: "inbound-gate", lease_expires_at: new Date().toISOString(), response_kind: "reply", status: "completed" } as never);
+            st.aiClaims.push({ id: "claim-x", inbound_message_id: "inbound-gate", lease_expires_at: new Date().toISOString(), response_kind: "sms_ai_responder_v1", status: "completed" } as never);
           }],
           ["claim lookup error", (st: MockState) => { st.claimLimitLookupError = true; }],
           ["classification-run lookup error", (st: MockState) => { st.runLimitLookupError = true; }],

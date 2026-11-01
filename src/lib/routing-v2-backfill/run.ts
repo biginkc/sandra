@@ -147,6 +147,16 @@ export type BackfillRunResult = {
 
 export class BackfillRefusal extends Error {}
 
+/** Seller texts in the window with an apply started and not finished (applyStarted, no apply). */
+export async function countInterrupted(db: Db, orgId: string, sinceIso: string): Promise<number> {
+  const { count, error } = await db.from("messages").select("id", { count: "exact", head: true })
+    .eq("org_id", orgId).eq("direction", "inbound").gte("created_at", sinceIso)
+    .not("metadata->routingV2Backfill->applyStarted", "is", null)
+    .is("metadata->routingV2Backfill->apply", null);
+  if (error) throw new BackfillRefusal("could not count interrupted backfill texts");
+  return count ?? 0;
+}
+
 /**
  * Apply needs the backfill recorder (migration 20261031150000). Probe it with an empty row: the
  * function's own "is this the newest text" check finds no such text and returns without writing
@@ -412,10 +422,9 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     flags: flagSummary(state), flagWarnings: flagCheck.warnings, selection, dispatched: queue, items: [], supersededMarked: 0,
     interruptedBefore: 0, interruptedAfter: 0,
   };
-  // Counted from the database markers, not from what this run selected (Astra 3rd pass, 2).
-  const interruptedIds = new Set(facts.inbounds.filter((r) => r.marker?.applyStarted && !r.marker?.apply).map((r) => r.id));
-  result.interruptedBefore = interruptedIds.size;
-  result.interruptedAfter = interruptedIds.size;
+  // Counted from the database markers, not from what this run selected (Astra 3rd / 4th pass).
+  result.interruptedBefore = await countInterrupted(db, opts.orgId, sinceIso);
+  result.interruptedAfter = result.interruptedBefore;
   if (opts.mode === "dry_run") {
     result.finishedAt = new Date(now()).toISOString();
     return result;
@@ -523,13 +532,8 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
   }
-  if (opts.mode === "apply") {
-    for (const it of result.items) {
-      if (it.error && it.outcome === "error") interruptedIds.add(it.inboundId);
-      else if (!it.error && interruptedIds.has(it.inboundId)) interruptedIds.delete(it.inboundId);
-    }
-    result.interruptedAfter = interruptedIds.size;
-  }
+  // A fresh recount of unfinished markers after the run (never derived from this run's items).
+  if (opts.mode === "apply") result.interruptedAfter = await countInterrupted(db, opts.orgId, sinceIso);
   result.finishedAt = new Date(now()).toISOString();
   return result;
 }

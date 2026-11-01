@@ -7,6 +7,7 @@ import { MOCK_SENDER_PRIMARY, seedSenderCatalog } from "@tests/integration/deliv
 import type { AnthropicLike } from "@/lib/ai-responder/generate";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 import { claimAiResponse } from "@/lib/ai-responder/claims";
+import { dispatchAiResponse as liveDispatch } from "@/lib/ai-responder/dispatch";
 import { V2_REPLY_TEXTS } from "@/lib/sms-classification/routing-v2/reply-texts";
 import { APPROVED_REPLY_TEXTS } from "@/lib/ai-responder/approved-reply-texts";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
@@ -605,11 +606,31 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     const resumed = await run("apply", "bf-wrong", { limit: 1 });
     expect(resumed.items.map((i) => [i.inboundId, i.error])).toEqual([[id, null]]);
     expect(resumed.interruptedBefore).toBeGreaterThanOrEqual(1);
-    expect(resumed.interruptedAfter).toBe(resumed.interruptedBefore - 1);
+    expect(resumed.interruptedAfter).toBe(resumed.interruptedBefore - 1); // DB recount after the run
     await settle();
     expect(sentTo(lead.phone)).toHaveLength(1); // never sent twice
     const [end] = await q("select outreach_dispo d, needs_human_attention h from properties where id = $1", [lead.propertyId]);
     // Finished: this property is closed as wrong number, not left to a person.
     expect(end).toEqual({ d: "wrong_number", h: false });
+  });
+
+  it("a classify-only claim never makes a later LIVE hot-only look skip (live claim key only)", async () => {
+    const lead = await seedLead();
+    await addToCanary(lead.propertyId);
+    await parkOthers(lead.propertyId);
+    const id = await sellerText(lead, "Okay call me tomorrow", 1, { asked_call: 0.95 });
+    await pg.query("delete from ai_response_claims where inbound_message_id = $1", [id]);
+    await run("classify_only", "bf-hot", { limit: 1 });
+    expect(await n("select count(*)::int n from ai_response_claims where inbound_message_id = $1 and response_kind = 'sms_ai_responder_v1:backfill_classify' and status = 'completed'", [id])).toBe(1);
+    // The lead is now held by a person; the live dispatch gives it its one classify-only hot look.
+    await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'nine_needs_person' where id = $1", [lead.propertyId]);
+    const [m] = await q("select body, conversation_id c, from_address f, to_address t from messages where id = $1", [id]);
+    const calls = jevCalls;
+    await liveDispatch(supabase, {
+      propertyId: lead.propertyId, contactId: lead.contactId, conversationId: m.c, inboundFromPhone: m.f, inboundToPhone: m.t,
+      inboundBody: m.body, inboundMessageId: id,
+    }, { anthropic: NO_ANTHROPIC, checkSuperseded: true });
+    // The live look ran (it classified the text); the backfill's completed claim did not stop it.
+    expect(jevCalls).toBeGreaterThan(calls);
   });
 });
