@@ -129,17 +129,23 @@ describe("formatNotification", () => {
   });
 
   it("task_assigned → 'Task assigned: <title>' with type label + due in body", () => {
-    // dueAt one day from a fixed "now" — the formatter uses real-time
-    // now, so we feed dueAt = real-now + 1d to land in "tomorrow" reliably.
-    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const out = formatNotification("task_assigned", {
-      taskTitle: "Follow up on 123 Main St",
-      taskType: "follow_up",
-      dueAt: tomorrow,
-    });
-    expect(out.title).toBe("Task assigned: Follow up on 123 Main St");
-    expect(out.body).toContain("Follow-up");
-    expect(out.body).toContain("Due tomorrow");
+    // A fixed "now": real-now + 24h is still "today" on a 25-hour DST-end day
+    // (e.g. 2026-11-01 in America/Chicago), so the clock is frozen on a normal day.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T17:00:00Z"));
+    try {
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const out = formatNotification("task_assigned", {
+        taskTitle: "Follow up on 123 Main St",
+        taskType: "follow_up",
+        dueAt: tomorrow,
+      });
+      expect(out.title).toBe("Task assigned: Follow up on 123 Main St");
+      expect(out.body).toContain("Follow-up");
+      expect(out.body).toContain("Due tomorrow");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("task_assigned truncates long titles at 60 chars", () => {
@@ -169,6 +175,26 @@ describe("formatNotification", () => {
         timezone: "America/Los_Angeles",
       });
       expect(out.body).toBe("Due today · Follow-up");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("task_assigned on the DST fall-back day labels by calendar day, not by 24 hours", () => {
+    // now = 2026-11-01 00:30 CDT (05:30Z). Chicago falls back at 02:00, so this calendar day
+    // is 25 hours long: now + 24h (2026-11-01 23:30 CST) is still TODAY, and the next
+    // calendar day is TOMORROW. Pins why the case above freezes its clock.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T05:30:00Z"));
+    try {
+      const plus24h = formatNotification("task_assigned", {
+        taskTitle: "Walkthrough", taskType: "follow_up", dueAt: "2026-11-02T05:30:00Z", timezone: "America/Chicago",
+      });
+      expect(plus24h.body).toBe("Due today · Follow-up");
+      const nextDay = formatNotification("task_assigned", {
+        taskTitle: "Walkthrough", taskType: "follow_up", dueAt: "2026-11-02T15:00:00Z", timezone: "America/Chicago",
+      });
+      expect(nextDay.body).toBe("Due tomorrow · Follow-up");
     } finally {
       vi.useRealTimers();
     }
