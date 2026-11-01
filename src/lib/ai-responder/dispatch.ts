@@ -125,7 +125,7 @@ import {
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
-import { openSafetyObligation } from "./safety-obligations";
+import { markObligationUnrecorded, openSafetyObligation, promoteUnrecordedObligationMarkers } from "./safety-obligations";
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
@@ -457,7 +457,14 @@ async function keywordHoldFailClosedInner(
   if (cancel.error) reportError(new Error(cancel.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
   // Round 18: the unresolved obligation (flags on or off) blocks newer texts and every automated
   // send on the lead until the hold lands (the sweep re-attempts it) or a person resolves it.
-  await openSafetyObligation(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason, source: "keyword" });
+  const recorded = await openSafetyObligation(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason, source: "keyword" });
+  // Opus B4 on #956: if even the obligation cannot be written, the durable fallback marker blocks
+  // instead (same predicate); if that fails too, the error is reported (#954 makes the webhook retry).
+  if (!recorded && !(await markObligationUnrecorded(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason }))) {
+    reportError(new Error("keyword hold: obligation and fallback marker both unwritable"), {
+      tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId, reason: a.reason },
+    });
+  }
 }
 
 export async function applyKeywordEscalation(
@@ -6664,6 +6671,8 @@ async function deliverResponderMessage(
   // the attempt deadline) and refuses the submission if either is gone.
   const sendResult = await sendSmsToContact(supabase, {
     origin: "automated",
+    // Opus B2 on #956: a person's Send on a held draft is never refused by the obligation gate.
+    ...(args.source === "human" ? { personInitiated: true } : {}),
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
     body: args.body,
@@ -8760,12 +8769,21 @@ async function runRoutingV2LiveStepInner(
     await pauseV2DripsFailClosed(supabase, input.propertyId);
     // Round 18: the unresolved obligation is the one source of truth; it survives any reclaim of
     // this claim and blocks every automated send and every newer text until a hold lands.
-    await openSafetyObligation(supabase, { propertyId: input.propertyId, inboundMessageId, reason: safetyHoldReason ?? "nine_needs_person", source: "hold_failed" });
+    const holdReason = safetyHoldReason ?? "nine_needs_person";
+    const obligationRecorded = await openSafetyObligation(supabase, { propertyId: input.propertyId, inboundMessageId, reason: holdReason, source: "hold_failed" });
     reportError(new Error("routing v2: safety decision and hold could not be recorded"), {
-      tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId },
+      tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId, obligationRecorded },
     });
-    await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
-    return { outcome: "escalated", reason: safetyHoldReason ?? "nine_needs_person" };
+    if (obligationRecorded) {
+      await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
+      return { outcome: "escalated", reason: holdReason };
+    }
+    // Opus B4 on #956: the obligation could not be written either. The fallback marker completes
+    // this claim (never reclaimed) and blocks like an obligation; if even that fails, the claim is
+    // left as it is (processing) so lease expiry and the sweep re-run this text: never completed
+    // without a durable record.
+    await markObligationUnrecorded(supabase, { propertyId: input.propertyId, inboundMessageId, reason: holdReason });
+    return { outcome: "escalated", reason: holdReason };
   }
   await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });
   // A duplicate never acts on this run's classification: only the stored original does.
@@ -9473,6 +9491,9 @@ export async function sweepUnstampedV2Inbounds(
   // change or a not_v2 mark never discharges one): the hold is written; the obligation resolves in
   // the same transaction when it lands. Ones still open after a day are reported once per pass.
   let held = 0;
+  // Opus B4 on #956: fallback markers (the obligation itself could not be written) become real
+  // obligations first, so the candidate list below recovers them like any other.
+  await promoteUnrecordedObligationMarkers(supabase, { limit: 50, propertyId: propertyId ?? null });
   const ob = await db.rpc("routing_v2_obligation_candidates", { p_limit: 50, ...(propertyId ? { p_property_id: propertyId } : {}) });
   if (ob.error) {
     if (!/PGRST202|42883|does not exist|Could not find/i.test(ob.error.message)) {

@@ -36,8 +36,26 @@ export async function clearNeedsHumanAttention(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
-    // Round 18: a person resolving the lead resolves its routing v2 safety obligations first (the
-    // only non-automated way an obligation ends), so the clear below is not kept by the trigger.
+    // Opus B3 on #956: prove access FIRST with the caller's own (RLS-scoped) client, and only for a
+    // lead that is really held. Nothing is resolved for a lead the caller cannot see or that is not
+    // held (a hold-failed obligation with no hold must reach a person through the hold, not here).
+    const { data: visible, error: readError } = await supabase
+      .from("properties")
+      .select("id, needs_human_attention")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (readError) {
+      return { ok: false, error: { code: "CLEAR_ATTENTION_FAILED", message: readError.message } };
+    }
+    if (!visible) {
+      return { ok: false, error: { code: "NOT_FOUND", message: "Lead not found" } };
+    }
+    if (!visible.needs_human_attention) {
+      revalidatePath(`/leads/${propertyId}`);
+      return ok(null);
+    }
+    // Round 18: the person's clear resolves the lead's safety obligations (the only non-automated
+    // way an obligation ends), so the clear below is not kept by the trigger.
     await resolveSafetyObligationsByPerson(createAdminClient(), propertyId);
     const { data: updated, error } = await supabase
       .from("properties")
@@ -49,13 +67,17 @@ export async function clearNeedsHumanAttention(
       })
       .eq("id", propertyId)
       .eq("needs_human_attention", true)
-      .select("id")
+      .select("id, needs_human_attention")
       .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "CLEAR_ATTENTION_FAILED", message: error.message },
       };
+    }
+    if (updated?.needs_human_attention) {
+      // A trigger kept the hold (an obligation opened in between): not cleared, never audited as cleared.
+      return { ok: false, error: { code: "HOLD_KEPT", message: "The lead is still held for a person" } };
     }
     if (updated) {
       await recordLeadEvent({

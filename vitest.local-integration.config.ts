@@ -34,6 +34,7 @@ export default defineConfig({
       "supabase/migrations/20261031132100_routing_v2_gate_bounded.integration.test.ts",
       "supabase/migrations/20261031132200_routing_v2_safety_decision_atomic.integration.test.ts",
       "supabase/migrations/20261031132300_routing_v2_safety_obligations.integration.test.ts",
+      "supabase/migrations/20261031132400_routing_v2_obligations_person_and_fallback.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",

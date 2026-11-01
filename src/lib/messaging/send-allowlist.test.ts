@@ -51,7 +51,11 @@ function fakeDb(lead: { data?: unknown; error?: { code?: string; message: string
   const inserts: Array<Record<string, unknown>> = [];
   const db = {
     from: (t: string) => ({
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: lead.data ?? null, error: lead.error ?? null }) }) }),
+      select: () => ({ eq: () => ({
+        maybeSingle: async () => ({ data: lead.data ?? null, error: lead.error ?? null }),
+        // The routing v2 obligation read (none open on these leads).
+        is: () => ({ limit: async () => ({ data: [], error: null }) }),
+      }) }),
       insert: async (row: Record<string, unknown>) => { inserts.push({ table: t, ...row }); return { error: null }; },
     }),
   };
@@ -122,6 +126,13 @@ describe("round 18 safety-obligation gate at the send boundary", () => {
     expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
     expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "queued_release", queuedSendOrigin: "automated" })).toEqual({ allowed: false, why: "safety_obligation_open" });
     expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "queued_release" })).toEqual({ allowed: false, why: "safety_obligation_open" });
+  });
+  it("an exception from the obligation read (e.g. a malformed client) fails closed, never 'no obligation'", async () => {
+    const throwing = { from: () => ({ select: () => ({ eq: () => ({ is: () => { throw new TypeError("boom"); }, maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }) }) };
+    expect(await checkSendAllowed(throwing as never, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
+  });
+  it("a person-initiated send (a held draft's Send) is never gated on an open obligation", async () => {
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, personInitiated: true })).toEqual({ allowed: true });
   });
   it("an unreadable store fails closed for automated sends", async () => {
     expect(await checkSendAllowed(obligationDb({ error: { message: "canceling statement due to statement timeout" } }).db, send)).toEqual({ allowed: false, why: "safety_obligation_open" });

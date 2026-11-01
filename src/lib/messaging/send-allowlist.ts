@@ -125,6 +125,8 @@ export async function checkSendAllowed(
     messageId?: string | null;
     /** queued_release only: who queued the row (metadata.sendOrigin). A person's queued text is not automated. */
     queuedSendOrigin?: "automated" | "manual";
+    /** A person clicked Send (e.g. a held draft from the hold card): never gated on obligations. */
+    personInitiated?: boolean;
     env?: Record<string, string | undefined>;
   },
 ): Promise<SendAllowCheck> {
@@ -132,7 +134,7 @@ export async function checkSendAllowed(
   // Astra review of 7e6e72c13839 (round 18): an unresolved safety obligation blocks every automated
   // send on the lead (all paths, flags on or off); a person's own send (immediate, or a text the
   // person queued and then released) is not blocked here: only a real hold stops a person.
-  if (input.origin === "automated" || (input.origin === "queued_release" && input.queuedSendOrigin !== "manual")) {
+  if (!input.personInitiated && (input.origin === "automated" || (input.origin === "queued_release" && input.queuedSendOrigin !== "manual"))) {
     const open = await hasUnresolvedSafetyObligation(supabase, input.propertyId);
     if (open !== "no") {
       if (open === "unknown") {

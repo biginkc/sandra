@@ -66,7 +66,8 @@ export async function hasUnresolvedSafetyObligation(
     if (error) return MISSING.test(error.message) ? "no" : "unknown";
     return (data ?? []).length > 0 ? "yes" : "no";
   } catch (e) {
-    if (e instanceof TypeError) return "no"; // a client double without this table / chain
+    // Opus N4 on #956: never "no" from an exception; the caller fails closed.
+    reportError(e, { tags: { surface: "routing_v2_safety_obligation_read" }, extra: { propertyId } });
     return "unknown";
   }
 }
@@ -83,5 +84,49 @@ export async function resolveSafetyObligationsByPerson(
     }
   } catch (e) {
     if (!(e instanceof TypeError)) reportError(e, { tags: { surface: "routing_v2_safety_obligation_person" }, extra: { propertyId } });
+  }
+}
+
+/**
+ * Opus B4 on #956: the obligation itself could not be written on a failure path. Write the durable
+ * fallback marker on the inbound's claim (completed, so never reclaimed); the one predicate treats
+ * it as unresolved and the sweep promotes it. Returns false only when the marker failed too.
+ */
+export async function markObligationUnrecorded(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; inboundMessageId: string | null; reason: string },
+): Promise<boolean> {
+  try {
+    const { data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_obligation_unrecorded", {
+      p_property_id: a.propertyId, p_inbound_message_id: a.inboundMessageId, p_reason: a.reason,
+    });
+    if (error) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_safety_obligation_fallback" }, extra: { propertyId: a.propertyId } });
+      return false;
+    }
+    return data === true;
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_safety_obligation_fallback" }, extra: { propertyId: a.propertyId } });
+    return false;
+  }
+}
+
+/** The sweep turns fallback markers into real obligations (flags on or off). Returns how many. */
+export async function promoteUnrecordedObligationMarkers(
+  supabase: SupabaseClient<Database>,
+  a: { limit: number; propertyId?: string | null },
+): Promise<number> {
+  try {
+    const { data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_promote_unrecorded_markers", {
+      p_limit: a.limit, p_property_id: a.propertyId ?? null,
+    });
+    if (error) {
+      if (!MISSING.test(error.message)) reportError(new Error(error.message), { tags: { surface: "routing_v2_safety_obligation_promote" } });
+      return 0;
+    }
+    return typeof data === "number" ? data : 0;
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_safety_obligation_promote" } });
+    return 0;
   }
 }

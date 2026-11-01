@@ -1915,6 +1915,113 @@ describe("routing v2 cutover through dispatchAiResponse (disposable local stack)
       expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
     });
 
+    // ---- Opus review of #956 at 36321be81c39 (B1, B2, B4) ----
+    let personUserId: string | null = null;
+    async function person(): Promise<string> {
+      if (!personUserId) {
+        const { data, error } = await supabase.auth.admin.createUser({ email: `rv2-person-${randomUUID()}@example.invalid`, password: randomUUID() + randomUUID(), email_confirm: true });
+        if (error || !data.user) throw error ?? new Error("no user");
+        personUserId = data.user.id;
+      }
+      // beforeEach deletes this org's memberships; an owner membership for the person (no acquisitions flags).
+      await pg.query("insert into memberships (user_id, org_id, role, access_status) values ($1, $2, 'owner', 'active') on conflict (user_id, org_id) do update set role = 'owner', access_status = 'active'", [personUserId, orgId]);
+      return personUserId;
+    }
+    async function holdDeps() {
+      const userId = await person();
+      const { sendHumanDraft } = await import("./dispatch");
+      return { admin: supabase, orgId, userId, sendHumanDraft, recordLeadEvent: async () => {}, resumeRun: async () => null, recordStep: async () => {}, reportError: (e: unknown) => { throw e; } } as never;
+    }
+    async function seenOf(propertyId: string) {
+      const { rows: [p] } = await pg.query("select last_ai_escalation_reason r, last_ai_escalation_at::text a from properties where id = $1", [propertyId]);
+      return { through: new Date(Date.now() + 1000).toISOString(), flagReason: p.r as string | null, flagAt: (p.a as string | null) ?? null };
+    }
+    async function stackedHold(lead: Awaited<ReturnType<typeof seedLead>>) {
+      await pg.query("update properties set needs_human_attention = true, last_ai_escalation_reason = 'draft_held', last_ai_escalation_at = now() where id = $1", [lead.propertyId]);
+      const { markPropertyNeedsAttention } = await import("./dispatch");
+      expect(await markPropertyNeedsAttention(supabase, lead.propertyId, "nine_asked_stop")).toBe(true); // legacy re-escalation: stacked
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(1);
+    }
+    for (const flagsOn of [true, false]) {
+      forced(`M34 (B1): a stacked hold (legacy re-escalation on a held lead) is cleared by the REAL Messages v2 Dismiss and Take over (flags ${flagsOn ? "on" : "off"})`, async (lead) => {
+        const saved = (await pg.query("select routing_v2_flags f from ai_responder_configs where org_id = $1", [orgId])).rows[0].f;
+        if (!flagsOn) await pg.query("update ai_responder_configs set routing_v2_flags = '{}'::jsonb where org_id = $1", [orgId]);
+        try { await m34Body(lead); } finally {
+          await pg.query("update ai_responder_configs set routing_v2_flags = $2 where org_id = $1", [orgId, JSON.stringify(saved)]);
+        }
+      });
+    }
+    async function m34Body(lead: Awaited<ReturnType<typeof seedLead>>) {
+        const { dismissHold, takeOverHold } = await import("@/app/(dashboard)/messages-v2/hold-actions");
+        await stackedHold(lead);
+        const dismissed = await dismissHold(await holdDeps(), { propertyId: lead.propertyId, reason: "handled by phone", seen: await seenOf(lead.propertyId) });
+        expect(dismissed.ok).toBe(true);
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_by = 'person'", [lead.propertyId])).toBe(1);
+        await stackedHold(lead);
+        const taken = await takeOverHold(await holdDeps(), { propertyId: lead.propertyId, seen: await seenOf(lead.propertyId) });
+        expect(taken.ok).toBe(true);
+        expect((await prop(lead.propertyId)).needs_human_attention).toBe(false);
+        expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(0);
+    }
+    forced("M35 (B2): an open obligation never refuses a person's own draft reply (sendHumanDraft): it is sent", async (lead) => {
+      await legacySafetyDecision(lead, "stop texting me maybe", "flag_failed");
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1 and resolved_at is null", [lead.propertyId])).toBe(1);
+      // The held draft answers a newer seller text that nothing has answered yet.
+      const { rows: [m] } = await pg.query("insert into messages (org_id, property_id, contact_id, direction, channel, status, body, from_address, to_address) values ($1,$2,$3,'inbound','sms','received','are you there',$4,$5) returning id",
+        [orgId, lead.propertyId, lead.contactId, lead.phone, MOCK_SENDER_PRIMARY]);
+      const { sendHumanDraft } = await import("./dispatch");
+      const r = await sendHumanDraft(supabase, { orgId, propertyId: lead.propertyId, contactId: lead.contactId, conversationId: null, inboundMessageId: m.id as string, inboundFromPhone: lead.phone, body: "person reply (test)", userId: await person(), edited: false });
+      expect(r, JSON.stringify(r)).toMatchObject({ status: "sent" });
+      expect(sentTo(lead.phone).map((m) => m.body)).toEqual(["person reply (test)"]);
+    });
+    forced("M36 (B4): the recorder fails AND the obligation insert fails: the fallback marker blocks B (0 sends); the sweep promotes it and the hold lands", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const fn = `refuse_ob_${lead.propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${lead.propertyId}' then raise exception 'forced obligation failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before insert on public.routing_v2_safety_obligations for each row execute function public.${fn}()`);
+      let a: string;
+      try {
+        a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.routing_v2_safety_obligations`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+      haikuAnswer = null;
+      expect(await count("select count(*)::int n from routing_v2_safety_obligations where property_id = $1", [lead.propertyId])).toBe(0);
+      await say(lead, B_TEXT); await runWorkflows(); await settle();
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 }); // B's reply, if any, is delivered here
+      expect(sentTo(lead.phone)).toEqual([]);
+      expect((await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0]).toMatchObject({ status: "completed", error_message: "v2_safety_obligation_promoted" }); // the per-property sweep promoted the marker
+      await runRoutingV2OutboxReplies(supabase, { propertyId: lead.propertyId, limit: 10 });
+      expect((await prop(lead.propertyId)).needs_human_attention).toBe(true);
+      expect(sentTo(lead.phone)).toEqual([]);
+    });
+    forced("M37 (B4): obligation AND fallback marker both unwritable: the claim is never completed (lease expiry re-runs the text)", async (lead) => {
+      await pg.query("update ai_responder_configs set routing_v2_flags = routing_v2_flags || '{\"haiku\": true}'::jsonb where org_id = $1", [orgId]);
+      haikuAnswer = { road: "asked_stop", confidence: 0.9 };
+      jevByReply = { ...RACE_JEV, "I think I'm all set": { asked_stop: 0.65 } };
+      const fn = `refuse_obm_${lead.propertyId.replace(/-/g, "")}`;
+      await pg.query(`create or replace function public.${fn}() returns trigger language plpgsql as $f$ begin if new.property_id = '${lead.propertyId}' and (tg_table_name = 'routing_v2_safety_obligations' or new.error_message = 'v2_safety_obligation_unrecorded') then raise exception 'forced failure (test)'; end if; return new; end $f$`);
+      await pg.query(`create trigger ${fn} before insert on public.routing_v2_safety_obligations for each row execute function public.${fn}()`);
+      await pg.query(`create trigger ${fn}_c before insert or update on public.ai_response_claims for each row execute function public.${fn}()`);
+      let a: string;
+      try {
+        a = await withHoldRefused(lead.propertyId, async () => { const id = await say(lead, "I think I'm all set"); await runWorkflows(); await settle(); return id; });
+      } finally {
+        await pg.query(`drop trigger if exists ${fn} on public.routing_v2_safety_obligations`);
+        await pg.query(`drop trigger if exists ${fn}_c on public.ai_response_claims`);
+        await pg.query(`drop function if exists public.${fn}()`);
+      }
+      haikuAnswer = null;
+      const claim = (await pg.query("select status, error_message from ai_response_claims where inbound_message_id = $1", [a])).rows[0];
+      expect(claim.status).not.toBe("completed");
+      expect(claim.error_message).not.toBe("v2_safety_hold_failed");
+    });
+
     it("M11: a mechanics hold about an older inbound after a newer one is committed: superseded, the lead is not held", async () => {
       const lead = await raceSetup();
       const a = await say(lead, A_TEXT);
