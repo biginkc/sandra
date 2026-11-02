@@ -319,12 +319,13 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply'", [L.oldYes.propertyId])).toBe(0);
     expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [L.oldYes.propertyId])).toBeGreaterThanOrEqual(1);
     expect(await n("select count(*)::int n from sequence_enrollments where property_id = $1", [L.oldYes.propertyId])).toBe(0);
-    // Sort-only price check ("too high", reply-only live): its STORED action carries the alert, and it queued.
+    // Sort-only price check "too high" (reply-only live): no alert is added (Jarrad 2026-11-02); held quietly.
     const [priceDecision] = await q("select action from routing_v2_live_decisions where inbound_message_id = $1", [T.oldPrice]);
-    expect(priceDecision.action.steps).toEqual(expect.arrayContaining([{ kind: "alert", reason: "named_price" }]));
+    expect(priceDecision.action.steps.some((st: { kind: string }) => st.kind === "alert")).toBe(false);
     expect(priceDecision.action.steps.some((st: { kind: string; key?: string }) => st.kind === "reply" && st.key === "price_too_high")).toBe(true);
-    // Sort-only price check: an alert (never a silent hold), no reply.
-    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [L.oldPrice.propertyId])).toBeGreaterThanOrEqual(1);
+    const [pricedLead] = await q("select needs_human_attention h from properties where id = $1", [L.oldPrice.propertyId]);
+    expect(pricedLead.h).toBe(true);
+    expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'alert'", [L.oldPrice.propertyId])).toBe(0);
     expect(await n("select count(*)::int n from routing_v2_outbox where property_id = $1 and kind = 'reply'", [L.oldPrice.propertyId])).toBe(0);
     expect(sentTo(L.oldPrice.phone)).toHaveLength(0);
     // Sort-only closes: wrong person and not interested, no reply.

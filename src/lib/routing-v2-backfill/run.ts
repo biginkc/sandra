@@ -25,7 +25,6 @@ import {
   ROUTING_V2_BACKFILL_CLASSIFY_ONLY,
   ROUTING_V2_BACKFILL_HOLD_ROADS,
   routingV2SortOnlyKind,
-  withSortOnlyPriceAlert,
   runRoutingV2OutboxReplies,
   type AiDispatchInput,
   type AiDispatchOutcome,
@@ -292,11 +291,9 @@ export function wouldDo(d: StoredDecision | null, treatment: Treatment, timeOnly
   const has = (k: string) => steps.some((s) => s.kind === k);
   if (treatment === "sort_only") {
     const kind = routingV2SortOnlyKind(d as never);
-    // A sort-only price text with no alert of its own gets "Named a price" (withSortOnlyPriceAlert).
-    const alertSteps = withSortOnlyPriceAlert((d.action ?? null) as Parameters<typeof withSortOnlyPriceAlert>[0])?.steps ?? [];
     return {
       wouldReply: false, wouldDrip: false,
-      wouldAlert: (kind === "alert_and_hold" || kind === "live_hold" || kind === "live_stop") && deliversAlert(alertSteps, timeOnly),
+      wouldAlert: (kind === "alert_and_hold" || kind === "live_hold" || kind === "live_stop") && deliversAlert(steps, timeOnly),
       wouldHold: kind.startsWith("live_") || kind === "alert_and_hold",
       wouldClose: kind === "close_wrong_number" || kind === "close_not_interested",
     };
