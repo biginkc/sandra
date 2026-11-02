@@ -138,7 +138,7 @@ import {
 } from "@/lib/sms-classification/routing-v2/wrong-number-all";
 import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { liveDecisionRow, recordLiveV2Decision, recordLiveV2DecisionRow } from "@/lib/sms-classification/routing-v2/live-decisions";
-import type { V2Action, V2Step } from "@/lib/sms-classification/routing-v2/actions";
+import type { V2Action } from "@/lib/sms-classification/routing-v2/actions";
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
@@ -423,7 +423,10 @@ export const ROUTING_V2_BACKFILL_CLASSIFY_ONLY = "routing_v2:backfill_classify_o
  */
 export const ROUTING_V2_BACKFILL_HOLD_ROADS: ReadonlySet<string> = new Set(["driving_reply+book_appointment"]);
 
-/** Hot roads: in sort-only their owner alerts are raised and the lead goes to Jarrad's queue. */
+/**
+ * Hot roads: in sort-only their stored owner alerts are raised and the lead goes to Jarrad's queue.
+ * A price check "too high" (reply only, no alert of its own) is held quietly (Jarrad 2026-11-02).
+ */
 const ROUTING_V2_SORT_ONLY_HOT_ROADS: ReadonlySet<string> = new Set([
   "book_appointment", "reaction+book_appointment", "driving_reply+book_appointment", "price_check", "ALERT_call_me",
 ]);
@@ -8914,9 +8917,6 @@ async function runRoutingV2LiveStepInner(
     if (storedRow.property_id !== input.propertyId || storedRow.org_id !== property.org_id || storedRow.inbound_message_id !== inboundMessageId) {
       return nineHoldAndComplete(supabase, a, "nine_needs_person");
     }
-    if (input.routingV2Backfill?.mode === "sort_only" && storedRow.action) {
-      storedRow.action = withSortOnlyPriceAlert(storedRow.action as V2Action);
-    }
     const replayHold = v2SafetyHoldReason({
       kind: storedRow.status === "failed" ? "failed" : "decided",
       reason: (storedRow.failure_reason as string | null) ?? undefined,
@@ -8979,9 +8979,6 @@ async function runRoutingV2LiveStepInner(
 
   await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
     (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
-  if (input.routingV2Backfill?.mode === "sort_only" && classification.kind === "decided") {
-    classification = { ...classification, action: withSortOnlyPriceAlert(classification.action) };
-  }
   const decisionContext = { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision };
   if (input.routingV2Backfill?.mode === "classify_only") {
     // Backfill classify-only (Opus review B1): the decision row goes to the caller, NOT to the
@@ -9259,21 +9256,6 @@ async function applyRoutingV2SortOnly(
   }
   await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED });
   return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED };
-}
-
-/** The owner alert (not a hold reason) a sort-only price text raises: the existing "Named a price". */
-const SORT_ONLY_PRICE_ALERT = "named_price" as const;
-
-/**
- * Sort-only (Astra review 2b-5): a hot road with no alert of its own (price check "too high":
- * reply only) gets the existing "Named a price" owner alert IN ITS STORED ACTION, before the
- * decision is recorded, so the recorded evidence and the queued alert agree (the database
- * validator compares them). Builder's reading of "alert hot roads", pending Jarrad; flagged in
- * the backfill report. Any other action is returned unchanged.
- */
-export function withSortOnlyPriceAlert<T extends { road: string; steps: readonly V2Step[] } | null | undefined>(action: T): T {
-  if (!action || action.road !== "price_check" || action.steps.some((s) => s.kind === "alert")) return action;
-  return { ...action, steps: [...action.steps, { kind: "alert", reason: SORT_ONLY_PRICE_ALERT }] } as T;
 }
 
 /** Sort-only on a road with nothing to sort (reply / drip only): decision recorded, nothing else. */

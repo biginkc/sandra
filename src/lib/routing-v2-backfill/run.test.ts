@@ -107,8 +107,9 @@ describe("age split (Jarrad 2026-10-31)", () => {
     expect(wouldDo(dec("not_interested_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only", true)).toMatchObject({ wouldReply: false, wouldDrip: false, wouldClose: true });
     expect(wouldDo(dec("maybe_later_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only", true)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false });
     expect(wouldDo(dec("stop", [{ kind: "hold" }]), "sort_only", true)).toMatchObject({ wouldHold: true, wouldReply: false });
-    // Price too high has no alert of its own live; sort-only adds "Named a price" (never time-only).
-    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only", true)).toMatchObject({ wouldHold: true, wouldReply: false, wouldAlert: true });
+    // Old "price too high" (reply only): held quietly, no alert (Jarrad 2026-11-02); fair/unclear keeps its own alert.
+    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only", true)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: true, wouldClose: false });
+    expect(wouldDo(dec("price_check", [{ kind: "reply" }, { kind: "alert", reason: "named_price" }]), "sort_only", true)).toMatchObject({ wouldHold: true, wouldReply: false, wouldAlert: true });
     expect(wouldDo(dec("price_check", [{ kind: "reply" }, { kind: "alert", reason: "named_price" }]), "full", true)).toMatchObject({ wouldReply: true, wouldAlert: true });
   });
 
