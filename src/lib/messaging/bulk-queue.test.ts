@@ -104,6 +104,31 @@ describe("queueSmsBatch rapid_offer", () => {
   });
 });
 
+describe("queueSmsBatch literal-body rendering compatibility", () => {
+  beforeEach(() => {
+    sendSmsToContact.mockReset().mockResolvedValue({ status: "queued" });
+    loadTemplateVarsWithMeta.mockReset().mockResolvedValue({ vars: { rapid_offer: "" }, rapidOffer: null });
+  });
+
+  it("an unknown token in a literal body now renders blank (behaviour change)", async () => {
+    await run({ body: "Reference {{external_id}}" });
+    expect(sendSmsToContact.mock.calls[0][1].body).toBe("Reference ");
+  });
+
+  it("legacy serialized state without skippedNoValue still counts a no-value skip", async () => {
+    const legacy = { ...freshScheduleState(Date.UTC(2026, 10, 2)) } as Record<string, unknown>;
+    delete legacy.skippedNoValue;
+    const state = await queueSmsBatch(fakeClient(), {
+      propertyIds: ["prop-1"],
+      opts: { campaignId: "camp-1", paceSeconds: 60, body: "Offer {{rapid_offer}}" },
+      state: legacy as never,
+    });
+    expect(state.skippedNoValue).toBe(1);
+    expect(state.skipped).toBe(1);
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+});
+
 describe("renderTemplate identity", () => {
   it("returns text with no tokens unchanged", () => {
     const text = "Plain body, $5 {not a token} } { | 100% as-is.";

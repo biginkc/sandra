@@ -21,7 +21,12 @@ import { getMessagingProvider } from "@/lib/messaging/registry";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
 import { loadTemplateVarsWithMeta } from "@/lib/sequences/template-vars";
-import { RAPID_OFFER_ROUND_TO, usesRapidOfferToken, type RapidOfferMeta } from "@/lib/templates/rapid-offer";
+import {
+  RAPID_OFFER_ROUND_TO,
+  rapidOfferBlocksSend,
+  usesRapidOfferToken,
+  type RapidOfferMeta,
+} from "@/lib/templates/rapid-offer";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
@@ -492,7 +497,7 @@ export async function queueSmsBatch(
         contactId,
       });
       rapidOffer = loaded.rapidOffer;
-      if (usesRapidOffer && !rapidOffer) {
+      if (rapidOfferBlocksSend(rawBody, loaded.vars)) {
         state.skipped++;
         state.skippedNoValue = (state.skippedNoValue ?? 0) + 1;
         continue;

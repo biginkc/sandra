@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveApprovedTemplateReply, selectAutoReplyTemplate, type TemplateCandidate, type TemplateRow } from "@/lib/ai-responder/template-reply";
 import { renderReviewedReply } from "@/lib/inbox/reply-template";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
 import type { Database } from "@/lib/supabase/types";
 import { readRoutingV2Flags, v2SliceAllowed } from "./flags";
 import { v2ReplyText, type V2AnyReplyKey } from "./reply-texts";
@@ -53,6 +54,7 @@ export async function resolveV2Reply(
     // to render identically must not silently replace the word-for-word routing contract.
     if (chosen.candidate.template.content !== approved) return { kind: "none", reason: "reply_text_not_approved" };
     const vars = await loadTemplateVars(db, { propertyId, contactId });
+    if (rapidOfferBlocksSend(approved, vars)) return { kind: "none", reason: "reply_preparation_failed" };
     const body = renderReviewedReply(approved, vars);
     return { kind: "ready", body, source: approved, templateId: chosen.candidate.templateId, fixed: false };
   } catch {

@@ -19,33 +19,6 @@ export type TemplateVarsWithMeta = {
 };
 
 /**
- * Stored DealMachine estimate for a property, from the routing-v2 value
- * cache. Never calls DealMachine. Any error (table absent, RLS, etc.)
- * is treated as "no value".
- */
-async function loadCachedEstimatedValue(
-  client: SupabaseClient<Database>,
-  propertyId: string,
-): Promise<number | null> {
-  try {
-    // dealmachine_value_cache is not in the generated types yet.
-    const untyped = client as unknown as SupabaseClient;
-    const { data, error } = await untyped
-      .from("dealmachine_value_cache")
-      .select("estimated_value")
-      .eq("property_id", propertyId)
-      .eq("state", "ok")
-      .not("estimated_value", "is", null)
-      .maybeSingle();
-    if (error || !data) return null;
-    const n = Number((data as { estimated_value: unknown }).estimated_value);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Build the variable map for a sequence step's template. Pulls per-lead
  * data from the DB; the set of variables exposed is the V1 whitelist:
  *
@@ -53,7 +26,7 @@ async function loadCachedEstimatedValue(
  *   property_address, city, state, property_zip,
  *   market,
  *   my_first_name, company_name,
- *   rapid_offer (75% of stored DealMachine value, "" when none)
+ *   rapid_offer (75% of properties.arv, "" when none)
  *
  * Internal fields (lists, stack_count) are deliberately omitted — they
  * shouldn't leak into seller-facing SMS (Jarrad's rule 2026-04-23).
@@ -115,11 +88,7 @@ export async function loadTemplateVarsWithMeta(
   }
 
   const arv = typeof property?.arv === "number" ? property.arv : null;
-  const cacheValue =
-    property && !(arv !== null && arv > 0)
-      ? await loadCachedEstimatedValue(client, params.propertyId)
-      : null;
-  const source = resolveRapidOfferSource({ arv, cacheValue });
+  const source = resolveRapidOfferSource({ arv });
   const pct = resolveRapidOfferPct();
   const amount = source ? computeRapidOffer(source.value, pct) : null;
   const rapidOffer: RapidOfferMeta | null =

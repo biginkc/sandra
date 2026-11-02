@@ -1,8 +1,9 @@
 /**
- * `{{rapid_offer}}` merge token: a fixed percentage of the DealMachine
- * estimated value, rounded to the nearest $1,000. Pure helpers only —
- * value lookup reads stored data (properties.arv, dealmachine_value_cache)
- * and never calls the DealMachine API.
+ * `{{rapid_offer}}` merge token: a fixed percentage of the stored
+ * property value (properties.arv), rounded to the nearest $1,000. Pure
+ * helpers only — never calls the DealMachine API. (The routing-v2
+ * dealmachine_value_cache is service-role only, so it is not used: the
+ * sync bulk path runs on the user client and would diverge.)
  */
 
 export const RAPID_OFFER_PCT_DEFAULT = 0.75;
@@ -10,7 +11,7 @@ export const RAPID_OFFER_ROUND_TO = 1000;
 
 export const RAPID_OFFER_TOKEN_RE = /\{\{\s*rapid_offer(\s*\|[^}]*)?\s*\}\}/;
 
-export type RapidOfferSource = "properties.arv" | "dealmachine_value_cache";
+export type RapidOfferSource = "properties.arv";
 
 export type RapidOfferMeta = {
   amount: number;
@@ -53,13 +54,27 @@ function positive(n: number | null | undefined): n is number {
 
 export function resolveRapidOfferSource(row: {
   arv: number | null;
-  cacheValue: number | null;
 }): { value: number; source: RapidOfferSource } | null {
-  if (positive(row.arv)) return { value: row.arv, source: "properties.arv" };
-  if (positive(row.cacheValue)) return { value: row.cacheValue, source: "dealmachine_value_cache" };
-  return null;
+  return positive(row.arv) ? { value: row.arv, source: "properties.arv" } : null;
 }
 
 export function usesRapidOfferToken(text: string | null | undefined): boolean {
   return !!text && RAPID_OFFER_TOKEN_RE.test(text);
+}
+
+/**
+ * True when `templateText` uses `{{rapid_offer}}` but `vars.rapid_offer`
+ * is empty — an automated send would print a blank offer, so callers
+ * must not send. Applied in every AUTOMATED path (bulk queue, sequence
+ * tick, voicemail-drop step, AI template reply, routing-v2 reply).
+ * Manual paths (lead actions, load-lead-vars, lead page) show the
+ * rendered preview to the operator before sending and are left as is.
+ */
+export function rapidOfferBlocksSend(
+  templateText: string | null | undefined,
+  vars: Record<string, unknown>,
+): boolean {
+  if (!usesRapidOfferToken(templateText)) return false;
+  const v = vars.rapid_offer;
+  return v === null || v === undefined || String(v).trim() === "";
 }

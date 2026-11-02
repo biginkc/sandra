@@ -4,6 +4,7 @@ import {
   RAPID_OFFER_PCT_DEFAULT,
   computeRapidOffer,
   formatRapidOffer,
+  rapidOfferBlocksSend,
   resolveRapidOfferPct,
   resolveRapidOfferSource,
   usesRapidOfferToken,
@@ -52,10 +53,19 @@ describe("formatRapidOffer", () => {
 });
 
 describe("resolveRapidOfferSource", () => {
-  it("prefers properties.arv, then the cache", () => {
-    expect(resolveRapidOfferSource({ arv: 200_000, cacheValue: 180_000 })).toEqual({ value: 200_000, source: "properties.arv" });
-    expect(resolveRapidOfferSource({ arv: null, cacheValue: 180_000 })).toEqual({ value: 180_000, source: "dealmachine_value_cache" });
-    expect(resolveRapidOfferSource({ arv: 0, cacheValue: null })).toBeNull();
+  it("uses properties.arv only", () => {
+    expect(resolveRapidOfferSource({ arv: 200_000 })).toEqual({ value: 200_000, source: "properties.arv" });
+    expect(resolveRapidOfferSource({ arv: null })).toBeNull();
+    expect(resolveRapidOfferSource({ arv: 0 })).toBeNull();
+  });
+});
+
+describe("rapidOfferBlocksSend", () => {
+  it("blocks only when the token is used and the value is empty", () => {
+    expect(rapidOfferBlocksSend("Offer {{rapid_offer}}", { rapid_offer: "" })).toBe(true);
+    expect(rapidOfferBlocksSend("Offer {{rapid_offer}}", {})).toBe(true);
+    expect(rapidOfferBlocksSend("Offer {{rapid_offer}}", { rapid_offer: "$139,000" })).toBe(false);
+    expect(rapidOfferBlocksSend("Hi {{first_name}}", { rapid_offer: "" })).toBe(false);
   });
 });
 
