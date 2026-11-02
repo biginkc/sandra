@@ -92,6 +92,11 @@ describe("queueSmsBatch rapid_offer", () => {
     expect(input.metadata).toBeUndefined();
   });
 
+  it("does not load template vars for a body with no tokens", async () => {
+    await run({ body: "Hello there" });
+    expect(loadTemplateVarsWithMeta).not.toHaveBeenCalled();
+  });
+
   it("does not log rapidOffer metadata when the body omits the token", async () => {
     loadTemplateVarsWithMeta.mockResolvedValue({ vars: { rapid_offer: "$139,000" }, rapidOffer: OFFER });
     await run({ body: "Hello there" });

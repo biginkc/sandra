@@ -21,7 +21,7 @@ import { getMessagingProvider } from "@/lib/messaging/registry";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
 import { loadTemplateVarsWithMeta } from "@/lib/sequences/template-vars";
-import { RAPID_OFFER_ROUND_TO, usesRapidOfferToken } from "@/lib/templates/rapid-offer";
+import { RAPID_OFFER_ROUND_TO, usesRapidOfferToken, type RapidOfferMeta } from "@/lib/templates/rapid-offer";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
@@ -481,19 +481,24 @@ export async function queueSmsBatch(
       continue;
     }
 
-    // Literal bodies render too (identity when there are no tokens), so
-    // merge tokens like {{rapid_offer}} work in the ad-hoc Bulk SMS modal.
-    const { vars, rapidOffer } = await loadTemplateVarsWithMeta(client, {
-      propertyId,
-      contactId,
-    });
+    // Literal bodies render too, so merge tokens like {{rapid_offer}} work
+    // in the ad-hoc Bulk SMS modal. A body with no `{{` skips the lookup.
+    let body: string = rawBody;
+    let rapidOffer: RapidOfferMeta | null = null;
     const usesRapidOffer = usesRapidOfferToken(rawBody);
-    if (usesRapidOffer && !rapidOffer) {
-      state.skipped++;
-      state.skippedNoValue = (state.skippedNoValue ?? 0) + 1;
-      continue;
+    if (rawBody.includes("{{")) {
+      const loaded = await loadTemplateVarsWithMeta(client, {
+        propertyId,
+        contactId,
+      });
+      rapidOffer = loaded.rapidOffer;
+      if (usesRapidOffer && !rapidOffer) {
+        state.skipped++;
+        state.skippedNoValue = (state.skippedNoValue ?? 0) + 1;
+        continue;
+      }
+      body = renderTemplate(rawBody, loaded.vars);
     }
-    const body = renderTemplate(rawBody, vars);
 
     if (!body) {
       state.skipped++;
