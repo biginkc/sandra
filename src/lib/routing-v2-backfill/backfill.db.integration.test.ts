@@ -264,7 +264,7 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     // What apply WOULD do is reported; nothing was done.
     for (const id of safetyIds()) expect(r.items.find((i) => i.inboundId === id), id).toMatchObject({ wouldHold: true, holdCreated: false, wouldReply: false });
     expect(r.items.find((i) => i.inboundId === T.oldYes)).toMatchObject({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true });
-    expect(r.items.find((i) => i.inboundId === T.oldPrice)).toMatchObject({ wouldReply: false, wouldAlert: true, wouldHold: true });
+    expect(r.items.find((i) => i.inboundId === T.oldPrice)).toMatchObject({ wouldReply: false, wouldAlert: false, wouldHold: true });
     expect(r.items.find((i) => i.inboundId === T.fresh)).toMatchObject({ wouldReply: true, wouldDrip: false });
     // Spend is read from the ledger per text (one Jev call each; the Jev-failed text retries).
     expect(r.items.find((i) => i.inboundId === T.fresh)!.jevCalls).toBe(1);
@@ -349,7 +349,7 @@ describe("routing v2 backfill (disposable local stack, mock provider, stubbed Je
     const md = markdownReport("sha-test", r);
     expect(md).toContain("## Full treatment");
     expect(md).toContain("## Sort only");
-    expect(md).toContain("builder's reading");
+    expect(md).toContain("\"price too high\" is held with no alert");
     expect(md).not.toMatch(/\+1816/);
   });
 
