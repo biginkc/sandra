@@ -15,6 +15,7 @@ import { applyOptOut } from "./opt-out";
 import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
 import { processVoicemailDropStep } from "./voicemail-drop-step";
 import { hasSlotToken } from "./routing-v2/slot-time";
 import {
@@ -481,6 +482,17 @@ export async function processEnrollmentTick(
       const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted", "slot_time outside routing v2");
       if (runError) {
         return failAfterRunWrite(client, enrollment.id, runError, "Slot-time bookkeeping failed");
+      }
+      const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      return { status: "paused", enrollmentId: enrollment.id, reason: "step_misconfigured" };
+    }
+
+    // {{rapid_offer}} with no stored property value: never send a blank offer.
+    if (rapidOfferBlocksSend(bodySource, vars)) {
+      const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted", "rapid_offer has no property value");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Rapid-offer bookkeeping failed");
       }
       const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
       if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };

@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import { renderReviewedReply } from "@/lib/inbox/reply-template";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
 import type { Database } from "@/lib/supabase/types";
 import {
   loadOrgThresholdMap,
@@ -270,6 +271,9 @@ export async function resolveApprovedTemplateReply(
       propertyId: args.propertyId,
       contactId: args.contactId,
     });
+    if (rapidOfferBlocksSend(candidate.template.content, vars)) {
+      return { kind: "none", reason: "render_failed" };
+    }
     // Strict renderer: a missing variable without a fallback throws instead of
     // sending a message with a hole in it.
     const body = renderReviewedReply(candidate.template.content, vars);

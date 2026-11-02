@@ -17,9 +17,10 @@ export const LEGACY_FILES = [
   "src/app/(dashboard)/properties/_actions/count.ts",
   "src/app/(dashboard)/leads/actions.ts",
   "src/lib/prospects/eligibility.ts",
-  "src/lib/messaging/bulk-queue.ts",
   // campaigns/actions.ts and workflows/bulk-sms.ts removed in #927 (batched
   // campaign queue RPCs); they are campaign code, not Prospects/Search.
+  // lib/messaging/bulk-queue.ts removed for the {{rapid_offer}} merge token
+  // (literal bodies now render; recipients without a value are skipped).
 ];
 
 function git(...args: string[]): string | null {

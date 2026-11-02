@@ -25,6 +25,7 @@ import { pickVoicemailFromPool } from "@/lib/templates/pool";
 
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
 import {
   advanceEnrollment,
   failAfterRunWrite,
@@ -359,6 +360,15 @@ export async function processVoicemailDropStep(
   if (mediaId) {
     audio = { kind: "media", mediaId };
   } else {
+    if (rapidOfferBlocksSend(ttsTemplate, vars)) {
+      return pauseNotAttempted(
+        client,
+        enrollment.id,
+        claimId,
+        "step_misconfigured",
+        "voicemail drop script uses rapid_offer but the property has no value",
+      );
+    }
     renderedScript = renderVoicemailScript(ttsTemplate ?? "", vars);
     // Drop Cowboy treats braces as its own merge fields: nothing unrendered
     // (malformed or single-brace placeholders) may reach it.

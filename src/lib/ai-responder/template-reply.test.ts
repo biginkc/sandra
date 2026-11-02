@@ -166,6 +166,16 @@ describe("resolveApprovedTemplateReply", () => {
     );
   });
 
+  it("refuses a {{rapid_offer}} template when the property has no value", async () => {
+    const OFFER_TEXT = "Offer {{rapid_offer}}";
+    loadTemplateVars.mockResolvedValue({ my_first_name: "Mel", rapid_offer: "" });
+    const { client } = fakeSupabase({
+      data: [row({ sms_templates: approved({ content: OFFER_TEXT, approved_content: OFFER_TEXT }) })],
+      error: null,
+    });
+    expect(await resolveApprovedTemplateReply(client, base)).toEqual({ kind: "none", reason: "render_failed" });
+  });
+
   it("uses the template fallback when the contact has no first name", async () => {
     loadTemplateVars.mockResolvedValue({ first_name: null, my_first_name: "Mel" });
     const { client } = fakeSupabase({ data: [row()], error: null });

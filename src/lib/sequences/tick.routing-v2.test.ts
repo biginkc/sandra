@@ -241,6 +241,16 @@ describe("processEnrollmentTick — routing v2 wiring", () => {
     }));
   });
 
+  it("a {{rapid_offer}} body on a property with no value: held, never sent blank", async () => {
+    vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
+    const { client, writes } = fixture({ routingV2Key: null, body: "Offer {{rapid_offer}}" });
+    expect(await processEnrollmentTick(client, ENROLLMENT)).toEqual({ status: "paused", enrollmentId: "enrollment-1", reason: "step_misconfigured" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+    expect(writes).toContainEqual(expect.objectContaining({
+      table: "sequence_step_runs", payload: expect.objectContaining({ attempt_outcome: "not_attempted" }),
+    }));
+  });
+
   it("a claim-close failure (accepted, receipt not saved) is surfaced and held for reconciliation, not swallowed", async () => {
     vi.setSystemTime(new Date("2026-10-14T18:07:00Z"));
     vi.mocked(sendSmsToContact).mockResolvedValue({ status: "db_error", messageId: "m1", externalId: "p1", deliveryOutcome: "accepted", error: "receipt write failed" } as never);
