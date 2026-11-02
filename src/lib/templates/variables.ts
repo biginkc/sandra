@@ -27,6 +27,7 @@ export const TEMPLATE_VARIABLES: readonly TemplateVariable[] = [
   { name: "state", label: "State", group: "Property", example: "TX" },
   { name: "property_zip", label: "ZIP Code", group: "Property", example: "75201" },
   { name: "market", label: "Market", group: "Property", example: "DFW" },
+  { name: "rapid_offer", label: "Rapid offer (75% of est. value)", group: "Property", example: "$139,000" },
 
   // Account fields
   { name: "my_first_name", label: "Sender Name", group: "Account", example: "Mel" },

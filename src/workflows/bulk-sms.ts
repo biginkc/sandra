@@ -466,6 +466,7 @@ async function finalizeBulkSmsStep(args: {
       result_summary: {
         queued: state.succeeded,
         skipped: state.skipped,
+        skipped_no_value: state.skippedNoValue ?? 0,
         failed: state.failed.length,
         failed_sample: state.failed.slice(0, 20),
       },
@@ -507,6 +508,7 @@ async function failBulkSmsJobStep(args: BulkSmsJobFailureArgs): Promise<void> {
       result_summary: {
         queued: state.succeeded,
         skipped: state.skipped,
+        skipped_no_value: state.skippedNoValue ?? 0,
         failed: failedItems,
         failed_sample: state.failed.slice(0, 20),
         workflow_error: args.errorMessage,

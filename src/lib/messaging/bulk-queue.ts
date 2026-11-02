@@ -20,7 +20,8 @@ import {
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
-import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { loadTemplateVarsWithMeta } from "@/lib/sequences/template-vars";
+import { RAPID_OFFER_ROUND_TO, usesRapidOfferToken } from "@/lib/templates/rapid-offer";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
@@ -103,6 +104,11 @@ export type BulkSmsScheduleState = {
   dayBucketCount: number;
   succeeded: number;
   skipped: number;
+  /**
+   * Subset of `skipped`: body used `{{rapid_offer}}` but the property has
+   * no stored value. Optional so legacy serialized state still parses.
+   */
+  skippedNoValue?: number;
   failed: { propertyId: string; message: string }[];
 };
 
@@ -113,6 +119,7 @@ export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {
     dayBucketCount: 0,
     succeeded: 0,
     skipped: 0,
+    skippedNoValue: 0,
     failed: [],
   };
 }
@@ -448,9 +455,9 @@ export async function queueSmsBatch(
       continue;
     }
 
-    let body: string | null = null;
+    let rawBody: string | null = null;
     if (opts.body) {
-      body = opts.body;
+      rawBody = opts.body;
     } else if (opts.templateCategory) {
       if (!property.org_id) {
         state.skipped++;
@@ -466,12 +473,27 @@ export async function queueSmsBatch(
         state.skipped++;
         continue;
       }
-      const vars = await loadTemplateVars(client, {
-        propertyId,
-        contactId,
-      });
-      body = renderTemplate(template.content, vars);
+      rawBody = template.content;
     }
+
+    if (!rawBody) {
+      state.skipped++;
+      continue;
+    }
+
+    // Literal bodies render too (identity when there are no tokens), so
+    // merge tokens like {{rapid_offer}} work in the ad-hoc Bulk SMS modal.
+    const { vars, rapidOffer } = await loadTemplateVarsWithMeta(client, {
+      propertyId,
+      contactId,
+    });
+    const usesRapidOffer = usesRapidOfferToken(rawBody);
+    if (usesRapidOffer && !rapidOffer) {
+      state.skipped++;
+      state.skippedNoValue = (state.skippedNoValue ?? 0) + 1;
+      continue;
+    }
+    const body = renderTemplate(rawBody, vars);
 
     if (!body) {
       state.skipped++;
@@ -509,6 +531,13 @@ export async function queueSmsBatch(
       queueOnly: true,
       scheduledFor,
       requiresOpeningIdentity: opts.templateCategory === "Opener - Homeowner",
+      ...(usesRapidOffer && rapidOffer
+        ? {
+            metadata: {
+              rapidOffer: { ...rapidOffer, roundTo: RAPID_OFFER_ROUND_TO },
+            },
+          }
+        : {}),
     });
 
     if (outcome.status === "queued" || outcome.status === "paused") {

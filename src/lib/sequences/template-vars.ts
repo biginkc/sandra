@@ -3,7 +3,47 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type { Database } from "@/lib/supabase/types";
 
+import {
+  computeRapidOffer,
+  formatRapidOffer,
+  resolveRapidOfferPct,
+  resolveRapidOfferSource,
+  type RapidOfferMeta,
+} from "@/lib/templates/rapid-offer";
+
 import type { TemplateVars } from "./render";
+
+export type TemplateVarsWithMeta = {
+  vars: TemplateVars;
+  rapidOffer: RapidOfferMeta | null;
+};
+
+/**
+ * Stored DealMachine estimate for a property, from the routing-v2 value
+ * cache. Never calls DealMachine. Any error (table absent, RLS, etc.)
+ * is treated as "no value".
+ */
+async function loadCachedEstimatedValue(
+  client: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<number | null> {
+  try {
+    // dealmachine_value_cache is not in the generated types yet.
+    const untyped = client as unknown as SupabaseClient;
+    const { data, error } = await untyped
+      .from("dealmachine_value_cache")
+      .select("estimated_value")
+      .eq("property_id", propertyId)
+      .eq("state", "ok")
+      .not("estimated_value", "is", null)
+      .maybeSingle();
+    if (error || !data) return null;
+    const n = Number((data as { estimated_value: unknown }).estimated_value);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Build the variable map for a sequence step's template. Pulls per-lead
@@ -12,7 +52,8 @@ import type { TemplateVars } from "./render";
  *   first_name, last_name,
  *   property_address, city, state, property_zip,
  *   market,
- *   my_first_name, company_name
+ *   my_first_name, company_name,
+ *   rapid_offer (75% of stored DealMachine value, "" when none)
  *
  * Internal fields (lists, stack_count) are deliberately omitted — they
  * shouldn't leak into seller-facing SMS (Jarrad's rule 2026-04-23).
@@ -31,10 +72,24 @@ export async function loadTemplateVars(
     contactId: string | null;
   },
 ): Promise<TemplateVars> {
+  return (await loadTemplateVarsWithMeta(client, params)).vars;
+}
+
+/**
+ * Same as `loadTemplateVars`, plus the pieces behind `{{rapid_offer}}`
+ * so callers can log how the offer was computed.
+ */
+export async function loadTemplateVarsWithMeta(
+  client: SupabaseClient<Database>,
+  params: {
+    propertyId: string;
+    contactId: string | null;
+  },
+): Promise<TemplateVarsWithMeta> {
   const [propertyResult, contactResult] = await Promise.all([
     client
       .from("properties")
-      .select("address, city, state, zip, market, org_id")
+      .select("address, city, state, zip, market, org_id, arv")
       .eq("id", params.propertyId)
       .maybeSingle(),
     params.contactId
@@ -59,7 +114,20 @@ export async function loadTemplateVars(
     companyName = org?.name ?? null;
   }
 
-  return {
+  const arv = typeof property?.arv === "number" ? property.arv : null;
+  const cacheValue =
+    property && !(arv !== null && arv > 0)
+      ? await loadCachedEstimatedValue(client, params.propertyId)
+      : null;
+  const source = resolveRapidOfferSource({ arv, cacheValue });
+  const pct = resolveRapidOfferPct();
+  const amount = source ? computeRapidOffer(source.value, pct) : null;
+  const rapidOffer: RapidOfferMeta | null =
+    source && amount !== null
+      ? { amount, sourceValue: source.value, source: source.source, pct }
+      : null;
+
+  const vars: TemplateVars = {
     first_name: contact?.first_name ?? null,
     last_name: contact?.last_name ?? null,
     property_address: property?.address ?? null,
@@ -69,5 +137,7 @@ export async function loadTemplateVars(
     market: property?.market ?? null,
     my_first_name: getOutboundSenderName(),
     company_name: companyName,
+    rapid_offer: rapidOffer ? formatRapidOffer(rapidOffer.amount) : "",
   };
+  return { vars, rapidOffer };
 }

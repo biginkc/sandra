@@ -223,6 +223,7 @@ async function finalizeSearchSmsStep(args: {
       result_summary: {
         queued: state.succeeded,
         skipped: state.skipped,
+        skipped_no_value: state.skippedNoValue ?? 0,
         skipped_leads: args.skippedLeads,
         skipped_dnc: args.skippedDnc,
         failed: state.failed.length,
@@ -270,6 +271,7 @@ async function failSearchSmsStep(args: {
       result_summary: {
         queued: state.succeeded,
         skipped: state.skipped,
+        skipped_no_value: state.skippedNoValue ?? 0,
         skipped_leads: args.skippedLeads,
         skipped_dnc: args.skippedDnc,
         failed: failedItems,
