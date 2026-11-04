@@ -58,6 +58,7 @@ const ids = {
   deleted: randomUUID(), // org A, soft-deleted
   training: randomUUID(), // org A, training lead
   otherOrg: randomUUID(), // org B
+  outOfOrder: randomUUID(), // org A, a text created early but sent after a later-created one
 };
 const contacts = { person: randomUUID(), entity: randomUUID(), quiet: randomUUID(), b: randomUUID() };
 
@@ -112,6 +113,7 @@ async function seed() {
   await db.query(prop, [ids.quiet, orgA, "3 Quiet St", contacts.quiet]);
   await db.query(prop, [ids.deleted, orgA, "4 Deleted St", contacts.quiet]);
   await db.query(prop, [ids.otherOrg, orgB, "6 Other Org St", contacts.b]);
+  await db.query(prop, [ids.outOfOrder, orgA, "7 Late Send St", contacts.quiet]);
   await db.query("update public.properties set deleted_at = now() where id = $1", [ids.deleted]);
   // Training leads are server-created through their own guard; the view must hide them whatever their data.
   await db.query("alter table public.properties disable trigger user");
@@ -137,6 +139,9 @@ async function seed() {
      values ($1,$2,$3,$4,'nld-session','2026-11-01T09:00:00Z','2026-11-01T09:02:00Z','jitter','outbound')`,
     [orgA, ids.entity, contacts.entity, `nld-${randomUUID()}`],
   );
+  // ids.outOfOrder: created Monday but sent Wednesday, versus created and sent Tuesday. Wednesday is the latest contact.
+  await db.query(msg, [orgA, ids.outOfOrder, contacts.quiet, "outbound", "delivered", "late send", "2026-11-02T09:00:00Z", "2026-11-04T09:00:00Z"]);
+  await db.query(msg, [orgA, ids.outOfOrder, contacts.quiet, "outbound", "sent", "on time", "2026-11-03T09:00:00Z", "2026-11-03T09:00:05Z"]);
   // ids.otherOrg: org B data that must never be visible.
   await db.query(msg, [orgB, ids.otherOrg, contacts.b, "inbound", "received", "org b reply", "2026-11-02T12:00:00Z", null]);
 }
@@ -336,6 +341,12 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
     });
   });
 
+  it("latest contact is the outbound text that went out last, even when it was created earlier", async () => {
+    const [row] = await readerRows([ids.outOfOrder]);
+    expect(row).toMatchObject({ last_contact_kind: "text", last_inbound_text: null });
+    expect(row.last_contact_at.toISOString()).toBe("2026-11-04T09:00:00.000Z");
+  });
+
   it("hides soft-deleted, training and other-org leads", async () => {
     const rows = await readerRows([ids.deleted, ids.training, ids.otherOrg]);
     expect(rows).toEqual([]);
@@ -421,7 +432,9 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
       expect(conds("properties").some((n) => /\bid = ANY\b/.test(cond(n)))).toBe(true);
       const messages = conds("messages");
       expect(messages.length).toBeGreaterThanOrEqual(2); // inbound lateral + outbound branch
-      for (const node of messages) expect(node["Index Cond"] ?? "").toMatch(/property_id = p\.id/);
+      // The outbound branch orders by when the text went out, so it may scan the property's rows by bitmap; either way
+      // the scan is keyed on the property.
+      for (const node of messages) expect(cond(node)).toMatch(/property_id = p\.id/);
       const calls = conds("call_activities");
       expect(calls.length).toBe(1);
       expect(calls[0]["Index Cond"] ?? "").toMatch(/property_id = p\.id/);

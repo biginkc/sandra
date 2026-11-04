@@ -119,8 +119,9 @@ begin
          where m.org_id = p.org_id and m.property_id = p.id and m.channel = 'sms' and m.direction = 'inbound'
          order by m.created_at desc, m.id desc
          limit 1) li on true
-      -- Latest contact of any kind: inbound text, outbound text that actually went out, or a call. Outbound picks the
-      -- newest-created sent/delivered text (index order on idx_messages_property_created_id) and reports when it went out.
+      -- Latest contact of any kind: inbound text, outbound text that actually went out, or a call. Outbound is ordered by
+      -- the time it reports (when it went out), so a text created early but sent late still counts as the latest; the
+      -- per-property scan stays on the property_id index (a property's outbound history is small).
       left join lateral (
         select x.at, x.kind
           from (
@@ -131,7 +132,7 @@ begin
                from public.messages m
               where m.org_id = p.org_id and m.property_id = p.id and m.channel = 'sms' and m.direction = 'outbound'
                 and m.status in ('sent', 'delivered')
-              order by m.created_at desc, m.id desc
+              order by coalesce(m.sent_at, m.created_at) desc, m.id desc
               limit 1)
             union all
             (select ca.started_at, 'call'::text
