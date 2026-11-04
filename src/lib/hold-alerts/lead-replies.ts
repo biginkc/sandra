@@ -6,7 +6,17 @@ import type { HotPromotion } from "./types";
 import { MAX_ATTEMPTS } from "./types";
 
 const PAGE = 200;
-export const LEAD_REPLY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Texts checked per round of "already alerted?" lookups. Each text becomes four
+ * hold_key values in one URL; 200 texts (800 keys) overflowed the request and
+ * PostgREST answered 400, so every lead text in a full batch was skipped.
+ */
+export const KEY_BATCH = 50;
+/** Only recent replies may page the owner. Older texts remain in the inbox.
+ * This bounds recovery after an outage: fixing delivery must not replay days of
+ * history as "new text". Allows twice the 30-minute dispatch settling window.
+ */
+export const LEAD_REPLY_LOOKBACK_MS = 60 * 60 * 1000;
 /**
  * A lead reply waits until AI dispatch is done with the text (its response
  * claim completed, its pipeline run finished, or processing.aiResponder.completedAt
@@ -121,8 +131,8 @@ export async function loadLeadReplies(
   const skip = new Set<string>();
   const done = new Set<string>();
   const ids = leadMsgs.map((m) => m.id);
-  for (let i = 0; i < ids.length; i += PAGE) {
-    const batch = ids.slice(i, i + PAGE);
+  for (let i = 0; i < ids.length; i += KEY_BATCH) {
+    const batch = ids.slice(i, i + KEY_BATCH);
     const cl = await db
       .from("ai_response_claims")
       .select("inbound_message_id, status")
