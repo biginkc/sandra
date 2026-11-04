@@ -92,23 +92,45 @@ describe("age split (Jarrad 2026-10-31)", () => {
     expect(treatmentFor(3, 2)).toBe("sort_only");
   });
 
-  const dec = (road: string, steps: Array<{ kind: string }>, status = "decided") => ({ status, road, failure_reason: null, action: { road, steps } });
-  const book = dec("book_appointment", [{ kind: "alert" }, { kind: "reply" }, { kind: "drip" }]);
+  type Step = { kind: string; reason?: string; whenTimeOnlyOff?: boolean };
+  const dec = (road: string, steps: Step[], status = "decided") => ({ status, road, failure_reason: null, action: { road, steps } });
+  const HOT_YES: Step = { kind: "alert", reason: "hot_yes", whenTimeOnlyOff: true };
+  // Shapes from actions.ts: the yes roads carry ONLY the time-only hot alert.
+  const book = dec("book_appointment", [HOT_YES, { kind: "reply" }, { kind: "drip" }]);
+  const reactionBook = dec("reaction+book_appointment", [HOT_YES, { kind: "drip" }]);
+  const driving = dec("driving_reply+book_appointment", [HOT_YES, { kind: "reply" }, { kind: "drip" }]);
 
-  it("sort-only never replies or drips; hot roads alert + hold; closes close", () => {
-    expect(wouldDo(book, "full")).toMatchObject({ wouldReply: true, wouldDrip: true, wouldAlert: true, wouldHold: false });
-    expect(wouldDo(book, "sort_only")).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true, wouldClose: false });
-    expect(wouldDo(dec("wrong_number_close", [{ kind: "wrong_number_close" }]), "sort_only")).toMatchObject({ wouldReply: false, wouldClose: true, wouldHold: false });
-    expect(wouldDo(dec("not_interested_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only")).toMatchObject({ wouldReply: false, wouldDrip: false, wouldClose: true });
-    expect(wouldDo(dec("maybe_later_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only")).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false });
-    expect(wouldDo(dec("stop", [{ kind: "hold" }]), "sort_only")).toMatchObject({ wouldHold: true, wouldReply: false });
-    // Price too high has no alert of its own live; sort-only still alerts (never a silent hold).
-    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only")).toMatchObject({ wouldHold: true, wouldReply: false, wouldAlert: true });
+  it("sort-only never replies or drips; hot roads hold; closes close (time-only off: yes roads alert)", () => {
+    expect(wouldDo(book, "full", false)).toMatchObject({ wouldReply: true, wouldDrip: true, wouldAlert: true, wouldHold: false });
+    expect(wouldDo(book, "sort_only", false)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true, wouldClose: false });
+    expect(wouldDo(dec("wrong_number_close", [{ kind: "wrong_number_close" }]), "sort_only", true)).toMatchObject({ wouldReply: false, wouldClose: true, wouldHold: false });
+    expect(wouldDo(dec("not_interested_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only", true)).toMatchObject({ wouldReply: false, wouldDrip: false, wouldClose: true });
+    expect(wouldDo(dec("maybe_later_drip", [{ kind: "reply" }, { kind: "drip" }]), "sort_only", true)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false });
+    expect(wouldDo(dec("stop", [{ kind: "hold" }]), "sort_only", true)).toMatchObject({ wouldHold: true, wouldReply: false });
+    // Price too high has no alert of its own live; sort-only adds "Named a price" (never time-only).
+    expect(wouldDo(dec("price_check", [{ kind: "reply" }]), "sort_only", true)).toMatchObject({ wouldHold: true, wouldReply: false, wouldAlert: true });
+    expect(wouldDo(dec("price_check", [{ kind: "reply" }, { kind: "alert", reason: "named_price" }]), "full", true)).toMatchObject({ wouldReply: true, wouldAlert: true });
+  });
+
+  it("alert only when a time is picked: the yes roads' hot alert is not projected while it is in force", () => {
+    for (const d of [book, reactionBook, driving]) {
+      expect(wouldDo(d, "sort_only", true)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: true, wouldClose: false });
+      expect(wouldDo(d, "sort_only", false)).toMatchObject({ wouldAlert: true, wouldHold: true });
+    }
+    expect(wouldDo(book, "full", true)).toEqual({ wouldReply: true, wouldDrip: true, wouldAlert: false, wouldHold: false, wouldClose: false });
+    expect(wouldDo(reactionBook, "full", true)).toMatchObject({ wouldDrip: true, wouldAlert: false });
+    expect(wouldDo(reactionBook, "full", false)).toMatchObject({ wouldDrip: true, wouldAlert: true });
+    // A road with a non-time-only alert still alerts when time-only is in force.
+    const callMe = dec("ALERT_call_me", [{ kind: "alert", reason: "call_me" }]);
+    expect(wouldDo(callMe, "full", true)).toMatchObject({ wouldAlert: true });
+    expect(wouldDo(callMe, "sort_only", true)).toMatchObject({ wouldAlert: true, wouldHold: true });
+    // Mixed steps: the plain alert still goes.
+    expect(wouldDo(dec("book_appointment", [HOT_YES, { kind: "alert", reason: "x" }]), "full", true)).toMatchObject({ wouldAlert: true });
   });
 
   it("full treatment: the driving reply never goes to an old text (holds with its alerts instead)", () => {
-    const driving = dec("driving_reply+book_appointment", [{ kind: "alert" }, { kind: "reply" }, { kind: "drip" }]);
-    expect(wouldDo(driving, "full")).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true, wouldClose: false });
+    expect(wouldDo(driving, "full", false)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: true, wouldHold: true, wouldClose: false });
+    expect(wouldDo(driving, "full", true)).toEqual({ wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: true, wouldClose: false });
   });
 });
 
