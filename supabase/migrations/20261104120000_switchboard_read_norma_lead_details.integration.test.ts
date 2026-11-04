@@ -63,7 +63,19 @@ const contacts = { person: randomUUID(), entity: randomUUID(), quiet: randomUUID
 
 let db: Client;
 
-type PlanNode = { "Node Type": string; "Relation Name"?: string; Plans?: PlanNode[] };
+type PlanNode = { "Node Type": string; "Relation Name"?: string; "Index Cond"?: string; "Recheck Cond"?: string; Plans?: PlanNode[] };
+
+// Every catalog fact the migration sets, for before/after comparisons.
+const STATE_SQL = `select
+    (select pg_get_viewdef('switchboard_read.norma_lead_details'::regclass)) as viewdef,
+    (select row(c.relowner::regrole::text, c.relacl::text, c.reloptions::text)::text from pg_class c
+      where c.oid = 'switchboard_read.norma_lead_details'::regclass) as view_meta,
+    (select relacl::text from pg_class where oid = 'public.call_activities'::regclass) as call_activities_acl,
+    (select string_agg(format('%s|%s|%s|%s', tablename, policyname, roles, qual), ',' order by tablename, policyname)
+       from pg_policies where policyname = 'switchboard_read_owner_select') as policies,
+    (select string_agg(format('%s|%s|%s|%s|%s', member::regrole, grantor::regrole, admin_option, inherit_option, set_option),
+            ',' order by member::regrole::text, grantor::regrole::text)
+       from pg_auth_members where roleid = 'switchboard_read_owner'::regrole) as memberships`;
 
 async function asReader<T>(fn: () => Promise<T>): Promise<T> {
   await db.query("savepoint reader");
@@ -188,7 +200,11 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
     await seed();
     await provisionSwitchboardRead();
     await db.query(migrationSql);
+    const before = (await db.query(STATE_SQL)).rows[0];
     await db.query(migrationSql); // re-run must succeed and change nothing
+    const after = (await db.query(STATE_SQL)).rows[0];
+    expect(after).toEqual(before);
+    expect(before.viewdef).toContain("call_activities");
 
     const view = await db.query(
       `select c.relkind, pg_get_userbyid(c.relowner) as owner, c.reloptions
@@ -201,6 +217,52 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
         where schemaname = 'public' and tablename = 'call_activities' and policyname = 'switchboard_read_owner_select'`,
     );
     expect(policy.rows).toEqual([{ roles: ["switchboard_read_owner"], cmd: "SELECT", qual: `(org_id = '${orgA}'::uuid)` }]);
+  });
+
+  it("refuses to run when the owner policies disagree on the org", async () => {
+    await db.query("savepoint mismatch");
+    try {
+      await db.query(`alter policy switchboard_read_owner_select on public.contacts using (org_id = '${orgB}'::uuid)`);
+      await expect(db.query(migrationSql)).rejects.toThrow(
+        `switchboard_read_owner_select on public.contacts does not scope to org ${orgA}`,
+      );
+    } finally {
+      await db.query("rollback to savepoint mismatch");
+    }
+  });
+
+  it("grants itself owner membership only when missing, and revokes it afterwards", async () => {
+    await db.query("savepoint membership");
+    try {
+      const has = async () =>
+        (await db.query(
+          `select pg_has_role(current_user, 'switchboard_read_owner', 'USAGE') as usage,
+                  pg_has_role(current_user, 'switchboard_read_owner', 'SET') as set`,
+        )).rows[0];
+      const before = (await db.query(STATE_SQL)).rows[0];
+      await db.query("set local role switchboard_read_owner");
+      await db.query("drop view switchboard_read.norma_lead_details");
+      await db.query("reset role");
+      // Drop the operator script's membership (granted by this role), leaving only what CREATE ROLE gave the creator.
+      await db.query("revoke switchboard_read_owner from current_user granted by current_user");
+      expect(await has()).toEqual({ usage: false, set: false });
+      const withoutSelfGrant = (
+        await db.query("select string_agg(format('%s|%s', member::regrole, grantor::regrole), ',') as m from pg_auth_members where roleid = 'switchboard_read_owner'::regrole")
+      ).rows[0].m;
+
+      await db.query(migrationSql);
+
+      const after = (await db.query(STATE_SQL)).rows[0];
+      // View, grants and policies recreated identically.
+      expect({ ...after, memberships: null }).toEqual({ ...before, memberships: null });
+      // Membership is back to exactly what it was before the migration ran: its temporary grant was revoked.
+      expect(await has()).toEqual({ usage: false, set: false });
+      expect(
+        (await db.query("select string_agg(format('%s|%s', member::regrole, grantor::regrole), ',') as m from pg_auth_members where roleid = 'switchboard_read_owner'::regrole")).rows[0].m,
+      ).toBe(withoutSelfGrant);
+    } finally {
+      await db.query("rollback to savepoint membership");
+    }
   });
 
   it("matches the column contract exactly", async () => {
@@ -316,28 +378,55 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
     expect(writable.rows[0].w).toBe(false);
   });
 
-  it("a property_id lookup plans as index scans, not sequential scans of messages or call_activities", async () => {
-    const plan = await asReader(async () => {
-      await db.query("set local enable_seqscan = off"); // tiny fixture tables; force the planner to show index paths
-      const { rows } = await db.query(
-        "explain (format json) select * from switchboard_read.norma_lead_details where property_id = any($1::uuid[])",
-        [[ids.live, ids.entity]],
+  it("a property_id lookup uses property-keyed index conditions on properties, messages and call_activities", async () => {
+    await db.query("savepoint plan");
+    try {
+      // Give the planner realistic statistics: 300 extra leads with texts and calls, then ANALYZE (sees this transaction's rows).
+      await db.query(
+        `with p as (
+           insert into public.properties(org_id,address,state,status)
+           select $1, 'Bulk ' || g, 'MO', 'new_lead' from generate_series(1, 300) g returning id)
+         insert into public.messages(org_id,property_id,channel,direction,status,body,created_at)
+         select $1, p.id, 'sms', d, case d when 'inbound' then 'received' else 'delivered' end, 'bulk',
+                now() - make_interval(mins => g)
+           from p, generate_series(1, 8) g, unnest(array['inbound','outbound']) d`,
+        [orgA],
       );
-      return rows[0]["QUERY PLAN"][0].Plan as PlanNode;
-    });
-    const scans = new Map<string, Set<string>>();
-    const walk = (node: PlanNode) => {
-      if (node["Relation Name"]) {
-        const set = scans.get(node["Relation Name"]) ?? new Set<string>();
-        set.add(node["Node Type"]);
-        scans.set(node["Relation Name"], set);
+      await db.query(
+        `insert into public.call_activities(org_id,property_id,contact_id,jitter_attempt_id,jitter_session_id,started_at,provider,direction)
+         select $1, p.id, $2, 'bulk-' || p.id || '-' || g, 'bulk-session', now() - make_interval(hours => g), 'jitter', 'outbound'
+           from public.properties p, generate_series(1, 4) g where p.org_id = $1 and p.address like 'Bulk %'`,
+        [orgA, contacts.quiet],
+      );
+      await db.query("analyze public.properties, public.contacts, public.messages, public.call_activities");
+      const plan = await asReader(async () => {
+        const { rows } = await db.query(
+          "explain (format json) select * from switchboard_read.norma_lead_details where property_id = any($1::uuid[])",
+          [[ids.live, ids.entity]],
+        );
+        return rows[0]["QUERY PLAN"][0].Plan as PlanNode;
+      });
+      const nodes: PlanNode[] = [];
+      const walk = (node: PlanNode) => {
+        if (node["Relation Name"]) nodes.push(node);
+        for (const child of node.Plans ?? []) walk(child);
+      };
+      walk(plan);
+      const conds = (relation: string) => nodes.filter((n) => n["Relation Name"] === relation);
+      for (const relation of ["properties", "messages", "call_activities"]) {
+        expect([relation, conds(relation).some((n) => n["Node Type"] === "Seq Scan")]).toEqual([relation, false]);
       }
-      for (const child of node.Plans ?? []) walk(child);
-    };
-    walk(plan);
-    for (const relation of ["properties", "messages", "call_activities"]) {
-      expect([relation, scans.has(relation)]).toEqual([relation, true]);
-      expect([relation, [...(scans.get(relation) ?? [])].includes("Seq Scan")]).toEqual([relation, false]);
+      // A bitmap heap scan carries its index condition as "Recheck Cond".
+      const cond = (n: PlanNode) => n["Index Cond"] ?? n["Recheck Cond"] ?? "";
+      expect(conds("properties").some((n) => /\bid = ANY\b/.test(cond(n)))).toBe(true);
+      const messages = conds("messages");
+      expect(messages.length).toBeGreaterThanOrEqual(2); // inbound lateral + outbound branch
+      for (const node of messages) expect(node["Index Cond"] ?? "").toMatch(/property_id = p\.id/);
+      const calls = conds("call_activities");
+      expect(calls.length).toBe(1);
+      expect(calls[0]["Index Cond"] ?? "").toMatch(/property_id = p\.id/);
+    } finally {
+      await db.query("rollback to savepoint plan");
     }
   });
 });

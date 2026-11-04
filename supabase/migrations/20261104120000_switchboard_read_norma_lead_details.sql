@@ -15,15 +15,21 @@
 -- On a database where the operator script was never run (fresh local/CI chains), this migration is a no-op.
 --
 -- New base-table access: SELECT on public.call_activities for switchboard_read_owner, scoped by the same
--- org policy. Switchboard's db/sandra/0001_switchboard_read.sql and expected.json must list public.call_activities and
--- switchboard_read.norma_lead_details, or that script's post-check rejects the extra grant on its next re-run.
+-- org policy.
+--
+-- Cross-repo contract: Switchboard's db/sandra/0001_switchboard_read.sql creates the identical view, grant and policy
+-- (call_activities in its base-table list; norma_lead_details in its reader grant). Release order: that script update
+-- merges first, then this migration, then a re-run of the script must succeed and keep the reader's grant. Keep the
+-- view body byte-identical in both places (Switchboard pins its pg_get_viewdef md5).
 do $migration$
 declare
   v_org uuid;
   v_reader oid;
   v_bad text;
   v_table text;
+  v_granted boolean := false;
 begin
+  perform set_config('lock_timeout', '5s', true);
   if to_regnamespace('switchboard_read') is null
      or not exists (select 1 from pg_roles where rolname = 'switchboard_read_owner')
      or not exists (select 1 from pg_roles where rolname = 'sandra_switchboard_reader') then
@@ -51,13 +57,21 @@ begin
       and not rolcreatedb and not rolcreaterole and not rolinherit and not rolbypassrls and not rolreplication) then
     raise exception 'switchboard_read_owner exists with unexpected attributes';
   end if;
-  if not (select rolsuper from pg_roles where rolname = current_user)
-     and not pg_has_role(current_user, 'switchboard_read_owner', 'SET') then
-    if current_setting('server_version_num')::int >= 160000 then
-      execute 'grant switchboard_read_owner to current_user with inherit true, set true';
-    else
-      execute 'grant switchboard_read_owner to current_user';
+  -- Creating the view and handing it to the owner needs USAGE and SET on switchboard_read_owner. The operator script
+  -- normally leaves that membership in place; if it is missing, grant it for this migration only and revoke it at the
+  -- end, so the migration leaves role memberships exactly as it found them.
+  if not (pg_has_role(current_user, 'switchboard_read_owner', 'USAGE')
+          and pg_has_role(current_user, 'switchboard_read_owner', 'SET')) then
+    if current_setting('server_version_num')::int < 160000 then
+      raise exception 'switchboard_read_norma_lead_details needs PostgreSQL 16+ (role membership SET/INHERIT options)';
     end if;
+    if exists (select 1 from pg_auth_members
+                where roleid = 'switchboard_read_owner'::regrole and member = current_user::regrole
+                  and grantor = current_user::regrole) then
+      raise exception '% already holds a membership in switchboard_read_owner granted by itself, without USAGE and SET; fix it by hand', current_user;
+    end if;
+    execute 'grant switchboard_read_owner to current_user with inherit true, set true';
+    v_granted := true;
   end if;
 
   -- Owner access to call activity, org-scoped exactly like the operator script's other base tables.
@@ -105,7 +119,8 @@ begin
          where m.org_id = p.org_id and m.property_id = p.id and m.channel = 'sms' and m.direction = 'inbound'
          order by m.created_at desc, m.id desc
          limit 1) li on true
-      -- Latest contact of any kind: inbound text, outbound text that actually went out, or a call.
+      -- Latest contact of any kind: inbound text, outbound text that actually went out, or a call. Outbound picks the
+      -- newest-created sent/delivered text (index order on idx_messages_property_created_id) and reports when it went out.
       left join lateral (
         select x.at, x.kind
           from (
@@ -116,7 +131,7 @@ begin
                from public.messages m
               where m.org_id = p.org_id and m.property_id = p.id and m.channel = 'sms' and m.direction = 'outbound'
                 and m.status in ('sent', 'delivered')
-              order by coalesce(m.sent_at, m.created_at) desc, m.id desc
+              order by m.created_at desc, m.id desc
               limit 1)
             union all
             (select ca.started_at, 'call'::text
@@ -145,6 +160,10 @@ begin
   if v_bad is not null then raise exception 'reader has privileges on base tables: %', v_bad; end if;
   if has_table_privilege(v_reader, 'switchboard_read.norma_lead_details', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') then
     raise exception 'reader has write privileges on switchboard_read.norma_lead_details';
+  end if;
+
+  if v_granted then
+    execute 'revoke switchboard_read_owner from current_user granted by current_user';
   end if;
 end
 $migration$;
