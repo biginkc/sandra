@@ -16,21 +16,26 @@ const AT = "2026-10-21T11:00:00.000Z";
 
 type Tables = Record<string, Array<Record<string, unknown>>>;
 
+/** Real PostgREST rejected an in() list of 800 hold keys with HTTP 400 (400 passed): mirror that. */
+const MAX_IN_LIST = 400;
+
 /** Minimal in-memory query builder: eq / in / gte / or (keyset) / order / limit. */
 function fakeDb(tables: Tables) {
   return {
     from(table: string) {
       const filters: Array<(r: Record<string, unknown>) => boolean> = [];
       let limit = Infinity;
+      let tooLong = false;
       const q = {
         select: () => q,
         eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), q),
-        in: (c: string, v: unknown[]) => (filters.push((r) => v.includes(r[c])), q),
+        in: (c: string, v: unknown[]) => ((tooLong ||= v.length > MAX_IN_LIST), filters.push((r) => v.includes(r[c])), q),
         gte: (c: string, v: string) => (filters.push((r) => String(r[c]) >= v), q),
         or: () => q,
         order: () => q,
         limit: (n: number) => ((limit = n), q),
-        then(resolve: (v: { data: unknown[]; error: null }) => void) {
+        then(resolve: (v: { data: unknown[] | null; error: { message: string } | null }) => void) {
+          if (tooLong) return resolve({ data: null, error: { message: "Bad Request" } });
           const rows = (tables[table] ?? []).filter((r) => filters.every((f) => f(r)));
           resolve({ data: rows.slice(0, limit), error: null });
         },
@@ -254,6 +259,32 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
     const t = depsWith({ messages: [msg("in-old", "p1", "2026-10-20T10:00:00.000Z")], properties: [prop("p1", "new_lead")] });
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toEqual([]);
+  });
+
+  it("a busy hour stays within the history-query limit and alerts every fresh text", async () => {
+    const texts = Array.from({ length: 120 }, (_, i) => msg(`in-${String(i).padStart(3, "0")}`, "p1", AT));
+    const t = depsWith({ messages: texts, properties: [prop("p1", "interested")] });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(120);
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(120);
+  });
+
+  it("does not release an old unread backlog when history queries recover", async () => {
+    const t = depsWith({
+      messages: [
+        msg("week-old", "p1", "2026-10-15T12:00:00.000Z"),
+        msg("just-expired", "p1", "2026-10-21T10:59:59.999Z"),
+        msg("boundary", "p1", AT),
+      ],
+      properties: [prop("p1", "new_lead")],
+    });
+    t.store.leadWatermarks.set(ORG, "2026-10-14T00:00:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.map((r) => r.holdKey)).toEqual([
+      leadReplyKey("boundary"), leadReplyKey("boundary"),
+    ]);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
   });
 
   it("no loadLeadReplies dep → behaviour unchanged", async () => {
