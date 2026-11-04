@@ -70,7 +70,9 @@ begin
                   and grantor = current_user::regrole) then
       raise exception '% already holds a membership in switchboard_read_owner granted by itself, without USAGE and SET; fix it by hand', current_user;
     end if;
-    execute 'grant switchboard_read_owner to current_user with inherit true, set true';
+    -- The role is named explicitly: GRANT/REVOKE ... CURRENT_USER segfaults the backend under some supautils builds
+    -- (reproduced on supabase/postgres 17.6.1.143), which restarts the whole server.
+    execute format('grant switchboard_read_owner to %I with inherit true, set true', current_user);
     v_granted := true;
   end if;
 
@@ -164,7 +166,7 @@ begin
   end if;
 
   if v_granted then
-    execute 'revoke switchboard_read_owner from current_user granted by current_user';
+    execute format('revoke switchboard_read_owner from %1$I granted by %1$I', current_user);
   end if;
 end
 $migration$;

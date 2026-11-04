@@ -151,9 +151,11 @@ async function provisionSwitchboardRead() {
   await db.query(`create role switchboard_read_owner nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls noreplication`);
   await db.query(`create role sandra_switchboard_reader login nosuperuser nocreatedb nocreaterole noinherit nobypassrls
     noreplication connection limit 3`);
-  await db.query("grant switchboard_read_owner to current_user with inherit true, set true");
+  // Role names are explicit: GRANT/REVOKE ... CURRENT_USER segfaults the backend under some supautils builds.
+  const me = (await db.query<{ me: string }>("select quote_ident(current_user) as me")).rows[0].me;
+  await db.query(`grant switchboard_read_owner to ${me} with inherit true, set true`);
   // Test-only: lets this session SET ROLE to the reader (no inherit, so it gains none of the reader's rights).
-  await db.query("grant sandra_switchboard_reader to current_user with inherit false, set true");
+  await db.query(`grant sandra_switchboard_reader to ${me} with inherit false, set true`);
   for (const table of ["properties", "contacts", "messages", "organizations"]) {
     const column = table === "organizations" ? "id" : "org_id";
     await db.query(`grant select on public.${table} to switchboard_read_owner`);
@@ -249,7 +251,8 @@ describe("20261104120000 switchboard_read.norma_lead_details", () => {
       await db.query("drop view switchboard_read.norma_lead_details");
       await db.query("reset role");
       // Drop the operator script's membership (granted by this role), leaving only what CREATE ROLE gave the creator.
-      await db.query("revoke switchboard_read_owner from current_user granted by current_user");
+      const me = (await db.query<{ me: string }>("select quote_ident(current_user) as me")).rows[0].me;
+      await db.query(`revoke switchboard_read_owner from ${me} granted by ${me}`);
       expect(await has()).toEqual({ usage: false, set: false });
       const withoutSelfGrant = (
         await db.query("select string_agg(format('%s|%s', member::regrole, grantor::regrole), ',') as m from pg_auth_members where roleid = 'switchboard_read_owner'::regrole")
