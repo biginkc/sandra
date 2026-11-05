@@ -4,11 +4,12 @@
 set -u
 : "${SBX_WORKDIR:?SBX_WORKDIR must be set to the disposable stack workdir}"
 LABEL=$1; N=$2
-DB=postgresql://postgres:postgres@127.0.0.1:55329/postgres
+${SBX_PROJECT:?set SBX_PROJECT (no default)}; ${SBX_DB_PORT:?set SBX_DB_PORT (no default)}; export SBX_PROJECT SBX_DB_PORT
+DB=postgresql://postgres:postgres@127.0.0.1:$SBX_DB_PORT/postgres
 OUT=scripts/filter-volume/results/cold-$LABEL.jsonl; : > "$OUT"
 for i in $(seq 1 "$N"); do
   node scripts/filter-volume/assert-sandbox-target.mjs >/dev/null || { echo "identity check failed; aborting" >&2; exit 1; }
-  docker restart supabase_db_sandra-filter-vol supabase_rest_sandra-filter-vol >/dev/null
+  docker restart supabase_db_$SBX_PROJECT supabase_rest_$SBX_PROJECT >/dev/null
   until psql $DB -Atc "select 1" >/dev/null 2>&1; do sleep 1; done; sleep 3
   node scripts/filter-volume/revert-cache-migrations.mjs >/dev/null
   psql $DB -qAtc "delete from messages where body='probe'; delete from tasks where title='probe'" >/dev/null

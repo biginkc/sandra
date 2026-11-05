@@ -1,4 +1,4 @@
-// Local-only (55329 sandbox, identity-checked): barrier-forced test of the residual
+// Local-only (disposable sandbox, identity-checked): barrier-forced test of the residual
 // lock-order path for migration 20261002110000's single up-front LOCK statement.
 //  Order X: writer holds `properties` (FOR UPDATE), the migration's LOCK takes the child
 //           tables then waits on `properties`, then the writer inserts into `messages`
@@ -12,7 +12,8 @@ import { execFileSync } from "node:child_process";
 import pg from "pg";
 import { assertSandboxTarget, SANDBOX } from "./assert-sandbox-target.mjs";
 
-const CLI = process.env.SUPABASE_CLI ?? "/tmp/sb2109/node_modules/.bin/supabase";
+const CLI = process.env.SUPABASE_CLI;
+if (!CLI) throw new Error("Set SUPABASE_CLI to the pinned Supabase CLI binary (2.109.1, as in db-migrate-*.yml)");
 const ORG = "00000000-0000-0000-0000-000000000bbb";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mk = async () => { const c = new pg.Client({ connectionString: SANDBOX.url }); await c.connect(); return c; };
