@@ -35,6 +35,12 @@ export const V2_ALERT_LABELS = {
    * can never dedupe it away.
    */
   reply_failed: "Reply could not be sent — needs a person",
+  /**
+   * Jarrad 2026-11-08: the reply was suppressed because the same text was already sent on this
+   * property (the seller texted again, or a second owner replied) while the drip runs, so no hold
+   * and no reply. Same plumbing as reply_failed: own identity per inbound, never time-only gated.
+   */
+  reply_repeat: "Seller texted again — same reply already sent, needs a person",
 } as const;
 export type V2AlertReason = keyof typeof V2_ALERT_LABELS;
 
