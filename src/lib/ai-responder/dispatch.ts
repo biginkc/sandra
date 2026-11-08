@@ -10067,7 +10067,17 @@ export async function runRoutingV2OutboxReplies(
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
     for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
       // A-2 F2: mechanics hold about this outbox row's own reply (superseded by a newer text = done).
-      const { data: boxRow } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      const { data: boxRow, error: boxError } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      if (boxError) {
+        // Unreadable now: keep hold_pending (no hold_written mark) so the next sweep retries the
+        // hold and the reply_failed alert; never fall through to a hold without its alert.
+        if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+          reportError(new Error((boxError as { message?: string }).message ?? "routing_v2_outbox unreadable"), {
+            tags: { surface: "routing_v2_outbox_holds" }, extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+          });
+        }
+        continue;
+      }
       const inboundId = (boxRow as { inbound_message_id?: string } | null)?.inbound_message_id;
       const written = inboundId
         ? await writeV2Hold(supabase, row.property_id, inboundId, routingV2OutboxHoldReason(row.reason), "mechanics")

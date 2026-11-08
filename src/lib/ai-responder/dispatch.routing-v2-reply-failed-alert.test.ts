@@ -54,13 +54,13 @@ describe("enqueueV2ReplyFailedAlert", () => {
  */
 describe("reply_failed alert through the production callers", () => {
   const REPLY = { id: "box1", org_id: "org1", property_id: "p1", inbound_message_id: "in1", kind: "reply" as const, payload: {}, created_at: new Date().toISOString() };
-  function prodFake(rpc: Record<string, unknown>, insertFails: { n: number }) {
+  function prodFake(rpc: Record<string, unknown>, insertFails: { n: number }, lookupFails = { n: 0 }) {
     const calls: string[] = [];
     const inserts: Array<Record<string, unknown>> = [];
     const chain = (table: string) => {
       const c: Record<string, unknown> = {};
       for (const m of ["select", "eq", "neq", "in", "is", "order", "update", "limit"]) c[m] = () => c;
-      c.maybeSingle = async () => ({
+      c.maybeSingle = async () => (table === "routing_v2_outbox" && lookupFails.n > 0 ? (lookupFails.n--, { data: null, error: { message: "transient read" } }) : {
         data: table === "routing_v2_outbox"
           ? { org_id: "org1", property_id: "p1", inbound_message_id: "in1", transition_seq: 3, kind: "reply" }
           : null,
@@ -131,5 +131,33 @@ describe("reply_failed alert through the production callers", () => {
     await runRoutingV2OutboxReplies(f.client);
     expect(f.inserts).toEqual([]);
     expect(f.calls).toContain("routing_v2_mark_outbox_hold_written");
+  });
+
+  it("cron sweep: the outbox lookup fails first = no hold_written mark, no insert; next sweep queues and clears", async () => {
+    const lookup = { n: 1 };
+    const rpc = {
+      routing_v2_release_stale_outbox_claims: 0, routing_v2_reconcile_outbox: {}, routing_v2_write_hold: "held",
+      routing_v2_outbox_holds_due: [{ outbox_id: "box1", property_id: "p1", reason: "not_sent:no_mapping", attempts: 0 }],
+      routing_v2_mark_outbox_hold_written: "ok", routing_v2_due_outbox_replies: [],
+    };
+    const a = prodFake(rpc, { n: 0 }, lookup);
+    expect((await runRoutingV2OutboxReplies(a.client)).held).toBe(0);
+    expect(a.calls).not.toContain("routing_v2_mark_outbox_hold_written");
+    expect(a.inserts).toEqual([]);
+    const b = prodFake(rpc, { n: 0 }, lookup);
+    expect((await runRoutingV2OutboxReplies(b.client)).held).toBe(1);
+    expect(b.inserts).toHaveLength(1);
+    expect(b.calls).toContain("routing_v2_mark_outbox_hold_written");
+  });
+
+  it("dispatch-time: the helper's own source-row lookup fails = marker kept, no insert", async () => {
+    const f = prodFake({
+      routing_v2_outbox_expired: true, routing_v2_mark_outbox_not_sent: "ok", routing_v2_write_hold: "held",
+      routing_v2_mark_outbox_hold_written: "ok",
+    }, { n: 0 }, { n: 1 });
+    await deliverRoutingV2OutboxReply(f.client, REPLY);
+    expect(f.calls).toContain("routing_v2_write_hold");
+    expect(f.calls).not.toContain("routing_v2_mark_outbox_hold_written");
+    expect(f.inserts).toEqual([]);
   });
 });
