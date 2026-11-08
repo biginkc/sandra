@@ -42,6 +42,7 @@ vi.mock("@/lib/messages/threading", () => ({
 }));
 
 import { releaseQueuedMessage, sendSmsToContact } from "./send";
+import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON } from "@/lib/ai-responder/hostile";
 import { getMessagingProvider } from "./registry";
 import { getConsentState, getConsentStateStrict } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
@@ -1395,3 +1396,63 @@ describe("sendSmsToContact — service-owned rep SMS retry fence", () => {
   expect(getMessagingProvider).not.toHaveBeenCalled();
   expect(fromSpy).not.toHaveBeenCalled();
  });
+
+describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-08)", () => {
+  const SEQ = { enrollmentId: "enr-1", stepId: "step-1", claimId: "claim-1" };
+  function holdSupabase(fresh: Record<string, unknown>) {
+    return fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: { outreach_dispo: null, ...fresh }, error: null },
+      ],
+      messages: [
+        { data: { id: "msg-h" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+  }
+
+  it.each([
+    ["stop-texting", `${OPTOUT_PHRASE_NEEDS_CONFIRM_REASON}:in-1`],
+    ["hostile", `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2`],
+  ])("blocks a drip/sequence send to an open %s hold", async (_l, reason) => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase({ needs_human_attention: true, last_ai_escalation_reason: reason }), {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165550145",
+      sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold", messageId: "msg-h" });
+  });
+
+  it("does not block a drip/sequence send once the hold is cleared", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(
+      holdSupabase({ needs_human_attention: false, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` }),
+      { origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ },
+    ).catch((e: unknown) => ({ status: "threw", e }));
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).not.toMatchObject({ source: "open_confirm_hold" });
+  });
+
+  it("does not apply the hold to a non-campaign, non-sequence automated send (fresh read stays dispo-only)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(
+      holdSupabase({ needs_human_attention: true, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` }),
+      { origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145" },
+    ).catch((e: unknown) => ({ status: "threw", e }));
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).not.toMatchObject({ source: "open_confirm_hold" });
+  });
+});

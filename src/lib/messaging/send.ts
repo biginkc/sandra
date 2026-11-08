@@ -1,3 +1,4 @@
+import { CONFIRM_HOLD_BLOCK_REASON, hasOpenConfirmHold } from "./confirm-hold";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
@@ -969,6 +970,10 @@ async function sendSmsToContactInner(
     const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: input.propertyId,
       contactId: input.contactId,
+      // Campaign and drip/sequence sends only; AI replies and person-clicked
+      // held drafts are not blocked by the stop-texting / hostile hold.
+      blockOpenConfirmHold:
+        !input.personInitiated && (!!input.campaignId || !!input.sequenceContext),
     });
     if (!freshCheck.ok) {
       await supabase
@@ -2086,6 +2091,8 @@ async function releaseQueuedMessageInner(
     const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: msg.property_id,
       contactId: msg.contact_id,
+      // Queued campaign rows only (manual composer rows never reach here).
+      blockOpenConfirmHold: !!msg.campaign_id,
     });
     if (!freshCheck.ok) {
       const { error: holdError } = await supabase
@@ -2617,9 +2624,16 @@ type FreshSuppressionCheck =
  */
 async function checkFreshAutomatedSuppression(
   supabase: SupabaseClient<Database>,
-  args: { propertyId: string; contactId: string },
+  args: { propertyId: string; contactId: string; blockOpenConfirmHold?: boolean },
 ): Promise<FreshSuppressionCheck> {
-  let propertyResult: { data: { outreach_dispo: string | null } | null; error: { message: string } | null };
+  let propertyResult: {
+    data: {
+      outreach_dispo: string | null;
+      needs_human_attention?: boolean | null;
+      last_ai_escalation_reason?: string | null;
+    } | null;
+    error: { message: string } | null;
+  };
   let contactResult: {
     data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
     error: { message: string } | null;
@@ -2629,7 +2643,7 @@ async function checkFreshAutomatedSuppression(
     [propertyResult, contactResult, consentResult] = await Promise.all([
       supabase
         .from("properties")
-        .select("outreach_dispo")
+        .select("outreach_dispo, needs_human_attention, last_ai_escalation_reason")
         .eq("id", args.propertyId)
         .maybeSingle(),
       supabase
@@ -2667,6 +2681,17 @@ async function checkFreshAutomatedSuppression(
       error: !propertyResult.data
         ? "fresh suppression state reload: property row not found"
         : "fresh suppression state reload: contact row not found",
+    };
+  }
+  if (args.blockOpenConfirmHold && hasOpenConfirmHold(propertyResult.data)) {
+    return {
+      ok: true,
+      decision: {
+        suppressed: true,
+        reason: CONFIRM_HOLD_BLOCK_REASON,
+        source: "open_confirm_hold",
+        outreachDispo: propertyResult.data.outreach_dispo ?? null,
+      },
     };
   }
   const decision = evaluateAutomatedSuppression({

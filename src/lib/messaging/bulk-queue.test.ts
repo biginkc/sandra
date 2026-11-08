@@ -25,12 +25,16 @@ vi.mock("@/lib/messaging/delivery", () => ({
 import { renderTemplate } from "@/lib/sequences/render";
 
 import { freshScheduleState, queueSmsBatch } from "./bulk-queue";
+import {
+  HOSTILE_NEEDS_CONFIRM_REASON,
+  OPTOUT_PHRASE_NEEDS_CONFIRM_REASON,
+} from "@/lib/ai-responder/hostile";
 
 const PHONE = { phone_1: "+18165551234", phone_1_type: "mobile", phone_2: null, phone_2_type: null, phone_3: null, phone_3_type: null };
 
-function fakeClient() {
+function fakeClient(propertyExtra: Record<string, unknown> = {}) {
   const tables: Record<string, unknown[]> = {
-    properties: [{ id: "prop-1", homeowner_contact_id: "c-1", org_id: "org-1", outreach_dispo: null, homeowner: PHONE }],
+    properties: [{ id: "prop-1", homeowner_contact_id: "c-1", org_id: "org-1", outreach_dispo: null, homeowner: PHONE, ...propertyExtra }],
     campaign_recipients: [{ property_id: "prop-1", contact_id: "c-1" }],
     contacts: [{ id: "c-1", ...PHONE, do_not_contact: false, sms_opted_out: false }],
     messages: [],
@@ -133,5 +137,44 @@ describe("renderTemplate identity", () => {
   it("returns text with no tokens unchanged", () => {
     const text = "Plain body, $5 {not a token} } { | 100% as-is.";
     expect(renderTemplate(text, { first_name: "X", rapid_offer: "$1,000" })).toBe(text);
+  });
+});
+
+describe("queueSmsBatch open stop-texting / hostile hold skip", () => {
+  beforeEach(() => {
+    sendSmsToContact.mockReset().mockResolvedValue({ status: "queued" });
+    loadTemplateVarsWithMeta.mockReset().mockResolvedValue({ vars: { rapid_offer: "" }, rapidOffer: null });
+  });
+
+  async function runWith(extra: Record<string, unknown>) {
+    return queueSmsBatch(fakeClient(extra), {
+      propertyIds: ["prop-1"],
+      opts: { campaignId: "camp-1", paceSeconds: 60, body: "Hello there" },
+      state: freshScheduleState(Date.UTC(2026, 10, 8)),
+    });
+  }
+
+  it.each([
+    ["stop-texting", `${OPTOUT_PHRASE_NEEDS_CONFIRM_REASON}:msg-1`],
+    ["hostile", `${HOSTILE_NEEDS_CONFIRM_REASON}:msg-2`],
+  ])("skips a property with an open %s hold and counts it", async (_label, reason) => {
+    const state = await runWith({ needs_human_attention: true, last_ai_escalation_reason: reason });
+    expect(state.skipped).toBe(1);
+    expect(state.skippedConfirmHold).toBe(1);
+    expect(state.succeeded).toBe(0);
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("queues a property whose hold a person already cleared", async () => {
+    const state = await runWith({ needs_human_attention: false, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:msg-2` });
+    expect(state.succeeded).toBe(1);
+    expect(state.skippedConfirmHold).toBe(0);
+    expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues a property flagged for an unrelated reason", async () => {
+    const state = await runWith({ needs_human_attention: true, last_ai_escalation_reason: "something_else" });
+    expect(state.succeeded).toBe(1);
+    expect(sendSmsToContact).toHaveBeenCalledTimes(1);
   });
 });

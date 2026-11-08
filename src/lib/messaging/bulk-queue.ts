@@ -10,6 +10,7 @@
  * and template behavior are unchanged; the integration suite pins them.
  */
 
+import { hasOpenConfirmHold } from "./confirm-hold";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
@@ -114,6 +115,11 @@ export type BulkSmsScheduleState = {
    * no stored value. Optional so legacy serialized state still parses.
    */
   skippedNoValue?: number;
+  /**
+   * Subset of `skipped`: the property has an open, uncleared stop-texting or
+   * hostile hold (Jarrad's decision 2026-11-08), so the campaign skips it.
+   */
+  skippedConfirmHold?: number;
   failed: { propertyId: string; message: string }[];
 };
 
@@ -125,6 +131,7 @@ export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {
     succeeded: 0,
     skipped: 0,
     skippedNoValue: 0,
+    skippedConfirmHold: 0,
     failed: [],
   };
 }
@@ -197,6 +204,8 @@ export async function queueSmsBatch(
     homeowner_contact_id: string | null;
     org_id: string | null;
     outreach_dispo: string | null;
+    needs_human_attention: boolean | null;
+    last_ai_escalation_reason: string | null;
     homeowner: SmsPhoneContact | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
@@ -205,6 +214,7 @@ export async function queueSmsBatch(
       .from("properties")
       .select(
         `id, homeowner_contact_id, org_id, outreach_dispo,
+         needs_human_attention, last_ai_escalation_reason,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
          )`,
@@ -383,6 +393,12 @@ export async function queueSmsBatch(
 
     if (!contactId) {
       state.skipped++;
+      continue;
+    }
+
+    if (hasOpenConfirmHold(property)) {
+      state.skipped++;
+      state.skippedConfirmHold = (state.skippedConfirmHold ?? 0) + 1;
       continue;
     }
 
