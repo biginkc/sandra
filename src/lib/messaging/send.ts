@@ -1137,6 +1137,34 @@ async function sendSmsToContactInner(
         return { status: "blocked_before_provider", messageId: pending.id, retired };
       }
     }
+    // Final dispatch boundary for the stop-texting / hostile hold: re-read it
+    // as the LAST await before the provider call, so a hold committed while
+    // the earlier checks ran still stops a campaign / sequence send.
+    if (input.origin === "automated" && !input.personInitiated && (!!input.campaignId || !!input.sequenceContext)) {
+      const finalHold = await readOpenConfirmHold(supabase, input.propertyId);
+      if (!finalHold.ok || finalHold.open) {
+        await supabase
+          .from("messages")
+          .update({
+            status: "failed",
+            failed_at: new Date().toISOString(),
+            error_message: finalHold.ok
+              ? CONFIRM_HOLD_BLOCK_REASON
+              : `Held: could not confirm current hold state before sending (${finalHold.error}).`,
+          })
+          .eq("id", pending.id);
+        return finalHold.ok
+          ? {
+            status: "blocked_automated_suppressed",
+            messageId: pending.id,
+            reason: CONFIRM_HOLD_BLOCK_REASON,
+            source: "open_confirm_hold",
+            outreachDispo: propertyResult.data.outreach_dispo ?? null,
+            consentState: null,
+          }
+          : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: finalHold.error };
+      }
+    }
     providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
@@ -2182,6 +2210,37 @@ async function releaseQueuedMessageInner(
       if (refuseError) return { status: "db_error", error: refuseError.message };
       return { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED };
     }
+    // Final dispatch boundary for the stop-texting / hostile hold (queued
+    // campaign rows): last await before the provider call.
+    if (queuedOrigin === "automated" && msg.campaign_id && msg.property_id) {
+      const finalHold = await readOpenConfirmHold(supabase, msg.property_id);
+      if (!finalHold.ok) {
+        // A read blip delays this text (back to queued), never sends it.
+        const { error: requeueError } = await supabase
+          .from("messages")
+          .update({ status: "queued", scheduled_for: new Date(Date.now() + TEST_TAG_RETRY_MS).toISOString() })
+          .eq("id", msg.id)
+          .eq("status", "pending");
+        if (requeueError) return { status: "db_error", error: requeueError.message };
+        return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: finalHold.error };
+      }
+      if (finalHold.open) {
+        const { error: holdError } = await supabase
+          .from("messages")
+          .update({ status: "failed", failed_at: new Date().toISOString(), error_message: CONFIRM_HOLD_BLOCK_REASON })
+          .eq("id", msg.id)
+          .eq("status", "pending");
+        if (holdError) return { status: "db_error", error: holdError.message };
+        return {
+          status: "blocked_automated_suppressed",
+          messageId: msg.id,
+          reason: CONFIRM_HOLD_BLOCK_REASON,
+          source: "open_confirm_hold",
+          outreachDispo: null,
+          consentState: null,
+        };
+      }
+    }
     const result = await provider.sendSms({
       to: msg.to_address,
       body: claimed.body,
@@ -2701,6 +2760,28 @@ async function checkFreshAutomatedSuppression(
     smsOptedOut: contactResult.data?.sms_opted_out ?? null,
   });
   return { ok: true, decision: decision.suppressed ? decision : null };
+}
+
+/**
+ * Fresh read of the stop-texting / hostile hold on one property. Fail closed:
+ * any read error or missing row is `{ ok: false }` and the caller holds the send.
+ */
+async function readOpenConfirmHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<{ ok: true; open: boolean } | { ok: false; error: string }> {
+  try {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (error) return { ok: false, error: error.message };
+    if (!data) return { ok: false, error: "hold state reload: property row not found" };
+    return { ok: true, open: hasOpenConfirmHold(data) };
+  } catch (e) {
+    return { ok: false, error: `hold state reload threw: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /**
