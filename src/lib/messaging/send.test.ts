@@ -1433,7 +1433,7 @@ describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-
     expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold", messageId: "msg-h" });
   });
 
-  it("blocks a sequence send when the hold is committed after the first check but before dispatch", async () => {
+  it("blocks a sequence send when the hold is committed after the first fresh check (pre-authorization read)", async () => {
     const provider = fakeProvider();
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
     const outcome = await sendSmsToContact(holdSupabase(NO_HOLD, HOSTILE_OPEN), {
@@ -1443,11 +1443,10 @@ describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-
     expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
   });
 
-  it("holds a sequence send when the final hold read fails (fail closed)", async () => {
+  it("holds a sequence send when the hold read fails, before sequence authorization (fail closed)", async () => {
     const provider = fakeProvider();
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
-    const outcome = await sendSmsToContact(
-      fakeSupabase({
+    const failing = fakeSupabase({
         contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
         properties: [
           { data: PROPERTY_ROW, error: null },
@@ -1455,11 +1454,15 @@ describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-
           { data: null, error: { message: "read timeout" } },
         ],
         messages: Array.from({ length: 6 }, () => ({ data: { id: "msg-h" }, error: null })),
-      }),
+      });
+    const outcome = await sendSmsToContact(failing,
       { origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ },
     );
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "read timeout" });
+    // The sequence authorization RPC never ran, so the claim is still
+    // `not_attempted` and the tick can retire it and retry (see tick.test.ts).
+    expect(failing.rpc).not.toHaveBeenCalled();
   });
 
   it("sends a drip/sequence text once the hold is cleared", async () => {

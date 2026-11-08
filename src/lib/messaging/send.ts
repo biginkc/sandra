@@ -1018,6 +1018,37 @@ async function sendSmsToContactInner(
   // provider intent as `unknown` in the same transaction. Keep the provider
   // invocation directly after this await: there must be no intervening read
   // or write that could make a cancellation appear to prove non-delivery.
+  if (input.sequenceContext && !input.personInitiated) {
+    // Stop-texting / hostile hold, final read for sequence sends. It runs
+    // BEFORE the authorization RPC so a read failure leaves the claim
+    // `not_attempted` and the tick retries it. The race with a hold committed
+    // after this read is closed by the RPC itself: the hold flow pauses the
+    // property's enrollments before it sets the hold flag, and the RPC
+    // re-locks the enrollment and requires status = 'active'.
+    const seqHold = await readOpenConfirmHold(supabase, input.propertyId);
+    if (!seqHold.ok || seqHold.open) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: seqHold.ok
+            ? CONFIRM_HOLD_BLOCK_REASON
+            : `Held: could not confirm current hold state before sending (${seqHold.error}).`,
+        })
+        .eq("id", pending.id);
+      return seqHold.ok
+        ? {
+          status: "blocked_automated_suppressed",
+          messageId: pending.id,
+          reason: CONFIRM_HOLD_BLOCK_REASON,
+          source: "open_confirm_hold",
+          outreachDispo: propertyResult.data.outreach_dispo ?? null,
+          consentState: null,
+        }
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: seqHold.error };
+    }
+  }
   if (input.sequenceContext) {
     const { data: authorization, error: authorizationError } = await supabase.rpc(
       "authorize_sequence_provider_attempt",
@@ -1140,7 +1171,9 @@ async function sendSmsToContactInner(
     // Final dispatch boundary for the stop-texting / hostile hold: re-read it
     // as the LAST await before the provider call, so a hold committed while
     // the earlier checks ran still stops a campaign / sequence send.
-    if (input.origin === "automated" && !input.personInitiated && (!!input.campaignId || !!input.sequenceContext)) {
+    // Sequence sends do this read before their authorization RPC instead (see
+    // above): no read may follow the RPC that moves the claim to `unknown`.
+    if (input.origin === "automated" && !input.personInitiated && !!input.campaignId && !input.sequenceContext) {
       const finalHold = await readOpenConfirmHold(supabase, input.propertyId);
       if (!finalHold.ok || finalHold.open) {
         await supabase
