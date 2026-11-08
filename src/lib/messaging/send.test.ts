@@ -1456,3 +1456,31 @@ describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-
     expect(outcome).not.toMatchObject({ source: "open_confirm_hold" });
   });
 });
+
+describe("releaseQueuedMessage — open stop-texting / hostile hold", () => {
+  function queuedRow(campaignId: string | null) {
+    return {
+      id: "queued-h", status: "queued", provider: "fake-test-provider", org_id: PROPERTY_ROW.org_id,
+      campaign_id: campaignId, contact_id: CONTACT_ID, property_id: PROPERTY_ID,
+      body: "Hi there, Mel with BMH here.", from_address: "+18165550145", to_address: CONTACT_ROW.phone_1,
+      scheduled_for: null, metadata: { sendOrigin: "automated" },
+    };
+  }
+  it("holds a queued campaign row for a property with an open hostile hold", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: Array.from({ length: 8 }, (_, i) =>
+        i === 0 ? { data: queuedRow("camp-1"), error: null } : { data: { id: "queued-h", body: queuedRow("camp-1").body }, error: null }),
+      campaigns: Array.from({ length: 4 }, () => ({ data: { status: "active", paused_at: null }, error: null })),
+      contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: { outreach_dispo: null, needs_human_attention: true, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-9` }, error: null },
+      ],
+    });
+    const outcome = await releaseQueuedMessage(supabase, "queued-h");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+});
