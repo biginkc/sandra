@@ -9566,8 +9566,12 @@ export async function deliverRoutingV2OutboxReply(
       await pauseV2DripsFailClosed(supabase, row.property_id);
       return false;
     }
-    // The hold alone was silent: the owner is told the seller got no reply.
-    if (r !== "superseded") await enqueueV2ReplyFailedAlert(supabase, row.id);
+    // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+    // be queued keeps hold_pending set (no hold_written mark), so the cron sweep retries both.
+    if (r !== "superseded") {
+      const alerted = await enqueueV2ReplyFailedAlert(supabase, row.id);
+      if (alerted === "error") return true;
+    }
     const { error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.id });
     if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
       reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_hold_written" }, extra: { outboxId: row.id } });
@@ -9846,8 +9850,11 @@ export function v2ReplyFailedAlertKey(inboundMessageId: string): string {
  * `reply_failed` owner alert (kind 'alert', same transition_seq as the failed reply). A newer seller
  * text does NOT cancel it (claim/check supersede replies only): the owner still learns the seller got
  * no reply. when_time_only_off is false: never time-only gated.
- * Idempotent per inbound (the dedupe key is also the hold-alert delivery identity). Best effort:
- * never throws and never changes the hold outcome.
+ * Not atomic: a look-first-then-insert (no unique index on routing_v2_outbox), so two concurrent
+ * callers (dispatch-time holdFor and the holds_due sweep) can each insert a row. That is safe for
+ * delivery: the fan-out collapses rows by dedupe_key and hold_alert_deliveries keys per channel on
+ * it, so the owner gets at most one alert per inbound. Never throws; "error" = caller keeps its
+ * retry obligation (hold_pending) so the alert is retried.
  */
 export async function enqueueV2ReplyFailedAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
   const loose = supabase as unknown as {
@@ -10068,8 +10075,20 @@ export async function runRoutingV2OutboxReplies(
       const ok = inboundId
         ? written !== "error"
         : await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
-      // The hold alone was silent: the owner is told the seller got no reply (idempotent per inbound).
-      if (inboundId && written !== "error" && written !== "superseded") await enqueueV2ReplyFailedAlert(supabase, row.outbox_id);
+      // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+      // be queued leaves the row pending (no hold_written mark): the next sweep retries it.
+      if (inboundId && written !== "error" && written !== "superseded") {
+        const alerted = await enqueueV2ReplyFailedAlert(supabase, row.outbox_id);
+        if (alerted === "error") {
+          if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+            reportError(new Error("routing v2 reply_failed alert keeps failing"), {
+              tags: { surface: "routing_v2_outbox_holds" },
+              extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+            });
+          }
+          continue;
+        }
+      }
       if (!ok) {
         // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
         // Astra review of a0c905d42390 (P1 #2): a hold that cannot be written never lets the drip go.
