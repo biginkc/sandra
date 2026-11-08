@@ -138,7 +138,7 @@ import {
 } from "@/lib/sms-classification/routing-v2/wrong-number-all";
 import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
 import { liveDecisionRow, recordLiveV2Decision, recordLiveV2DecisionRow } from "@/lib/sms-classification/routing-v2/live-decisions";
-import type { V2Action, V2Step } from "@/lib/sms-classification/routing-v2/actions";
+import { V2_ALERT_LABELS, type V2Action, type V2Step } from "@/lib/sms-classification/routing-v2/actions";
 import {
   DEALMACHINE_NO_KEY,
   MODEL_STOP_NO_PHONE,
@@ -9566,6 +9566,12 @@ export async function deliverRoutingV2OutboxReply(
       await pauseV2DripsFailClosed(supabase, row.property_id);
       return false;
     }
+    // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+    // be queued keeps hold_pending set (no hold_written mark), so the cron sweep retries both.
+    if (r !== "superseded") {
+      const alerted = await enqueueV2ReplyFailedAlert(supabase, row.id);
+      if (alerted === "error") return true;
+    }
     const { error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.id });
     if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
       reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_hold_written" }, extra: { outboxId: row.id } });
@@ -9829,6 +9835,72 @@ export async function writeV2Hold(
 /** A hold that has failed this many times is reported on every further failure. */
 export const ROUTING_V2_HOLD_REPORT_AFTER = 5;
 
+/** Owner alert reason for a queued reply that could not go out (an alert reason, not a hold reason). */
+const V2_REPLY_FAILED_ALERT = "reply_failed" as const;
+
+/** Delivery identity of the reply-failed owner alert: one per inbound, never hotTextKey. */
+export function v2ReplyFailedAlertKey(inboundMessageId: string): string {
+  return `routing_v2:${inboundMessageId}:reply_failed`;
+}
+
+/**
+ * A queued v2 reply the seller did not get (cancelled not_sent / expired / unknown too long) used
+ * to end in a hold flag only: no owner alert, because the road's own alert was either absent
+ * (price too high) or skipped by alert_on_time_only (book appointment). This queues one
+ * `reply_failed` owner alert (kind 'alert', same transition_seq as the failed reply). A newer seller
+ * text does NOT cancel it (claim/check supersede replies only): the owner still learns the seller got
+ * no reply. when_time_only_off is false: never time-only gated.
+ * Not atomic: a look-first-then-insert (no unique index on routing_v2_outbox), so two concurrent
+ * callers (dispatch-time holdFor and the holds_due sweep) can each insert a row. That is safe for
+ * delivery: the fan-out collapses rows by dedupe_key and hold_alert_deliveries keys per channel on
+ * it, so the owner gets at most one alert per inbound. Never throws; "error" = caller keeps its
+ * retry obligation (hold_pending) so the alert is retried.
+ */
+export async function enqueueV2ReplyFailedAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
+  const loose = supabase as unknown as {
+    from: (t: string) => {
+      select: (c: string) => {
+        eq: (k: string, v: unknown) => {
+          maybeSingle: () => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+          eq: (k: string, v: unknown) => { eq: (k: string, v: unknown) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }> } };
+        };
+      };
+      insert: (v: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+    };
+  };
+  try {
+    const { data, error } = await loose.from("routing_v2_outbox")
+      .select("org_id, property_id, inbound_message_id, transition_seq, kind").eq("id", replyOutboxId).maybeSingle();
+    const src = data as { org_id: string; property_id: string; inbound_message_id: string; transition_seq: number; kind: string } | null;
+    if (error || !src) {
+      if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      return error ? "error" : "skipped";
+    }
+    if (src.kind !== "reply") return "skipped";
+    const key = v2ReplyFailedAlertKey(src.inbound_message_id);
+    const existing = await loose.from("routing_v2_outbox").select("id")
+      .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").eq("payload->>dedupe_key", key).limit(1);
+    if (existing.error) {
+      reportError(new Error(existing.error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    if ((existing.data ?? []).length > 0) return "exists";
+    const ins = await loose.from("routing_v2_outbox").insert({
+      org_id: src.org_id, property_id: src.property_id, inbound_message_id: src.inbound_message_id,
+      transition_seq: src.transition_seq, kind: "alert", engine: "v2", slice: "replies",
+      payload: { reason: V2_REPLY_FAILED_ALERT, label: V2_ALERT_LABELS[V2_REPLY_FAILED_ALERT], dedupe_key: key, when_time_only_off: false },
+    });
+    if (ins.error) {
+      reportError(new Error(ins.error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    return "queued";
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+    return "error";
+  }
+}
+
 /** A queued reply the seller did not get: today's hold reason family, no whitespace. */
 export function routingV2OutboxHoldReason(cancelReason: string): string {
   if (cancelReason.startsWith("unknown:")) return "nine_reply_not_sent:send_outcome_unknown";
@@ -9995,11 +10067,38 @@ export async function runRoutingV2OutboxReplies(
     if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
     for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
       // A-2 F2: mechanics hold about this outbox row's own reply (superseded by a newer text = done).
-      const { data: boxRow } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      const { data: boxRow, error: boxError } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      if (boxError) {
+        // Unreadable now: keep hold_pending (no hold_written mark) so the next sweep retries the
+        // hold and the reply_failed alert; never fall through to a hold without its alert.
+        if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+          reportError(new Error((boxError as { message?: string }).message ?? "routing_v2_outbox unreadable"), {
+            tags: { surface: "routing_v2_outbox_holds" }, extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+          });
+        }
+        continue;
+      }
       const inboundId = (boxRow as { inbound_message_id?: string } | null)?.inbound_message_id;
+      const written = inboundId
+        ? await writeV2Hold(supabase, row.property_id, inboundId, routingV2OutboxHoldReason(row.reason), "mechanics")
+        : null;
       const ok = inboundId
-        ? (await writeV2Hold(supabase, row.property_id, inboundId, routingV2OutboxHoldReason(row.reason), "mechanics")) !== "error"
+        ? written !== "error"
         : await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
+      // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+      // be queued leaves the row pending (no hold_written mark): the next sweep retries it.
+      if (inboundId && written !== "error" && written !== "superseded") {
+        const alerted = await enqueueV2ReplyFailedAlert(supabase, row.outbox_id);
+        if (alerted === "error") {
+          if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+            reportError(new Error("routing v2 reply_failed alert keeps failing"), {
+              tags: { surface: "routing_v2_outbox_holds" },
+              extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+            });
+          }
+          continue;
+        }
+      }
       if (!ok) {
         // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
         // Astra review of a0c905d42390 (P1 #2): a hold that cannot be written never lets the drip go.

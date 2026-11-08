@@ -29,6 +29,12 @@ export const V2_ALERT_LABELS = {
   haiku_unsure: "Couldn't tell what they meant — please check",
   haiku_error: "Haiku error — please check",
   possible_stop: "Possible stop request — please check",
+  /**
+   * Our own reply to the seller could not go out (not_sent / cancelled at send). Never subject to
+   * alert_on_time_only and never hot-keyed: its own identity per inbound, so a cancelled hot_yes
+   * can never dedupe it away.
+   */
+  reply_failed: "Reply could not be sent — needs a person",
 } as const;
 export type V2AlertReason = keyof typeof V2_ALERT_LABELS;
 
@@ -220,6 +226,13 @@ export async function executeV2Action(action: V2Action, deps: V2ExecDeps): Promi
         if (!res.sent) {
           // Fail closed: no later drip/alert after a reply that did not go out; a person looks.
           await deps.hold("needs_person");
+          // The hold alone was silent: tell the owner. Not time-only gated, not hot-keyed. A failed
+          // alert never changes the hold outcome.
+          try {
+            await deps.alert("reply_failed", V2_ALERT_LABELS.reply_failed, null);
+          } catch {
+            /* the hold stands; the alert is best effort */
+          }
           return { kind: "reply_not_sent", done, reason: res.reason ?? "not_sent" };
         }
         break;
