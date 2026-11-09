@@ -153,7 +153,7 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
     } else if (effective.road === "price_check") {
       const price = await runV2PriceCheck({
         flags, propertyId, decision: effective, reply: input.reply,
-        propertyType: complete.propertyType, lookupValue: deps.lookupValue,
+        propertyType: complete.propertyType, probabilities: complete.probabilities, lookupValue: deps.lookupValue,
       });
       action = price.action;
       priceOutcome = price.outcome;

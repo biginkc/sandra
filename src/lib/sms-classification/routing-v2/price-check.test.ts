@@ -36,6 +36,7 @@ import {
   type RepairsFollowUpId,
   type V2QuestionId,
 } from "./questions";
+import { NINE_HOT_REPLY_TEXTS } from "../nine-questions";
 import { v2ReplyText } from "./reply-texts";
 import { routeV2, type V2Decision } from "./route";
 
@@ -132,7 +133,7 @@ describe("askAboveEightyPercent", () => {
 });
 
 describe("runV2PriceCheck", () => {
-  const run = (reply: string, lookup: () => Promise<{ kind: "value"; value: number; source: "provider" } | { kind: "no_value"; reason: string }>, over: { flags?: RoutingV2Flags; pt?: Partial<Record<PropertyTypeOption, number>> } = {}) => {
+  const run = (reply: string, lookup: () => Promise<{ kind: "value"; value: number; source: "provider" } | { kind: "no_value"; reason: string }>, over: { flags?: RoutingV2Flags; pt?: Partial<Record<PropertyTypeOption, number>>; probabilities?: Partial<Record<V2QuestionId, number>> } = {}) => {
     const lookupValue = vi.fn(lookup);
     return {
       lookupValue,
@@ -142,6 +143,7 @@ describe("runV2PriceCheck", () => {
         decision: DECISION,
         reply,
         propertyType: PT(over.pt),
+        probabilities: over.probabilities,
         lookupValue,
       }),
     };
@@ -182,7 +184,8 @@ describe("runV2PriceCheck", () => {
   it.each(["no idea, make me an offer", "$90k or $100k", "150-170k", "Paid 90k want 150k"])(
     "no single amount (%s) → fair-price reply + alert, no DealMachine call",
     async (reply) => {
-      const { result, lookupValue } = run(reply, value(100_000));
+      // Explicit low asked_offer: the asked-offer branch must not fire here.
+      const { result, lookupValue } = run(reply, value(100_000), { probabilities: { asked_offer: 0.1, named_price: 0.9, talked_price: 0.9 } });
       expect(await result).toMatchObject({ outcome: "no_single_amount", action: FAIR });
       expect(lookupValue).not.toHaveBeenCalled();
     },
@@ -847,5 +850,99 @@ describe("lookupDealMachineValue (claim + cache)", () => {
       lookupValue: async () => ({ kind: "no_value", reason: "rate_limited" }),
     });
     expect(r).toMatchObject({ outcome: "no_value", action: FAIR, noValueReason: "rate_limited" });
+  });
+});
+
+describe("runV2PriceCheck: asked for our offer with no amount (row 12 asked_offer)", () => {
+  type Lookup = () => Promise<{ kind: "value"; value: number; source: "provider" }>;
+  const value = (v: number): Lookup => async () => ({ kind: "value", value: v, source: "provider" });
+  const ASK = { asked_offer: 0.95, talked_price: 0.95, named_price: 0.04 };
+  const run = (reply: string, probabilities: Partial<Record<V2QuestionId, number>> | undefined, over: { flags?: RoutingV2Flags; pt?: Partial<Record<PropertyTypeOption, number>>; lookup?: Lookup } = {}) => {
+    const lookupValue = vi.fn(over.lookup ?? value(100_000));
+    return {
+      lookupValue,
+      result: runV2PriceCheck({
+        flags: over.flags ?? ON, propertyId: PROP, decision: { ...DECISION, provenance: { by: "jev", row: "11", step: "price", signal: "talked_price", probability: 0.95 } },
+        reply, propertyType: PT(over.pt), probabilities, lookupValue,
+      }),
+    };
+  };
+  const BOOK_ASKED_OFFER = {
+    road: "book_appointment",
+    steps: [
+      { kind: "alert", reason: "hot_yes", whenTimeOnlyOff: true },
+      { kind: "reply", key: "asked_offer" },
+      { kind: "drip", drip: "Book appointment", skipFirstStep: false },
+    ],
+  };
+
+  it.each(["What's your offer?", "How much?", "Depends what cash value you offer is"])(
+    "%s → book_appointment with the asked_offer reply + Book appointment drip, no named-price alert, no DealMachine call",
+    async (reply) => {
+      const { result, lookupValue } = run(reply, ASK);
+      const r = await result;
+      expect(r).toMatchObject({ outcome: "asked_offer_no_amount", action: BOOK_ASKED_OFFER, value: null });
+      expect(r.extracted).toEqual({ kind: "none" });
+      expect(r.action.steps).not.toContainEqual({ kind: "alert", reason: "named_price" });
+      expect(r.action.steps.filter((s) => s.kind === "reply")).toHaveLength(1);
+      expect(lookupValue).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the action equals the book_appointment road for a Jev asked_offer decision (same reply key as row 12)", async () => {
+    const asked: V2Decision = { road: "book_appointment", provenance: { by: "jev", row: "12", step: "book", signal: "asked_offer", probability: 0.95 }, haiku: null, opportunityAlert: false };
+    expect((await run("What's your offer?", ASK).result).action).toEqual(actionForV2Decision(asked));
+  });
+
+  it("asked_offer probability rides on the provenance (reply key asked_offer, never said_yes)", async () => {
+    const r = await run("what would you pay", { asked_offer: 0.6, named_price: 0.1 }).result;
+    expect(r.outcome).toBe("asked_offer_no_amount");
+    expect(r.action.steps).toContainEqual({ kind: "reply", key: "asked_offer" });
+  });
+
+  it("a single named amount still runs the price check", async () => {
+    const { result, lookupValue } = run("What would you offer? I might take $300k", { asked_offer: 0.9, named_price: 0.9, talked_price: 0.9 }, { lookup: value(300_000) });
+    expect(await result).toMatchObject({ outcome: "too_high", action: TOO_HIGH });
+    expect(lookupValue).toHaveBeenCalledOnce();
+    expect(await run("I'd take $100k, what's your offer", { asked_offer: 0.9, named_price: 0.04 }, { lookup: value(300_000) }).result).toMatchObject({ outcome: "fair", action: FAIR });
+  });
+
+  it.each(["$300k-$350k, what's your offer", "$250k or $275k, what's the offer"])(
+    "range / multiple amounts (%s) still alert", async (reply) => {
+      const { result, lookupValue } = run(reply, ASK);
+      expect(await result).toMatchObject({ outcome: "no_single_amount", action: FAIR });
+      expect(lookupValue).not.toHaveBeenCalled();
+    });
+
+  it.each(["Make me an offer", "I want one fifty thousand, what's your offer"])(
+    "named_price also high (%s) → fair-price reply + alert (a person looks)", async (reply) => {
+      expect(await run(reply, { asked_offer: 0.9, named_price: 0.7, talked_price: 0.9 }).result).toMatchObject({ outcome: "no_single_amount", action: FAIR });
+    });
+
+  it("cutoff boundary: asked_offer 0.59 alerts, 0.60 books; named_price 0.60 alerts", async () => {
+    expect((await run("What's your offer?", { asked_offer: 0.59, named_price: 0.04 }).result).outcome).toBe("no_single_amount");
+    expect((await run("What's your offer?", { asked_offer: 0.6, named_price: 0.04 }).result).outcome).toBe("asked_offer_no_amount");
+    expect((await run("What's your offer?", { asked_offer: 0.95, named_price: 0.6 }).result).outcome).toBe("no_single_amount");
+  });
+
+  it("missing or invalid probabilities never book (fail closed to the alert)", async () => {
+    for (const p of [undefined, {}, { asked_offer: 0.95 }, { asked_offer: Number.NaN, named_price: 0.01 }, { asked_offer: 1.5, named_price: 0.01 }, { asked_offer: 0.95, named_price: -1 }]) {
+      expect((await run("What's your offer?", p).result).outcome).toBe("no_single_amount");
+    }
+  });
+
+  it("lot and commercial still win first", async () => {
+    expect(await run("What's your offer?", ASK, { pt: { lot: 0.8 } }).result).toMatchObject({ outcome: "land_price", action: { road: "ALERT_land_price" } });
+    expect(await run("What's your offer?", ASK, { pt: { commercial: 0.8 } }).result).toMatchObject({ outcome: "commercial", action: { road: "ALERT_commercial" } });
+  });
+
+  it("flag off: today's price alert, byte-identical", async () => {
+    const r = await run("What's your offer?", ASK, { flags: { ...ON, price_check: false } }).result;
+    expect(r.outcome).toBe("flag_off");
+    expect(r.action.steps).toEqual([{ kind: "reply", key: "named_price" }, { kind: "alert", reason: "named_price" }]);
+  });
+
+  it("the asked_offer reply text is the existing approved one (no new text)", () => {
+    expect(v2ReplyText("asked_offer")).toBe(NINE_HOT_REPLY_TEXTS.asked_offer);
   });
 });

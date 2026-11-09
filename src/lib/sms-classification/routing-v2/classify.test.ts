@@ -156,6 +156,25 @@ describe("v2 decision preparation", () => {
     await classifyV2({ ...input, thread, flags: { ...flags, price_check: false } }, deps);
     expect(vi.mocked(deps.jev).mock.calls.at(-1)![0].questions).not.toHaveProperty("no_repairs");
   });
+  it("asked for our offer with no amount → book_appointment, asked_offer reply, Book appointment drip (road recorded as book)", async () => {
+    const { input, deps } = fixture({ talked_price: 0.95, asked_offer: 0.95, named_price: 0.04 });
+    const r = await classifyV2({ ...input, reply: "What's your offer?" }, deps);
+    expect(r).toMatchObject({
+      kind: "decided", priceOutcome: "asked_offer_no_amount",
+      decision: { road: "price_check" },
+      action: { road: "book_appointment", steps: [{ kind: "alert", reason: "hot_yes" }, { kind: "reply", key: "asked_offer" }, { kind: "drip", drip: "Book appointment" }] },
+    });
+    expect(JSON.stringify((r as { action: unknown }).action)).not.toContain("named_price");
+    expect(deps.lookupValue).not.toHaveBeenCalled();
+    const swapped = await classifyV2({ ...input, reply: "What's your offer?", askedHowNumber: true }, deps);
+    expect(swapped).toMatchObject({ action: { road: "book_appointment", steps: [{ kind: "alert" }, { kind: "reply", key: "number_source" }, { kind: "drip" }] } });
+  });
+  it("after the repairs reply, an offer question runs the repairs follow-ups, not the asked-offer branch", async () => {
+    const { input, deps } = fixture({ talked_price: 0.95, asked_offer: 0.95, named_price: 0.04 });
+    const r = await classifyV2({ ...input, reply: "What's your offer?", thread: [{ direction: "outbound", body: v2ReplyText("price_too_high") }] }, deps);
+    expect(r).toMatchObject({ kind: "decided", priceOutcome: "other" });
+    expect(deps.lookupValue).not.toHaveBeenCalled();
+  });
   it("uses the 80 percent check and replaces only the reply for number source", async () => {
     const { input, deps } = fixture({ named_price: 0.95 });
     expect(await classifyV2({ ...input, reply: "$180000" }, deps)).toMatchObject({ kind: "decided", priceOutcome: "too_high", action: { steps: [{ kind: "reply", key: "price_too_high" }] } });
