@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ambiguousThreadKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
-import { AMBIGUOUS_THREAD_RESOLUTIONS, ambiguousThreadLinkPath, loadAmbiguousThreadAlerts } from "./ambiguous-threads";
+import { AMBIGUOUS_THREAD_RESOLUTIONS, DRAIN_MAX_PAGES, DRAIN_PAGE, ambiguousThreadLinkPath, loadAmbiguousThreadAlerts } from "./ambiguous-threads";
 import { runHoldAlertsForOrg } from "./core";
 import { createHoldAlertDeps } from "./index";
 import { loadLeadReplies } from "./lead-replies";
@@ -28,12 +28,14 @@ const col = (r: Row, c: string): unknown => {
   return r[c];
 };
 
-/** In-memory PostgREST subset: eq / in / is / gte / like / or (keyset, ignored) / order / limit. */
-function fakeDb(tables: () => Tables, calls: Array<{ table: string; op: string; col: string; val: unknown }> = []) {
+/** In-memory PostgREST subset: eq / in / is / gte / like / or (keyset, ignored) / order / limit / range; `maxRows` mimics the API row cap. */
+function fakeDb(tables: () => Tables, calls: Array<{ table: string; op: string; col: string; val: unknown }> = [], maxRows = Infinity) {
   return {
     from(table: string) {
       const filters: Array<(r: Row) => boolean> = [];
       let limit = Infinity;
+      let offset = 0;
+      const sorts: Array<[string, boolean]> = [];
       const rec = (op: string, c: string, v: unknown) => calls.push({ table, op, col: c, val: v });
       const q = {
         select: () => q,
@@ -43,11 +45,20 @@ function fakeDb(tables: () => Tables, calls: Array<{ table: string; op: string; 
         gte: (c: string, v: string) => (filters.push((r) => String(col(r, c)) >= v), q),
         like: (c: string, v: string) => (filters.push((r) => String(col(r, c)).startsWith(v.replace(/%$/, ""))), q),
         or: () => q,
-        order: () => q,
+        order: (c: string, o?: { ascending?: boolean }) => (sorts.push([c, o?.ascending !== false]), q),
         limit: (n: number) => ((limit = n), q),
+        range: (from: number, to: number) => ((offset = from), (limit = to - from + 1), q),
         then(resolve: (v: { data: unknown[] | null; error: { message: string } | null }) => void) {
           const rows = (tables()[table] ?? []).filter((r) => filters.every((f) => f(r)));
-          resolve({ data: rows.slice(0, limit), error: null });
+          if (table === "hold_alert_deliveries")
+            rows.sort((a, b) => {
+              for (const [c, asc] of sorts) {
+                const x = String(col(a, c)), y = String(col(b, c));
+                if (x !== y) return (x < y ? -1 : 1) * (asc ? 1 : -1);
+              }
+              return 0;
+            });
+          resolve({ data: rows.slice(offset, offset + Math.min(limit, maxRows)), error: null });
         },
       };
       return q;
@@ -76,7 +87,7 @@ function setup(tables: Tables, opts: { flag?: boolean; ambSince?: string; extra?
   const view = (): Tables => ({
     ...tables,
     hold_alert_deliveries: t.store.rows.map((r) => ({
-      org_id: r.orgId, hold_key: r.holdKey, channel: r.channel, status: r.status, attempts: r.attempts, recipient_user_id: r.recipientUserId, created_at: r.createdAt,
+      id: r.id, org_id: r.orgId, hold_key: r.holdKey, channel: r.channel, status: r.status, attempts: r.attempts, recipient_user_id: r.recipientUserId, created_at: r.createdAt,
     })),
   });
   const db = fakeDb(view, calls);
@@ -161,6 +172,58 @@ describe("ambiguous-thread loader predicate", () => {
     }));
     const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
     expect(r.promotions.map((p) => [p.key, p.drained])).toEqual([[ambiguousThreadKey("retry"), true]]);
+  });
+});
+
+describe("drain paging (Astra MAJOR: capped response must not hide unfinished pairs)", () => {
+  const dRow = (n: number, key: string, channel: string, status: string, attempts: number) => ({
+    id: `d${String(n).padStart(6, "0")}`,
+    org_id: ORG,
+    hold_key: key,
+    channel,
+    status,
+    attempts,
+    recipient_user_id: OWNER.userId,
+    created_at: new Date(Date.parse("2026-11-08T00:00:00.000Z") + n * 1000).toISOString(),
+  });
+  /** `done` finished pairs first (oldest), then unfinished pairs: a retryable SMS, and a Slack with no SMS row. */
+  function seed(done: number) {
+    const deliveries: Row[] = [];
+    let n = 0;
+    for (let i = 0; i < done; i += 1) {
+      deliveries.push(dRow(n++, ambiguousThreadKey(`done-${i}`), "slack", "sent", 1), dRow(n++, ambiguousThreadKey(`done-${i}`), "sms", "sent", 1));
+    }
+    deliveries.push(dRow(n++, ambiguousThreadKey("retry"), "slack", "sent", 1), dRow(n++, ambiguousThreadKey("retry"), "sms", "failed", 1));
+    deliveries.push(dRow(n++, ambiguousThreadKey("missing"), "slack", "sent", 1));
+    const messages = [amb("retry", { property_id: "p1", created_at: "2026-11-08T00:00:00.000Z" }), amb("missing", { property_id: "p2", created_at: "2026-11-08T00:00:00.000Z" })];
+    return { deliveries, messages };
+  }
+
+  it("completed rows filling several capped pages ahead of unfinished pairs: every unfinished pair is recovered, complete stays true", async () => {
+    const { deliveries, messages } = seed(DRAIN_PAGE + 300); // > 2 pages of finished rows first
+    const db = fakeDb(() => ({ messages, hold_alert_deliveries: deliveries }), [], DRAIN_PAGE);
+    const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.promotions.map((p) => p.key).sort()).toEqual([ambiguousThreadKey("missing"), ambiguousThreadKey("retry")]);
+    expect(r.promotions.every((p) => p.drained)).toBe(true);
+    expect(r.complete).toBe(true);
+  });
+
+  it("hitting the page safety cap reports complete:false (never complete with unseen rows)", async () => {
+    const { deliveries, messages } = seed((DRAIN_PAGE * DRAIN_MAX_PAGES) / 2 + 10);
+    const db = fakeDb(() => ({ messages, hold_alert_deliveries: deliveries }), [], DRAIN_PAGE);
+    const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.complete).toBe(false);
+  });
+
+  it("a delivery query error reports complete:false", async () => {
+    const db = {
+      from: (t: string) =>
+        t === "hold_alert_deliveries"
+          ? { select: function () { return this; }, eq: function () { return this; }, like: function () { return this; }, gte: function () { return this; }, order: function () { return this; }, range: async () => ({ data: null, error: { message: "boom" } }) }
+          : (fakeDb(() => ({})) as { from: (t: string) => unknown }).from(t),
+    } as never;
+    const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.complete).toBe(false);
   });
 });
 

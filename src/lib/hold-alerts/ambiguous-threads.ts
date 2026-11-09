@@ -17,6 +17,10 @@ const KEY_PREFIX = "ambiguous_thread:";
  */
 export const AMBIGUOUS_THREAD_RESOLUTIONS: readonly string[] = ["ambiguous_recipient_number", "ambiguous_history", "ambiguous_contact"];
 
+/** Delivery rows per drain page (at or under PostgREST's default max-rows), and the page safety cap. */
+export const DRAIN_PAGE = 500;
+export const DRAIN_MAX_PAGES = 40;
+
 /** How far back unfinished ambiguous_thread:* delivery pairs are drained. */
 export const AMBIGUOUS_DRAIN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -88,17 +92,39 @@ export async function loadAmbiguousThreadAlerts(
 
   // Drain: unfinished pairs on existing ambiguous_thread:* keys.
   const drainIds: string[] = [];
-  const dl = await db
-    .from("hold_alert_deliveries")
-    .select("hold_key, channel, status, attempts, recipient_user_id")
-    .eq("org_id", orgId)
-    .like("hold_key", `${KEY_PREFIX}%`)
-    .gte("created_at", new Date(nowMs - AMBIGUOUS_DRAIN_WINDOW_MS).toISOString());
-  if (dl.error) {
-    complete = false;
-  } else {
+  // Paged deterministically (created_at, id) so a response row cap can never silently
+  // drop unfinished pairs. Completed rows are needed too: a pair whose second channel
+  // row was never created is only visible next to its finished partner.
+  const rowsSeen: Array<DeliveryLite & { id: string; created_at: string }> = [];
+  let drainOk = true;
+  const windowIso = new Date(nowMs - AMBIGUOUS_DRAIN_WINDOW_MS).toISOString();
+  for (let page = 0; ; page += 1) {
+    if (page >= DRAIN_MAX_PAGES) {
+      // Safety cap: unseen rows may remain, so never report complete.
+      drainOk = false;
+      break;
+    }
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("id, hold_key, channel, status, attempts, recipient_user_id, created_at")
+      .eq("org_id", orgId)
+      .like("hold_key", `${KEY_PREFIX}%`)
+      .gte("created_at", windowIso)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(page * DRAIN_PAGE, page * DRAIN_PAGE + DRAIN_PAGE - 1);
+    if (error) {
+      drainOk = false;
+      break;
+    }
+    const rows = (data ?? []) as Array<DeliveryLite & { id: string; created_at: string }>;
+    rowsSeen.push(...rows);
+    if (rows.length < DRAIN_PAGE) break;
+  }
+  if (!drainOk) complete = false;
+  {
     const byKey = new Map<string, DeliveryLite[]>();
-    for (const d of (dl.data ?? []) as DeliveryLite[]) {
+    for (const d of rowsSeen) {
       if (!d.hold_key.startsWith(KEY_PREFIX) || d.hold_key.includes(":closed:")) continue;
       const list = byKey.get(d.hold_key) ?? [];
       list.push(d);
