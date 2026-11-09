@@ -1,6 +1,6 @@
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
-import { hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
+import { ambiguousThreadKey, hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
 import type { HotPromotion } from "./types";
 import { MAX_ATTEMPTS } from "./types";
@@ -46,6 +46,12 @@ export async function loadLeadReplies(
   alertsSince: string,
   nowMs: number = Date.now(),
   currentOwner: string | null = null,
+  /**
+   * HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED=1: the ambiguous-thread loader owns
+   * ambiguous_thread:<inbound> keys (including their retries), so a text with any
+   * such row is left to it. Off (default): this loader is unchanged.
+   */
+  opts: { ambiguousOwnsKeys?: boolean } = {},
 ): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
   const sinceMs = Math.max(Date.parse(alertsSince) || 0, nowMs - LEAD_REPLY_LOOKBACK_MS);
   const since = new Date(sinceMs).toISOString();
@@ -149,7 +155,13 @@ export async function loadLeadReplies(
       .eq("org_id", orgId)
       .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, HOT_FAILED_SOURCE_TYPE])
       .in("source_id", batch);
-    const keys = batch.flatMap((id) => [hotTextKey(id), hotHandoffKey(id), hotFailedKey(id), leadReplyKey(id)]);
+    const keys = batch.flatMap((id) => [
+      hotTextKey(id),
+      hotHandoffKey(id),
+      hotFailedKey(id),
+      leadReplyKey(id),
+      ...(opts.ambiguousOwnsKeys ? [ambiguousThreadKey(id)] : []),
+    ]);
     const dl = await db
       .from("hold_alert_deliveries")
       .select("hold_key, channel, status, attempts, recipient_user_id")

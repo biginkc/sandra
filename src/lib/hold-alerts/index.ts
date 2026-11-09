@@ -23,6 +23,7 @@ import type {
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
 import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
+import { loadAmbiguousThreadAlerts } from "./ambiguous-threads";
 import { loadLeadReplies } from "./lead-replies";
 
 export { runHoldAlertsForOrg } from "./core";
@@ -280,6 +281,7 @@ export function createHoldAlertDeps(
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
   const now = () => new Date();
+  const ambiguousThreadEnabled = env.HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED === "1";
   return {
     now,
     store: createSupabaseDeliveryStore(db),
@@ -313,8 +315,18 @@ export function createHoldAlertDeps(
     },
     async loadLeadReplies(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
-      return loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
+      return ambiguousThreadEnabled
+        ? loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner, { ambiguousOwnsKeys: true })
+        : loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
     },
+    ...(ambiguousThreadEnabled
+      ? {
+          async loadAmbiguousThreadAlerts(orgId: string, since: string) {
+            const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+            return loadAmbiguousThreadAlerts(db, orgId, since, now().getTime(), owner);
+          },
+        }
+      : {}),
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
     v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
     v2OutboxAlertGate: (outboxId, key) => v2OutboxAlertGate(db, outboxId, key),
