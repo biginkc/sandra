@@ -9708,12 +9708,17 @@ async function deliverRoutingV2OutboxIntent(
       // Astra review of a0c905d42390 (P1 #2): the cancel itself decided the handoff, atomically:
       // "ok_no_hold" = overtaken by a newer text (A-2 F1) or a mechanics no-op while this inbound's
       // drip runs (A-2 C1); "ok" = cancelled with hold_pending (the drip waits until the hold lands).
-      if (marked === "ok_no_hold") return;
+      // Jarrad 2026-11-08: a repeat-text suppression with no hold leaves the seller in silence:
+      // tell the owner (the duplicate text itself is still never sent).
+      const repeatNoHold = async () => {
+        if (reason === TEMPLATE_ALREADY_SENT) await enqueueV2ReplyRepeatAlert(supabase, row.id);
+      };
+      if (marked === "ok_no_hold") return repeatNoHold();
       if (marked !== "ok") return;
       // A database still on the 330000 body returns plain "ok" for every cancel: keep its checks.
       if (isV2SupersededReason(reason)) return;
       await testBarrier("outbox:before_hold", { propertyId: row.property_id, inboundMessageId: row.inbound_message_id });
-      if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return;
+      if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return repeatNoHold();
       await holdFor(reason.replace(/\s+/g, "_"));
     },
   });
@@ -9838,9 +9843,29 @@ export const ROUTING_V2_HOLD_REPORT_AFTER = 5;
 /** Owner alert reason for a queued reply that could not go out (an alert reason, not a hold reason). */
 const V2_REPLY_FAILED_ALERT = "reply_failed" as const;
 
+/** Owner alert reason for a reply suppressed as a repeat of a text already sent on the property. */
+const V2_REPLY_REPEAT_ALERT = "reply_repeat" as const;
+
 /** Delivery identity of the reply-failed owner alert: one per inbound, never hotTextKey. */
 export function v2ReplyFailedAlertKey(inboundMessageId: string): string {
   return `routing_v2:${inboundMessageId}:reply_failed`;
+}
+
+/** Delivery identity of the reply-repeat owner alert: one per inbound, never hotTextKey. */
+export function v2ReplyRepeatAlertKey(inboundMessageId: string): string {
+  return `routing_v2:${inboundMessageId}:reply_repeat`;
+}
+
+/**
+ * Jarrad 2026-11-08: a v2 reply suppressed because the same text was already sent on this
+ * property (`template_already_sent`) while this inbound's drip runs is cancelled with no hold
+ * (ok_no_hold), so the seller got no reply and no person was told. This queues one
+ * `reply_repeat` owner alert per inbound (same row shape and gating as reply_failed). The
+ * suppression itself stays. Not retry-backed (there is no hold_pending on this path): a failed
+ * enqueue is reported. Never throws.
+ */
+export async function enqueueV2ReplyRepeatAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
+  return enqueueV2ReplyOwnerAlert(supabase, replyOutboxId, V2_REPLY_REPEAT_ALERT, v2ReplyRepeatAlertKey);
 }
 
 /**
@@ -9857,6 +9882,16 @@ export function v2ReplyFailedAlertKey(inboundMessageId: string): string {
  * retry obligation (hold_pending) so the alert is retried.
  */
 export async function enqueueV2ReplyFailedAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
+  return enqueueV2ReplyOwnerAlert(supabase, replyOutboxId, V2_REPLY_FAILED_ALERT, v2ReplyFailedAlertKey);
+}
+
+async function enqueueV2ReplyOwnerAlert(
+  supabase: SupabaseClient<Database>,
+  replyOutboxId: string,
+  reason: typeof V2_REPLY_FAILED_ALERT | typeof V2_REPLY_REPEAT_ALERT,
+  keyFor: (inboundMessageId: string) => string,
+): Promise<"queued" | "exists" | "skipped" | "error"> {
+  const surface = `routing_v2_${reason}_alert`;
   const loose = supabase as unknown as {
     from: (t: string) => {
       select: (c: string) => {
@@ -9873,30 +9908,30 @@ export async function enqueueV2ReplyFailedAlert(supabase: SupabaseClient<Databas
       .select("org_id, property_id, inbound_message_id, transition_seq, kind").eq("id", replyOutboxId).maybeSingle();
     const src = data as { org_id: string; property_id: string; inbound_message_id: string; transition_seq: number; kind: string } | null;
     if (error || !src) {
-      if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      if (error) reportError(new Error(error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
       return error ? "error" : "skipped";
     }
     if (src.kind !== "reply") return "skipped";
-    const key = v2ReplyFailedAlertKey(src.inbound_message_id);
+    const key = keyFor(src.inbound_message_id);
     const existing = await loose.from("routing_v2_outbox").select("id")
       .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").eq("payload->>dedupe_key", key).limit(1);
     if (existing.error) {
-      reportError(new Error(existing.error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      reportError(new Error(existing.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
       return "error";
     }
     if ((existing.data ?? []).length > 0) return "exists";
     const ins = await loose.from("routing_v2_outbox").insert({
       org_id: src.org_id, property_id: src.property_id, inbound_message_id: src.inbound_message_id,
       transition_seq: src.transition_seq, kind: "alert", engine: "v2", slice: "replies",
-      payload: { reason: V2_REPLY_FAILED_ALERT, label: V2_ALERT_LABELS[V2_REPLY_FAILED_ALERT], dedupe_key: key, when_time_only_off: false },
+      payload: { reason, label: V2_ALERT_LABELS[reason], dedupe_key: key, when_time_only_off: false },
     });
     if (ins.error) {
-      reportError(new Error(ins.error.message), { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+      reportError(new Error(ins.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
       return "error";
     }
     return "queued";
   } catch (e) {
-    reportError(e, { tags: { surface: "routing_v2_reply_failed_alert" }, extra: { outboxId: replyOutboxId } });
+    reportError(e, { tags: { surface }, extra: { outboxId: replyOutboxId } });
     return "error";
   }
 }
