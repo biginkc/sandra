@@ -39,7 +39,8 @@ export type Recipient = { userId: string; role: "owner" | "member" };
 
 /** A hot seller handed to Jarrad on My Leads (lead_events 'assigned', source hot_seller_handoff). */
 export type HotPromotion = {
-  propertyId: string;
+  /** null only for kind "ambiguous_thread" (the reply has no property yet). */
+  propertyId: string | null;
   /** Who the lead was assigned to: the one recipient of this promotion's alerts. */
   assigneeUserId: string;
   /** First name (or "Unknown sender"); never message text or address. */
@@ -47,7 +48,7 @@ export type HotPromotion = {
   /** When the hot inbound text arrived (messages.created_at): the cutoff and watermark test this, not the event row time. */
   assignedAt: string;
   /** handoff = Sandra put the lead on My Leads; hot_text = his lead already, a new hot text. */
-  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply" | "selling_opportunity" | "routing_v2_alert";
+  kind?: "handoff" | "hot_text" | "hot_failed" | "lead_reply" | "selling_opportunity" | "routing_v2_alert" | "ambiguous_thread";
   /** lead_reply: the inbound text this alert is about (dedupes against hot alerts on the same text). */
   inboundId?: string;
   /** hot_text on a lead that already needs a person: may be unassigned. */
@@ -62,6 +63,10 @@ export type HotPromotion = {
   outboxId?: string;
   /** routing_v2_alert: the approved v2 alert label (V2_ALERT_LABELS). */
   label?: string;
+  /** ambiguous_thread: app-relative link (`/messages?thread=<conversation>` or `/messages?filter=unknown`). */
+  linkPath?: string;
+  /** ambiguous_thread: re-surfaced from an unfinished delivery row; exempt from the since/lookback filters. */
+  drained?: boolean;
 };
 
 export type DeliveryRow = {
@@ -116,6 +121,12 @@ export interface DeliveryStore {
    * null), so turning the feature on never sends a burst of old texts.
    */
   getOrInitLeadRepliesSince(orgId: string, nowIso: string): Promise<string>;
+  /**
+   * Ambiguous-thread alert watermark (hold_alert_settings.ambiguous_thread_alerts_since):
+   * set to nowIso by the first pass with the feature on (only if still null). Throws
+   * when the column is missing (migration not applied): that pass skips the feature.
+   */
+  getOrInitAmbiguousThreadAlertsSince(orgId: string, nowIso: string): Promise<string>;
   /** insert ... on conflict do nothing, then return the row for the unique key. */
   ensure(input: EnsureInput): Promise<DeliveryRow>;
   /**
@@ -197,6 +208,12 @@ export interface HoldAlertDeps {
   loadHotPromotions(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /** Every inbound text on a My Leads lead (kind lead_reply). Optional: absent → none. */
   loadLeadReplies?(orgId: string, alertsSince: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
+  /**
+   * Replies threading could not tie to one property (kind ambiguous_thread), plus
+   * unfinished ambiguous_thread:* delivery pairs to drain. Defined only when
+   * HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED=1; absent = feature off, nothing read or written.
+   */
+  loadAmbiguousThreadAlerts?(orgId: string, since: string): Promise<{ promotions: HotPromotion[]; complete: boolean }>;
   /**
    * Routing v2 send-time check for `selling_opportunity` alerts only: re-reads the v2
    * flags + canary eligibility right before the Slack/SMS send. Absent or false = not sent.

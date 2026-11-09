@@ -72,24 +72,37 @@ export function leadReplyHeadline(p: HotPromotion): string {
   return p.address ? `New text on your lead: ${p.name}, ${p.address}` : `New text on your lead: ${p.name}`;
 }
 
+/** ambiguous_thread link: the reply's own conversation, or the unknown-sender list. */
+export function ambiguousThreadLink(baseUrl: string, p: HotPromotion): string {
+  return `${baseUrl.replace(/\/+$/, "")}${p.linkPath ?? "/messages?filter=unknown"}`;
+}
+
+/** Every other kind carries a property; a missing one falls back to the inbox rather than a broken lead link. */
+function promotionLink(baseUrl: string, p: HotPromotion): string {
+  return p.propertyId ? leadLink(baseUrl, p.propertyId) : ambiguousThreadLink(baseUrl, p);
+}
+
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  // Ambiguous thread: the existing hold copy with the existing needs_reply label; no new wording.
+  if (p.kind === "ambiguous_thread") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel("needs_reply"))}). ${ambiguousThreadLink(baseUrl, p)}`;
   // Routing v2 owner alert: today's hold-alert copy with the approved v2 label.
-  if (p.kind === "routing_v2_alert") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(p.label ?? "hold")}). ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "selling_opportunity") return `Possible selling opportunity: ${escapeSlack(p.name)} mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale. ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "lead_reply") return `${escapeSlack(leadReplyHeadline(p))}. ${leadLink(baseUrl, p.propertyId)}`;
+  if (p.kind === "routing_v2_alert") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(p.label ?? "hold")}). ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "selling_opportunity") return `Possible selling opportunity: ${escapeSlack(p.name)} mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale. ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "lead_reply") return `${escapeSlack(leadReplyHeadline(p))}. ${promotionLink(baseUrl, p)}`;
   // A failed hand-off uses the existing hold alert copy.
-  if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${leadLink(baseUrl, p.propertyId)}`;
-  return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
+  if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${promotionLink(baseUrl, p)}`;
+  return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${promotionLink(baseUrl, p)}`;
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {
-  if (p.kind === "routing_v2_alert") return `Hot hold: ${p.name} (${p.label ?? "hold"}). ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "selling_opportunity") return `Possible selling opportunity from ${p.name}. May be another property or a referral. Review conversation: ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "lead_reply") return `${leadReplyHeadline(p)}. ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "hot_failed") return `Hot hold: ${p.name} (${holdReasonLabel(p.reason ?? "hold")}). ${leadLink(baseUrl, p.propertyId)}`;
-  if (p.kind === "hot_text") return `${hotTextHeadline(p)}. ${leadLink(baseUrl, p.propertyId)}`;
-  return `Hot seller: ${p.name} is now on My Leads under you. ${leadLink(baseUrl, p.propertyId)}`;
+  if (p.kind === "ambiguous_thread") return `Hot hold: ${p.name} (${holdReasonLabel("needs_reply")}). ${ambiguousThreadLink(baseUrl, p)}`;
+  if (p.kind === "routing_v2_alert") return `Hot hold: ${p.name} (${p.label ?? "hold"}). ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "selling_opportunity") return `Possible selling opportunity from ${p.name}. May be another property or a referral. Review conversation: ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "lead_reply") return `${leadReplyHeadline(p)}. ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "hot_failed") return `Hot hold: ${p.name} (${holdReasonLabel(p.reason ?? "hold")}). ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "hot_text") return `${hotTextHeadline(p)}. ${promotionLink(baseUrl, p)}`;
+  return `Hot seller: ${p.name} is now on My Leads under you. ${promotionLink(baseUrl, p)}`;
 }
 
 export function digestMessage(holds: readonly HoldInfo[], nowMs: number, baseUrl: string): EmailMessage {
