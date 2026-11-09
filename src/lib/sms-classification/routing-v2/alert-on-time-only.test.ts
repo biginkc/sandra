@@ -8,6 +8,8 @@ import { alertOnTimeOnlyInForce, ALL_OFF, parseRoutingV2Flags, type RoutingV2Fla
 import type { V2Road } from "./order";
 import { V2_QUESTION_IDS, PROPERTY_TYPE_OPTIONS, type V2QuestionId } from "./questions";
 import { routeV2, type V2Decision } from "./route";
+import { runV2PriceCheck } from "./price-check";
+import { isV2Opportunity } from "@/lib/hold-alerts/v2-opportunities";
 
 /**
  * Routing v2 PR-F: "alert only when a time is picked" (alert_on_time_only).
@@ -349,5 +351,36 @@ describe("PR-F hot.ts: yes-family triggers dropped only behind the flag", () => 
     );
     expect([...V2_YES_FAMILY_ROADS].sort()).toEqual(withHotYes.sort());
     expect(YES_ROADS.sort()).toEqual([...V2_YES_FAMILY_ROADS].sort());
+  });
+});
+
+describe("asked for our offer with no amount (price check → book_appointment)", () => {
+  it("time-only ON: asked_offer reply + Book appointment drip and NO alert; OFF: the hot_yes alert, never named_price", async () => {
+    const decision = decide("What's your offer?", { talked_price: 0.95, asked_offer: 0.95, named_price: 0.04 });
+    expect(decision.road).toBe("price_check");
+    const price = await runV2PriceCheck({
+      flags: { ...TIME_ONLY_ON, price_check: true }, propertyId: P1, decision, reply: "What's your offer?",
+      propertyType: Object.fromEntries(PROPERTY_TYPE_OPTIONS.map((o) => [o, o === "residential" ? 0.9 : 0])) as never,
+      probabilities: { talked_price: 0.95, asked_offer: 0.95, named_price: 0.04 },
+      lookupValue: async () => { throw new Error("DealMachine must not be asked"); },
+    });
+    expect(price.outcome).toBe("asked_offer_no_amount");
+
+    const on = deps(TIME_ONLY_ON, "m1", fakeDrips().t);
+    expect((await executeV2Action(price.action, on.d)).kind).toBe("done");
+    expect(alerts(on.log)).toEqual([]);
+    expect(on.log).toEqual(["reply:asked_offer", "drip:Book appointment"]);
+
+    const off = deps(TIME_ONLY_OFF, "m2", fakeDrips().t);
+    expect((await executeV2Action(price.action, off.d)).kind).toBe("done");
+    expect(alerts(off.log)).toEqual([`alert:hot_yes:${hotTextKey("m2")}`]);
+  });
+
+  it("the opportunity alert exception still applies on the book_appointment road (unchanged)", () => {
+    const row = (probabilities: Record<string, number>) => ({ status: "decided", road: "book_appointment", opportunity_alert: true, probabilities });
+    expect(isV2Opportunity(row({ own_other_property: 0.8 }), { alertOnTimeOnly: true })).toBe(true);
+    expect(isV2Opportunity(row({ own_other_property: 0.1, someone_else_property: 0.1 }), { alertOnTimeOnly: true })).toBe(false);
+    // the old price_check road never carried it
+    expect(isV2Opportunity({ ...row({ own_other_property: 0.8 }), road: "price_check" }, { alertOnTimeOnly: true })).toBe(false);
   });
 });
