@@ -225,9 +225,11 @@ describe("F5: a bare ok right after the approved not-interested reply", () => {
     const { input, deps } = fixture({ just_ok: 0.95, asked_stop: 0.9 });
     expect(await classifyV2({ ...input, thread: afterNo }, deps)).toMatchObject({ action: { road: "stop" } });
   });
-  it("number-source yes has no reply step to swap", async () => {
+  it("also asked how we got the number: today's book action with the number-source reply", async () => {
     const { input, deps } = fixture({ just_ok: 0.95 });
     const r = await classifyV2({ ...input, thread: afterNo, askedHowNumber: true }, deps);
-    expect(r.kind === "decided" && r.action).toEqual(dripOnly);
+    if (r.kind !== "decided") throw new Error("expected decided");
+    expect(r.action.road).toBe("book_appointment");
+    expect(r.action.steps).toContainEqual({ kind: "reply", key: "number_source" });
   });
 });

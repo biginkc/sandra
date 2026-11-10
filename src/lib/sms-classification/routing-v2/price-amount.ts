@@ -38,10 +38,13 @@ const MULTIPLIERS: Record<string, number> = {
 const NUM = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?`;
 const AREA_AFTER = String.raw`(?!\s*(?:sq\b|sq\.|sqft|square|ft\b|feet|acre|acres|ac\b|mi\b|miles|%|percent|bed|bd\b|bath|ba\b|br\b|yrs?\b|years?\b))`;
 
+// "1500 K Street": a k followed by a street word is an address, never thousands.
+const STREET_AFTER = String.raw`(?!\s+(?:st|street|ave|avenue|rd|road|dr|drive|blvd|ln|lane|ct|court|ter|terrace|pl|place|way|hwy)\b)`;
+
 const TOKEN_RE = new RegExp(
   String.raw`(?<![\w$.,])(\$\s?)?(${NUM})` + // optional $, number (not glued to a word or digit)
     // One optional space before `k` only ("500 k"); m/mm/mil stay glued (minutes, miles).
-    String.raw`(?: ?(k)\b|(mm|m|mil)\b|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
+    String.raw`(?: ?(k)\b${STREET_AFTER}|(mm|m|mil)\b|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
     // Never fall back to the bare number when a spaced "k" follows ("$2 k sq ft" is not $2).
     String.raw`(?! ?k\b)` +
     AREA_AFTER +
@@ -65,8 +68,6 @@ function readTokens(text: string): Token[] {
   for (const m of text.matchAll(TOKEN_RE)) {
     const [, dollar, body, kSuffix, glued, word, currency] = m;
     const suffix = (kSuffix ?? glued ?? word ?? "").toLowerCase();
-    // A spaced capital "K" is a street/grade name ("1500 K Street"), not a magnitude: no amount.
-    if (/ K$/.test(m[0])) continue;
     const grouped = body.includes(",");
     const hasEvidence = Boolean(dollar) || Boolean(suffix) || Boolean(currency) || grouped;
     if (!hasEvidence) continue;

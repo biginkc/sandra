@@ -132,9 +132,9 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   // With Haiku disabled, an ambiguous stop still needs a person, never silent suppression.
   else if (!final && decision.road === "stop" && decision.haiku !== null) action = actionForHaikuOutcome("haiku_decided_stop");
   else action = actionForV2Decision(effective);
-  // F5: the table action stood (no Haiku decision, hold, or unsure) — remembered so a later
-  // repairs follow-up or price check is never overridden below.
-  const tableAction = action;
+  // F5: remembered so a repairs follow-up or price check that replaces the action below is never
+  // overridden. (Haiku / hold cases are excluded by F5's own road + provenance checks.)
+  const beforePriceSteps = action;
 
   let priceOutcome: string | null = null;
   // Never let a price follow-up override a failed second opinion or a stop (A-8): a Haiku error,
@@ -165,8 +165,12 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   // F5: a bare "ok" (Jev row 19) right after our approved not-interested reply acknowledges the
   // no. Keep the seller on the Not interested drip like a second "no", minus the reply. The
   // decision/final/probabilities stay as Jev said for the audit; only the action changes.
+  // A seller who also asked how we got the number keeps today's path (number-source reply).
+  const askedHowNumber = input.askedHowNumber
+    ?? (input.numberSourceQuestion === true && raw.answers?.[NUMBER_SOURCE_QUESTION_ID]?.choice === "yes");
   if (
-    action === tableAction
+    action === beforePriceSteps
+    && !askedHowNumber
     && effective.road === "book_appointment"
     && effective.provenance.by === "jev"
     && effective.provenance.signal === "just_ok"
@@ -178,8 +182,6 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
     };
   }
   // The approved number-source reply replaces an existing reply, never adds a second one.
-  const askedHowNumber = input.askedHowNumber
-    ?? (input.numberSourceQuestion === true && raw.answers?.[NUMBER_SOURCE_QUESTION_ID]?.choice === "yes");
   if (askedHowNumber) action = {
     ...action,
     steps: action.steps.map((step) => step.kind === "reply" ? { kind: "reply", key: "number_source" } : step),

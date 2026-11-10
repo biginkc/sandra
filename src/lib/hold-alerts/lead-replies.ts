@@ -190,7 +190,7 @@ export async function loadLeadReplies(
       if (r.payload?.covered_by_hold !== true) skip.add(r.source_id);
     }
     for (const r of (v2.data ?? []) as Array<{ inbound_message_id: string; status: string }>) {
-      if (r.status !== "cancelled") skip.add(r.inbound_message_id);
+      skip.add(r.inbound_message_id);
     }
     const finished = new Map<string, Set<string>>();
     for (const d of (dl.data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string }>) {
