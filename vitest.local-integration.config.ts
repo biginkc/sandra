@@ -168,6 +168,7 @@ export default defineConfig({
       "src/lib/ai-responder/template-claims.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
+      "src/lib/ai-responder/routing-v2.ok-after-no.dispatch.integration.test.ts",
       "src/lib/routing-v2-backfill/backfill.db.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",

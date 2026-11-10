@@ -129,7 +129,7 @@ import { markObligationUnrecorded, openSafetyObligation, promoteUnrecordedObliga
 import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
 import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
 import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
-import { isV2Eligible, readRoutingV2Flags, readRoutingV2FlagsResult, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { alertOnTimeOnlyInForce, isV2Eligible, readRoutingV2Flags, readRoutingV2FlagsResult, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import {
   runRoutingV2PhoneAction,
@@ -9897,7 +9897,10 @@ async function enqueueV2ReplyOwnerAlert(
       select: (c: string) => {
         eq: (k: string, v: unknown) => {
           maybeSingle: () => PromiseLike<{ data: unknown; error: { message: string } | null }>;
-          eq: (k: string, v: unknown) => { eq: (k: string, v: unknown) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }> } };
+          eq: (k: string, v: unknown) => {
+            eq: (k: string, v: unknown) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }> };
+            limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>;
+          };
         };
       };
       insert: (v: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
@@ -9905,13 +9908,15 @@ async function enqueueV2ReplyOwnerAlert(
   };
   try {
     const { data, error } = await loose.from("routing_v2_outbox")
-      .select("org_id, property_id, inbound_message_id, transition_seq, kind").eq("id", replyOutboxId).maybeSingle();
-    const src = data as { org_id: string; property_id: string; inbound_message_id: string; transition_seq: number; kind: string } | null;
+      .select("org_id, property_id, inbound_message_id, transition_seq, kind, payload").eq("id", replyOutboxId).maybeSingle();
+    const src = data as { org_id: string; property_id: string; inbound_message_id: string; transition_seq: number; kind: string; payload?: { key?: unknown } | null } | null;
     if (error || !src) {
       if (error) reportError(new Error(error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
       return error ? "error" : "skipped";
     }
     if (src.kind !== "reply") return "skipped";
+    // Alert-noise F1 (2026-11-10): a repeated "no" (not_interested reply suppressed) does not alert.
+    if (reason === V2_REPLY_REPEAT_ALERT && src.payload?.key === "not_interested") return "skipped";
     const key = keyFor(src.inbound_message_id);
     const existing = await loose.from("routing_v2_outbox").select("id")
       .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").eq("payload->>dedupe_key", key).limit(1);
@@ -9920,6 +9925,32 @@ async function enqueueV2ReplyOwnerAlert(
       return "error";
     }
     if ((existing.data ?? []).length > 0) return "exists";
+    // Alert-noise F3b (2026-11-10): one alert per inbound. Another alert row for the same inbound
+    // (different reason) that WILL reach the owner covers it: sent; or pending/claimed and not
+    // time-only conditional; or pending/claimed, conditional, and time-only not in force right now
+    // (fresh, strict flag read). Cancelled rows never cover. Any lookup failure = "error", never "skipped".
+    const others = await loose.from("routing_v2_outbox").select("id, status, payload")
+      .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").limit(100);
+    if (others.error) {
+      reportError(new Error(others.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    let timeOnlyInForce: boolean | null = null;
+    for (const o of (others.data ?? []) as Array<{ status?: string; payload?: { reason?: unknown; when_time_only_off?: unknown } | null }>) {
+      if (o.payload?.reason === reason) continue; // same reason (incl. a racing duplicate) is not "another" alert
+      if (o.status === "sent") return "skipped";
+      if (o.status !== "pending" && o.status !== "claimed") continue;
+      if (o.payload?.when_time_only_off !== true) return "skipped";
+      if (timeOnlyInForce === null) {
+        const flags = await readRoutingV2FlagsResult(supabase, src.org_id);
+        if (!flags.ok) {
+          reportError(new Error("routing v2 flags unreadable"), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+          return "error";
+        }
+        timeOnlyInForce = alertOnTimeOnlyInForce(flags.flags, src.property_id);
+      }
+      if (!timeOnlyInForce) return "skipped";
+    }
     const ins = await loose.from("routing_v2_outbox").insert({
       org_id: src.org_id, property_id: src.property_id, inbound_message_id: src.inbound_message_id,
       transition_seq: src.transition_seq, kind: "alert", engine: "v2", slice: "replies",

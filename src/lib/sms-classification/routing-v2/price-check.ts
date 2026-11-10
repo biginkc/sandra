@@ -140,9 +140,20 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
  * Exact match against the approved text (whitespace-trimmed), never a fuzzy match.
  */
 export function isAfterRepairsReply(ourLastText: string | null | undefined): boolean {
+  return isExactlyApprovedReply(ourLastText, v2ReplyText("price_too_high"));
+}
+
+/**
+ * F5: was our last text the approved not-interested reply? Then a bare "ok" (Jev row 19) is
+ * an acknowledgement of the no, not a yes. Same exact-match rule as isAfterRepairsReply.
+ */
+export function isAfterNotInterestedReply(ourLastText: string | null | undefined): boolean {
+  return isExactlyApprovedReply(ourLastText, v2ReplyText("not_interested"));
+}
+
+function isExactlyApprovedReply(ourLastText: string | null | undefined, approved: string): boolean {
   if (typeof ourLastText !== "string") return false;
   const body = ourLastText.trim();
-  const approved = v2ReplyText("price_too_high");
   if (body === approved) return true;
   // Only Sandra's exact appended phrases; arbitrary trailing seller text is not stripped.
   return OPT_OUT_PHRASES.some((footer) => body === `${approved} ${footer}`);

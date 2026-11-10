@@ -175,6 +175,35 @@ describe("ambiguous-thread loader predicate", () => {
   });
 });
 
+describe("F2: unmatched carrier STOP does not alert", () => {
+  it("skips keyword=stop, still alerts a wrong-number keyword and a plain body", async () => {
+    const db = fakeDb(() => ({
+      messages: [
+        amb("stop", { metadata: { routing: "ambiguous_contact", keyword: "stop" } }),
+        amb("wrong", { metadata: { routing: "ambiguous_contact", keyword: "wrong_number" } }),
+        amb("plain", { created_at: "2026-11-09T11:40:00.000Z" }),
+      ],
+      contacts: [contact],
+    }));
+    const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.promotions.map((p) => p.inboundId)).toEqual(["wrong", "plain"]);
+    expect(r.complete).toBe(true);
+  });
+
+  it("drain unchanged: an unfinished pair on a STOP text still finishes", async () => {
+    const key = ambiguousThreadKey("stop");
+    const db = fakeDb(() => ({
+      messages: [amb("stop", { metadata: { routing: "ambiguous_contact", keyword: "stop" } })],
+      hold_alert_deliveries: [
+        { org_id: ORG, hold_key: key, channel: "slack", status: "sent", attempts: 1, recipient_user_id: OWNER.userId, created_at: AT },
+        { org_id: ORG, hold_key: key, channel: "sms", status: "failed", attempts: 1, recipient_user_id: OWNER.userId, created_at: AT },
+      ],
+    }));
+    const r = await loadAmbiguousThreadAlerts(db, ORG, "2026-11-09T11:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.promotions.map((p) => [p.key, p.drained])).toEqual([[key, true]]);
+  });
+});
+
 describe("drain paging (Astra MAJOR: capped response must not hide unfinished pairs)", () => {
   const dRow = (n: number, key: string, channel: string, status: string, attempts: number) => ({
     id: `d${String(n).padStart(6, "0")}`,

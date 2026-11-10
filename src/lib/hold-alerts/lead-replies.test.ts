@@ -287,6 +287,46 @@ describe("lead-reply alerts (owner decision 2026-10-20)", () => {
     expect(t.sent).toHaveLength(2);
   });
 
+  it("F3a: a pending, claimed or sent routing v2 alert on the inbound leaves the text to routing v2", async () => {
+    for (const status of ["pending", "claimed", "sent"]) {
+      const t = depsWith({
+        messages: [msg("in-1", "p1")],
+        properties: [prop("p1", "new_lead")],
+        routing_v2_outbox: [{ org_id: ORG, inbound_message_id: "in-1", kind: "alert", status }],
+      });
+      await runHoldAlertsForOrg(t.deps, ORG);
+      expect(t.sent).toEqual([]);
+    }
+  });
+
+  it("F3a: a cancelled-only routing v2 alert (or a v2 reply row) does not suppress the lead reply", async () => {
+    const t = depsWith({
+      messages: [msg("in-1", "p1")],
+      properties: [prop("p1", "new_lead")],
+      routing_v2_outbox: [
+        { org_id: ORG, inbound_message_id: "in-1", kind: "alert", status: "cancelled" },
+        { org_id: ORG, inbound_message_id: "in-1", kind: "reply", status: "sent" },
+      ],
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(2);
+    expect(t.store.rows[0]!.holdKey).toBe(leadReplyKey("in-1"));
+  });
+
+  it("F3a: a routing v2 outbox lookup error skips the text this pass and reports incomplete", async () => {
+    const base = fakeDb({ messages: [msg("in-1", "p1")], properties: [prop("p1", "new_lead")] }) as { from: (t: string) => unknown };
+    const db = {
+      from(table: string) {
+        if (table !== "routing_v2_outbox") return base.from(table);
+        const q = { select: () => q, eq: () => q, in: () => q, then: (r: (v: unknown) => void) => r({ data: null, error: { message: "boom" } }) };
+        return q;
+      },
+    } as never;
+    const r = await loadLeadReplies(db, ORG, "2026-10-21T00:00:00.000Z", Date.parse(NOW), OWNER.userId);
+    expect(r.promotions).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
   it("no loadLeadReplies dep → behaviour unchanged", async () => {
     const t = makeDeps({ nowIso: NOW, holds: [] });
     const deps: HoldAlertDeps = { ...t.deps, loadLeadReplies: undefined };

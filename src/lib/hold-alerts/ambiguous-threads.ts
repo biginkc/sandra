@@ -35,8 +35,15 @@ type Msg = {
   contact_id: string | null;
   conversation_id: string | null;
   created_at: string;
-  metadata: { routing?: unknown } | null;
+  metadata: { routing?: unknown; keyword?: unknown } | null;
 };
+
+/**
+ * A carrier STOP with no property is fully handled by inbound.ts (phone-level opt-out,
+ * metadata.keyword = "stop"), so it needs no ambiguous-thread alert. Wrong-number keyword
+ * texts still alert: with no property nothing else stops further texts to that number.
+ */
+const handledWithoutProperty = (m: Msg) => m.metadata?.keyword === "stop";
 const MSG_COLUMNS = "id, property_id, contact_id, conversation_id, created_at, metadata";
 
 type DeliveryLite = { hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string };
@@ -84,7 +91,11 @@ export async function loadAmbiguousThreadAlerts(
     }
     const page = (data ?? []) as Msg[];
     // Defensive re-check of the predicate in code.
-    primary.push(...page.filter((m) => m.property_id === null && AMBIGUOUS_THREAD_RESOLUTIONS.includes(String(m.metadata?.routing ?? ""))));
+    primary.push(
+      ...page.filter(
+        (m) => m.property_id === null && AMBIGUOUS_THREAD_RESOLUTIONS.includes(String(m.metadata?.routing ?? "")) && !handledWithoutProperty(m),
+      ),
+    );
     if (page.length < PAGE) break;
     const last = page[page.length - 1]!;
     before = { at: last.created_at, id: last.id };

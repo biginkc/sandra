@@ -115,6 +115,27 @@ describe("extractDollarAmount", () => {
     ["between 150k and 170k", { kind: "range", amounts: [150_000, 170_000] }],
     ["150k or 160k", { kind: "range", amounts: [150_000, 160_000] }],
     ["somewhere 150,000 – 175,000", { kind: "range", amounts: [150_000, 175_000] }],
+    // F4: one optional space before k only.
+    ["500 k", { kind: "single", amount: 500_000 }],
+    ["$500 k", { kind: "single", amount: 500_000 }],
+    ["I'd take 500 k for it", { kind: "single", amount: 500_000 }],
+    ["500 K", { kind: "single", amount: 500_000 }],
+    ["1500 k street", { kind: "none" }],
+    ["it is on 1500 K St", { kind: "none" }],
+    ["1500 K Streets", { kind: "none" }],
+    ["1500 K-Street", { kind: "none" }],
+    ["150k way too low", { kind: "single", amount: 150_000 }],
+    ["150 k way too low", { kind: "single", amount: 150_000 }],
+    ["$150k st", { kind: "single", amount: 150_000 }],
+    ["100k drive away", { kind: "single", amount: 100_000 }],
+    ["250k court costs", { kind: "single", amount: 250_000 }],
+    ["500K", { kind: "single", amount: 500_000 }],
+    ["150 k to 170 k", { kind: "range", amounts: [150_000, 170_000] }],
+    ["2 k sq ft", { kind: "none" }],
+    ["$2 k sq ft", { kind: "none" }],
+    ["500  k", { kind: "none" }],
+    ["1 m", { kind: "none" }],
+    ["5 kids", { kind: "none" }],
   ];
   it.each(table)("%s", (text, expected) => {
     expect(extractDollarAmount(text)).toEqual(expected);

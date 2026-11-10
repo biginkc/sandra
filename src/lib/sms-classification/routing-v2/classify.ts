@@ -1,10 +1,10 @@
 import { askJev, type JevAskRequest, type JevAskResult, type JevAttemptOutcome } from "../providers/jev-gateway";
-import { actionForHaikuOutcome, actionForV2Decision, type V2Action } from "./actions";
+import { actionForHaikuOutcome, actionForV2Decision, V2_ROAD_ACTIONS, type V2Action } from "./actions";
 import type { ValueLookupResult } from "./dealmachine-value";
 import { isV2Eligible, v2SliceAllowed, type RoutingV2Flags } from "./flags";
 import { askHaiku, formatHaikuThread, type HaikuAnswer, type HaikuFailure, type HaikuCallResult, type HaikuThreadMessage } from "./haiku";
 import { applyHaikuPolicy, type FinalDecision } from "./haiku-policy";
-import { decideRepairsFollowUp, isAfterRepairsReply, readRepairsFollowUps, runV2PriceCheck } from "./price-check";
+import { decideRepairsFollowUp, isAfterNotInterestedReply, isAfterRepairsReply, readRepairsFollowUps, runV2PriceCheck } from "./price-check";
 import { NUMBER_SOURCE_QUESTION_ID } from "../questions";
 import { buildV2JevRequest, type PropertyTypeOption, type V2QuestionId } from "./questions";
 import { assertCompleteV2, routeV2, type V2Decision } from "./route";
@@ -132,6 +132,9 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
   // With Haiku disabled, an ambiguous stop still needs a person, never silent suppression.
   else if (!final && decision.road === "stop" && decision.haiku !== null) action = actionForHaikuOutcome("haiku_decided_stop");
   else action = actionForV2Decision(effective);
+  // F5: remembered so a repairs follow-up or price check that replaces the action below is never
+  // overridden. (Haiku / hold cases are excluded by F5's own road + provenance checks.)
+  const beforePriceSteps = action;
 
   let priceOutcome: string | null = null;
   // Never let a price follow-up override a failed second opinion or a stop (A-8): a Haiku error,
@@ -159,9 +162,26 @@ export async function classifyV2(input: V2ClassificationInput, deps: V2Classific
       priceOutcome = price.outcome;
     }
   }
-  // The approved number-source reply replaces an existing reply, never adds a second one.
+  // F5: a bare "ok" (Jev row 19) right after our approved not-interested reply acknowledges the
+  // no. Keep the seller on the Not interested drip like a second "no", minus the reply. The
+  // decision/final/probabilities stay as Jev said for the audit; only the action changes.
+  // A seller who also asked how we got the number keeps today's path (number-source reply).
   const askedHowNumber = input.askedHowNumber
     ?? (input.numberSourceQuestion === true && raw.answers?.[NUMBER_SOURCE_QUESTION_ID]?.choice === "yes");
+  if (
+    action === beforePriceSteps
+    && !askedHowNumber
+    && effective.road === "book_appointment"
+    && effective.provenance.by === "jev"
+    && effective.provenance.signal === "just_ok"
+    && isAfterNotInterestedReply(lastOutbound?.body)
+  ) {
+    action = {
+      road: "not_interested_drip",
+      steps: V2_ROAD_ACTIONS.not_interested_drip(effective).filter((step) => step.kind !== "reply"),
+    };
+  }
+  // The approved number-source reply replaces an existing reply, never adds a second one.
   if (askedHowNumber) action = {
     ...action,
     steps: action.steps.map((step) => step.kind === "reply" ? { kind: "reply", key: "number_source" } : step),
