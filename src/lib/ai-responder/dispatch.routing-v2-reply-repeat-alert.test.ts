@@ -97,3 +97,93 @@ describe("reply_repeat owner alert (Jarrad 2026-11-08)", () => {
     expect(v2ReplyRepeatAlertKey("in1")).not.toMatch(/^hot_text/);
   });
 });
+
+/**
+ * Alert-noise F1 + F3b (2026-11-10). Synthetic rows only. `others` = the alert rows already on the
+ * inbound (the coverage lookup); `flags` = the org's routing_v2_flags row (undefined = read error).
+ */
+const P = "11111111-1111-4111-8111-111111111111";
+const FLAGS_BASE = { questions_live: true, replies: true, drips: true, canary_property_ids: [P] };
+function cov(opts: { key?: string; others?: unknown[]; othersError?: boolean; flags?: Record<string, unknown> | "error" } = {}) {
+  const inserts: Array<Record<string, unknown>> = [];
+  let flagReads = 0;
+  const client = {
+    from: (table: string) => {
+      const eqs: string[] = [];
+      const c: Record<string, unknown> = {};
+      c.select = () => c;
+      c.eq = (k: string) => (eqs.push(k), c);
+      c.maybeSingle = async () => {
+        if (table === "ai_responder_configs") {
+          flagReads++;
+          return opts.flags === "error" ? { data: null, error: { message: "flags down" } } : { data: { routing_v2_flags: opts.flags ?? {} }, error: null };
+        }
+        return { data: { org_id: "org1", property_id: P, inbound_message_id: "in1", transition_seq: 4, kind: "reply", payload: { key: opts.key ?? "said_yes" } }, error: null };
+      };
+      c.limit = async () => eqs.includes("payload->>dedupe_key")
+        ? { data: [], error: null }
+        : opts.othersError ? { data: null, error: { message: "lookup down" } } : { data: opts.others ?? [], error: null };
+      c.insert = async (row: Record<string, unknown>) => (inserts.push(row), { error: null });
+      return c;
+    },
+  };
+  return { client: client as never, inserts, flagReads: () => flagReads };
+}
+const hotYes = (status: string, conditional: boolean) => ({ id: "a1", status, payload: { reason: "hot_yes", dedupe_key: "hot_text:in1", when_time_only_off: conditional } });
+
+describe("F1: a repeated no does not alert", () => {
+  it("not_interested repeat: no reply_repeat queued", async () => {
+    const f = cov({ key: "not_interested" });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("skipped");
+    expect(f.inserts).toEqual([]);
+  });
+  it("any other key still queues", async () => {
+    const f = cov({ key: "said_yes" });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("queued");
+    expect(f.inserts).toHaveLength(1);
+  });
+});
+
+describe("F3b: reply_repeat is skipped when another alert covers the inbound", () => {
+  it("sent other alert covers", async () => {
+    const f = cov({ others: [hotYes("sent", true)] });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("skipped");
+    expect(f.inserts).toEqual([]);
+  });
+  it("non-conditional pending/claimed alert covers (no flag read needed)", async () => {
+    for (const s of ["pending", "claimed"]) {
+      const f = cov({ others: [hotYes(s, false)], flags: "error" });
+      expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("skipped");
+      expect(f.inserts).toEqual([]);
+    }
+  });
+  it("repeated yes, time-only OFF: the conditional hot_yes covers", async () => {
+    const f = cov({ others: [hotYes("pending", true)], flags: { ...FLAGS_BASE, alert_on_time_only: false } });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("skipped");
+    expect(f.inserts).toEqual([]);
+  });
+  it("repeated yes, time-only ON: hot_yes will be cancelled, so reply_repeat IS queued", async () => {
+    const f = cov({ others: [hotYes("pending", true)], flags: { ...FLAGS_BASE, alert_on_time_only: true } });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("queued");
+    expect(f.inserts).toHaveLength(1);
+  });
+  it("a cancelled alert never covers", async () => {
+    const f = cov({ others: [hotYes("cancelled", false)] });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("queued");
+  });
+  it("queued when no other alert", async () => {
+    const f = cov();
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("queued");
+    expect(f.flagReads()).toBe(0);
+  });
+  it("coverage lookup error = error, nothing queued", async () => {
+    const f = cov({ othersError: true });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("error");
+    expect(f.inserts).toEqual([]);
+  });
+  it("flag read error with a conditional alert = error (never fake coverage)", async () => {
+    const f = cov({ others: [hotYes("pending", true)], flags: "error" });
+    expect(await enqueueV2ReplyRepeatAlert(f.client, "box-in1")).toBe("error");
+    expect(f.inserts).toEqual([]);
+  });
+});

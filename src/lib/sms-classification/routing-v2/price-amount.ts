@@ -40,7 +40,10 @@ const AREA_AFTER = String.raw`(?!\s*(?:sq\b|sq\.|sqft|square|ft\b|feet|acre|acre
 
 const TOKEN_RE = new RegExp(
   String.raw`(?<![\w$.,])(\$\s?)?(${NUM})` + // optional $, number (not glued to a word or digit)
-    String.raw`(?:(k|mm|m|mil)\b|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
+    // One optional space before `k` only ("500 k"); m/mm/mil stay glued (minutes, miles).
+    String.raw`(?: ?(k)\b|(mm|m|mil)\b|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
+    // Never fall back to the bare number when a spaced "k" follows ("$2 k sq ft" is not $2).
+    String.raw`(?! ?k\b)` +
     AREA_AFTER +
     String.raw`(?!\w)`,
   "gi",
@@ -60,8 +63,10 @@ function toCents(n: number): number {
 function readTokens(text: string): Token[] {
   const tokens: Token[] = [];
   for (const m of text.matchAll(TOKEN_RE)) {
-    const [, dollar, body, glued, word, currency] = m;
-    const suffix = (glued ?? word ?? "").toLowerCase();
+    const [, dollar, body, kSuffix, glued, word, currency] = m;
+    const suffix = (kSuffix ?? glued ?? word ?? "").toLowerCase();
+    // A spaced capital "K" is a street/grade name ("1500 K Street"), not a magnitude: no amount.
+    if (/ K$/.test(m[0])) continue;
     const grouped = body.includes(",");
     const hasEvidence = Boolean(dollar) || Boolean(suffix) || Boolean(currency) || grouped;
     if (!hasEvidence) continue;

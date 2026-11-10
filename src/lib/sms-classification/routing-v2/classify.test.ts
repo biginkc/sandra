@@ -3,7 +3,7 @@ import type { JevAskResult } from "../providers/jev-gateway";
 import { OPT_OUT_PHRASES } from "@/lib/sequences/opt-out";
 import { classifyV2, JevAttemptsError, type V2ClassificationDeps } from "./classify";
 import { ALL_OFF, type RoutingV2Flags } from "./flags";
-import { isAfterRepairsReply } from "./price-check";
+import { isAfterNotInterestedReply, isAfterRepairsReply } from "./price-check";
 import { PROPERTY_TYPE_OPTIONS, REPAIRS_FOLLOW_UP_IDS, V2_QUESTION_IDS } from "./questions";
 import { v2ReplyText } from "./reply-texts";
 import { NUMBER_SOURCE_QUESTION, NUMBER_SOURCE_QUESTION_ID } from "../questions";
@@ -179,5 +179,55 @@ describe("v2 decision preparation", () => {
     const { input, deps } = fixture({ named_price: 0.95 });
     expect(await classifyV2({ ...input, reply: "$180000" }, deps)).toMatchObject({ kind: "decided", priceOutcome: "too_high", action: { steps: [{ kind: "reply", key: "price_too_high" }] } });
     expect(await classifyV2({ ...input, reply: "$180000", askedHowNumber: true }, deps)).toMatchObject({ kind: "decided", action: { steps: [{ kind: "reply", key: "number_source" }] } });
+  });
+});
+
+describe("F5: a bare ok right after the approved not-interested reply", () => {
+  const afterNo = [{ direction: "outbound" as const, body: v2ReplyText("not_interested") }];
+  const dripOnly = { road: "not_interested_drip", steps: [{ kind: "drip", drip: "Not interested", skipFirstStep: false }] };
+  it("keeps the seller on the Not interested drip, no reply/alert/hold; decision stays row 19 book", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95 });
+    const result = await classifyV2({ ...input, thread: afterNo }, deps);
+    expect(result).toMatchObject({
+      kind: "decided", priceOutcome: null,
+      decision: { road: "book_appointment", provenance: { by: "jev", row: "19", signal: "just_ok" } },
+    });
+    expect(result.kind === "decided" && result.action).toEqual(dripOnly);
+  });
+  it("accepts the exact opt-out footers, never fuzzy text", async () => {
+    for (const footer of OPT_OUT_PHRASES) {
+      const body = `  ${v2ReplyText("not_interested")} ${footer}\n`;
+      expect(isAfterNotInterestedReply(body)).toBe(true);
+      const { input, deps } = fixture({ just_ok: 0.95 });
+      expect(await classifyV2({ ...input, thread: [{ direction: "outbound", body }] }, deps)).toMatchObject({ action: dripOnly });
+    }
+    expect(isAfterNotInterestedReply(`${v2ReplyText("not_interested")} Not approved text`)).toBe(false);
+    expect(isAfterNotInterestedReply(v2ReplyText("said_yes"))).toBe(false);
+    expect(isAfterNotInterestedReply(null)).toBe(false);
+  });
+  it("only our LAST outbound counts", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95 });
+    const thread = [...afterNo, { direction: "outbound" as const, body: v2ReplyText("nurture") }];
+    expect(await classifyV2({ ...input, thread }, deps)).toMatchObject({ action: { road: "book_appointment" } });
+  });
+  it("just_ok after any other text keeps today's book action", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95 });
+    const r = await classifyV2({ ...input, thread: [{ direction: "outbound", body: "Hi, is this the owner?" }] }, deps);
+    expect(r).toMatchObject({ action: { road: "book_appointment", steps: expect.arrayContaining([{ kind: "reply", key: "said_yes" }]) } });
+  });
+  it("open_to_selling after the not-interested reply still books", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95, open_to_selling: 0.9 });
+    expect(await classifyV2({ ...input, thread: afterNo }, deps)).toMatchObject({
+      decision: { provenance: { signal: "open_to_selling" } }, action: { road: "book_appointment" },
+    });
+  });
+  it("a stop is untouched", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95, asked_stop: 0.9 });
+    expect(await classifyV2({ ...input, thread: afterNo }, deps)).toMatchObject({ action: { road: "stop" } });
+  });
+  it("number-source yes has no reply step to swap", async () => {
+    const { input, deps } = fixture({ just_ok: 0.95 });
+    const r = await classifyV2({ ...input, thread: afterNo, askedHowNumber: true }, deps);
+    expect(r.kind === "decided" && r.action).toEqual(dripOnly);
   });
 });

@@ -38,7 +38,8 @@ export function dispatchDone(meta: ProcessingMeta, claimCompleted: boolean, crea
  * alerts Jarrad once, keyed lead_reply:<inbound>, whoever the lead is assigned to.
  * A lead = status past prospect, or a hot_seller_handoff / hot_seller_text event.
  * STOP texts included. A text that already got (or is getting) its own hot alert
- * on the same inbound is left to that alert. Read-only: never changes the lead.
+ * on the same inbound is left to that alert, as is one with a non-cancelled
+ * routing_v2_outbox alert row. Read-only: never changes the lead.
  */
 export async function loadLeadReplies(
   db: LooseSupabase,
@@ -167,7 +168,15 @@ export async function loadLeadReplies(
       .select("hold_key, channel, status, attempts, recipient_user_id")
       .eq("org_id", orgId)
       .in("hold_key", keys);
-    if (ev.error || dl.error || cl.error || runs.error) {
+    // Routing v2 owns its own alert for this inbound unless that alert was cancelled.
+    const v2 = await db
+      .from("routing_v2_outbox")
+      .select("inbound_message_id, status")
+      .eq("org_id", orgId)
+      .eq("kind", "alert")
+      .in("status", ["pending", "claimed", "sent"])
+      .in("inbound_message_id", batch);
+    if (ev.error || dl.error || cl.error || runs.error || v2.error) {
       complete = false;
       for (const id of batch) skip.add(id);
       continue;
@@ -179,6 +188,9 @@ export async function loadLeadReplies(
     for (const m of leadMsgs) if (batch.includes(m.id) && !dispatchDone(m.metadata, completed.has(m.id), m.created_at, nowMs)) skip.add(m.id);
     for (const r of (ev.data ?? []) as Array<{ source_id: string; payload: { covered_by_hold?: unknown } | null }>) {
       if (r.payload?.covered_by_hold !== true) skip.add(r.source_id);
+    }
+    for (const r of (v2.data ?? []) as Array<{ inbound_message_id: string; status: string }>) {
+      if (r.status !== "cancelled") skip.add(r.inbound_message_id);
     }
     const finished = new Map<string, Set<string>>();
     for (const d of (dl.data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string }>) {
