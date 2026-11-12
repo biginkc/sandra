@@ -29,6 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "supabase/migrations/20261112120100_multi_number_sender_rpcs.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "e2e/stress/my-leads-queue/smoke.integration.test.ts",
       "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
