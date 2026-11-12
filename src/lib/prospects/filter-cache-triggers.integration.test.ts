@@ -19,6 +19,7 @@ import { resetTenantTables } from "@tests/integration/reset";
 import { assertLocalOnlyEnvironment } from "@/lib/testing/local-only-guard";
 
 assertLocalOnlyEnvironment();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const svc = createTestClient();
 let pg: Client;
 let userA: any;
@@ -327,6 +328,195 @@ describe("generated columns are derived from the catalog", () => {
       expect(await cache(p)).toMatchObject({ hi: true, hu: true });
     } finally {
       await pg.query(`alter table public.properties drop column zz_gen_probe`);
+    }
+  });
+});
+
+describe("insert fast path (skip when cached flags already cover the row)", () => {
+  const truth = async (id: string) => {
+    const { rows } = await pg.query(
+      `select exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound') hi,
+              exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='outbound') ho,
+              exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound' and read_at is null) hu,
+              exists(select 1 from public.tasks where related_property_id=$1 and org_id=$2 and status='open') ot`,
+      [id, BMH_ORG_ID],
+    );
+    return rows[0];
+  };
+  const cacheTruth = async (id: string) => {
+    const c = await cache(id);
+    return { hi: c.hi, ho: c.ho, hu: c.hu, ot: c.ot };
+  };
+  const conn = async () => { const c = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL! }); await c.connect(); return c; };
+
+  it("a covered insert skips (no property update) while an uncovered one still flips the flag", async () => {
+    const p = await prop();
+    await msg(p, "inbound");
+    const before = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    await msg(p, "inbound", { read: true }); // covered: has_inbound already true and read
+    await msg(p, "outbound"); // not covered: has_outbound false -> refresh flips it
+    expect(await cache(p)).toMatchObject({ hi: true, ho: true, hu: true });
+    const afterSkipOnly = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    expect(afterSkipOnly).not.toBe(before); // outbound flip updated the row
+    const x1 = afterSkipOnly;
+    await msg(p, "outbound"); // covered now -> skip: row version must not change
+    await msg(p, "inbound", { read: true });
+    const x2 = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    expect(x2).toBe(x1);
+    await task(p, "completed"); // non-open task never changes the cache
+    expect((await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x).toBe(x1);
+  });
+
+  it("race: a clearing tx (delete the only inbound) vs a skipping insert -> final cache equals truth (both orders)", async () => {
+    for (const order of ["clearer-first", "inserter-first"]) {
+      for (let i = 0; i < 6; i++) {
+        const p = await prop();
+        const m = await msg(p, "inbound", { read: true });
+        const a = await conn(); // clearer
+        const b = await conn(); // inserter (looks covered)
+        try {
+          const clear = async () => { await a.query("begin"); await a.query(`delete from public.messages where id=$1`, [m]); await sleep(150); await a.query("commit"); };
+          const ins = async () => { await b.query("begin"); await b.query(`insert into public.messages (org_id, property_id, channel, direction, body, read_at) values ('${BMH_ORG_ID}', $1, 'sms', 'inbound', 'r', now())`, [p]); await sleep(150); await b.query("commit"); };
+          if (order === "clearer-first") { const c = clear(); await sleep(40 + i * 20); await Promise.all([c, ins()]); }
+          else { const t = ins(); await sleep(40 + i * 20); await Promise.all([t, clear()]); }
+        } finally { await a.end(); await b.end(); }
+        expect(await cacheTruth(p), `${order} #${i}`).toEqual(await truth(p));
+      }
+    }
+  });
+
+  it("randomised concurrent workload on a few hot properties: every op completes (bounded retries), cache == truth afterwards", async () => {
+    const props = [await prop(), await prop(), await prop()];
+    const workers = await Promise.all([1, 2, 3, 4, 5, 6].map(() => conn()));
+    const opts = ["inbound-read", "inbound-unread", "outbound"] as const;
+    let deadlocks = 0;
+    let completed = 0;
+    const MAX_ATTEMPTS = 5;
+    try {
+      await Promise.all(workers.map(async (c, w) => {
+        for (let i = 0; i < 40; i++) {
+          const p = props[(w + i) % 3];
+          const r = (w * 7 + i * 13) % 10;
+          let ok = false;
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS && !ok; attempt++) {
+            try {
+              await c.query("begin");
+              if (r < 5) {
+                const o = opts[(w + i) % 3];
+                await c.query(`insert into public.messages (org_id, property_id, channel, direction, body, read_at) values ('${BMH_ORG_ID}', $1, 'sms', $2, 'w', $3)`, [p, o.startsWith("inbound") ? "inbound" : "outbound", o === "inbound-read" ? new Date().toISOString() : null]);
+              } else if (r < 7) {
+                await c.query(`delete from public.messages where id in (select id from public.messages where property_id=$1 order by created_at limit 2)`, [p]);
+              } else if (r < 8) {
+                await c.query(`update public.messages set read_at = now() where property_id=$1 and direction='inbound' and read_at is null`, [p]);
+              } else if (r < 9) {
+                await c.query(`insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1,$2,$2,$3,'follow_up','open','t',now())`, [BMH_ORG_ID, userAId, p]);
+              } else {
+                await c.query(`update public.tasks set status='completed' where related_property_id=$1 and status='open'`, [p]);
+              }
+              await c.query("commit");
+              ok = true;
+              completed++;
+            } catch (e: any) {
+              await c.query("rollback").catch(() => {});
+              if (e.code !== "40P01") throw e;
+              deadlocks++;
+            }
+          }
+          if (!ok) throw new Error(`operation ${w}/${i} still deadlocking after ${MAX_ATTEMPTS} attempts`);
+        }
+      }));
+    } finally { await Promise.all(workers.map((c) => c.end())); }
+    expect(completed).toBe(6 * 40);
+    expect(deadlocks).toBeLessThanOrEqual(10);
+    for (const p of props) expect(await cacheTruth(p)).toEqual(await truth(p));
+  });
+});
+
+async function waitForLockWait(c: Client, pid: number, ms = 10_000) {
+  const t0 = Date.now();
+  for (;;) {
+    const { rows } = await pg.query(`select 1 from pg_stat_activity where pid = $1 and wait_event_type = 'Lock'`, [pid]);
+    if (rows.length) return;
+    if (Date.now() - t0 > ms) throw new Error(`pid ${pid} never started waiting on a lock`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+async function pidOf(c: Client) { return (await c.query("select pg_backend_pid() p")).rows[0].p as number; }
+
+describe("deterministic lock-order regressions (coordinated by lock-wait barriers, not timing)", () => {
+  const mk = async () => { const c = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL! }); await c.connect(); return c; };
+  const truthOf = async (id: string) => (await pg.query(
+    `select exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound') hi,
+            exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='outbound') ho,
+            exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound' and read_at is null) hu`, [id, BMH_ORG_ID])).rows[0];
+  const cacheOf = async (id: string) => { const c = await cache(id); return { hi: c.hi, ho: c.ho, hu: c.hu }; };
+
+  it("overlapping multi-property batch vs a full refresh holding P then wanting Q: no deadlock (P < Q)", async () => {
+    const [P, Q] = [await prop(), await prop()].sort();
+    await msg(P, "inbound", { read: true }); // P covered for a read inbound
+    const mQ = await msg(Q, "outbound");
+    const t2 = await mk(); const t1 = await mk();
+    try {
+      await t2.query("begin");
+      await t2.query(`delete from public.messages where property_id = $1`, [P]); // full refresh: holds P
+      await t1.query("begin");
+      const t1pid = await pidOf(t1);
+      const batch = t1.query(
+        `insert into public.messages (org_id, property_id, channel, direction, body, read_at)
+         values ('${BMH_ORG_ID}', $1, 'sms', 'inbound', 'b', now()), ('${BMH_ORG_ID}', $2, 'sms', 'inbound', 'b', null)`, [P, Q]);
+      const batchOutcome = batch.then(() => "ok", (e) => e.code);
+      await waitForLockWait(t1, t1pid); // T1 is now queued on P, holding nothing on Q
+      // T2 now needs Q (a full refresh via delete): in the old two-phase design T1 already held Q => deadlock
+      await t2.query(`delete from public.messages where id = $1`, [mQ]);
+      await t2.query("commit");
+      expect(await batchOutcome).toBe("ok");
+      await t1.query("commit");
+    } finally { await t2.end().catch(() => {}); await t1.end().catch(() => {}); }
+    for (const id of [P, Q]) expect(await cacheOf(id)).toEqual(await truthOf(id));
+  });
+
+  it("global-DNC writer path (apply_switchboard_contact_preferences, global DNC) vs an inbound insert: both orders complete, cache == truth", async () => {
+    for (const order of ["dnc-first", "insert-first"]) {
+      const orgId = crypto.randomUUID(); const consumerId = crypto.randomUUID(); const contactId = crypto.randomUUID(); const propertyId = crypto.randomUUID();
+      const phone = `+1816${String(Math.floor(Math.random() * 10_000_000)).padStart(7, "0")}`;
+      await pg.query("insert into public.organizations (id, name) values ($1, $2)", [orgId, `dnc-race ${orgId}`]);
+      await pg.query(`insert into public.webhook_consumers (id, org_id, name, secret_hash, consumer_type, default_source) values ($1,$2,$3,$4,'switchboard_contact_preference',null)`, [consumerId, orgId, `c ${consumerId}`, consumerId.replaceAll("-", "").padEnd(64, "0")]);
+      await pg.query(`insert into public.contacts (id, org_id, first_name, last_name, phone_1, phone_1_type) values ($1,$2,'Synth','Race',$3,'mobile')`, [contactId, orgId, phone]);
+      await pg.query(`insert into public.properties (id, org_id, address, address_normalized, city, state, zip, status, homeowner_contact_id) values ($1,$2,'1 race st','1 race st','Kansas City','MO','64108','new_lead',$3)`, [propertyId, orgId, contactId]);
+      const a = await mk(); const b = await mk();
+      const key = crypto.randomUUID();
+      const applyDnc = async () => {
+        await a.query("begin");
+        await a.query("select set_config('request.jwt.claim.role', 'service_role', true)");
+        await a.query(
+          `select public.apply_switchboard_contact_preferences($1,$2,$3,$4,'provider_call','contact_preference.explicit',$5,$6,'analysis:global_dnc_requested',null,now(),$7,$8,null,true,false,'explicit_do_not_contact',$9,null,null,null,null)`,
+          [orgId, consumerId, key, "a".repeat(64), `source-${key}`, `call-${key}`.slice(0, 128), `corr-${key}`.slice(0, 128), phone,
+           (await import("node:crypto")).createHash("sha256").update(`switchboard_contact_preference_v1\0${key}\0explicit_do_not_contact\0analysis:global_dnc_requested`, "utf8").digest("hex")],
+        );
+      };
+      const insertInbound = async () => {
+        await b.query("begin");
+        await b.query(`insert into public.messages (org_id, property_id, channel, direction, body) values ($1,$2,'sms','inbound','stop')`, [orgId, propertyId]);
+      };
+      try {
+        const aPid = await pidOf(a); const bPid = await pidOf(b);
+        if (order === "dnc-first") {
+          await applyDnc(); // holds the exclusive global-DNC barrier
+          const ins = insertInbound();
+          await waitForLockWait(b, bPid); // the insert's statement trigger waits on the shared barrier
+          await a.query("commit");
+          await ins; await b.query("commit");
+        } else {
+          await insertInbound(); // holds the shared barrier + property row lock
+          const dnc = applyDnc();
+          await waitForLockWait(a, aPid); // the DNC writer waits for the exclusive barrier
+          await b.query("commit");
+          await dnc; await a.query("commit");
+        }
+      } finally { await a.end().catch(() => {}); await b.end().catch(() => {}); }
+      const { rows } = await pg.query(`select is_dnc_locked, has_inbound_message hi, has_unread_inbound hu from public.properties where id=$1`, [propertyId]);
+      expect(rows[0], order).toMatchObject({ hi: true, hu: true });
+      expect(rows[0].is_dnc_locked, order).toBe(true);
     }
   });
 });

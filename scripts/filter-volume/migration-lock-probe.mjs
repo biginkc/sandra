@@ -8,11 +8,12 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import pg from "pg";
-import { assertSandboxTarget } from "./assert-sandbox-target.mjs";
+import { assertSandboxTarget, SANDBOX } from "./assert-sandbox-target.mjs";
 
-const DB = "postgresql://postgres:postgres@127.0.0.1:55329/postgres";
+const DB = SANDBOX.url;
 console.error("target:", JSON.stringify(await assertSandboxTarget()));
-const CLI = process.env.SUPABASE_CLI ?? "/tmp/sb2109/node_modules/.bin/supabase";
+const CLI = process.env.SUPABASE_CLI;
+if (!CLI) throw new Error("Set SUPABASE_CLI to the pinned Supabase CLI binary (2.109.1, as in db-migrate-*.yml)");
 const ORG = "00000000-0000-0000-0000-000000000bbb";
 const TABLES = ["properties", "messages", "tasks", "property_lists", "property_tags"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -79,10 +80,8 @@ const obsLoop = (async () => {
 
 const dry = process.argv.includes("--dry");
 await assertSandboxTarget(); // re-check immediately before db push
-// Refuse to push anywhere but the disposable stack (workdir config must be the 55329 sandbox).
-if (!process.env.SBX_WORKDIR || !/port\s*=\s*55329/.test(fs.readFileSync(process.env.SBX_WORKDIR + "/supabase/config.toml", "utf8"))) {
-  throw new Error("SBX_WORKDIR must point at the disposable stack workdir (db port 55329); refusing to run db push --local");
-}
+// assertSandboxTarget() above/below also validates SBX_WORKDIR's config port; refuse an unset workdir.
+if (!process.env.SBX_WORKDIR) throw new Error("SBX_WORKDIR must point at the disposable stack workdir; refusing to run db push --local");
 const child = spawn(CLI, ["db", "push", "--include-all", "--local", "--workdir", process.env.SBX_WORKDIR, ...(dry ? ["--dry-run"] : [])], { stdio: ["ignore", "pipe", "pipe"] });
 let log = ""; child.stdout.on("data", (d) => (log += d)); child.stderr.on("data", (d) => (log += d));
 const code = await new Promise((r) => child.on("close", r));
