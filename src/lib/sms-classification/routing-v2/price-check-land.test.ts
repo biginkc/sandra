@@ -42,6 +42,12 @@ describe("land detection from the DealMachine record", () => {
     expect(dealMachineShape({ living_area_sqft: "980", num_bedrooms: 0 }).isLand).toBe(false);
   });
 
+  it("only one field in the response → unknown, never land", () => {
+    expect(dealMachineShape({ living_area_sqft: 0 }).isLand).toBeNull();
+    expect(dealMachineShape({ num_bedrooms: null }).isLand).toBeNull();
+    expect(dealMachineShape({ num_bedrooms: 0, estimated_value: 1 }).isLand).toBeNull();
+  });
+
   it("neither field in the response → unknown, never land", () => {
     expect(dealMachineShape({ estimated_value: 231000 }).isLand).toBeNull();
     expect(parseDealMachineEnrichResponse({ data: [{ matched: true, estimated_value: 231000 }] })).toEqual({ kind: "ok", value: 231000 });
@@ -147,6 +153,16 @@ describe("cache carries the land signal", () => {
     const cached: DealMachineCacheStore = { ...ledger, claim: async () => ({ outcome: "cached_negative", isLand: true }), settle };
     expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store: cached, callProvider: vi.fn() }))
       .toEqual({ kind: "no_value", reason: "cached_negative", isLand: true });
+  });
+
+  it("lost claim on a negative settle → no land signal returned", async () => {
+    const store: DealMachineCacheStore = {
+      ...ledger, claim: async () => ({ outcome: "claimed", claimToken: "tok" }), settle: async () => false, recordShape: async () => false,
+    };
+    const r = await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, {
+      store, callProvider: async () => ({ kind: "no_value", reason: "no_estimated_value", shape: { livingAreaSqft: 0, numBedrooms: 0, isLand: true } }),
+    });
+    expect(r).toEqual({ kind: "no_value", reason: "no_estimated_value" });
   });
 
   it("storing the shape fails (migration not applied) → value and this call's land answer still used", async () => {

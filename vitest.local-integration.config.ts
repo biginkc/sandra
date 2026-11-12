@@ -11,6 +11,7 @@ export default defineConfig({
   test: {
     include: [
       "supabase/migrations/20261031130000_routing_v2_live_decision_log.integration.test.ts",
+      "supabase/migrations/20261111120000_dealmachine_value_cache_land_signal.integration.test.ts",
       "supabase/migrations/20261031130100_routing_v2_legacy_drip_snapshots.integration.test.ts",
       "supabase/migrations/20261031130200_routing_v2_skip_first_step.integration.test.ts",
       "supabase/migrations/20261031130300_routing_v2_live_transition_guard.integration.test.ts",

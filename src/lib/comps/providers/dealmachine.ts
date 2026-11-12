@@ -94,8 +94,8 @@ export function dealMachineShape(item: Record<string, unknown>): DealMachineShap
   const beds = readShapeField(item, "num_bedrooms");
   const livingAreaSqft = area.kind === "number" ? area.n : null;
   const numBedrooms = beds.kind === "number" ? beds.n : null;
-  // Malformed values, or neither field returned at all → unknown (never land).
-  if (area.kind === "invalid" || beds.kind === "invalid" || (area.kind === "absent" && beds.kind === "absent")) {
+  // Both fields must be returned and readable; a missing or malformed field → unknown (never land).
+  if (area.kind === "invalid" || beds.kind === "invalid" || area.kind === "absent" || beds.kind === "absent") {
     return { livingAreaSqft, numBedrooms, isLand: null };
   }
   return { livingAreaSqft, numBedrooms, isLand: (livingAreaSqft ?? 0) === 0 && (numBedrooms ?? 0) === 0 };

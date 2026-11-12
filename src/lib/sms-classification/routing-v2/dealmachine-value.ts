@@ -161,7 +161,8 @@ async function callAndSettle(
       if (!(await settle("ok", { value: res.value }))) return { kind: "no_value", reason: "settle_lost" };
       return { kind: "value", value: res.value, source: "provider", ...landKey(res.shape?.isLand) };
     case "no_value":
-      await settle("negative", { error: res.reason });
+      // A lost claim never carries this (possibly obsolete) land answer.
+      if (!(await settle("negative", { error: res.reason }))) return { kind: "no_value", reason: res.reason };
       return { kind: "no_value", reason: res.reason, ...landKey(res.shape?.isLand) };
     case "retryable_error":
       await settle("failed_retryable", { retryAfterSeconds: res.retryAfterSeconds, error: res.reason });
