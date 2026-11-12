@@ -101,7 +101,9 @@ describe("Sendillo sender catalog sync on the health-snapshot cron", () => {
     });
     const response = await GET(request());
     expect(response.status).toBe(200);
-    expect(mocks.syncProviderCatalog).toHaveBeenCalledWith({ role: "service" }, "org-sendillo");
+    expect(mocks.syncProviderCatalog).toHaveBeenCalledWith({ role: "service" }, "org-sendillo", {
+      deactivateMissing: false,
+    });
     expect(await response.json()).toEqual({
       ok: true,
       capturedAt: "2026-11-12T15:00:00.000Z",

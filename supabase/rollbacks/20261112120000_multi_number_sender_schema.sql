@@ -1,7 +1,7 @@
 -- Rollback for 20261112120000_multi_number_sender_schema.
 -- Run 20261112120100's rollback first. Drops the new tables (their rows are derived or
 -- unused while pinning is off), the mirror trigger, the evidence indexes and the catalog /
--- org columns, and restores reset_tenant_tables() to its 20261008140000 definition.
+-- org columns, and restores reset_tenant_tables() to its 20261008140100_jev_lead_decisions definition.
 begin;
 
 set local lock_timeout = '5s';

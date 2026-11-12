@@ -164,7 +164,7 @@ security definer
 set search_path = public, pg_temp
 as $$
   select coalesce((
-    select (o.metadata ? 'repSms')
+    select (coalesce(o.metadata, '{}'::jsonb) ? 'repSms')
     from public.messages o
     where o.org_id = p_org_id
       and o.channel = 'sms'
@@ -212,7 +212,7 @@ begin
     and o.to_address = p_seller_phone
     and o.provider = 'sendillo'
     and o.status in ('sent', 'delivered')
-    and not (o.metadata ? 'repSms')
+    and not (coalesce(o.metadata, '{}'::jsonb) ? 'repSms')
     and public.is_pool_sender(p_org_id, o.from_address)
   order by o.created_at desc, o.id desc
   limit 1;
@@ -256,6 +256,7 @@ declare
   v_old_allocation boolean := false;
   v_old_default text := null;
   v_old_pinning_at timestamptz := null;
+  v_old_paused_at timestamptz := null;
 begin
   -- Lock protocol: exclusive per-org settings lock BEFORE any check. Resolutions hold the
   -- same key shared until commit, so this waits for every in-flight resolution.
@@ -266,9 +267,20 @@ begin
       raise exception 'sms_sender_settings.org_id cannot change' using errcode = '23514';
     end if;
     -- Re-read under the lock (another writer may have committed while we waited).
-    select s.pinning_enabled, s.allocation_enabled, s.default_sender_phone, s.pinning_enabled_at
-      into v_old_pinning, v_old_allocation, v_old_default, v_old_pinning_at
+    select s.pinning_enabled, s.allocation_enabled, s.default_sender_phone, s.pinning_enabled_at,
+           s.admission_paused_at
+      into v_old_pinning, v_old_allocation, v_old_default, v_old_pinning_at, v_old_paused_at
     from public.sms_sender_settings s where s.org_id = old.org_id;
+  end if;
+
+  -- admission_paused_at is stamped here, never trusted from the caller: turning the
+  -- pause on records now(); keeping it on keeps the stored stamp; null clears it.
+  if new.admission_paused_at is null then
+    new.admission_paused_at := null;
+  elsif v_old_paused_at is null then
+    new.admission_paused_at := now();
+  else
+    new.admission_paused_at := v_old_paused_at;
   end if;
 
   new.pinning_enabled := coalesce(new.pinning_enabled, false);
@@ -284,7 +296,11 @@ begin
        or not public.is_sendable_sender(new.org_id, 'sendillo', new.default_sender_phone) then
       raise exception 'pinning requires a sendable default_sender_phone' using errcode = '23514';
     end if;
-    if new.admission_paused_at is null or new.admission_paused_at > now() - interval '15 minutes' then
+    -- The drain is measured from the pause stamp already stored by an earlier statement
+    -- (v_old_paused_at), not from anything in this row image.
+    if v_old_paused_at is null
+       or new.admission_paused_at is null
+       or v_old_paused_at > now() - interval '15 minutes' then
       raise exception 'pinning can be enabled only after admission has been paused for 15 minutes'
         using errcode = '23514';
     end if;

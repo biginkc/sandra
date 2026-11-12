@@ -21,6 +21,18 @@ begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '120s';
 
+-- Messages indexes for the phone-wide evidence lookups (§3.2), built FIRST so the
+-- builds run while this transaction holds only the messages SHARE lock (and nothing
+-- on organizations / campaigns / the catalog yet). Plain, inside this transaction: a
+-- lock/statement timeout rolls the whole migration back, never leaving an invalid index.
+create index if not exists idx_messages_org_to_sms_outbound_created
+  on public.messages (org_id, to_address, created_at desc, id desc)
+  where direction = 'outbound' and channel = 'sms';
+
+create index if not exists idx_messages_org_from_sms_inbound_created
+  on public.messages (org_id, from_address, created_at desc, id desc)
+  where direction = 'inbound' and channel = 'sms';
+
 -- ---------------------------------------------------------------------------
 -- Catalog + org brand
 -- ---------------------------------------------------------------------------
@@ -201,18 +213,7 @@ revoke all on table public.sms_sender_settings from public, anon, authenticated,
 grant select on table public.sms_sender_settings to authenticated;
 grant select, insert, update on table public.sms_sender_settings to service_role;
 
--- Messages indexes for the phone-wide evidence lookups (§3.2). Plain, inside this
--- transaction: a lock/statement timeout rolls the whole migration back, never leaving an
--- invalid index.
-create index if not exists idx_messages_org_to_sms_outbound_created
-  on public.messages (org_id, to_address, created_at desc, id desc)
-  where direction = 'outbound' and channel = 'sms';
-
-create index if not exists idx_messages_org_from_sms_inbound_created
-  on public.messages (org_id, from_address, created_at desc, id desc)
-  where direction = 'inbound' and channel = 'sms';
-
--- reset_tenant_tables() (test helper; last redefined in 20261008140000_jev_outcome_thresholds.sql),
+-- reset_tenant_tables() (test helper; last redefined in 20261008140100_jev_lead_decisions.sql),
 -- now also clearing the three new tenant tables.
 create or replace function public.reset_tenant_tables()
  RETURNS void

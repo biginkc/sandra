@@ -441,22 +441,56 @@ describe("sms_sender_settings trigger", () => {
     ).toBe("ok");
   });
 
-  it("enabling pinning needs a sendable default and a 15-minute admission pause; sets pinning_enabled_at", async () => {
+  /** Fixture: backdate the stored pause stamp (the trigger never accepts a caller-supplied one). */
+  async function backdatePause(orgId: string, interval: string) {
+    await db.query("begin");
+    await db.query("set local session_replication_role = replica");
+    await db.query(
+      `update public.sms_sender_settings set admission_paused_at = now() - $2::interval where org_id = $1`,
+      [orgId, interval],
+    );
+    await db.query("commit");
+  }
+
+  it("enabling pinning needs a sendable default and a stored 15-minute admission pause; sets pinning_enabled_at", async () => {
     const orgId = await setupOrg();
     await expect(
       db.query("insert into public.sms_sender_settings (org_id, pinning_enabled) values ($1, true)", [orgId]),
     ).rejects.toThrow(/sendable default_sender_phone/);
+    // A caller-supplied, backdated pause is ignored: the trigger stamps now().
     await db.query(
-      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now())",
+      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now() - interval '1 day')",
       [orgId, A],
+    );
+    const stamped = (
+      await db.query(
+        "select admission_paused_at > now() - interval '1 minute' as fresh from public.sms_sender_settings where org_id = $1",
+        [orgId],
+      )
+    ).rows[0];
+    expect(stamped.fresh).toBe(true);
+    await expect(
+      db.query("update public.sms_sender_settings set pinning_enabled = true where org_id = $1", [orgId]),
+    ).rejects.toThrow(/paused for 15 minutes/);
+    // Re-supplying an older stamp while paused is ignored too.
+    await db.query(
+      "update public.sms_sender_settings set admission_paused_at = now() - interval '2 hours' where org_id = $1",
+      [orgId],
     );
     await expect(
       db.query("update public.sms_sender_settings set pinning_enabled = true where org_id = $1", [orgId]),
     ).rejects.toThrow(/paused for 15 minutes/);
-    await db.query(
-      "update public.sms_sender_settings set admission_paused_at = now() - interval '16 minutes' where org_id = $1",
-      [orgId],
-    );
+    // Pausing and enabling in the same statement is rejected.
+    const org3 = await setupOrg();
+    await db.query("insert into public.sms_sender_settings (org_id, default_sender_phone) values ($1, $2)", [org3, A]);
+    await expect(
+      db.query(
+        "update public.sms_sender_settings set admission_paused_at = now() - interval '1 day', pinning_enabled = true where org_id = $1",
+        [org3],
+      ),
+    ).rejects.toThrow(/paused for 15 minutes/);
+
+    await backdatePause(orgId, "16 minutes");
     await db.query("update public.sms_sender_settings set pinning_enabled = true where org_id = $1", [orgId]);
     const row = (
       await db.query("select pinning_enabled_at is not null as set from public.sms_sender_settings where org_id = $1", [
@@ -467,9 +501,10 @@ describe("sms_sender_settings trigger", () => {
     // non-sendable default
     const org2 = await setupOrg();
     await db.query(
-      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now() - interval '1 hour')",
+      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now())",
       [org2, C],
     );
+    await backdatePause(org2, "1 hour");
     await expect(
       db.query("update public.sms_sender_settings set pinning_enabled = true where org_id = $1", [org2]),
     ).rejects.toThrow(/sendable default_sender_phone/);
@@ -478,9 +513,10 @@ describe("sms_sender_settings trigger", () => {
   it("rejects allocation before the hour, and accepts it after", async () => {
     const orgId = await setupOrg();
     await db.query(
-      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now() - interval '20 minutes')",
+      "insert into public.sms_sender_settings (org_id, default_sender_phone, admission_paused_at) values ($1, $2, now())",
       [orgId, A],
     );
+    await backdatePause(orgId, "20 minutes");
     await db.query("update public.sms_sender_settings set pinning_enabled = true where org_id = $1", [orgId]);
     await expect(
       db.query("update public.sms_sender_settings set allocation_enabled = true where org_id = $1", [orgId]),
@@ -598,6 +634,25 @@ describe("resolve_sms_sender", () => {
     await msg(orgId, { direction: "outbound", from: A, to: s2, status: "delivered", at: "2026-11-03T10:00:00Z" });
     await msg(orgId, { direction: "inbound", from: s2, to: C, status: "received", at: "2026-11-01T10:00:00Z" });
     expect(await resolve(orgId, s2)).toMatchObject({ sender_phone: C, source: "evidence_inbound" });
+  });
+
+  it("ordinary history with NULL metadata is evidence (inbound and outbound)", async () => {
+    const { orgId } = await poolOrg();
+    const s1 = sellerPhone();
+    const id = await msg(orgId, { direction: "outbound", from: B, to: s1, status: "delivered" });
+    await db.query("update public.messages set metadata = null where id = $1", [id]);
+    expect(await resolve(orgId, s1, { allowDefault: true })).toMatchObject({
+      sender_phone: B,
+      source: "evidence_outbound",
+    });
+    const s2 = sellerPhone();
+    const sent = await msg(orgId, { direction: "outbound", from: C, to: s2, status: "sent", at: "2026-11-01T10:00:00Z" });
+    const inbound = await msg(orgId, { direction: "inbound", from: s2, to: C, status: "received", at: "2026-11-01T11:00:00Z" });
+    await db.query("update public.messages set metadata = null where id = any($1)", [[sent, inbound]]);
+    expect(await resolve(orgId, s2, { allowDefault: true })).toMatchObject({
+      sender_phone: C,
+      source: "evidence_inbound",
+    });
   });
 
   it("inbound on another property/contact for the same phone is found (phone-wide)", async () => {
@@ -1039,12 +1094,21 @@ describe("preview, adoption, admin, KPIs, number set", () => {
 });
 
 describe("evidence query plans", () => {
-  it("the phone-wide evidence lookups can use the new indexes", async () => {
+  it("the phone-wide evidence lookups use the new indexes", async () => {
+    // Synthetic volume so the planner's choice does not depend on whatever else is in the table.
+    const orgId = await newOrg();
+    await db.query(
+      `insert into public.messages (org_id, channel, direction, provider, from_address, to_address, body, status, created_at)
+       select $1, 'sms', case when g % 4 = 0 then 'inbound' else 'outbound' end, 'sendillo',
+         case when g % 4 = 0 then '+1913' || lpad((g % 2000)::text, 7, '0') else $2 end,
+         case when g % 4 = 0 then $2 else '+1913' || lpad((g % 2000)::text, 7, '0') end,
+         'synthetic', case when g % 4 = 0 then 'received' else 'delivered' end, now() - (g || ' seconds')::interval
+       from generate_series(1, 20000) g`,
+      [orgId, A],
+    );
+    await db.query("analyze public.messages");
     const plan = async (sql: string) => {
-      await db.query("begin");
-      await db.query("set local enable_seqscan = off");
-      const r = await db.query(`explain ${sql}`, [randomUUID(), "+19135550000"]);
-      await db.query("rollback");
+      const r = await db.query(`explain ${sql}`, [orgId, "+19130000444"]);
       return r.rows.map((row) => row["QUERY PLAN"]).join("\n");
     };
     expect(
@@ -1057,5 +1121,5 @@ describe("evidence query plans", () => {
         "select id from public.messages where org_id = $1 and direction = 'outbound' and channel = 'sms' and to_address = $2 and status in ('sent','delivered') order by created_at desc, id desc limit 1",
       ),
     ).toContain("idx_messages_org_to_sms_outbound_created");
-  });
+  }, 60_000);
 });

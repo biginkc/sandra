@@ -44,7 +44,9 @@ async function handle(request: Request) {
 /**
  * Keep the sender catalog (and so the "sendable" rule) fresh: the read-only
  * Sendillo number sync also runs on this cron, scoped to the configured
- * Sendillo org. A sync failure is reported but never fails the snapshot.
+ * Sendillo org. It is additive: it never deactivates a number (a partial
+ * provider list must not stop sending). Deactivation stays on the
+ * on-demand/manual sync. A sync failure is reported but never fails the snapshot.
  */
 async function syncSenderCatalog(
   admin: ReturnType<typeof createAdminClient>,
@@ -52,7 +54,8 @@ async function syncSenderCatalog(
   const orgId = process.env.SENDILLO_ORG_ID?.trim();
   if (!orgId) return null;
   try {
-    return await syncProviderCatalog(admin, orgId);
+    // Additive only: never deactivates a sender (see CatalogSyncOptions).
+    return await syncProviderCatalog(admin, orgId, { deactivateMissing: false });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_sendillo_catalog_sync" } });
     return { error: error instanceof Error ? error.message : "unknown" };

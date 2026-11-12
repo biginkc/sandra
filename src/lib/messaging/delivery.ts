@@ -80,10 +80,23 @@ export function normalizeSenderNumber(value: string): string {
  * soft-deactivated. `client` must be the admin client — the catalog
  * tables are select-only under RLS.
  */
+export type CatalogSyncOptions = {
+  /**
+   * Soft-deactivate catalog rows the provider no longer reports (default
+   * true: the on-demand/manual sync). The scheduled cron passes false: it
+   * may add numbers and refresh provider fields, but a partial provider list
+   * must never take a live sender out of `active` (release would then fail
+   * queued rows).
+   */
+  deactivateMissing?: boolean;
+};
+
 export async function syncProviderCatalog(
   client: Supabase,
   orgId: string,
+  options: CatalogSyncOptions = {},
 ): Promise<CatalogSyncResult> {
+  const deactivateMissing = options.deactivateMissing ?? true;
   const provider = getMessagingProvider();
   if (!provider || !providerSupportsSenderInventory(provider)) {
     return { supported: false, provider: provider?.providerId ?? null };
@@ -92,11 +105,11 @@ export async function syncProviderCatalog(
   // let a caller populate another tenant's synced sender inventory.
   assertSendilloOrganizationScope(orgId, provider.providerId);
 
-  const syncKey = `${orgId}:${provider.providerId}`;
+  const syncKey = `${orgId}:${provider.providerId}:${deactivateMissing ? "full" : "additive"}`;
   const inflight = catalogSyncInflight.get(syncKey);
   if (inflight) return inflight;
 
-  const sync = syncProviderCatalogOnce(client, orgId, provider).finally(() => {
+  const sync = syncProviderCatalogOnce(client, orgId, provider, deactivateMissing).finally(() => {
     catalogSyncInflight.delete(syncKey);
   });
   catalogSyncInflight.set(syncKey, sync);
@@ -107,6 +120,7 @@ async function syncProviderCatalogOnce(
   client: Supabase,
   orgId: string,
   provider: MessagingProvider,
+  deactivateMissing: boolean,
 ): Promise<CatalogSyncResult> {
   const nowIso = new Date().toISOString();
 
@@ -143,7 +157,7 @@ async function syncProviderCatalogOnce(
       throw new Error(`sender catalog upsert failed: ${error.message}`);
     }
   }
-  {
+  if (deactivateMissing) {
     const { count: activeSenderCount, error: activeSenderError } = await client
       .from("provider_sender_numbers")
       .select("id", { count: "exact", head: true })
@@ -210,17 +224,19 @@ async function syncProviderCatalogOnce(
         throw new Error(`provider campaign upsert failed: ${error.message}`);
       }
     }
-    const { error } = await client
-      .from("provider_campaigns")
-      .update({ status: "inactive", updated_at: nowIso })
-      .eq("org_id", orgId)
-      .eq("provider", provider.providerId)
-      .lt("last_synced_at", nowIso)
-      .eq("status", "active");
-    if (error) {
-      throw new Error(
-        `provider campaign deactivate failed: ${error.message}`,
-      );
+    if (deactivateMissing) {
+      const { error } = await client
+        .from("provider_campaigns")
+        .update({ status: "inactive", updated_at: nowIso })
+        .eq("org_id", orgId)
+        .eq("provider", provider.providerId)
+        .lt("last_synced_at", nowIso)
+        .eq("status", "active");
+      if (error) {
+        throw new Error(
+          `provider campaign deactivate failed: ${error.message}`,
+        );
+      }
     }
     providerCampaignCount = campaignRows.length;
   }

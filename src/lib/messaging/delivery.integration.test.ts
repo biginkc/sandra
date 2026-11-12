@@ -210,6 +210,69 @@ describe("syncProviderCatalog (integration)", () => {
   });
 });
 
+describe("syncProviderCatalog additive mode (scheduled cron)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+    resetMockState();
+  });
+
+  it("a partial provider list never deactivates the live sender; release gate stays approved", async () => {
+    const orgId = await getOrgId();
+    await syncProviderCatalog(supabase, orgId); // both mock numbers active
+
+    setMockPurchasedNumbers([
+      {
+        phoneE164: MOCK_SENDER_SECONDARY,
+        providerNumberId: "mock-num-2",
+        status: "active",
+        messagingStatus: "Inactive",
+        raw: { mock: true, partial: true },
+      },
+    ]);
+    await sleep(25);
+    await syncProviderCatalog(supabase, orgId, { deactivateMissing: false });
+
+    const rows = await listSenderRows(orgId);
+    expect(rows.map((r) => [r.phone_e164, r.status])).toEqual([
+      [MOCK_SENDER_PRIMARY, "active"],
+      [MOCK_SENDER_SECONDARY, "active"],
+    ]);
+    expect(await getSenderInventoryState(supabase, orgId, "mock", MOCK_SENDER_PRIMARY)).toEqual({
+      state: "approved",
+    });
+    // Provider fields of the reported number are still refreshed.
+    const { data } = await supabase
+      .from("provider_sender_numbers")
+      .select("messaging_status")
+      .eq("org_id", orgId)
+      .eq("phone_e164", MOCK_SENDER_SECONDARY)
+      .single();
+    expect(data?.messaging_status).toBe("Inactive");
+
+    // An empty list is not an error in additive mode and changes nothing.
+    setMockPurchasedNumbers([]);
+    await syncProviderCatalog(supabase, orgId, { deactivateMissing: false });
+    expect((await listSenderRows(orgId)).every((r) => r.status === "active")).toBe(true);
+
+    // The on-demand sync keeps deactivating as before.
+    setMockPurchasedNumbers([
+      {
+        phoneE164: MOCK_SENDER_SECONDARY,
+        providerNumberId: "mock-num-2",
+        status: "active",
+        messagingStatus: "ready",
+        raw: { mock: true },
+      },
+    ]);
+    await sleep(25);
+    await syncProviderCatalog(supabase, orgId);
+    expect((await listSenderRows(orgId)).map((r) => [r.phone_e164, r.status])).toEqual([
+      [MOCK_SENDER_PRIMARY, "inactive"],
+      [MOCK_SENDER_SECONDARY, "active"],
+    ]);
+  });
+});
+
 describe("syncProviderCatalog: Sendillo pending-number-addition snapshot (2026-11-12)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
