@@ -194,8 +194,9 @@ jobs:
             "src/app/(dashboard)/properties/dnc-safe-actions.ts" \
             "src/app/(dashboard)/properties/promote-leads-actions.ts" \
             "src/app/(dashboard)/properties/_actions/count.ts" \
-            "src/app/(dashboard)/leads/actions.ts" \
             src/lib/prospects/eligibility.ts
+          # leads/actions.ts now shares operator lead links; its no-Search
+          # assertion remains in legacy-isolation.test.ts.
           # campaigns/actions.ts and workflows/bulk-sms.ts left this list in
           # #927: campaign pause/resume/cadence must loop batched RPCs (8s
           # statement_timeout). Prospects/Search behaviour is unaffected.
