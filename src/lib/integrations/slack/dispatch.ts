@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import { WebClient } from "@slack/web-api";
 
 import { reportError } from "@/lib/errors/report";
@@ -335,7 +336,7 @@ export async function refreshSlackMessage(input: {
     const propertyAddress = task.related_property_id
       ? await loadPropertyAddress(admin, task.related_property_id)
       : "Personal block";
-    const deepLink = buildTaskDeepLink(input.taskId);
+    const deepLink = buildLeadDeepLink(task.related_property_id);
     const slack = new WebClient(token.accessToken.reveal());
     await slack.chat.update({
       channel: input.channel,
@@ -391,46 +392,12 @@ async function loadPropertyAddress(
   return data?.address ?? "Property";
 }
 
-/** Exported for reuse by other reminder channels (e.g. the SMS/bell
- *  delivery worker) that need the same deep-link shape Slack uses.
- *
- *  Codex round 11 (finding 2): `/tasks/<id>` has no page.tsx — every link
- *  built with this 404s. Kept as-is (still used by `refreshSlackMessage`'s
- *  "Mark Done" update, out of this round's scope) but the appointment-
- *  reminder Slack CTA now uses `buildAppointmentDeepLink` below instead. */
-export function buildTaskDeepLink(taskId: string): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.VERCEL_PROJECT_PRODUCTION_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  return `${normalizedBaseUrl}/tasks/${taskId}`;
-}
-
-/**
- * Codex round 11 (finding 2): linkage-aware deep link for an appointment
- * task — property-linked -> `/leads/<propertyId>`, contact-only ->
- * `/messages?thread=<contactId>`, personal block (neither) -> `/dashboard`.
- * Same routing `lifecycle-actions.ts`'s and `book-appointment-action.ts`'s
- * own local copies already use for the assignment/lifecycle Slack CTAs;
- * exported here (not consolidated with those in this round) so the
- * reminder-sweep worker (`reminders.ts`) can build the SAME CTA instead of
- * the dead `/tasks/<id>` route `buildTaskDeepLink` produces.
- */
+/** Shared lead destination for appointment notifications; contacts are not lead IDs. */
 export function buildAppointmentDeepLink(
   propertyId?: string | null,
-  contactId?: string | null,
+  _contactId?: string | null,
 ): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.VERCEL_PROJECT_PRODUCTION_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  if (propertyId) return `${normalizedBaseUrl}/leads/${propertyId}`;
-  if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
-  return `${normalizedBaseUrl}/dashboard`;
+  // Retained for existing callers; a contact is never a lead identifier.
+  void _contactId;
+  return buildLeadDeepLink(propertyId);
 }

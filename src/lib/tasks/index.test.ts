@@ -607,7 +607,7 @@ describe("snoozeTask", () => {
       dueAt: newDue,
       endAt: undefined,
       timezone: "America/Denver",
-      deepLink: "https://app.test/messages?property_id=property-3",
+      deepLink: "https://app.test/leads/property-3",
       calendarEnabled: true,
     });
   });

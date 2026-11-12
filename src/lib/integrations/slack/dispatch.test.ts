@@ -44,6 +44,7 @@ vi.mock("@slack/web-api", () => ({
 }));
 
 import {
+  buildAppointmentDeepLink,
   completeTaskFromSlack,
   dispatchAppointmentReminderSlack,
   dispatchTaskAssignedSlack,
@@ -543,6 +544,8 @@ describe("slack/dispatch", () => {
         text: "Marked done",
       }),
     );
+    expect(JSON.stringify(chatUpdate.mock.calls[0])).toContain("/leads/");
+    expect(JSON.stringify(chatUpdate.mock.calls[0])).not.toContain("/tasks/");
   });
 
   it("refreshSlackMessage on Slack error reportErrors and never throws", async () => {
@@ -571,5 +574,14 @@ describe("slack/dispatch", () => {
       expect.any(Error),
       expect.objectContaining({ tags: { surface: "slack_task_refresh" } }),
     );
+  });
+});
+
+
+describe("appointment lead links", () => {
+  it("opens the lead or Leads list without using a contact as a property", () => {
+    expect(buildAppointmentDeepLink("p1", "c1")).toMatch(/\/leads\/p1$/);
+    expect(buildAppointmentDeepLink(null, "c1")).toMatch(/\/leads$/);
+    expect(buildAppointmentDeepLink()).toMatch(/\/leads$/);
   });
 });

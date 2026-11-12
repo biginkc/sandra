@@ -259,7 +259,7 @@ describe("drain paging (Astra MAJOR: capped response must not hide unfinished pa
 describe("ambiguous-thread alerts: wording reuses the existing hold strings", () => {
   const p: HotPromotion = { propertyId: null, assigneeUserId: "", name: "Testa", assignedAt: AT, kind: "ambiguous_thread", key: "k", linkPath: "/messages?thread=conv-1" };
   it("Slack and SMS", () => {
-    expect(hotPromotionSlackText(p, BASE)).toBe("New hold needs review: Testa (needs a reply). https://app.example.com/messages?thread=conv-1");
+    expect(hotPromotionSlackText(p, BASE)).toBe("New hold needs review: Testa (needs a reply). https://app.example.com/leads");
     expect(hotPromotionSmsText(p, BASE)).toBe("Hot hold: Testa (needs a reply). https://app.example.com/messages?thread=conv-1");
   });
   it("matches the existing routing-v2 hold copy shape exactly", () => {
@@ -275,7 +275,7 @@ describe("ambiguous-thread alerts end to end (fake store, real loaders)", () => 
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.map((s) => [s.channel, s.userId, s.text])).toEqual([
-      ["slack", OWNER.userId, "New hold needs review: Testa (needs a reply). https://app.example.com/messages?thread=conv-1"],
+      ["slack", OWNER.userId, "New hold needs review: Testa (needs a reply). https://app.example.com/leads"],
       ["sms", OWNER.userId, "Hot hold: Testa (needs a reply). https://app.example.com/messages?thread=conv-1"],
     ]);
     expect(t.store.rows.map((r) => [r.holdKey, r.propertyId])).toEqual([

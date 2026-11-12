@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
 import type { EmailMessage, HoldInfo, HotPromotion } from "./types";
@@ -11,7 +12,7 @@ const escapeSlack = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;"
 
 /** The one link every alert carries: the lead's own page (the lead id is the property id). */
 export function leadLink(baseUrl: string, propertyId: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}/leads/${encodeURIComponent(propertyId)}`;
+  return buildLeadDeepLink(propertyId, { baseUrl });
 }
 
 const REASON_LABELS: Record<string, string> = {
@@ -83,16 +84,17 @@ function promotionLink(baseUrl: string, p: HotPromotion): string {
 }
 
 export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string {
+  const link = buildLeadDeepLink(p.propertyId, { baseUrl });
   // Ambiguous thread: the existing hold copy with the existing needs_reply label; no new wording.
-  if (p.kind === "ambiguous_thread") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel("needs_reply"))}). ${ambiguousThreadLink(baseUrl, p)}`;
+  if (p.kind === "ambiguous_thread") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel("needs_reply"))}). ${link}`;
   // Routing v2 owner alert: today's hold-alert copy with the approved v2 label.
-  if (p.kind === "routing_v2_alert") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(p.label ?? "hold")}). ${promotionLink(baseUrl, p)}`;
-  if (p.kind === "selling_opportunity") return `Possible selling opportunity: ${escapeSlack(p.name)} mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale. ${promotionLink(baseUrl, p)}`;
-  if (p.kind === "lead_reply") return `${escapeSlack(leadReplyHeadline(p))}. ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "routing_v2_alert") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(p.label ?? "hold")}). ${link}`;
+  if (p.kind === "selling_opportunity") return `Possible selling opportunity: ${escapeSlack(p.name)} mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale. ${link}`;
+  if (p.kind === "lead_reply") return `${escapeSlack(leadReplyHeadline(p))}. ${link}`;
   // A failed hand-off uses the existing hold alert copy.
-  if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${promotionLink(baseUrl, p)}`;
-  if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${promotionLink(baseUrl, p)}`;
-  return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${promotionLink(baseUrl, p)}`;
+  if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${link}`;
+  if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${link}`;
+  return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${link}`;
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {

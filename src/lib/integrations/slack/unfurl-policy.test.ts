@@ -25,7 +25,7 @@ describe("slack unfurl policy", () => {
   it("accepts canonical lead and My Leads URLs while ignoring unrelated query/fragment data", () => {
     expect(parseSlackLeadUrl(`https://sandra.bmhgroupkc.com/leads/${id}?utm=ignored#fragment`)).toMatchObject({ ok: true, link: { propertyId: id.toLowerCase() } });
     expect(parseSlackLeadUrl(`https://sandra.bmhgroupkc.com/my-leads?utm=ignored&lead=${id}#fragment`)).toMatchObject({ ok: true, link: { propertyId: id.toLowerCase() } });
-    expect(buildSlackLeadDeepLink(id)).toBe(`https://sandra.bmhgroupkc.com/my-leads?lead=${id.toLowerCase()}`);
+    expect(buildSlackLeadDeepLink(id)).toBe(`https://sandra.bmhgroupkc.com/leads/${id.toLowerCase()}`);
   });
 
   it("rejects deceptive hosts, userinfo, explicit ports, duplicate lead values, and invalid paths", () => {
