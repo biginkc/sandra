@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import "server-only";
 
 import { revalidatePath } from "next/cache";
@@ -121,17 +122,6 @@ function mapRpcError(error: { message: string; code?: string }) {
   return err({ code: "CREATE_NEXT_STEP_FAILED", message: m || "Could not create the next step." });
 }
 
-function loadDeepLink(propertyId?: string, contactId?: string): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const base = baseUrl.startsWith("http") ? baseUrl : `https://${baseUrl}`;
-  if (propertyId) return `${base}/leads/${propertyId}`;
-  if (contactId) return `${base}/messages?thread=${contactId}`;
-  return `${base}/dashboard`;
-}
-
 /**
  * Creates a next step (appointment or task) through the one SQL write
  * function `fn_create_next_step`. SQL writes the lead event, so this wrapper
@@ -235,7 +225,6 @@ export async function createNextStep(
       alreadyQualified: data.already_qualified ?? false,
     };
     const linkedPropertyId = result.relatedPropertyId ?? undefined;
-    const linkedContactId = result.contactId ?? undefined;
 
     // (a) The ledger row is the durable calendar-create intent; advance it now.
     if (result.ledgerId) {
@@ -264,7 +253,7 @@ export async function createNextStep(
             .maybeSingle();
           subjectLabel = prop?.address ?? "Appointment";
         }
-        const deepLink = loadDeepLink(linkedPropertyId, linkedContactId);
+        const deepLink = buildLeadDeepLink(linkedPropertyId);
         after(async () => {
           await Promise.allSettled([
             dispatchTaskAssigned(supabase, {

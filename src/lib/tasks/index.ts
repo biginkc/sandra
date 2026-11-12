@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { after } from "next/server";
 
@@ -471,7 +472,7 @@ async function scheduleCalendarUpdateAfterSnooze(
     ? await loadTaskPropertyAddress(supabase, task.related_property_id)
     : task.title;
   const prefs = await loadIntegrationPrefs(supabase, task.assignee_id);
-  const deepLink = buildTaskDeepLink(task.related_property_id, task.contact_id);
+  const deepLink = buildLeadDeepLink(task.related_property_id);
 
   after(async () => {
     await dispatchTaskCalendarEventUpdate({
@@ -501,24 +502,4 @@ async function loadTaskPropertyAddress(
     .eq("id", propertyId)
     .maybeSingle();
   return data?.address ?? "Property";
-}
-
-function buildTaskDeepLink(
-  propertyId: string | null,
-  contactId: string | null,
-): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  if (propertyId)
-    return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
-  // Contact-only tasks (no property) deep-link to the Messages thread
-  // instead — canonicalizeThreadId resolves a raw contact id to its
-  // conversation.
-  if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
-  return normalizedBaseUrl;
 }

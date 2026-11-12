@@ -779,10 +779,7 @@ async function deliverSlack(
     taskTitle: row.taskTitle,
     dueAt: row.taskDueAt,
     timezone: row.assigneeTimezone,
-    // Codex round 11 (finding 2): linkage-aware CTA — property-linked ->
-    // /leads/<id>, contact-only -> /messages?thread=<contactId>, personal
-    // block (neither) -> /dashboard. `buildTaskDeepLink`'s `/tasks/<id>`
-    // (the prior deep link here) 404s: that route has no page.tsx.
+    // Operator links open the lead, or the Leads list when no property is known.
     deepLink: buildAppointmentDeepLink(row.relatedPropertyId, row.contactId),
   });
   if (result.outcome === "sent") {

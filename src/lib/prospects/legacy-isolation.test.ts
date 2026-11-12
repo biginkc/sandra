@@ -15,7 +15,7 @@ export const LEGACY_FILES = [
   "src/app/(dashboard)/properties/dnc-safe-actions.ts",
   "src/app/(dashboard)/properties/promote-leads-actions.ts",
   "src/app/(dashboard)/properties/_actions/count.ts",
-  "src/app/(dashboard)/leads/actions.ts",
+  // Lead actions use the shared operator-notification link helper; they are not Search.
   "src/lib/prospects/eligibility.ts",
   // campaigns/actions.ts and workflows/bulk-sms.ts removed in #927 (batched
   // campaign queue RPCs); they are campaign code, not Prospects/Search.
@@ -44,7 +44,7 @@ describe("legacy actions are untouched", () => {
   });
 
   it("no legacy file knows about Search (no origin/mode plumbing leaked in)", () => {
-    for (const f of LEGACY_FILES) {
+    for (const f of [...LEGACY_FILES, "src/app/(dashboard)/leads/actions.ts"]) {
       const text = readFileSync(path.join(root, f), "utf8");
       expect(text, f).not.toMatch(/search-scope|lib\/prospects\/select-all|search_properties|QueryOrigin|parseQueryOrigin|enforceCap|searchPage/);
     }

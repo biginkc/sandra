@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import { WebClient } from "@slack/web-api";
 
 export const SLACK_CANONICAL_ORIGIN = "https://sandra.bmhgroupkc.com";
@@ -56,7 +57,7 @@ export function parseSlackLeadLinks(urls: readonly string[]): {
 
 export function buildSlackLeadDeepLink(propertyId: string): string {
   if (!UUID_RE.test(propertyId)) throw new Error("Invalid property id");
-  return `${SLACK_CANONICAL_ORIGIN}/my-leads?lead=${propertyId.toLowerCase()}`;
+  return buildLeadDeepLink(propertyId.toLowerCase(), { baseUrl: SLACK_CANONICAL_ORIGIN });
 }
 
 export function escapeSlackText(value: string): string {
