@@ -638,6 +638,7 @@ describe('20261007190000_call_facts', () => {
     'public.lists.name': 'not_a_person (list label)',
     'public.my_leads_housekeeping_before_images.table_name': 'not_a_person (table name)',
     'public.organizations.name': 'not_a_person (our own company)',
+    'public.organizations.sendillo_brand_name': 'not_a_person (our own 10DLC brand name as registered with Sendillo; never a contact name)',
     'public.provider_campaigns.name': 'not_a_person (campaign label)',
     'public.saved_filters.name': 'not_a_person (filter label)',
     'public.sequences.name': 'not_a_person (sequence label)',
