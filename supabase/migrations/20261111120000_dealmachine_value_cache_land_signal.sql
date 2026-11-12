@@ -24,6 +24,31 @@ alter table public.dealmachine_value_cache
 comment on column public.dealmachine_value_cache.is_land is
   'DealMachine record looks like land (living_area_sqft and num_bedrooms both 0/null). NULL = unknown (row cached before 20261111120000, or not recorded).';
 
+-- Every new claim (a fresh claim token while in_flight) wipes the previous shape, in the DB,
+-- whatever code runs the claim. A refresh whose shape write fails, or that runs on code that
+-- does not write a shape, therefore settles as unknown, never with an older land answer.
+create or replace function public.fn_dealmachine_value_cache_reset_shape()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if new.state = 'in_flight' and new.claim_token is distinct from old.claim_token then
+    new.living_area_sqft := null;
+    new.num_bedrooms := null;
+    new.is_land := null;
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.fn_dealmachine_value_cache_reset_shape() from public, anon, authenticated;
+
+drop trigger if exists dealmachine_value_cache_reset_shape on public.dealmachine_value_cache;
+create trigger dealmachine_value_cache_reset_shape
+  before update on public.dealmachine_value_cache
+  for each row execute function public.fn_dealmachine_value_cache_reset_shape();
+
 -- Record the shape for the current claim holder only (matching token, still in_flight),
 -- called right before settle. A stale claimer changes nothing.
 create or replace function public.fn_dealmachine_value_record_shape(

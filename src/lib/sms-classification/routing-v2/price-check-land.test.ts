@@ -47,6 +47,19 @@ describe("land detection from the DealMachine record", () => {
     expect(parseDealMachineEnrichResponse({ data: [{ matched: true, estimated_value: 231000 }] })).toEqual({ kind: "ok", value: 231000 });
   });
 
+  it("malformed shape values → unknown, never land", () => {
+    expect(dealMachineShape({ living_area_sqft: "unknown", num_bedrooms: 0 }).isLand).toBeNull();
+    expect(dealMachineShape({ living_area_sqft: 0, num_bedrooms: -1 }).isLand).toBeNull();
+    expect(dealMachineShape({ living_area_sqft: {}, num_bedrooms: 0 }).isLand).toBeNull();
+  });
+
+  it.each([null, 0])("matched land with no usable value (%s) keeps the land signal", (estimated_value) => {
+    expect(parseDealMachineEnrichResponse({ data: [{ matched: true, estimated_value, living_area_sqft: 0, num_bedrooms: 0 }] })).toEqual({
+      kind: "no_value", reason: "no_estimated_value", shape: { livingAreaSqft: 0, numBedrooms: 0, isLand: true },
+    });
+    expect(parseDealMachineEnrichResponse({ data: [{ matched: true, estimated_value }] })).toEqual({ kind: "no_value", reason: "no_estimated_value" });
+  });
+
   it("parses the shape from the same response as the value", () => {
     const r = parseDealMachineEnrichResponse({
       data: [{ matched: true, estimated_value: 231000, living_area_sqft: 0, num_bedrooms: 0, total_assessed_value: 5320 }],
@@ -80,6 +93,14 @@ describe("price check with a DealMachine land signal", () => {
     expect(r.action).toEqual(LAND_ALERT);
   });
 
+  it("land with no DealMachine value → still the vacant-lot alert, no fair-price reply", async () => {
+    const r = await runV2PriceCheck({
+      flags: ON, propertyId: PROP, decision: DECISION, reply: "$50k", propertyType: PT,
+      lookupValue: async () => ({ kind: "no_value", reason: "cached_negative", isLand: true }),
+    });
+    expect(r).toMatchObject({ outcome: "land_price", action: LAND_ALERT, value: null });
+  });
+
   it("the alert Jarrad sees says vacant lot", () => {
     expect(V2_ALERT_LABELS.land_price.toLowerCase()).toContain("vacant lot");
   });
@@ -110,6 +131,22 @@ describe("cache carries the land signal", () => {
     expect(r).toEqual({ kind: "value", value: 231000, source: "provider", isLand: true });
     expect(recordShape).toHaveBeenCalledWith({ propertyId: PROP, claimToken: "tok", shape: { livingAreaSqft: 0, numBedrooms: 0, isLand: true } });
     expect(order).toEqual(["shape", "settle"]);
+  });
+
+  it("matched land with no value: shape recorded, negative cached, land returned; cached negative carries it", async () => {
+    const recordShape = vi.fn(async () => true);
+    const settle = vi.fn(async () => true);
+    const shape = { livingAreaSqft: 0, numBedrooms: 0, isLand: true };
+    const store: DealMachineCacheStore = { ...ledger, claim: async () => ({ outcome: "claimed", claimToken: "tok" }), settle, recordShape };
+    const r = await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, {
+      store, callProvider: async () => ({ kind: "no_value", reason: "no_estimated_value", shape }),
+    });
+    expect(r).toEqual({ kind: "no_value", reason: "no_estimated_value", isLand: true });
+    expect(recordShape).toHaveBeenCalledWith({ propertyId: PROP, claimToken: "tok", shape });
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({ state: "negative" }));
+    const cached: DealMachineCacheStore = { ...ledger, claim: async () => ({ outcome: "cached_negative", isLand: true }), settle };
+    expect(await lookupDealMachineValue({ orgId: ORG, propertyId: PROP, address: ADDR }, { store: cached, callProvider: vi.fn() }))
+      .toEqual({ kind: "no_value", reason: "cached_negative", isLand: true });
   });
 
   it("storing the shape fails (migration not applied) → value and this call's land answer still used", async () => {

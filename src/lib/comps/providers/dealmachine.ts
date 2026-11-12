@@ -45,7 +45,7 @@ export type DealMachineShape = { livingAreaSqft: number | null; numBedrooms: num
 export type DealMachineValueResult =
   | { kind: "ok"; value: number; shape?: DealMachineShape }
   /** Address not matched, or matched with no usable value (null / 0 / not a number). */
-  | { kind: "no_value"; reason: string }
+  | { kind: "no_value"; reason: string; shape?: DealMachineShape }
   /** 429 / 5xx / timeout / network, retries exhausted. */
   | { kind: "retryable_error"; reason: string; retryAfterSeconds: number }
   /** 400 / 401 / other non-retryable response or an unreadable body. */
@@ -90,10 +90,23 @@ const toNumberOrNull = (v: unknown): number | null => {
  * turn every price check into a land alert.
  */
 export function dealMachineShape(item: Record<string, unknown>): DealMachineShape {
-  const livingAreaSqft = toNumberOrNull(item.living_area_sqft);
-  const numBedrooms = toNumberOrNull(item.num_bedrooms);
-  if (!("living_area_sqft" in item) && !("num_bedrooms" in item)) return { livingAreaSqft, numBedrooms, isLand: null };
+  const area = readShapeField(item, "living_area_sqft");
+  const beds = readShapeField(item, "num_bedrooms");
+  const livingAreaSqft = area.kind === "number" ? area.n : null;
+  const numBedrooms = beds.kind === "number" ? beds.n : null;
+  // Malformed values, or neither field returned at all → unknown (never land).
+  if (area.kind === "invalid" || beds.kind === "invalid" || (area.kind === "absent" && beds.kind === "absent")) {
+    return { livingAreaSqft, numBedrooms, isLand: null };
+  }
   return { livingAreaSqft, numBedrooms, isLand: (livingAreaSqft ?? 0) === 0 && (numBedrooms ?? 0) === 0 };
+}
+
+function readShapeField(item: Record<string, unknown>, key: string): { kind: "absent" } | { kind: "null" } | { kind: "number"; n: number } | { kind: "invalid" } {
+  if (!(key in item)) return { kind: "absent" };
+  const v = item[key];
+  if (v === null) return { kind: "null" };
+  const n = toNumberOrNull(v);
+  return n === null || n < 0 ? { kind: "invalid" } : { kind: "number", n };
 }
 
 export function buildDealMachineEnrichRequest(address: DealMachineAddress): Json {
@@ -112,10 +125,13 @@ export function parseDealMachineEnrichResponse(body: unknown): DealMachineValueR
     const code = isRecord(item.match_failure) && typeof item.match_failure.code === "string" ? item.match_failure.code : "unmatched";
     return { kind: "no_value", reason: `unmatched:${code}` };
   }
+  const shape = dealMachineShape(item);
   const v = item.estimated_value;
   const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
-  if (!Number.isFinite(n) || n <= 0) return { kind: "no_value", reason: "no_estimated_value" };
-  const shape = dealMachineShape(item);
+  if (!Number.isFinite(n) || n <= 0) {
+    // A matched land record often has no value: keep the land signal so it still routes as land.
+    return shape.isLand === null ? { kind: "no_value", reason: "no_estimated_value" } : { kind: "no_value", reason: "no_estimated_value", shape };
+  }
   // Unknown shape (neither field returned) is left off, so the result is exactly as before.
   return shape.isLand === null ? { kind: "ok", value: n } : { kind: "ok", value: n, shape };
 }

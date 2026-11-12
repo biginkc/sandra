@@ -24,7 +24,7 @@ export type ClaimOutcome =
   | { outcome: "claimed"; claimToken: string }
   /** isLand: the stored land signal; null = unknown (pre-signal row, or unreadable). */
   | { outcome: "cached_ok"; value: number; isLand?: boolean | null }
-  | { outcome: "cached_negative" }
+  | { outcome: "cached_negative"; isLand?: boolean | null }
   | { outcome: "in_flight" }
   | { outcome: "backoff" };
 
@@ -53,7 +53,8 @@ export const DM_CALLS_PER_MINUTE = 60;
 export type ValueLookupResult =
   /** isLand: DealMachine record looks like land; null/undefined = unknown (today's behaviour). */
   | { kind: "value"; value: number; source: "provider" | "cache"; isLand?: boolean | null }
-  | { kind: "no_value"; reason: string };
+  /** isLand may be set when DealMachine matched land but gave no usable value. */
+  | { kind: "no_value"; reason: string; isLand?: boolean };
 
 export type LookupDeps = {
   store: DealMachineCacheStore;
@@ -101,7 +102,7 @@ export async function lookupDealMachineValue(
       return { kind: "no_value", reason: "claim_error" };
     }
     if (claim.outcome === "cached_ok") return { kind: "value", value: claim.value, source: "cache", ...landKey(claim.isLand) };
-    if (claim.outcome === "cached_negative") return { kind: "no_value", reason: "cached_negative" };
+    if (claim.outcome === "cached_negative") return { kind: "no_value", reason: "cached_negative", ...landKey(claim.isLand) };
     if (claim.outcome === "backoff") return { kind: "no_value", reason: "backoff" };
     if (claim.outcome === "in_flight") {
       if (now() >= deadline) return { kind: "no_value", reason: "in_flight_timeout" };
@@ -149,7 +150,7 @@ async function callAndSettle(
       await deps.store.recordShape({
         propertyId: input.propertyId,
         claimToken,
-        shape: res.kind === "ok" ? res.shape ?? null : null,
+        shape: res.kind === "ok" || res.kind === "no_value" ? res.shape ?? null : null,
       });
     } catch {
       // Not stored: later cache reads say unknown; this call still uses its own answer.
@@ -161,7 +162,7 @@ async function callAndSettle(
       return { kind: "value", value: res.value, source: "provider", ...landKey(res.shape?.isLand) };
     case "no_value":
       await settle("negative", { error: res.reason });
-      return { kind: "no_value", reason: res.reason };
+      return { kind: "no_value", reason: res.reason, ...landKey(res.shape?.isLand) };
     case "retryable_error":
       await settle("failed_retryable", { retryAfterSeconds: res.retryAfterSeconds, error: res.reason });
       return { kind: "no_value", reason: res.reason };
@@ -196,10 +197,10 @@ export function supabaseDealMachineCacheStore(client: SupabaseClient<Database>):
         case "cached_ok": {
           const v = Number(row.estimated_value);
           if (!Number.isFinite(v) || v <= 0) throw new Error("bad cached value");
-          return { outcome: "cached_ok", value: v, isLand: await readCachedIsLand(client, propertyId) };
+          return { outcome: "cached_ok", value: v, isLand: await readCachedIsLand(client, propertyId, "ok") };
         }
         case "cached_negative":
-          return { outcome: "cached_negative" };
+          return { outcome: "cached_negative", isLand: await readCachedIsLand(client, propertyId, "negative") };
         case "backoff":
           return { outcome: "backoff" };
         case "in_flight":
@@ -255,13 +256,13 @@ export function supabaseDealMachineCacheStore(client: SupabaseClient<Database>):
 }
 
 /**
- * The stored land signal for a cached ok row. Any failure (column not there yet, read error)
+ * The stored land signal for a cached ok/negative row (cleared by the DB on every new claim). Any failure (column not there yet, read error)
  * = null (unknown), which keeps today's price-check behaviour. Never re-bills.
  */
-async function readCachedIsLand(client: SupabaseClient<Database>, propertyId: string): Promise<boolean | null> {
+async function readCachedIsLand(client: SupabaseClient<Database>, propertyId: string, state: "ok" | "negative"): Promise<boolean | null> {
   try {
     const { data, error } = await (client as unknown as { from: (t: string) => any }) // eslint-disable-line @typescript-eslint/no-explicit-any
-      .from("dealmachine_value_cache").select("is_land").eq("property_id", propertyId).eq("state", "ok").maybeSingle();
+      .from("dealmachine_value_cache").select("is_land").eq("property_id", propertyId).eq("state", state).maybeSingle();
     if (error) return null;
     const v = (data as { is_land?: unknown } | null)?.is_land;
     return typeof v === "boolean" ? v : null;
