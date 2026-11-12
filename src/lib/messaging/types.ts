@@ -55,6 +55,10 @@ export type ProviderSenderNumber = {
   status: string | null;
   /** Provider-reported messaging/10DLC status, when exposed. */
   messagingStatus: string | null;
+  /** 10DLC campaign the number is attached to, verbatim (Sendillo `attachedCampaign`). */
+  attachedCampaign?: string | null;
+  /** Brand the number is attached to, verbatim (Sendillo `attachedBrand`). */
+  attachedBrand?: string | null;
   /** Raw catalog entry — stored in provider_sender_numbers.raw for audit. */
   raw: unknown;
 };

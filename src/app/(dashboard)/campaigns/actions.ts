@@ -15,6 +15,7 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  checkSenderSendable,
   loadCampaignDeliverySettings,
   loadDeliveryCatalog,
   normalizeSenderNumber,
@@ -991,6 +992,10 @@ export async function createCampaign(
     );
     if (!deliveryResult.ok) return deliveryResult;
     const delivery = deliveryResult.data;
+    // Create and revival both pass here (before the archived lookup), so a
+    // campaign whose sender is not sendable can no longer be created or revived.
+    const sendable = await checkSenderSendable(supabase, orgId, delivery);
+    if (!sendable.ok) return sendable;
 
     const { data: activeCandidates, error: activeLookupError } = await supabase
       .from("campaigns")

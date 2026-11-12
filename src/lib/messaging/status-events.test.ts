@@ -671,3 +671,69 @@ describe("applyMessageStatusEvent", () => {
     expect(filters).toContainEqual(["eq", "metadata->>providerOutcome", "provider_unknown"]);
   });
 });
+
+describe("failed status callback records a conclusive provider rejection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("stale-recovered unknown row: keeps providerAttempt, adds providerRejection", async () => {
+    const providerAttempt = {
+      pendingAt: "2026-06-24T14:59:00.000Z",
+      terminal: true,
+      recoveredAt: "2026-06-24T15:15:00.000Z",
+      recoveryReason: "stale_pending_provider_attempt",
+    };
+    const row = message({
+      status: "failed",
+      sent_at: null,
+      failed_at: "2026-06-24T15:15:00.000Z",
+      error_message: "Provider attempt stayed pending past the recovery window",
+      metadata: { providerAttempt } as Json,
+    });
+    const { supabase, updates } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "failed",
+        externalId: "provider-message-stale",
+        timestamp: new Date("2026-06-24T15:20:00.000Z"),
+        errorMessage: "carrier rejected",
+      }),
+    ).resolves.toBe("updated");
+
+    expect(updates[0]).toMatchObject({
+      status: "failed",
+      metadata: {
+        providerAttempt,
+        providerRejection: { source: "status_callback", at: "2026-06-24T15:20:00.000Z" },
+      },
+    });
+  });
+
+  it("provider_unknown row: clears providerOutcome and adds providerRejection", async () => {
+    const row = message({
+      status: "failed",
+      failed_at: "2026-06-24T15:00:00.000Z",
+      error_message: "Sendillo request timed out",
+      metadata: {
+        providerOutcome: "provider_unknown",
+        providerAttempt: { pendingAt: "2026-06-24T14:59:00.000Z", terminal: true, retryable: false },
+      } as Json,
+    });
+    const { supabase, updates } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "failed",
+      externalId: "provider-message-unknown",
+      timestamp: new Date("2026-06-24T15:05:00.000Z"),
+      errorMessage: "undeliverable",
+    });
+
+    expect(updates[0].metadata).not.toHaveProperty("providerOutcome");
+    expect(updates[0].metadata).toMatchObject({
+      providerAttempt: { terminal: true },
+      providerRejection: { source: "status_callback" },
+    });
+  });
+});

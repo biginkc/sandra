@@ -11,6 +11,7 @@ import {
   setMockPurchasedNumbers,
   setMockProviderCampaigns,
 } from "@/lib/messaging/providers/mock";
+import { SENDILLO_PURCHASED_PENDING_ADDITION_2026_11_12 } from "@/lib/messaging/providers/__fixtures__/sendillo-purchased-numbers-2026-11-12";
 import { createTestClient } from "@tests/integration/client";
 import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import {
@@ -206,6 +207,127 @@ describe("syncProviderCatalog (integration)", () => {
     const rows = await listSenderRows(orgId);
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.status === "active")).toBe(true);
+  });
+});
+
+describe("syncProviderCatalog additive mode (scheduled cron)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+    resetMockState();
+  });
+
+  it("a partial provider list never deactivates the live sender; release gate stays approved", async () => {
+    const orgId = await getOrgId();
+    await syncProviderCatalog(supabase, orgId); // both mock numbers active
+
+    setMockPurchasedNumbers([
+      {
+        phoneE164: MOCK_SENDER_SECONDARY,
+        providerNumberId: "mock-num-2",
+        status: "active",
+        messagingStatus: "Inactive",
+        raw: { mock: true, partial: true },
+      },
+    ]);
+    await sleep(25);
+    await syncProviderCatalog(supabase, orgId, { deactivateMissing: false });
+
+    const rows = await listSenderRows(orgId);
+    expect(rows.map((r) => [r.phone_e164, r.status])).toEqual([
+      [MOCK_SENDER_PRIMARY, "active"],
+      [MOCK_SENDER_SECONDARY, "active"],
+    ]);
+    expect(await getSenderInventoryState(supabase, orgId, "mock", MOCK_SENDER_PRIMARY)).toEqual({
+      state: "approved",
+    });
+    // Provider fields of the reported number are still refreshed.
+    const { data } = await supabase
+      .from("provider_sender_numbers")
+      .select("messaging_status")
+      .eq("org_id", orgId)
+      .eq("phone_e164", MOCK_SENDER_SECONDARY)
+      .single();
+    expect(data?.messaging_status).toBe("Inactive");
+
+    // An empty list is not an error in additive mode and changes nothing.
+    setMockPurchasedNumbers([]);
+    await syncProviderCatalog(supabase, orgId, { deactivateMissing: false });
+    expect((await listSenderRows(orgId)).every((r) => r.status === "active")).toBe(true);
+
+    // The on-demand sync keeps deactivating as before.
+    setMockPurchasedNumbers([
+      {
+        phoneE164: MOCK_SENDER_SECONDARY,
+        providerNumberId: "mock-num-2",
+        status: "active",
+        messagingStatus: "ready",
+        raw: { mock: true },
+      },
+    ]);
+    await sleep(25);
+    await syncProviderCatalog(supabase, orgId);
+    expect((await listSenderRows(orgId)).map((r) => [r.phone_e164, r.status])).toEqual([
+      [MOCK_SENDER_PRIMARY, "inactive"],
+      [MOCK_SENDER_SECONDARY, "active"],
+    ]);
+  });
+});
+
+describe("syncProviderCatalog: Sendillo pending-number-addition snapshot (2026-11-12)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+    resetMockState();
+  });
+
+  it("stores provider fields verbatim, keeps the release gate open, and is_sendable_sender is false for both", async () => {
+    const orgId = await getOrgId();
+    setMockPurchasedNumbers(
+      SENDILLO_PURCHASED_PENDING_ADDITION_2026_11_12.map((entry) => ({
+        phoneE164: entry.phoneNumber,
+        providerNumberId: null,
+        status: entry.numberStatus,
+        messagingStatus: entry.messagingStatus,
+        attachedCampaign: entry.attachedCampaign,
+        attachedBrand: entry.attachedBrand,
+        raw: entry,
+      })),
+    );
+    await syncProviderCatalog(supabase, orgId);
+
+    const { data, error } = await supabase
+      .from("provider_sender_numbers")
+      .select("phone_e164, status, messaging_status, attached_campaign, attached_brand")
+      .eq("org_id", orgId)
+      .order("phone_e164", { ascending: false });
+    if (error) throw new Error(error.message);
+    expect(data).toEqual([
+      {
+        phone_e164: "+18164876899",
+        status: "active",
+        messaging_status: "Inactive",
+        attached_campaign: "Kansas City Metro SMS Outreach",
+        attached_brand: "BMH Group",
+      },
+      {
+        phone_e164: "+18164876883",
+        status: "active",
+        messaging_status: "Inactive",
+        attached_campaign: "not assigned",
+        attached_brand: "not assigned",
+      },
+    ]);
+
+    // PR 1 changes no send behaviour: the release-time inventory gate still approves.
+    expect(await getSenderInventoryState(supabase, orgId, "mock", "+18164876899")).toEqual({ state: "approved" });
+
+    for (const phone of ["+18164876899", "+18164876883"]) {
+      const sendable = await supabase.rpc("is_sendable_sender", {
+        p_org_id: orgId,
+        p_provider: "mock",
+        p_phone: phone,
+      });
+      expect([phone, sendable.error, sendable.data]).toEqual([phone, null, false]);
+    }
   });
 });
 
