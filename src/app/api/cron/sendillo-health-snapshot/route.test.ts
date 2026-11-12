@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   inWindow: vi.fn(),
   createAdminClient: vi.fn(() => ({ role: "service" })),
   reportError: vi.fn(),
+  syncProviderCatalog: vi.fn(),
 }));
 
 vi.mock("@/lib/messages/sendillo-health-snapshot", () => ({
@@ -17,18 +18,25 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: mocks.createAdminClient,
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
+vi.mock("@/lib/messaging/delivery", () => ({
+  syncProviderCatalog: mocks.syncProviderCatalog,
+}));
 
 import { GET, POST } from "./route";
 
 const priorSecret = process.env.CRON_SECRET;
+const priorOrg = process.env.SENDILLO_ORG_ID;
 
 beforeEach(() => {
   process.env.CRON_SECRET = "cron-test-secret";
   vi.clearAllMocks();
+  delete process.env.SENDILLO_ORG_ID;
   mocks.inWindow.mockReturnValue(true);
 });
 
 afterEach(() => {
+  if (priorOrg === undefined) delete process.env.SENDILLO_ORG_ID;
+  else process.env.SENDILLO_ORG_ID = priorOrg;
   if (priorSecret === undefined) delete process.env.CRON_SECRET;
   else process.env.CRON_SECRET = priorSecret;
 });
@@ -78,5 +86,44 @@ describe("Sendillo health snapshot cron", () => {
     const response = await GET(request());
     expect(response.status).toBe(500);
     expect(mocks.reportError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Sendillo sender catalog sync on the health-snapshot cron", () => {
+  it("syncs the configured Sendillo org's catalog after the snapshot", async () => {
+    process.env.SENDILLO_ORG_ID = "org-sendillo";
+    mocks.capture.mockResolvedValue({ updatedAt: "2026-11-12T15:00:00.000Z" });
+    mocks.syncProviderCatalog.mockResolvedValue({
+      supported: true,
+      provider: "sendillo",
+      senderCount: 2,
+      providerCampaignCount: 1,
+    });
+    const response = await GET(request());
+    expect(response.status).toBe(200);
+    expect(mocks.syncProviderCatalog).toHaveBeenCalledWith({ role: "service" }, "org-sendillo");
+    expect(await response.json()).toEqual({
+      ok: true,
+      capturedAt: "2026-11-12T15:00:00.000Z",
+      catalogSync: { supported: true, provider: "sendillo", senderCount: 2, providerCampaignCount: 1 },
+    });
+  });
+
+  it("reports a catalog sync failure without failing the snapshot", async () => {
+    process.env.SENDILLO_ORG_ID = "org-sendillo";
+    mocks.capture.mockResolvedValue({ updatedAt: "2026-11-12T15:00:00.000Z" });
+    mocks.syncProviderCatalog.mockRejectedValue(new Error("sender catalog upsert failed: boom"));
+    const response = await GET(request());
+    expect(response.status).toBe(200);
+    expect((await response.json()).catalogSync).toEqual({ error: "sender catalog upsert failed: boom" });
+    expect(mocks.reportError).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { surface: "cron_sendillo_catalog_sync" },
+    });
+  });
+
+  it("does not sync when no Sendillo org is configured", async () => {
+    mocks.capture.mockResolvedValue({ updatedAt: "2026-11-12T15:00:00.000Z" });
+    await GET(request());
+    expect(mocks.syncProviderCatalog).not.toHaveBeenCalled();
   });
 });

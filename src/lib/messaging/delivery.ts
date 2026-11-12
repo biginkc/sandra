@@ -124,6 +124,8 @@ async function syncProviderCatalogOnce(
       provider_number_id: entry.providerNumberId,
       status: "active",
       messaging_status: entry.messagingStatus ?? entry.status,
+      attached_campaign: entry.attachedCampaign ?? null,
+      attached_brand: entry.attachedBrand ?? null,
       raw: (entry.raw ?? null) as Json,
       last_synced_at: nowIso,
       updated_at: nowIso,
@@ -493,6 +495,43 @@ export async function resolveDeliverySelection(
     providerCampaignExternalId: providerCampaign.external_id,
     providerCampaignName: providerCampaign.name,
   });
+}
+
+/**
+ * Sendable rule (multi-number plan §3.1), evaluated by the single SQL
+ * definition `is_sendable_sender` so app and SQL paths cannot diverge:
+ * active synced row, provider messaging status Active, attached to a real
+ * 10DLC campaign and (when the org names one) to the org's Sendillo brand.
+ * Applied at campaign create and revival only; release keeps its inventory
+ * gate unchanged.
+ */
+export async function checkSenderSendable(
+  client: Supabase,
+  orgId: string,
+  delivery: Pick<ResolvedDeliverySelection, "senderProvider" | "senderNumber">,
+): Promise<Result<null>> {
+  const { data, error } = await client.rpc("is_sendable_sender", {
+    p_org_id: orgId,
+    p_provider: delivery.senderProvider,
+    p_phone: delivery.senderNumber,
+  });
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "DELIVERY_LOOKUP_FAILED", message: error.message },
+    };
+  }
+  if (data !== true) {
+    return {
+      ok: false,
+      error: {
+        code: "SENDER_NOT_SENDABLE",
+        message:
+          "This sending number is not ready to send: it must be active in Sendillo and attached to the approved texting campaign. Sync Delivery senders and pick a ready number.",
+      },
+    };
+  }
+  return ok(null);
 }
 
 export type CampaignDeliverySettings = {

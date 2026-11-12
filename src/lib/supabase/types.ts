@@ -1563,6 +1563,51 @@ export type Database = {
           },
         ]
       }
+      campaign_sender_numbers: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          org_id: string
+          paused_at: string | null
+          phone_e164: string
+          position: number
+          provider: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          org_id: string
+          paused_at?: string | null
+          phone_e164: string
+          position: number
+          provider: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          org_id?: string
+          paused_at?: string | null
+          phone_e164?: string
+          position?: number
+          provider?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_sender_numbers_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_sender_numbers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       campaigns: {
         Row: {
           archived_at: string | null
@@ -3690,16 +3735,19 @@ export type Database = {
           created_at: string
           id: string
           name: string
+          sendillo_brand_name: string | null
         }
         Insert: {
           created_at?: string
           id?: string
           name: string
+          sendillo_brand_name?: string | null
         }
         Update: {
           created_at?: string
           id?: string
           name?: string
+          sendillo_brand_name?: string | null
         }
         Relationships: []
       }
@@ -4366,6 +4414,8 @@ export type Database = {
       }
       provider_sender_numbers: {
         Row: {
+          attached_brand: string | null
+          attached_campaign: string | null
           created_at: string
           id: string
           last_synced_at: string
@@ -4379,6 +4429,8 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          attached_brand?: string | null
+          attached_campaign?: string | null
           created_at?: string
           id?: string
           last_synced_at?: string
@@ -4392,6 +4444,8 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          attached_brand?: string | null
+          attached_campaign?: string | null
           created_at?: string
           id?: string
           last_synced_at?: string
@@ -4832,6 +4886,92 @@ export type Database = {
             columns: ["template_id"]
             isOneToOne: false
             referencedRelation: "sms_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_sender_assignments: {
+        Row: {
+          assigned_at: string
+          org_id: string
+          provider: string
+          seller_phone_e164: string
+          sender_phone_e164: string
+          source: string
+          source_campaign_id: string | null
+          source_message_id: string | null
+        }
+        Insert: {
+          assigned_at?: string
+          org_id: string
+          provider: string
+          seller_phone_e164: string
+          sender_phone_e164: string
+          source: string
+          source_campaign_id?: string | null
+          source_message_id?: string | null
+        }
+        Update: {
+          assigned_at?: string
+          org_id?: string
+          provider?: string
+          seller_phone_e164?: string
+          sender_phone_e164?: string
+          source?: string
+          source_campaign_id?: string | null
+          source_message_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_sender_assignments_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_sender_assignments_source_campaign_id_fkey"
+            columns: ["source_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_sender_settings: {
+        Row: {
+          admission_paused_at: string | null
+          allocation_enabled: boolean
+          default_sender_phone: string | null
+          org_id: string
+          pinning_enabled: boolean
+          pinning_enabled_at: string | null
+          updated_at: string
+        }
+        Insert: {
+          admission_paused_at?: string | null
+          allocation_enabled?: boolean
+          default_sender_phone?: string | null
+          org_id: string
+          pinning_enabled?: boolean
+          pinning_enabled_at?: string | null
+          updated_at?: string
+        }
+        Update: {
+          admission_paused_at?: string | null
+          allocation_enabled?: boolean
+          default_sender_phone?: string | null
+          org_id?: string
+          pinning_enabled?: boolean
+          pinning_enabled_at?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_sender_settings_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: true
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -7109,6 +7249,47 @@ export type Database = {
       fn_list_ambiguous_native_calls: { Args: { p_org_id: string }; Returns: Json }
       fn_assign_native_call_to_lead: { Args: { p_org_id: string; p_provider_call_id: string; p_property_id: string }; Returns: Json }
       fn_claim_dialpad_artifact_fetches: { Args: { p_limit?: number; p_lease_seconds?: number; p_artifacts?: string[] }; Returns: Json }
+      add_campaign_sender_numbers: {
+        Args: { p_campaign_id: string; p_phones: string[] }
+        Returns: {
+            campaign_id: string
+            created_at: string
+            org_id: string
+            paused_at: string | null
+            phone_e164: string
+            position: number
+            provider: string
+          }[]
+      }
+      admin_reassign_sms_sender: {
+        Args: { p_org_id: string; p_sender_phone: string; p_seller_phone: string }
+        Returns: undefined
+      }
+      admit_sms_submission: {
+        Args: { p_from: string; p_org_id: string; p_seller_phone: string }
+        Returns: string
+      }
+      adopt_sms_sender_assignments: {
+        Args: { p_after_phone?: string | null; p_limit?: number; p_org_id: string }
+        Returns: {
+          seller_phone: string
+          sender_phone: string | null
+          source: string | null
+          status: string
+        }[]
+      }
+      campaign_kpis_by_sender: {
+        Args: { p_campaign_id: string }
+        Returns: {
+          delivered: number
+          failed: number
+          from_address: string | null
+          queued: number
+          repliers: number
+          sent_no_receipt: number
+          sent_total: number
+        }[]
+      }
       fn_record_dialpad_artifact_result: {
         Args: { p_id: string; p_outcome: string; p_error?: string; p_text?: string; p_language?: string; p_summary?: string }
         Returns: Json
@@ -7177,6 +7358,39 @@ export type Database = {
           attempt_outcome: string
           authorized: boolean
           reason: string | null
+        }[]
+      }
+      is_possibly_submitted_sms: {
+        Args: { p_metadata: Json; p_status: string }
+        Returns: boolean
+      }
+      is_sendable_sender: {
+        Args: { p_org_id: string; p_phone: string; p_provider: string }
+        Returns: boolean
+      }
+      preview_sms_sender_conflicts: {
+        Args: { p_org_id: string }
+        Returns: {
+          expected_sender: string | null
+          kind: string
+          message_id: string | null
+          sender_phone: string | null
+          seller_phone: string
+        }[]
+      }
+      resolve_sms_sender: {
+        Args: {
+          p_allow_default?: boolean
+          p_campaign_id?: string | null
+          p_commitment_sender?: string | null
+          p_org_id: string
+          p_requested_sender?: string | null
+          p_seller_phone: string
+        }
+        Returns: {
+          sender_phone: string | null
+          source: string | null
+          status: string
         }[]
       }
       retry_sequence_step: {
@@ -8134,6 +8348,18 @@ export type Database = {
           p_request_id: string
         }
         Returns: string
+      }
+      set_campaign_sender_paused: {
+        Args: { p_campaign_id: string; p_paused: boolean; p_phone: string }
+        Returns: {
+            campaign_id: string
+            created_at: string
+            org_id: string
+            paused_at: string | null
+            phone_e164: string
+            position: number
+            provider: string
+          }
       }
       soft_delete_esign_template: {
         Args: {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SENDILLO_PURCHASED_PENDING_ADDITION_2026_11_12 } from "./__fixtures__/sendillo-purchased-numbers-2026-11-12";
 
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 
@@ -707,6 +708,74 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
     });
     // Raw entries preserved for the catalog audit column.
     expect(numbers[0].raw).toMatchObject({ id: 1 });
+  });
+
+  it("maps attachedCampaign / attachedBrand (sendable rule inputs)", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: 1,
+            phoneNumber: "+18165550001",
+            numberStatus: "Active",
+            messagingStatus: "Active",
+            attachedCampaign: "Kansas City Metro SMS Outreach",
+            attachedBrand: "BMH Group",
+          },
+          {
+            id: 2,
+            phoneNumber: "+18165550002",
+            numberStatus: "Active",
+            messagingStatus: "Inactive",
+            attachedCampaign: "not assigned",
+            attachedBrand: "not assigned",
+          },
+          { id: 3, phoneNumber: "+18165550003", numberStatus: "Active" },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider("sendillo-test-key", "+18165550000");
+
+    const numbers = await provider.listPurchasedNumbers();
+
+    expect(numbers.map((n) => [n.phoneE164, n.attachedCampaign, n.attachedBrand])).toEqual([
+      ["+18165550001", "Kansas City Metro SMS Outreach", "BMH Group"],
+      ["+18165550002", "not assigned", "not assigned"],
+      ["+18165550003", null, null],
+    ]);
+  });
+
+  it("parses the 2026-11-12 pending-number-addition snapshot verbatim", async () => {
+    mockFetch({ status: 200, body: { data: SENDILLO_PURCHASED_PENDING_ADDITION_2026_11_12 } });
+    const provider = new SendilloMessagingProvider("sendillo-test-key", "+18165550000");
+
+    const numbers = await provider.listPurchasedNumbers();
+
+    expect(
+      numbers.map(({ phoneE164, status, messagingStatus, attachedCampaign, attachedBrand }) => ({
+        phoneE164,
+        status,
+        messagingStatus,
+        attachedCampaign,
+        attachedBrand,
+      })),
+    ).toEqual([
+      {
+        phoneE164: "18164876899",
+        status: "Active",
+        messagingStatus: "Inactive",
+        attachedCampaign: "Kansas City Metro SMS Outreach",
+        attachedBrand: "BMH Group",
+      },
+      {
+        phoneE164: "18164876883",
+        status: "Active",
+        messagingStatus: "Inactive",
+        attachedCampaign: "not assigned",
+        attachedBrand: "not assigned",
+      },
+    ]);
   });
 
   it("uses the configured nonsecret connection identity when the catalog omits an account id", async () => {

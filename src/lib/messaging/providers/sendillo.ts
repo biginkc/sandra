@@ -324,6 +324,14 @@ export class SendilloMessagingProvider implements MessagingProvider {
           readString(entry, "messagingStatus") ??
           readString(entry, "messaging_status") ??
           readString(entry, "smsStatus"),
+        attachedCampaign:
+          readString(entry, "attachedCampaign") ??
+          readString(entry, "attachedCampaign", "name") ??
+          readString(entry, "attached_campaign"),
+        attachedBrand:
+          readString(entry, "attachedBrand") ??
+          readString(entry, "attachedBrand", "name") ??
+          readString(entry, "attached_brand"),
         raw: entry,
       });
     }
