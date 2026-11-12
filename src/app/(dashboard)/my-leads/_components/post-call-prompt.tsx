@@ -248,12 +248,12 @@ export function PostCallPrompt({
     if (outcome === "no_answer") {
       const next: FollowUpState = result.ok && result.followUp
         ? result.followUp
-        : { status: "required", message: "Attempt recorded. Follow-up still needs to be accepted or delivered." }
+        : { status: "unknown", message: "Attempt recorded. The follow-up text status could not be confirmed." }
       setFollowUpState(next)
       if (next.status === "accepted" || next.status === "delivered") {
         setSavedForDrip(true)
       } else {
-        setClientError(next.message ?? `Attempt recorded. Follow-up is ${next.status.replaceAll("_", " ")}. Your draft is retained.`)
+        setClientError(next.message ?? `Attempt recorded. Follow-up is ${next.status.replaceAll("_", " ")}. Do not record another attempt.`)
       }
       return
     }
