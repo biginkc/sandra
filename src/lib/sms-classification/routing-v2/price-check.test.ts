@@ -446,7 +446,7 @@ describe("DealMachine provider (mocked fetch; no real calls)", () => {
   it("builds the documented request: contact_audience none, estimated_value field", () => {
     expect(buildDealMachineEnrichRequest(ADDR)).toEqual({
       data: [{ street: "1 Test St", city: "Kansas City", state: "MO", zip: "64111" }],
-      fields: ["estimated_value"],
+      fields: ["estimated_value", "living_area_sqft", "num_bedrooms"],
       contact_audience: "none",
     });
   });
