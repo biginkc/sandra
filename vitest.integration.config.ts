@@ -163,6 +163,7 @@ export default defineConfig({
       "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
       "supabase/migrations/20261030131000_auto_reply_templates_routing_v2_keys.integration.test.ts",
       "supabase/migrations/20261030180000_routing_v2_dealmachine_value_cache.integration.test.ts",
+      "supabase/migrations/20261111120000_dealmachine_value_cache_land_signal.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",
       "supabase/migrations/20261030230000_routing_v2_outbox_delivery_recheck.integration.test.ts",
