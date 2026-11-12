@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { DealMachineAddress, DealMachineAttempt, DealMachineValueResult } from "@/lib/comps/providers/dealmachine";
+import type { DealMachineAddress, DealMachineAttempt, DealMachineShape, DealMachineValueResult } from "@/lib/comps/providers/dealmachine";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -22,7 +22,8 @@ import type { Database } from "@/lib/supabase/types";
  */
 export type ClaimOutcome =
   | { outcome: "claimed"; claimToken: string }
-  | { outcome: "cached_ok"; value: number }
+  /** isLand: the stored land signal; null = unknown (pre-signal row, or unreadable). */
+  | { outcome: "cached_ok"; value: number; isLand?: boolean | null }
   | { outcome: "cached_negative" }
   | { outcome: "in_flight" }
   | { outcome: "backoff" };
@@ -42,13 +43,16 @@ export interface DealMachineCacheStore {
   /** Pre-call ledger row + rate-limit slot. Returns the call id, or null when over the limit. Throws on write failure. */
   startAttempt(input: { orgId: string; propertyId: string }): Promise<string | null>;
   settleAttempt(attempt: DealMachineAttempt): Promise<boolean>;
+  /** Stores the land signal for the current claim (before settle). Optional; failures = unknown. */
+  recordShape?(input: { propertyId: string; claimToken: string; shape: DealMachineShape | null }): Promise<boolean>;
 }
 
 /** Shared per-org DealMachine limit (BUILD-PLAN §15: ≤60 calls/min). */
 export const DM_CALLS_PER_MINUTE = 60;
 
 export type ValueLookupResult =
-  | { kind: "value"; value: number; source: "provider" | "cache" }
+  /** isLand: DealMachine record looks like land; null/undefined = unknown (today's behaviour). */
+  | { kind: "value"; value: number; source: "provider" | "cache"; isLand?: boolean | null }
   | { kind: "no_value"; reason: string };
 
 export type LookupDeps = {
@@ -76,6 +80,9 @@ export function usableAddress(a: Partial<DealMachineAddress> | null | undefined)
   return { street, city, state, zip: a?.zip?.trim() || null };
 }
 
+/** Only a known answer is carried; unknown leaves the result exactly as before the land signal. */
+const landKey = (isLand: boolean | null | undefined): { isLand?: boolean } => (typeof isLand === "boolean" ? { isLand } : {});
+
 export async function lookupDealMachineValue(
   input: { orgId: string; propertyId: string; address: Partial<DealMachineAddress> | null },
   deps: LookupDeps,
@@ -93,7 +100,7 @@ export async function lookupDealMachineValue(
     } catch {
       return { kind: "no_value", reason: "claim_error" };
     }
-    if (claim.outcome === "cached_ok") return { kind: "value", value: claim.value, source: "cache" };
+    if (claim.outcome === "cached_ok") return { kind: "value", value: claim.value, source: "cache", ...landKey(claim.isLand) };
     if (claim.outcome === "cached_negative") return { kind: "no_value", reason: "cached_negative" };
     if (claim.outcome === "backoff") return { kind: "no_value", reason: "backoff" };
     if (claim.outcome === "in_flight") {
@@ -136,10 +143,22 @@ async function callAndSettle(
     }
   };
 
+  // Always (re)write the shape for this claim, so a re-lookup never keeps an older land signal.
+  if (deps.store.recordShape) {
+    try {
+      await deps.store.recordShape({
+        propertyId: input.propertyId,
+        claimToken,
+        shape: res.kind === "ok" ? res.shape ?? null : null,
+      });
+    } catch {
+      // Not stored: later cache reads say unknown; this call still uses its own answer.
+    }
+  }
   switch (res.kind) {
     case "ok":
       if (!(await settle("ok", { value: res.value }))) return { kind: "no_value", reason: "settle_lost" };
-      return { kind: "value", value: res.value, source: "provider" };
+      return { kind: "value", value: res.value, source: "provider", ...landKey(res.shape?.isLand) };
     case "no_value":
       await settle("negative", { error: res.reason });
       return { kind: "no_value", reason: res.reason };
@@ -177,7 +196,7 @@ export function supabaseDealMachineCacheStore(client: SupabaseClient<Database>):
         case "cached_ok": {
           const v = Number(row.estimated_value);
           if (!Number.isFinite(v) || v <= 0) throw new Error("bad cached value");
-          return { outcome: "cached_ok", value: v };
+          return { outcome: "cached_ok", value: v, isLand: await readCachedIsLand(client, propertyId) };
         }
         case "cached_negative":
           return { outcome: "cached_negative" };
@@ -211,6 +230,18 @@ export function supabaseDealMachineCacheStore(client: SupabaseClient<Database>):
       if (error) throw new Error("attempt start failed");
       return typeof data === "string" && data ? data : null;
     },
+    async recordShape({ propertyId, claimToken, shape }) {
+      const { data, error } = await db.rpc("fn_dealmachine_value_record_shape", {
+        p_property_id: propertyId,
+        p_claim_token: claimToken,
+        p_living_area_sqft: shape?.livingAreaSqft ?? null,
+        p_num_bedrooms: shape?.numBedrooms ?? null,
+        p_is_land: shape?.isLand ?? null,
+      });
+      // Before 20261111120000 is applied the RPC is missing: unknown, never an error path.
+      if (error) return false;
+      return data === true;
+    },
     async settleAttempt(attempt) {
       const { data, error } = await db.rpc("fn_provider_attempt_settle", {
         p_call_id: attempt.callId,
@@ -221,4 +252,20 @@ export function supabaseDealMachineCacheStore(client: SupabaseClient<Database>):
       return data === true;
     },
   };
+}
+
+/**
+ * The stored land signal for a cached ok row. Any failure (column not there yet, read error)
+ * = null (unknown), which keeps today's price-check behaviour. Never re-bills.
+ */
+async function readCachedIsLand(client: SupabaseClient<Database>, propertyId: string): Promise<boolean | null> {
+  try {
+    const { data, error } = await (client as unknown as { from: (t: string) => any }) // eslint-disable-line @typescript-eslint/no-explicit-any
+      .from("dealmachine_value_cache").select("is_land").eq("property_id", propertyId).eq("state", "ok").maybeSingle();
+    if (error) return null;
+    const v = (data as { is_land?: unknown } | null)?.is_land;
+    return typeof v === "boolean" ? v : null;
+  } catch {
+    return null;
+  }
 }

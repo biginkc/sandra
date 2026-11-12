@@ -23,6 +23,8 @@ import type { V2Decision } from "./route";
  *     road with the asked_offer reply + Book appointment drip (no named-price alert), no call.
  *   no single dollar amount (none / multiple / range) → fair-price reply + alert, no call.
  *   DealMachine error / no value → fair-price reply + alert.
+ *   DealMachine record is land (living_area_sqft and num_bedrooms both 0/null) → the same
+ *     vacant-lot alert as Jev's lot answer, no 80% check, no seller reply. Unknown → as before.
  *   ask > 80% of value → repairs reply (`price_too_high`); follow-ups run on the next inbound.
  *   ask ≤ 80% (exactly 80% included) → fair-price reply + alert.
  */
@@ -127,6 +129,16 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
       extracted,
       value: null,
       noValueReason: lookup.kind === "no_value" ? lookup.reason : "invalid_value",
+    };
+  }
+  // Jarrad 2026-11-11: DealMachine says land (no living area, no bedrooms) → straight to him as
+  // the vacant-lot alert (same road as Jev's lot answer): no 80% check, no seller reply.
+  if (lookup.isLand === true) {
+    return {
+      outcome: "land_price",
+      action: { road: "ALERT_land_price", steps: V2_ROAD_ACTIONS.ALERT_land_price(input.decision) },
+      extracted,
+      value: lookup.value,
     };
   }
   if (askAboveEightyPercent(extracted.amount, lookup.value)) {
