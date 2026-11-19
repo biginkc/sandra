@@ -1,11 +1,15 @@
 import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
+import type { SlackHeadline } from "./slack-thread";
 import type { EmailMessage, HoldInfo, HotPromotion } from "./types";
 
 /**
- * Alert copy carries ids, first name, age and a link: never seller message text.
- * The hot-text alert also carries the property address (record data, allowed).
+ * Alert copy carries ids, first name, age and a link. The hot-text alert also
+ * carries the property address (record data, allowed).
+ * Seller message text: Slack alert DMs now carry the recent text thread under
+ * the headline (Jarrad approved 2026-11-18; see slack-thread.ts). The SMS alert
+ * and the email digest still never carry seller message text.
  */
 
 const escapeSlack = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -53,6 +57,11 @@ export function slackFirstText(hold: HoldInfo, baseUrl: string): string {
   return `New hold needs review: ${escapeSlack(where(hold))} (${escapeSlack(hold.reasonLabel)}). ${leadLink(baseUrl, hold.propertyId)}`;
 }
 
+/** slackFirstText for Slack blocks: same words, the name is the link, no trailing URL. */
+export function slackFirstHeadline(hold: HoldInfo, baseUrl: string): SlackHeadline {
+  return { before: "New hold needs review: ", linkText: where(hold), after: ` (${hold.reasonLabel}).`, url: leadLink(baseUrl, hold.propertyId) };
+}
+
 export function smsText(hold: HoldInfo, baseUrl: string): string {
   return `Hot hold: ${where(hold)} (${hold.reasonLabel}). ${leadLink(baseUrl, hold.propertyId)}`;
 }
@@ -95,6 +104,27 @@ export function hotPromotionSlackText(p: HotPromotion, baseUrl: string): string 
   if (p.kind === "hot_failed") return `New hold needs review: ${escapeSlack(p.name)} (${escapeSlack(holdReasonLabel(p.reason ?? "hold"))}). ${link}`;
   if (p.kind === "hot_text") return `${escapeSlack(hotTextHeadline(p))}. ${link}`;
   return `Hot seller: ${escapeSlack(p.name)} is now on My Leads under you. ${link}`;
+}
+
+/**
+ * hotPromotionSlackText for Slack blocks: identical words, with the name (and
+ * address, when the headline has one) as the link and the trailing URL dropped.
+ * Rich text is not mrkdwn, so nothing is escaped here.
+ */
+export function hotPromotionSlackHeadline(p: HotPromotion, baseUrl: string): SlackHeadline {
+  const url = p.kind === "ambiguous_thread" ? ambiguousThreadLink(baseUrl, p) : promotionLink(baseUrl, p);
+  const named = (before: string, after: string): SlackHeadline => ({ before, linkText: p.name, after, url });
+  const hold = (label: string) => named("New hold needs review: ", ` (${label}).`);
+  if (p.kind === "ambiguous_thread") return hold(holdReasonLabel("needs_reply"));
+  if (p.kind === "routing_v2_alert") return hold(p.label ?? "hold");
+  if (p.kind === "selling_opportunity") return named("Possible selling opportunity: ", " mentioned interest in selling, including a possible referral or another property. Review the conversation; this does not mark the original property for sale.");
+  if (p.kind === "hot_failed") return hold(holdReasonLabel(p.reason ?? "hold"));
+  if (p.kind === "lead_reply" || p.kind === "hot_text") {
+    const prefix = p.kind === "lead_reply" ? "New text on your lead: " : "Hot text on your lead: ";
+    const headline = p.kind === "lead_reply" ? leadReplyHeadline(p) : hotTextHeadline(p);
+    return { before: prefix, linkText: headline.slice(prefix.length), after: ".", url };
+  }
+  return named("Hot seller: ", " is now on My Leads under you.");
 }
 
 export function hotPromotionSmsText(p: HotPromotion, baseUrl: string): string {

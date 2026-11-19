@@ -1,7 +1,16 @@
 import { reportError } from "@/lib/errors/report";
 import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
-import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
+import {
+  digestMessage,
+  hotPromotionSlackHeadline,
+  hotPromotionSlackText,
+  hotPromotionSmsText,
+  slackFirstHeadline,
+  slackFirstText,
+  smsText,
+} from "./messages";
+import { buildSlackAlertBlocks, type SlackHeadline, type ThreadLookup, type ThreadMessage } from "./slack-thread";
 import {
   MAX_ATTEMPTS,
   ROUTE_MAX_DURATION_MS,
@@ -344,9 +353,10 @@ export async function runHoldAlertsForOrg(
             }
             if (gate !== "ok") return { status: "skipped", reason: `routing_v2_alert:${gate}` };
           }
-          return channel === "slack"
-            ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
-            : deps.sendSms(owner, hotPromotionSmsText(p, link));
+          if (channel === "sms") return deps.sendSms(owner, hotPromotionSmsText(p, link));
+          // Thread load runs after every gate, right before the provider call; it can't fail the send.
+          const blocks = await slackBlocks(deps, orgId, hotPromotionSlackHeadline(p, link), { inboundId: p.inboundId, propertyId: p.propertyId });
+          return deps.sendSlack(owner, hotPromotionSlackText(p, link), blocks);
         },
         requireOwner: true,
       });
@@ -363,7 +373,9 @@ export async function runHoldAlertsForOrg(
             const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
             if (ownerCheck) return ownerCheck;
             // Every hot hold pings Jarrad, whoever has the lead (owner decision 2026-10-19).
-            return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
+            if (channel === "sms") return deps.sendSms(r.userId, smsText(hold, link));
+            const blocks = await slackBlocks(deps, orgId, slackFirstHeadline(hold, link), { inboundId: hold.runInbound, propertyId: hold.propertyId });
+            return deps.sendSlack(r.userId, slackFirstText(hold, link), blocks);
           },
           requireOwner: true,
         });
@@ -478,4 +490,19 @@ function capFor(deps: HoldAlertDeps, input: EnsureInput): CapBucket | null {
     return { orgId: input.orgId, channel: "sms", recipientUserId: null, cap: MAX_SMS_PER_HOUR, sinceIso };
   }
   return null;
+}
+
+/**
+ * Slack alert blocks: linked headline + recent thread (Jarrad 2026-11-18). Fails
+ * open: a missing loader or a lookup error sends the linked headline alone.
+ */
+async function slackBlocks(deps: HoldAlertDeps, orgId: string, headline: SlackHeadline, lookup: ThreadLookup) {
+  let thread: ThreadMessage[] = [];
+  try {
+    thread = (await deps.loadSlackThread?.(orgId, lookup)) ?? [];
+  } catch (error) {
+    reportError(error, { tags: { surface: "hold_alert_slack_thread", orgId } });
+    thread = [];
+  }
+  return buildSlackAlertBlocks(headline, thread, deps.now().getTime());
 }

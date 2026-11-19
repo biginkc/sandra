@@ -1,3 +1,5 @@
+import type { SlackBlock, ThreadLookup, ThreadMessage } from "./slack-thread";
+
 export type AlertChannel = "slack" | "sms" | "email";
 export type AlertStage = "first" | "nudge_1h" | "digest";
 export type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "skipped";
@@ -231,7 +233,13 @@ export interface HoldAlertDeps {
    * re-confirms role = owner at send time (the SMS path).
    */
   isRecipientAuthorized(orgId: string, userId: string, opts?: { requireOwner?: boolean }): Promise<boolean>;
-  sendSlack(userId: string, text: string): Promise<ChannelResult>;
+  /**
+   * Recent SMS thread with the seller for the Slack alert blocks (Slack only).
+   * Optional: absent or throwing -> the alert still goes with just the linked headline.
+   */
+  loadSlackThread?(orgId: string, lookup: ThreadLookup): Promise<ThreadMessage[]>;
+  /** `blocks`: optional Block Kit blocks; `text` stays the notification/fallback text. */
+  sendSlack(userId: string, text: string, blocks?: SlackBlock[]): Promise<ChannelResult>;
   sendSms(userId: string, text: string): Promise<ChannelResult>;
   sendEmail(userId: string, message: EmailMessage, opts?: { idempotencyKey?: string }): Promise<ChannelResult>;
 }
