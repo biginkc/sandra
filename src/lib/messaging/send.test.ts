@@ -42,6 +42,7 @@ vi.mock("@/lib/messages/threading", () => ({
 }));
 
 import { releaseQueuedMessage, sendSmsToContact } from "./send";
+import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON } from "@/lib/ai-responder/hostile";
 import { getMessagingProvider } from "./registry";
 import { getConsentState, getConsentStateStrict } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
@@ -1395,3 +1396,153 @@ describe("sendSmsToContact — service-owned rep SMS retry fence", () => {
   expect(getMessagingProvider).not.toHaveBeenCalled();
   expect(fromSpy).not.toHaveBeenCalled();
  });
+
+const HOSTILE_OPEN = { needs_human_attention: true, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` };
+const HOSTILE_CLEARED = { needs_human_attention: false, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` };
+const NO_HOLD = { needs_human_attention: false, last_ai_escalation_reason: null };
+const SEQ = { enrollmentId: "enr-1", stepId: "step-1", claimId: "claim-1" };
+
+/** Property reads in order: main lookup, fresh re-check, final dispatch-boundary hold read. */
+function holdSupabase(fresh: Record<string, unknown>, final: Record<string, unknown> = fresh) {
+  return fakeSupabase({
+    contacts: [
+      { data: CONTACT_ROW, error: null },
+      { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+    ],
+    properties: [
+      { data: { ...PROPERTY_ROW, ...fresh }, error: null },
+      { data: { outreach_dispo: null, ...fresh }, error: null },
+      { data: { ...final }, error: null },
+    ],
+    messages: Array.from({ length: 6 }, () => ({ data: { id: "msg-h" }, error: null })),
+    campaigns: Array.from({ length: 4 }, () => ({ data: { status: "active", paused_at: null }, error: null })),
+  });
+}
+
+describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-08)", () => {
+  it.each([
+    ["stop-texting", `${OPTOUT_PHRASE_NEEDS_CONFIRM_REASON}:in-1`],
+    ["hostile", `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2`],
+  ])("blocks a drip/sequence send to an open %s hold", async (_l, reason) => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase({ needs_human_attention: true, last_ai_escalation_reason: reason }), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold", messageId: "msg-h" });
+  });
+
+  it("blocks a sequence send when the hold is committed after the first fresh check (pre-authorization read)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(NO_HOLD, HOSTILE_OPEN), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+
+  it("holds a sequence send when the hold read fails, before sequence authorization (fail closed)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const failing = fakeSupabase({
+        contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+        properties: [
+          { data: PROPERTY_ROW, error: null },
+          { data: { outreach_dispo: null, ...NO_HOLD }, error: null },
+          { data: null, error: { message: "read timeout" } },
+        ],
+        messages: Array.from({ length: 6 }, () => ({ data: { id: "msg-h" }, error: null })),
+      });
+    const outcome = await sendSmsToContact(failing,
+      { origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ },
+    );
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "read timeout" });
+    // The sequence authorization RPC never ran, so the claim is still
+    // `not_attempted` and the tick can retire it and retry (see tick.test.ts).
+    expect(failing.rpc).not.toHaveBeenCalled();
+  });
+
+  it("sends a drip/sequence text once the hold is cleared", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_CLEARED), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent", messageId: "msg-h" });
+  });
+
+  it("does not apply the hold to a non-campaign, non-sequence automated send (AI reply)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+
+  it("a manual inbox send to a property with an open hold still sends", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+
+  it("a person-initiated held draft to a property with an open hold still sends", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "automated", personInitiated: true, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+      sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+});
+
+describe("releaseQueuedMessage — open stop-texting / hostile hold", () => {
+  function queuedRow(campaignId: string | null) {
+    return {
+      id: "queued-h", status: "queued", provider: "fake-test-provider", org_id: PROPERTY_ROW.org_id,
+      campaign_id: campaignId, contact_id: CONTACT_ID, property_id: PROPERTY_ID,
+      body: "Hi there, Mel with BMH here.", from_address: "+18165550145", to_address: CONTACT_ROW.phone_1,
+      scheduled_for: null, metadata: { sendOrigin: "automated" },
+    };
+  }
+  function releaseSupabase(fresh: Record<string, unknown>, final: Record<string, unknown> = fresh) {
+    return fakeSupabase({
+      messages: Array.from({ length: 8 }, (_, i) =>
+        i === 0 ? { data: queuedRow("camp-1"), error: null } : { data: { id: "queued-h", body: queuedRow("camp-1").body }, error: null }),
+      campaigns: Array.from({ length: 4 }, () => ({ data: { status: "active", paused_at: null }, error: null })),
+      contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: { outreach_dispo: null, ...fresh }, error: null },
+        { data: { ...final }, error: null },
+      ],
+    });
+  }
+
+  it("holds a queued campaign row for a property with an open hostile hold", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await releaseQueuedMessage(releaseSupabase(HOSTILE_OPEN), "queued-h");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+
+  it("holds a queued campaign row when the hold is committed after the first check but before dispatch", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await releaseQueuedMessage(releaseSupabase(NO_HOLD, HOSTILE_OPEN), "queued-h");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+});

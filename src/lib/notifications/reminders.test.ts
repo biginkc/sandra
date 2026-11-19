@@ -11,14 +11,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./dispatch", () => ({ createNotification: mocks.createNotification }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({
   dispatchAppointmentReminderSlack: mocks.dispatchAppointmentReminderSlack,
-  // Codex round 11 (finding 2): real linkage-routing logic (not a stub) so
-  // the "route.ts" deep-link tests below actually exercise the same
-  // property/contact/personal-block branching production uses.
-  buildAppointmentDeepLink: (propertyId?: string | null, contactId?: string | null) => {
-    if (propertyId) return `https://sandra-sooty.vercel.app/leads/${propertyId}`;
-    if (contactId) return `https://sandra-sooty.vercel.app/messages?thread=${contactId}`;
-    return "https://sandra-sooty.vercel.app/dashboard";
-  },
+  buildAppointmentDeepLink: (propertyId?: string | null) =>
+    `https://sandra-sooty.vercel.app/leads${propertyId ? `/${propertyId}` : ""}`,
 }));
 vi.mock("./rep-sms", () => ({ sendRepSmsReminder: mocks.sendRepSmsReminder }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs: mocks.loadIntegrationPrefs }));
@@ -216,8 +210,8 @@ describe("deliverAppointmentReminder — slack", () => {
         dueAt: row.taskDueAt,
         timezone: "America/Chicago",
         // Personal block (no property/contact linkage on baseRow's
-        // default) -> /dashboard, not the dead /tasks/<id> route.
-        deepLink: "https://sandra-sooty.vercel.app/dashboard",
+        // default) -> the Leads list.
+        deepLink: "https://sandra-sooty.vercel.app/leads",
       }),
     );
     expect(outcome).toEqual({
@@ -269,7 +263,7 @@ describe("deliverAppointmentReminder — slack", () => {
       );
     });
 
-    it("contact-only -> /messages?thread=<contactId>", async () => {
+    it("contact-only -> /leads", async () => {
       const supabase = fakeSupabase();
       const row = baseRow({ channel: "slack", relatedPropertyId: null, contactId: "contact-1" });
 
@@ -277,19 +271,19 @@ describe("deliverAppointmentReminder — slack", () => {
 
       expect(mocks.dispatchAppointmentReminderSlack).toHaveBeenCalledWith(
         expect.objectContaining({
-          deepLink: "https://sandra-sooty.vercel.app/messages?thread=contact-1",
+          deepLink: "https://sandra-sooty.vercel.app/leads",
         }),
       );
     });
 
-    it("personal block (neither linkage) -> /dashboard", async () => {
+    it("personal block (neither linkage) -> /leads", async () => {
       const supabase = fakeSupabase();
       const row = baseRow({ channel: "slack", relatedPropertyId: null, contactId: null });
 
       await deliverAppointmentReminder(supabase, row);
 
       expect(mocks.dispatchAppointmentReminderSlack).toHaveBeenCalledWith(
-        expect.objectContaining({ deepLink: "https://sandra-sooty.vercel.app/dashboard" }),
+        expect.objectContaining({ deepLink: "https://sandra-sooty.vercel.app/leads" }),
       );
     });
   });

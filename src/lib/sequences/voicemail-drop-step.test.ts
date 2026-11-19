@@ -493,6 +493,12 @@ describe("voicemail drop step — gates before the provider", () => {
     expect(getMockVoicemailDropLog()).toHaveLength(0);
   });
 
+  it("a {{rapid_offer}} script with no property value pauses step_misconfigured", async () => {
+    const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_tts_body: "Offer {{rapid_offer}}" });
+    expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });
+    expect(getMockVoicemailDropLog()).toHaveLength(0);
+  });
+
   it("missing phone line pauses step_misconfigured", async () => {
     const { outcome } = await run(baseWorld(), { ...TTS_STEP, vm_phone_line_id: null });
     expect(outcome).toMatchObject({ status: "paused", reason: "step_misconfigured" });

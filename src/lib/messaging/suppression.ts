@@ -31,7 +31,8 @@ export type SuppressionDecision =
         | "do_not_contact"
         | "phone_suppression"
         | "sms_opted_out"
-        | "human_owned_dispo";
+        | "human_owned_dispo"
+        | "open_confirm_hold";
       outreachDispo?: string | null;
       consentState?: ConsentState | null;
     };

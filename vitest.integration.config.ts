@@ -29,6 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "supabase/migrations/20261112120100_multi_number_sender_rpcs.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "e2e/stress/my-leads-queue/smoke.integration.test.ts",
       "e2e/stress/my-leads-queue/race.dispatch.integration.test.ts",
@@ -163,6 +164,7 @@ export default defineConfig({
       "supabase/migrations/20261012020000_auto_reply_templates_number_source.integration.test.ts",
       "supabase/migrations/20261030131000_auto_reply_templates_routing_v2_keys.integration.test.ts",
       "supabase/migrations/20261030180000_routing_v2_dealmachine_value_cache.integration.test.ts",
+      "supabase/migrations/20261111120000_dealmachine_value_cache_land_signal.integration.test.ts",
       "supabase/migrations/20261012010000_nurture_auto_drip.integration.test.ts",
       "supabase/migrations/20261030181000_routing_v2_versioned_drips.integration.test.ts",
       "supabase/migrations/20261030230000_routing_v2_outbox_delivery_recheck.integration.test.ts",
@@ -193,9 +195,11 @@ export default defineConfig({
       "supabase/migrations/20261031140200_routing_v2_obligations_person_and_fallback.integration.test.ts",
       "supabase/migrations/20261031140000_routing_v2_model_stop_release_hold.integration.test.ts",
       "supabase/migrations/20261031140300_routing_v2_model_stop_release_obligations.integration.test.ts",
+      "supabase/migrations/20261104120000_switchboard_read_norma_lead_details.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
+      "src/lib/ai-responder/routing-v2.ok-after-no.dispatch.integration.test.ts",
       "src/lib/routing-v2-backfill/backfill.db.integration.test.ts",
       "src/lib/hot-sellers/hot-handoff.db.integration.test.ts",
       "src/lib/hot-sellers/hot-dispatch-switch-on.db.integration.test.ts",

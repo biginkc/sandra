@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import type { KnownBlock } from "@slack/types";
 
 import {
@@ -13,7 +14,7 @@ export type {
   SlackPreviewMessage,
 } from "./unfurl-types";
 
-const CANONICAL_MY_LEADS_ORIGIN = "https://sandra.bmhgroupkc.com";
+const CANONICAL_LEAD_ORIGIN = "https://sandra.bmhgroupkc.com";
 const HEADER_MAX = 150;
 const SECTION_TEXT_MAX = 3000;
 const SECTION_FIELD_MAX = 2000;
@@ -120,7 +121,7 @@ function messageLine(message: SlackPreviewMessage): string {
 
 export function canonicalPreviewUrl(propertyId: string): string {
   if (!UUID.test(propertyId)) throw new Error("Invalid lead id for Slack preview URL");
-  return `${CANONICAL_MY_LEADS_ORIGIN}/my-leads?lead=${propertyId.toLowerCase()}`;
+  return buildLeadDeepLink(propertyId.toLowerCase(), { baseUrl: CANONICAL_LEAD_ORIGIN });
 }
 
 export function buildPreviewBlocks(snapshot: SlackLeadPreview): KnownBlock[] {
@@ -175,7 +176,7 @@ export function buildPreviewBlocks(snapshot: SlackLeadPreview): KnownBlock[] {
           type: "button",
           text: {
             type: "plain_text",
-            text: truncate("Open in My Leads", BUTTON_TEXT_MAX),
+            text: truncate("Open lead in Sandra", BUTTON_TEXT_MAX),
             emoji: true,
           },
           url: truncate(canonicalPreviewUrl(snapshot.propertyId), URL_MAX),

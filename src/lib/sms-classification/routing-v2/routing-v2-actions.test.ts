@@ -171,7 +171,7 @@ describe("road -> action table", () => {
       const { deps, log } = execDeps(TIME_ONLY_OFF, { sendReply: async () => ({ sent: false, reason: "template_unapproved" }) });
       const res = await executeV2Action(actionForV2Decision(jevDecision(road)), deps);
       expect(res.kind, road).toBe("reply_not_sent");
-      expect(log, road).toEqual(["alert:hot_yes:hot_text:m1", "hold:needs_person"]);
+      expect(log, road).toEqual(["alert:hot_yes:hot_text:m1", "hold:needs_person", "alert:reply_failed"]);
     }
   });
 
@@ -352,14 +352,14 @@ describe("executor: flag-off no-op and send-time re-check", () => {
     const { deps, log } = execDeps(TIME_ONLY_ON, { sendReply: async () => { throw new Error("provider down"); } });
     const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip")), deps);
     expect(res).toEqual({ kind: "reply_not_sent", done: [], reason: "send_error" });
-    expect(log).toEqual(["hold:needs_person"]);
+    expect(log).toEqual(["hold:needs_person", "alert:reply_failed"]);
   });
 
   it("a reply that did not go out holds for a person and runs nothing after it", async () => {
     const { deps, log } = execDeps(TIME_ONLY_ON, { sendReply: async () => ({ sent: false, reason: "template_unapproved" }) });
     const res = await executeV2Action(actionForV2Decision(jevDecision("not_interested_drip")), deps);
     expect(res).toEqual({ kind: "reply_not_sent", done: [], reason: "template_unapproved" });
-    expect(log).toEqual(["hold:needs_person"]);
+    expect(log).toEqual(["hold:needs_person", "alert:reply_failed"]);
   });
 });
 
@@ -378,5 +378,58 @@ describe("seedV2ReplyTemplates", () => {
     expect(out.created).toHaveLength(Object.keys(V2_REPLY_TEXTS).length - 1);
     expect(inserted.every((r) => !("approved_for_auto_send" in r))).toBe(true);
     expect(inserted.map((r) => r.content)).toContain(V2_REPLY_TEXTS.fair_price);
+  });
+});
+
+describe("reply_failed owner alert (a reply that cannot send is never silent)", () => {
+  const failed = { sendReply: async () => ({ sent: false, reason: "not_sent:no_mapping" }) };
+
+  it("book_appointment reply failure with alert_on_time_only ON: hot_yes skipped, hold, then reply_failed alert", async () => {
+    const { deps, log } = execDeps(TIME_ONLY_ON, failed);
+    const res = await executeV2Action(actionForV2Decision(jevDecision("book_appointment")), deps);
+    expect(res).toMatchObject({ kind: "reply_not_sent", reason: "not_sent:no_mapping" });
+    expect(log).toEqual(["hold:needs_person", "alert:reply_failed"]);
+  });
+
+  it("price too_high reply failure: hold, then reply_failed alert", async () => {
+    const { deps, log } = execDeps(TIME_ONLY_ON, failed);
+    const res = await executeV2Action({ road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.too_high }, deps);
+    expect(res.kind).toBe("reply_not_sent");
+    expect(log).toEqual(["hold:needs_person", "alert:reply_failed"]);
+  });
+
+  it("a reply that sends raises no reply_failed alert", async () => {
+    for (const flags of [TIME_ONLY_ON, TIME_ONLY_OFF]) {
+      const { deps, log } = execDeps(flags);
+      expect((await executeV2Action(actionForV2Decision(jevDecision("book_appointment")), deps)).kind).toBe("done");
+      expect((await executeV2Action({ road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.too_high }, deps)).kind).toBe("done");
+      expect(log.some((l) => l.startsWith("alert:reply_failed"))).toBe(false);
+    }
+  });
+
+  it("hot_yes time-only behaviour is unchanged: skipped when ON, sent hot-keyed when OFF", async () => {
+    const on = execDeps(TIME_ONLY_ON);
+    await executeV2Action(actionForV2Decision(jevDecision("book_appointment")), on.deps);
+    expect(on.log.filter((l) => l.startsWith("alert:"))).toEqual([]);
+    const off = execDeps(TIME_ONLY_OFF);
+    await executeV2Action(actionForV2Decision(jevDecision("book_appointment")), off.deps);
+    expect(off.log.filter((l) => l.startsWith("alert:"))).toEqual(["alert:hot_yes:hot_text:m1"]);
+  });
+
+  it("reply_failed is not deduped away by an earlier hot_yes (own identity, null key)", async () => {
+    const { deps, log } = execDeps(TIME_ONLY_OFF, failed);
+    await executeV2Action(actionForV2Decision(jevDecision("book_appointment")), deps);
+    expect(log).toEqual(["alert:hot_yes:hot_text:m1", "hold:needs_person", "alert:reply_failed"]);
+  });
+
+  it("an alert that throws never changes the hold outcome", async () => {
+    const { deps, log } = execDeps(TIME_ONLY_ON, { ...failed, alert: async () => { throw new Error("down"); } });
+    const res = await executeV2Action({ road: "price_check", steps: V2_PRICE_CHECK_ACTIONS.too_high }, deps);
+    expect(res.kind).toBe("reply_not_sent");
+    expect(log).toEqual(["hold:needs_person"]);
+  });
+
+  it("label is the plain owner-facing copy", () => {
+    expect(V2_ALERT_LABELS.reply_failed).toBe("Reply could not be sent — needs a person");
   });
 });

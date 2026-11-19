@@ -6,7 +6,7 @@ import "server-only";
  *
  * `POST /v1/enrichment/address` per DealMachine's API reference
  * (https://api.docs.dealmachine.com/api-reference/enrichment/enrich-by-address):
- *   request  `{ data: [{ street, city, state, zip? }], fields: ["estimated_value"], contact_audience: "none" }`
+ *   request  `{ data: [{ street, city, state, zip? }], fields: ["estimated_value", "living_area_sqft", "num_bedrooms"], contact_audience: "none" }`
  *            with `Authorization: Bearer <key>`;
  *   response `{ data: [{ matched, estimated_value, match_failure? }], totals, credits: { used } }`.
  * `contact_audience: "none"` skips people/contacts (fewer credits). Each request costs
@@ -36,10 +36,16 @@ export type DealMachineAttempt = {
   creditsUsed: number | null;
 };
 
+/**
+ * Property shape from the same enrichment response (no extra call). `isLand`: both
+ * living_area_sqft and num_bedrooms are 0 or missing on a matched record (Jarrad 2026-11-11).
+ */
+export type DealMachineShape = { livingAreaSqft: number | null; numBedrooms: number | null; isLand: boolean | null };
+
 export type DealMachineValueResult =
-  | { kind: "ok"; value: number }
+  | { kind: "ok"; value: number; shape?: DealMachineShape }
   /** Address not matched, or matched with no usable value (null / 0 / not a number). */
-  | { kind: "no_value"; reason: string }
+  | { kind: "no_value"; reason: string; shape?: DealMachineShape }
   /** 429 / 5xx / timeout / network, retries exhausted. */
   | { kind: "retryable_error"; reason: string; retryAfterSeconds: number }
   /** 400 / 401 / other non-retryable response or an unreadable body. */
@@ -70,11 +76,44 @@ export type DealMachineOptions = {
 type Json = Record<string, unknown>;
 const isRecord = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
 
+/** Requested in the one value call: the value plus the two fields that tell land from a house. */
+export const DEALMACHINE_VALUE_FIELDS = ["estimated_value", "living_area_sqft", "num_bedrooms"] as const;
+
+const toNumberOrNull = (v: unknown): number | null => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Land = no living area AND no bedrooms (each 0 or null) on a matched record. When the response
+ * carries neither field at all, the answer is unknown (null), never land: a missing field must not
+ * turn every price check into a land alert.
+ */
+export function dealMachineShape(item: Record<string, unknown>): DealMachineShape {
+  const area = readShapeField(item, "living_area_sqft");
+  const beds = readShapeField(item, "num_bedrooms");
+  const livingAreaSqft = area.kind === "number" ? area.n : null;
+  const numBedrooms = beds.kind === "number" ? beds.n : null;
+  // Both fields must be returned and readable; a missing or malformed field → unknown (never land).
+  if (area.kind === "invalid" || beds.kind === "invalid" || area.kind === "absent" || beds.kind === "absent") {
+    return { livingAreaSqft, numBedrooms, isLand: null };
+  }
+  return { livingAreaSqft, numBedrooms, isLand: (livingAreaSqft ?? 0) === 0 && (numBedrooms ?? 0) === 0 };
+}
+
+function readShapeField(item: Record<string, unknown>, key: string): { kind: "absent" } | { kind: "null" } | { kind: "number"; n: number } | { kind: "invalid" } {
+  if (!(key in item)) return { kind: "absent" };
+  const v = item[key];
+  if (v === null) return { kind: "null" };
+  const n = toNumberOrNull(v);
+  return n === null || n < 0 ? { kind: "invalid" } : { kind: "number", n };
+}
+
 export function buildDealMachineEnrichRequest(address: DealMachineAddress): Json {
   const item: Json = { street: address.street.trim(), city: address.city.trim(), state: address.state.trim() };
   const zip = address.zip?.trim();
   if (zip) item.zip = zip;
-  return { data: [item], fields: ["estimated_value"], contact_audience: "none" };
+  return { data: [item], fields: [...DEALMACHINE_VALUE_FIELDS], contact_audience: "none" };
 }
 
 /** Reads `data[0]`: matched + a positive finite `estimated_value` → ok; anything else → no_value. */
@@ -86,10 +125,15 @@ export function parseDealMachineEnrichResponse(body: unknown): DealMachineValueR
     const code = isRecord(item.match_failure) && typeof item.match_failure.code === "string" ? item.match_failure.code : "unmatched";
     return { kind: "no_value", reason: `unmatched:${code}` };
   }
+  const shape = dealMachineShape(item);
   const v = item.estimated_value;
   const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
-  if (!Number.isFinite(n) || n <= 0) return { kind: "no_value", reason: "no_estimated_value" };
-  return { kind: "ok", value: n };
+  if (!Number.isFinite(n) || n <= 0) {
+    // A matched land record often has no value: keep the land signal so it still routes as land.
+    return shape.isLand === null ? { kind: "no_value", reason: "no_estimated_value" } : { kind: "no_value", reason: "no_estimated_value", shape };
+  }
+  // Unknown shape (neither field returned) is left off, so the result is exactly as before.
+  return shape.isLand === null ? { kind: "ok", value: n } : { kind: "ok", value: n, shape };
 }
 
 function creditsUsed(body: unknown): number | null {
