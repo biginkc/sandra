@@ -286,6 +286,143 @@ describe("MessagesV2View", () => {
     expect(screen.queryByTestId("show-older")).toBeNull();
   });
 
+  it("the 60-second refresh keeps older cards loaded through Show older; only cards that left are dropped, none duplicated", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const all = Array.from({ length: 63 }, (_, i) => ({ ...openHold(`h${i + 1}`), ...at(i + 1) }));
+      const loadOlderHolds = byIdsServer(() => all);
+      const p = { ...props([], all.slice(0, 3)), holdsSnapshot: buildSnapshot(all), loadOlderHolds };
+      const { rerender } = render(<MessagesV2View {...p} />);
+      await waitFor(() => expect(mocks.handlers.length).toBeGreaterThan(0));
+      // Page through to the end: load 50, reveal the rest of that slice, load the last 10.
+      for (const shown of [40, 53, 63]) {
+        await userEvent.click(screen.getByTestId("show-older"));
+        await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(shown));
+      }
+      expect(loadOlderHolds).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        vi.advanceTimersByTime(61_000);
+      });
+      // The refresh delivers a NEW snapshot: h30 was resolved meanwhile; the first page is the same three.
+      const remaining = all.filter((h) => h.id !== "h30");
+      rerender(<MessagesV2View {...p} holds={remaining.slice(0, 3).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(remaining)} />);
+      await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(62));
+      const ids = screen.getAllByTestId("waiting-card").map((c) => c.textContent);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(loadOlderHolds).toHaveBeenCalledTimes(2); // nothing re-fetched
+      expect(screen.queryByTestId("show-older")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("after a refresh brings new holds to the top, the displaced first-page cards are reachable via Show older", async () => {
+    const old = [1, 2, 3, 4, 5, 6].map((m) => ({ ...openHold(`h${m}`), ...at(m + 10) }));
+    let server = old;
+    const loadOlderHolds = byIdsServer(() => server);
+    const p = { ...props([], old.slice(0, 3)), holdsSnapshot: buildSnapshot(old), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6));
+    // Refresh: two new holds arrive at the top; the first page is now n1, n2, h1.
+    server = [{ ...openHold("n1"), ...at(1) }, { ...openHold("n2"), ...at(2) }, ...old];
+    rerender(<MessagesV2View {...p} holds={server.slice(0, 3)} holdsSnapshot={buildSnapshot(server)} />);
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(6)); // n1, n2, h1 + kept h4..h6
+    expect(screen.getByTestId("waiting-count")).toHaveTextContent("8");
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(8));
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ ids: ["h2", "h3"] });
+    expect(screen.queryByTestId("show-older")).toBeNull();
+  });
+
+  it("a kept card whose draft changed in the new snapshot is not kept with its old body; it is fetched fresh", async () => {
+    const draft = (id: string, body: string) => ({ draft: { id, inbound_message_id: null, body, sendable: true }, draft_held: true });
+    const old = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m), ...(m === 5 ? draft("d1", "old body") : {}) }));
+    let server = old;
+    const loadOlderHolds = byIdsServer(() => server);
+    const p = { ...props([], old.slice(0, 3)), holdsSnapshot: buildSnapshot(old), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(5));
+    expect(screen.getByText("old body")).toBeInTheDocument();
+    server = old.map((h) => (h.id === "h5" ? { ...h, ...draft("d2", "new body") } : h));
+    rerender(<MessagesV2View {...p} holds={server.slice(0, 3).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(server)} />);
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(4)); // h4 kept, h5 dropped for reload
+    expect(screen.queryByText("old body")).toBeNull();
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getByText("new body")).toBeInTheDocument());
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ ids: ["h5"] });
+  });
+
+  it("a refresh landing while a Show older request is in flight, many pages deep, does not lose the click", async () => {
+    const all = Array.from({ length: 300 }, (_, i) => ({ ...openHold(`h${i + 1}`), ...at(i + 1) }));
+    const server = byIdsServer(() => all);
+    let gate: (() => void) | null = null;
+    let holdNext = false;
+    const loadOlderHolds = vi.fn(async (input: { ids: string[] }) => {
+      if (holdNext) await new Promise<void>((r) => (gate = r));
+      return server(input);
+    });
+    const p = { ...props([], all.slice(0, 20)), holdsSnapshot: buildSnapshot(all), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    const count = () => screen.getAllByTestId("waiting-card").length;
+    // Load 50, reveal, reveal: 70 shown, nothing hidden, so the next click is a load.
+    for (const n of [40, 60, 70]) {
+      await userEvent.click(screen.getByTestId("show-older"));
+      await waitFor(() => expect(count()).toBe(n));
+    }
+    holdNext = true;
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(gate).not.toBeNull());
+    // The 60-second refresh lands while that slice is still in flight.
+    rerender(<MessagesV2View {...p} holds={all.slice(0, 20).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(all)} />);
+    expect(count()).toBe(70);
+    await act(async () => {
+      gate!();
+    });
+    // The one click still adds cards (before this fix it added nothing until clicked again).
+    await waitFor(() => expect(count()).toBe(100));
+    const ids = screen.getAllByTestId("waiting-card").map((c) => c.textContent);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(loadOlderHolds).toHaveBeenCalledTimes(2);
+    // Paging continues from where it is, without re-asking for the slice that landed late.
+    holdNext = false;
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(count()).toBe(120));
+    expect(loadOlderHolds).toHaveBeenCalledTimes(2);
+  });
+
+  it("a late slice never lands a card whose draft changed in the new snapshot (it is fetched fresh instead)", async () => {
+    const draft = (id: string, body: string) => ({ draft: { id, inbound_message_id: null, body, sendable: true }, draft_held: true });
+    const all = Array.from({ length: 30 }, (_, i) => ({ ...openHold(`h${i + 1}`), ...at(i + 1), ...(i === 25 ? draft("d1", "old body") : {}) }));
+    let current = all;
+    const server = byIdsServer(() => all); // the slow request answers with the bodies it read BEFORE the change
+    let gate: (() => void) | null = null;
+    let holdNext = true;
+    const loadOlderHolds = vi.fn(async (input: { ids: string[] }) => {
+      if (holdNext) {
+        holdNext = false;
+        await new Promise<void>((r) => (gate = r));
+        return server(input);
+      }
+      return byIdsServer(() => current)(input);
+    });
+    const p = { ...props([], all.slice(0, 20)), holdsSnapshot: buildSnapshot(all), loadOlderHolds };
+    const { rerender } = render(<MessagesV2View {...p} />);
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(gate).not.toBeNull());
+    current = all.map((h) => (h.id === "h26" ? { ...h, ...draft("d2", "new body") } : h));
+    rerender(<MessagesV2View {...p} holds={current.slice(0, 20).map((h) => ({ ...h }))} holdsSnapshot={buildSnapshot(current)} />);
+    await act(async () => {
+      gate!();
+    });
+    await waitFor(() => expect(screen.getAllByTestId("waiting-card")).toHaveLength(29)); // h21..h30 except h26
+    expect(screen.queryByText("old body")).toBeNull();
+    await userEvent.click(screen.getByTestId("show-older"));
+    await waitFor(() => expect(screen.getByText("new body")).toBeInTheDocument());
+    expect(loadOlderHolds).toHaveBeenLastCalledWith({ ids: ["h26"] });
+  });
+
   it("holds handled since the snapshot come back missing: not rendered, counted out, with a note", async () => {
     const all = [1, 2, 3, 4, 5].map((m) => ({ ...openHold(`h${m}`), ...at(m) }));
     const loadOlderHolds = byIdsServer(() => all.filter((h) => h.id !== "h5"));
